@@ -22,6 +22,10 @@ const TEXT_EXT = /\.(md|txt|py|js|jsx|ts|json|html|css|csv|toml|yaml|yml|sh|tex)
 const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp)$/i
 const MEDIA_EXT = /\.(html?|pdf|png|jpg|jpeg|gif|svg|webp)$/i
 
+// board grid: drags are smooth, drops snap (matches the dot background)
+const GRID = 26
+const snap = (v) => Math.round(v / GRID) * GRID
+
 const rawUrl = (slug, p) =>
   `/api/projects/${slug}/raw/${p.split('/').map(encodeURIComponent).join('/')}`
 
@@ -32,9 +36,12 @@ export default function Workspace() {
   const [expanded, setExpanded] = useState(null)   // panel id
   const [expandRect, setExpandRect] = useState(null)
   const [menu, setMenu] = useState(null)           // {x, y, bx, by}
+  const [hovered, setHovered] = useState(null)     // panel id under the mouse
   const boardRef = useRef(null)
   const zRef = useRef(10)
   const saveTimer = useRef(null)
+  const mouseRef = useRef({ x: 200, y: 160 })
+  const undoRef = useRef([])                       // closed panels, for ctrl+z
 
   const refreshProject = useCallback(
     () => api(`/api/projects/${slug}`).then(setProject), [slug])
@@ -59,26 +66,56 @@ export default function Workspace() {
     return () => clearTimeout(saveTimer.current)
   }, [panels, slug])
 
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key !== 'Escape') return
-      if (menu) setMenu(null)
-      else if (expanded) setExpanded(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [menu, expanded])
-
   const patchPanel = (id, patch) =>
     setPanels((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)))
   const patchState = (id, patch) =>
     setPanels((ps) => ps.map((p) =>
       p.id === id ? { ...p, state: { ...p.state, ...patch } } : p))
   const front = (id) => patchPanel(id, { z: ++zRef.current })
+
   const close = (id) => {
-    if (expanded === id) setExpanded(null)
-    setPanels((ps) => ps.filter((p) => p.id !== id))
+    setExpanded((ex) => (ex === id ? null : ex))
+    setHovered((h) => (h === id ? null : h))
+    setPanels((ps) => {
+      const p = ps.find((x) => x.id === id)
+      if (p) undoRef.current.push(p)
+      return ps.filter((x) => x.id !== id)
+    })
   }
+
+  const undoClose = () => {
+    const p = undoRef.current.pop()
+    if (p) setPanels((ps) => [...ps, { ...p, z: ++zRef.current }])
+  }
+
+  // hover-targeted hotkeys: f expand, q close (ctrl+z restores), n add menu
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (menu) setMenu(null)
+        else if (expanded) setExpanded(null)
+        return
+      }
+      const t = e.target
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' || t.isContentEditable) return
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        undoClose()
+        return
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const k = e.key.toLowerCase()
+      if (k === 'f' && hovered) { e.preventDefault(); toggleExpand(hovered) }
+      else if (k === 'q' && hovered) { e.preventDefault(); close(hovered) }
+      else if (k === 'n' && !menu) {
+        e.preventDefault()
+        openMenuAt(mouseRef.current.x, mouseRef.current.y)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
 
   function toggleExpand(id) {
     if (expanded === id) { setExpanded(null); return }
@@ -95,21 +132,25 @@ export default function Workspace() {
     const spec = PANEL_TYPES[type]
     setPanels((ps) => [...ps, {
       id: `p${Date.now()}`, type,
-      x: Math.max(8, bx ?? 60), y: Math.max(8, by ?? 60),
-      w: spec.w, h: spec.h, z: ++zRef.current, state: {},
+      x: snap(Math.max(0, bx ?? 52)), y: snap(Math.max(0, by ?? 52)),
+      w: snap(spec.w), h: snap(spec.h), z: ++zRef.current, state: {},
     }])
     setMenu(null)
   }
 
-  function openMenu(e) {
-    e.preventDefault()
+  function openMenuAt(cx, cy) {
     const r = boardRef.current.getBoundingClientRect()
     setMenu({
-      x: Math.min(e.clientX, window.innerWidth - 280),
-      y: Math.min(e.clientY, window.innerHeight - 320),
-      bx: e.clientX - r.left + boardRef.current.scrollLeft,
-      by: e.clientY - r.top + boardRef.current.scrollTop,
+      x: Math.min(cx, window.innerWidth - 280),
+      y: Math.min(cy, window.innerHeight - 340),
+      bx: cx - r.left + boardRef.current.scrollLeft,
+      by: cy - r.top + boardRef.current.scrollTop,
     })
+  }
+
+  function openMenu(e) {
+    e.preventDefault()
+    openMenuAt(e.clientX, e.clientY)
   }
 
   if (!project || !panels) return <div className="center">…</div>
@@ -125,12 +166,14 @@ export default function Workspace() {
           : <button className="ghost" onClick={async () => {
               await api(`/api/projects/${slug}/load`, { method: 'POST' }); refreshProject() }}>
               load into context</button>}
-        <span className="dim hint">right-click the board to add a panel · double-click a
-          title bar to expand · esc collapses</span>
-        <button className="ghost" onClick={(e) => setMenu({
-          x: e.clientX - 120, y: e.clientY + 14, bx: 80, by: 60 })}>+ panel</button>
+        <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close ·
+          <kbd> ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add ·
+          <kbd> esc</kbd> collapse</span>
+        <button className="ghost" onClick={(e) => openMenuAt(e.clientX - 120, e.clientY + 14)}>
+          + panel</button>
       </header>
-      <div className="board" ref={boardRef} onContextMenu={openMenu}>
+      <div className="board" ref={boardRef} onContextMenu={openMenu}
+           onPointerMove={(e) => { mouseRef.current = { x: e.clientX, y: e.clientY } }}>
         {panels.map((p) => (
           <Window key={p.id} panel={p}
                   expanded={expanded === p.id} expandRect={expandRect}
@@ -138,6 +181,8 @@ export default function Workspace() {
                   onPatch={(patch) => patchPanel(p.id, patch)}
                   onFront={() => front(p.id)}
                   onClose={() => close(p.id)}
+                  onHover={(over) => setHovered((h) =>
+                    over ? p.id : (h === p.id ? null : h))}
                   onToggleExpand={() => toggleExpand(p.id)}>
             <PanelBody type={p.type} slug={slug} project={project}
                        refreshProject={refreshProject}
@@ -168,17 +213,19 @@ function PanelBody(props) {
 // ---- window chrome ----------------------------------------------------------
 
 function Window({ panel, expanded, expandRect, dimmed, onPatch, onFront,
-                  onClose, onToggleExpand, children }) {
+                  onClose, onHover, onToggleExpand, children }) {
   const [interacting, setInteracting] = useState(false)
 
-  function track(e, apply) {
+  function track(e, apply, settle) {
     e.preventDefault()
     onFront()
     setInteracting(true)
     const sx = e.clientX, sy = e.clientY
-    const move = (ev) => apply(ev.clientX - sx, ev.clientY - sy)
+    let dx = 0, dy = 0
+    const move = (ev) => { dx = ev.clientX - sx; dy = ev.clientY - sy; apply(dx, dy) }
     const up = () => {
-      setInteracting(false)
+      setInteracting(false)   // anim class returns, so the snap glides in
+      settle(dx, dy)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
     }
@@ -189,12 +236,18 @@ function Window({ panel, expanded, expandRect, dimmed, onPatch, onFront,
   const startDrag = (e) => {
     if (expanded || e.target.closest('button')) return
     const { x, y } = panel
-    track(e, (dx, dy) => onPatch({ x: Math.max(0, x + dx), y: Math.max(0, y + dy) }))
+    track(e,
+      (dx, dy) => onPatch({ x: Math.max(0, x + dx), y: Math.max(0, y + dy) }),
+      (dx, dy) => onPatch({ x: snap(Math.max(0, x + dx)),
+                            y: snap(Math.max(0, y + dy)) }))
   }
   const startResize = (e) => {
     if (expanded) return
     const { w, h } = panel
-    track(e, (dx, dy) => onPatch({ w: Math.max(280, w + dx), h: Math.max(200, h + dy) }))
+    track(e,
+      (dx, dy) => onPatch({ w: Math.max(280, w + dx), h: Math.max(200, h + dy) }),
+      (dx, dy) => onPatch({ w: Math.max(280, snap(w + dx)),
+                            h: Math.max(200, snap(h + dy)) }))
   }
 
   const style = expanded && expandRect
@@ -205,7 +258,9 @@ function Window({ panel, expanded, expandRect, dimmed, onPatch, onFront,
 
   return (
     <section className={`window ${interacting ? '' : 'anim'} ${expanded ? 'expanded' : ''} ${dimmed ? 'dimmed' : ''}`}
-             style={style} onPointerDown={onFront}>
+             style={style} onPointerDown={onFront}
+             onPointerEnter={() => onHover(true)}
+             onPointerLeave={() => onHover(false)}>
       <header className="window-head" onPointerDown={startDrag}
               onDoubleClick={onToggleExpand}>
         <span className="window-title">{PANEL_TYPES[panel.type]?.label || panel.type}</span>

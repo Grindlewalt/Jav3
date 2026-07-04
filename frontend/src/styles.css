@@ -211,7 +211,13 @@ input:focus, textarea:focus { border-color: var(--accent); }
   min-width: 280px; min-height: 200px;
 }
 .window.anim { transition: left 0.24s ease, top 0.24s ease,
-               width 0.24s ease, height 0.24s ease, opacity 0.2s; }
+               width 0.24s ease, height 0.24s ease, opacity 0.2s,
+               border-color 0.15s; }
+.window:hover { border-color: #3d465563; border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+kbd {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 5px; font: 11px ui-monospace, monospace;
+}
 .window.expanded { box-shadow: 0 18px 60px #000b; }
 .window.dimmed { opacity: 0.35; pointer-events: none; }
 .window-head {
