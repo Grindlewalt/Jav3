@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, chat, projects
+from . import auth, chat, memory_api, projects, workspace
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -24,6 +24,8 @@ app = FastAPI(title="Jarvis v3", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(chat.router)
+app.include_router(memory_api.router)
+app.include_router(workspace.router)
 
 
 @app.get("/api/health")

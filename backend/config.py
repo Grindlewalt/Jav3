@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     max_react_iterations: int = 10
     recent_message_limit: int = 40
 
+    # Workspace runner (light host-side sandbox; the QEMU VM is pass 2)
+    run_python: str = "python3"
+    run_timeout_seconds: int = 60
+    run_max_mem_mb: int = 768
+
 
 settings = Settings()
 

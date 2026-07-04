@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, chatStream } from '../api.js'
+import Md from '../Md.jsx'
 
 export default function Chat() {
   const [conversations, setConversations] = useState([])
@@ -110,7 +111,9 @@ export default function Chat() {
         <div className="messages">
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>
-              <pre>{m.content || (m.streaming ? '…' : '')}</pre>
+              {m.role === 'assistant'
+                ? <div className="bubble"><Md text={m.content || (m.streaming ? '…' : '')} /></div>
+                : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
             </div>
           ))}
           <div ref={bottomRef} />

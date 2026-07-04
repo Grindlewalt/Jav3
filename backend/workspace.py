@@ -1,0 +1,176 @@
+"""Project workspace: files, a light run sandbox, and a todo.md checklist.
+
+Deliberately file-based — everything the GUI touches here is a plain file in
+projects/<slug>/, so the agent can read and edit the same workspace with
+tools later without a second data model.
+"""
+import re
+from pathlib import Path
+
+import aiosqlite
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from .auth import require_user
+from .config import settings
+from .db import get_db
+from .fsutil import list_tree, read_text_or_binary, safe_join
+from .runner import run_python
+
+router = APIRouter(prefix="/api/projects/{slug}", tags=["workspace"],
+                   dependencies=[Depends(require_user)])
+
+
+async def project_dir(slug: str) -> Path:
+    db = await get_db()
+    try:
+        async with db.execute("SELECT 1 FROM projects WHERE slug = ?", (slug,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="no such project")
+    finally:
+        await db.close()
+    return settings.projects_dir / slug
+
+
+class SaveFile(BaseModel):
+    path: str
+    content: str
+
+
+class RunRequest(BaseModel):
+    path: str | None = None    # run an existing file...
+    code: str | None = None    # ...or scratch code (saved to code/scratch.py)
+
+
+class TodoAction(BaseModel):
+    action: str                # add | toggle | delete
+    text: str | None = None
+    index: int | None = None
+
+
+@router.get("/files")
+async def files(slug: str):
+    return {"files": list_tree(await project_dir(slug))}
+
+
+@router.get("/file")
+async def read_file(slug: str, path: str):
+    p = safe_join(await project_dir(slug), path)
+    return {"path": path, **read_text_or_binary(p)}
+
+
+@router.put("/file")
+async def save_file(slug: str, body: SaveFile):
+    p = safe_join(await project_dir(slug), body.path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body.content)
+    return {"ok": True, "path": body.path}
+
+
+@router.delete("/file")
+async def delete_file(slug: str, path: str):
+    p = safe_join(await project_dir(slug), path)
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="no such file")
+    if p.name == "project.md":
+        raise HTTPException(status_code=400, detail="project.md is the project's journal")
+    p.unlink()
+    return {"ok": True}
+
+
+@router.post("/upload")
+async def upload(slug: str, file: UploadFile, dest: str = "code"):
+    base = await project_dir(slug)
+    p = safe_join(base, f"{dest}/{file.filename}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(await file.read())
+    return {"ok": True, "path": str(p.relative_to(base))}
+
+
+@router.get("/raw/{path:path}")
+async def raw(slug: str, path: str):
+    p = safe_join(await project_dir(slug), path)
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="no such file")
+    return FileResponse(p)
+
+
+@router.post("/run")
+async def run(slug: str, body: RunRequest):
+    base = await project_dir(slug)
+    if body.code is not None:
+        rel = "code/scratch.py"
+        p = safe_join(base, rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body.code)
+    elif body.path:
+        rel = body.path
+        p = safe_join(base, rel)
+        if not p.is_file():
+            raise HTTPException(status_code=404, detail="no such file")
+        if p.suffix != ".py":
+            raise HTTPException(status_code=400, detail="only .py files can be run")
+    else:
+        raise HTTPException(status_code=400, detail="give 'path' or 'code'")
+    result = await run_python(base, rel)
+    db = await get_db()
+    try:
+        async with db.execute("SELECT id FROM projects WHERE slug = ?", (slug,)) as cur:
+            row = await cur.fetchone()
+        await db.execute(
+            "INSERT INTO runs (project_id, status) VALUES (?, ?)",
+            (row["id"], "ok" if result["exit_code"] == 0 else "failed"),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    return {"script": rel, **result}
+
+
+# --- todo.md checklist ------------------------------------------------------
+
+TODO_RE = re.compile(r"^- \[([ x])\] (.*)$")
+
+
+def _todo_path(base: Path) -> Path:
+    return base / "todo.md"
+
+
+def _parse_todos(base: Path) -> list[dict]:
+    path = _todo_path(base)
+    if not path.exists():
+        return []
+    todos = []
+    for line in path.read_text().splitlines():
+        m = TODO_RE.match(line.strip())
+        if m:
+            todos.append({"done": m.group(1) == "x", "text": m.group(2)})
+    return todos
+
+
+def _write_todos(base: Path, todos: list[dict]) -> None:
+    lines = ["# Todo", ""]
+    lines += [f"- [{'x' if t['done'] else ' '}] {t['text']}" for t in todos]
+    _todo_path(base).write_text("\n".join(lines) + "\n")
+
+
+@router.get("/todos")
+async def get_todos(slug: str):
+    return {"todos": _parse_todos(await project_dir(slug))}
+
+
+@router.post("/todos")
+async def modify_todos(slug: str, body: TodoAction):
+    base = await project_dir(slug)
+    todos = _parse_todos(base)
+    if body.action == "add" and body.text:
+        todos.append({"done": False, "text": body.text.strip()})
+    elif body.action == "toggle" and body.index is not None and 0 <= body.index < len(todos):
+        todos[body.index]["done"] = not todos[body.index]["done"]
+    elif body.action == "delete" and body.index is not None and 0 <= body.index < len(todos):
+        todos.pop(body.index)
+    else:
+        raise HTTPException(status_code=400, detail="bad todo action")
+    _write_todos(base, todos)
+    return {"todos": todos}

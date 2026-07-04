@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api.js'
 import Login from './pages/Login.jsx'
 import Chat from './pages/Chat.jsx'
 import Projects from './pages/Projects.jsx'
-import ProjectDetail from './pages/ProjectDetail.jsx'
+import Workspace from './pages/Workspace.jsx'
+import Context from './pages/Context.jsx'
 
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
@@ -23,8 +24,9 @@ export default function App() {
       {user && (
         <nav>
           <span className="brand">Jarvis</span>
-          <Link to="/">Chat</Link>
-          <Link to="/projects">Projects</Link>
+          <NavLink to="/" end>Chat</NavLink>
+          <NavLink to="/projects">Projects</NavLink>
+          <NavLink to="/context">Context</NavLink>
           <button
             className="link"
             onClick={async () => {
@@ -40,7 +42,8 @@ export default function App() {
         <Route path="/login" element={<Login onLogin={setUser} />} />
         <Route path="/" element={<Chat />} />
         <Route path="/projects" element={<Projects />} />
-        <Route path="/projects/:slug" element={<ProjectDetail />} />
+        <Route path="/projects/:slug" element={<Workspace />} />
+        <Route path="/context" element={<Context />} />
       </Routes>
     </div>
   )
