@@ -76,10 +76,13 @@ def load_registry() -> list[dict]:
 
 
 def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
-    """Registry entries in the wire format Model.complete expects."""
+    """Registry entries in the wire format Model.complete expects.
+    Entries with `enabled: false` are catalogued but not granted to the model."""
     entries = entries if entries is not None else load_registry()
     specs = []
     for e in entries:
+        if e.get("enabled") is False:
+            continue
         desc = e["description"]
         if e.get("when_to_use"):
             desc += f" Use when: {e['when_to_use']}"

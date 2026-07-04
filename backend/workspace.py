@@ -4,11 +4,12 @@ Deliberately file-based — everything the GUI touches here is a plain file in
 projects/<slug>/, so the agent can read and edit the same workspace with
 tools later without a second data model.
 """
+import json
 import re
 from pathlib import Path
 
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -80,9 +81,9 @@ async def delete_file(slug: str, path: str):
 
 
 @router.post("/upload")
-async def upload(slug: str, file: UploadFile, dest: str = "code"):
+async def upload(slug: str, file: UploadFile, dest: str = ""):
     base = await project_dir(slug)
-    p = safe_join(base, f"{dest}/{file.filename}")
+    p = safe_join(base, f"{dest.strip('/')}/{file.filename}".lstrip("/"))
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(await file.read())
     return {"ok": True, "path": str(p.relative_to(base))}
@@ -126,6 +127,117 @@ async def run(slug: str, body: RunRequest):
     finally:
         await db.close()
     return {"script": rel, **result}
+
+
+# --- organizer: dirs, marks, moves ------------------------------------------
+# A dir's "mark" is a .about.md inside it — a note telling Jarvis what belongs
+# there ("anything pertaining to code goes here"). File-based so the
+# organize_project skill can read the same scheme later.
+
+class MoveRequest(BaseModel):
+    src: str
+    dest: str  # full new relative path, e.g. "images/plot.png"
+
+
+class MkdirRequest(BaseModel):
+    path: str
+    mark: str | None = None
+
+
+class MarkRequest(BaseModel):
+    path: str  # "" = project root
+    mark: str
+
+
+def _read_mark(d: Path) -> str:
+    about = d / ".about.md"
+    return about.read_text().strip() if about.exists() else ""
+
+
+@router.get("/dirs")
+async def list_dirs(slug: str):
+    base = await project_dir(slug)
+    dirs = [{"path": "", "mark": _read_mark(base)}]
+    for p in sorted(base.rglob("*")):
+        if not p.is_dir():
+            continue
+        parts = p.relative_to(base).parts
+        if any(part.startswith(".") or part in
+               {"__pycache__", "node_modules", ".git"} for part in parts):
+            continue
+        dirs.append({"path": str(p.relative_to(base)), "mark": _read_mark(p)})
+    return {"dirs": dirs}
+
+
+@router.post("/mkdir")
+async def mkdir(slug: str, body: MkdirRequest):
+    base = await project_dir(slug)
+    p = safe_join(base, body.path)
+    p.mkdir(parents=True, exist_ok=True)
+    if body.mark:
+        (p / ".about.md").write_text(body.mark.strip() + "\n")
+    return {"ok": True, "path": body.path}
+
+
+@router.delete("/dirs")
+async def rmdir(slug: str, path: str):
+    base = await project_dir(slug)
+    p = safe_join(base, path)
+    if not path or not p.is_dir():
+        raise HTTPException(status_code=404, detail="no such directory")
+    contents = [c for c in p.iterdir() if c.name != ".about.md"]
+    if contents:
+        raise HTTPException(status_code=400, detail="directory not empty")
+    (p / ".about.md").unlink(missing_ok=True)
+    p.rmdir()
+    return {"ok": True}
+
+
+@router.put("/dirs/mark")
+async def set_mark(slug: str, body: MarkRequest):
+    base = await project_dir(slug)
+    d = safe_join(base, body.path) if body.path else base
+    if not d.is_dir():
+        raise HTTPException(status_code=404, detail="no such directory")
+    about = d / ".about.md"
+    if body.mark.strip():
+        about.write_text(body.mark.strip() + "\n")
+    else:
+        about.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@router.post("/move")
+async def move_file(slug: str, body: MoveRequest):
+    base = await project_dir(slug)
+    src = safe_join(base, body.src)
+    dest = safe_join(base, body.dest)
+    if not src.is_file():
+        raise HTTPException(status_code=404, detail="no such file")
+    if src.name == "project.md" and src.parent == base:
+        raise HTTPException(status_code=400, detail="project.md stays at the project root")
+    if dest.exists():
+        raise HTTPException(status_code=409, detail="destination already exists")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dest)
+    return {"ok": True, "src": body.src, "dest": body.dest}
+
+
+# --- control-board layout (persisted per project, hidden from file views) ----
+
+@router.get("/layout")
+async def get_layout(slug: str):
+    p = (await project_dir(slug)) / ".workspace.json"
+    if not p.exists():
+        return {"layout": None}
+    return {"layout": json.loads(p.read_text())}
+
+
+@router.put("/layout")
+async def save_layout(slug: str, layout: dict = Body(...)):
+    p = (await project_dir(slug)) / ".workspace.json"
+    p.write_text(json.dumps(layout))
+    return {"ok": True}
 
 
 # --- todo.md checklist ------------------------------------------------------
