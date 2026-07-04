@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+node_modules/
+frontend/dist/
+.pytest_cache/
+registry.json
+memory/*
+!memory/.gitkeep
+projects/*
+!projects/.gitkeep

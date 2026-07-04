@@ -1,0 +1,12 @@
+[Unit]
+Description=Jarvis v3 orchestrator
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/jarvis
+ExecStart=%h/jarvis/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
