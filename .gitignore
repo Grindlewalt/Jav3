@@ -10,3 +10,5 @@ memory/*
 !memory/.gitkeep
 projects/*
 !projects/.gitkeep
+agents/*
+!agents/.gitkeep

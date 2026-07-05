@@ -331,6 +331,37 @@ kbd {
 .tool-card.planned { opacity: 0.75; border-style: dashed; }
 .tool-card code { font-size: 13px; color: var(--accent); }
 
+/* ---- chatbox panel ---- */
+.chatbox { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; }
+.chatbox .row { margin: 0; }
+.chatbox textarea { resize: none; }
+.messages.compact { flex: 1; overflow-y: auto; padding: 4px 2px; }
+.messages.compact .msg { max-width: 94%; margin-bottom: 10px; }
+.messages.compact .msg pre, .messages.compact .msg .bubble {
+  padding: 8px 12px; font-size: 14px; }
+
+/* ---- agents ---- */
+.agent-form { display: flex; flex-direction: column; gap: 14px;
+  overflow-y: auto; padding-right: 6px; }
+.field-row { display: flex; gap: 12px; }
+.field-row label, .prompt-label {
+  display: flex; flex-direction: column; gap: 4px; flex: 1;
+  font-size: 12.5px; color: var(--dim);
+}
+.agent-section { display: flex; flex-direction: column; gap: 8px; }
+.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 6px; }
+.check-grid label {
+  display: flex; gap: 8px; align-items: center; font-size: 13px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 7px; padding: 6px 10px; cursor: pointer;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.check-grid label.excluded { opacity: 0.45; text-decoration: line-through; }
+.check-grid input, .own-memory input { accent-color: var(--accent); }
+.own-memory { display: flex; gap: 10px; align-items: flex-start;
+  font-size: 13.5px; cursor: pointer; }
+
 /* ---- todos ---- */
 .todo-list { list-style: none; padding: 0; }
 .todo-list li {

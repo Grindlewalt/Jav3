@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { api } from '../api.js'
+import ChatBox from '../ChatBox.jsx'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
+  chat: { label: 'Jarvis chat', w: 440, h: 520 },
   journal: { label: 'Journal — project.md', w: 460, h: 420 },
   editor: { label: 'Editor — text & markdown', w: 520, h: 440 },
   renderer: { label: 'Renderer — html / pdf / images', w: 520, h: 440 },
@@ -301,6 +303,7 @@ export default function Workspace() {
 
 function PanelBody(props) {
   switch (props.type) {
+    case 'chat': return <ChatBox projectSlug={props.slug} />
     case 'journal': return <JournalPanel {...props} />
     case 'editor': return <EditorPanel {...props} />
     case 'renderer': return <RendererPanel {...props} />

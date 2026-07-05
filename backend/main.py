@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, chat, memory_api, projects, skills_api, workspace
+from . import agents_api, auth, chat, memory_api, projects, skills_api, workspace
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -27,6 +27,7 @@ app.include_router(chat.router)
 app.include_router(memory_api.router)
 app.include_router(workspace.router)
 app.include_router(skills_api.router)
+app.include_router(agents_api.router)
 
 
 @app.get("/api/health")

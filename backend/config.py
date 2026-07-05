@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     memory_dir: Path = BASE_DIR / "memory"
     projects_dir: Path = BASE_DIR / "projects"
     skills_dir: Path = BASE_DIR / "skills"
+    agents_dir: Path = BASE_DIR / "agents"
     frontend_dist: Path = BASE_DIR / "frontend" / "dist"
 
     db_path: Path = BASE_DIR / "data" / "jarvis.db"
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    model_name: str = "deepseek-chat"
+    model_name: str = "deepseek-v4-flash"
     model_max_tokens: int = 4096
 
     # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
@@ -51,7 +52,7 @@ settings = Settings()
 
 def ensure_dirs() -> None:
     for d in (settings.data_dir, settings.memory_dir, settings.memory_dir / "notes",
-              settings.projects_dir, settings.skills_dir):
+              settings.projects_dir, settings.skills_dir, settings.agents_dir):
         d.mkdir(parents=True, exist_ok=True)
 
 
