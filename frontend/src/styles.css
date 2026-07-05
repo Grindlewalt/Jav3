@@ -382,3 +382,11 @@ kbd {
 .todo-list input[type="checkbox"] { accent-color: var(--accent);
                                     width: 16px; height: 16px; }
 .todo-list li button { margin-left: auto; }
+
+/* ---- sandbox vm panel ---- */
+.vm-status { align-items: center; }
+.vm-light { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+            background: var(--dim); }
+.vm-light.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.vm-light.mid { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+.mono { font-family: ui-monospace, Menlo, monospace; }

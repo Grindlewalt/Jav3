@@ -46,6 +46,18 @@ class Settings(BaseSettings):
     run_timeout_seconds: int = 60
     run_max_mem_mb: int = 768
 
+    # Sandbox VM (M3). Persistent: boots once and stays up; nuke is a
+    # recovery action (recreate the overlay), not a per-run ritual.
+    vm_dir: Path = BASE_DIR / "data" / "vm"
+    vm_ssh_host: str = "127.0.0.1"
+    vm_ssh_port: int = 2222
+    vm_ssh_user: str = "agent"
+    vm_unit: str = "jarvis-vm.service"
+    vm_workspace: str = "/workspace"
+    vm_run_timeout_seconds: int = 300
+    vm_boot_timeout_seconds: int = 120
+    vm_push_max_mb: int = 64
+
 
 settings = Settings()
 

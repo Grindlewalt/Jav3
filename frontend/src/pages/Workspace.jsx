@@ -12,6 +12,7 @@ const PANEL_TYPES = {
   organizer: { label: 'File organizer', w: 580, h: 460 },
   run: { label: 'Run — python sandbox', w: 560, h: 470 },
   todos: { label: 'To-dos', w: 360, h: 380 },
+  vm: { label: 'Sandbox VM', w: 560, h: 470 },
 }
 
 const DEFAULT_PANELS = [
@@ -338,6 +339,7 @@ function PanelBody(props) {
     case 'organizer': return <OrganizerPanel {...props} />
     case 'run': return <RunPanel {...props} />
     case 'todos': return <TodoPanel {...props} />
+    case 'vm': return <VmPanel {...props} />
     default: return <div className="dim">unknown panel</div>
   }
 }
@@ -736,6 +738,90 @@ function RunPanel({ slug, state, setState }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+// The persistent QEMU sandbox. Push the project in, run things, pull results
+// back into <project>/vm-results. Nuke throws the whole disk away — recovery
+// only, not routine.
+function VmPanel({ slug, state, setState }) {
+  const [st, setSt] = useState(null)
+  const [out, setOut] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const cmd = state.cmd ?? ''
+
+  const refresh = () => api('/api/vm/status').then(setSt).catch(() => setSt(null))
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 15000)
+    return () => clearInterval(t)
+  }, [])
+
+  async function act(path, body) {
+    setBusy(true)
+    setOut(null)
+    try {
+      const r = await api(`/api/vm/${path}`, {
+        method: 'POST', body: JSON.stringify(body || {}) })
+      if (path === 'run') setOut(r)
+      else setOut({ note: JSON.stringify(r) })
+      refresh()
+    } catch (err) {
+      setOut({ error: err.detail || String(err) })
+    }
+    setBusy(false)
+  }
+
+  const light = !st ? 'off' : st.ssh_ready ? 'on' : st.unit_active ? 'mid' : 'off'
+  const label = !st ? 'unknown'
+    : st.ssh_ready ? 'running'
+    : st.unit_active ? 'booting…'
+    : st.base_built ? 'stopped' : 'no golden image'
+
+  return (
+    <div className="pane-col">
+      <div className="row vm-status">
+        <span className={`vm-light ${light}`} />
+        <span className="grow">{label}</span>
+        <button className="ghost" disabled={busy || !st?.base_built || st?.unit_active}
+                onClick={() => act('start')}>start</button>
+        <button className="ghost" disabled={busy || !st?.unit_active}
+                onClick={() => act('stop')}>stop</button>
+        <button className="ghost danger" disabled={busy || !st?.base_built}
+                onClick={() => {
+                  if (window.confirm('Nuke the VM? Its entire disk is thrown away and it reboots fresh from the golden image.'))
+                    act('nuke', { confirm: true })
+                }}>nuke</button>
+      </div>
+      <div className="row">
+        <button disabled={busy || !st?.ssh_ready}
+                onClick={() => act('push', { project: slug })}>⇥ push project</button>
+        <button disabled={busy || !st?.ssh_ready}
+                onClick={() => act('pull', { project: slug, remote_path: slug })}>
+          ⇤ pull results</button>
+      </div>
+      <form className="row" onSubmit={(e) => {
+        e.preventDefault()
+        if (cmd.trim()) act('run', { command: cmd, cwd: `/workspace/${slug}` })
+      }}>
+        <input className="grow mono" placeholder={`run in /workspace/${slug}…`}
+               value={cmd} onChange={(e) => setState({ cmd: e.target.value })} />
+        <button type="submit" disabled={busy || !st?.ssh_ready}>▶</button>
+      </form>
+      {busy && <div className="dim">working…</div>}
+      {out?.error && <pre className="console err">{out.error}</pre>}
+      {out?.note && <pre className="console">{out.note}</pre>}
+      {out && 'exit_status' in out && (
+        <div className="run-result">
+          <div className="dim">exit {out.exit_status}
+            {out.timed_out && <span className="warn"> · timed out after {out.timeout}s</span>}</div>
+          {out.stdout && <pre className="console">{out.stdout}</pre>}
+          {out.stderr && <pre className="console err">{out.stderr}</pre>}
+        </div>
+      )}
+      <p className="dim small">pushed to <code>/workspace/{slug}</code> · pulls land in
+        <code> vm-results/</code> · nothing in the VM is durable</p>
     </div>
   )
 }

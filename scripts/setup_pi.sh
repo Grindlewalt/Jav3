@@ -8,7 +8,8 @@ cd "$REPO_DIR"
 
 echo "== apt deps =="
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-venv nodejs npm
+sudo apt-get install -y -qq python3-venv nodejs npm \
+  qemu-system-arm qemu-utils qemu-efi-aarch64 cloud-image-utils
 
 echo "== python venv =="
 [ -d .venv ] || python3 -m venv .venv
@@ -27,11 +28,14 @@ grep -q DEEPSEEK ~/.config/jarvis/env || \
 echo "== systemd user unit =="
 mkdir -p ~/.config/systemd/user
 cp scripts/jarvis.service ~/.config/systemd/user/jarvis.service
+cp scripts/jarvis-vm.service ~/.config/systemd/user/jarvis-vm.service
 systemctl --user daemon-reload
 systemctl --user enable jarvis.service
+systemctl --user enable jarvis-vm.service 2>/dev/null || true
 loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER"
 
 echo "== done =="
 echo "create the login user:   .venv/bin/python -m backend.cli create-user <name>"
 echo "start:                   systemctl --user restart jarvis"
 echo "logs:                    journalctl --user -u jarvis -f"
+echo "sandbox VM (once):       bash vm/build_base.sh && systemctl --user start jarvis-vm"

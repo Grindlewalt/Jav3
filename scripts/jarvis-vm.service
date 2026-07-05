@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis sandbox VM (QEMU, overlay on golden base)
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=%h/jarvis/vm/run_vm.sh
+Environment=VM_DIR=%h/jarvis/data/vm
+Restart=on-failure
+RestartSec=5
+MemoryMax=1536M
+OOMPolicy=kill
+
+[Install]
+WantedBy=default.target
