@@ -286,3 +286,51 @@ async def modify_todos(slug: str, body: TodoAction):
         raise HTTPException(status_code=400, detail="bad todo action")
     _write_todos(base, todos)
     return {"todos": todos}
+
+
+# --- staged changes (Jarvis's pending edits) ---------------------------------
+# Staged content is quarantined: these endpoints return it as text for diff
+# display only; nothing serves, runs or imports it until approved.
+
+from . import staging as _staging  # noqa: E402
+
+
+class StagingAction(BaseModel):
+    paths: list[str] | None = None   # None = everything
+
+
+@router.get("/staging")
+async def staged_list(slug: str):
+    await project_dir(slug)
+    return {"staged": _staging.list_staged(slug)}
+
+
+@router.get("/staging/diff")
+async def staged_diff(slug: str, path: str):
+    base = await project_dir(slug)
+    staged = safe_join(base / _staging.STAGING, path)
+    if not staged.is_file():
+        raise HTTPException(status_code=404, detail="nothing staged at that path")
+    canonical = safe_join(base, path)
+
+    def _text(p: Path) -> str | None:
+        if not p.is_file():
+            return None
+        try:
+            return p.read_text()
+        except UnicodeDecodeError:
+            return f"(binary, {p.stat().st_size} bytes)"
+
+    return {"path": path, "old": _text(canonical), "new": _text(staged)}
+
+
+@router.post("/staging/approve")
+async def staged_approve(slug: str, body: StagingAction):
+    await project_dir(slug)
+    return {"applied": _staging.approve(slug, body.paths)}
+
+
+@router.post("/staging/reject")
+async def staged_reject(slug: str, body: StagingAction):
+    await project_dir(slug)
+    return {"rejected": _staging.reject(slug, body.paths)}

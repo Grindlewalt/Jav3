@@ -390,3 +390,19 @@ kbd {
 .vm-light.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .vm-light.mid { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
 .mono { font-family: ui-monospace, Menlo, monospace; }
+
+/* ---- staged changes panel ---- */
+.staged-list { list-style: none; padding: 0; margin: 0; overflow-y: auto;
+               max-height: 40%; }
+.staged-list li { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 7px;
+  margin-bottom: 5px; cursor: pointer; font-size: 13px; }
+.staged-list li.active { border-color: var(--accent); }
+.staged-list .tag.new { color: var(--green); border-color: var(--green); }
+.staged-list .tag.modified { color: var(--amber); border-color: var(--amber); }
+.win-btn.ok:hover { color: var(--green); }
+.diff-view { display: flex; gap: 10px; flex: 1; min-height: 0; }
+.diff-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.diff-col pre { flex: 1; overflow: auto; margin: 0; padding: 8px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word; }

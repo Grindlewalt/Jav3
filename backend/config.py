@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     projects_dir: Path = BASE_DIR / "projects"
     skills_dir: Path = BASE_DIR / "skills"
     agents_dir: Path = BASE_DIR / "agents"
+    tools_dir: Path = BASE_DIR / "tools"
     frontend_dist: Path = BASE_DIR / "frontend" / "dist"
 
     db_path: Path = BASE_DIR / "data" / "jarvis.db"
@@ -64,7 +65,8 @@ settings = Settings()
 
 def ensure_dirs() -> None:
     for d in (settings.data_dir, settings.memory_dir, settings.memory_dir / "notes",
-              settings.projects_dir, settings.skills_dir, settings.agents_dir):
+              settings.projects_dir, settings.skills_dir, settings.agents_dir,
+              settings.tools_dir):
         d.mkdir(parents=True, exist_ok=True)
 
 

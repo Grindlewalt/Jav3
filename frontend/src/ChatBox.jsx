@@ -47,6 +47,14 @@ export default function ChatBox({ projectSlug }) {
                 body: JSON.stringify({ project: projectSlug }),
               }).then(refresh)
           }
+          if (ev.type === 'tool')
+            setMessages((m) => {
+              const copy = [...m]
+              const last = copy[copy.length - 1]
+              copy[copy.length - 1] = {
+                ...last, content: last.content + `\n\`⚙ ${ev.name}\`\n` }
+              return copy
+            })
           if (ev.type === 'token')
             setMessages((m) => {
               const copy = [...m]

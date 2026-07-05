@@ -13,6 +13,7 @@ const PANEL_TYPES = {
   run: { label: 'Run — python sandbox', w: 560, h: 470 },
   todos: { label: 'To-dos', w: 360, h: 380 },
   vm: { label: 'Sandbox VM', w: 560, h: 470 },
+  staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
 }
 
 const DEFAULT_PANELS = [
@@ -340,6 +341,7 @@ function PanelBody(props) {
     case 'run': return <RunPanel {...props} />
     case 'todos': return <TodoPanel {...props} />
     case 'vm': return <VmPanel {...props} />
+    case 'staging': return <StagingPanel {...props} />
     default: return <div className="dim">unknown panel</div>
   }
 }
@@ -736,6 +738,83 @@ function RunPanel({ slug, state, setState }) {
               {IMG_EXT.test(a) && <img src={`${rawUrl(slug, a)}?t=${Date.now()}`} alt={a} />}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Jarvis's pending edits: everything it writes lands here first, inert, and
+// only touches the real files when approved. Diffs are shown as plain text.
+function StagingPanel({ slug }) {
+  const [staged, setStaged] = useState([])
+  const [sel, setSel] = useState(null)
+  const [diff, setDiff] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = () =>
+    api(`/api/projects/${slug}/staging`).then((r) => {
+      setStaged(r.staged)
+      if (sel && !r.staged.some((e) => e.path === sel)) { setSel(null); setDiff(null) }
+    })
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 8000)
+    return () => clearInterval(t)
+  }, [slug]) // eslint-disable-line
+
+  useEffect(() => {
+    if (!sel) return
+    api(`/api/projects/${slug}/staging/diff?path=${encodeURIComponent(sel)}`)
+      .then(setDiff).catch(() => setDiff(null))
+  }, [sel, slug])
+
+  async function act(verb, paths) {
+    setBusy(true)
+    try {
+      await api(`/api/projects/${slug}/staging/${verb}`, {
+        method: 'POST', body: JSON.stringify({ paths }) })
+      await refresh()
+      window.dispatchEvent(new Event('jarvis-files-changed'))
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
+
+  if (staged.length === 0)
+    return <div className="dim center-pad">no staged changes — Jarvis's edits appear here for approval</div>
+
+  return (
+    <div className="pane-col">
+      <div className="row">
+        <span className="grow dim">{staged.length} pending file{staged.length !== 1 && 's'}</span>
+        <button disabled={busy} onClick={() => act('approve', null)}>✓ approve all</button>
+        <button className="ghost danger" disabled={busy}
+                onClick={() => window.confirm('discard ALL staged changes?') && act('reject', null)}>
+          ✕ reject all</button>
+      </div>
+      <ul className="staged-list">
+        {staged.map((e) => (
+          <li key={e.path} className={sel === e.path ? 'active' : ''}
+              onClick={() => setSel(e.path)}>
+            <span className={`tag ${e.status}`}>{e.status}</span>
+            <span className="grow ellipsis">{e.path}</span>
+            <button className="win-btn ok" title="approve" disabled={busy}
+                    onClick={(ev) => { ev.stopPropagation(); act('approve', [e.path]) }}>✓</button>
+            <button className="win-btn" title="reject" disabled={busy}
+                    onClick={(ev) => { ev.stopPropagation(); act('reject', [e.path]) }}>✕</button>
+          </li>
+        ))}
+      </ul>
+      {sel && diff && (
+        <div className="diff-view">
+          <div className="diff-col">
+            <div className="dim small">current</div>
+            <pre>{diff.old ?? '(new file)'}</pre>
+          </div>
+          <div className="diff-col">
+            <div className="dim small">staged</div>
+            <pre>{diff.new}</pre>
+          </div>
         </div>
       )}
     </div>

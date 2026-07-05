@@ -22,7 +22,8 @@ from ...config import settings
 
 # Never worth shipping into the VM (and .git would leak history the VM has
 # no business seeing — the VM never touches git, per spec).
-PUSH_EXCLUDE = {".git", ".venv", "node_modules", "__pycache__", "dist", ".workspace.json"}
+PUSH_EXCLUDE = {".git", ".venv", "node_modules", "__pycache__", "dist",
+                ".workspace.json", ".staging"}
 
 
 class VMError(Exception):
@@ -127,7 +128,7 @@ async def nuke(wait: bool = True) -> None:
 
 
 async def run(command: str, timeout: float | None = None,
-              cwd: str | None = None) -> dict:
+              cwd: str | None = None, input: str | None = None) -> dict:
     """Run a shell command in the VM as the agent user. Returns exit status
     and captured output; a timeout kills the command, not the VM."""
     timeout = timeout or settings.vm_run_timeout_seconds
@@ -137,7 +138,7 @@ async def run(command: str, timeout: float | None = None,
         full = f"cd {shlex.quote(workdir)} && {command}"
         try:
             result = await asyncio.wait_for(
-                conn.run(full, check=False), timeout=timeout)
+                conn.run(full, check=False, input=input), timeout=timeout)
         except asyncio.TimeoutError:
             return {"exit_status": -1, "stdout": "", "stderr": "",
                     "timed_out": True, "timeout": timeout}
@@ -196,6 +197,8 @@ async def pull(remote_path: str, local_dir: Path) -> dict:
             stderr = (result.stderr or b"").decode(errors="replace")
             raise VMError(f"pull failed: {stderr}")
         data = result.stdout or b""
+        if len(data) > settings.vm_push_max_mb * 1024 * 1024:
+            raise VMError(f"pull exceeds {settings.vm_push_max_mb}MB limit")
     finally:
         conn.close()
     local_dir.mkdir(parents=True, exist_ok=True)
