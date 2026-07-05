@@ -25,6 +25,65 @@ const MEDIA_EXT = /\.(html?|pdf|png|jpg|jpeg|gif|svg|webp)$/i
 // board grid: drags are smooth, drops snap (matches the dot background)
 const GRID = 26
 const snap = (v) => Math.round(v / GRID) * GRID
+const GAP = 12        // breathing room between tiled panels
+const SNAP_T = 16     // px within which an edge becomes magnetic
+const MIN_W = 280, MIN_H = 200
+
+// magnetic drop: prefer lining up with other panels' edges, else the grid
+function smartPos(me, x, y, others) {
+  let bestX = snap(x), bdx = SNAP_T
+  let bestY = snap(y), bdy = SNAP_T
+  for (const o of others) {
+    for (const c of [o.x, o.x + o.w + GAP, o.x + o.w - me.w, o.x - me.w - GAP]) {
+      if (Math.abs(x - c) < bdx) { bdx = Math.abs(x - c); bestX = c }
+    }
+    for (const c of [o.y, o.y + o.h + GAP, o.y + o.h - me.h, o.y - me.h - GAP]) {
+      if (Math.abs(y - c) < bdy) { bdy = Math.abs(y - c); bestY = c }
+    }
+  }
+  return { x: Math.max(0, bestX), y: Math.max(0, bestY) }
+}
+
+function smartW(me, w, others) {
+  let best = snap(w), bd = SNAP_T
+  for (const o of others) {
+    for (const c of [o.x - GAP - me.x, o.x + o.w - me.x]) {
+      if (c >= MIN_W && Math.abs(w - c) < bd) { bd = Math.abs(w - c); best = c }
+    }
+  }
+  return Math.max(MIN_W, best)
+}
+
+function smartH(me, h, others) {
+  let best = snap(h), bd = SNAP_T
+  for (const o of others) {
+    for (const c of [o.y - GAP - me.y, o.y + o.h - me.y]) {
+      if (c >= MIN_H && Math.abs(h - c) < bd) { bd = Math.abs(h - c); best = c }
+    }
+  }
+  return Math.max(MIN_H, best)
+}
+
+const overlapV = (a, b) => a.y < b.y + b.h && a.y + a.h > b.y
+const overlapH = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x
+
+// tiling behaviour: growing into a neighbour shrinks it (keeping its far
+// edge fixed). Computed from the gesture-start snapshot every frame, so
+// dragging back mid-gesture restores neighbours to their original size.
+function shrinkAway(p, me0, me) {
+  let out = { ...p }
+  if (p.x >= me0.x + me0.w - 2 && overlapV(p, me) && me.x + me.w + GAP > p.x) {
+    const right = p.x + p.w
+    const nx = me.x + me.w + GAP
+    out = { ...out, x: nx, w: Math.max(MIN_W, right - nx) }
+  }
+  if (p.y >= me0.y + me0.h - 2 && overlapH(p, me) && me.y + me.h + GAP > p.y) {
+    const bottom = p.y + p.h
+    const ny = me.y + me.h + GAP
+    out = { ...out, y: ny, h: Math.max(MIN_H, bottom - ny) }
+  }
+  return out
+}
 
 const rawUrl = (slug, p) =>
   `/api/projects/${slug}/raw/${p.split('/').map(encodeURIComponent).join('/')}`
@@ -37,11 +96,13 @@ export default function Workspace() {
   const [expandRect, setExpandRect] = useState(null)
   const [menu, setMenu] = useState(null)           // {x, y, bx, by}
   const [hovered, setHovered] = useState(null)     // panel id under the mouse
+  const [resizing, setResizing] = useState(false)  // gesture live: no transitions
   const boardRef = useRef(null)
   const zRef = useRef(10)
   const saveTimer = useRef(null)
   const mouseRef = useRef({ x: 200, y: 160 })
   const undoRef = useRef([])                       // closed panels, for ctrl+z
+  const gestureRef = useRef(null)                  // layout snapshot during a resize
 
   const refreshProject = useCallback(
     () => api(`/api/projects/${slug}`).then(setProject), [slug])
@@ -72,6 +133,42 @@ export default function Workspace() {
     setPanels((ps) => ps.map((p) =>
       p.id === id ? { ...p, state: { ...p.state, ...patch } } : p))
   const front = (id) => patchPanel(id, { z: ++zRef.current })
+
+  const dragEnd = (id, x, y) =>
+    setPanels((ps) => {
+      const me = ps.find((p) => p.id === id)
+      const pos = smartPos(me, x, y, ps.filter((p) => p.id !== id))
+      return ps.map((p) => (p.id === id ? { ...p, ...pos } : p))
+    })
+
+  const resizeStart = (id) => {
+    gestureRef.current = { id, snap: panels.map((p) => ({ ...p })) }
+    setResizing(true)
+  }
+
+  const resizeMove = (id, dx, dy, final) => {
+    const snap0 = gestureRef.current?.snap
+    if (!snap0) return
+    const me0 = snap0.find((p) => p.id === id)
+    const others0 = snap0.filter((p) => p.id !== id)
+    let w = Math.max(MIN_W, me0.w + dx)
+    let h = Math.max(MIN_H, me0.h + dy)
+    if (final) {
+      w = smartW(me0, w, others0)
+      h = smartH(me0, h, others0)
+    }
+    const me = { ...me0, w, h }
+    const resolved = others0.map((p) => shrinkAway(p, me0, me))
+    setPanels((ps) => ps.map((cur) => {
+      if (cur.id === id) return { ...cur, w, h }
+      const r = resolved.find((p) => p.id === cur.id)
+      return r ? { ...cur, x: r.x, y: r.y, w: r.w, h: r.h } : cur
+    }))
+    if (final) {
+      gestureRef.current = null
+      setResizing(false)
+    }
+  }
 
   const close = (id) => {
     setExpanded((ex) => (ex === id ? null : ex))
@@ -178,7 +275,11 @@ export default function Workspace() {
           <Window key={p.id} panel={p}
                   expanded={expanded === p.id} expandRect={expandRect}
                   dimmed={expanded !== null && expanded !== p.id}
+                  noAnim={resizing}
                   onPatch={(patch) => patchPanel(p.id, patch)}
+                  onDragEnd={(x, y) => dragEnd(p.id, x, y)}
+                  onResizeStart={() => resizeStart(p.id)}
+                  onResize={(dx, dy, final) => resizeMove(p.id, dx, dy, final)}
                   onFront={() => front(p.id)}
                   onClose={() => close(p.id)}
                   onHover={(over) => setHovered((h) =>
@@ -212,8 +313,9 @@ function PanelBody(props) {
 
 // ---- window chrome ----------------------------------------------------------
 
-function Window({ panel, expanded, expandRect, dimmed, onPatch, onFront,
-                  onClose, onHover, onToggleExpand, children }) {
+function Window({ panel, expanded, expandRect, dimmed, noAnim, onPatch,
+                  onDragEnd, onResizeStart, onResize, onFront, onClose,
+                  onHover, onToggleExpand, children }) {
   const [interacting, setInteracting] = useState(false)
 
   function track(e, apply, settle) {
@@ -238,16 +340,14 @@ function Window({ panel, expanded, expandRect, dimmed, onPatch, onFront,
     const { x, y } = panel
     track(e,
       (dx, dy) => onPatch({ x: Math.max(0, x + dx), y: Math.max(0, y + dy) }),
-      (dx, dy) => onPatch({ x: snap(Math.max(0, x + dx)),
-                            y: snap(Math.max(0, y + dy)) }))
+      (dx, dy) => onDragEnd(Math.max(0, x + dx), Math.max(0, y + dy)))
   }
   const startResize = (e) => {
     if (expanded) return
-    const { w, h } = panel
+    onResizeStart()
     track(e,
-      (dx, dy) => onPatch({ w: Math.max(280, w + dx), h: Math.max(200, h + dy) }),
-      (dx, dy) => onPatch({ w: Math.max(280, snap(w + dx)),
-                            h: Math.max(200, snap(h + dy)) }))
+      (dx, dy) => onResize(dx, dy, false),
+      (dx, dy) => onResize(dx, dy, true))
   }
 
   const style = expanded && expandRect
@@ -257,7 +357,7 @@ function Window({ panel, expanded, expandRect, dimmed, onPatch, onFront,
         zIndex: panel.z || 1 }
 
   return (
-    <section className={`window ${interacting ? '' : 'anim'} ${expanded ? 'expanded' : ''} ${dimmed ? 'dimmed' : ''}`}
+    <section className={`window ${interacting || noAnim ? '' : 'anim'} ${expanded ? 'expanded' : ''} ${dimmed ? 'dimmed' : ''}`}
              style={style} onPointerDown={onFront}
              onPointerEnter={() => onHover(true)}
              onPointerLeave={() => onHover(false)}>
