@@ -94,7 +94,7 @@ export default function ChatBox({ projectSlug }) {
           <option value="">new chat</option>
           {convos.map((c) => (
             <option key={c.id} value={c.id}>
-              #{c.id} · {c.started_at?.slice(5, 16)}
+              {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16)}`}
             </option>
           ))}
         </select>

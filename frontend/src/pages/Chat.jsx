@@ -118,7 +118,8 @@ export default function Chat() {
           {conversations.map((c) => (
             <li key={c.id} className={c.id === conversationId ? 'active' : ''}
                 onClick={() => openConversation(c.id)}>
-              <span className="grow">#{c.id} · {c.started_at?.slice(5, 16) || ''}</span>
+              <span className="grow ellipsis" title={c.summary || `#${c.id}`}>
+                {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
               {c.project_slug && <span className="tag">{c.project_slug}</span>}
               <button className="win-btn" title="delete chat"
                       onClick={(e) => { e.stopPropagation(); deleteConversation(c.id) }}>×</button>

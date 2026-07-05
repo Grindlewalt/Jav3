@@ -99,6 +99,7 @@ export default function Workspace() {
   const [menu, setMenu] = useState(null)           // {x, y, bx, by}
   const [hovered, setHovered] = useState(null)     // panel id under the mouse
   const [resizing, setResizing] = useState(false)  // gesture live: no transitions
+  const [closingIds, setClosingIds] = useState([]) // panels playing their exit
   const boardRef = useRef(null)
   const zRef = useRef(10)
   const saveTimer = useRef(null)
@@ -173,13 +174,18 @@ export default function Workspace() {
   }
 
   const close = (id) => {
+    if (closingIds.includes(id)) return
     setExpanded((ex) => (ex === id ? null : ex))
     setHovered((h) => (h === id ? null : h))
-    setPanels((ps) => {
-      const p = ps.find((x) => x.id === id)
-      if (p) undoRef.current.push(p)
-      return ps.filter((x) => x.id !== id)
-    })
+    setClosingIds((c) => [...c, id])   // play the exit animation first
+    setTimeout(() => {
+      setClosingIds((c) => c.filter((x) => x !== id))
+      setPanels((ps) => {
+        const p = ps.find((x) => x.id === id)
+        if (p) undoRef.current.push(p)
+        return ps.filter((x) => x.id !== id)
+      })
+    }, 170)
   }
 
   const undoClose = () => {
@@ -227,12 +233,33 @@ export default function Workspace() {
     setExpanded(id)
   }
 
+  // spawn placement: use the requested spot if it's genuinely free, else the
+  // first grid position in view where the panel fits with breathing room
+  function findSpot(w, h, want) {
+    const b = boardRef.current
+    const x1 = b.scrollLeft + b.clientWidth
+    const y1 = b.scrollTop + b.clientHeight
+    const free = (x, y) =>
+      x >= 0 && y >= 0 && x + w <= x1 - GAP && y + h <= y1 - GAP &&
+      !panels.some((r) =>
+        x < r.x + r.w + GAP && x + w + GAP > r.x &&
+        y < r.y + r.h + GAP && y + h + GAP > r.y)
+    if (want && free(want.x, want.y)) return want
+    const gx0 = Math.ceil((b.scrollLeft + GAP) / GRID) * GRID
+    const gy0 = Math.ceil((b.scrollTop + GAP) / GRID) * GRID
+    for (let y = gy0; y + h <= y1; y += GRID)
+      for (let x = gx0; x + w <= x1; x += GRID)
+        if (free(x, y)) return { x, y }
+    return want || { x: gx0 + 2 * GRID, y: gy0 + 2 * GRID }  // board's full: cascade
+  }
+
   function addPanel(type, bx, by) {
     const spec = PANEL_TYPES[type]
+    const w = snap(spec.w), h = snap(spec.h)
+    const want = bx != null ? { x: snap(Math.max(0, bx)), y: snap(Math.max(0, by)) } : null
+    const { x, y } = findSpot(w, h, want)
     setPanels((ps) => [...ps, {
-      id: `p${Date.now()}`, type,
-      x: snap(Math.max(0, bx ?? 52)), y: snap(Math.max(0, by ?? 52)),
-      w: snap(spec.w), h: snap(spec.h), z: ++zRef.current, state: {},
+      id: `p${Date.now()}`, type, x, y, w, h, z: ++zRef.current, state: {},
     }])
     setMenu(null)
   }
@@ -278,6 +305,7 @@ export default function Workspace() {
                   expanded={expanded === p.id} expandRect={expandRect}
                   dimmed={expanded !== null && expanded !== p.id}
                   noAnim={resizing}
+                  closing={closingIds.includes(p.id)}
                   onPatch={(patch) => patchPanel(p.id, patch)}
                   onDragEnd={(x, y) => dragEnd(p.id, x, y)}
                   onResizeStart={() => resizeStart(p.id)}
@@ -316,9 +344,9 @@ function PanelBody(props) {
 
 // ---- window chrome ----------------------------------------------------------
 
-function Window({ panel, expanded, expandRect, dimmed, noAnim, onPatch,
-                  onDragEnd, onResizeStart, onResize, onFront, onClose,
-                  onHover, onToggleExpand, children }) {
+function Window({ panel, expanded, expandRect, dimmed, noAnim, closing,
+                  onPatch, onDragEnd, onResizeStart, onResize, onFront,
+                  onClose, onHover, onToggleExpand, children }) {
   const [interacting, setInteracting] = useState(false)
 
   function track(e, apply, settle) {
@@ -360,7 +388,7 @@ function Window({ panel, expanded, expandRect, dimmed, noAnim, onPatch,
         zIndex: panel.z || 1 }
 
   return (
-    <section className={`window ${interacting || noAnim ? '' : 'anim'} ${expanded ? 'expanded' : ''} ${dimmed ? 'dimmed' : ''}`}
+    <section className={`window ${interacting || noAnim ? '' : 'anim'} ${expanded ? 'expanded' : ''} ${dimmed ? 'dimmed' : ''} ${closing ? 'closing' : ''}`}
              style={style} onPointerDown={onFront}
              onPointerEnter={() => onHover(true)}
              onPointerLeave={() => onHover(false)}>

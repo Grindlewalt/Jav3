@@ -1,10 +1,11 @@
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .agent.model import confirm_peak, in_peak_window, peak_confirmed
+from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import run_turn
 from .auth import require_user
 from .config import settings
@@ -22,6 +23,33 @@ class ChatRequest(BaseModel):
 
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
+
+
+async def _name_conversation(conversation_id: int, user_msg: str, reply: str) -> None:
+    """Ask the model for a short title. Fails silently — the truncated
+    first-message title stays if the call errors (no balance, offline...)."""
+    try:
+        final = None
+        async for ev in model.complete([
+            {"role": "system",
+             "content": "Name this chat in 3-6 words. Reply with only the title."},
+            {"role": "user",
+             "content": f"User: {user_msg[:400]}\n\nAssistant: {reply[:400]}"},
+        ]):
+            if ev["type"] == "message":
+                final = ev
+        title = (final["content"] or "").strip().strip('"').strip()[:60]
+        if not title:
+            return
+        db = await get_db()
+        try:
+            await db.execute("UPDATE conversations SET summary = ? WHERE id = ?",
+                             (title, conversation_id))
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception:
+        pass
 
 
 class AssignProject(BaseModel):
@@ -121,8 +149,12 @@ async def chat(body: ChatRequest):
                 ) as cur:
                     row = await cur.fetchone()
                 project_id = row["id"] if row else None
+            # provisional title: first bit of the opening message; an LLM
+            # naming pass upgrades it after the first exchange (best effort)
+            title = " ".join(body.message.split())[:48] or "(empty)"
             cur = await db.execute(
-                "INSERT INTO conversations (project_id) VALUES (?)", (project_id,))
+                "INSERT INTO conversations (project_id, summary) VALUES (?, ?)",
+                (project_id, title))
             conversation_id = cur.lastrowid
             await db.commit()
         else:
@@ -174,6 +206,14 @@ async def chat(body: ChatRequest):
                 (conversation_id, final_content),
             )
             await db.commit()
+            async with db.execute(
+                "SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?",
+                (conversation_id,),
+            ) as cur:
+                count = (await cur.fetchone())["c"]
+            if count == 2:  # first exchange done — try to give it a real name
+                asyncio.create_task(
+                    _name_conversation(conversation_id, body.message, final_content))
             yield sse({"type": "final", "content": final_content,
                        "conversation_id": conversation_id})
         except Exception as exc:  # surfaced to the GUI rather than a dropped stream
