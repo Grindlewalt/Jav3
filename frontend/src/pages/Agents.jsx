@@ -46,15 +46,19 @@ export default function Agents() {
 
   async function create(e) {
     e.preventDefault()
-    const name = nameRef.current.value.trim()
-    if (!name) return
+    let name = nameRef.current.value.trim()
+    if (!name) {
+      // clicking + with an empty field should ask, not silently do nothing
+      name = (window.prompt('name the new agent') || '').trim()
+      if (!name) { nameRef.current?.focus(); return }
+    }
     try {
       const r = await api('/api/agents', {
         method: 'POST', body: JSON.stringify({ name }) })
       nameRef.current.value = ''
       await refresh()
       setSelected(r.slug)
-    } catch (err) { window.alert(err.detail || err) }
+    } catch (err) { window.alert(err.detail || String(err)) }
   }
 
   const patch = (p) => { setAgent((a) => ({ ...a, ...p })); setDirty(true) }
