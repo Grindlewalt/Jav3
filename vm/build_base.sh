@@ -52,6 +52,9 @@ users:
   - name: agent
     shell: /bin/bash
     lock_passwd: true
+    # Full sudo inside the guest is fine: every guardrail lives host-side
+    # (egress firewall, staging, state API, nuke). Root here only risks the VM.
+    sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - $(cat agent_ed25519.pub)
 ssh_keys:
