@@ -82,7 +82,9 @@ def extract_summary(project_md: str) -> str:
 
 
 async def refresh_all_projects(db: aiosqlite.Connection) -> None:
-    async with db.execute("SELECT slug, name FROM projects ORDER BY name") as cur:
+    async with db.execute(
+        "SELECT slug, name FROM projects WHERE deleted_at IS NULL ORDER BY name"
+    ) as cur:
         rows = await cur.fetchall()
     lines = ["# All projects", ""]
     if not rows:

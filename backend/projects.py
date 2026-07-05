@@ -40,13 +40,20 @@ async def list_projects():
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT id, slug, name, github_remote, created_at FROM projects ORDER BY created_at DESC"
+            "SELECT id, slug, name, github_remote, created_at FROM projects "
+            "WHERE deleted_at IS NULL ORDER BY created_at DESC"
         ) as cur:
             rows = await cur.fetchall()
+        async with db.execute(
+            "SELECT id, slug, name, deleted_at FROM projects "
+            "WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+        ) as cur:
+            deleted = await cur.fetchall()
         active = await get_active_project(db)
     finally:
         await db.close()
-    return {"projects": [dict(r) for r in rows], "active": active}
+    return {"projects": [dict(r) for r in rows],
+            "deleted": [dict(r) for r in deleted], "active": active}
 
 
 @router.post("/projects")
@@ -106,13 +113,83 @@ async def update_project_md(slug: str, body: UpdateProjectMd):
 async def load_project(slug: str):
     db = await get_db()
     try:
-        async with db.execute("SELECT 1 FROM projects WHERE slug = ?", (slug,)) as cur:
+        async with db.execute(
+            "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL", (slug,)
+        ) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="no such project")
         await set_state(db, "active_project", slug)
     finally:
         await db.close()
     return {"ok": True, "active": slug}
+
+
+@router.delete("/projects/{slug}")
+async def soft_delete_project(slug: str):
+    """Move to the recently-deleted bin. Files stay on disk; restorable."""
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL", (slug,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="no such project")
+        await db.execute(
+            "UPDATE projects SET deleted_at = datetime('now') WHERE slug = ?", (slug,))
+        if await get_active_project(db) == slug:
+            await set_state(db, "active_project", None)
+        await db.commit()
+        await refresh_all_projects(db)
+    finally:
+        await db.close()
+    return {"ok": True}
+
+
+@router.post("/projects/{slug}/restore")
+async def restore_project(slug: str):
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NOT NULL", (slug,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="not in the deleted bin")
+        await db.execute(
+            "UPDATE projects SET deleted_at = NULL WHERE slug = ?", (slug,))
+        await db.commit()
+        await refresh_all_projects(db)
+    finally:
+        await db.close()
+    return {"ok": True}
+
+
+@router.delete("/projects/{slug}/purge")
+async def purge_project(slug: str):
+    """Permanent: only allowed from the bin. Removes files and DB rows;
+    conversations survive, detached from the project."""
+    import shutil
+
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT id FROM projects WHERE slug = ? AND deleted_at IS NOT NULL", (slug,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=400,
+                                detail="soft-delete first — purge only empties the bin")
+        pid = row["id"]
+        await db.execute("UPDATE conversations SET project_id = NULL WHERE project_id = ?", (pid,))
+        await db.execute("DELETE FROM runs WHERE project_id = ?", (pid,))
+        await db.execute("DELETE FROM projects WHERE id = ?", (pid,))
+        await db.commit()
+        await refresh_all_projects(db)
+    finally:
+        await db.close()
+    project_path = settings.projects_dir / slug
+    if project_path.exists():
+        shutil.rmtree(project_path)
+    return {"ok": True}
 
 
 @router.post("/projects/unload")

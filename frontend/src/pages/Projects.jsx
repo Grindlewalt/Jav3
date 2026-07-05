@@ -4,6 +4,7 @@ import { api } from '../api.js'
 
 export default function Projects() {
   const [projects, setProjects] = useState([])
+  const [deleted, setDeleted] = useState([])
   const [active, setActive] = useState(null)
   const [name, setName] = useState('')
   const [summary, setSummary] = useState('')
@@ -12,6 +13,7 @@ export default function Projects() {
   async function refresh() {
     const r = await api('/api/projects')
     setProjects(r.projects)
+    setDeleted(r.deleted || [])
     setActive(r.active)
   }
   useEffect(() => { refresh() }, [])
@@ -37,6 +39,20 @@ export default function Projects() {
     await api('/api/projects/unload', { method: 'POST' })
     refresh()
   }
+  async function softDelete(slug) {
+    if (!window.confirm(`move "${slug}" to recently deleted?`)) return
+    await api(`/api/projects/${slug}`, { method: 'DELETE' })
+    refresh()
+  }
+  async function restore(slug) {
+    await api(`/api/projects/${slug}/restore`, { method: 'POST' })
+    refresh()
+  }
+  async function purge(slug) {
+    if (!window.confirm(`permanently delete "${slug}" and all its files? This cannot be undone.`)) return
+    await api(`/api/projects/${slug}/purge`, { method: 'DELETE' })
+    refresh()
+  }
 
   return (
     <div className="page">
@@ -58,10 +74,27 @@ export default function Projects() {
               ? <button onClick={unload}>Unload from context</button>
               : <button onClick={() => load(p.slug)}>Load into context</button>}
             {active === p.slug && <span className="badge">in context</span>}
+            <button className="ghost danger" onClick={() => softDelete(p.slug)}>delete</button>
           </li>
         ))}
         {projects.length === 0 && <li className="dim">no projects yet</li>}
       </ul>
+
+      {deleted.length > 0 && (
+        <>
+          <h3 className="section-h">Recently deleted</h3>
+          <ul className="project-list">
+            {deleted.map((p) => (
+              <li key={p.slug} className="deleted">
+                <span>{p.name}</span>
+                <code>{p.slug} · deleted {p.deleted_at?.slice(0, 16)}</code>
+                <button className="ghost" onClick={() => restore(p.slug)}>restore</button>
+                <button className="ghost danger" onClick={() => purge(p.slug)}>delete forever</button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   )
 }

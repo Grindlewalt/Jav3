@@ -9,11 +9,15 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [active, setActive] = useState(null)
+  const [projects, setProjects] = useState([])
   const bottomRef = useRef(null)
 
-  useEffect(() => {
+  const refreshConvos = () =>
     api('/api/conversations').then((r) => setConversations(r.conversations))
-    api('/api/projects').then((r) => setActive(r.active))
+
+  useEffect(() => {
+    refreshConvos()
+    api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
   }, [])
 
   useEffect(() => {
@@ -29,6 +33,19 @@ export default function Chat() {
   function newConversation() {
     setConversationId(null)
     setMessages([])
+  }
+
+  async function deleteConversation(id) {
+    if (!window.confirm(`delete chat #${id}?`)) return
+    await api(`/api/conversations/${id}`, { method: 'DELETE' })
+    if (id === conversationId) newConversation()
+    refreshConvos()
+  }
+
+  async function assignProject(slug) {
+    await api(`/api/conversations/${conversationId}`, {
+      method: 'PATCH', body: JSON.stringify({ project: slug || null }) })
+    refreshConvos()
   }
 
   async function send(confirmPeak = false) {
@@ -101,13 +118,28 @@ export default function Chat() {
           {conversations.map((c) => (
             <li key={c.id} className={c.id === conversationId ? 'active' : ''}
                 onClick={() => openConversation(c.id)}>
-              #{c.id} · {c.started_at?.slice(0, 16) || ''}
+              <span className="grow">#{c.id} · {c.started_at?.slice(5, 16) || ''}</span>
+              {c.project_slug && <span className="tag">{c.project_slug}</span>}
+              <button className="win-btn" title="delete chat"
+                      onClick={(e) => { e.stopPropagation(); deleteConversation(c.id) }}>×</button>
             </li>
           ))}
         </ul>
         {active && <div className="active-project">project loaded: {active}</div>}
       </aside>
       <main>
+        {conversationId && (
+          <div className="chat-toolbar">
+            <span className="dim">chat #{conversationId}</span>
+            <label className="dim">project:</label>
+            <select
+              value={conversations.find((c) => c.id === conversationId)?.project_slug || ''}
+              onChange={(e) => assignProject(e.target.value)}>
+              <option value="">— none —</option>
+              {projects.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
+            </select>
+          </div>
+        )}
         <div className="messages">
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>

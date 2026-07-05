@@ -67,6 +67,10 @@ async def init_db() -> None:
     db = await get_db()
     try:
         await db.executescript(SCHEMA)
+        async with db.execute("PRAGMA table_info(projects)") as cur:
+            cols = [r["name"] for r in await cur.fetchall()]
+        if "deleted_at" not in cols:
+            await db.execute("ALTER TABLE projects ADD COLUMN deleted_at TEXT")
         await db.commit()
     finally:
         await db.close()

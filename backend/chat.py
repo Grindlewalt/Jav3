@@ -24,22 +24,73 @@ def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
+class AssignProject(BaseModel):
+    project: str | None  # slug, or null to detach
+
+
 @router.get("/conversations")
 async def list_conversations(project: str | None = None):
     db = await get_db()
     try:
+        q = ("SELECT c.*, p.slug AS project_slug, p.name AS project_name "
+             "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id ")
+        params: tuple = ()
         if project:
-            q = ("SELECT c.* FROM conversations c JOIN projects p ON p.id = c.project_id "
-                 "WHERE p.slug = ? ORDER BY c.started_at DESC")
-            params: tuple = (project,)
-        else:
-            q = "SELECT * FROM conversations ORDER BY started_at DESC"
-            params = ()
+            q += "WHERE p.slug = ? "
+            params = (project,)
+        q += "ORDER BY c.started_at DESC"
         async with db.execute(q, params) as cur:
             rows = await cur.fetchall()
     finally:
         await db.close()
     return {"conversations": [dict(r) for r in rows]}
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: int):
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="no such conversation")
+        await db.execute("DELETE FROM tool_calls WHERE conversation_id = ?", (conversation_id,))
+        await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": True}
+
+
+@router.patch("/conversations/{conversation_id}")
+async def assign_conversation(conversation_id: int, body: AssignProject):
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="no such conversation")
+        project_id = None
+        if body.project:
+            async with db.execute(
+                "SELECT id FROM projects WHERE slug = ? AND deleted_at IS NULL",
+                (body.project,),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="no such project")
+            project_id = row["id"]
+        await db.execute(
+            "UPDATE conversations SET project_id = ? WHERE id = ?",
+            (project_id, conversation_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": True, "project": body.project}
 
 
 @router.get("/conversations/{conversation_id}/messages")
