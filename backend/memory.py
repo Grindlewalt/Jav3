@@ -1,10 +1,35 @@
 """Durable memory: markdown files on the host + central-context assembly."""
+import json
 import re
 
 import aiosqlite
 
 from .config import settings, ensure_dirs
 from .db import get_state
+
+
+def estimate_tokens(text: str) -> int:
+    """Cheap chars/4 estimate — for budgeting the context, not billing."""
+    return max(0, round(len(text) / 4))
+
+
+def _context_file(slug: str):
+    return settings.projects_dir / slug / ".context.json"
+
+
+def context_selection(slug: str) -> list[str]:
+    p = _context_file(slug)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def set_context_selection(slug: str, files: list[str]) -> None:
+    _context_file(slug).write_text(json.dumps(files))
 
 SEEDS = {
     "soul.md": """# Soul — how Jarvis acts
@@ -143,4 +168,22 @@ async def assemble_system_prompt(db: aiosqlite.Connection) -> str:
             parts.append(
                 f"# Active project (loaded into central context): {active}\n\n{project_md}"
             )
+        parts.extend(_loaded_context_files(active))
     return "\n\n---\n\n".join(p.strip() for p in parts if p.strip())
+
+
+def _loaded_context_files(slug: str) -> list[str]:
+    """Full contents of the files the operator ticked into context for this
+    project. Missing/binary files are skipped silently (the picker guards them)."""
+    out = []
+    base = settings.projects_dir / slug
+    for rel in context_selection(slug):
+        path = base / rel
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        out.append(f"# Loaded project file: {rel}\n\n```\n{text}\n```")
+    return out

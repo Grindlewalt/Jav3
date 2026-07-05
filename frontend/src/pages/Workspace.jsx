@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { api } from '../api.js'
+import { api, chatStream } from '../api.js'
 import ChatBox from '../ChatBox.jsx'
+import Md from '../Md.jsx'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
@@ -14,12 +15,15 @@ const PANEL_TYPES = {
   todos: { label: 'To-dos', w: 360, h: 380 },
   vm: { label: 'Sandbox VM', w: 560, h: 470 },
   staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
+  context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
+  agent: { label: 'Run an agent', w: 460, h: 520 },
 }
 
 const DEFAULT_PANELS = [
-  { id: 'p1', type: 'journal', x: 16, y: 16, w: 460, h: 460, z: 1, state: {} },
-  { id: 'p2', type: 'organizer', x: 492, y: 16, w: 560, h: 460, z: 2, state: {} },
-  { id: 'p3', type: 'todos', x: 1068, y: 16, w: 340, h: 460, z: 3, state: {} },
+  { id: 'p1', type: 'chat', x: 16, y: 16, w: 440, h: 520, z: 1, state: {} },
+  { id: 'p2', type: 'journal', x: 472, y: 16, w: 440, h: 300, z: 2, state: {} },
+  { id: 'p3', type: 'todos', x: 928, y: 16, w: 340, h: 300, z: 3, state: {} },
+  { id: 'p4', type: 'staging', x: 472, y: 332, w: 620, h: 204, z: 4, state: {} },
 ]
 
 const TEXT_EXT = /\.(md|txt|py|js|jsx|ts|json|html|css|csv|toml|yaml|yml|sh|tex)$/i
@@ -113,7 +117,9 @@ export default function Workspace() {
     () => api(`/api/projects/${slug}`).then(setProject), [slug])
 
   useEffect(() => {
-    refreshProject()
+    // opening a project's board loads it into Jarvis's context — this tab is
+    // where you live, so what you're looking at is what Jarvis is thinking about
+    api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
     api(`/api/projects/${slug}/layout`).then((r) => {
       const p = r.layout?.panels?.length ? r.layout.panels : DEFAULT_PANELS
       zRef.current = Math.max(10, ...p.map((x) => x.z || 0))
@@ -342,6 +348,8 @@ function PanelBody(props) {
     case 'todos': return <TodoPanel {...props} />
     case 'vm': return <VmPanel {...props} />
     case 'staging': return <StagingPanel {...props} />
+    case 'context': return <ContextPanel {...props} />
+    case 'agent': return <AgentPanel {...props} />
     default: return <div className="dim">unknown panel</div>
   }
 }
@@ -744,6 +752,143 @@ function RunPanel({ slug, state, setState }) {
   )
 }
 
+// Pick which project files are loaded into Jarvis's context. Nothing is
+// loaded by default — tick a file to include its full contents; the token
+// count and running total keep you honest about how big the context gets.
+function ContextPanel({ slug }) {
+  const [files, setFiles] = useState([])
+  const [total, setTotal] = useState(0)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = () =>
+    api(`/api/projects/${slug}/context`).then((r) => {
+      setFiles(r.files)
+      setTotal(r.selected_tokens)
+    })
+  useEffect(() => {
+    refresh()
+    const h = () => refresh()
+    window.addEventListener('jarvis-files-changed', h)
+    return () => window.removeEventListener('jarvis-files-changed', h)
+  }, [slug]) // eslint-disable-line
+
+  async function toggle(path) {
+    setBusy(true)
+    const next = files.some((f) => f.path === path && f.selected)
+      ? files.filter((f) => f.selected && f.path !== path).map((f) => f.path)
+      : [...files.filter((f) => f.selected).map((f) => f.path), path]
+    try {
+      await api(`/api/projects/${slug}/context`, {
+        method: 'PUT', body: JSON.stringify({ files: next }) })
+      await refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
+
+  const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`)
+
+  return (
+    <div className="pane-col">
+      <div className="row">
+        <span className="grow dim">nothing loads by default — tick to include</span>
+        <span className="ctx-total">≈{fmt(total)} tokens loaded</span>
+      </div>
+      <ul className="ctx-list">
+        {files.length === 0 && <li className="dim">no files in this project yet</li>}
+        {files.map((f) => (
+          <li key={f.path} className={f.selected ? 'on' : ''}>
+            <label>
+              <input type="checkbox" checked={f.selected} disabled={f.binary || busy}
+                     onChange={() => toggle(f.path)} />
+              <span className="grow ellipsis">{f.path}</span>
+            </label>
+            <span className="ctx-tokens">{f.binary ? 'binary' : `≈${fmt(f.tokens)}`}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+// Run any defined agent right here in the project. It works in this project's
+// context and its file edits land in the same staging/approval queue.
+function AgentPanel({ slug, state, setState }) {
+  const [agents, setAgents] = useState([])
+  const [task, setTask] = useState('')
+  const [log, setLog] = useState([])
+  const [busy, setBusy] = useState(false)
+  const bottomRef = useRef(null)
+  const which = state.agent || ''
+
+  useEffect(() => { api('/api/agents').then((r) => setAgents(r.agents)) }, [])
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [log])
+
+  async function run(confirmPeak = false) {
+    if (!which || !task.trim() || busy) return
+    setBusy(true)
+    setLog((l) => [...l, { role: 'task', text: task }, { role: 'out', text: '' }])
+    try {
+      await chatStream(
+        { task, confirm_peak: confirmPeak }, (ev) => {
+          if (ev.type === 'tool')
+            setLog((l) => upLast(l, (last) => ({ ...last, text: last.text + `\n⚙ ${ev.name}\n` })))
+          if (ev.type === 'token')
+            setLog((l) => upLast(l, (last) => ({ ...last, text: last.text + ev.text })))
+          if (ev.type === 'final')
+            setLog((l) => upLast(l, () => ({ role: 'out', text: ev.content })))
+          if (ev.type === 'error')
+            setLog((l) => upLast(l, () => ({ role: 'err', text: ev.message })))
+        }, `/api/agents/${which}/run`)
+      setTask('')
+      window.dispatchEvent(new Event('jarvis-files-changed'))
+    } catch (err) {
+      setLog((l) => l.slice(0, -2))
+      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
+        if (window.confirm('Peak pricing right now — 2x cost. Run the agent anyway?')) {
+          setBusy(false); await run(true); return
+        }
+      } else setLog((l) => [...l, { role: 'err', text: err.detail || String(err) }])
+    }
+    setBusy(false)
+  }
+
+  return (
+    <div className="pane-col">
+      <div className="row">
+        <select className="grow" value={which}
+                onChange={(e) => setState({ agent: e.target.value })}>
+          <option value="">— pick an agent —</option>
+          {agents.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
+        </select>
+      </div>
+      <div className="messages compact">
+        {log.length === 0 && <div className="dim center-pad">
+          {agents.length ? 'pick an agent and give it a task' : 'no agents yet — create one in the Agents tab'}</div>}
+        {log.map((m, i) => (
+          <div key={i} className={`msg ${m.role === 'task' ? 'user' : m.role === 'err' ? 'error' : 'assistant'}`}>
+            {m.role === 'out'
+              ? <div className="bubble"><Md text={m.text || (busy ? '…' : '')} /></div>
+              : <pre>{m.text || (busy ? '…' : '')}</pre>}
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+      <form className="row" onSubmit={(e) => { e.preventDefault(); run() }}>
+        <textarea className="grow" rows={2} value={task} placeholder="task for the agent…"
+                  onChange={(e) => setTask(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); run() } }} />
+        <button type="submit" disabled={busy || !which}>{busy ? '…' : 'Run'}</button>
+      </form>
+    </div>
+  )
+}
+
+function upLast(list, fn) {
+  const copy = [...list]
+  copy[copy.length - 1] = fn(copy[copy.length - 1])
+  return copy
+}
+
 // Jarvis's pending edits: everything it writes lands here first, inert, and
 // only touches the real files when approved. Diffs are shown as plain text.
 function StagingPanel({ slug }) {
@@ -760,7 +905,9 @@ function StagingPanel({ slug }) {
   useEffect(() => {
     refresh()
     const t = setInterval(refresh, 8000)
-    return () => clearInterval(t)
+    const h = () => refresh()
+    window.addEventListener('jarvis-files-changed', h)
+    return () => { clearInterval(t); window.removeEventListener('jarvis-files-changed', h) }
   }, [slug]) // eslint-disable-line
 
   useEffect(() => {

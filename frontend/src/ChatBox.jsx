@@ -10,12 +10,32 @@ export default function ChatBox({ projectSlug }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
   const bottomRef = useRef(null)
 
   const refresh = () =>
     api(`/api/conversations${projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : ''}`)
       .then((r) => setConvos(r.conversations))
   useEffect(() => { refresh() }, [projectSlug]) // eslint-disable-line
+
+  async function pick(id) {
+    setShowHistory(false)
+    await open(id)
+  }
+
+  function newChat() {
+    setShowHistory(false)
+    setCid(null)
+    setMessages([])
+  }
+
+  async function del(id, e) {
+    e.stopPropagation()
+    if (!window.confirm(`delete chat #${id}?`)) return
+    await api(`/api/conversations/${id}`, { method: 'DELETE' })
+    if (id === cid) newChat()
+    refresh()
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -94,19 +114,29 @@ export default function ChatBox({ projectSlug }) {
     setBusy(false)
   }
 
+  const current = convos.find((c) => c.id === cid)
   return (
     <div className="chatbox">
-      <div className="row">
-        <select className="grow" value={cid || ''}
-                onChange={(e) => open(e.target.value ? Number(e.target.value) : null)}>
-          <option value="">new chat</option>
-          {convos.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16)}`}
-            </option>
-          ))}
-        </select>
+      <div className="row cb-head">
+        <button className="ghost" title="past chats"
+                onClick={() => setShowHistory((s) => !s)}>☰ {convos.length}</button>
+        <span className="grow ellipsis dim">
+          {current ? (current.summary || `#${current.id}`) : 'new chat'}</span>
+        <button className="ghost" title="new chat" onClick={newChat}>+ new</button>
       </div>
+      {showHistory && (
+        <ul className="cb-history">
+          {convos.length === 0 && <li className="dim">no past chats yet</li>}
+          {convos.map((c) => (
+            <li key={c.id} className={c.id === cid ? 'active' : ''}
+                onClick={() => pick(c.id)}>
+              <span className="grow ellipsis">
+                {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
+              <button className="win-btn" title="delete" onClick={(e) => del(c.id, e)}>×</button>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="messages compact">
         {messages.length === 0 && (
           <div className="dim center-pad">

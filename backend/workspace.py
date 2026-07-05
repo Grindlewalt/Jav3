@@ -223,6 +223,45 @@ async def move_file(slug: str, body: MoveRequest):
     return {"ok": True, "src": body.src, "dest": body.dest}
 
 
+# --- context files: which project files are loaded into Jarvis's context ----
+# Selection lives in projects/<slug>/.context.json (a list of relative paths).
+# assemble_system_prompt reads it when the project is active. Token counts are
+# a cheap chars/4 estimate — enough to budget, not exact.
+
+from .memory import context_selection, set_context_selection, estimate_tokens  # noqa: E402
+
+
+@router.get("/context")
+async def get_context(slug: str):
+    base = await project_dir(slug)
+    selected = set(context_selection(slug))
+    files = []
+    total = 0
+    for f in list_tree(base):
+        path = f["path"]
+        info = read_text_or_binary(base / path)
+        tokens = 0 if info["binary"] else estimate_tokens(info["content"])
+        is_sel = path in selected
+        if is_sel:
+            total += tokens
+        files.append({"path": path, "tokens": tokens,
+                      "binary": info["binary"], "selected": is_sel})
+    return {"files": files, "selected_tokens": total}
+
+
+class ContextSelection(BaseModel):
+    files: list[str]
+
+
+@router.put("/context")
+async def put_context(slug: str, body: ContextSelection):
+    base = await project_dir(slug)
+    valid = {f["path"] for f in list_tree(base)}
+    chosen = [p for p in body.files if p in valid]
+    set_context_selection(slug, chosen)
+    return {"ok": True, "files": chosen}
+
+
 # --- control-board layout (persisted per project, hidden from file views) ----
 
 @router.get("/layout")

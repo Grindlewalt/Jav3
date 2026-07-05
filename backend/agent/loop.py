@@ -21,9 +21,11 @@ async def run_turn(
     conversation_id: int,
     system_prompt: str,
     history: list[dict],
+    tools: list[dict] | None = None,
 ) -> AsyncIterator[dict]:
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
-    tools = registry.openai_tool_specs()
+    if tools is None:
+        tools = registry.openai_tool_specs()
 
     for _ in range(settings.max_react_iterations):
         final: dict | None = None

@@ -23,8 +23,8 @@ export class ApiError extends Error {
 
 // POST /api/chat and invoke onEvent for each SSE event. Throws ApiError on
 // non-200 (409 peak_confirmation_required included) before any event fires.
-export async function chatStream(body, onEvent) {
-  const res = await fetch('/api/chat', {
+export async function chatStream(body, onEvent, url = '/api/chat') {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
