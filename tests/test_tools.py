@@ -118,3 +118,14 @@ async def test_no_project_loaded(client):
 async def test_dispatch_survives_bad_args(client):
     out = await registry.dispatch("read_file", {"nope": 1})
     assert out.startswith("error:")
+
+
+async def test_load_project_tool(client):
+    out = await registry.dispatch("load_project", {"slug": "nope"})
+    assert "error" in out and "demo" in out
+    await client.post("/api/projects", json={"name": "Second", "summary": "two"})
+    out = await registry.dispatch("load_project", {"slug": "second"})
+    assert "loaded project 'second'" in out
+    assert "no project is loaded" not in await registry.dispatch("list_files", {})
+    r = await client.get("/api/projects")
+    assert r.json()["active"] == "second"
