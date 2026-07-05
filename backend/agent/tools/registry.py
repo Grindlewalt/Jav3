@@ -119,6 +119,8 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
         desc = e["description"]
         if e.get("when_to_use"):
             desc += f" Use when: {e['when_to_use']}"
+        if e.get("body"):
+            desc += f"\nNotes: {e['body'][:500]}"
         specs.append({
             "type": "function",
             "function": {

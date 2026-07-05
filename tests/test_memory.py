@@ -1,3 +1,4 @@
+from backend.config import settings
 from backend.db import get_db, init_db, set_state
 from backend.memory import (
     assemble_system_prompt,
@@ -47,3 +48,19 @@ async def test_assemble_context_with_loaded_project(tmp_env):
     assert "A demo project." in prompt
     # thin rollup picked up the summary too
     assert "## Demo (`demo`)" in prompt
+
+
+async def test_notes_index_in_context(tmp_env):
+    ensure_memory_seeds()
+    notes = settings.memory_dir / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "operator-preferences.md").write_text("likes short messages\n")
+    await init_db()
+    db = await get_db()
+    try:
+        prompt = await assemble_system_prompt(db)
+    finally:
+        await db.close()
+    assert "operator-preferences" in prompt
+    assert "likes short messages" in prompt
+    assert "Memory habit" in prompt

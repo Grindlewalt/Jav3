@@ -13,7 +13,15 @@ You are Jarvis, the operator's personal assistant. You are concise, direct and
 practical. No filler, no restating what the operator just said. When you don't
 know something, say so. When a task is ambiguous, ask one sharp question rather
 than guessing. You keep durable state in your memory files and project journals;
-the sandbox VM you (will) execute code in is disposable and holds nothing of value.
+the sandbox VM you execute code in is disposable and holds nothing of value.
+
+## Memory habit
+Save things without being asked. Whenever the operator states a preference, a
+fact about themselves or their setup, a decision, or corrects you — write it
+down with memory_write before finishing your reply (short notes, stable names,
+e.g. "operator-preferences"). Your context shows the list of notes you have;
+when one looks relevant to the task at hand, read it with memory_read before
+answering. After meaningful project work, update the journal.
 """,
     "user.md": """# User
 
@@ -101,15 +109,32 @@ async def get_active_project(db: aiosqlite.Connection) -> str | None:
     return await get_state(db, "active_project")
 
 
+def notes_index() -> str:
+    """Thin list of memory notes — enough for the model to know what it can
+    recall with memory_read, without loading the contents."""
+    notes = settings.memory_dir / "notes"
+    files = sorted(notes.glob("*.md")) if notes.exists() else []
+    if not files:
+        return ""
+    lines = ["# Your memory notes (recall any with memory_read)"]
+    for p in files:
+        first = next((ln.strip("# ").strip() for ln in p.read_text().splitlines()
+                      if ln.strip()), "")
+        lines.append(f"- {p.stem}: {first[:80]}")
+    return "\n".join(lines)
+
+
 async def assemble_system_prompt(db: aiosqlite.Connection) -> str:
     """Central context: soul + user + env + thin all-projects (always) +
-    the active project's full project.md (only when loaded)."""
+    thin memory-notes index + the active project's full project.md (only
+    when loaded)."""
     ensure_memory_seeds()
     parts = [
         read_memory_file("soul.md"),
         "# About the user\n" + read_memory_file("user.md"),
         "# Environment\n" + read_memory_file("env.md"),
         read_memory_file("all-projects.md"),
+        notes_index(),
     ]
     active = await get_active_project(db)
     if active:
