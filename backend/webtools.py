@@ -116,6 +116,9 @@ async def fetched_set(session: str) -> set[str]:
 
 
 async def record(session: str, url: str, title: str) -> None:
+    from . import runtime
+    if runtime.ephemeral.get():
+        return  # incognito: leave no trace in the ledger either
     db = await get_db()
     try:
         await db.execute(
