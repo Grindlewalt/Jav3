@@ -157,19 +157,44 @@ def agents_index() -> str:
             + "\n".join(rosters))
 
 
-def notes_index() -> str:
-    """Thin list of memory notes — enough for the model to know what it can
-    recall with memory_read, without loading the contents."""
+# How many tokens of memory notes to always carry in full. Notes are small;
+# this comfortably fits preferences + bio + homelab. Anything past the budget
+# is listed by name instead, recallable with memory_read.
+MEMORY_CONTEXT_BUDGET = 2000
+
+
+def _note_sort_key(path):
+    # preferences first — the standing rules Jarvis must always honor
+    name = path.stem.lower()
+    return (0 if "pref" in name else 1, name)
+
+
+def memory_block() -> str:
+    """Full contents of the operator's memory notes, always in context so
+    Jarvis honors standing facts and preferences without being reminded.
+    Overflow past the budget degrades to a recall-by-name index."""
     notes = settings.memory_dir / "notes"
-    files = sorted(notes.glob("*.md")) if notes.exists() else []
+    files = sorted(notes.glob("*.md"), key=_note_sort_key) if notes.exists() else []
     if not files:
         return ""
-    lines = ["# Your memory notes (recall any with memory_read)"]
+    loaded, overflow, used = [], [], 0
     for p in files:
-        first = next((ln.strip("# ").strip() for ln in p.read_text().splitlines()
-                      if ln.strip()), "")
-        lines.append(f"- {p.stem}: {first[:80]}")
-    return "\n".join(lines)
+        try:
+            text = p.read_text().strip()
+        except OSError:
+            continue
+        toks = estimate_tokens(text)
+        # always load at least the first (highest-priority) note in full
+        if not loaded or used + toks <= MEMORY_CONTEXT_BUDGET:
+            loaded.append(f"## {p.stem}\n{text}")
+            used += toks
+        else:
+            overflow.append(p.stem)
+    out = ["# What you know about the operator (standing memory — always honor this)",
+           *loaded]
+    if overflow:
+        out.append("Other notes (load with memory_read): " + ", ".join(overflow))
+    return "\n\n".join(out)
 
 
 _USE_DB = object()  # sentinel: "read the active project from the db"
@@ -187,7 +212,7 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB) -> st
         "# Environment\n" + read_memory_file("env.md"),
         read_memory_file("all-projects.md"),
         agents_index(),
-        notes_index(),
+        memory_block(),
     ]
     if active is _USE_DB:
         active = await get_active_project(db)

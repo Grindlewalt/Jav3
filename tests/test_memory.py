@@ -50,11 +50,14 @@ async def test_assemble_context_with_loaded_project(tmp_env):
     assert "## Demo (`demo`)" in prompt
 
 
-async def test_notes_index_in_context(tmp_env):
+async def test_memory_notes_fully_in_context(tmp_env):
     ensure_memory_seeds()
     notes = settings.memory_dir / "notes"
     notes.mkdir(parents=True, exist_ok=True)
-    (notes / "operator-preferences.md").write_text("likes short messages\n")
+    # a multi-line note: the whole point is that lines beyond the first are in
+    # context, so preferences like "never use em dashes" are always honored
+    (notes / "operator-preferences.md").write_text(
+        "Editor: helix\nShell: bash\nnever use em dashes\n")
     await init_db()
     db = await get_db()
     try:
@@ -62,5 +65,24 @@ async def test_notes_index_in_context(tmp_env):
     finally:
         await db.close()
     assert "operator-preferences" in prompt
-    assert "likes short messages" in prompt
+    assert "never use em dashes" in prompt   # not just the first line
     assert "Memory habit" in prompt
+
+
+async def test_memory_overflow_degrades_to_index(tmp_env, monkeypatch):
+    import backend.memory as m
+    monkeypatch.setattr(m, "MEMORY_CONTEXT_BUDGET", 30)
+    ensure_memory_seeds()
+    notes = settings.memory_dir / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "operator-preferences.md").write_text("never use em dashes\n")
+    (notes / "long-note.md").write_text("word " * 500)
+    await init_db()
+    db = await get_db()
+    try:
+        prompt = await assemble_system_prompt(db)
+    finally:
+        await db.close()
+    assert "never use em dashes" in prompt          # priority note loaded in full
+    assert "load with memory_read" in prompt         # overflow degraded to index
+    assert "long-note" in prompt
