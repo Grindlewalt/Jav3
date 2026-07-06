@@ -28,8 +28,9 @@ def is_safe_url(url: str) -> str:
     host = parsed.hostname
     if not host:
         raise UnsafeURL("no host in URL")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        infos = socket.getaddrinfo(host, parsed.port or 80, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as e:
         raise UnsafeURL(f"cannot resolve host: {e}")
     for info in infos:

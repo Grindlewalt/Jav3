@@ -25,13 +25,16 @@ async def run_turn(
     tools: list[dict] | None = None,
     model_name: str | None = None,
     base_url: str | None = None,
+    self_check: bool = True,
 ) -> AsyncIterator[dict]:
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
     if tools is None:
         tools = registry.openai_tool_specs()
 
-    # Standing rules from the operator's memory (empty string if none set).
-    rules = standing_rules_tail()
+    # Standing rules from the operator's memory. Skipped for internal subagents
+    # (self_check=False): their output is intermediate and gets synthesized, so
+    # enforcing operator formatting on it just burns tokens.
+    rules = standing_rules_tail() if self_check else ""
 
     # Tool schemas pull the model's attention off the system-prompt rules:
     # measured on deepseek-v4-flash, em-dash violations run ~0% with no tools
@@ -63,7 +66,8 @@ async def run_turn(
             # Self-check: a no-tools pass reliably obeys the operator's rules
             # (tools are what break adherence), so it cleans up anything the
             # tool-laden turn let slip. General — it checks against whatever
-            # rules are in memory, nothing rule-specific is hardcoded.
+            # rules are in memory, nothing rule-specific is hardcoded. `rules`
+            # is already empty when self_check is off, so this no-ops for subagents.
             if rules and content.strip():
                 content = await _enforce_rules(content, rules)
             yield {"type": "final", "content": content}

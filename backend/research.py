@@ -12,10 +12,11 @@ the previous ones already pulled) — diversity over raw speed.
 """
 from datetime import date
 
-from .agent.loop import run_turn
+from .agent.loop import _enforce_rules, run_turn
 from .agent.model import confirm_peak, model
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .db import get_db
+from .memory import standing_rules_tail
 from .staging import stage_write
 
 RESEARCH_TOOLS = ("web_search", "web_read")
@@ -79,11 +80,20 @@ async def _research_angle(angle: str, project: str) -> str:
         await db.commit()
         confirm_peak(cid)  # research is deliberate; don't stall on the peak gate
         final = ""
+        # self_check off: intermediate findings get synthesized, so enforcing
+        # operator formatting on them is wasted; the final document is enforced.
         async for ev in run_turn(db, cid, SUBAGENT_PROMPT,
                                  [{"role": "user", "content": f"Research question: {angle}"}],
-                                 tools=tools):
+                                 tools=tools, self_check=False):
             if ev["type"] == "final":
                 final = ev["content"]
+        # the subagent loop is internal machinery — collapse it (the funnel):
+        # its findings are returned and synthesized, so drop its conversation
+        # instead of cluttering the chat list with per-angle [research] entries.
+        for tbl, col in (("tool_calls", "conversation_id"),
+                         ("messages", "conversation_id"), ("conversations", "id")):
+            await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (cid,))
+        await db.commit()
         return final
     finally:
         await db.close()
@@ -98,7 +108,11 @@ async def _synthesize(topic: str, findings: list[dict]) -> str:
         "do not invent facts. No preamble.",
         f"Topic: {topic}\n\nFindings by angle:\n\n{joined}")
     header = f"# Research: {topic}\n\n*Compiled {date.today().isoformat()} by Jarvis research agents.*\n\n"
-    return header + body
+    doc = header + body
+    # the operator reads/approves this document, so enforce their rules on it
+    # (the subagents skipped enforcement; this is where it belongs)
+    rules = standing_rules_tail()
+    return await _enforce_rules(doc, rules) if rules else doc
 
 
 async def run_research(topic: str, project: str, n_angles: int = 4) -> dict:
