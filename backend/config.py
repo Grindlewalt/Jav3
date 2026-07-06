@@ -33,10 +33,10 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-v4-flash"
     model_max_tokens: int = 4096
-    # We send no temperature before this, so DeepSeek defaulted to 1.0 — too
-    # loose for an agent that must follow rules and call tools precisely.
-    # 0.4 keeps some fluency while tightening instruction/constraint adherence.
-    model_temperature: float = 0.4
+    # Main generation temperature. 0.7 keeps personality and fluency; the
+    # no-tools self-check pass (which runs at 0.0) is what enforces rules, so
+    # the main turn doesn't need to run cold. Tunable via JARVIS_MODEL_TEMPERATURE.
+    model_temperature: float = 0.7
 
     # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
     peak_windows: list[str] = ["18:00-21:00", "23:00-03:00"]
