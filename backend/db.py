@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     rollup TEXT,
     job_id TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_conv_parent ON conversations(parent_conversation_id);
-CREATE INDEX IF NOT EXISTS idx_conv_job ON conversations(job_id);
+-- indexes on the run-tree columns are created in init_db AFTER the migration
+-- ALTERs, so they don't reference columns a pre-existing DB hasn't gained yet.
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     conversation_id INTEGER NOT NULL REFERENCES conversations(id),
