@@ -183,12 +183,17 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             context = await _node_context(kind, project, parent_summary)
             node = Agent(context=context, tools=leaf_tools or [], brief=brief)
             system_prompt = node.system_prompt()
+            # subagents are narrow: a tight iteration cap stops the "read 80
+            # pages" runaway. Head/leader nodes that fall through to DIRECT keep
+            # the normal cap.
+            cap = settings.subagent_max_iterations if kind == "subagent" else None
             db = await get_db()
             try:
                 final = ""
                 async for ev in run_turn(db, cid, system_prompt,
                                          [{"role": "user", "content": brief}],
-                                         tools=leaf_tools, self_check=False):
+                                         tools=leaf_tools, self_check=False,
+                                         max_iterations=cap):
                     if ev["type"] in ("token", "tool"):
                         bus.publish(job_id, {**ev, "node_id": cid})
                     elif ev["type"] == "final":

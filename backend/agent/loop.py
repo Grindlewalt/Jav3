@@ -27,6 +27,7 @@ async def run_turn(
     model_name: str | None = None,
     base_url: str | None = None,
     self_check: bool = True,
+    max_iterations: int | None = None,
 ) -> AsyncIterator[dict]:
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
     if tools is None:
@@ -50,11 +51,15 @@ async def run_turn(
                                "content": (messages[i]["content"] or "") + "\n\n" + rules}
                 break
 
-    for _ in range(settings.max_react_iterations):
+    n_iter = max_iterations or settings.max_react_iterations
+    for i in range(n_iter):
+        # on the final allowed round, drop tools so the model must produce an
+        # answer from what it has instead of another tool call it can't act on
+        call_tools = None if i == n_iter - 1 else (tools or None)
         final: dict | None = None
         try:
             async for event in model.complete(
-                messages, tools=tools or None, conversation_id=conversation_id,
+                messages, tools=call_tools, conversation_id=conversation_id,
                 model_name=model_name, base_url=base_url,
             ):
                 if event["type"] == "token":

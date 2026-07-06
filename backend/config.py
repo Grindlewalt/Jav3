@@ -43,9 +43,12 @@ class Settings(BaseSettings):
     # How long a user's "yes, use the API" answer stays valid.
     peak_confirm_ttl_minutes: int = 60
 
-    # A high backstop only: the real limit is the token budget below, so a run
-    # loops as long as it needs instead of being cut off after a few rounds.
-    max_react_iterations: int = 60
+    # Backstop for the main/chat loop. Subagents get a much tighter cap below:
+    # a research subagent reading 1-3 sources needs a handful of rounds, not 60
+    # — leaving it high let subagents read 40-85 pages and burn millions of
+    # tokens re-sending the pile each iteration.
+    max_react_iterations: int = 40
+    subagent_max_iterations: int = 8
     recent_message_limit: int = 40
 
     # Per-operation token budget (shared across every agent in a chat turn or a
@@ -66,7 +69,10 @@ class Settings(BaseSettings):
     web_search_results: int = 8
     web_fetch_timeout: int = 15
     web_max_bytes: int = 2_000_000      # stop reading a page past this
-    web_max_chars: int = 20_000         # cap the inert text handed back to the model
+    # cap the inert text handed to the model. Was 20k (~5k tokens/page); a
+    # research subagent reads a few pages and re-sends them each loop, so a
+    # smaller slice cuts token throughput hard while keeping the useful content.
+    web_max_chars: int = 6_000
 
     # Sandbox VM (M3). Persistent: boots once and stays up; nuke is a
     # recovery action (recreate the overlay), not a per-run ritual.
