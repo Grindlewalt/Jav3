@@ -101,8 +101,9 @@ async def test_standing_rules_restated_at_end(tmp_env):
         prompt = await assemble_system_prompt(db)
     finally:
         await db.close()
-    # the rule appears both up top (standing memory) and restated at the very end
-    assert prompt.count("never use em dashes") >= 2
+    # rule up top (standing memory, verbatim) AND restated imperatively at the end
     tail = prompt.rsplit("---", 1)[-1]
     assert "Operator rules (non-negotiable)" in tail
-    assert "never use em dashes" in tail
+    assert "em dash" in tail.lower()
+    assert "Wrong:" in tail                     # negative example present
+    assert "Editor:" not in tail                # plain facts excluded from the tail

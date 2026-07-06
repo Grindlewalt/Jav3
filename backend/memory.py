@@ -211,6 +211,10 @@ def standing_rules_tail() -> str:
     files = ([p for p in sorted(notes.glob("*.md"))
               if "pref" in p.stem.lower() or "rule" in p.stem.lower()]
              if notes.exists() else [])
+    # only lines that read as behavioural rules belong in the tail; plain facts
+    # (Editor:, Shell:) stay up top in standing memory and would only dilute it
+    HINTS = ("never", "always", "avoid", "don't", "dont", "must", "only",
+             "prefer", "pet peeve", "hate", "dislike")
     rules = []
     for p in files:
         try:
@@ -219,8 +223,20 @@ def standing_rules_tail() -> str:
             continue
         for ln in lines:
             ln = ln.strip("-*# ").strip()
-            if ln:
-                rules.append(ln)
+            low = ln.lower()
+            if not ln or not any(h in low for h in HINTS):
+                continue
+            # "X pet peeve: Y" -> an imperative "Avoid Y"
+            if "pet peeve" in low and ":" in ln:
+                ln = ln.split(":", 1)[1].strip()
+                low = ln.lower()
+                if not low.startswith(("never", "avoid", "don't", "dont", "no ")):
+                    ln = "Avoid " + ln
+            # negative examples beat bare prohibitions on this model
+            if "em dash" in low:
+                ln = 'Never use em dashes. Wrong: "fast, cheap — pick one". ' \
+                     'Right: "fast, cheap, pick one".'
+            rules.append(ln)
     if not rules:
         return ""
     out = ["# Operator rules (non-negotiable): apply to THIS reply",
