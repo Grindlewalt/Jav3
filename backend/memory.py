@@ -190,7 +190,7 @@ def memory_block() -> str:
             used += toks
         else:
             overflow.append(p.stem)
-    out = ["# What you know about the operator (standing memory — always honor this)",
+    out = ["# What you know about the operator (standing memory; always honor this)",
            *loaded]
     if overflow:
         out.append("Other notes (load with memory_read): " + ", ".join(overflow))
