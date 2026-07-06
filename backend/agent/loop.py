@@ -28,21 +28,21 @@ async def run_turn(
     if tools is None:
         tools = registry.openai_tool_specs()
 
+    # Standing rules from the operator's memory (empty string if none set).
+    rules = standing_rules_tail()
+
     # Tool schemas pull the model's attention off the system-prompt rules:
     # measured on deepseek-v4-flash, em-dash violations run ~0% with no tools
-    # but ~65% once tools are attached. Restating the operator's hard rules in
-    # the latest user turn (closest to generation) roughly halves that to ~33%.
-    # It helps but does NOT fully solve it — tool-calling mode caps constraint
-    # adherence on this model, so mechanical rules still need deterministic
-    # enforcement. Model-only; persisted DB history stays clean.
-    if tools:
-        rules = standing_rules_tail()
-        if rules:
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i]["role"] == "user":
-                    messages[i] = {**messages[i],
-                                   "content": (messages[i]["content"] or "") + "\n\n" + rules}
-                    break
+    # but ~65% once tools are attached. Restating the rules in the latest user
+    # turn (closest to generation) roughly halves that to ~33% — it helps but
+    # doesn't fully solve it, so the final answer also goes through a no-tools
+    # self-check below. Model-only; persisted DB history stays clean.
+    if tools and rules:
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                messages[i] = {**messages[i],
+                               "content": (messages[i]["content"] or "") + "\n\n" + rules}
+                break
 
     for _ in range(settings.max_react_iterations):
         final: dict | None = None
@@ -56,7 +56,14 @@ async def run_turn(
 
         assert final is not None
         if not final["tool_calls"]:
-            yield {"type": "final", "content": final["content"]}
+            content = final["content"] or ""
+            # Self-check: a no-tools pass reliably obeys the operator's rules
+            # (tools are what break adherence), so it cleans up anything the
+            # tool-laden turn let slip. General — it checks against whatever
+            # rules are in memory, nothing rule-specific is hardcoded.
+            if rules and content.strip():
+                content = await _enforce_rules(content, rules)
+            yield {"type": "final", "content": content}
             return
 
         messages.append({
@@ -81,3 +88,27 @@ async def run_turn(
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}
+
+
+async def _enforce_rules(content: str, rules: str) -> str:
+    """No-tools verification pass. flash obeys rules ~100% without tool schemas
+    attached, so this reliably fixes violations the tool-laden turn let through.
+    Preserves meaning and structure; only touches rule breaks. Falls back to the
+    original text on any error so a failed check never blocks the reply."""
+    prompt = [
+        {"role": "system", "content":
+            "You are a strict copy editor for another assistant's reply. Rewrite "
+            "it so it fully obeys the operator's rules below. Preserve the "
+            "meaning, structure, markdown, and every point exactly; change ONLY "
+            "what breaks a rule. If it already obeys every rule, return it "
+            "verbatim. Output only the reply text, no preamble or explanation."},
+        {"role": "user", "content": f"{rules}\n\n---\nReply to check and fix:\n\n{content}"},
+    ]
+    try:
+        revised = ""
+        async for ev in model.complete(prompt):  # no tools -> reliably obeys
+            if ev["type"] == "message":
+                revised = ev["content"]
+        return revised.strip() or content
+    except Exception:  # noqa: BLE001 — never let the check block the answer
+        return content
