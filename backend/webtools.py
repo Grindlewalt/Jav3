@@ -27,7 +27,8 @@ async def search(query: str, session: str) -> str:
     """Query SearXNG, return a compact text list of results. Results already
     pulled in this session are flagged so agents pick fresh sources."""
     try:
-        async with httpx.AsyncClient(timeout=settings.web_fetch_timeout) as c:
+        async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
+                                     http2=True) as c:
             r = await c.get(f"{settings.searxng_url}/search",
                             params={"q": query, "format": "json"},
                             headers=HEADERS)
@@ -71,8 +72,14 @@ async def read(url: str, session: str) -> str:
 
     try:
         async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
-                                     follow_redirects=True) as c:
+                                     follow_redirects=True, http2=True) as c:
             async with c.stream("GET", url, headers=HEADERS) as r:
+                # a public URL can 3xx to an internal one — re-check where we
+                # actually landed before reading a byte of the body
+                try:
+                    is_safe_url(str(r.url))
+                except UnsafeURL as e:
+                    return f"error: refused after redirect — {e}"
                 r.raise_for_status()
                 ctype = r.headers.get("content-type", "")
                 chunks, total = [], 0
