@@ -84,6 +84,7 @@ class Model:
             "model": self.name,
             "messages": messages,
             "max_tokens": settings.model_max_tokens,
+            "temperature": settings.model_temperature,
             "stream": True,
         }
         if tools:

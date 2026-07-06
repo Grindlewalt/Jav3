@@ -13,7 +13,6 @@ import aiosqlite
 
 from ..config import settings
 from .model import model
-from .style import output_replacements, scrub
 from .tools import registry
 
 
@@ -27,9 +26,6 @@ async def run_turn(
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
     if tools is None:
         tools = registry.openai_tool_specs()
-    # deterministic enforcement of mechanical formatting prefs the model won't
-    # reliably obey from instruction alone (see agent/style.py)
-    repl = output_replacements()
 
     for _ in range(settings.max_react_iterations):
         final: dict | None = None
@@ -37,13 +33,13 @@ async def run_turn(
             messages, tools=tools or None, conversation_id=conversation_id
         ):
             if event["type"] == "token":
-                yield {"type": "token", "text": scrub(event["text"], repl)} if repl else event
+                yield event
             else:
                 final = event
 
         assert final is not None
         if not final["tool_calls"]:
-            yield {"type": "final", "content": scrub(final["content"] or "", repl)}
+            yield {"type": "final", "content": final["content"]}
             return
 
         messages.append({

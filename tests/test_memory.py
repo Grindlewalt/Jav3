@@ -88,15 +88,21 @@ async def test_memory_overflow_degrades_to_index(tmp_env, monkeypatch):
     assert "long-note" in prompt
 
 
-async def test_em_dash_scrubber_gated_on_memory(tmp_env):
-    from backend.agent.style import output_replacements, scrub
+
+async def test_standing_rules_restated_at_end(tmp_env):
     ensure_memory_seeds()
     notes = settings.memory_dir / "notes"
     notes.mkdir(parents=True, exist_ok=True)
-    # no preference yet -> no enforcement
-    assert output_replacements() == {}
-    (notes / "operator-preferences.md").write_text("never use em dashes\n")
-    repl = output_replacements()
-    assert repl != {}
-    assert scrub("shows what matters — not everything", repl) == "shows what matters, not everything"
-    assert "—" not in scrub("a—b and c — d", repl)
+    (notes / "operator-preferences.md").write_text(
+        "Editor: helix\nnever use em dashes\nbe concise\n")
+    await init_db()
+    db = await get_db()
+    try:
+        prompt = await assemble_system_prompt(db)
+    finally:
+        await db.close()
+    # the rule appears both up top (standing memory) and restated at the very end
+    assert prompt.count("never use em dashes") >= 2
+    tail = prompt.rsplit("---", 1)[-1]
+    assert "Operator rules (non-negotiable)" in tail
+    assert "never use em dashes" in tail

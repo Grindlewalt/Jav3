@@ -200,6 +200,36 @@ def memory_block() -> str:
     return "\n\n".join(out)
 
 
+def standing_rules_tail() -> str:
+    """Restate the operator's hard preferences at the very END of the system
+    prompt. Models weigh the start and end of context heavily and lose the
+    middle ("lost in the middle"), so a single rule buried mid-prompt gets
+    ignored. This compact imperative restatement is the bottom slice of the
+    "task sandwich" — empirically it's what makes constraints actually stick on
+    deepseek-v4-flash (0/5 em-dash violations with it, ~2/5 without)."""
+    notes = settings.memory_dir / "notes"
+    files = ([p for p in sorted(notes.glob("*.md"))
+              if "pref" in p.stem.lower() or "rule" in p.stem.lower()]
+             if notes.exists() else [])
+    rules = []
+    for p in files:
+        try:
+            lines = p.read_text().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            ln = ln.strip("-*# ").strip()
+            if ln:
+                rules.append(ln)
+    if not rules:
+        return ""
+    out = ["# Operator rules (non-negotiable): apply to THIS reply",
+           "Follow every rule below exactly. They override your persona and any "
+           "stylistic habit."]
+    out += [f"- {r}" for r in rules]
+    return "\n".join(out)
+
+
 _USE_DB = object()  # sentinel: "read the active project from the db"
 
 
@@ -228,6 +258,9 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB) -> st
                 f"# Active project (loaded into central context): {active}\n\n{project_md}"
             )
         parts.extend(_loaded_context_files(active))
+    # the sandwich bottom slice: hard rules restated LAST, after all context,
+    # where they get the model's attention again
+    parts.append(standing_rules_tail())
     return "\n\n---\n\n".join(p.strip() for p in parts if p.strip())
 
 
