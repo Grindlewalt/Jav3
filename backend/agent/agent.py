@@ -15,9 +15,11 @@ class Agent:
             return f"{self.context}\n\n---\n\n# Your brief\n{self.brief}"
         return self.context
 
-    def spawn(self, sub_brief: str, context_subset: str) -> "Agent":
-        raise NotImplementedError(
-            "multi-agent funnel is a post-v3 seam: spawn() will return an "
-            "Agent(context_subset, tools, sub_brief) running the same loop, "
-            "reporting back a summary"
-        )
+    def spawn(self, sub_brief: str, context_subset: str,
+              tools: list[dict] | None = None) -> "Agent":
+        """A child agent: narrower context, a brief from this layer, the same
+        loop. The orchestrator (backend/orchestrator.py) drives it and collects
+        its rollup; this is just the factory the funnel is built on."""
+        return Agent(context=context_subset,
+                     tools=tools if tools is not None else self.tools,
+                     brief=sub_brief)

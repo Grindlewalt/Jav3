@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 
 from . import (agents_api, agents_run, auth, chat, memory_api, projects,
-               schedules, skills_api, vm_api, workspace)
+               runs_api, schedules, skills_api, vm_api, workspace)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -37,6 +37,7 @@ app.include_router(skills_api.router)
 app.include_router(agents_api.router)
 app.include_router(agents_run.router)
 app.include_router(schedules.router)
+app.include_router(runs_api.router)
 app.include_router(vm_api.router)
 
 

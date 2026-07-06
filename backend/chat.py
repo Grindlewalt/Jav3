@@ -63,11 +63,14 @@ class AssignProject(BaseModel):
 async def list_conversations(project: str | None = None):
     db = await get_db()
     try:
+        # only real chats in the sidebar — head/leader/subagent job nodes live
+        # on the Runs page, not here
         q = ("SELECT c.*, p.slug AS project_slug, p.name AS project_name "
-             "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id ")
+             "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id "
+             "WHERE (c.kind = 'chat' OR c.kind IS NULL) ")
         params: tuple = ()
         if project:
-            q += "WHERE p.slug = ? "
+            q += "AND p.slug = ? "
             params = (project,)
         q += "ORDER BY c.started_at DESC"
         async with db.execute(q, params) as cur:

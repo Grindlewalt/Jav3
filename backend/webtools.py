@@ -58,18 +58,20 @@ async def search(query: str, session: str) -> str:
 
 
 async def read(url: str, session: str) -> str:
-    """Fetch a page and return inert plain text. SSRF-guarded; the fetch is
-    recorded so the session doesn't pull the same URL twice."""
+    """Fetch a page and return inert plain text. SSRF-guarded. Claims the URL
+    in the shared ledger BEFORE fetching, so parallel bots never pull the same
+    page; a failed fetch releases the claim so it can be retried."""
     try:
         is_safe_url(url)
     except UnsafeURL as e:
         return f"error: refused to fetch — {e}"
 
-    if url in await fetched_set(session):
-        return (f"note: {url} was already fetched in this session (by you or "
-                "another agent). Pick a different source to diversify — or say "
+    if not await claim(session, url):
+        return (f"note: {url} was already claimed this session (by you or "
+                "another bot). Pick a different source to diversify — or say "
                 "why you need it again.")
 
+    ok = False
     try:
         async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
                                      follow_redirects=True, http2=True) as c:
@@ -89,18 +91,20 @@ async def read(url: str, session: str) -> str:
                     if total > settings.web_max_bytes:
                         break
                 raw = b"".join(chunks)
+        body = raw.decode("utf-8", errors="replace")
+        if "html" in ctype or "<html" in body[:2000].lower():
+            title, text = html_to_text(body)
+        else:
+            title, text = "", body  # plain text / markdown / json served as-is
+        text = text[:settings.web_max_chars]
+        ok = True
+        head = f"# {title}\n{url}\n\n" if title else f"{url}\n\n"
+        return head + (text or "(no readable text extracted)")
     except httpx.HTTPError as e:
         return f"error: fetch failed: {e}"
-
-    body = raw.decode("utf-8", errors="replace")
-    if "html" in ctype or "<html" in body[:2000].lower():
-        title, text = html_to_text(body)
-    else:
-        title, text = "", body  # plain text / markdown / json served as-is
-    text = text[:settings.web_max_chars]
-    await record(session, url, title)
-    head = f"# {title}\n{url}\n\n" if title else f"{url}\n\n"
-    return head + (text or "(no readable text extracted)")
+    finally:
+        if not ok:
+            await release(session, url)  # let a failed/refused fetch be retried
 
 
 # --- fetch ledger ------------------------------------------------------------
@@ -115,10 +119,43 @@ async def fetched_set(session: str) -> set[str]:
         await db.close()
 
 
-async def record(session: str, url: str, title: str) -> None:
+async def claim(session: str, url: str) -> bool:
+    """Reserve a URL before fetching. Returns True if this caller got the claim,
+    False if another bot already claimed it (INSERT OR IGNORE + rowcount is the
+    atomic test-and-set; WAL lets parallel bots race it safely)."""
     from . import runtime
     if runtime.ephemeral.get():
-        return  # incognito: leave no trace in the ledger either
+        return True  # incognito: no ledger, no dedup
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT OR IGNORE INTO fetched_urls (session, url) VALUES (?, ?)",
+            (session, url))
+        await db.commit()
+        return cur.rowcount == 1
+    finally:
+        await db.close()
+
+
+async def release(session: str, url: str) -> None:
+    """Drop a claim so a failed/refused fetch can be retried by anyone."""
+    from . import runtime
+    if runtime.ephemeral.get():
+        return
+    db = await get_db()
+    try:
+        await db.execute(
+            "DELETE FROM fetched_urls WHERE session = ? AND url = ?", (session, url))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def record(session: str, url: str, title: str) -> None:
+    """Legacy record (kept for tests / direct use). claim() is the fetch path."""
+    from . import runtime
+    if runtime.ephemeral.get():
+        return
     db = await get_db()
     try:
         await db.execute(

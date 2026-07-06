@@ -10,6 +10,7 @@ import Skills from './pages/Skills.jsx'
 import Tools from './pages/Tools.jsx'
 import Agents from './pages/Agents.jsx'
 import Schedules from './pages/Schedules.jsx'
+import Runs from './pages/Runs.jsx'
 
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
@@ -32,6 +33,7 @@ export default function App() {
           <NavLink to="/projects">Projects</NavLink>
           <NavLink to="/context">Context</NavLink>
           <NavLink to="/agents">Agents</NavLink>
+          <NavLink to="/runs">Runs</NavLink>
           <NavLink to="/schedules">Schedules</NavLink>
           <NavLink to="/skills">Skills</NavLink>
           <NavLink to="/tools">Tools</NavLink>
@@ -53,6 +55,7 @@ export default function App() {
         <Route path="/projects/:slug" element={<Workspace />} />
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />
+        <Route path="/runs" element={<Runs />} />
         <Route path="/schedules" element={<Schedules />} />
         <Route path="/skills" element={<Skills />} />
         <Route path="/tools" element={<Tools />} />

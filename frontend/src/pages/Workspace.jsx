@@ -17,6 +17,7 @@ const PANEL_TYPES = {
   staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
+  research: { label: 'Research bots — live', w: 620, h: 560 },
 }
 
 const DEFAULT_PANELS = [
@@ -350,6 +351,7 @@ function PanelBody(props) {
     case 'staging': return <StagingPanel {...props} />
     case 'context': return <ContextPanel {...props} />
     case 'agent': return <AgentPanel {...props} />
+    case 'research': return <ResearchPanel {...props} />
     default: return <div className="dim">unknown panel</div>
   }
 }
@@ -879,6 +881,86 @@ function AgentPanel({ slug, state, setState }) {
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); run() } }} />
         <button type="submit" disabled={busy || !which}>{busy ? '…' : 'Run'}</button>
       </form>
+    </div>
+  )
+}
+
+// Watch the funnel work: a topic decomposes into a tree of bots (head ->
+// leaders -> subagents) that light up live. Each node shows its status, current
+// tool activity, and an expandable rollup (cascading fidelity: collapsed by
+// default). Built purely from the streamed node_spawned parent/child links.
+const STATUS_TAG = {
+  planning: 'planning', delegating: 'planning', running: 'running',
+  summarizing: 'running', done: 'done', error: 'error',
+}
+function ResearchPanel({ slug, state, setState }) {
+  const [nodes, setNodes] = useState({})   // id -> {id,parent,kind,title,depth,status,tool,rollup}
+  const [order, setOrder] = useState([])   // node ids in spawn order
+  const [open, setOpen] = useState({})      // id -> rollup expanded
+  const [busy, setBusy] = useState(false)
+  const [doc, setDoc] = useState(null)
+  const topic = state.topic || ''
+  const angles = state.angles || 4
+
+  const upNode = (id, patch) =>
+    setNodes((n) => ({ ...n, [id]: { ...(n[id] || {}), ...patch } }))
+
+  async function run(confirmPeak = false) {
+    if (!topic.trim() || busy) return
+    setBusy(true); setNodes({}); setOrder([]); setOpen({}); setDoc(null)
+    try {
+      await chatStream({ topic, angles: Number(angles) || 4, confirm_peak: confirmPeak }, (ev) => {
+        if (ev.type === 'node_spawned') {
+          upNode(ev.node_id, { id: ev.node_id, parent: ev.parent_id, kind: ev.kind,
+                               title: ev.title, depth: ev.depth, status: 'planning' })
+          setOrder((o) => o.includes(ev.node_id) ? o : [...o, ev.node_id])
+        }
+        if (ev.type === 'node_status') upNode(ev.node_id, { status: ev.status })
+        if (ev.type === 'tool') upNode(ev.node_id, { tool: ev.name })
+        if (ev.type === 'node_done') upNode(ev.node_id, { status: 'done', rollup: ev.rollup, tool: null })
+        if (ev.type === 'error') upNode(ev.node_id, { status: 'error', tool: ev.message })
+        if (ev.type === 'job_final') setDoc(ev.doc_path)
+      }, '/api/runs/research')
+      window.dispatchEvent(new Event('jarvis-files-changed'))
+    } catch (err) {
+      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
+        if (window.confirm('Peak pricing right now — 2x cost. Run the research anyway?')) {
+          setBusy(false); await run(true); return
+        }
+      } else window.alert(err.detail || String(err))
+    }
+    setBusy(false)
+  }
+
+  return (
+    <div className="pane-col">
+      <form className="row" onSubmit={(e) => { e.preventDefault(); run() }}>
+        <input className="grow" placeholder="research topic…" value={topic}
+               onChange={(e) => setState({ topic: e.target.value })} />
+        <input type="number" min="2" max="6" value={angles} style={{ width: '3.5em' }}
+               title="angles" onChange={(e) => setState({ angles: e.target.value })} />
+        <button type="submit" disabled={busy || !topic.trim()}>{busy ? '…' : 'Research'}</button>
+      </form>
+      <div className="run-tree">
+        {order.length === 0 && <div className="dim center-pad">
+          give a topic and watch the bots divide it up</div>}
+        {order.map((id) => {
+          const n = nodes[id]; if (!n) return null
+          return (
+            <div key={id} className="run-node" style={{ marginLeft: (n.depth || 0) * 16 }}>
+              <div className="run-row" onClick={() => n.rollup && setOpen((o) => ({ ...o, [id]: !o[id] }))}>
+                <span className={`tag ${STATUS_TAG[n.status] || 'planning'}`}>{n.kind}</span>
+                <span className="grow ellipsis">{n.title}</span>
+                {n.tool && <span className="run-activity">⚙ {n.tool}</span>}
+                <span className={`run-dot ${STATUS_TAG[n.status] || 'planning'}`} />
+                {n.rollup && <span className="dim">{open[id] ? '▾' : '▸'}</span>}
+              </div>
+              {open[id] && n.rollup && <div className="run-rollup"><Md text={n.rollup} /></div>}
+            </div>
+          )
+        })}
+      </div>
+      {doc && <div className="dim small">document staged at <code>{doc}</code> — approve it in Staged changes</div>}
     </div>
   )
 }

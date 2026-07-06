@@ -22,8 +22,16 @@ CREATE TABLE IF NOT EXISTS conversations (
     project_id INTEGER REFERENCES projects(id),
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     summary TEXT,
-    fidelity_tier INTEGER NOT NULL DEFAULT 0
+    fidelity_tier INTEGER NOT NULL DEFAULT 0,
+    -- run-tree (M7): a conversation is a node in an agent job. NULL parent +
+    -- kind 'chat' is an ordinary chat; head/leader/subagent are job nodes.
+    parent_conversation_id INTEGER REFERENCES conversations(id),
+    kind TEXT NOT NULL DEFAULT 'chat',
+    rollup TEXT,
+    job_id TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_conv_parent ON conversations(parent_conversation_id);
+CREATE INDEX IF NOT EXISTS idx_conv_job ON conversations(job_id);
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     conversation_id INTEGER NOT NULL REFERENCES conversations(id),
@@ -84,6 +92,10 @@ async def get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(settings.db_path)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys = ON")
+    # WAL + a busy timeout let parallel agent nodes write the single DB file
+    # concurrently without 'database is locked' (M7 runs many nodes at once).
+    await db.execute("PRAGMA journal_mode = WAL")
+    await db.execute("PRAGMA busy_timeout = 5000")
     return db
 
 
@@ -95,6 +107,18 @@ async def init_db() -> None:
             cols = [r["name"] for r in await cur.fetchall()]
         if "deleted_at" not in cols:
             await db.execute("ALTER TABLE projects ADD COLUMN deleted_at TEXT")
+        # run-tree columns on an already-created conversations table
+        async with db.execute("PRAGMA table_info(conversations)") as cur:
+            ccols = [r["name"] for r in await cur.fetchall()]
+        for col, decl in (("parent_conversation_id", "INTEGER"),
+                          ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
+                          ("rollup", "TEXT"), ("job_id", "TEXT")):
+            if col not in ccols:
+                await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_parent ON conversations(parent_conversation_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_job ON conversations(job_id)")
         await db.commit()
     finally:
         await db.close()
