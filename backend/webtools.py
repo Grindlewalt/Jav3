@@ -12,7 +12,10 @@ from .config import settings
 from .db import get_db
 from .websec import UnsafeURL, html_to_text, is_safe_url
 
-UA = "JarvisResearch/1.0 (+personal assistant; text-only)"
+# A normal browser UA: many sites 403 an unknown agent, and this fetcher only
+# ever reads public pages and returns inert text.
+UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/125.0.0.0 Safari/537.36")
 
 
 async def search(query: str, session: str) -> str:
