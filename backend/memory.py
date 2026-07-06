@@ -190,7 +190,10 @@ def memory_block() -> str:
             used += toks
         else:
             overflow.append(p.stem)
-    out = ["# What you know about the operator (standing memory; always honor this)",
+    out = ["# Standing memory about the operator",
+           "These are binding rules and preferences. Follow every one in EVERY "
+           "response without being reminded. If a preference forbids something "
+           "(e.g. a formatting habit), never do it.",
            *loaded]
     if overflow:
         out.append("Other notes (load with memory_read): " + ", ".join(overflow))
@@ -208,11 +211,13 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB) -> st
     ensure_memory_seeds()
     parts = [
         read_memory_file("soul.md"),
+        # standing memory rides up top, right after the soul, so hard rules and
+        # preferences get the model's attention instead of being buried deep
+        memory_block(),
         "# About the user\n" + read_memory_file("user.md"),
         "# Environment\n" + read_memory_file("env.md"),
         read_memory_file("all-projects.md"),
         agents_index(),
-        memory_block(),
     ]
     if active is _USE_DB:
         active = await get_active_project(db)
