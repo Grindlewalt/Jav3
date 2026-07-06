@@ -106,7 +106,8 @@ async def _enforce_rules(content: str, rules: str) -> str:
     ]
     try:
         revised = ""
-        async for ev in model.complete(prompt):  # no tools -> reliably obeys
+        # temperature 0: this is a deterministic editing task, not creative
+        async for ev in model.complete(prompt, temperature=0.0):  # no tools -> reliably obeys
             if ev["type"] == "message":
                 revised = ev["content"]
         return revised.strip() or content

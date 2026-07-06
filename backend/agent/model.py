@@ -71,6 +71,7 @@ class Model:
         messages: list[dict],
         tools: list[dict] | None = None,
         conversation_id: int | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content": str, "tool_calls": list}. Raises
@@ -84,7 +85,7 @@ class Model:
             "model": self.name,
             "messages": messages,
             "max_tokens": settings.model_max_tokens,
-            "temperature": settings.model_temperature,
+            "temperature": settings.model_temperature if temperature is None else temperature,
             "stream": True,
         }
         if tools:
