@@ -13,6 +13,7 @@ import aiosqlite
 
 from ..config import settings
 from ..memory import standing_rules_tail
+from .budget import BudgetExceeded
 from .model import model
 from .tools import registry
 
@@ -51,14 +52,18 @@ async def run_turn(
 
     for _ in range(settings.max_react_iterations):
         final: dict | None = None
-        async for event in model.complete(
-            messages, tools=tools or None, conversation_id=conversation_id,
-            model_name=model_name, base_url=base_url,
-        ):
-            if event["type"] == "token":
-                yield event
-            else:
-                final = event
+        try:
+            async for event in model.complete(
+                messages, tools=tools or None, conversation_id=conversation_id,
+                model_name=model_name, base_url=base_url,
+            ):
+                if event["type"] == "token":
+                    yield event
+                else:
+                    final = event
+        except BudgetExceeded as e:
+            yield {"type": "final", "content": f"(stopped: {e})"}
+            return
 
         assert final is not None
         if not final["tool_calls"]:

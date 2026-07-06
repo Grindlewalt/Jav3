@@ -8,6 +8,7 @@ from typing import AsyncIterator
 import httpx
 
 from ..config import settings
+from . import budget as budget_mod
 
 
 class PeakPricingConfirmationRequired(Exception):
@@ -84,6 +85,10 @@ class Model:
         usually needs no key, so the DeepSeek-key requirement is relaxed there."""
         if conversation_id is not None:
             check_peak_gate(conversation_id)
+        budget = budget_mod.active_budget.get()
+        if budget is not None and budget.over():
+            raise budget_mod.BudgetExceeded(
+                f"token budget spent ({budget.summary()})")
         base = (base_url or self.base_url).rstrip("/")
         name = model_name or self.name
         key = self.api_key
@@ -98,12 +103,15 @@ class Model:
             "max_tokens": settings.model_max_tokens,
             "temperature": settings.model_temperature if temperature is None else temperature,
             "stream": True,
+            # ask for a final usage chunk so we can meter tokens + cache hits
+            "stream_options": {"include_usage": True},
         }
         if tools:
             payload["tools"] = tools
 
         content_parts: list[str] = []
         tool_calls: dict[int, dict] = {}
+        usage: dict | None = None
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
             async with client.stream(
@@ -121,7 +129,13 @@ class Model:
                     data = line[5:].strip()
                     if data == "[DONE]":
                         break
-                    delta = json.loads(data)["choices"][0].get("delta", {})
+                    obj = json.loads(data)
+                    if obj.get("usage"):        # final include_usage chunk
+                        usage = obj["usage"]
+                    choices = obj.get("choices") or []
+                    if not choices:             # usage-only chunk has no choices
+                        continue
+                    delta = choices[0].get("delta", {})
                     if delta.get("content"):
                         content_parts.append(delta["content"])
                         yield {"type": "token", "text": delta["content"]}
@@ -138,10 +152,13 @@ class Model:
                         if fn.get("arguments"):
                             slot["function"]["arguments"] += fn["arguments"]
 
+        if budget is not None:
+            budget.add(usage or {})
         yield {
             "type": "message",
             "content": "".join(content_parts),
             "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
+            "usage": usage,
         }
 
 

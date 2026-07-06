@@ -126,3 +126,40 @@ async def test_job_nodes_hidden_from_chat_list(client):
     summaries = [c["summary"] for c in r.json()["conversations"]]
     assert "a chat" in summaries
     assert "a head" not in summaries and "a sub" not in summaries
+
+
+# --- token budget ------------------------------------------------------------
+
+def test_budget_accounting_and_cap():
+    from backend.agent.budget import Budget
+    b = Budget(max_input=1000, max_output=500)
+    assert not b.over()
+    b.add({"prompt_tokens": 600, "completion_tokens": 100,
+           "prompt_cache_hit_tokens": 400, "prompt_cache_miss_tokens": 200})
+    assert not b.over()
+    b.add({"prompt_tokens": 500, "completion_tokens": 50})  # input now 1100 >= 1000
+    assert b.over()
+    assert "cache hit" in b.summary()
+
+
+def test_budget_over_on_output():
+    from backend.agent.budget import Budget
+    b = Budget(max_input=10**9, max_output=100)
+    b.add({"prompt_tokens": 10, "completion_tokens": 100})
+    assert b.over()
+
+
+async def test_budget_stops_loop(tmp_env, monkeypatch):
+    # a spent budget makes the next model.complete raise BudgetExceeded, which
+    # run_turn turns into a graceful final instead of erroring
+    from backend.agent import budget as bmod
+    from backend.agent.model import model
+    b = bmod.Budget(max_input=1, max_output=1)
+    b.add({"prompt_tokens": 5})  # already over
+    tok = bmod.active_budget.set(b)
+    try:
+        with pytest.raises(bmod.BudgetExceeded):
+            async for _ in model.complete([{"role": "user", "content": "hi"}]):
+                pass
+    finally:
+        bmod.active_budget.reset(tok)

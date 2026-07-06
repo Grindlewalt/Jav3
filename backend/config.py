@@ -43,8 +43,16 @@ class Settings(BaseSettings):
     # How long a user's "yes, use the API" answer stays valid.
     peak_confirm_ttl_minutes: int = 60
 
-    max_react_iterations: int = 10
+    # A high backstop only: the real limit is the token budget below, so a run
+    # loops as long as it needs instead of being cut off after a few rounds.
+    max_react_iterations: int = 60
     recent_message_limit: int = 40
+
+    # Per-operation token budget (shared across every agent in a chat turn or a
+    # research job). DeepSeek caches prompt prefixes automatically, so the input
+    # cap is generous. ~5M in / ~1M out is roughly a cent (cached) to a dime.
+    max_op_input_tokens: int = 5_000_000
+    max_op_output_tokens: int = 1_000_000
 
     # Workspace runner (light host-side sandbox; the QEMU VM is pass 2)
     run_python: str = "python3"

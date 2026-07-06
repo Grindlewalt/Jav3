@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import runtime
+from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import run_turn
 from .auth import require_user
@@ -190,6 +191,9 @@ async def chat(body: ChatRequest):
 
     async def event_stream():
         token = runtime.ephemeral.set(body.ephemeral)
+        # one token budget for the whole turn, shared by any tools/agents it spawns
+        btoken = budget.active_budget.set(budget.Budget(
+            settings.max_op_input_tokens, settings.max_op_output_tokens))
         db = await get_db()
         try:
             yield sse({"type": "start", "conversation_id": conversation_id})
@@ -235,6 +239,7 @@ async def chat(body: ChatRequest):
                 await db.commit()
                 shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
             runtime.ephemeral.reset(token)
+            budget.active_budget.reset(btoken)
             await db.close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

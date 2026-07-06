@@ -919,7 +919,7 @@ function ResearchPanel({ slug, state, setState }) {
         if (ev.type === 'tool') upNode(ev.node_id, { tool: ev.name })
         if (ev.type === 'node_done') upNode(ev.node_id, { status: 'done', rollup: ev.rollup, tool: null })
         if (ev.type === 'error') upNode(ev.node_id, { status: 'error', tool: ev.message })
-        if (ev.type === 'job_final') setDoc(ev.doc_path)
+        if (ev.type === 'job_final') setDoc({ path: ev.doc_path, usage: ev.usage })
       }, '/api/runs/research')
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (err) {
@@ -960,7 +960,8 @@ function ResearchPanel({ slug, state, setState }) {
           )
         })}
       </div>
-      {doc && <div className="dim small">document staged at <code>{doc}</code> — approve it in Staged changes</div>}
+      {doc && <div className="dim small">document staged at <code>{doc.path}</code> — approve it in Staged changes
+        {doc.usage && <> · {doc.usage}</>}</div>}
     </div>
   )
 }

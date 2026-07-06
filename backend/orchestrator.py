@@ -17,9 +17,11 @@ lifecycle + tool/token event is published under the job id for the SSE view.
 import asyncio
 
 from . import bus
+from .agent import budget as budget_mod
 from .agent.agent import Agent
 from .agent.loop import run_turn
 from .agent.model import confirm_peak, model
+from .config import settings
 from .db import get_db
 from .memory import assemble_system_prompt
 from .staging import stage_write
@@ -241,14 +243,29 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
         "type": "node_spawned", "node_id": root_id, "parent_id": None,
         "kind": "head", "title": title or brief[:60], "depth": 0})
 
-    budget = _Budget(MAX_NODES)
-    budget.take()  # the head itself
-    result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
-                            project=project, depth=0, budget=budget,
-                            leaf_tools=leaf_tools, peak=peak, deliverable=deliverable)
+    # one token budget across every node of this job (contextvar propagates into
+    # the gathered child tasks). Inherit a caller's budget if there is one, else
+    # create the job's own; only reset what we created.
+    tok = None
+    tbudget = budget_mod.active_budget.get()
+    if tbudget is None:
+        tbudget = budget_mod.Budget(settings.max_op_input_tokens,
+                                    settings.max_op_output_tokens)
+        tok = budget_mod.active_budget.set(tbudget)
+
+    ncap = _Budget(MAX_NODES)
+    ncap.take()  # the head itself
+    try:
+        result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
+                                project=project, depth=0, budget=ncap,
+                                leaf_tools=leaf_tools, peak=peak, deliverable=deliverable)
+    finally:
+        if tok is not None:
+            budget_mod.active_budget.reset(tok)
 
     bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": root_id,
-                         "rollup": result["rollup"], "doc_path": result.get("doc_path")})
+                         "rollup": result["rollup"], "doc_path": result.get("doc_path"),
+                         "usage": tbudget.summary()})
     bus.close_job(job_id)
     return {"root_id": root_id, "rollup": result["rollup"],
-            "doc_path": result.get("doc_path")}
+            "doc_path": result.get("doc_path"), "usage": tbudget.summary()}
