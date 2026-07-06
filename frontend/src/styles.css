@@ -428,3 +428,24 @@ kbd {
 .cb-history li:last-child { border-bottom: none; }
 .cb-history li:hover { background: var(--panel); }
 .cb-history li.active { color: var(--accent); }
+
+/* ---- schedules ---- */
+.sched-form { display: flex; flex-direction: column; gap: 8px; }
+.sched-form input, .sched-form select, .sched-form textarea {
+  width: 100%; box-sizing: border-box; }
+.sched-form label.mini { display: flex; flex-direction: column; gap: 3px;
+  font-size: 12px; color: var(--dim); }
+.sched-list { list-style: none; padding: 0; margin: 0; }
+.sched-list li { border: 1px solid var(--border); border-radius: 9px;
+  padding: 10px 12px; margin-bottom: 9px; background: var(--panel);
+  display: flex; flex-direction: column; gap: 5px; }
+.sched-list li.off { opacity: 0.55; }
+.sched-head { display: flex; align-items: center; gap: 6px; }
+.sched-result { margin: 4px 0 0; padding: 7px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 7px; font-size: 12px;
+  white-space: pre-wrap; max-height: 140px; overflow: auto; }
+
+/* ---- agent trash bin ---- */
+.trash-bin { margin: 6px 0; font-size: 13px; }
+.trash-bin summary { cursor: pointer; color: var(--dim); padding: 4px 0; }
+.file-list li.trashed { opacity: 0.75; }

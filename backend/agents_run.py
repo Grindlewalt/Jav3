@@ -37,14 +37,20 @@ def sse(event: dict) -> str:
 
 def _agent_tools(agent: dict) -> list[dict]:
     excluded = set(agent.get("tools_exclude") or [])
+    # an agent never spawns further agents — no recursion, no fork bombs
+    excluded.add("spawn_agent")
     entries = [e for e in load_registry() if e["name"] not in excluded]
     return openai_tool_specs(entries)
 
 
-async def _agent_system_prompt(db, agent: dict) -> str:
+_USE_DB = object()
+
+
+async def _agent_system_prompt(db, agent: dict, active=_USE_DB) -> str:
     """The agent's prompt, then the shared project context minus excluded
     sections. Exclusions match on the '# Loaded project file:' / heading text."""
-    base = await assemble_system_prompt(db)
+    base = (await assemble_system_prompt(db) if active is _USE_DB
+            else await assemble_system_prompt(db, active=active))
     excluded = set(agent.get("context_exclude") or [])
     if excluded:
         blocks = base.split("\n\n---\n\n")
@@ -52,6 +58,57 @@ async def _agent_system_prompt(db, agent: dict) -> str:
                 if not any(x and x in b.split("\n", 1)[0] for x in excluded)]
         base = "\n\n---\n\n".join(kept)
     return f"{agent['prompt']}\n\n---\n\n{base}"
+
+
+async def _open_agent_run(db, slug: str, task: str, active=_USE_DB) -> tuple[dict, int]:
+    """Create the conversation for an agent run and record the task. Returns
+    (agent def, conversation_id)."""
+    agent = _read(slug)  # 404s if missing
+    if active is _USE_DB:
+        active = await get_active_project(db)
+    project_id = None
+    if active:
+        async with db.execute(
+            "SELECT id FROM projects WHERE slug = ?", (active,)) as cur:
+            row = await cur.fetchone()
+        project_id = row["id"] if row else None
+    title = f"[{agent['name']}] " + " ".join(task.split())[:40]
+    cur = await db.execute(
+        "INSERT INTO conversations (project_id, summary) VALUES (?, ?)",
+        (project_id, title))
+    conversation_id = cur.lastrowid
+    await db.execute(
+        "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
+        (conversation_id, task))
+    await db.commit()
+    return agent, conversation_id
+
+
+async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
+    """Run an agent to completion, no streaming — for scheduled runs and the
+    spawn_agent tool. Peak is auto-confirmed: the caller (a schedule or Jarvis
+    itself) already intended this, there's no human to prompt. `active` pins
+    the project context without disturbing the operator's live session."""
+    db = await get_db()
+    try:
+        agent, conversation_id = await _open_agent_run(db, slug, task, active=active)
+        confirm_peak(conversation_id)
+        system_prompt = await _agent_system_prompt(db, agent, active=active)
+        tools = _agent_tools(agent)
+        history = [{"role": "user", "content": task}]
+        final_content = ""
+        async for event in run_turn(db, conversation_id, system_prompt,
+                                    history, tools=tools):
+            if event["type"] == "final":
+                final_content = event["content"]
+        await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) "
+            "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
+        await db.commit()
+        return {"conversation_id": conversation_id, "agent": agent["name"],
+                "final": final_content}
+    finally:
+        await db.close()
 
 
 @router.post("/{slug}/run")

@@ -82,11 +82,12 @@ def _read(slug: str) -> dict:
     return out
 
 
-@router.get("")
-async def list_agents():
+def _list_dir(base):
     agents = []
-    if settings.agents_dir.exists():
-        for md in sorted(settings.agents_dir.glob("*/AGENT.md")):
+    if base.exists():
+        for md in sorted(base.glob("*/AGENT.md")):
+            if md.parent.name.startswith("."):
+                continue  # skip the .trash bin
             meta = _parse_md(md) or {}
             agents.append({
                 "slug": md.parent.name,
@@ -94,7 +95,17 @@ async def list_agents():
                 "description": meta.get("description", ""),
                 "model": meta.get("model", ""),
             })
-    return {"agents": agents}
+    return agents
+
+
+@router.get("")
+async def list_agents():
+    return {"agents": _list_dir(settings.agents_dir)}
+
+
+@router.get("/trash")
+async def list_trash():
+    return {"agents": _list_dir(settings.agents_dir / ".trash")}
 
 
 @router.post("")
@@ -121,9 +132,40 @@ async def save_agent(slug: str, body: SaveAgent):
 
 @router.delete("/{slug}")
 async def delete_agent(slug: str):
+    """Soft delete: move to the .trash bin. Restorable until purged."""
     import shutil
     path = _agent_path(slug)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="no such agent")
-    shutil.rmtree(path.parent)
+    trash = settings.agents_dir / ".trash"
+    trash.mkdir(exist_ok=True)
+    dest = trash / slug
+    if dest.exists():
+        shutil.rmtree(dest)  # a re-created-then-deleted agent overwrites its old grave
+    shutil.move(str(path.parent), str(dest))
+    return {"ok": True}
+
+
+@router.post("/{slug}/restore")
+async def restore_agent(slug: str):
+    import shutil
+    src = settings.agents_dir / ".trash" / slug
+    if not (src / "AGENT.md").is_file():
+        raise HTTPException(status_code=404, detail="not in the trash")
+    dest = settings.agents_dir / slug
+    if dest.exists():
+        raise HTTPException(status_code=409,
+                            detail=f"an agent '{slug}' already exists — rename it first")
+    shutil.move(str(src), str(dest))
+    return {"ok": True}
+
+
+@router.delete("/{slug}/purge")
+async def purge_agent(slug: str):
+    """Permanent: only from the trash."""
+    import shutil
+    src = settings.agents_dir / ".trash" / slug
+    if not (src / "AGENT.md").is_file():
+        raise HTTPException(status_code=400, detail="delete first — purge only empties trash")
+    shutil.rmtree(src)
     return {"ok": True}

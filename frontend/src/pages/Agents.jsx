@@ -6,6 +6,7 @@ import { api } from '../api.js'
 // shouldn't need.
 export default function Agents() {
   const [agents, setAgents] = useState([])
+  const [trash, setTrash] = useState([])
   const [selected, setSelected] = useState(null)
   const [agent, setAgent] = useState(null)
   const [dirty, setDirty] = useState(false)
@@ -14,7 +15,10 @@ export default function Agents() {
   const [skillItems, setSkillItems] = useState([])
   const nameRef = useRef(null)
 
-  const refresh = () => api('/api/agents').then((r) => setAgents(r.agents))
+  const refresh = () => {
+    api('/api/agents').then((r) => setAgents(r.agents))
+    api('/api/agents/trash').then((r) => setTrash(r.agents))
+  }
   useEffect(() => {
     refresh()
     api('/api/memory').then((r) => setContextItems([
@@ -80,9 +84,21 @@ export default function Agents() {
   }
 
   async function del() {
-    if (!window.confirm(`delete agent "${selected}"?`)) return
+    if (!window.confirm(`move agent "${selected}" to trash?`)) return
     await api(`/api/agents/${selected}`, { method: 'DELETE' })
     setSelected(null)
+    refresh()
+  }
+
+  async function restore(slug) {
+    try {
+      await api(`/api/agents/${slug}/restore`, { method: 'POST' })
+      refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+  }
+  async function purge(slug) {
+    if (!window.confirm(`permanently delete "${slug}"? this can't be undone`)) return
+    await api(`/api/agents/${slug}/purge`, { method: 'DELETE' })
     refresh()
   }
 
@@ -130,9 +146,25 @@ export default function Agents() {
           ))}
           {agents.length === 0 && <li className="dim">none yet — press n</li>}
         </ul>
-        <p className="dim small">definitions only for now — the spawn tool that
-          runs these lands with the tool layer. Everything is included by
-          default; untick to exclude.</p>
+        {trash.length > 0 && (
+          <details className="trash-bin">
+            <summary>Recently deleted ({trash.length})</summary>
+            <ul className="file-list">
+              {trash.map((a) => (
+                <li key={a.slug} className="trashed">
+                  <span className="grow ellipsis">{a.name}</span>
+                  <button className="win-btn" title="restore"
+                          onClick={() => restore(a.slug)}>↺</button>
+                  <button className="win-btn" title="delete forever"
+                          onClick={() => purge(a.slug)}>×</button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        <p className="dim small">run an agent from a project board (Run an agent
+          panel), on a schedule, or have Jarvis summon one in chat. Everything
+          is included by default; untick to exclude.</p>
       </aside>
       <main className="editor-pane">
         {!agent ? (

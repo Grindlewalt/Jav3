@@ -52,6 +52,22 @@ CREATE TABLE IF NOT EXISTS session_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,              -- 'agent' | 'jarvis'
+    agent_slug TEXT,                 -- when kind = agent
+    project_slug TEXT,               -- context to run in (optional)
+    task TEXT NOT NULL,
+    cadence_kind TEXT NOT NULL,      -- 'daily' | 'interval'
+    daily_at TEXT,                   -- 'HH:MM' local, when cadence = daily
+    interval_minutes INTEGER,        -- when cadence = interval
+    enabled INTEGER NOT NULL DEFAULT 1,
+    next_run TEXT NOT NULL,          -- ISO local
+    last_run TEXT,
+    last_result TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

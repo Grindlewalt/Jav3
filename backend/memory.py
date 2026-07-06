@@ -134,6 +134,29 @@ async def get_active_project(db: aiosqlite.Connection) -> str | None:
     return await get_state(db, "active_project")
 
 
+def agents_index() -> str:
+    """Thin roster of defined agents so Jarvis knows what it can spawn_agent."""
+    import yaml
+    d = settings.agents_dir
+    rosters = []
+    if d.exists():
+        for md in sorted(d.glob("*/AGENT.md")):
+            if md.parent.name.startswith("."):
+                continue
+            try:
+                text = md.read_text()
+                fm = text.split("---")[1] if text.startswith("---") else ""
+                meta = yaml.safe_load(fm) or {}
+            except (IndexError, yaml.YAMLError, OSError):
+                meta = {}
+            desc = meta.get("description") or "(no description)"
+            rosters.append(f"- {md.parent.name}: {desc}")
+    if not rosters:
+        return ""
+    return ("# Agents you can summon with spawn_agent (by slug)\n"
+            + "\n".join(rosters))
+
+
 def notes_index() -> str:
     """Thin list of memory notes — enough for the model to know what it can
     recall with memory_read, without loading the contents."""
@@ -149,19 +172,25 @@ def notes_index() -> str:
     return "\n".join(lines)
 
 
-async def assemble_system_prompt(db: aiosqlite.Connection) -> str:
+_USE_DB = object()  # sentinel: "read the active project from the db"
+
+
+async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB) -> str:
     """Central context: soul + user + env + thin all-projects (always) +
-    thin memory-notes index + the active project's full project.md (only
-    when loaded)."""
+    agent roster + memory-notes index + the active project's full project.md
+    (only when loaded). Pass `active=<slug>` to assemble for a specific project
+    without touching global session state (scheduled/headless runs)."""
     ensure_memory_seeds()
     parts = [
         read_memory_file("soul.md"),
         "# About the user\n" + read_memory_file("user.md"),
         "# Environment\n" + read_memory_file("env.md"),
         read_memory_file("all-projects.md"),
+        agents_index(),
         notes_index(),
     ]
-    active = await get_active_project(db)
+    if active is _USE_DB:
+        active = await get_active_project(db)
     if active:
         project_md = read_project_md(active)
         if project_md:

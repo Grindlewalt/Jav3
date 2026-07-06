@@ -4,8 +4,10 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import asyncio
+
 from . import (agents_api, agents_run, auth, chat, memory_api, projects,
-               skills_api, vm_api, workspace)
+               schedules, skills_api, vm_api, workspace)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -18,7 +20,11 @@ async def lifespan(app: FastAPI):
     await init_db()
     ensure_memory_seeds()
     compile_registry()
-    yield
+    task = asyncio.create_task(schedules.scheduler_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 app = FastAPI(title="Jarvis v3", lifespan=lifespan)
@@ -30,6 +36,7 @@ app.include_router(workspace.router)
 app.include_router(skills_api.router)
 app.include_router(agents_api.router)
 app.include_router(agents_run.router)
+app.include_router(schedules.router)
 app.include_router(vm_api.router)
 
 
