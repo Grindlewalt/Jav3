@@ -1,0 +1,7 @@
+[Unit]
+Description=Jarvis durable-state backup to Gitea
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/jarvis/scripts/backup.sh

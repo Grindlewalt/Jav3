@@ -29,9 +29,13 @@ echo "== systemd user unit =="
 mkdir -p ~/.config/systemd/user
 cp scripts/jarvis.service ~/.config/systemd/user/jarvis.service
 cp scripts/jarvis-vm.service ~/.config/systemd/user/jarvis-vm.service
+cp scripts/jarvis-backup.service ~/.config/systemd/user/jarvis-backup.service
+cp scripts/jarvis-backup.timer ~/.config/systemd/user/jarvis-backup.timer
+chmod +x scripts/backup.sh
 systemctl --user daemon-reload
 systemctl --user enable jarvis.service
 systemctl --user enable jarvis-vm.service 2>/dev/null || true
+systemctl --user enable --now jarvis-backup.timer 2>/dev/null || true
 loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER"
 
 echo "== done =="
