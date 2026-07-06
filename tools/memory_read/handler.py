@@ -1,6 +1,6 @@
 import re
 
-from backend.config import settings
+from backend.memory import notes_dir
 
 
 def _safe_name(name: str) -> str:
@@ -11,7 +11,7 @@ def _safe_name(name: str) -> str:
 
 
 async def run(name: str | None = None) -> str:
-    notes = settings.memory_dir / "notes"
+    notes = notes_dir()
     if name is None:
         files = sorted(notes.glob("*.md")) if notes.exists() else []
         if not files:

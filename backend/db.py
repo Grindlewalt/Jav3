@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS session_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS fetched_urls (
+    id INTEGER PRIMARY KEY,
+    session TEXT NOT NULL,           -- research scope (project slug, or 'global')
+    url TEXT NOT NULL,
+    title TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(session, url)
+);
 CREATE TABLE IF NOT EXISTS schedules (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

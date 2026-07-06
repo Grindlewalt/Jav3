@@ -1,6 +1,6 @@
 import re
 
-from backend.config import settings
+from backend.memory import notes_dir
 
 
 def _safe_name(name: str) -> str:
@@ -11,7 +11,7 @@ def _safe_name(name: str) -> str:
 
 
 async def run(name: str, content: str, mode: str = "append") -> str:
-    notes = settings.memory_dir / "notes"
+    notes = notes_dir()
     notes.mkdir(parents=True, exist_ok=True)
     path = notes / f"{_safe_name(name)}.md"
     if mode == "replace" or not path.exists():

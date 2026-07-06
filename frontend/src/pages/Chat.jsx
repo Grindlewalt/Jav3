@@ -10,6 +10,7 @@ export default function Chat() {
   const [busy, setBusy] = useState(false)
   const [active, setActive] = useState(null)
   const [projects, setProjects] = useState([])
+  const [incognito, setIncognito] = useState(false)
   const bottomRef = useRef(null)
 
   const refreshConvos = () =>
@@ -56,9 +57,10 @@ export default function Chat() {
                         { role: 'assistant', content: '', streaming: true }])
     try {
       await chatStream(
-        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak },
+        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
+          ephemeral: incognito },
         (ev) => {
-          if (ev.type === 'start') setConversationId(ev.conversation_id)
+          if (ev.type === 'start' && !incognito) setConversationId(ev.conversation_id)
           if (ev.type === 'token')
             setMessages((m) => {
               const copy = [...m]
@@ -114,6 +116,11 @@ export default function Chat() {
     <div className="chat-layout">
       <aside>
         <button onClick={newConversation}>+ New chat</button>
+        <label className="incognito-toggle" title="persist nothing; memory writes go to a temp dir">
+          <input type="checkbox" checked={incognito}
+                 onChange={(e) => { setIncognito(e.target.checked); newConversation() }} />
+          <span>🕶 incognito</span>
+        </label>
         <ul className="convo-list">
           {conversations.map((c) => (
             <li key={c.id} className={c.id === conversationId ? 'active' : ''}

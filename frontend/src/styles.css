@@ -449,3 +449,8 @@ kbd {
 .trash-bin { margin: 6px 0; font-size: 13px; }
 .trash-bin summary { cursor: pointer; color: var(--dim); padding: 4px 0; }
 .file-list li.trashed { opacity: 0.75; }
+
+/* ---- incognito toggle ---- */
+.incognito-toggle { display: flex; align-items: center; gap: 7px; padding: 6px 4px;
+  font-size: 13px; color: var(--dim); cursor: pointer; }
+.incognito-toggle input { accent-color: var(--accent-2); }

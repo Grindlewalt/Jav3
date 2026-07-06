@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     run_timeout_seconds: int = 60
     run_max_mem_mb: int = 768
 
+    # Web access (secure + inert). The agent never touches the raw internet:
+    # host-side tools query SearXNG and fetch pages, strip them to plain text,
+    # and refuse internal/private targets (SSRF guard).
+    searxng_url: str = "http://10.0.0.58:8080"
+    web_search_results: int = 8
+    web_fetch_timeout: int = 15
+    web_max_bytes: int = 2_000_000      # stop reading a page past this
+    web_max_chars: int = 20_000         # cap the inert text handed back to the model
+
     # Sandbox VM (M3). Persistent: boots once and stays up; nuke is a
     # recovery action (recreate the overlay), not a per-run ritual.
     vm_dir: Path = BASE_DIR / "data" / "vm"

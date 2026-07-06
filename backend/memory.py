@@ -13,6 +13,17 @@ def estimate_tokens(text: str) -> int:
     return max(0, round(len(text) / 4))
 
 
+def notes_dir():
+    """Where memory notes are written/read. In ephemeral mode this is a
+    throwaway dir, so test turns never pollute real memory. Context assembly
+    (memory_block/notes) always uses the REAL dir, so ephemeral writes never
+    leak upward."""
+    from . import runtime
+    if runtime.ephemeral.get():
+        return settings.memory_dir / ".ephemeral-notes"
+    return settings.memory_dir / "notes"
+
+
 def _context_file(slug: str):
     return settings.projects_dir / slug / ".context.json"
 

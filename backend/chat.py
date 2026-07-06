@@ -1,10 +1,12 @@
 import asyncio
 import json
+import shutil
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from . import runtime
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import run_turn
 from .auth import require_user
@@ -19,6 +21,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: int | None = None
     confirm_peak: bool = False
+    ephemeral: bool = False   # incognito: persist nothing, memory writes go to a temp dir
 
 
 def sse(event: dict) -> str:
@@ -183,6 +186,7 @@ async def chat(body: ChatRequest):
         await db.close()
 
     async def event_stream():
+        token = runtime.ephemeral.set(body.ephemeral)
         db = await get_db()
         try:
             yield sse({"type": "start", "conversation_id": conversation_id})
@@ -206,19 +210,28 @@ async def chat(body: ChatRequest):
                 (conversation_id, final_content),
             )
             await db.commit()
-            async with db.execute(
-                "SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?",
-                (conversation_id,),
-            ) as cur:
-                count = (await cur.fetchone())["c"]
-            if count == 2:  # first exchange done — try to give it a real name
-                asyncio.create_task(
-                    _name_conversation(conversation_id, body.message, final_content))
+            if not body.ephemeral:
+                async with db.execute(
+                    "SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?",
+                    (conversation_id,),
+                ) as cur:
+                    count = (await cur.fetchone())["c"]
+                if count == 2:  # first exchange done — try to give it a real name
+                    asyncio.create_task(
+                        _name_conversation(conversation_id, body.message, final_content))
             yield sse({"type": "final", "content": final_content,
                        "conversation_id": conversation_id})
         except Exception as exc:  # surfaced to the GUI rather than a dropped stream
             yield sse({"type": "error", "message": str(exc)})
         finally:
+            if body.ephemeral:
+                # incognito: leave zero trace — drop the convo and any temp notes
+                for tbl in ("tool_calls", "messages", "conversations"):
+                    col = "id" if tbl == "conversations" else "conversation_id"
+                    await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
+                await db.commit()
+                shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
+            runtime.ephemeral.reset(token)
             await db.close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -1,0 +1,111 @@
+"""Host-side web access core: SearXNG search + inert page fetch + a shared
+fetch ledger so multiple agents don't scrape the same page (wasting tokens
+and narrowing the diversity of what's gathered).
+
+Everything here runs on the trusted host. When Jarvis moves into the VM, these
+become the host proxy the VM calls — the VM never opens a raw socket to the
+internet; it only ever receives the sanitised text these functions return.
+"""
+import httpx
+
+from .config import settings
+from .db import get_db
+from .websec import UnsafeURL, html_to_text, is_safe_url
+
+UA = "JarvisResearch/1.0 (+personal assistant; text-only)"
+
+
+async def search(query: str, session: str) -> str:
+    """Query SearXNG, return a compact text list of results. Results already
+    pulled in this session are flagged so agents pick fresh sources."""
+    try:
+        async with httpx.AsyncClient(timeout=settings.web_fetch_timeout) as c:
+            r = await c.get(f"{settings.searxng_url}/search",
+                            params={"q": query, "format": "json"},
+                            headers={"User-Agent": UA})
+            r.raise_for_status()
+            data = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        return f"error: search backend unreachable: {e}"
+
+    seen = await fetched_set(session)
+    lines = [f"search: {query}"]
+    for ans in (data.get("answers") or [])[:3]:
+        text = ans if isinstance(ans, str) else ans.get("answer", "")
+        if text:
+            lines.append(f"[answer] {text}")
+    for box in (data.get("infoboxes") or [])[:1]:
+        if box.get("content"):
+            lines.append(f"[infobox] {box['content'][:400]}")
+    results = data.get("results") or []
+    if not results:
+        lines.append("(no results)")
+    for i, res in enumerate(results[:settings.web_search_results], 1):
+        url = res.get("url", "")
+        flag = "  [already fetched — pick a different source]" if url in seen else ""
+        lines.append(f"\n{i}. {res.get('title', '(no title)')}\n   {url}{flag}\n"
+                     f"   {(res.get('content') or '').strip()[:280]}")
+    return "\n".join(lines)
+
+
+async def read(url: str, session: str) -> str:
+    """Fetch a page and return inert plain text. SSRF-guarded; the fetch is
+    recorded so the session doesn't pull the same URL twice."""
+    try:
+        is_safe_url(url)
+    except UnsafeURL as e:
+        return f"error: refused to fetch — {e}"
+
+    if url in await fetched_set(session):
+        return (f"note: {url} was already fetched in this session (by you or "
+                "another agent). Pick a different source to diversify — or say "
+                "why you need it again.")
+
+    try:
+        async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
+                                     follow_redirects=True) as c:
+            async with c.stream("GET", url, headers={"User-Agent": UA}) as r:
+                r.raise_for_status()
+                ctype = r.headers.get("content-type", "")
+                chunks, total = [], 0
+                async for chunk in r.aiter_bytes():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > settings.web_max_bytes:
+                        break
+                raw = b"".join(chunks)
+    except httpx.HTTPError as e:
+        return f"error: fetch failed: {e}"
+
+    body = raw.decode("utf-8", errors="replace")
+    if "html" in ctype or "<html" in body[:2000].lower():
+        title, text = html_to_text(body)
+    else:
+        title, text = "", body  # plain text / markdown / json served as-is
+    text = text[:settings.web_max_chars]
+    await record(session, url, title)
+    head = f"# {title}\n{url}\n\n" if title else f"{url}\n\n"
+    return head + (text or "(no readable text extracted)")
+
+
+# --- fetch ledger ------------------------------------------------------------
+
+async def fetched_set(session: str) -> set[str]:
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT url FROM fetched_urls WHERE session = ?", (session,)) as cur:
+            return {r["url"] for r in await cur.fetchall()}
+    finally:
+        await db.close()
+
+
+async def record(session: str, url: str, title: str) -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT OR IGNORE INTO fetched_urls (session, url, title) VALUES (?, ?, ?)",
+            (session, url, title))
+        await db.commit()
+    finally:
+        await db.close()

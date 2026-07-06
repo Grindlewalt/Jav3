@@ -1,0 +1,16 @@
+---
+name: web_read
+description: Fetch one web page and return it as inert plain text (all scripts, styles and markup stripped). Internal/private addresses are refused.
+when_to_use: To read the contents of a specific URL found via web_search.
+enabled: true
+parameters:
+  type: object
+  properties:
+    url:
+      type: string
+      description: A full http(s) URL.
+  required: [url]
+---
+You never touch the raw internet — the host fetches and sanitizes the page for
+you. If a URL was already fetched this session it won't be pulled again; choose
+a different source to keep the gathered knowledge diverse.
