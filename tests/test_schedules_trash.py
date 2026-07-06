@@ -100,3 +100,19 @@ async def test_spawn_agent_registered_and_guards(tmp_env):
     assert "spawn_agent" in names
     out = await registry.dispatch("spawn_agent", {"agent": "ghost", "task": "hi"})
     assert "no agent named 'ghost'" in out
+
+
+async def test_agent_model_override_plumbed(client, monkeypatch):
+    # an agent with a model + ollama base_url should push those into model.complete
+    await client.post("/api/agents", json={"name": "Local"})
+    await client.put("/api/agents/local", json={
+        "name": "Local", "model": "qwen3", "base_url": "http://localhost:11434/v1",
+        "prompt": "you are local", "context_exclude": [], "tools_exclude": [],
+        "skills_exclude": []})
+    from backend.agents_run import _read, _agent_overrides
+    mdl, burl = _agent_overrides(_read("local"))
+    assert mdl == "qwen3" and burl == "http://localhost:11434/v1"
+    # a default agent inherits (None, None)
+    await client.post("/api/agents", json={"name": "Default"})
+    mdl2, burl2 = _agent_overrides(_read("default"))
+    assert mdl2 is None and burl2 is None

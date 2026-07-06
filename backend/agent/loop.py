@@ -23,6 +23,8 @@ async def run_turn(
     system_prompt: str,
     history: list[dict],
     tools: list[dict] | None = None,
+    model_name: str | None = None,
+    base_url: str | None = None,
 ) -> AsyncIterator[dict]:
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
     if tools is None:
@@ -47,7 +49,8 @@ async def run_turn(
     for _ in range(settings.max_react_iterations):
         final: dict | None = None
         async for event in model.complete(
-            messages, tools=tools or None, conversation_id=conversation_id
+            messages, tools=tools or None, conversation_id=conversation_id,
+            model_name=model_name, base_url=base_url,
         ):
             if event["type"] == "token":
                 yield event

@@ -72,17 +72,28 @@ class Model:
         tools: list[dict] | None = None,
         conversation_id: int | None = None,
         temperature: float | None = None,
+        model_name: str | None = None,
+        base_url: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content": str, "tool_calls": list}. Raises
-        PeakPricingConfirmationRequired before any network I/O if gated."""
+        PeakPricingConfirmationRequired before any network I/O if gated.
+
+        model_name/base_url override the defaults so an agent can run on a
+        different model or a local endpoint (e.g. ollama). A custom endpoint
+        usually needs no key, so the DeepSeek-key requirement is relaxed there."""
         if conversation_id is not None:
             check_peak_gate(conversation_id)
-        if not self.api_key:
+        base = (base_url or self.base_url).rstrip("/")
+        name = model_name or self.name
+        key = self.api_key
+        if base_url:                       # custom endpoint (ollama etc.)
+            key = self.api_key or "local"  # local servers ignore the auth header
+        elif not key:
             raise ModelError("DEEPSEEK_API_KEY is not set (~/.config/jarvis/env, JARVIS_DEEPSEEK_API_KEY=...)")
 
         payload: dict = {
-            "model": self.name,
+            "model": name,
             "messages": messages,
             "max_tokens": settings.model_max_tokens,
             "temperature": settings.model_temperature if temperature is None else temperature,
@@ -97,8 +108,8 @@ class Model:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
             async with client.stream(
                 "POST",
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
                 json=payload,
             ) as resp:
                 if resp.status_code != 200:

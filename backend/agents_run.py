@@ -35,6 +35,11 @@ def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
+def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
+    """(model_name, base_url) for this agent — empty means inherit the default."""
+    return (agent.get("model") or None, agent.get("base_url") or None)
+
+
 def _agent_tools(agent: dict) -> list[dict]:
     excluded = set(agent.get("tools_exclude") or [])
     # an agent never spawns further agents — no recursion, no fork bombs
@@ -95,10 +100,11 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
         confirm_peak(conversation_id)
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent)
+        mdl, burl = _agent_overrides(agent)
         history = [{"role": "user", "content": task}]
         final_content = ""
         async for event in run_turn(db, conversation_id, system_prompt,
-                                    history, tools=tools):
+                                    history, tools=tools, model_name=mdl, base_url=burl):
             if event["type"] == "final":
                 final_content = event["content"]
         await db.execute(
@@ -151,10 +157,11 @@ async def run_agent(slug: str, body: RunAgent):
                        "agent": agent["name"]})
             system_prompt = await _agent_system_prompt(db, agent)
             tools = _agent_tools(agent)
+            mdl, burl = _agent_overrides(agent)
             history = [{"role": "user", "content": body.task}]
             final_content = ""
             async for event in run_turn(db, conversation_id, system_prompt,
-                                        history, tools=tools):
+                                        history, tools=tools, model_name=mdl, base_url=burl):
                 if event["type"] == "final":
                     final_content = event["content"]
                 else:
