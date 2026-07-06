@@ -29,10 +29,12 @@ async def run_turn(
         tools = registry.openai_tool_specs()
 
     # Tool schemas pull the model's attention off the system-prompt rules:
-    # measured on deepseek-v4-flash, em-dash violations jump 0/6 -> 4/6 the
-    # moment tools are attached. Restating the operator's hard rules in the
-    # latest user turn — closest to generation, where tools can't crowd them
-    # out — reclaims adherence (back to 0/6). Model-only; DB history stays clean.
+    # measured on deepseek-v4-flash, em-dash violations run ~0% with no tools
+    # but ~65% once tools are attached. Restating the operator's hard rules in
+    # the latest user turn (closest to generation) roughly halves that to ~33%.
+    # It helps but does NOT fully solve it — tool-calling mode caps constraint
+    # adherence on this model, so mechanical rules still need deterministic
+    # enforcement. Model-only; persisted DB history stays clean.
     if tools:
         rules = standing_rules_tail()
         if rules:
