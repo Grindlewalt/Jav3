@@ -12,6 +12,7 @@ from typing import AsyncIterator
 import aiosqlite
 
 from ..config import settings
+from ..memory import standing_rules_tail
 from .model import model
 from .tools import registry
 
@@ -26,6 +27,20 @@ async def run_turn(
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
     if tools is None:
         tools = registry.openai_tool_specs()
+
+    # Tool schemas pull the model's attention off the system-prompt rules:
+    # measured on deepseek-v4-flash, em-dash violations jump 0/6 -> 4/6 the
+    # moment tools are attached. Restating the operator's hard rules in the
+    # latest user turn — closest to generation, where tools can't crowd them
+    # out — reclaims adherence (back to 0/6). Model-only; DB history stays clean.
+    if tools:
+        rules = standing_rules_tail()
+        if rules:
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i]["role"] == "user":
+                    messages[i] = {**messages[i],
+                                   "content": (messages[i]["content"] or "") + "\n\n" + rules}
+                    break
 
     for _ in range(settings.max_react_iterations):
         final: dict | None = None
