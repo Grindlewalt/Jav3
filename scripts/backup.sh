@@ -83,10 +83,12 @@ else
   echo "committed a new snapshot"
 fi
 
+# Local commits accumulate as rollback history regardless; the push just gets
+# the snapshot off-box. Push failure is non-fatal (e.g. repo not created yet)
+# so the timer stays green and keeps versioning locally until the remote works.
 if git -C "$BACKUP" push -q origin "$BRANCH" 2>&1 | redact; then
   echo "backup pushed to $REPO_HOST/$REPO_PATH"
 else
-  echo "PUSH FAILED — does the repo exist on Gitea? (create an empty private" >&2
-  echo "  '$REPO_PATH' or give the token write:user scope)" >&2
-  exit 2
+  echo "note: push did not land (repo may not exist on Gitea yet) — snapshot is" >&2
+  echo "  committed locally in $BACKUP and will push once the remote is reachable" >&2
 fi
