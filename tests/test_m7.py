@@ -163,3 +163,42 @@ async def test_budget_stops_loop(tmp_env, monkeypatch):
                 pass
     finally:
         bmod.active_budget.reset(tok)
+
+
+async def test_run_stream_snapshot_completed(client):
+    # a finished job (head has a rollup) streams its snapshot then closes,
+    # without hanging on the live bus
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT INTO conversations (summary, kind, job_id, rollup) "
+            "VALUES ('[head] Demo', 'head', 'jX', 'top rollup')")
+        head = cur.lastrowid
+        await db.execute(
+            "INSERT INTO conversations (summary, kind, job_id, parent_conversation_id, rollup) "
+            "VALUES ('[subagent] a', 'subagent', 'jX', ?, 'sub rollup')", (head,))
+        await db.commit()
+    finally:
+        await db.close()
+    body = ""
+    async with client.stream("GET", f"/api/runs/{head}/stream") as r:
+        assert r.status_code == 200
+        async for chunk in r.aiter_text():
+            body += chunk
+    assert '"type": "node_spawned"' in body
+    assert '"kind": "subagent"' in body
+    assert '"type": "node_done"' in body and "sub rollup" in body
+    assert '"type": "job_final"' in body   # closed, did not hang
+
+
+async def test_run_list_marks_running(client):
+    db = await get_db()
+    try:
+        await db.execute("INSERT INTO conversations (summary, kind, job_id) VALUES ('[head] r', 'head', 'jR')")  # no rollup = running
+        await db.execute("INSERT INTO conversations (summary, kind, job_id, rollup) VALUES ('[head] d', 'head', 'jD', 'x')")  # done
+        await db.commit()
+    finally:
+        await db.close()
+    runs = (await client.get("/api/runs")).json()["runs"]
+    by_sum = {r["summary"]: r["running"] for r in runs}
+    assert by_sum["[head] r"] is True and by_sum["[head] d"] is False

@@ -85,7 +85,83 @@ async def list_runs():
             rows = await cur.fetchall()
     finally:
         await db.close()
-    return {"runs": [dict(r) for r in rows]}
+    # a head with no rollup yet is still running (watchable live)
+    return {"runs": [{**dict(r), "running": r["rollup"] is None} for r in rows]}
+
+
+def _depths(nodes) -> dict:
+    parent = {n["id"]: n["parent_conversation_id"] for n in nodes}
+    out = {}
+    for nid in parent:
+        d, p = 0, parent[nid]
+        while p is not None and p in parent:
+            d += 1
+            p = parent[p]
+        out[nid] = d
+    return out
+
+
+@router.get("/{cid}/stream")
+async def run_stream(cid: int):
+    """Follow a job live by its head id — including one Jarvis deployed from a
+    chat. Emits the tree-so-far as a snapshot, then streams live bus events
+    until the job ends (or, if it already finished, closes right after)."""
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT job_id, rollup FROM conversations WHERE id = ? AND kind = 'head'",
+            (cid,)) as cur:
+            head = await cur.fetchone()
+        if head is None:
+            raise HTTPException(status_code=404, detail="no such run")
+        job_id = head["job_id"]
+        async with db.execute(
+            "SELECT id, kind, summary, rollup, parent_conversation_id "
+            "FROM conversations WHERE job_id = ? ORDER BY id", (job_id,)) as cur:
+            nodes = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+    done_at_start = head["rollup"] is not None
+    depths = _depths(nodes)
+    queue = bus.subscribe(job_id)  # subscribe before emitting snapshot: no gap
+
+    async def event_stream():
+        try:
+            for n in nodes:  # snapshot of what already happened
+                title = (n["summary"] or "").split("] ", 1)[-1]
+                yield sse({"type": "node_spawned", "node_id": n["id"],
+                           "parent_id": n["parent_conversation_id"], "kind": n["kind"],
+                           "title": title, "depth": depths.get(n["id"], 0)})
+                if n["rollup"] is not None:
+                    yield sse({"type": "node_done", "node_id": n["id"], "rollup": n["rollup"]})
+            if done_at_start:
+                yield sse({"type": "job_final", "job_id": job_id, "root_id": cid})
+                return
+            while True:  # follow live
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30)
+                except asyncio.TimeoutError:
+                    d2 = await get_db()  # did it finish while we waited?
+                    try:
+                        async with d2.execute(
+                            "SELECT rollup FROM conversations WHERE id = ?", (cid,)) as cur:
+                            r = await cur.fetchone()
+                    finally:
+                        await d2.close()
+                    if r and r["rollup"] is not None:
+                        yield sse({"type": "job_final", "job_id": job_id, "root_id": cid})
+                        break
+                    continue
+                if event is bus.JOB_END or event.get("type") == "job_end":
+                    break
+                yield sse(event)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            bus.unsubscribe(job_id, queue)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.get("/{cid}/tree")
