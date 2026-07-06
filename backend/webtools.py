@@ -12,10 +12,15 @@ from .config import settings
 from .db import get_db
 from .websec import UnsafeURL, html_to_text, is_safe_url
 
-# A normal browser UA: many sites 403 an unknown agent, and this fetcher only
-# ever reads public pages and returns inert text.
+# Browser-like headers: many sites 403 a bare/unknown agent or a request with
+# no Accept headers. This fetcher only reads public pages and returns inert text.
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/125.0.0.0 Safari/537.36")
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 async def search(query: str, session: str) -> str:
@@ -25,7 +30,7 @@ async def search(query: str, session: str) -> str:
         async with httpx.AsyncClient(timeout=settings.web_fetch_timeout) as c:
             r = await c.get(f"{settings.searxng_url}/search",
                             params={"q": query, "format": "json"},
-                            headers={"User-Agent": UA})
+                            headers=HEADERS)
             r.raise_for_status()
             data = r.json()
     except (httpx.HTTPError, ValueError) as e:
@@ -67,7 +72,7 @@ async def read(url: str, session: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
                                      follow_redirects=True) as c:
-            async with c.stream("GET", url, headers={"User-Agent": UA}) as r:
+            async with c.stream("GET", url, headers=HEADERS) as r:
                 r.raise_for_status()
                 ctype = r.headers.get("content-type", "")
                 chunks, total = [], 0
