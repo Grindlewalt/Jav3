@@ -86,3 +86,17 @@ async def test_memory_overflow_degrades_to_index(tmp_env, monkeypatch):
     assert "never use em dashes" in prompt          # priority note loaded in full
     assert "load with memory_read" in prompt         # overflow degraded to index
     assert "long-note" in prompt
+
+
+async def test_em_dash_scrubber_gated_on_memory(tmp_env):
+    from backend.agent.style import output_replacements, scrub
+    ensure_memory_seeds()
+    notes = settings.memory_dir / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    # no preference yet -> no enforcement
+    assert output_replacements() == {}
+    (notes / "operator-preferences.md").write_text("never use em dashes\n")
+    repl = output_replacements()
+    assert repl != {}
+    assert scrub("shows what matters — not everything", repl) == "shows what matters, not everything"
+    assert "—" not in scrub("a—b and c — d", repl)
