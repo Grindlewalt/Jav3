@@ -192,8 +192,9 @@ async def chat(body: ChatRequest):
     async def event_stream():
         token = runtime.ephemeral.set(body.ephemeral)
         # one token budget for the whole turn, shared by any tools/agents it spawns
-        btoken = budget.active_budget.set(budget.Budget(
-            settings.max_op_input_tokens, settings.max_op_output_tokens))
+        the_budget = budget.Budget(
+            settings.max_op_input_tokens, settings.max_op_output_tokens)
+        btoken = budget.active_budget.set(the_budget)
         db = await get_db()
         try:
             yield sse({"type": "start", "conversation_id": conversation_id})
@@ -238,6 +239,17 @@ async def chat(body: ChatRequest):
                     await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
                 await db.commit()
                 shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
+            if not body.ephemeral:
+                try:
+                    await db.execute(
+                        "INSERT INTO usage_log (conversation_id, input_tokens, "
+                        "output_tokens, cache_hit, cache_miss) VALUES (?,?,?,?,?)",
+                        (conversation_id, the_budget.input_tokens,
+                         the_budget.output_tokens, the_budget.cache_hit,
+                         the_budget.cache_miss))
+                    await db.commit()
+                except Exception:
+                    pass
             runtime.ephemeral.reset(token)
             budget.active_budget.reset(btoken)
             await db.close()

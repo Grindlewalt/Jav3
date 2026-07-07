@@ -1,0 +1,95 @@
+"""Transcript / log viewer: scroll everything a conversation actually did.
+
+The chat sidebar hides tool calls; this exposes the full interleaved timeline
+(user + assistant messages and every tool call with its args and result) plus
+the numbers that explain a token blow-up — tool-call counts, result bytes, and
+the real token usage recorded per turn. Read-only.
+"""
+import json
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from .auth import require_user
+from .db import get_db
+
+router = APIRouter(prefix="/api/logs", tags=["logs"],
+                   dependencies=[Depends(require_user)])
+
+
+@router.get("/conversations")
+async def conversations(kind: str | None = None):
+    db = await get_db()
+    try:
+        q = (
+            "SELECT c.id, c.kind, c.summary, c.started_at, p.slug AS project, "
+            "  (SELECT COUNT(*) FROM tool_calls t WHERE t.conversation_id=c.id) AS tool_calls, "
+            "  (SELECT COALESCE(SUM(LENGTH(t.result)),0) FROM tool_calls t WHERE t.conversation_id=c.id) AS result_bytes, "
+            "  (SELECT COALESCE(SUM(u.input_tokens),0) FROM usage_log u WHERE u.conversation_id=c.id) AS input_tokens, "
+            "  (SELECT COALESCE(SUM(u.output_tokens),0) FROM usage_log u WHERE u.conversation_id=c.id) AS output_tokens "
+            "FROM conversations c LEFT JOIN projects p ON p.id=c.project_id ")
+        args: tuple = ()
+        if kind:
+            q += "WHERE c.kind = ? "
+            args = (kind,)
+        q += "ORDER BY c.id DESC LIMIT 200"
+        cur = await db.execute(q, args)
+        return {"conversations": [dict(r) for r in await cur.fetchall()]}
+    finally:
+        await db.close()
+
+
+@router.get("/conversations/{cid}")
+async def transcript(cid: int):
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT id, kind, summary FROM conversations WHERE id=?", (cid,))
+        conv = await cur.fetchone()
+        if not conv:
+            raise HTTPException(status_code=404, detail="no such conversation")
+        cur = await db.execute(
+            "SELECT id, role, content, created_at FROM messages "
+            "WHERE conversation_id=? ORDER BY id", (cid,))
+        items = [{"kind": "message", "id": r["id"], "role": r["role"],
+                  "content": r["content"] or "", "ts": r["created_at"]}
+                 for r in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT id, tool, args, result, created_at FROM tool_calls "
+            "WHERE conversation_id=? ORDER BY id", (cid,))
+        hist: dict[str, dict] = {}
+        n_calls = tot_bytes = 0
+        for r in await cur.fetchall():
+            res = r["result"] or ""
+            items.append({"kind": "tool", "id": r["id"], "tool": r["tool"],
+                          "args": r["args"] or "", "result": res,
+                          "result_bytes": len(res), "ts": r["created_at"]})
+            h = hist.setdefault(r["tool"], {"tool": r["tool"], "count": 0, "bytes": 0})
+            h["count"] += 1
+            h["bytes"] += len(res)
+            n_calls += 1
+            tot_bytes += len(res)
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o, "
+            "COALESCE(SUM(cache_hit),0) ch, COALESCE(SUM(cache_miss),0) cm, COUNT(*) turns "
+            "FROM usage_log WHERE conversation_id=?", (cid,))
+        u = await cur.fetchone()
+        # interleave by wall-clock: message and tool ids come from separate
+        # sequences, so only the timestamp orders them across streams. Tool
+        # calls share the second of the turn that made them, so on a tie order
+        # user message -> tools -> assistant message (the real sequence).
+        def _rank(x):
+            if x["kind"] == "tool":
+                return 1
+            return 0 if x["role"] == "user" else 2
+        items.sort(key=lambda x: (x["ts"] or "", _rank(x), x["id"]))
+        return {
+            "id": cid, "kind": conv["kind"], "summary": conv["summary"],
+            "timeline": items,
+            "tool_histogram": sorted(hist.values(), key=lambda h: -h["bytes"]),
+            "stats": {
+                "tool_calls": n_calls, "result_bytes": tot_bytes,
+                "input_tokens": u["i"], "output_tokens": u["o"],
+                "cache_hit": u["ch"], "cache_miss": u["cm"], "turns": u["turns"],
+            },
+        }
+    finally:
+        await db.close()

@@ -561,3 +561,43 @@ kbd {
   .sbx-queue { max-height: 40vh; overflow-y: auto; }
   .sbx-main { overflow-y: visible; }
 }
+
+/* ---- logs transcript viewer ---- */
+.log-row { display: block; }
+.log-row-top { display: flex; align-items: center; gap: 6px; }
+.log-row-meta { font-size: 11.5px; color: var(--dim); margin-top: 2px;
+  display: flex; align-items: center; flex-wrap: wrap; }
+.log-heat { color: var(--red); font-weight: 600; }
+.log-detail { display: flex; flex-direction: column; overflow-y: auto;
+  min-height: 0; padding-right: 4px; }
+.log-hist { display: flex; flex-direction: column; gap: 6px; }
+.log-hist-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.log-hist-name { flex: 0 0 150px; color: var(--accent); }
+.log-hist-count { flex: 0 0 44px; text-align: right; }
+.log-hist-track { flex: 1; height: 8px; background: var(--panel-2);
+  border-radius: 5px; overflow: hidden; }
+.log-hist-bar { height: 100%; background: var(--accent); border-radius: 5px; }
+.log-hist-bytes { flex: 0 0 70px; text-align: right; }
+.log-timeline { display: flex; flex-direction: column; gap: 10px; }
+.log-msg { border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 14px; background: var(--bg-soft); }
+.log-msg.assistant { background: var(--panel); }
+.log-msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.log-role { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--dim); }
+.log-msg.assistant .log-role { color: var(--accent); }
+.log-tool { border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); overflow: hidden; }
+.log-tool-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  cursor: pointer; font-size: 13px; }
+.log-tool-head:hover { background: var(--panel-2); }
+.log-tool-name { color: var(--accent); }
+.log-size { background: var(--panel-2); color: var(--dim); border-radius: 8px;
+  padding: 1px 8px; font-size: 11px; }
+.log-size.hot { background: #e5534b26; color: var(--red); }
+.log-tool-body { padding: 8px 12px 12px; border-top: 1px solid var(--border); }
+.log-tool-label { text-transform: uppercase; letter-spacing: 1px; margin: 6px 0 3px; }
+.log-pre { margin: 0; padding: 8px 10px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 7px; white-space: pre-wrap;
+  word-break: break-word; font: 12px/1.5 ui-monospace, Menlo, monospace; }
+.log-result { max-height: 300px; overflow: auto; }

@@ -13,6 +13,7 @@ import Schedules from './pages/Schedules.jsx'
 import Runs from './pages/Runs.jsx'
 import Jobs from './pages/Jobs.jsx'
 import Sandbox from './pages/Sandbox.jsx'
+import Logs from './pages/Logs.jsx'
 
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
@@ -36,6 +37,7 @@ export default function App() {
           <NavLink to="/context">Context</NavLink>
           <NavLink to="/agents">Agents</NavLink>
           <NavLink to="/sandbox">Sandbox</NavLink>
+          <NavLink to="/logs">Logs</NavLink>
           <NavLink to="/runs">Runs</NavLink>
           <NavLink to="/jobs">Jobs</NavLink>
           <NavLink to="/schedules">Schedules</NavLink>
@@ -60,6 +62,7 @@ export default function App() {
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />
         <Route path="/sandbox" element={<Sandbox />} />
+        <Route path="/logs" element={<Logs />} />
         <Route path="/runs" element={<Runs />} />
         <Route path="/jobs" element={<Jobs />} />
         <Route path="/schedules" element={<Schedules />} />

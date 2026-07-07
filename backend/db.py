@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS schedules (
     last_result TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    cache_miss INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS sandbox_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dest TEXT NOT NULL,              -- human label (hostname if known, else ip)
