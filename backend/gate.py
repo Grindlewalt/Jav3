@@ -301,16 +301,29 @@ def _build_evidence(run_id: int, slug: str, command: str, result: dict,
     """Raw capture assembled into one record. No verdict, no severity — that is
     sandbox.classify()'s job against the live allowlist."""
     ip2host = parse_dns_replies(dns_text)
-    flows = pcap_bytes(pcap_text)
+
+    # The tap sees the guest's outbound SYNs even for connections nftables
+    # drops, so packet-presence does NOT mean "allowed". A connection was only
+    # actually delivered if data came BACK (bytes_down > 0); a dropped SYN gets
+    # no reply. Everything else is an attempt. Gateway DNS/DHCP is infra noise.
+    def _infra(ip, port):
+        return ip == "10.66.0.1" and port in (53, 67, 68)
+
+    peers = pcap_bytes(pcap_text)
+    flows = [f for f in peers
+             if f["bytes_down"] > 0 and not _infra(f["ip"], f["port"])]
     for f in flows:
         f["host"] = ip2host.get(f["ip"])
+    delivered_keys = {(f["ip"], f["port"], f["proto"]) for f in flows}
+
+    blocked = []
     for b in since_drops:
+        if _infra(b["ip"], b["port"]):
+            continue
+        if (b["ip"], b["port"], b["proto"]) in delivered_keys:
+            continue                        # actually got through — not blocked
         b["host"] = ip2host.get(b["ip"])
-    # a dest that both delivered and shows drops is really delivered; don't
-    # double-list it as blocked
-    flow_keys = {(f["ip"], f["port"], f["proto"]) for f in flows}
-    blocked = [b for b in since_drops
-               if (b["ip"], b["port"], b["proto"]) not in flow_keys]
+        blocked.append(b)
     return {
         "run_id": run_id, "project": slug, "command": command,
         "created_at": dt.datetime.now().isoformat(timespec="seconds"),

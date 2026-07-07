@@ -133,6 +133,25 @@ def test_parse_drops_counted_aggregates():
     assert got[("1.2.3.4", 443)] == 2 and got[("10.66.0.1", 22)] == 1
 
 
+def test_build_evidence_delivered_needs_reply():
+    """A tap-visible outbound SYN to a dropped host must NOT count as delivered;
+    only a peer that sent data back is a real flow. Gateway DNS is infra."""
+    from backend.gate import _build_evidence
+    pcap = ("IP 10.66.0.10.5000 > 1.1.1.1.443: tcp 100\n"
+            "IP 1.1.1.1.443 > 10.66.0.10.5000: tcp 5000\n"      # delivered
+            "IP 10.66.0.10.5001 > 9.9.9.9.443: tcp 0\n"         # blocked SYN, no reply
+            "IP 10.66.0.10.5002 > 10.66.0.1.53: tcp 40\n"
+            "IP 10.66.0.1.53 > 10.66.0.10.5002: tcp 60\n")      # infra DNS reply
+    drops = [{"ip": "9.9.9.9", "port": 443, "proto": "tcp", "attempts": 3}]
+    ev = _build_evidence(1, "slug", "cmd", {"exit_status": 0, "staged": []},
+                         True, True, "", [], since_drops=drops, pcap_text=pcap)
+    flows = {(f["ip"], f["port"]) for f in ev["flows"]}
+    blocked = {(b["ip"], b["port"]) for b in ev["blocked"]}
+    assert ("1.1.1.1", 443) in flows
+    assert ("9.9.9.9", 443) in blocked
+    assert ("10.66.0.1", 53) not in flows      # infra filtered out
+
+
 def test_parse_dns_replies_and_typed():
     text = ("query[A] pypi.org from 10.66.0.10\n"
             "reply pypi.org is 151.101.0.223\n")
