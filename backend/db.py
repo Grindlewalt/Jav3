@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS fetched_urls (
     fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(session, url)
 );
+CREATE TABLE IF NOT EXISTS git_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT NOT NULL,
+    message TEXT NOT NULL,
+    paths TEXT,                      -- JSON array or NULL = all changes
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    commit_sha TEXT,
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    decided_at TEXT
+);
 CREATE TABLE IF NOT EXISTS schedules (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

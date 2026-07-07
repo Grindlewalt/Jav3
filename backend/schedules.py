@@ -146,7 +146,8 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
                 r = await cur.fetchone()
             project_id = r["id"] if r else None
         cur = await db.execute(
-            "INSERT INTO conversations (project_id, summary) VALUES (?, ?)",
+            "INSERT INTO conversations (project_id, summary, kind) "
+            "VALUES (?, ?, 'scheduled')",
             (project_id, "[scheduled] " + " ".join(task.split())[:40]))
         conversation_id = cur.lastrowid
         await db.execute(

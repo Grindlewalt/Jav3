@@ -260,35 +260,48 @@ def standing_rules_tail() -> str:
 _USE_DB = object()  # sentinel: "read the active project from the db"
 
 
-async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB) -> str:
+async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB,
+                                 exclude: set[str] | None = None) -> str:
     """Central context: soul + user + env + thin all-projects (always) +
     agent roster + memory-notes index + the active project's full project.md
     (only when loaded). Pass `active=<slug>` to assemble for a specific project
-    without touching global session state (scheduled/headless runs)."""
+    without touching global session state (scheduled/headless runs).
+
+    `exclude` drops whole blocks by label — this is what an agent definition's
+    context_exclude maps to. Labels: soul.md, standing-memory, user.md, env.md,
+    all-projects.md, agents-index, active-project (covers the project.md block
+    AND every opted-in context file). 'operator-rules' is labeled too, but it
+    is NEVER dropped even if listed: the operator's hard rules bind every
+    agent, and letting a definition opt out would defeat the whole tail."""
     ensure_memory_seeds()
-    parts = [
-        read_memory_file("soul.md"),
+    exclude = exclude or set()
+    parts: list[tuple[str, str]] = [
+        ("soul.md", read_memory_file("soul.md")),
         # standing memory rides up top, right after the soul, so hard rules and
         # preferences get the model's attention instead of being buried deep
-        memory_block(),
-        "# About the user\n" + read_memory_file("user.md"),
-        "# Environment\n" + read_memory_file("env.md"),
-        read_memory_file("all-projects.md"),
-        agents_index(),
+        ("standing-memory", memory_block()),
+        ("user.md", "# About the user\n" + read_memory_file("user.md")),
+        ("env.md", "# Environment\n" + read_memory_file("env.md")),
+        ("all-projects.md", read_memory_file("all-projects.md")),
+        ("agents-index", agents_index()),
     ]
     if active is _USE_DB:
         active = await get_active_project(db)
     if active:
         project_md = read_project_md(active)
         if project_md:
-            parts.append(
-                f"# Active project (loaded into central context): {active}\n\n{project_md}"
-            )
-        parts.extend(_loaded_context_files(active))
+            parts.append((
+                "active-project",
+                f"# Active project (loaded into central context): {active}\n\n{project_md}",
+            ))
+        parts.extend(("active-project", block)
+                     for block in _loaded_context_files(active))
     # the sandwich bottom slice: hard rules restated LAST, after all context,
-    # where they get the model's attention again
-    parts.append(standing_rules_tail())
-    return "\n\n---\n\n".join(p.strip() for p in parts if p.strip())
+    # where they get the model's attention again (deliberately not excludable)
+    parts.append(("operator-rules", standing_rules_tail()))
+    return "\n\n---\n\n".join(
+        text.strip() for label, text in parts
+        if text.strip() and (label == "operator-rules" or label not in exclude))
 
 
 def _loaded_context_files(slug: str) -> list[str]:

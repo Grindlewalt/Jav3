@@ -4,19 +4,22 @@ Deliberately file-based — everything the GUI touches here is a plain file in
 projects/<slug>/, so the agent can read and edit the same workspace with
 tools later without a second data model.
 """
+import io
 import json
 import re
-from pathlib import Path
+import stat
+import zipfile
+from pathlib import Path, PurePosixPath
 
 import aiosqlite
-from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .auth import require_user
 from .config import settings
 from .db import get_db
-from .fsutil import list_tree, read_text_or_binary, safe_join
+from .fsutil import SKIP_DIRS, list_tree, read_text_or_binary, safe_join
 from .runner import run_python
 
 router = APIRouter(prefix="/api/projects/{slug}", tags=["workspace"],
@@ -32,6 +35,13 @@ async def project_dir(slug: str) -> Path:
     finally:
         await db.close()
     return settings.projects_dir / slug
+
+
+def _refuse_git(base: Path, p: Path) -> Path:
+    """Repo internals belong to the git gate — nothing writes into .git/."""
+    if p.relative_to(base.resolve()).parts[:1] == (".git",):
+        raise HTTPException(status_code=400, detail=".git is managed by the git gate")
+    return p
 
 
 class SaveFile(BaseModel):
@@ -63,7 +73,8 @@ async def read_file(slug: str, path: str):
 
 @router.put("/file")
 async def save_file(slug: str, body: SaveFile):
-    p = safe_join(await project_dir(slug), body.path)
+    base = await project_dir(slug)
+    p = _refuse_git(base, safe_join(base, body.path))
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body.content)
     return {"ok": True, "path": body.path}
@@ -83,10 +94,78 @@ async def delete_file(slug: str, path: str):
 @router.post("/upload")
 async def upload(slug: str, file: UploadFile, dest: str = ""):
     base = await project_dir(slug)
-    p = safe_join(base, f"{dest.strip('/')}/{file.filename}".lstrip("/"))
+    p = _refuse_git(base, safe_join(base, f"{dest.strip('/')}/{file.filename}".lstrip("/")))
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(await file.read())
     return {"ok": True, "path": str(p.relative_to(base))}
+
+
+def _zip_members(zf: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo, str]]:
+    """Regular-file members that are safe to extract, as (info, relpath).
+    Absolute paths, `..`, symlinks and junk dirs are silently skipped;
+    a single GitHub-style top-level directory is stripped."""
+    kept = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        mode = info.external_attr >> 16
+        if stat.S_IFMT(mode) and not stat.S_ISREG(mode):
+            continue  # symlink / device / anything non-regular
+        name = info.filename.replace("\\", "/")
+        p = PurePosixPath(name)
+        if p.is_absolute() or ".." in p.parts or not p.parts:
+            continue
+        if any(part in SKIP_DIRS or part == ".git" for part in p.parts[:-1]):
+            continue
+        kept.append((info, str(p)))
+    tops = {rel.split("/", 1)[0] for _, rel in kept}
+    if len(tops) == 1 and all("/" in rel for _, rel in kept):
+        kept = [(info, rel.split("/", 1)[1]) for info, rel in kept]
+    return kept
+
+
+@router.post("/upload_archive")
+async def upload_archive(slug: str, file: UploadFile, dest: str = Form("code")):
+    base = await project_dir(slug)
+    dest_dir = _refuse_git(base, safe_join(base, dest.strip("/") or "code"))
+    data = await file.read()
+    if not (file.filename or "").lower().endswith(".zip") or not data.startswith(b"PK"):
+        raise HTTPException(status_code=400, detail="only zip archives are accepted")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="not a valid zip archive")
+
+    members = _zip_members(zf)
+    max_bytes = settings.upload_max_uncompressed_mb * 1024 * 1024
+    if len(members) > settings.upload_max_files:
+        raise HTTPException(status_code=413,
+                            detail=f"too many files ({len(members)} > {settings.upload_max_files})")
+    if sum(info.file_size for info, _ in members) > max_bytes:
+        raise HTTPException(status_code=413,
+                            detail=f"archive exceeds {settings.upload_max_uncompressed_mb} MB uncompressed")
+
+    written: list[Path] = []
+    total = 0
+    try:
+        for info, rel in members:
+            target = safe_join(dest_dir, rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            written.append(target)  # before writing, so a mid-file abort cleans it up
+            with zf.open(info) as src, open(target, "wb") as out:
+                while chunk := src.read(65536):
+                    total += len(chunk)
+                    if total > max_bytes:  # headers lied (zip bomb)
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"archive exceeds {settings.upload_max_uncompressed_mb} MB uncompressed")
+                    out.write(chunk)
+    except HTTPException:
+        for p in written:
+            p.unlink(missing_ok=True)
+        raise
+    return {"files": len(written), "bytes": total,
+            "dest": str(dest_dir.relative_to(base)) or "."}
 
 
 @router.get("/raw/{path:path}")
@@ -210,8 +289,8 @@ async def set_mark(slug: str, body: MarkRequest):
 @router.post("/move")
 async def move_file(slug: str, body: MoveRequest):
     base = await project_dir(slug)
-    src = safe_join(base, body.src)
-    dest = safe_join(base, body.dest)
+    src = _refuse_git(base, safe_join(base, body.src))
+    dest = _refuse_git(base, safe_join(base, body.dest))
     if not src.is_file():
         raise HTTPException(status_code=404, detail="no such file")
     if src.name == "project.md" and src.parent == base:

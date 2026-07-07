@@ -3,7 +3,7 @@ Description=Run the Jarvis backup regularly
 
 [Timer]
 OnBootSec=3min
-OnUnitActiveSec=15min
+OnUnitActiveSec=5min
 Persistent=true
 
 [Install]

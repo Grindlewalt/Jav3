@@ -3,6 +3,7 @@ import httpx
 import pytest
 
 from backend.auth import hash_password
+from backend.config import settings
 from backend.db import get_db, init_db
 from backend.main import app
 from backend.memory import assemble_system_prompt, ensure_memory_seeds
@@ -92,7 +93,61 @@ async def test_agent_run_creates_findable_conversation(client):
             body += chunk
     assert '"type": "start"' in body
     assert '"agent": "Scout"' in body
-    # the run is persisted and linked to the project
+    # agent runs are jobs now: absent from the chat sidebar, listed on /api/jobs
     r = await client.get("/api/conversations?project=demo")
-    convos = r.json()["conversations"]
-    assert any(c["summary"].startswith("[Scout]") for c in convos)
+    assert not any(c["summary"].startswith("[Scout]")
+                   for c in r.json()["conversations"])
+    jobs = (await client.get("/api/jobs")).json()["jobs"]
+    assert any(j["summary"].startswith("[Scout]") and j["kind"] == "agent"
+               and j["project"] == "demo" for j in jobs)
+
+
+# --- labeled context blocks + agent context_exclude ---------------------------
+
+async def test_exclude_drops_labeled_block(client):
+    db = await get_db()
+    try:
+        base = await assemble_system_prompt(db)
+        assert "# About the user" in base
+        out = await assemble_system_prompt(db, exclude={"user.md"})
+        assert "# About the user" not in out
+        assert "# Environment" in out  # only the excluded block dropped
+    finally:
+        await db.close()
+
+
+async def test_exclude_active_project_drops_project_and_context_files(client):
+    await client.put("/api/projects/demo/file",
+                     json={"path": "notes/spec.md", "content": "CTXFILE_MARKER"})
+    await client.put("/api/projects/demo/context", json={"files": ["notes/spec.md"]})
+    db = await get_db()
+    try:
+        base = await assemble_system_prompt(db)
+        assert "# Active project" in base and "CTXFILE_MARKER" in base
+        out = await assemble_system_prompt(db, exclude={"active-project"})
+        assert "# Active project" not in out
+        assert "CTXFILE_MARKER" not in out
+    finally:
+        await db.close()
+
+
+async def test_operator_rules_never_excludable(client):
+    notes = settings.memory_dir / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "operator-preferences.md").write_text(
+        "- Never use semicolons in prose\n")
+    db = await get_db()
+    try:
+        out = await assemble_system_prompt(db, exclude={"operator-rules"})
+        assert "# Operator rules" in out  # the tail survives even if listed
+    finally:
+        await db.close()
+
+
+async def test_empty_exclude_is_noop(client):
+    db = await get_db()
+    try:
+        assert (await assemble_system_prompt(db)
+                == await assemble_system_prompt(db, exclude=set()))
+    finally:
+        await db.close()

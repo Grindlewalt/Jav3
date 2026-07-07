@@ -14,8 +14,9 @@ from .fsutil import safe_join
 
 STAGING = ".staging"
 
-# project.md is journal territory (journal_update), and staging metadata is ours.
-PROTECTED = {STAGING}
+# project.md is journal territory (journal_update), staging metadata is ours,
+# and .git belongs to the git gate (host commits only, after approval).
+PROTECTED = {STAGING, ".git"}
 
 
 def _staging_dir(slug: str) -> Path:
@@ -24,11 +25,12 @@ def _staging_dir(slug: str) -> Path:
 
 def stage_write(slug: str, rel: str, content: bytes) -> Path:
     """Stage new content for <rel>. The canonical file is untouched."""
-    if rel.split("/")[0] in PROTECTED:
-        raise ValueError(f"cannot write into {rel.split('/')[0]}")
     base = _staging_dir(slug)
     base.mkdir(parents=True, exist_ok=True)
     dest = safe_join(base, rel)
+    top = dest.relative_to(base.resolve()).parts[0]  # normalized: '../' resolved
+    if top in PROTECTED:
+        raise ValueError(f"cannot write into {top}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
     dest.chmod(0o644)  # staged bytes never carry exec bits

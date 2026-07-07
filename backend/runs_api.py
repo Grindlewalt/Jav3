@@ -24,6 +24,40 @@ from .staging import effective_read
 
 router = APIRouter(prefix="/api/runs", tags=["runs"], dependencies=[Depends(require_user)])
 
+# Background work of every flavour in one list (the Jobs tab): agent runs,
+# scheduled runs, and research heads. Separate router because the runs router
+# is prefixed /api/runs and this is /api/jobs.
+jobs_router = APIRouter(prefix="/api", tags=["jobs"], dependencies=[Depends(require_user)])
+
+JOB_KINDS = ("agent", "scheduled", "head")
+
+
+@jobs_router.get("/jobs")
+async def list_jobs(kind: str | None = None):
+    if kind is not None and kind not in JOB_KINDS:
+        raise HTTPException(status_code=400,
+                            detail=f"kind must be one of {', '.join(JOB_KINDS)}")
+    # done: research heads set a rollup when finished; agent/scheduled runs
+    # never set one — their completion mark is the final assistant message.
+    q = ("SELECT c.id, c.kind, c.summary, c.started_at, c.job_id, "
+         "p.slug AS project, "
+         "(c.rollup IS NOT NULL OR EXISTS (SELECT 1 FROM messages m "
+         "  WHERE m.conversation_id = c.id AND m.role = 'assistant')) AS done "
+         "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id "
+         "WHERE c.kind IN ('agent', 'scheduled', 'head') ")
+    params: tuple = ()
+    if kind:
+        q += "AND c.kind = ? "
+        params = (kind,)
+    q += "ORDER BY c.started_at DESC, c.id DESC LIMIT 100"
+    db = await get_db()
+    try:
+        async with db.execute(q, params) as cur:
+            rows = await cur.fetchall()
+    finally:
+        await db.close()
+    return {"jobs": [{**dict(r), "done": bool(r["done"])} for r in rows]}
+
 
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"

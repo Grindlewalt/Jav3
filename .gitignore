@@ -12,3 +12,6 @@ projects/*
 !projects/.gitkeep
 agents/*
 !agents/.gitkeep
+
+# personal ops notes, not shared
+CLAUDE.md

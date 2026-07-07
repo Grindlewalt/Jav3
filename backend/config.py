@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     max_op_input_tokens: int = 5_000_000
     max_op_output_tokens: int = 1_000_000
 
+    # Auto-approve the FINAL research document (research/<topic>.md) so it goes
+    # straight to canonical instead of waiting in the approval queue. Node
+    # scratch files under runs/ stay staged regardless.
+    research_auto_approve: bool = True
+
+    # Archive upload caps (POST /upload_archive extraction)
+    upload_max_uncompressed_mb: int = 200
+    upload_max_files: int = 5000
+
     # Workspace runner (light host-side sandbox; the QEMU VM is pass 2)
     run_python: str = "python3"
     run_timeout_seconds: int = 60
@@ -77,8 +86,9 @@ class Settings(BaseSettings):
     # Sandbox VM (M3). Persistent: boots once and stays up; nuke is a
     # recovery action (recreate the overlay), not a per-run ritual.
     vm_dir: Path = BASE_DIR / "data" / "vm"
-    vm_ssh_host: str = "127.0.0.1"
-    vm_ssh_port: int = 2222
+    # M4 moved the VM onto a tap network — direct address, plain SSH port.
+    vm_ssh_host: str = "10.66.0.10"
+    vm_ssh_port: int = 22
     vm_ssh_user: str = "agent"
     vm_unit: str = "jarvis-vm.service"
     vm_workspace: str = "/workspace"

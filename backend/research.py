@@ -20,7 +20,7 @@ import uuid
 from datetime import date
 from urllib.parse import urlparse
 
-from . import bus, webtools
+from . import bus, staging, webtools
 from .agent import budget as budget_mod
 from .agent.loop import _enforce_rules
 from .agent.model import confirm_peak, model
@@ -54,6 +54,18 @@ def _dom(u: str) -> str:
         return urlparse(u).netloc.replace("www.", "") or u
     except Exception:
         return u
+
+
+def _write_doc(project: str, doc_path: str, doc: str) -> str:
+    """Write the FINAL research document: stage it, and when the operator has
+    auto-approve on (the default) promote it straight to canonical. Node
+    scratch files under runs/ stay staged either way — only the synthesized
+    doc is trusted enough to skip the queue. Returns 'canonical'|'staged'."""
+    stage_write(project, doc_path, doc.encode())
+    if settings.research_auto_approve:
+        staging.approve(project, [doc_path])
+        return "canonical"
+    return "staged"
 
 
 async def _node(project, parent, job_id, kind, title) -> int:
@@ -240,13 +252,14 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
             doc = (f"# Research: {topic}\n\nThe search backend returned no usable "
                    "sources for this topic (it may have been momentarily "
                    "unavailable). Please try again.")
-            stage_write(project, doc_path, doc.encode())
+            doc_status = _write_doc(project, doc_path, doc)
             note = "no sources retrieved — search returned nothing"
             await _save_rollup(head, note)
             bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
                                  "doc_path": doc_path, "rollup": note, "usage": b.summary()})
             bus.close_job(job_id)
-            return {"topic": topic, "job_id": job_id, "root_id": head, "doc_path": doc_path}
+            return {"topic": topic, "job_id": job_id, "root_id": head,
+                    "doc_path": doc_path, "doc_status": doc_status}
 
         # phase 2: readers in parallel (session = job_id so reads are fresh per run)
         findings = await asyncio.gather(
@@ -254,7 +267,7 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
 
         # phase 3: synthesize
         doc = await _synthesize(topic, [f for f in findings if f])
-        stage_write(project, doc_path, doc.encode())
+        doc_status = _write_doc(project, doc_path, doc)
         head_rollup = f"Researched '{topic}' via {len(groups)} reader groups. {b.summary()}"
         await _save_rollup(head, head_rollup)
         stage_write(project, f"runs/{job_id}/{head}-head.md", head_rollup.encode())
@@ -263,7 +276,8 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
                              "doc_path": doc_path, "rollup": head_rollup,
                              "usage": b.summary()})
         bus.close_job(job_id)
-        return {"topic": topic, "job_id": job_id, "root_id": head, "doc_path": doc_path}
+        return {"topic": topic, "job_id": job_id, "root_id": head,
+                "doc_path": doc_path, "doc_status": doc_status}
     finally:
         if tok is not None:
             budget_mod.active_budget.reset(tok)

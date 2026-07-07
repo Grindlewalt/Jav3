@@ -53,15 +53,12 @@ _USE_DB = object()
 
 async def _agent_system_prompt(db, agent: dict, active=_USE_DB) -> str:
     """The agent's prompt, then the shared project context minus excluded
-    sections. Exclusions match on the '# Loaded project file:' / heading text."""
-    base = (await assemble_system_prompt(db) if active is _USE_DB
-            else await assemble_system_prompt(db, active=active))
-    excluded = set(agent.get("context_exclude") or [])
-    if excluded:
-        blocks = base.split("\n\n---\n\n")
-        kept = [b for b in blocks
-                if not any(x and x in b.split("\n", 1)[0] for x in excluded)]
-        base = "\n\n---\n\n".join(kept)
+    sections. The agent's context_exclude tokens (soul.md, user.md, env.md,
+    all-projects.md, active-project, ...) are assemble_system_prompt's block
+    labels, so exclusion happens at assembly instead of post-hoc splitting."""
+    exclude = set(agent.get("context_exclude") or [])
+    base = (await assemble_system_prompt(db, exclude=exclude) if active is _USE_DB
+            else await assemble_system_prompt(db, active=active, exclude=exclude))
     return f"{agent['prompt']}\n\n---\n\n{base}"
 
 
@@ -79,7 +76,7 @@ async def _open_agent_run(db, slug: str, task: str, active=_USE_DB) -> tuple[dic
         project_id = row["id"] if row else None
     title = f"[{agent['name']}] " + " ".join(task.split())[:40]
     cur = await db.execute(
-        "INSERT INTO conversations (project_id, summary) VALUES (?, ?)",
+        "INSERT INTO conversations (project_id, summary, kind) VALUES (?, ?, 'agent')",
         (project_id, title))
     conversation_id = cur.lastrowid
     await db.execute(
@@ -131,7 +128,7 @@ async def run_agent(slug: str, body: RunAgent):
             project_id = row["id"] if row else None
         title = f"[{agent['name']}] " + " ".join(body.task.split())[:40]
         cur = await db.execute(
-            "INSERT INTO conversations (project_id, summary) VALUES (?, ?)",
+            "INSERT INTO conversations (project_id, summary, kind) VALUES (?, ?, 'agent')",
             (project_id, title))
         conversation_id = cur.lastrowid
         await db.commit()

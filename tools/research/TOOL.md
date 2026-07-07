@@ -16,5 +16,6 @@ parameters:
 ---
 This runs several subagents and many web fetches, so it takes a while and is
 worth it for real research, not quick lookups (use web_search for those). The
-finished document is STAGED for the operator to approve. Read it with read_file
-if you need the details; otherwise just tell the operator it's ready to review.
+finished document is written to research/ in the project (auto-approved by
+default; otherwise staged for the operator). Read it with read_file if you need
+the details; otherwise just tell the operator it's ready.
