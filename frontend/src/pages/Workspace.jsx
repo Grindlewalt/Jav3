@@ -536,7 +536,22 @@ function EditorPanel({ slug, state, setState }) {
 function RendererPanel({ slug, state, setState, onToggleExpand }) {
   const [files, setFiles] = useState([])
   const [html, setHtml] = useState('')
+  const [scanning, setScanning] = useState(false)
   const path = state.path || ''
+  const isHtml = /\.html?$/i.test(path)
+
+  async function scanBeacons() {
+    setScanning(true)
+    try {
+      const r = await api('/api/sandbox/render', {
+        method: 'POST', body: JSON.stringify({ project: slug, path }) })
+      window.alert(r.verdict === 'crit'
+        ? '⚠ This artifact tried to beacon out — open the Sandbox tab to review before trusting it'
+        : '✓ Scan clean — no external beacons. See the Sandbox tab for details.')
+    } catch (err) {
+      window.alert(`Scan failed: ${err.detail || err.message || err}`)
+    } finally { setScanning(false) }
+  }
 
   const refresh = useCallback(() =>
     api(`/api/projects/${slug}/files`).then((r) =>
@@ -560,6 +575,11 @@ function RendererPanel({ slug, state, setState, onToggleExpand }) {
           {files.map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
         <button className="ghost" onClick={refresh} title="refresh">↻</button>
+        {isHtml && (
+          <button className="ghost" onClick={scanBeacons} disabled={scanning}
+                  title="render in the sandbox VM and report any network beacons (~90s)">
+            {scanning ? 'Scanning…' : '🛡 Scan for beacons'}</button>
+        )}
         {url && <a className="ghost-link" href={url} target="_blank" rel="noreferrer">raw</a>}
       </div>
       <div className="render-area" onDoubleClick={onToggleExpand}>

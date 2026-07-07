@@ -101,6 +101,29 @@ function EgressRow({ row, busy, onDecide }) {
   )
 }
 
+function BeaconRow({ b }) {
+  return (
+    <div className={`sbx-row sev-${b.sev || 'ok'}`}>
+      <div className="grow" style={{ minWidth: 0 }}>
+        <div className="ellipsis">
+          <span className="dim small">{b.method}</span>{' '}
+          <span className="mono">{b.url}</span>
+        </div>
+        <div className="sbx-sub">
+          {b.api && <span className="tag">{b.api}</span>}
+          {b.host && <span className="sbx-rule-chip">{b.host}</span>}
+          {b.bytes && <span className="dim small">{b.bytes}</span>}
+        </div>
+      </div>
+      <div className="sbx-right">
+        {b.external
+          ? <span className="sbx-pill crit">external · blocked</span>
+          : <span className="sbx-pill ok">local</span>}
+      </div>
+    </div>
+  )
+}
+
 export default function Sandbox() {
   const [sessions, setSessions] = useState([])
   const [filter, setFilter] = useState('all')
@@ -199,6 +222,7 @@ export default function Sandbox() {
 
   const shown = filter === 'undecided' ? sessions.filter((s) => !s.decided) : sessions
   const facts = detail?.facts || {}
+  const beacons = detail?.beacons || []
   const wan = (detail?.egress || []).filter((r) => r.scope === 'wan')
   const lan = (detail?.egress || []).filter((r) => r.scope === 'lan')
 
@@ -220,6 +244,8 @@ export default function Sandbox() {
                 onClick={() => openSession(s.id)}>
               <div className="sbx-session-top">
                 <span className="grow ellipsis mono" title={s.command}>{s.command}</span>
+                {(s.counts?.beacons_external ?? 0) > 0 &&
+                  <span title="external beacon attempt">🛡</span>}
                 <span className={`sbx-pill ${s.verdict}`}>{s.verdict}</span>
               </div>
               {s.headline && <div className="sbx-headline ellipsis">{s.headline}</div>}
@@ -260,12 +286,35 @@ export default function Sandbox() {
                 <Tile label="Delivered" value={fmtBytes(facts.delivered_bytes)} />
                 <Tile label="Sensitive reads" value={facts.sensitive ?? 0}
                       bad={(facts.sensitive ?? 0) > 0} />
+                <Tile label="Beacons" value={facts.beacons ?? 0}
+                      bad={(facts.beacons_external ?? 0) > 0} />
                 <Tile label="Processes" value={facts.execs ?? 0} />
               </div>
               <div className="dim small sbx-prov">
                 Signals: nftables · dnsmasq · auditd · tcpdump · staging — computed by rules, no model
               </div>
             </div>
+
+            {(detail.artifact || beacons.length > 0) && (
+              <Section title="Artifact it wants you to open"
+                       note="Rendered in the sandbox · jsdom + tap · nothing reached your browser">
+                {detail.artifact && (
+                  <div className="sbx-row sev-ok">
+                    <span className="mono grow ellipsis" title={detail.artifact}>
+                      {detail.artifact}</span>
+                  </div>
+                )}
+                {beacons.length === 0 ? (
+                  <div className="sbx-row sev-ok">
+                    <span className="grow" style={{ color: 'var(--green)' }}>
+                      No network calls — safe to open.</span>
+                    <span className="sbx-pill ok">clean</span>
+                  </div>
+                ) : (
+                  beacons.map((b, i) => <BeaconRow key={i} b={b} />)
+                )}
+              </Section>
+            )}
 
             {wan.length > 0 && (
               <Section title="Internet egress" note="deny-by-default · blocked rows never carried a payload">
