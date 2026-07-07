@@ -1,0 +1,57 @@
+#!/usr/sbin/nft -f
+# Jarvis VM egress lockdown. Deny-by-default for everything originating from
+# the guest tap (jvtap0): the guest may talk DHCP/DNS to the host and nothing
+# else unless a destination is added to @allowed_tcp / @allowed_udp.
+# Blocked packets are logged with prefix "jvm-egress-drop " (kernel log) so the
+# gate report can show attempted connections.
+#
+# Loaded by vm-net.sh (idempotent: table is replaced wholesale).
+
+table inet jarvis_vm
+delete table inet jarvis_vm
+
+table inet jarvis_vm {
+    # Approved egress destinations, e.g. add with:
+    #   nft add element inet jarvis_vm allowed_tcp { 140.82.121.4 . 443 }
+    set allowed_tcp {
+        type ipv4_addr . inet_service
+    }
+    set allowed_udp {
+        type ipv4_addr . inet_service
+    }
+
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname "jvtap0" jump guest_input
+    }
+
+    # Guest -> host: only DHCP, DNS, ping. The host is not the guest's toy.
+    chain guest_input {
+        ct state established,related accept
+        udp dport { 53, 67 } accept
+        tcp dport 53 accept
+        icmp type echo-request accept
+        limit rate 10/second counter log prefix "jvm-host-drop " drop
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+        iifname "jvtap0" jump guest_forward
+        oifname "jvtap0" ct state established,related accept
+    }
+
+    # Guest -> world: allowlist only.
+    chain guest_forward {
+        ct state established,related accept
+        ip daddr . tcp dport @allowed_tcp accept
+        ip daddr . udp dport @allowed_udp accept
+        limit rate 20/second counter log prefix "jvm-egress-drop " drop
+        counter drop
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        ip saddr 10.66.0.0/24 oifname != "jvtap0" masquerade
+    }
+}

@@ -72,13 +72,32 @@ packages:
   - curl
   - jq
   - unzip
+  - auditd
 write_files:
   - path: /etc/motd
     content: |
       Jarvis sandbox VM. Nothing here is durable — assume this disk can be
       recreated from the golden image at any moment.
+  - path: /etc/audit/rules.d/jarvis-exec.rules
+    content: |
+      ## Log every exec (M4 monitored execution). Streamed to the host via
+      ## audit-stream.service; the guest deleting its copy changes nothing.
+      -a always,exit -F arch=b64 -S execve,execveat -k jexec
+  - path: /etc/systemd/system/audit-stream.service
+    content: |
+      [Unit]
+      Description=Stream audit log to host (virtio console -> audit-stream.log)
+      After=auditd.service
+      Requires=auditd.service
+      [Service]
+      ExecStart=/bin/sh -c 'exec tail -n +1 -F /var/log/audit/audit.log > /dev/hvc0'
+      Restart=always
+      RestartSec=2
+      [Install]
+      WantedBy=multi-user.target
 runcmd:
   - mkdir -p /workspace && chown agent:agent /workspace
+  - systemctl enable audit-stream.service
   - touch /etc/jarvis-provisioned
 power_state:
   mode: poweroff
@@ -113,8 +132,11 @@ echo "== finalizing =="
 mv base-work.qcow2 base.qcow2
 chmod 444 base.qcow2
 cp "$AAVMF_VARS" efi_vars.fd
-# Pin the baked host key for the forwarded SSH port.
-echo "[127.0.0.1]:2222 $(cat vm_host_ed25519.pub)" > known_hosts
+# Pin the baked host key: tap address (primary) + legacy loopback forward.
+{
+  echo "10.66.0.10 $(cat vm_host_ed25519.pub)"
+  echo "[127.0.0.1]:2222 $(cat vm_host_ed25519.pub)"
+} > known_hosts
 rm -f seed.iso user-data meta-data vm_host_ed25519 efi_vars_build.fd
 chmod 600 agent_ed25519
 

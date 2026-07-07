@@ -8,10 +8,13 @@ anywhere else on the host.
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import gate
 from .agent.tools import vm
 from .auth import require_user
 from .config import settings
+from .db import get_db
 from .fsutil import safe_join
+from .staging import effective_read
 
 router = APIRouter(prefix="/api/vm", tags=["vm"], dependencies=[Depends(require_user)])
 
@@ -100,6 +103,66 @@ async def push(body: PushBody):
         return await vm.push(src, body.project)
     except vm.VMError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+class GateRunBody(BaseModel):
+    project: str
+    command: str
+    timeout: float | None = None
+    fresh: bool = True
+
+
+@router.post("/gate/run")
+async def gate_run(body: GateRunBody):
+    """M4 monitored execution: fresh VM, full capture, staged gate report."""
+    _project_dir(body.project)
+    if not body.command.strip():
+        raise HTTPException(status_code=400, detail="empty command")
+    try:
+        return await gate.run_gated(body.project, body.command,
+                                    timeout=body.timeout, fresh=body.fresh)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except vm.VMError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/gate/runs")
+async def gate_runs(project: str | None = None):
+    db = await get_db()
+    try:
+        q = ("SELECT r.id, p.slug, r.status, r.exec_log_path, r.net_log_path, "
+             "r.pushed, r.created_at FROM runs r JOIN projects p ON p.id = r.project_id")
+        args: tuple = ()
+        if project:
+            q += " WHERE p.slug = ?"
+            args = (project,)
+        q += " ORDER BY r.id DESC LIMIT 50"
+        cur = await db.execute(q, args)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+@router.get("/gate/runs/{run_id}/report")
+async def gate_report(run_id: int):
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT p.slug FROM runs r JOIN projects p ON p.id = r.project_id "
+            "WHERE r.id = ?", (run_id,))
+        row = await cur.fetchone()
+    finally:
+        await db.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="no such run")
+    slug = row["slug"]
+    p = effective_read(slug, f"runs/gate-{run_id}/report.md")
+    if p is None:
+        raise HTTPException(status_code=404, detail="no report for this run")
+    return {"run_id": run_id, "project": slug, "report": p.read_text(),
+            "staged": ".staging" in str(p)}
 
 
 @router.post("/pull")

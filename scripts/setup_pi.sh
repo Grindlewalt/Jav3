@@ -9,7 +9,8 @@ cd "$REPO_DIR"
 echo "== apt deps =="
 sudo apt-get update -qq
 sudo apt-get install -y -qq python3-venv nodejs npm \
-  qemu-system-arm qemu-utils qemu-efi-aarch64 cloud-image-utils
+  qemu-system-arm qemu-utils qemu-efi-aarch64 cloud-image-utils \
+  nftables tcpdump dnsmasq-base
 
 echo "== python venv =="
 [ -d .venv ] || python3 -m venv .venv
@@ -37,6 +38,14 @@ systemctl --user enable jarvis.service
 systemctl --user enable jarvis-vm.service 2>/dev/null || true
 systemctl --user enable --now jarvis-backup.timer 2>/dev/null || true
 loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER"
+
+echo "== systemd system units (VM tap network + logged DNS, need root) =="
+chmod +x vm/net/vm-net.sh
+for u in jarvis-vm-net jarvis-vm-dns; do
+  sed "s|@HOME@|$HOME|g; s|@USER@|$USER|g" "scripts/$u.service" | sudo tee "/etc/systemd/system/$u.service" >/dev/null
+done
+sudo systemctl daemon-reload
+sudo systemctl enable --now jarvis-vm-net.service jarvis-vm-dns.service
 
 echo "== done =="
 echo "create the login user:   .venv/bin/python -m backend.cli create-user <name>"
