@@ -77,13 +77,13 @@ def sse_chat(message):
 
 
 def main():
+    global BASE
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default=BASE)
     ap.add_argument("--user", default="operator")
     ap.add_argument("--password", required=True)
     ap.add_argument("--vm", action="store_true", help="require the gated VM run")
     args = ap.parse_args()
-    global BASE
     BASE = args.base.rstrip("/")
 
     print("== auth ==")
