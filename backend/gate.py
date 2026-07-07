@@ -295,9 +295,21 @@ async def _journal_drops(since: str) -> list[str]:
     return parse_drop_slice(await _drop_text(since))
 
 
+def parse_render_attempts(stdout: str) -> list[dict]:
+    """Pull the beacon-catcher harness's attempt log out of the run stdout."""
+    for line in stdout.splitlines():
+        if line.startswith("JARVIS_RENDER "):
+            try:
+                return json.loads(line[len("JARVIS_RENDER "):]).get("attempts", [])
+            except ValueError:
+                return []
+    return []
+
+
 def _build_evidence(run_id: int, slug: str, command: str, result: dict,
                     locked: bool, fresh: bool, dns_text: str, execs: list[str],
-                    since_drops: list[dict], pcap_text: str) -> dict:
+                    since_drops: list[dict], pcap_text: str,
+                    render: dict | None = None) -> dict:
     """Raw capture assembled into one record. No verdict, no severity — that is
     sandbox.classify()'s job against the live allowlist."""
     ip2host = parse_dns_replies(dns_text)
@@ -332,14 +344,21 @@ def _build_evidence(run_id: int, slug: str, command: str, result: dict,
         "egress_locked": locked, "fresh": fresh,
         "flows": flows, "blocked": blocked, "dns": parse_dns_typed(dns_text),
         "execs": execs, "sensitive": [], "staged": result.get("staged", []),
+        "render": render,
     }
 
 
 # ---- the gate flow ----------------------------------------------------------
 
 async def run_gated(slug: str, command: str, timeout: float | None = None,
-                    fresh: bool = True) -> dict:
-    """Full monitored run. Returns report summary + run id."""
+                    fresh: bool = True, input: str | None = None,
+                    render_of: str | None = None) -> dict:
+    """Full monitored run. Returns report summary + run id.
+
+    `input` is fed to the command's stdin (used to stream the render harness).
+    `render_of` marks this as a beacon-catcher render of that artifact path;
+    the command's stdout is parsed for the harness's attempt log and folded
+    into the evidence."""
     project = settings.projects_dir / slug
     if not (project / "project.md").exists():
         raise LookupError(f"no such project: {slug}")
@@ -373,7 +392,8 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
 
     status, error = "done", None
     try:
-        result = await vmexec.run_in_project(slug, command, timeout=timeout)
+        result = await vmexec.run_in_project(slug, command, timeout=timeout,
+                                             input=input)
     except Exception as e:
         status, error = "error", str(e)
         result = {"exit_status": -1, "stdout": "", "stderr": str(e), "staged": []}
@@ -392,11 +412,16 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     exec_log_path = cap_dir / f"gate-{run_id}-exec.log"
     exec_log_path.write_text("\n".join(execs) + ("\n" if execs else ""))
 
+    render = None
+    if render_of is not None:
+        render = {"artifact": render_of,
+                  "attempts": parse_render_attempts(result.get("stdout", ""))}
+
     # structured evidence for the review console (raw capture, no verdict yet)
     evidence = _build_evidence(
         run_id, slug, command, result, locked, fresh,
         dns_text, execs, since_drops=parse_drops_counted(await _drop_text(since)),
-        pcap_text=await _pcap_dump(pcap_path))
+        pcap_text=await _pcap_dump(pcap_path), render=render)
     evidence_path = cap_dir / f"gate-{run_id}-evidence.json"
     evidence_path.write_text(json.dumps(evidence, indent=1))
 

@@ -73,6 +73,8 @@ packages:
   - jq
   - unzip
   - auditd
+  - nodejs
+  - npm
 write_files:
   - path: /etc/motd
     content: |
@@ -98,6 +100,9 @@ write_files:
 runcmd:
   - mkdir -p /workspace && chown agent:agent /workspace
   - systemctl enable audit-stream.service
+  # jsdom for the beacon-catcher: renders agent-built HTML in the sandbox so
+  # its network calls hit the tap. Installed at provision time (net available).
+  - mkdir -p /opt/jarvis && cd /opt/jarvis && npm install --no-audit --no-fund jsdom
   - touch /etc/jarvis-provisioned
 power_state:
   mode: poweroff

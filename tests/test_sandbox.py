@@ -97,6 +97,31 @@ def test_dns_new_flag_from_allowlist():
     assert by["pypi.org"] is False and by["sketchy.net"] is True
 
 
+def test_classify_beacon_external_is_critical():
+    ev = _ev(render={"artifact": "dashboards/q3.html", "attempts": [
+        {"api": "fetch", "method": "POST", "url": "https://evil.example.com/x", "bytes": 2300},
+        {"api": "xhr", "method": "GET", "url": "https://192.168.1.9/local", "bytes": 0},
+    ]})
+    c = sandbox.classify(ev, {})
+    assert c["artifact"] == "dashboards/q3.html"
+    beac = {b["host"]: b for b in c["beacons"]}
+    assert beac["evil.example.com"]["external"] and beac["evil.example.com"]["sev"] == "crit"
+    assert not beac["192.168.1.9"]["external"]         # LAN, not external
+    assert c["verdict"] == "crit" and c["rule"] == "dashboard-beacon"
+    assert "beaconed to 1 external host" in c["headline"]
+    assert c["facts"]["beacons"] == 2 and c["facts"]["beacons_external"] == 1
+
+
+def test_parse_render_attempts():
+    from backend.gate import parse_render_attempts
+    out = ('some log line\n'
+           'JARVIS_RENDER {"attempts":[{"api":"fetch","method":"GET",'
+           '"url":"https://x.com","bytes":0}]}\n')
+    a = parse_render_attempts(out)
+    assert len(a) == 1 and a[0]["url"] == "https://x.com"
+    assert parse_render_attempts("nothing here") == []
+
+
 def test_is_lan():
     assert sandbox.is_lan("192.168.1.5") and sandbox.is_lan("10.0.0.1")
     assert not sandbox.is_lan("8.8.8.8")

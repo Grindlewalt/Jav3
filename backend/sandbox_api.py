@@ -13,7 +13,9 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import render as render_flow
 from . import sandbox, staging
+from .agent.tools import vm
 from .auth import require_user
 from .config import settings
 from .db import get_db
@@ -147,6 +149,26 @@ async def quarantine_session(run_id: int):
         staging.reject(ev["project"], paths)
     await _set_run_status(run_id, "quarantined", 0)
     return {"ok": True}
+
+
+class RenderBody(BaseModel):
+    project: str
+    path: str                # relative .html path in the project
+
+
+@router.post("/render")
+async def render_artifact(body: RenderBody):
+    """Beacon-catcher: render an agent-built HTML file in the sandbox VM and
+    return the resulting review session (its network attempts are captured)."""
+    d = settings.projects_dir / body.project
+    if not (d / "project.md").exists():
+        raise HTTPException(status_code=404, detail="no such project")
+    try:
+        return await render_flow.render_gated(body.project, body.path)
+    except (LookupError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except vm.VMError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/rules")

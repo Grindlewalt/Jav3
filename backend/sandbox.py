@@ -272,12 +272,32 @@ def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
            for d in evidence.get("dns", [])]
     staged = [{"path": p} for p in evidence.get("staged", [])]
 
+    # beacon-catcher: a rendered artifact's network attempts (payload visible)
+    beacons, artifact = [], None
+    render = evidence.get("render")
+    if render:
+        artifact = render.get("artifact")
+        for a in render.get("attempts", []):
+            host = _url_host(a.get("url", ""))
+            external = bool(host) and not is_lan_host(host) and host not in allow_hosts
+            beacons.append({
+                "api": a.get("api", ""), "method": a.get("method", ""),
+                "url": a.get("url", ""), "host": host or "",
+                "bytes": _human(a.get("bytes", 0)) if a.get("bytes") else "",
+                "external": external, "sev": "crit" if external else "ok",
+            })
+    beacon_ext = sum(1 for b in beacons if b["external"])
+
     egress_new = sum(1 for e in egress if not e["learned"])
     lan_hosts = sum(1 for e in egress if e["scope"] == "lan")
 
     # deterministic verdict = worst signal present
-    if sensitive and any(s["sev"] == "crit" for s in sensitive) or exec_crit:
-        verdict, rule = "crit", ("sensitive-path-read" if sensitive else "exec-reaches-untrusted-host")
+    crit_sens = any(s["sev"] == "crit" for s in sensitive)
+    if beacon_ext:
+        verdict, rule = "crit", "dashboard-beacon"
+    elif crit_sens or exec_crit:
+        verdict, rule = "crit", ("sensitive-path-read" if crit_sens
+                                 else "exec-reaches-untrusted-host")
     elif egress_new:
         verdict, rule = "warn", "new-destination-blocked"
     else:
@@ -287,13 +307,19 @@ def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
         "dns": len(dns), "egress_dests": len(egress), "egress_new": egress_new,
         "blocked_attempts": blocked_attempts, "delivered_bytes": _human(delivered_bytes),
         "sensitive": len(sensitive), "execs": len(execs), "staged": len(staged),
-        "lan_hosts": lan_hosts,
+        "lan_hosts": lan_hosts, "beacons": len(beacons), "beacons_external": beacon_ext,
     }
     return {
         "verdict": verdict, "rule": rule, "headline": _headline(facts, verdict),
         "facts": facts, "egress": egress, "dns": dns,
         "sensitive": sensitive, "execs": execs, "staged": staged,
+        "beacons": beacons, "artifact": artifact,
     }
+
+
+def _url_host(url: str) -> str:
+    m = re.match(r"^(?:https?:)?//([^/:?#]+)", url.strip(), re.I)
+    return m.group(1).lower() if m else ""
 
 
 def is_lan_host(host: str) -> bool:
@@ -306,6 +332,9 @@ def is_lan_host(host: str) -> bool:
 
 def _headline(f: dict, verdict: str) -> str:
     p = []
+    if f.get("beacons_external"):
+        n = f["beacons_external"]
+        p.append(f"artifact beaconed to {n} external host{'s' if n > 1 else ''}")
     if f["egress_new"]:
         p.append(f"{f['egress_new']} new destination{'s' if f['egress_new'] > 1 else ''} blocked")
     if f["sensitive"]:
