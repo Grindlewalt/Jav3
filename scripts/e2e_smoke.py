@@ -76,6 +76,14 @@ def sse_chat(message):
     return final, events
 
 
+async def _make_request(slug):
+    """Create a commit request exactly as the git_commit_request tool does."""
+    from backend import gitgate
+    await gitgate.ensure_repo(slug)
+    row = await gitgate.create_request(slug, "e2e commit", None)
+    return row.get("id") if isinstance(row, dict) else row
+
+
 def main():
     global BASE
     ap = argparse.ArgumentParser()
@@ -130,20 +138,21 @@ def main():
     check("git status returned", "status" in gs)
     _req("PUT", f"/api/projects/{slug}/file",
          {"path": "code/hello.py", "content": f"print('e2e {int(time.time())}')\n"})
+    # Request creation is agent-only (the git_commit_request tool); drive it via
+    # the same function the tool calls, then approve over the operator HTTP API.
     try:
-        cr = json.load(_req("POST", f"/api/projects/{slug}/git/requests",
-                            {"message": "e2e commit"}))
-        rid = cr.get("id")
-        if check("commit request created", rid is not None, str(cr)[:100]):
+        import asyncio
+        rid = asyncio.run(_make_request(slug))
+        if check("commit request created (tool path)", rid is not None, str(rid)):
             ap_ = json.load(_req("POST",
                   f"/api/projects/{slug}/git/requests/{rid}/approve"))
             check("commit approved -> sha", bool(ap_.get("commit_sha")), str(ap_)[:100])
             after = json.load(_req("GET", f"/api/projects/{slug}/git/status"))
-            check("tree clean after commit", "clean" in after["status"].lower()
-                  or "nothing to commit" in after["status"].lower(),
-                  after["status"][:80])
-    except urllib.error.HTTPError as e:
-        check("git commit flow", False, f"HTTP {e.code}: {e.read()[:120]}")
+            s = after["status"].lower()
+            check("tree clean after commit",
+                  "clean" in s or "nothing to commit" in s, after["status"][:80])
+    except Exception as e:  # noqa: BLE001 - smoke test, surface anything
+        check("git commit flow", False, repr(e)[:160])
 
     print("== jobs view ==")
     try:
