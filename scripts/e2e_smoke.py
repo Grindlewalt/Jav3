@@ -100,7 +100,7 @@ def main():
         if e.code != 409:
             raise
     _req("POST", f"/api/projects/{slug}/load")
-    projects = json.load(_req("GET", "/api/projects"))
+    projects = json.load(_req("GET", "/api/projects")).get("projects", [])
     check("project exists", any(p["slug"] == slug for p in projects))
 
     print("== chat (SSE messaging, real model turn) ==")
@@ -111,12 +111,12 @@ def main():
     print(f"        ({events} events, {time.time()-t0:.1f}s, reply={text.strip()[:40]!r})")
 
     print("== conversations list ==")
-    convs = json.load(_req("GET", f"/api/conversations?project={slug}"))
-    check("chat conversation listed", isinstance(convs, list) and len(convs) >= 1)
+    convs = json.load(_req("GET", f"/api/conversations?project={slug}")).get("conversations", [])
+    check("chat conversation listed", len(convs) >= 1)
 
     print("== memory ==")
-    mem = json.load(_req("GET", "/api/memory"))
-    check("memory files present", isinstance(mem, list) and len(mem) > 0)
+    mem = json.load(_req("GET", "/api/memory")).get("files", [])
+    check("memory files present", len(mem) > 0)
 
     print("== tool registry ==")
     tools = json.load(_req("GET", "/api/tools")).get("tools", [])
