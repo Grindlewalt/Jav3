@@ -1,6 +1,7 @@
 """The single model choke point: every LLM call goes through Model.complete,
 and the peak-cost gate lives in front of it. The router drops in here later."""
 import json
+import re
 import time
 from datetime import datetime, time as dtime
 from typing import AsyncIterator
@@ -9,6 +10,37 @@ import httpx
 
 from ..config import settings
 from . import budget as budget_mod
+
+
+# deepseek-v4-flash sometimes emits tool calls in its native markup as plain
+# TEXT instead of the structured tool_calls field, so the serving layer doesn't
+# parse them and they arrive as garbage content (the tool never runs). Recover
+# them: parse the markup back into tool_calls. The '｜' below is U+FF5C.
+_DSML_MARK = "DSML"
+_DSML_INVOKE = re.compile(
+    r'<｜｜DSML｜｜invoke name="([^"]+)">(.*?)</｜｜DSML｜｜invoke>', re.S)
+_DSML_PARAM = re.compile(
+    r'<｜｜DSML｜｜parameter name="([^"]+)"[^>]*>(.*?)</｜｜DSML｜｜parameter>', re.S)
+
+
+def _coerce(v: str):
+    s = v.strip()
+    if re.fullmatch(r"-?\d+", s):
+        return int(s)
+    if s in ("true", "false"):
+        return s == "true"
+    return v
+
+
+def parse_dsml_tool_calls(content: str) -> list[dict]:
+    """Recover tool calls the model emitted as text markup instead of structured
+    fields. Returns [] if there are none."""
+    calls = []
+    for i, m in enumerate(_DSML_INVOKE.finditer(content)):
+        args = {p.group(1): _coerce(p.group(2)) for p in _DSML_PARAM.finditer(m.group(2))}
+        calls.append({"id": f"dsml_{i}", "type": "function",
+                      "function": {"name": m.group(1), "arguments": json.dumps(args)}})
+    return calls
 
 
 class PeakPricingConfirmationRequired(Exception):
@@ -112,6 +144,7 @@ class Model:
         content_parts: list[str] = []
         tool_calls: dict[int, dict] = {}
         usage: dict | None = None
+        dsml = False   # once the native tool-call markup starts, stop streaming it
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
             async with client.stream(
@@ -138,7 +171,10 @@ class Model:
                     delta = choices[0].get("delta", {})
                     if delta.get("content"):
                         content_parts.append(delta["content"])
-                        yield {"type": "token", "text": delta["content"]}
+                        if not dsml and _DSML_MARK in "".join(content_parts):
+                            dsml = True   # it's a tool call in disguise, not prose
+                        if not dsml:
+                            yield {"type": "token", "text": delta["content"]}
                     for tc in delta.get("tool_calls") or []:
                         idx = tc.get("index", 0)
                         slot = tool_calls.setdefault(
@@ -154,12 +190,15 @@ class Model:
 
         if budget is not None:
             budget.add(usage or {})
-        yield {
-            "type": "message",
-            "content": "".join(content_parts),
-            "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
-            "usage": usage,
-        }
+        content = "".join(content_parts)
+        tcs = [tool_calls[i] for i in sorted(tool_calls)]
+        # recover native-markup tool calls the serving layer failed to parse
+        if not tcs and _DSML_MARK in content:
+            recovered = parse_dsml_tool_calls(content)
+            if recovered:
+                tcs = recovered
+                content = ""   # the markup was the tool call, not a message
+        yield {"type": "message", "content": content, "tool_calls": tcs, "usage": usage}
 
 
 model = Model()

@@ -17,6 +17,8 @@ export default function Runs() {
   const [order, setOrder] = useState([])
   const [open, setOpen] = useState({})
   const [live, setLive] = useState(false)
+  const [doc, setDoc] = useState(null)
+  const [showDoc, setShowDoc] = useState(true)
   const esRef = useRef(null)
 
   const refresh = () => api('/api/runs').then((r) => setRuns(r.runs))
@@ -26,9 +28,14 @@ export default function Runs() {
     return () => { clearInterval(t); esRef.current?.close() }
   }, [])
 
+  function loadDoc(cid) {
+    api(`/api/runs/${cid}/doc`).then((r) => setDoc(r.content ? r : null)).catch(() => setDoc(null))
+  }
+
   function openRun(cid) {
     esRef.current?.close()
-    setSelected(cid); setNodes({}); setOrder([]); setOpen({}); setLive(true)
+    setSelected(cid); setNodes({}); setOrder([]); setOpen({}); setLive(true); setDoc(null)
+    loadDoc(cid)
     const es = new EventSource(`/api/runs/${cid}/stream`)
     esRef.current = es
     const up = (id, patch) => setNodes((n) => ({ ...n, [id]: { ...(n[id] || {}), ...patch } }))
@@ -44,7 +51,7 @@ export default function Runs() {
       if (ev.type === 'tool') up(ev.node_id, { tool: ev.name })
       if (ev.type === 'node_done') up(ev.node_id, { status: 'done', rollup: ev.rollup, tool: null })
       if (ev.type === 'error') up(ev.node_id, { status: 'error', tool: ev.message })
-      if (ev.type === 'job_final') { setLive(false); es.close(); refresh() }
+      if (ev.type === 'job_final') { setLive(false); es.close(); refresh(); loadDoc(cid) }
     }
     es.onerror = () => { setLive(false); es.close() }
   }
@@ -70,7 +77,17 @@ export default function Runs() {
           <div className="dim center-pad">pick a run to watch or walk its tree</div>
         ) : (
           <>
-            {live && <div className="dim small">● live</div>}
+            <div className="row" style={{ alignItems: 'center' }}>
+              {live && <span className="dim small grow">● live</span>}
+              {doc && <button className="ghost" onClick={() => setShowDoc((s) => !s)}>
+                {showDoc ? 'show tree' : 'show document'}</button>}
+            </div>
+            {doc && showDoc ? (
+              <div className="run-doc">
+                <div className="dim small">{doc.staged ? 'staged (pending approval)' : 'approved'} · {doc.path}</div>
+                <Md text={doc.content} />
+              </div>
+            ) : (
             <div className="run-tree" style={{ padding: '4px 2px' }}>
               {order.map((id) => {
                 const n = nodes[id]; if (!n) return null
@@ -89,6 +106,7 @@ export default function Runs() {
                 )
               })}
             </div>
+            )}
           </>
         )}
       </main>

@@ -94,18 +94,24 @@ async def _gen_queries(topic: str) -> list[str]:
 
 
 async def _batch_search(queries: list[str]) -> list[dict]:
-    lists = await asyncio.gather(
-        *[webtools.search_results(q, limit=RESULTS_PER_QUERY) for q in queries],
-        return_exceptions=True)
-    seen, out = set(), []
-    for lst in lists:
-        if not isinstance(lst, list):
-            continue
-        for r in lst:
-            if r["url"] not in seen:
-                seen.add(r["url"])
-                out.append(r)
-    return out[:MAX_SOURCES_TO_FILTER]
+    # a transient SearXNG hiccup would otherwise yield 0 sources and a silently
+    # empty research, so retry the whole batch once before giving up
+    for attempt in range(2):
+        lists = await asyncio.gather(
+            *[webtools.search_results(q, limit=RESULTS_PER_QUERY) for q in queries],
+            return_exceptions=True)
+        seen, out = set(), []
+        for lst in lists:
+            if not isinstance(lst, list):
+                continue
+            for r in lst:
+                if r["url"] not in seen:
+                    seen.add(r["url"])
+                    out.append(r)
+        if out or attempt == 1:
+            return out[:MAX_SOURCES_TO_FILTER]
+        await asyncio.sleep(1.5)
+    return []
 
 
 def _parse_groups(text: str, valid_urls: set) -> list[dict]:
@@ -228,6 +234,19 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         await _save_rollup(scout, scout_rollup)
         stage_write(project, f"runs/{job_id}/{scout}-scout.md", scout_rollup.encode())
         bus.publish(job_id, {"type": "node_done", "node_id": scout, "rollup": scout_rollup})
+
+        if not groups:
+            # no sources -> say so plainly instead of synthesizing from nothing
+            doc = (f"# Research: {topic}\n\nThe search backend returned no usable "
+                   "sources for this topic (it may have been momentarily "
+                   "unavailable). Please try again.")
+            stage_write(project, doc_path, doc.encode())
+            note = "no sources retrieved — search returned nothing"
+            await _save_rollup(head, note)
+            bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
+                                 "doc_path": doc_path, "rollup": note, "usage": b.summary()})
+            bus.close_job(job_id)
+            return {"topic": topic, "job_id": job_id, "root_id": head, "doc_path": doc_path}
 
         # phase 2: readers in parallel (session = job_id so reads are fresh per run)
         findings = await asyncio.gather(

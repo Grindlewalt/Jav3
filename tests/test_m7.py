@@ -202,3 +202,17 @@ async def test_run_list_marks_running(client):
     runs = (await client.get("/api/runs")).json()["runs"]
     by_sum = {r["summary"]: r["running"] for r in runs}
     assert by_sum["[head] r"] is True and by_sum["[head] d"] is False
+
+
+def test_dsml_tool_call_recovery():
+    from backend.agent.model import parse_dsml_tool_calls
+    import json as _j
+    c = ('<｜｜DSML｜｜tool_calls>\n'
+         '<｜｜DSML｜｜invoke name="run_code">\n'
+         '<｜｜DSML｜｜parameter name="code" string="true">print(2+2)</｜｜DSML｜｜parameter>\n'
+         '</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>')
+    calls = parse_dsml_tool_calls(c)
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "run_code"
+    assert _j.loads(calls[0]["function"]["arguments"]) == {"code": "print(2+2)"}
+    assert parse_dsml_tool_calls("just normal text") == []
