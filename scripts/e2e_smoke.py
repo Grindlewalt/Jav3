@@ -14,10 +14,14 @@ Usage:  .venv/bin/python scripts/e2e_smoke.py --password PW [--vm]
 """
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
+
+# so the git-gate step can import backend.gitgate when run as scripts/e2e_smoke.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 BASE = "http://localhost:8000"
 COOKIE = None
