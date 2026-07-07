@@ -23,6 +23,27 @@ HEADERS = {
 }
 
 
+async def search_results(query: str, limit: int = 6) -> list[dict]:
+    """Structured SearXNG results [{url, title, snippet}] — for the research
+    pipeline's batch-search phase (as data, not a text blob)."""
+    try:
+        async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
+                                     http2=True) as c:
+            r = await c.get(f"{settings.searxng_url}/search",
+                            params={"q": query, "format": "json"}, headers=HEADERS)
+            r.raise_for_status()
+            data = r.json()
+    except (httpx.HTTPError, ValueError):
+        return []
+    out = []
+    for res in (data.get("results") or [])[:limit]:
+        url = res.get("url")
+        if url:
+            out.append({"url": url, "title": res.get("title", ""),
+                        "snippet": (res.get("content") or "").strip()[:300]})
+    return out
+
+
 async def search(query: str, session: str) -> str:
     """Query SearXNG, return a compact text list of results. Results already
     pulled in this session are flagged so agents pick fresh sources."""
