@@ -95,6 +95,17 @@ CREATE TABLE IF NOT EXISTS schedules (
     last_result TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS sandbox_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dest TEXT NOT NULL,              -- human label (hostname if known, else ip)
+    ip TEXT NOT NULL,               -- the address programmed into nftables
+    port INTEGER NOT NULL,
+    proto TEXT NOT NULL DEFAULT 'tcp',
+    scope TEXT NOT NULL DEFAULT 'wan',   -- wan | lan
+    note TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(ip, port, proto)
+);
 """
 
 

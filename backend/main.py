@@ -7,7 +7,8 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 
 from . import (agents_api, agents_run, auth, chat, git_api, memory_api,
-               projects, runs_api, schedules, skills_api, vm_api, workspace)
+               projects, runs_api, sandbox, sandbox_api, schedules, skills_api,
+               vm_api, workspace)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -20,6 +21,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     ensure_memory_seeds()
     compile_registry()
+    # re-program the learned egress allowlist into nftables (empty on boot);
+    # best-effort so a dev host without the table starts fine
+    try:
+        await sandbox.sync_nft()
+    except Exception:
+        pass
     task = asyncio.create_task(schedules.scheduler_loop())
     try:
         yield
@@ -41,6 +48,7 @@ app.include_router(runs_api.router)
 app.include_router(runs_api.jobs_router)
 app.include_router(vm_api.router)
 app.include_router(git_api.router)
+app.include_router(sandbox_api.router)
 
 
 @app.get("/api/health")

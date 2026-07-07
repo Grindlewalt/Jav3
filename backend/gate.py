@@ -17,8 +17,8 @@ capture sections then say "unavailable" instead of failing the run.
 import asyncio
 import binascii
 import datetime as dt
+import json
 import re
-import shlex
 from pathlib import Path
 
 from .agent.tools import vm, vmexec
@@ -121,6 +121,80 @@ def parse_drop_slice(text: str) -> list[str]:
     return out
 
 
+def parse_dns_typed(text: str) -> list[dict]:
+    """dnsmasq queries from the guest -> [{name, type}] (unique, ordered)."""
+    seen, out = set(), []
+    for m in re.finditer(r"query\[([A-Z]+)\] (\S+) from " + re.escape(GUEST_IP), text):
+        key = (m.group(2), m.group(1))
+        if key not in seen:
+            seen.add(key)
+            out.append({"name": m.group(2), "type": m.group(1)})
+    return out
+
+
+def parse_dns_replies(text: str) -> dict:
+    """dnsmasq 'reply <name> is <ip>' lines -> {ip: hostname}."""
+    ip2host = {}
+    for m in re.finditer(r"reply (\S+) is (\d+\.\d+\.\d+\.\d+)", text):
+        ip2host[m.group(2)] = m.group(1)
+    return ip2host
+
+
+def parse_drops_counted(text: str) -> list[dict]:
+    """nft drop log -> [{ip, port, proto, attempts}] aggregated per dest."""
+    counts: dict[tuple, int] = {}
+    for line in text.splitlines():
+        if "jvm-egress-drop" not in line and "jvm-host-drop" not in line:
+            continue
+        dst = re.search(r"DST=(\S+)", line)
+        dpt = re.search(r"DPT=(\d+)", line)
+        proto = re.search(r"PROTO=(\S+)", line)
+        if not dst:
+            continue
+        key = (dst.group(1), int(dpt.group(1)) if dpt else 0,
+               (proto.group(1) if proto else "tcp").lower())
+        counts[key] = counts.get(key, 0) + 1
+    return [{"ip": ip, "port": port, "proto": proto, "attempts": n}
+            for (ip, port, proto), n in counts.items()]
+
+
+def pcap_bytes(text: str) -> list[dict]:
+    """`tcpdump -nn -q -r` output -> per-remote-peer delivered byte totals.
+
+    Only established (allowlisted) flows carry payload; SSH to the guest is
+    already filtered out of the capture. Payload bytes only (headers excluded)
+    — an honest floor on what was actually delivered."""
+    agg: dict[tuple, list] = {}
+    rx = re.compile(r"IP (\d+\.\d+\.\d+\.\d+)\.(\d+) > (\d+\.\d+\.\d+\.\d+)\.(\d+): "
+                    r"(tcp|UDP,? ?\w*) ?(?:length )?(\d+)?", re.I)
+    for line in text.splitlines():
+        m = rx.search(line)
+        if not m:
+            continue
+        sip, sport, dip, dport, proto, ln = m.groups()
+        length = int(ln) if ln else 0
+        proto = "udp" if proto.lower().startswith("udp") else "tcp"
+        if sip == GUEST_IP:                 # guest -> remote (upload)
+            key = (dip, int(dport), proto)
+            agg.setdefault(key, [0, 0])[1] += length
+        elif dip == GUEST_IP:               # remote -> guest (download)
+            key = (sip, int(sport), proto)
+            agg.setdefault(key, [0, 0])[0] += length
+    return [{"ip": ip, "port": port, "proto": proto,
+             "bytes_down": d, "bytes_up": u}
+            for (ip, port, proto), (d, u) in agg.items()]
+
+
+async def _pcap_dump(path: Path) -> str:
+    if not path.is_file() or path.stat().st_size == 0:
+        return ""
+    proc = await asyncio.create_subprocess_exec(
+        "tcpdump", "-nn", "-q", "-r", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await proc.communicate()
+    return out.decode(errors="replace")
+
+
 def _cap(lines: list[str]) -> list[str]:
     if len(lines) > REPORT_CAP:
         return lines[:REPORT_CAP] + [f"... ({len(lines) - REPORT_CAP} more)"]
@@ -211,12 +285,41 @@ async def _pcap_flows(path: Path) -> list[str]:
     return flows
 
 
-async def _journal_drops(since: str) -> list[str]:
+async def _drop_text(since: str) -> str:
     code, out, _ = await _sudo("journalctl", "-k", "--since", since,
                                "-o", "short-iso", "--no-pager", timeout=15)
-    if code != 0:
-        return []
-    return parse_drop_slice(out)
+    return out if code == 0 else ""
+
+
+async def _journal_drops(since: str) -> list[str]:
+    return parse_drop_slice(await _drop_text(since))
+
+
+def _build_evidence(run_id: int, slug: str, command: str, result: dict,
+                    locked: bool, fresh: bool, dns_text: str, execs: list[str],
+                    since_drops: list[dict], pcap_text: str) -> dict:
+    """Raw capture assembled into one record. No verdict, no severity — that is
+    sandbox.classify()'s job against the live allowlist."""
+    ip2host = parse_dns_replies(dns_text)
+    flows = pcap_bytes(pcap_text)
+    for f in flows:
+        f["host"] = ip2host.get(f["ip"])
+    for b in since_drops:
+        b["host"] = ip2host.get(b["ip"])
+    # a dest that both delivered and shows drops is really delivered; don't
+    # double-list it as blocked
+    flow_keys = {(f["ip"], f["port"], f["proto"]) for f in flows}
+    blocked = [b for b in since_drops
+               if (b["ip"], b["port"], b["proto"]) not in flow_keys]
+    return {
+        "run_id": run_id, "project": slug, "command": command,
+        "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "exit_status": result.get("exit_status"),
+        "timed_out": bool(result.get("timed_out")),
+        "egress_locked": locked, "fresh": fresh,
+        "flows": flows, "blocked": blocked, "dns": parse_dns_typed(dns_text),
+        "execs": execs, "sensitive": [], "staged": result.get("staged", []),
+    }
 
 
 # ---- the gate flow ----------------------------------------------------------
@@ -264,16 +367,25 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     finally:
         await _stop_pcap(pcap_proc)
 
-    dns = parse_dns_slice(_slice(DNS_LOG, dns_off))
+    dns_text = _slice(DNS_LOG, dns_off)
+    dns = parse_dns_slice(dns_text)
     execs = parse_audit_slice(_slice(audit_path, audit_off))
     drops = await _journal_drops(since)
     flows = await _pcap_flows(pcap_path)
     have_pcap = pcap_path.is_file() and pcap_path.stat().st_size > 0
 
     # exec-log slice is preserved verbatim next to the pcap
-    exec_log_path = cap_dir / f"gate-{run_id}-exec.log"
     cap_dir.mkdir(parents=True, exist_ok=True)
+    exec_log_path = cap_dir / f"gate-{run_id}-exec.log"
     exec_log_path.write_text("\n".join(execs) + ("\n" if execs else ""))
+
+    # structured evidence for the review console (raw capture, no verdict yet)
+    evidence = _build_evidence(
+        run_id, slug, command, result, locked, fresh,
+        dns_text, execs, since_drops=parse_drops_counted(await _drop_text(since)),
+        pcap_text=await _pcap_dump(pcap_path))
+    evidence_path = cap_dir / f"gate-{run_id}-evidence.json"
+    evidence_path.write_text(json.dumps(evidence, indent=1))
 
     report = build_report(slug, command, result, dns, execs, drops, flows,
                           locked, fresh, str(pcap_path) if have_pcap else None)

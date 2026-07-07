@@ -96,6 +96,17 @@ class Settings(BaseSettings):
     vm_boot_timeout_seconds: int = 120
     vm_push_max_mb: int = 64
 
+    # M4 sandbox review console. The nft table + drop-log prefixes the gate
+    # analysis keys off; RFC-1918 defines what counts as "your LAN"; the globs
+    # flag a run touching secrets / proprietary / financial paths.
+    nft_table: str = "jarvis_vm"
+    lan_cidrs: list[str] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    sandbox_sensitive_globs: list[str] = [
+        "**/.env", "**/.env.*", "**/secrets/**", "**/*.pem", "**/*.key",
+        "**/id_rsa", "**/id_ed25519", "**/credentials*", "**/.aws/**",
+        "finance/**", "**/proprietary/**",
+    ]
+
 
 settings = Settings()
 

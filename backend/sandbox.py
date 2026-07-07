@@ -1,0 +1,326 @@
+"""Sandbox review console — the deterministic layer over gate captures.
+
+Two jobs:
+
+1. The persistent egress allowlist (`sandbox_rules`). Approving a destination
+   in the console writes a row AND programs the live nftables set; revoking
+   removes both; `sync_nft()` re-loads every rule into the (empty-on-boot) set
+   at backend startup, so learned rules survive a reboot regardless of unit
+   ordering.
+
+2. `classify()` turns a run's raw capture (gate.py's evidence.json) into the
+   verdict + per-connection findings the console renders. **Everything here is
+   rule-based arithmetic over typed fields** — no LLM, and untrusted strings
+   (hostnames, argv, paths) are only ever compared or counted, never
+   interpreted. That is deliberate: the console is the thing that catches a
+   compromised agent, so it must not itself be steerable by the agent's output.
+
+Deny-by-default means a non-allowlisted connection is dropped at the tap: the
+handshake never completes, so its intended payload size is unknowable. Blocked
+findings therefore carry an *attempt count* (from the nft drop log) and never a
+byte figure; only allowlisted, delivered flows report bytes (from the pcap).
+"""
+import asyncio
+import ipaddress
+import re
+
+from .config import settings
+from .db import get_db
+
+
+# ---- nftables allowlist ----------------------------------------------------
+
+async def _nft(*args: str, timeout: float = 15) -> tuple[int, str, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "nft", *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    except (FileNotFoundError, OSError):     # no sudo/nft (dev host) — no-op
+        return -1, "", "nft unavailable"
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return -1, "", "timeout"
+    return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+def _set_for(proto: str) -> str:
+    return "allowed_udp" if proto == "udp" else "allowed_tcp"
+
+
+async def _nft_add(ip: str, port: int, proto: str) -> None:
+    await _nft("add", "element", "inet", settings.nft_table, _set_for(proto),
+               f"{{ {ip} . {port} }}")
+
+
+async def _nft_del(ip: str, port: int, proto: str) -> None:
+    await _nft("delete", "element", "inet", settings.nft_table, _set_for(proto),
+               f"{{ {ip} . {port} }}")
+
+
+async def sync_nft() -> int:
+    """Re-program every persisted rule into the live nft sets. Best-effort:
+    on a host without the table (dev laptop) this quietly does nothing."""
+    rules = await list_rules()
+    n = 0
+    for r in rules:
+        try:
+            ipaddress.ip_address(r["ip"])
+        except ValueError:
+            continue
+        await _nft_add(r["ip"], r["port"], r["proto"])
+        n += 1
+    return n
+
+
+async def list_rules() -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id, dest, ip, port, proto, scope, note, created_at "
+            "FROM sandbox_rules ORDER BY created_at DESC, id DESC")
+        return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def add_rule(dest: str, ip: str, port: int, proto: str = "tcp",
+                   scope: str = "wan", note: str | None = None) -> dict:
+    ipaddress.ip_address(ip)          # reject anything that isn't an address
+    port = int(port)
+    proto = "udp" if proto == "udp" else "tcp"
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT OR IGNORE INTO sandbox_rules (dest, ip, port, proto, scope, note) "
+            "VALUES (?, ?, ?, ?, ?, ?)", (dest, ip, port, proto, scope, note))
+        await db.commit()
+        cur = await db.execute(
+            "SELECT id, dest, ip, port, proto, scope, note, created_at "
+            "FROM sandbox_rules WHERE ip=? AND port=? AND proto=?", (ip, port, proto))
+        row = dict(await cur.fetchone())
+    finally:
+        await db.close()
+    await _nft_add(ip, port, proto)   # live-allow; safe to re-add
+    return row
+
+
+async def delete_rule(rule_id: int) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT ip, port, proto FROM sandbox_rules WHERE id=?", (rule_id,))
+        row = await cur.fetchone()
+        if not row:
+            return False
+        await db.execute("DELETE FROM sandbox_rules WHERE id=?", (rule_id,))
+        await db.commit()
+    finally:
+        await db.close()
+    await _nft_del(row["ip"], row["port"], row["proto"])
+    return True
+
+
+async def rules_index() -> dict[tuple, dict]:
+    """(ip, port, proto) -> rule, for O(1) allowlist membership in classify()."""
+    return {(r["ip"], r["port"], r["proto"]): r for r in await list_rules()}
+
+
+# ---- classification (pure, given the rule index) ---------------------------
+
+def is_lan(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for cidr in settings.lan_cidrs:
+        if addr in ipaddress.ip_network(cidr):
+            return True
+    return False
+
+
+def _glob_to_re(pattern: str) -> re.Pattern:
+    # minimal ** / * / ? glob -> regex; ** spans path separators, * does not.
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern[i:i + 2] == "**":
+            out.append(".*")
+            i += 2
+            if pattern[i:i + 1] == "/":
+                i += 1
+        elif c == "*":
+            out.append("[^/]*")
+            i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+_SENSITIVE_RES = None
+
+
+def _sensitive_globs():
+    global _SENSITIVE_RES
+    if _SENSITIVE_RES is None:
+        _SENSITIVE_RES = [(g, _glob_to_re(g)) for g in settings.sandbox_sensitive_globs]
+    return _SENSITIVE_RES
+
+
+def match_sensitive(path: str) -> str | None:
+    p = path.strip()
+    if p.startswith("./"):
+        p = p[2:]
+    for glob, rx in _sensitive_globs():
+        if rx.match(p) or rx.match(p.split("/")[-1]):
+            return glob
+    return None
+
+
+# path-ish tokens inside an argv line (skip flags, urls handled separately)
+_PATHISH = re.compile(r"(?:^|\s)((?:/|\./|\.\./|[\w.-]+/)[\w./-]+|\.[\w.-]+)")
+_URL_HOST = re.compile(r"(?:https?://|ssh://|git@)([\w.-]+)")
+
+
+def _hosts_in_exec(cmd: str) -> list[str]:
+    return _URL_HOST.findall(cmd)
+
+
+def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
+    """Raw capture + current allowlist -> the console's session view."""
+    allow_hosts = {r["dest"] for r in rule_index.values()}
+
+    egress: list[dict] = []
+    delivered_bytes = 0
+
+    # delivered flows (handshake completed => these were allowlisted)
+    for f in evidence.get("flows", []):
+        ip, port, proto = f["ip"], int(f["port"]), f.get("proto", "tcp")
+        host = f.get("host") or ip
+        down, up = int(f.get("bytes_down", 0)), int(f.get("bytes_up", 0))
+        delivered_bytes += down + up
+        egress.append({
+            "key": f"{host}:{port}", "host": host, "ip": ip, "port": port,
+            "proto": proto, "scope": "lan" if is_lan(ip) else "wan",
+            "learned": True, "status": "delivered", "sev": "ok",
+            "rule": "in-allowlist",
+            "bytes": _human(down + up), "dir": "down" if down >= up else "up",
+            "attempts": 0,
+        })
+
+    # blocked attempts (dropped at the tap => attempt count, never bytes)
+    blocked_attempts = 0
+    for b in evidence.get("blocked", []):
+        ip, port, proto = b["ip"], int(b["port"]), b.get("proto", "tcp")
+        host = b.get("host") or ip
+        attempts = int(b.get("attempts", 1))
+        blocked_attempts += attempts
+        lan = is_lan(ip)
+        learned = (ip, port, proto) in rule_index or host in allow_hosts
+        if learned:
+            sev, status, rule = "ok", "delivered", "in-allowlist"
+        elif lan:
+            sev, status, rule = "warn", "blocked", "lan-not-allowlisted"
+        else:
+            sev, status, rule = "warn", "blocked", "egress-not-allowlisted"
+        egress.append({
+            "key": f"{host}:{port}", "host": host, "ip": ip, "port": port,
+            "proto": proto, "scope": "lan" if lan else "wan",
+            "learned": learned, "status": status, "sev": sev, "rule": rule,
+            "bytes": None, "dir": "up", "attempts": attempts,
+        })
+
+    # execs: flag any that reach for a non-allowlisted host (curl/git push/etc.)
+    execs = []
+    exec_crit = False
+    for cmd in evidence.get("execs", []):
+        sev, rule = "ok", None
+        for host in _hosts_in_exec(cmd):
+            if host not in allow_hosts and not is_lan_host(host):
+                sev, rule = "crit", f"reaches {host} (not allowlisted)"
+                exec_crit = True
+                break
+        execs.append({"cmd": cmd, "sev": sev, "rule": rule})
+
+    # sensitive: capture-supplied hits, plus argv path tokens matched to globs
+    sensitive = []
+    seen_paths = set()
+    for s in evidence.get("sensitive", []):
+        p = s["path"]
+        if p not in seen_paths:
+            seen_paths.add(p)
+            sensitive.append({"path": p, "glob": s.get("glob", ""), "sev": "crit"})
+    for cmd in evidence.get("execs", []):
+        for tok in _PATHISH.findall(cmd):
+            g = match_sensitive(tok)
+            if g and tok not in seen_paths:
+                seen_paths.add(tok)
+                sensitive.append({"path": tok, "glob": g, "sev": "crit"})
+    for p in evidence.get("staged", []):
+        g = match_sensitive(p)
+        if g and p not in seen_paths:
+            seen_paths.add(p)
+            sensitive.append({"path": p, "glob": g, "sev": "warn"})
+
+    dns = [{"name": d.get("name", ""), "type": d.get("type", ""),
+            "new": d.get("name", "") not in allow_hosts}
+           for d in evidence.get("dns", [])]
+    staged = [{"path": p} for p in evidence.get("staged", [])]
+
+    egress_new = sum(1 for e in egress if not e["learned"])
+    lan_hosts = sum(1 for e in egress if e["scope"] == "lan")
+
+    # deterministic verdict = worst signal present
+    if sensitive and any(s["sev"] == "crit" for s in sensitive) or exec_crit:
+        verdict, rule = "crit", ("sensitive-path-read" if sensitive else "exec-reaches-untrusted-host")
+    elif egress_new:
+        verdict, rule = "warn", "new-destination-blocked"
+    else:
+        verdict, rule = "ok", "nothing-outside-allowlist"
+
+    facts = {
+        "dns": len(dns), "egress_dests": len(egress), "egress_new": egress_new,
+        "blocked_attempts": blocked_attempts, "delivered_bytes": _human(delivered_bytes),
+        "sensitive": len(sensitive), "execs": len(execs), "staged": len(staged),
+        "lan_hosts": lan_hosts,
+    }
+    return {
+        "verdict": verdict, "rule": rule, "headline": _headline(facts, verdict),
+        "facts": facts, "egress": egress, "dns": dns,
+        "sensitive": sensitive, "execs": execs, "staged": staged,
+    }
+
+
+def is_lan_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return host.endswith(".local") or host == "localhost"
+    return is_lan(host)
+
+
+def _headline(f: dict, verdict: str) -> str:
+    p = []
+    if f["egress_new"]:
+        p.append(f"{f['egress_new']} new destination{'s' if f['egress_new'] > 1 else ''} blocked")
+    if f["sensitive"]:
+        p.append(f"{f['sensitive']} sensitive path{'s' if f['sensitive'] > 1 else ''} touched")
+    if f["lan_hosts"]:
+        p.append(f"{f['lan_hosts']} LAN host{'s' if f['lan_hosts'] > 1 else ''}")
+    if not p:
+        p.append("nothing outside the allowlist")
+    return " · ".join(p)
+
+
+def _human(n: int) -> str:
+    n = int(n)
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
