@@ -133,6 +133,12 @@ export default function Sandbox() {
   const [toasts, setToasts] = useState([])
   const [busy, setBusy] = useState(false)
   const selectedRef = useRef(null)
+  // "New sandbox run" control (left rail, above the queue).
+  const [projects, setProjects] = useState([])
+  const [runProject, setRunProject] = useState('')
+  const [runCmd, setRunCmd] = useState('')
+  const [running, setRunning] = useState(false)
+  const [runErr, setRunErr] = useState('')
 
   const toast = (msg) => {
     const id = Date.now() + Math.random()
@@ -151,6 +157,13 @@ export default function Sandbox() {
 
   useEffect(() => {
     refreshSessions(); refreshRules()
+    api('/api/projects')
+      .then((r) => {
+        const list = r.projects || []
+        setProjects(list)
+        if (list.length) setRunProject(r.active || list[0].slug)
+      })
+      .catch(() => {})
     const t = setInterval(() => {
       refreshSessions(); refreshRules()
       if (selectedRef.current != null) refreshDetail(selectedRef.current)
@@ -162,6 +175,29 @@ export default function Sandbox() {
     selectedRef.current = id
     setSelected(id); setDetail(null)
     refreshDetail(id)
+  }
+
+  // Kick off a monitored VM run from the UI. This is the same gated pipeline
+  // that also runs when Jarvis calls the `run_gated` tool in chat, or via the
+  // Renderer panel's "Scan for beacons" button — this is just the manual,
+  // operator-initiated entry point. Slow: boots a fresh VM + runs (up to ~90s).
+  async function startRun() {
+    const cmd = runCmd.trim()
+    if (!runProject || !cmd) return
+    setRunning(true); setRunErr('')
+    try {
+      const r = await api('/api/vm/gate/run', {
+        method: 'POST',
+        body: JSON.stringify({ project: runProject, command: cmd, fresh: true }),
+      })
+      setRunCmd('')
+      await refreshSessions()
+      if (r && r.run_id != null) openSession(r.run_id)
+    } catch (e) {
+      setRunErr(e.detail || e.message || 'run failed')
+    } finally {
+      setRunning(false)
+    }
   }
 
   async function decide(row, decision) {
@@ -229,6 +265,24 @@ export default function Sandbox() {
   return (
     <div className="sbx-layout">
       <aside className="sbx-queue">
+        <div className="sbx-newrun">
+          <div className="side-title">New sandbox run</div>
+          <select value={runProject} disabled={running}
+                  onChange={(e) => setRunProject(e.target.value)}>
+            {projects.length === 0 && <option value="">no projects</option>}
+            {projects.map((p) => (
+              <option key={p.slug} value={p.slug}>{p.name || p.slug}</option>
+            ))}
+          </select>
+          <input value={runCmd} disabled={running} placeholder="python3 app.py"
+                 onChange={(e) => setRunCmd(e.target.value)}
+                 onKeyDown={(e) => { if (e.key === 'Enter') startRun() }} />
+          <button disabled={running || !runProject || !runCmd.trim()}
+                  onClick={startRun}>
+            {running ? 'Running…' : 'Run in sandbox'}</button>
+          {runErr && <div className="error">{runErr}</div>}
+        </div>
+
         <div className="row" style={{ margin: 0 }}>
           <div className="side-title grow">Sessions</div>
           <select value={filter} onChange={(e) => setFilter(e.target.value)}
