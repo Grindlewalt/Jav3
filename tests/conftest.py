@@ -11,4 +11,5 @@ def tmp_env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "memory_dir", tmp_path / "memory")
     monkeypatch.setattr(settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(settings, "skills_dir", tmp_path / "skills")
+    monkeypatch.setattr(settings, "agents_dir", tmp_path / "agents")
     return tmp_path

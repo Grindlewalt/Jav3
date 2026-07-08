@@ -3,6 +3,7 @@ name: research
 description: Research a topic with a team of subagents. Decomposes it into angles, runs a focused research subagent per angle (coordinating so none scrape the same page), synthesizes their findings into one document, and stages it for approval.
 when_to_use: When the operator asks you to research, investigate, or write up a topic that needs several web sources.
 enabled: true
+requires_project: true
 parameters:
   type: object
   properties:

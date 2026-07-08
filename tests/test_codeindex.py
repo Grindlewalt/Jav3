@@ -139,12 +139,14 @@ async def test_crawl_codebase_builds_index(client):
 
 async def test_search_codebase(client):
     _seed_code()
+    # grouped-by-file format: a header per file, "  N: match", "  N- context"
     out = await registry.dispatch("search_codebase", {"query": "NEEDLE_xyz"})
-    assert "code/src/app.py:5:" in out and "needle_xyz" in out
+    assert "code/src/app.py (" in out and "  5: " in out and "needle_xyz" in out
+    assert "  4- " in out   # one line of context around the match
 
     out = await registry.dispatch("search_codebase",
                                   {"query": r"def\s+ig\w+", "regex": True})
-    assert "code/src/app.py:4:" in out
+    assert "code/src/app.py (" in out and "  4: " in out
 
     out = await registry.dispatch("search_codebase", {"query": "not_here_at_all"})
     assert out == "no matches"
@@ -159,5 +161,29 @@ async def test_search_codebase_cap(client):
     code.mkdir(parents=True, exist_ok=True)
     (code / "many.txt").write_text("hit_me\n" * 80)
     out = await registry.dispatch("search_codebase", {"query": "hit_me"})
-    assert "matches (truncated" in out
-    assert out.count("hit_me") == 50
+    assert "showing first 50 matches" in out
+    assert out.count(": hit_me") == 50   # exactly 50 match-marker lines
+
+
+async def test_search_codebase_ranks_files_by_hits(client):
+    code = settings.projects_dir / "demo" / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "one.txt").write_text("rankme\n")
+    (code / "lots.txt").write_text("rankme\n" * 5)
+    out = await registry.dispatch("search_codebase", {"query": "rankme"})
+    assert out.index("code/lots.txt (5 matches)") < out.index("code/one.txt (1 match)")
+
+
+async def test_search_codebase_warns_on_stale_index(client):
+    import os
+    _seed_code()
+    await registry.dispatch("crawl_codebase", {})
+    out = await registry.dispatch("search_codebase", {"query": "NEEDLE_xyz"})
+    assert "index is stale" not in out
+    code = settings.projects_dir / "demo" / "code"
+    (code / "new_since_index.py").write_text("NEEDLE_xyz = 1\n")
+    # make the new file measurably newer than INDEX.md regardless of fs clock
+    st = (settings.projects_dir / "demo" / "notes" / "codebase" / "INDEX.md").stat()
+    os.utime(code / "new_since_index.py", (st.st_mtime + 5, st.st_mtime + 5))
+    out = await registry.dispatch("search_codebase", {"query": "NEEDLE_xyz"})
+    assert "index is stale" in out

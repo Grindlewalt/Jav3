@@ -142,6 +142,10 @@ async def test_run_gated_full_flow_mocked(client, tmp_env, monkeypatch):
     async def fake_flows(path):
         return []
 
+    async def fake_drop_text(since):
+        return ("kernel: jvm-egress-drop IN=jvtap0 SRC=10.66.0.10 "
+                "DST=1.2.3.4 PROTO=TCP DPT=443\n")
+
     monkeypatch.setattr(gate.vm, "nuke", fake_nuke)
     monkeypatch.setattr(gate.vmexec, "run_in_project", fake_run)
     monkeypatch.setattr(gate, "egress_locked", fake_locked)
@@ -149,12 +153,19 @@ async def test_run_gated_full_flow_mocked(client, tmp_env, monkeypatch):
     monkeypatch.setattr(gate, "_start_pcap", fake_start)
     monkeypatch.setattr(gate, "_stop_pcap", fake_stop)
     monkeypatch.setattr(gate, "_pcap_flows", fake_flows)
+    monkeypatch.setattr(gate, "_drop_text", fake_drop_text)
 
     r = await gate.run_gated("gate-demo", "python3 -c 'print(1)'", fresh=True)
     assert nuked["n"] == 1
     assert r["exit_status"] == 0 and r["status"] == "done"
     assert r["egress_locked"] is True and r["blocked_attempts"] == 1
     assert r["report"] == f"runs/gate-{r['run_id']}/report.md"
+
+    # the classifier verdict is fed back to the caller (i.e. the agent), so it
+    # can react in-loop instead of only the operator console seeing it
+    assert r["verdict"] == "warn" and r["verdict_rule"] == "new-destination-blocked"
+    assert "blocked" in r["headline"]
+    assert r["blocked"] == ["1.2.3.4:443/tcp (1 attempt)"]
 
     p = effective_read("gate-demo", r["report"])
     assert p is not None

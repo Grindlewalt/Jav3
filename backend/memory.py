@@ -288,14 +288,8 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB,
     if active is _USE_DB:
         active = await get_active_project(db)
     if active:
-        project_md = read_project_md(active)
-        if project_md:
-            parts.append((
-                "active-project",
-                f"# Active project (loaded into central context): {active}\n\n{project_md}",
-            ))
         parts.extend(("active-project", block)
-                     for block in _loaded_context_files(active))
+                     for block in _active_project_blocks(active))
     # the sandwich bottom slice: hard rules restated LAST, after all context,
     # where they get the model's attention again (deliberately not excludable)
     parts.append(("operator-rules", standing_rules_tail()))
@@ -304,11 +298,24 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB,
         if text.strip() and (label == "operator-rules" or label not in exclude))
 
 
-def _loaded_context_files(slug: str) -> list[str]:
-    """Full contents of the files the operator ticked into context for this
-    project. Missing/binary files are skipped silently (the picker guards them)."""
-    out = []
+def _active_project_blocks(slug: str) -> list[str]:
+    """project.md plus the operator-ticked context files, held to a token
+    budget. This block re-rides EVERY turn's system prompt, so it is the one
+    place an oversized selection silently taxes the whole session: project.md
+    gets priority, then files are inlined in selection order until the budget
+    is spent; the rest degrade to a path index readable on demand with
+    read_file. Missing/binary files are skipped silently (the picker guards
+    them)."""
+    budget = settings.project_context_budget_tokens
+    blocks: list[str] = []
+    used = 0
+    project_md = read_project_md(slug)
+    if project_md:
+        text = f"# Active project (loaded into central context): {slug}\n\n{project_md}"
+        blocks.append(text)
+        used += estimate_tokens(text)
     base = settings.projects_dir / slug
+    skipped: list[str] = []
     for rel in context_selection(slug):
         path = base / rel
         if not path.is_file():
@@ -317,5 +324,15 @@ def _loaded_context_files(slug: str) -> list[str]:
             text = path.read_text()
         except (UnicodeDecodeError, OSError):
             continue
-        out.append(f"# Loaded project file: {rel}\n\n```\n{text}\n```")
-    return out
+        toks = estimate_tokens(text)
+        if used + toks > budget:
+            skipped.append(f"{rel} ({path.stat().st_size:,} B)")
+            continue
+        used += toks
+        blocks.append(f"# Loaded project file: {rel}\n\n```\n{text}\n```")
+    if skipped:
+        blocks.append(
+            "# Selected project files NOT inlined (over the context budget)\n"
+            "Read any of these on demand with read_file:\n"
+            + "\n".join(f"- {s}" for s in skipped))
+    return blocks

@@ -31,6 +31,9 @@ FIELD_DEFAULTS = {
     "context_exclude": [],
     "tools_exclude": [],
     "skills_exclude": [],
+    # headless runs (spawn_agent, schedules) get the tight subagent iteration
+    # cap by default; set this to grant a specific agent more rounds. 0 = default.
+    "max_iterations": 0,
 }
 
 
@@ -47,6 +50,7 @@ class SaveAgent(BaseModel):
     context_exclude: list[str] = []
     tools_exclude: list[str] = []
     skills_exclude: list[str] = []
+    max_iterations: int = 0
     prompt: str = ""
 
 

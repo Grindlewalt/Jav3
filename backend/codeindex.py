@@ -134,8 +134,11 @@ def build_index(slug: str, subdir: str = "code") -> dict:
 
 
 def search_code(slug: str, query: str, subdir: str | None = None,
-                regex: bool = False, max_results: int = 100) -> list[dict]:
-    """Case-insensitive scan; returns {path, line_no, line} hits."""
+                regex: bool = False, max_results: int = 100,
+                context: int = 0) -> list[dict]:
+    """Case-insensitive scan; returns {path, line_no, line} hits, plus
+    `before`/`after` neighbour lines when context > 0 — a bare match line
+    usually forces a full-file read, a line of context usually doesn't."""
     base = settings.projects_dir / slug
     if regex:
         try:
@@ -155,9 +158,31 @@ def search_code(slug: str, query: str, subdir: str | None = None,
                 continue
             seen.add(p)
             rel = str(p.relative_to(base))
-            for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
+            lines = p.read_text(errors="replace").splitlines()
+            for i, line in enumerate(lines, 1):
                 if (pat.search(line) if pat else needle in line.lower()):
-                    hits.append({"path": rel, "line_no": i, "line": line.strip()[:200]})
+                    hit = {"path": rel, "line_no": i, "line": line.strip()[:200]}
+                    if context:
+                        hit["before"] = [lines[j].strip()[:200]
+                                         for j in range(max(0, i - 1 - context), i - 1)]
+                        hit["after"] = [lines[j].strip()[:200]
+                                        for j in range(i, min(len(lines), i + context))]
+                    hits.append(hit)
                     if len(hits) >= max_results:
                         return hits
     return hits
+
+
+def index_stale(slug: str, subdir: str = "code") -> int:
+    """How many indexed-scope files changed since notes/codebase/ was built.
+    0 = fresh, or no index exists yet (nothing to be stale)."""
+    base = settings.projects_dir / slug
+    index = base / NOTES_SUBDIR / "INDEX.md"
+    if not index.is_file():
+        return 0
+    built = index.stat().st_mtime
+    try:
+        root = safe_join(base, subdir) if subdir else base
+    except ValueError:
+        return 0
+    return sum(1 for p in _walk(root) if p.stat().st_mtime > built)

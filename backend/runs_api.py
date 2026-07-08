@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from pathlib import Path
 
-from . import bus, research
+from . import bus, orchestrator, research
 from .agent.model import in_peak_window, peak_confirmed
 from .auth import require_user
 from .config import settings
@@ -106,6 +106,57 @@ async def research_run(body: ResearchRun):
         finally:
             bus.unsubscribe(job_id, queue)
             # the job keeps running to completion regardless of the socket
+            if not task.done():
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+class FunnelRun(BaseModel):
+    brief: str
+    confirm_peak: bool = False
+
+
+@router.post("/funnel")
+async def funnel_run(body: FunnelRun):
+    """Deploy the generic M7 funnel (head -> leaders -> subagents) on a brief.
+    Same live-stream contract as /research: subscribe first, stream the tree,
+    the job survives a dropped socket. The head lands in the Jobs view and can
+    be re-followed via /api/runs/{cid}/stream."""
+    if not body.brief.strip():
+        raise HTTPException(status_code=400, detail="brief is required")
+    db = await get_db()
+    try:
+        project = await get_active_project(db)
+    finally:
+        await db.close()
+    if not project:
+        raise HTTPException(status_code=400,
+                            detail="load a project first — the funnel stages its rollups into it")
+
+    import uuid
+    job_id = uuid.uuid4().hex
+
+    if not body.confirm_peak and in_peak_window() and not peak_confirmed(job_id):
+        raise HTTPException(status_code=409, detail="peak_confirmation_required",
+                            headers={"X-Conversation-Id": job_id})
+
+    queue = bus.subscribe(job_id)
+    task = asyncio.create_task(
+        orchestrator.run_job(job_id, body.brief, project, peak=True))
+
+    async def event_stream():
+        try:
+            yield sse({"type": "job_opened", "job_id": job_id})
+            while True:
+                event = await queue.get()
+                if event is bus.JOB_END or event.get("type") == "job_end":
+                    break
+                yield sse(event)
+        except asyncio.CancelledError:  # client disconnected
+            pass
+        finally:
+            bus.unsubscribe(job_id, queue)
             if not task.done():
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 

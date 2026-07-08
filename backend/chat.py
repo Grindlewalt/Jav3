@@ -10,6 +10,7 @@ from . import runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import run_turn
+from .agent.tools.registry import load_registry, openai_tool_specs
 from .auth import require_user
 from .config import settings
 from .db import get_db
@@ -199,6 +200,15 @@ async def chat(body: ChatRequest):
         try:
             yield sse({"type": "start", "conversation_id": conversation_id})
             system_prompt = await assemble_system_prompt(db)
+            # tool subsetting: with no project loaded, the project-scoped tools
+            # (file edits, runs, git, search...) can only error — withholding
+            # them trims the per-turn spec tax and steers the model to
+            # load_project first. The set is stable within a project state, so
+            # the provider's prefix cache survives.
+            entries = load_registry()
+            if not await get_active_project(db):
+                entries = [e for e in entries if not e.get("requires_project")]
+            tools = openai_tool_specs(entries)
             async with db.execute(
                 "SELECT role, content FROM messages WHERE conversation_id = ? "
                 "ORDER BY id DESC LIMIT ?", (conversation_id, settings.recent_message_limit)
@@ -207,7 +217,8 @@ async def chat(body: ChatRequest):
             history = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
             final_content = ""
-            async for event in run_turn(db, conversation_id, system_prompt, history):
+            async for event in run_turn(db, conversation_id, system_prompt,
+                                        history, tools=tools):
                 if event["type"] == "final":
                     final_content = event["content"]
                 else:

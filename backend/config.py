@@ -51,6 +51,30 @@ class Settings(BaseSettings):
     subagent_max_iterations: int = 8
     recent_message_limit: int = 40
 
+    # Tool results inside the ReAct loop. A result is re-sent on EVERY later
+    # iteration of the turn, so an uncapped read_file dump is the one quadratic
+    # cost in the system: cap what enters the message list, and once a result
+    # is `keep_recent` rounds old, replace anything bigger than `evict_chars`
+    # with a one-line stub (the model can re-call the tool if it still needs it).
+    tool_result_max_chars: int = 12_000
+    tool_result_evict_chars: int = 4_000
+    tool_result_keep_recent: int = 2
+
+    # Transient model-API failures (connect errors, 5xx) retry with exponential
+    # backoff — but only if no tokens have streamed to the client yet, so a
+    # retry can never duplicate visible output.
+    model_retries: int = 2
+    model_retry_backoff_seconds: float = 0.5
+
+    # Token budget (chars/4 estimate) for the active-project block of the
+    # system prompt: project.md plus the operator-ticked context files. Files
+    # past the budget degrade to a path index readable on demand with read_file.
+    project_context_budget_tokens: int = 12_000
+
+    # A spawned agent's report rides the PARENT loop's context for the rest of
+    # the turn; reports past this size get compacted to a summary first.
+    agent_report_max_chars: int = 4_000
+
     # Per-operation token budget (shared across every agent in a chat turn or a
     # research job). DeepSeek caches prompt prefixes automatically, so the input
     # cap is generous. ~5M in / ~1M out is roughly a cent (cached) to a dime.

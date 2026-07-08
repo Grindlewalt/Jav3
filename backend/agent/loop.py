@@ -52,6 +52,7 @@ async def run_turn(
                 break
 
     n_iter = max_iterations or settings.max_react_iterations
+    tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
     for i in range(n_iter):
         # on the final allowed round, drop tools so the model must produce an
         # answer from what it has instead of another tool call it can't act on
@@ -77,8 +78,11 @@ async def run_turn(
             # (tools are what break adherence), so it cleans up anything the
             # tool-laden turn let slip. General — it checks against whatever
             # rules are in memory, nothing rule-specific is hardcoded. `rules`
-            # is already empty when self_check is off, so this no-ops for subagents.
-            if rules and content.strip():
+            # is already empty when self_check is off, so this no-ops for
+            # subagents. When every rule is mechanically checkable and none is
+            # violated, the pass is skipped — no reason to pay a model call to
+            # confirm what a substring check already proved.
+            if rules and content.strip() and _quick_rules_verdict(content, rules) is not False:
                 content = await _enforce_rules(content, rules)
             yield {"type": "final", "content": content}
             return
@@ -101,10 +105,73 @@ async def run_turn(
                 (conversation_id, name, json.dumps(args), result[:10000]),
             )
             await db.commit()
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+            messages.append({"role": "tool", "tool_call_id": tc["id"],
+                             "content": _cap_result(name, result)})
+            tool_msgs.append({"idx": len(messages) - 1, "round": i, "name": name})
+        _evict_stale_results(messages, tool_msgs, i)
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}
+
+
+def _cap_result(name: str, result: str) -> str:
+    """A tool result rides every remaining iteration of the turn, so what
+    enters the message list is capped (the DB copy is truncated separately)."""
+    cap = settings.tool_result_max_chars
+    if len(result) <= cap:
+        return result
+    return (result[:cap] + f"\n...(truncated: {len(result):,} chars total. "
+            f"Re-call {name} with a narrower target if you need the rest.)")
+
+
+def _evict_stale_results(messages: list[dict], tool_msgs: list[dict],
+                         current_round: int) -> None:
+    """Replace big tool results from older rounds with a one-line stub. The
+    model has already acted on them; re-sending a multi-KB dump every remaining
+    iteration costs tokens and pulls attention off the live task. Small results
+    stay (cheap, and mutating history invalidates the provider's prefix cache,
+    so eviction is reserved for results where the savings clearly win)."""
+    horizon = current_round - settings.tool_result_keep_recent
+    for t in tool_msgs:
+        if t["round"] > horizon or t.get("evicted"):
+            continue
+        content = messages[t["idx"]]["content"]
+        if len(content) <= settings.tool_result_evict_chars:
+            continue
+        messages[t["idx"]] = {**messages[t["idx"]], "content":
+                              f"[{t['name']} result from an earlier step "
+                              f"({len(content):,} chars) was dropped to keep "
+                              "context small. Call the tool again if you still "
+                              "need it.]"}
+        t["evicted"] = True
+
+
+# Mechanically checkable operator rules: (does this rule line match, is the
+# content in violation). Anything not covered here forces the model pass.
+_RULE_CHECKS = [
+    (lambda rule: "em dash" in rule, lambda text: "—" in text),
+]
+
+
+def _quick_rules_verdict(content: str, rules: str) -> bool | None:
+    """Cheap pre-filter for the copy-editor pass. False = every rule line is
+    checkable here and none is violated (safe to skip the model call); True =
+    a checkable rule IS violated; None = some rule can't be checked mechanically,
+    so the model pass must run."""
+    unknown = False
+    for ln in rules.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("- "):     # headers/preamble, not rules
+            continue
+        rule = ln[2:].strip().lower()
+        for matches, violated in _RULE_CHECKS:
+            if matches(rule):
+                if violated(content):
+                    return True
+                break
+        else:
+            unknown = True
+    return None if unknown else False
 
 
 async def _enforce_rules(content: str, rules: str) -> str:

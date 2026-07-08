@@ -1,4 +1,4 @@
-from backend.agents_run import run_agent_headless
+from backend.agents_run import compact_report, run_agent_headless
 
 
 async def run(agent: str, task: str) -> str:
@@ -10,4 +10,8 @@ async def run(agent: str, task: str) -> str:
             return (f"error: no agent named '{agent}'. Check the agent list — "
                     "agents are created in the Agents tab.")
         return f"error: {e.detail}"
-    return f"[{result['agent']} reports]\n{result['final']}"
+    # big reports get compacted: this string re-rides the parent's context
+    # every remaining iteration of its turn
+    final = await compact_report(result["agent"], task, result["final"],
+                                 result["conversation_id"])
+    return f"[{result['agent']} reports]\n{final}"

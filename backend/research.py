@@ -176,14 +176,20 @@ async def _reader(project, parent, job_id, group, topic, session) -> str:
     bus.publish(job_id, {"type": "node_spawned", "node_id": cid, "parent_id": parent,
                          "kind": "reader", "title": group["theme"], "depth": 1})
     bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "running"})
-    summaries = []
-    for url in group["urls"]:
+    async def _one(url: str) -> str | None:
         bus.publish(job_id, {"type": "tool", "node_id": cid, "name": f"read {_dom(url)}"})
         text = await webtools.read(url, session)
         if text.startswith("error") or text.startswith("note"):
-            continue
+            return None
         summary = await _summarize_page(topic, group["theme"], url, text)  # compaction
-        summaries.append(f"Source: {url}\n{summary}")
+        return f"Source: {url}\n{summary}"
+
+    # pages within a group are independent — fetch+summarize them concurrently
+    # (the readers themselves already run in parallel; this was the last serial
+    # leg of the pipeline)
+    results = await asyncio.gather(*[_one(u) for u in group["urls"]],
+                                   return_exceptions=True)
+    summaries = [r for r in results if isinstance(r, str)]
     findings = (f"## {group['theme']}\n\n" +
                 ("\n\n".join(summaries) if summaries else "(no usable sources)"))
     bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "summarizing"})

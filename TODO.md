@@ -21,9 +21,26 @@ and a real ollama base_url override.
       model proxy so the API key never enters the guest. (The monitored-
       execution slice is done; this is the larger "brain in the box" step.)
 
+## Security hardening (deferred — needs doing, see ARCHITECTURE-AND-OPTIMIZATION.md §8)
+- [ ] sensitive-read detection is argv-only: the in-guest audit rule logs only
+      execve, and evidence["sensitive"] is always [] (gate.py). Add auditd
+      `-w <path> -p r` watches for the sandbox_sensitive_globs so a script that
+      opens ~/.aws/credentials without naming it on a command line is caught —
+      the console section is labelled "auditd path-watch" and currently
+      overstates what's captured.
+- [ ] egress lock is advisory: a failed egress_locked() only WARNs in the
+      report and the run proceeds (gate.py). Refuse to start a gated run when
+      the deny-by-default table isn't loaded.
+- [ ] run_command bypasses monitoring entirely (no pcap/DNS/audit slice).
+      Steer network-touching commands to run_gated (TOOL.md guidance at
+      minimum; better, diff the nft drop counters across each run_command and
+      warn when a "local" command generated egress attempts).
+
 ## Ideas / later
 - [ ] gate flow: a GUI panel to review the pcap/exec-log report + approve in one
       place (report is staged today; approval reuses the staging approve flow).
+- [ ] GUI panel for the generic funnel (POST /api/runs/funnel is live; the Jobs
+      view already lists and streams its heads).
 - [ ] compaction for the generic orchestrator's subagents — currently bounded by
       subagent_max_iterations=8; add per-tool-result compaction only if leaves
       start doing heavy reads.

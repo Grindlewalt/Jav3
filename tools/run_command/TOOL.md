@@ -3,6 +3,7 @@ name: run_command
 description: Run a shell command inside the sandbox VM, in the active project's workspace. You have passwordless sudo. File changes made by the command are staged for operator approval.
 when_to_use: Building, testing, installing packages (sudo apt/pip), inspecting — any shell work.
 enabled: true
+requires_project: true
 parameters:
   type: object
   properties:

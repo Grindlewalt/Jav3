@@ -3,6 +3,7 @@ name: todo_update
 description: Add, check off, or remove items on the active project's todo list.
 when_to_use: Track work items the operator should see on the board.
 enabled: true
+requires_project: true
 parameters:
   type: object
   properties:

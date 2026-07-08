@@ -19,10 +19,10 @@ TOOL.md frontmatter:
     ---
     (body = references / examples for the model)
 
-handler.py must define `async def run(**args) -> str`. Legacy sources still
-scanned: backend/agent/tools/defs/*.md (with @tool_handler registration) and
-skills/<name>/SKILL.md. A registry entry without a handler is surfaced to the
-model but fails loudly if called — that mismatch is a bug we want to see.
+handler.py must define `async def run(**args) -> str`. Skills are compiled into
+the same registry from skills/<name>/SKILL.md. A registry entry without a
+handler is surfaced to the model but fails loudly if called — that mismatch is
+a bug we want to see.
 """
 import importlib.util
 import json
@@ -35,20 +35,9 @@ import yaml
 
 from ...config import settings
 
-TOOL_HANDLERS: dict[str, Callable[..., Awaitable[str]]] = {}
-
-DEFS_DIR = Path(__file__).parent / "defs"
-
 # handler.py modules loaded from tool folders, keyed by name, with the file
 # mtime so an edited handler reloads without a restart.
 _DYNAMIC: dict[str, tuple[float, Callable[..., Awaitable[str]]]] = {}
-
-
-def tool_handler(name: str):
-    def decorator(fn):
-        TOOL_HANDLERS[name] = fn
-        return fn
-    return decorator
 
 
 def _load_dynamic(name: str) -> Callable[..., Awaitable[str]] | None:
@@ -82,17 +71,19 @@ def _parse_md(path: Path) -> dict | None:
     return meta
 
 
+def _sources() -> list[Path]:
+    out: list[Path] = []
+    if settings.tools_dir.exists():
+        out += sorted(settings.tools_dir.glob("*/TOOL.md"))
+    if settings.skills_dir.exists():
+        out += sorted(settings.skills_dir.glob("*/SKILL.md"))
+    return out
+
+
 def compile_registry() -> list[dict]:
     """Scan tool defs + skills, write data/registry.json, return the entries."""
     entries: list[dict] = []
-    candidates: list[Path] = []
-    if settings.tools_dir.exists():
-        candidates += sorted(settings.tools_dir.glob("*/TOOL.md"))
-    if DEFS_DIR.exists():
-        candidates += sorted(DEFS_DIR.glob("*.md"))
-    if settings.skills_dir.exists():
-        candidates += sorted(settings.skills_dir.glob("*/SKILL.md"))
-    for path in candidates:
+    for path in _sources():
         meta = _parse_md(path)
         if meta:
             entries.append(meta)
@@ -102,8 +93,14 @@ def compile_registry() -> list[dict]:
 
 
 def load_registry() -> list[dict]:
+    """Cached registry, recompiled whenever any TOOL.md/SKILL.md is newer than
+    the cache — handlers already hot-reload by mtime, so the specs should too
+    (a stale spec meant an edited TOOL.md wasn't seen until restart)."""
     path = settings.data_dir / "registry.json"
     if not path.exists():
+        return compile_registry()
+    cached = path.stat().st_mtime
+    if any(p.stat().st_mtime > cached for p in _sources()):
         return compile_registry()
     return json.loads(path.read_text())
 
@@ -119,8 +116,10 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
         desc = e["description"]
         if e.get("when_to_use"):
             desc += f" Use when: {e['when_to_use']}"
+        # every enabled tool's spec ships on every turn, so the body slice is a
+        # per-turn tax across the whole registry — keep it tight
         if e.get("body"):
-            desc += f"\nNotes: {e['body'][:500]}"
+            desc += f"\nNotes: {e['body'][:300]}"
         specs.append({
             "type": "function",
             "function": {
@@ -133,7 +132,7 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
 
 
 async def dispatch(name: str, args: dict) -> str:
-    handler = TOOL_HANDLERS.get(name) or _load_dynamic(name)
+    handler = _load_dynamic(name)
     if handler is None:
         return f"error: tool '{name}' is registered but has no handler"
     try:

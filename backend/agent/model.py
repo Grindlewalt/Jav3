@@ -1,5 +1,6 @@
 """The single model choke point: every LLM call goes through Model.complete,
 and the peak-cost gate lives in front of it. The router drops in here later."""
+import asyncio
 import json
 import re
 import time
@@ -49,7 +50,9 @@ class PeakPricingConfirmationRequired(Exception):
 
 
 class ModelError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _parse_window(spec: str) -> tuple[dtime, dtime]:
@@ -141,6 +144,46 @@ class Model:
         if tools:
             payload["tools"] = tools
 
+        # Transient failures (connect errors, 5xx) retry with backoff — but only
+        # while nothing has streamed to the caller yet: once a token is out, a
+        # retry would duplicate visible output, so the error propagates instead.
+        raw: dict | None = None
+        yielded = False
+        for attempt in range(settings.model_retries + 1):
+            try:
+                async for ev in self._stream_once(base, key, payload):
+                    if ev["type"] == "token":
+                        yielded = True
+                        yield ev
+                    else:
+                        raw = ev
+                break
+            except (httpx.TransportError, ModelError) as e:
+                status = getattr(e, "status", None)
+                retryable = isinstance(e, httpx.TransportError) or (
+                    status is not None and status >= 500)
+                if yielded or not retryable or attempt == settings.model_retries:
+                    raise
+                await asyncio.sleep(
+                    settings.model_retry_backoff_seconds * (2 ** attempt))
+
+        assert raw is not None
+        usage = raw["usage"]
+        if budget is not None:
+            budget.add(usage or {})
+        content = raw["content"]
+        tcs = raw["tool_calls"]
+        # recover native-markup tool calls the serving layer failed to parse
+        if not tcs and _DSML_MARK in content:
+            recovered = parse_dsml_tool_calls(content)
+            if recovered:
+                tcs = recovered
+                content = ""   # the markup was the tool call, not a message
+        yield {"type": "message", "content": content, "tool_calls": tcs, "usage": usage}
+
+    async def _stream_once(self, base: str, key: str, payload: dict) -> AsyncIterator[dict]:
+        """One streaming HTTP attempt: token events, then a single raw
+        {"type": "raw", "content", "tool_calls", "usage"} accumulation."""
         content_parts: list[str] = []
         tool_calls: dict[int, dict] = {}
         usage: dict | None = None
@@ -155,7 +198,8 @@ class Model:
             ) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode(errors="replace")
-                    raise ModelError(f"model API {resp.status_code}: {body[:500]}")
+                    raise ModelError(f"model API {resp.status_code}: {body[:500]}",
+                                     status=resp.status_code)
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -188,17 +232,9 @@ class Model:
                         if fn.get("arguments"):
                             slot["function"]["arguments"] += fn["arguments"]
 
-        if budget is not None:
-            budget.add(usage or {})
-        content = "".join(content_parts)
-        tcs = [tool_calls[i] for i in sorted(tool_calls)]
-        # recover native-markup tool calls the serving layer failed to parse
-        if not tcs and _DSML_MARK in content:
-            recovered = parse_dsml_tool_calls(content)
-            if recovered:
-                tcs = recovered
-                content = ""   # the markup was the tool call, not a message
-        yield {"type": "message", "content": content, "tool_calls": tcs, "usage": usage}
+        yield {"type": "raw", "content": "".join(content_parts),
+               "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
+               "usage": usage}
 
 
 model = Model()

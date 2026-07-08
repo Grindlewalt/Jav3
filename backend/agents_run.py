@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .agent.loop import run_turn
-from .agent.model import confirm_peak, in_peak_window, peak_confirmed
+from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .agents_api import _read
 from .auth import require_user
@@ -90,7 +90,12 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
     """Run an agent to completion, no streaming — for scheduled runs and the
     spawn_agent tool. Peak is auto-confirmed: the caller (a schedule or Jarvis
     itself) already intended this, there's no human to prompt. `active` pins
-    the project context without disturbing the operator's live session."""
+    the project context without disturbing the operator's live session.
+
+    Headless runs are subagents of something (a parent turn or a schedule), so
+    they get the tight subagent iteration cap unless the agent's definition
+    grants more via max_iterations — the full 40-round chat cap is what let a
+    subagent read dozens of pages and snowball its context."""
     db = await get_db()
     try:
         agent, conversation_id = await _open_agent_run(db, slug, task, active=active)
@@ -98,10 +103,12 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent)
         mdl, burl = _agent_overrides(agent)
+        cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
         final_content = ""
         async for event in run_turn(db, conversation_id, system_prompt,
-                                    history, tools=tools, model_name=mdl, base_url=burl):
+                                    history, tools=tools, model_name=mdl,
+                                    base_url=burl, max_iterations=cap):
             if event["type"] == "final":
                 final_content = event["content"]
         await db.execute(
@@ -112,6 +119,38 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
                 "final": final_content}
     finally:
         await db.close()
+
+
+async def compact_report(agent_name: str, task: str, report: str,
+                          conversation_id: int) -> str:
+    """A spawned agent's report becomes a tool result in the PARENT's loop and
+    re-rides its context every remaining iteration, so a big one is compacted
+    to a tight summary first (the full report stays persisted on the agent's
+    conversation, findable in the Jobs view). Falls back to plain truncation if
+    the summarize call fails — compaction must never lose the run."""
+    cap = settings.agent_report_max_chars
+    if len(report) <= cap:
+        return report
+    try:
+        parts = []
+        async for ev in model.complete([
+            {"role": "system", "content":
+                "Compress this agent report for the agent that requested it: "
+                "keep every finding, decision, number and file path that the "
+                "requester needs; drop process narration. Tight markdown, no "
+                "preamble."},
+            {"role": "user", "content": f"Task: {task}\n\nReport:\n{report[:24_000]}"},
+        ], temperature=0.2):
+            if ev["type"] == "message":
+                parts.append(ev["content"])
+        summary = "".join(parts).strip()
+        if not summary:
+            raise ValueError("empty summary")
+        return (f"{summary}\n\n(compacted from {len(report):,} chars — full "
+                f"report on conversation {conversation_id} in the Jobs view)")
+    except Exception:  # noqa: BLE001 — degrade to truncation, never fail the run
+        return (report[:cap] + f"\n...(truncated: {len(report):,} chars total — "
+                f"full report on conversation {conversation_id} in the Jobs view)")
 
 
 @router.post("/{slug}/run")

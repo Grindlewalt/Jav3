@@ -24,6 +24,7 @@ from pathlib import Path
 from .agent.tools import vm, vmexec
 from .config import settings
 from .db import get_db
+from .sandbox import classify, rules_index
 from .staging import stage_write
 
 TAP = "jvtap0"
@@ -425,6 +426,14 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     evidence_path = cap_dir / f"gate-{run_id}-evidence.json"
     evidence_path.write_text(json.dumps(evidence, indent=1))
 
+    # Deterministic verdict, same classifier the review console uses. It is
+    # rule-based arithmetic over host-side captures (never steered by agent
+    # output), so it is safe to hand back to the agent — closing the feedback
+    # loop lets the agent react in-turn ("my run tried to beacon somewhere,
+    # fix the code / ask the operator") instead of only the human seeing it.
+    # Approval authority stays with the operator regardless.
+    c = classify(evidence, await rules_index())
+
     report = build_report(slug, command, result, dns, execs, drops, flows,
                           locked, fresh, str(pcap_path) if have_pcap else None)
     report_rel = f"runs/gate-{run_id}/report.md"
@@ -447,4 +456,9 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
         "staged": result.get("staged", []), "report": report_rel,
         "egress_locked": locked, "dns_lookups": len(dns),
         "blocked_attempts": len(drops), "execs_logged": len(execs),
+        "verdict": c["verdict"], "verdict_rule": c["rule"],
+        "headline": c["headline"],
+        "blocked": [f"{b.get('host') or b['ip']}:{b['port']}/{b['proto']} "
+                    f"({b['attempts']} attempt{'s' if b['attempts'] != 1 else ''})"
+                    for b in evidence["blocked"]],
     }

@@ -16,9 +16,17 @@ async def run(command: str, timeout: float | None = None, fresh: bool = True) ->
         return f"error: {e}"
     lines = [
         f"gate run {r['run_id']}: exit={r['exit_status']} status={r['status']}",
+        # deterministic classifier verdict (host-side captures, not agent
+        # output) — react to it: a warn/crit means the run did something the
+        # operator will have to judge; fix the code or flag it yourself
+        f"verdict: {r['verdict']} ({r['verdict_rule']}) — {r['headline']}",
         f"egress lock: {'verified' if r['egress_locked'] else 'NOT VERIFIED'}",
         f"dns lookups: {r['dns_lookups']}, blocked egress attempts: "
         f"{r['blocked_attempts']}, execs logged: {r['execs_logged']}",
+    ]
+    if r["blocked"]:
+        lines.append("blocked destinations: " + ", ".join(r["blocked"]))
+    lines += [
         f"staged: {', '.join(r['staged']) if r['staged'] else 'none'}",
         f"report staged at {r['report']} — operator must review it and approve "
         "staged files before anything goes live",

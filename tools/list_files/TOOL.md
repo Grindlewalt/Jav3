@@ -3,6 +3,7 @@ name: list_files
 description: List all files in the active project, marking which have unapproved staged edits.
 when_to_use: To see what exists before reading, editing or running anything.
 enabled: true
+requires_project: true
 parameters:
   type: object
   properties: {}
