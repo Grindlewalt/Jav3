@@ -92,7 +92,7 @@ write_files:
       ## the stream is broad but the retained evidence is scoped. If run-time
       ## volume is a problem, narrow this to dir watches on the fixed secret
       ## locations -- the host parser keys off jread either way.
-      -a always,exit -F arch=b64 -S openat,open -F auid>=1000 -F success=1 -k jread
+      -a always,exit -F arch=b64 -S openat -F auid>=1000 -F success=1 -k jread
   - path: /etc/systemd/system/audit-stream.service
     content: |
       [Unit]
