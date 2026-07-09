@@ -186,8 +186,12 @@ async def suricata_scan(pcap_path: Path, out_dir: Path) -> list[dict]:
     if not suricata_ready() or not pcap_path.is_file() or pcap_path.stat().st_size == 0:
         return []
     out_dir.mkdir(parents=True, exist_ok=True)
+    # -k none: the tap captures packets before the NIC computes checksums (offload),
+    # so checksum validation would flag every run with bogus "invalid checksum"
+    # anomalies. Disable it for offline pcap analysis.
     r = await _run(["suricata", "-r", str(pcap_path), "-l", str(out_dir),
-                    "-S", str(SURICATA_RULES), "--runmode", "single"], timeout=180)
+                    "-S", str(SURICATA_RULES), "-k", "none",
+                    "--runmode", "single"], timeout=180)
     if r is None:
         return []
     eve = out_dir / "eve.json"
