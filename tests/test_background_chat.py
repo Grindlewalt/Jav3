@@ -111,3 +111,27 @@ async def test_second_message_while_running_409s(client, monkeypatch):
     r = await client.get(f"/api/conversations/{cid}/messages")
     roles = [m["role"] for m in r.json()["messages"]]
     assert roles == ["user", "assistant"]
+
+async def test_job_announce_reaches_chat_channel(client, monkeypatch):
+    """A tool-launched job (research/funnel) announces itself on the chat
+    channel so the GUI mounts a live tree inline."""
+    from backend import bus, chat as chat_mod, runtime
+
+    async def turn_that_launches_a_job(db, cid, system_prompt, history,
+                                       tools=None, **kw):
+        # simulate what run_research does inside a tool dispatch
+        bus.announce_job("jobabc", 4242, "Research: pi facts")
+        yield {"type": "final", "content": "done"}
+
+    monkeypatch.setattr(chat_mod, "run_turn", turn_that_launches_a_job)
+    r = await client.post("/api/chat", json={"message": "go", "confirm_peak": True})
+    # the POST tail returns on the final event while the detached turn task is
+    # still in its finally (usage log, db.close) — await it, or pytest closes
+    # the loop under it and the orphaned aiosqlite thread blocks process exit
+    await asyncio.gather(*chat_mod._active_turns.values())
+    assert '"type": "job"' in r.text
+    assert '"root_id": 4242' in r.text
+    assert "Research: pi facts" in r.text
+    # outside a chat turn the announce is a silent no-op
+    assert runtime.event_chan.get() is None
+    bus.announce_job("jobxyz", 1, "orphan")   # must not raise

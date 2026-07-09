@@ -47,3 +47,13 @@ def publish(job_id: str, event: dict) -> None:
 def close_job(job_id: str) -> None:
     """Signal end-of-job to every subscriber; they unsubscribe themselves."""
     publish(job_id, JOB_END)
+
+
+def announce_job(job_id: str, root_id: int, title: str) -> None:
+    """Tell the chat turn that launched this job (if any) that it started, so
+    the GUI mounts a live JobTree inline. No-op outside a chat turn."""
+    from . import runtime
+    chan = runtime.event_chan.get()
+    if chan:
+        publish(chan, {"type": "job", "job_id": job_id, "root_id": root_id,
+                       "title": title})

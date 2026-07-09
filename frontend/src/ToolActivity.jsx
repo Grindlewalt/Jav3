@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import JobTree from './JobTree.jsx'
 import Md from './Md.jsx'
 
 // Live tool-activity rendering shared by Chat and ChatBox: humanized one-line
@@ -85,7 +86,9 @@ export function ActivityGroup({ parts }) {
       <div className="tool-row-head dim" onClick={() => setOpen((o) => !o)}>
         <span>{open ? '▾' : '▸'} {parts.length} step{parts.length !== 1 ? 's' : ''}</span>
       </div>
-      {open && parts.map((p, i) => <ToolRow key={p.id || i} part={p} />)}
+      {open && parts.map((p, i) => p.kind === 'job'
+        ? <div key={`job${p.root_id}`} className="tool-row ok"><JobTree cid={p.root_id} /></div>
+        : <ToolRow key={p.id || i} part={p} />)}
     </div>
   )
 }
@@ -104,6 +107,9 @@ export function applyTurnEvent(m, ev) {
     const i = parts.findIndex((p) => p.kind === 'tool' && !p.done
       && (ev.id ? p.id === ev.id : p.name === ev.name))
     if (i !== -1) parts[i] = { ...parts[i], done: true, ok: ev.ok, result: ev.result }
+  } else if (ev.type === 'job') {
+    // a tool launched a multi-agent job — mount its live tree inline
+    parts.push({ kind: 'job', root_id: ev.root_id, title: ev.title })
   }
   return { ...m, parts }
 }
@@ -112,8 +118,8 @@ export function applyTurnEvent(m, ev) {
 export function finishTurn(m, content) {
   return {
     role: 'assistant', content,
-    activity: (m.parts || []).filter((p) => p.kind === 'tool')
-      .map((p) => (p.done ? p : { ...p, done: true, ok: true })),
+    activity: (m.parts || []).filter((p) => p.kind === 'tool' || p.kind === 'job')
+      .map((p) => (p.kind === 'job' || p.done ? p : { ...p, done: true, ok: true })),
   }
 }
 
@@ -122,9 +128,16 @@ export function MessageBody({ m }) {
     return (
       <div className="bubble">
         {m.parts.length === 0 && '…'}
-        {m.parts.map((p, i) => p.kind === 'text'
-          ? <Md key={i} text={p.text} />
-          : <ToolRow key={p.id || i} part={p} />)}
+        {m.parts.map((p, i) => {
+          if (p.kind === 'text') return <Md key={i} text={p.text} />
+          if (p.kind === 'job') return (
+            <div key={`job${p.root_id}`} className="tool-row ok">
+              <div className="tool-row-head"><span className="grow">🌳 {p.title}</span></div>
+              <JobTree cid={p.root_id} />
+            </div>
+          )
+          return <ToolRow key={p.id || i} part={p} />
+        })}
       </div>
     )
   }

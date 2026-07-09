@@ -24,6 +24,7 @@ from pathlib import Path
 from .agent.tools import vm, vmexec
 from .config import settings
 from .db import get_db
+from . import threatintel
 from .sandbox import classify, match_sensitive, rules_index
 from .staging import stage_write
 
@@ -484,7 +485,7 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     # loop lets the agent react in-turn ("my run tried to beacon somewhere,
     # fix the code / ask the operator") instead of only the human seeing it.
     # Approval authority stays with the operator regardless.
-    c = classify(evidence, await rules_index())
+    c = classify(evidence, await rules_index(), threatintel.load())
 
     report = build_report(slug, command, result, dns, execs, drops, flows,
                           locked, fresh, str(pcap_path) if have_pcap else None)

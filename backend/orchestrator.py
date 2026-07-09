@@ -247,6 +247,7 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     bus.publish(job_id, {
         "type": "node_spawned", "node_id": root_id, "parent_id": None,
         "kind": "head", "title": title or brief[:60], "depth": 0})
+    bus.announce_job(job_id, root_id, title or brief[:60])
 
     # one token budget across every node of this job (contextvar propagates into
     # the gathered child tasks). Inherit a caller's budget if there is one, else

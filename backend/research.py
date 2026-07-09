@@ -231,6 +231,7 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         head = await _node(project, None, job_id, "head", f"Research: {topic}")
         confirm_peak(head)
         bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": head})
+        bus.announce_job(job_id, head, f"Research: {topic}")
         bus.publish(job_id, {"type": "node_spawned", "node_id": head, "parent_id": None,
                              "kind": "head", "title": f"Research: {topic}", "depth": 0})
 

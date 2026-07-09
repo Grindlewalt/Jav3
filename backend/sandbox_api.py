@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from . import render as render_flow
-from . import sandbox, staging
+from . import sandbox, staging, threatintel
 from .agent.tools import vm
 from .auth import require_user
 from .config import settings
@@ -55,12 +55,13 @@ async def _runs_with_evidence() -> list[dict]:
 async def sessions():
     rows = await _runs_with_evidence()
     idx = await sandbox.rules_index()
+    bl = threatintel.load()
     out = []
     for r in rows:
         ev = _load_evidence(r["id"])
         if ev is None:
             continue
-        c = sandbox.classify(ev, idx)
+        c = sandbox.classify(ev, idx, bl)
         f = c["facts"]
         out.append({
             "id": r["id"], "project": r["project"],
@@ -81,7 +82,7 @@ async def session_detail(run_id: int):
     if ev is None:
         raise HTTPException(status_code=404, detail="no evidence for this run")
     idx = await sandbox.rules_index()
-    c = sandbox.classify(ev, idx)
+    c = sandbox.classify(ev, idx, threatintel.load())
     return {
         "id": run_id, "project": ev.get("project", ""),
         "command": ev.get("command", ""), "created_at": ev.get("created_at"),

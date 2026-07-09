@@ -67,7 +67,7 @@ export default function ChatBox({ projectSlug }) {
                 body: JSON.stringify({ project: projectSlug }),
               }).then(refresh)
           }
-          if (ev.type === 'token' || ev.type === 'tool' || ev.type === 'tool_result')
+          if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
             setMessages((m) => {
               const copy = [...m]
               copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)

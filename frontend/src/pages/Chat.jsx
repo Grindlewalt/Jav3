@@ -32,7 +32,7 @@ export default function Chat() {
   // swaps in the reply with the activity collapsed above it.
   function handleTurnEvent(ev) {
     if (ev.type === 'start' && !incognito) setConversationId(ev.conversation_id)
-    if (ev.type === 'token' || ev.type === 'tool' || ev.type === 'tool_result')
+    if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
       setMessages((m) => {
         const copy = [...m]
         copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)

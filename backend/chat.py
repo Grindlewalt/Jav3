@@ -172,6 +172,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         settings.max_op_input_tokens, settings.max_op_output_tokens)
     btoken = budget.active_budget.set(the_budget)
     chan = _chan(conversation_id)
+    ctoken = runtime.event_chan.set(chan)
     atoken = None
     db = await get_db()
     try:
@@ -243,6 +244,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 pass
         if atoken is not None:
             runtime.artifact_slug.reset(atoken)
+        runtime.event_chan.reset(ctoken)
         runtime.ephemeral.reset(token)
         budget.active_budget.reset(btoken)
         await db.close()

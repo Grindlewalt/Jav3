@@ -313,9 +313,17 @@ def behavior_findings(evidence: dict) -> list[dict]:
     return out
 
 
-def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
-    """Raw capture + current allowlist -> the console's session view."""
+def classify(evidence: dict, rule_index: dict[tuple, dict],
+             blocklist=None) -> dict:
+    """Raw capture + current allowlist -> the console's session view.
+
+    `blocklist` is an optional threatintel.Blocklist; a matched destination is a
+    hard critical that no allowlist approval can clear. None => no reputation
+    matching (keeps classify pure and testable without feeds on disk)."""
     allow_hosts = {r["dest"] for r in rule_index.values()}
+
+    def _ti(ip="", host=""):
+        return bool(blocklist) and blocklist.hit(ip, host)
 
     egress: list[dict] = []
     delivered_bytes = 0
@@ -394,6 +402,22 @@ def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
            for d in evidence.get("dns", [])]
     staged = [{"path": p} for p in evidence.get("staged", [])]
 
+    # threat-intel reputation: a captured dest on a known-bad feed is a hard
+    # critical and non-clearable. Overrides the allowlist — even an approved dest
+    # that later shows up on a feed flags. Marks the row so the console/API can
+    # refuse to allowlist it.
+    threat = []
+    for e in egress:
+        if _ti(e["ip"], e["host"]):
+            e["sev"], e["blocklisted"] = "crit", True
+            e["rule"] = "threat-intel: known-bad host"
+            threat.append({"kind": "egress", "host": e["host"], "ip": e["ip"],
+                           "port": e["port"]})
+    for d in dns:
+        if _ti(host=d["name"]):
+            d["threat"] = True
+            threat.append({"kind": "dns", "host": d["name"]})
+
     # beacon-catcher: a rendered artifact's network attempts (payload visible)
     beacons, artifact = [], None
     render = evidence.get("render")
@@ -420,7 +444,9 @@ def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
 
     # deterministic verdict = worst signal present
     crit_sens = any(s["sev"] == "crit" for s in sensitive)
-    if beacon_ext:
+    if threat:
+        verdict, rule = "crit", "threat-intel:known-bad-destination"
+    elif beacon_ext:
         verdict, rule = "crit", "dashboard-beacon"
     elif behavior_crit:
         verdict, rule = "crit", f"behavior:{behavior_crit['kind']}"
@@ -439,13 +465,14 @@ def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
         "blocked_attempts": blocked_attempts, "delivered_bytes": _human(delivered_bytes),
         "sensitive": len(sensitive), "execs": len(execs), "staged": len(staged),
         "lan_hosts": lan_hosts, "beacons": len(beacons), "beacons_external": beacon_ext,
-        "behavior": len(behavior),
+        "behavior": len(behavior), "threat": len(threat),
     }
     return {
         "verdict": verdict, "rule": rule, "headline": _headline(facts, verdict),
         "facts": facts, "egress": egress, "dns": dns,
         "sensitive": sensitive, "execs": execs, "staged": staged,
         "beacons": beacons, "artifact": artifact, "behavior": behavior,
+        "threat": threat,
     }
 
 
@@ -464,6 +491,9 @@ def is_lan_host(host: str) -> bool:
 
 def _headline(f: dict, verdict: str) -> str:
     p = []
+    if f.get("threat"):
+        n = f["threat"]
+        p.append(f"{n} known-bad destination{'s' if n > 1 else ''} (threat feed)")
     if f.get("beacons_external"):
         n = f["beacons_external"]
         p.append(f"artifact beaconed to {n} external host{'s' if n > 1 else ''}")

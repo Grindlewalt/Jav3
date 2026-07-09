@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { NavLink } from 'react-router-dom'
 import { api } from '../api.js'
+import JobTree from '../JobTree.jsx'
 import Md from '../Md.jsx'
 
 // All background work in one place: agent runs, scheduled runs, and research
 // heads. The list polls so fresh jobs appear; opening an agent/scheduled job
-// shows its transcript, opening a research head shows its document (watch it
-// live on the Runs tab).
+// shows its transcript, opening a research head shows its live tree and
+// document (the tree also appears inline in the chat that launched it).
 const KINDS = ['', 'agent', 'scheduled', 'head']
 const KIND_LABEL = { agent: 'agent', scheduled: 'scheduled', head: 'research' }
 
@@ -16,6 +16,7 @@ export default function Jobs() {
   const [selected, setSelected] = useState(null) // the selected job row
   const [messages, setMessages] = useState([])
   const [doc, setDoc] = useState(null)
+  const [showTree, setShowTree] = useState(false)
 
   const refresh = () =>
     api(`/api/jobs${kind ? `?kind=${kind}` : ''}`).then((r) => setJobs(r.jobs)).catch(() => {})
@@ -26,7 +27,7 @@ export default function Jobs() {
   }, [kind]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function openJob(j) {
-    setSelected(j); setMessages([]); setDoc(null)
+    setSelected(j); setMessages([]); setDoc(null); setShowTree(!j.done)
     if (j.kind === 'head') {
       api(`/api/runs/${j.id}/doc`).then((r) => setDoc(r.content ? r : null)).catch(() => setDoc(null))
     } else {
@@ -71,7 +72,7 @@ export default function Jobs() {
             set a schedule, or start a research</li>}
         </ul>
         <p className="dim small">agent and scheduled runs show their transcript;
-          research jobs show their document (follow them live on the Runs tab).</p>
+          research jobs show their live tree and document.</p>
       </aside>
       <main className="editor-pane">
         {!selected ? (
@@ -81,9 +82,12 @@ export default function Jobs() {
             <div className="row" style={{ alignItems: 'center' }}>
               <span className="dim small grow">
                 {selected.done ? 'finished' : '● running'} · {selected.started_at}</span>
-              <NavLink to="/runs" className="ghost-link">watch on Runs</NavLink>
+              <button className="ghost" onClick={() => setShowTree((s) => !s)}>
+                {showTree ? 'show document' : 'show tree'}</button>
             </div>
-            {doc ? (
+            {showTree ? (
+              <JobTree cid={selected.id} onFinal={refresh} />
+            ) : doc ? (
               <div className="run-doc">
                 <div className="dim small">
                   {doc.staged ? 'staged (pending approval)' : 'approved'} · {doc.path}</div>

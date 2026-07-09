@@ -14,3 +14,8 @@ ephemeral = contextvars.ContextVar("jarvis_ephemeral", default=False)
 # project slug the file tools fall back to when no project is loaded. An
 # explicitly loaded project always wins (see toolctx.require_project).
 artifact_slug = contextvars.ContextVar("jarvis_artifact_slug", default=None)
+
+# The bus channel of the chat turn that's running (chat:<cid>), so a job a
+# tool launches mid-turn (research, funnel) can announce itself to the chat
+# stream — the GUI mounts a live JobTree on the announcement.
+event_chan = contextvars.ContextVar("jarvis_event_chan", default=None)
