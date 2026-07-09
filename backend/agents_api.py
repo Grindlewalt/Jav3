@@ -41,6 +41,92 @@ class CreateAgent(BaseModel):
     name: str
 
 
+# --- auto prompt generator: one-line description -> quiz -> system prompt ----
+
+QUIZ_SYSTEM = """You design system prompts for task agents. Given a one-line \
+description of an agent, produce 3-5 short clarifying questions whose answers \
+would most improve the prompt — scope, tone, output format, autonomy/limits, \
+failure behavior. Reply with ONLY a JSON array, no prose:
+[{"question": "...", "kind": "single"|"multi"|"short", "options": ["...", ...]}]
+kind "short" means free text (options must be []). Keep options concrete and \
+mutually distinct, 2-4 per question."""
+
+GENERATE_SYSTEM = """You write system prompts for task agents. Given the \
+agent's description and the operator's answers to clarifying questions, write \
+a complete system prompt (150-300 words): who the agent is, its exact scope, \
+how it should work, output format, and what it must NOT do. Direct second \
+person ("You are..."). Output only the prompt text, no preamble or fences."""
+
+
+class QuizRequest(BaseModel):
+    description: str
+
+
+class GenerateRequest(BaseModel):
+    description: str
+    answers: list[dict] = []   # [{question, answer}]
+
+
+def _extract_json_array(text: str):
+    import json
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-z]*\n?|\n?```$", "", text, flags=re.M).strip()
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end <= start:
+        raise ValueError("no JSON array in reply")
+    return json.loads(text[start:end + 1])
+
+
+@router.post("/prompt-quiz")
+async def prompt_quiz(body: QuizRequest):
+    from .summarize import complete_text
+    if not body.description.strip():
+        raise HTTPException(status_code=400, detail="description is required")
+    last_err = None
+    for attempt in range(2):
+        try:
+            raw = await complete_text(
+                QUIZ_SYSTEM if attempt == 0 else
+                QUIZ_SYSTEM + "\nYour previous reply was not valid JSON. "
+                "Reply with ONLY the JSON array.",
+                f"Agent description: {body.description.strip()}",
+                temperature=0.4)
+            questions = _extract_json_array(raw)
+            cleaned = [{"question": str(q.get("question", "")).strip(),
+                        "kind": q.get("kind") if q.get("kind") in
+                        ("single", "multi", "short") else "single",
+                        "options": [str(o) for o in (q.get("options") or [])]}
+                       for q in questions if str(q.get("question", "")).strip()]
+            if cleaned:
+                return {"questions": cleaned[:5]}
+            last_err = "model returned no questions"
+        except Exception as e:  # noqa: BLE001 — surfaced as a 502 below
+            last_err = str(e)
+    raise HTTPException(status_code=502, detail=f"quiz generation failed: {last_err}")
+
+
+@router.post("/prompt-generate")
+async def prompt_generate(body: GenerateRequest):
+    from .summarize import complete_text
+    if not body.description.strip():
+        raise HTTPException(status_code=400, detail="description is required")
+    answered = "\n".join(
+        f"Q: {a.get('question', '')}\nA: {a.get('answer', '')}"
+        for a in body.answers if str(a.get('answer', '')).strip())
+    try:
+        prompt = await complete_text(
+            GENERATE_SYSTEM,
+            f"Agent description: {body.description.strip()}\n\n"
+            f"Operator's answers:\n{answered or '(none given)'}",
+            temperature=0.5)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"generation failed: {e}")
+    if not prompt.strip():
+        raise HTTPException(status_code=502, detail="model returned an empty prompt")
+    return {"prompt": prompt.strip()}
+
+
 class SaveAgent(BaseModel):
     name: str
     description: str = ""

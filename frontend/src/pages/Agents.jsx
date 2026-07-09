@@ -13,6 +13,8 @@ export default function Agents() {
   const [contextItems, setContextItems] = useState([])
   const [toolItems, setToolItems] = useState([])
   const [skillItems, setSkillItems] = useState([])
+  const [quiz, setQuiz] = useState(null)        // [{question, kind, options, answer}]
+  const [genBusy, setGenBusy] = useState(false)
   const nameRef = useRef(null)
 
   const refresh = () => {
@@ -74,6 +76,40 @@ export default function Agents() {
         ? list.filter((x) => x !== item)
         : [...list, item],
     })
+  }
+
+  function setAnswer(i, answer) {
+    setQuiz((qz) => qz.map((q, j) => (j === i ? { ...q, answer } : q)))
+  }
+
+  async function startQuiz() {
+    const description = agent.description?.trim()
+      || window.prompt('one sentence: what should this agent do?')
+    if (!description) return
+    if (!agent.description?.trim()) patch({ description })
+    setGenBusy(true)
+    try {
+      const r = await api('/api/agents/prompt-quiz', {
+        method: 'POST', body: JSON.stringify({ description }) })
+      setQuiz(r.questions.map((q) => ({ ...q, answer: q.kind === 'multi' ? [] : '' })))
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setGenBusy(false)
+  }
+
+  async function generatePrompt() {
+    setGenBusy(true)
+    try {
+      const answers = quiz.map((q) => ({
+        question: q.question,
+        answer: Array.isArray(q.answer) ? q.answer.join(', ') : q.answer,
+      }))
+      const r = await api('/api/agents/prompt-generate', {
+        method: 'POST',
+        body: JSON.stringify({ description: agent.description, answers }) })
+      patch({ prompt: r.prompt })
+      setQuiz(null)
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setGenBusy(false)
   }
 
   async function save() {
@@ -197,10 +233,48 @@ export default function Agents() {
               </label>
             </div>
             <label className="prompt-label">system prompt
+              <span className="row" style={{ float: 'right', gap: 6 }}>
+                <button className="ghost" type="button" disabled={genBusy}
+                        title="answer a short quiz, get a generated prompt"
+                        onClick={startQuiz}>{genBusy ? '…' : '✨ generate'}</button>
+              </span>
               <textarea className="md-editor" rows={7} spellCheck={false}
                         value={agent.prompt}
                         onChange={(e) => patch({ prompt: e.target.value })} />
             </label>
+            {quiz && (
+              <div className="quiz">
+                <div className="side-title">quick quiz — answers shape the prompt</div>
+                {quiz.map((q, i) => (
+                  <div key={i} className="quiz-q">
+                    <div>{q.question}</div>
+                    {q.kind === 'short' ? (
+                      <input placeholder="short answer…" value={q.answer || ''}
+                             onChange={(e) => setAnswer(i, e.target.value)} />
+                    ) : q.options.map((o) => (
+                      <label key={o} className="quiz-opt">
+                        <input
+                          type={q.kind === 'multi' ? 'checkbox' : 'radio'}
+                          name={`q${i}`}
+                          checked={q.kind === 'multi'
+                            ? (q.answer || []).includes(o) : q.answer === o}
+                          onChange={() => q.kind === 'multi'
+                            ? setAnswer(i, (q.answer || []).includes(o)
+                                ? (q.answer || []).filter((x) => x !== o)
+                                : [...(q.answer || []), o])
+                            : setAnswer(i, o)} />
+                        <span>{o}</span>
+                      </label>
+                    ))}
+                  </div>
+                ))}
+                <div className="row">
+                  <button type="button" disabled={genBusy} onClick={generatePrompt}>
+                    {genBusy ? 'writing…' : 'write the prompt'}</button>
+                  <button type="button" className="ghost" onClick={() => setQuiz(null)}>cancel</button>
+                </div>
+              </div>
+            )}
             <ExcludeList title="context (untick to exclude)" items={contextItems}
                          field="context_exclude" />
             <ExcludeList title="tools (untick to exclude)" items={toolItems}

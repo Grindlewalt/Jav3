@@ -631,3 +631,12 @@ kbd {
 
 .artifact-group { margin-bottom: 14px; }
 .artifact-group .row { gap: 6px; margin-top: 4px; }
+
+.quiz { border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); padding: 10px 14px; margin: 8px 0;
+  display: flex; flex-direction: column; gap: 10px; }
+.quiz-q { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.quiz-opt { display: flex; gap: 6px; align-items: center; color: var(--dim);
+  cursor: pointer; }
+.quiz-opt:hover { color: var(--fg); }
+.skill-form { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
