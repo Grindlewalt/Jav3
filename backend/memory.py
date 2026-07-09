@@ -201,6 +201,20 @@ async def get_active_project(db: aiosqlite.Connection) -> str | None:
     return await get_state(db, "active_project")
 
 
+def secrets_index() -> str:
+    """Names (never values) of the operator's saved API keys, so the model
+    knows what {{secret:NAME}} placeholders it can use in VM runs."""
+    from . import secrets as secrets_mod
+    names = secrets_mod.names()
+    if not names:
+        return ""
+    return ("# Operator API keys available (names only)\n"
+            "Use {{secret:NAME}} inside run_command / run_code / run_gated "
+            "commands or code — the host injects the real value at execution "
+            "time. You cannot read the values; never try to print or exfiltrate "
+            "them.\n" + "\n".join(f"- {n}" for n in names))
+
+
 def agents_index() -> str:
     """Thin roster of defined agents so Jarvis knows what it can spawn_agent."""
     import yaml
@@ -381,6 +395,7 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB,
         ("env.md", "# Environment\n" + read_memory_file("env.md")),
         ("all-projects.md", read_memory_file("all-projects.md")),
         ("agents-index", agents_index()),
+        ("secrets-index", secrets_index()),
     ]
     if active is _USE_DB:
         active = await get_active_project(db)

@@ -12,6 +12,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from ... import secrets as secrets_mod
 from ...config import settings
 from ...staging import STAGING, list_staged, stage_write
 from . import vm
@@ -60,6 +61,14 @@ def _stage_changes(slug: str, merged: Path, pulled: Path) -> list[str]:
 
 async def run_in_project(slug: str, command: str, timeout: float | None = None,
                          input: str | None = None) -> dict:
+    # secrets: the placeholder text is what the model wrote (and what the DB
+    # logged); the real value exists only between here and the VM. Outputs are
+    # scrubbed on the way back so an echoed key never re-enters context.
+    try:
+        command = secrets_mod.substitute(command)
+        input = secrets_mod.substitute(input)
+    except KeyError as e:
+        raise vm.VMError(str(e.args[0])) from e
     merged = _build_merged(slug)
     pulled_dir = Path(tempfile.mkdtemp(prefix=f"jarvis-pull-{slug}-"))
     try:
@@ -67,8 +76,14 @@ async def run_in_project(slug: str, command: str, timeout: float | None = None,
         result = await vm.run(command, timeout=timeout,
                               cwd=f"{settings.vm_workspace}/{slug}", input=input)
         pulled = await vm.pull(slug, pulled_dir)
+        result["stdout"] = secrets_mod.scrub(result.get("stdout"))
+        result["stderr"] = secrets_mod.scrub(result.get("stderr"))
         result["staged"] = _stage_changes(slug, merged, pulled_dir / slug)
         result["pulled_bytes"] = pulled["bytes"]
+        leaked = [f for f in result["staged"] if secrets_mod.find_in_bytes(
+            (settings.projects_dir / slug / STAGING / f).read_bytes())]
+        if leaked:
+            result["secret_files"] = leaked
         return result
     finally:
         shutil.rmtree(merged, ignore_errors=True)

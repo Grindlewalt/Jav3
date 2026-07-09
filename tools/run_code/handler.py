@@ -13,6 +13,10 @@ def _fmt(r: dict) -> str:
         parts[0] += " (no output)"
     if r.get("staged"):
         parts.append("files changed (staged for approval): " + ", ".join(r["staged"]))
+    if r.get("secret_files"):
+        parts.append("warning: a secret VALUE was written into staged file(s): "
+                     + ", ".join(r["secret_files"])
+                     + " — tell the operator to review before approving")
     return "\n".join(parts)
 
 

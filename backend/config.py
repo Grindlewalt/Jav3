@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_ttl_hours: int = 24 * 7
 
+    # Operator API keys the agent uses by {{secret:NAME}} placeholder but
+    # never sees (backend/secrets.py). Lives next to the env file.
+    secrets_path: Path = Path(os.path.expanduser("~/.config/jarvis/secrets.json"))
+
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-v4-flash"

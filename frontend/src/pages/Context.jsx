@@ -10,12 +10,32 @@ export default function Context() {
   const [assembled, setAssembled] = useState(null)
   const [dirty, setDirty] = useState(false)
   const [status, setStatus] = useState('')
+  const [secrets, setSecrets] = useState([])
 
   async function refresh() {
     const r = await api('/api/memory')
     setFiles(r.files)
+    api('/api/secrets').then((s) => setSecrets(s.secrets)).catch(() => {})
   }
   useEffect(() => { refresh() }, [])
+
+  async function addSecret() {
+    const name = window.prompt('secret name (e.g. TBA_KEY)')
+    if (!name) return
+    const value = window.prompt(`value for ${name.toUpperCase()} (stored host-side; the agent only ever sees the name)`)
+    if (!value) return
+    try {
+      await api(`/api/secrets/${encodeURIComponent(name)}`, {
+        method: 'PUT', body: JSON.stringify({ value }) })
+      refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+  }
+
+  async function delSecret(name) {
+    if (!window.confirm(`delete secret ${name}?`)) return
+    await api(`/api/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    refresh()
+  }
 
   useEffect(() => {
     if (selected === ASSEMBLED) {
@@ -71,6 +91,21 @@ export default function Context() {
           ))}
         </ul>
         <button className="ghost" onClick={newNote}>+ new note</button>
+        <div className="side-title" style={{ marginTop: 16 }}
+             title="API keys the agent can use via {{secret:NAME}} in VM runs but never read">
+          Secrets</div>
+        <ul className="file-list">
+          {secrets.length === 0 && <li className="dim">none saved</li>}
+          {secrets.map((s) => (
+            <li key={s.name}>
+              <span className="grow">{s.name}</span>
+              <span className="dim small">…{s.last4}</span>
+              <button className="win-btn" title="delete"
+                      onClick={() => delSecret(s.name)}>×</button>
+            </li>
+          ))}
+        </ul>
+        <button className="ghost" onClick={addSecret}>+ add secret</button>
       </aside>
       <main className="editor-pane">
         {readOnly ? (
