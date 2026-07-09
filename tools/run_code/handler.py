@@ -16,7 +16,19 @@ def _fmt(r: dict) -> str:
     return "\n".join(parts)
 
 
+def _has_executable(code: str) -> bool:
+    return any(s.strip() and not s.strip().startswith("#")
+               for s in code.splitlines())
+
+
 async def run(code: str, timeout: float | None = None) -> str:
+    # convo-16 failure mode: the model used run_code as a notepad, submitting
+    # comment-only snippets that boot a VM round-trip to print nothing
+    if not _has_executable(code or ""):
+        return ("error: this code contains no executable statements — run_code "
+                "executes Python in the sandbox VM, it is not a notepad. Put "
+                "reasoning in your reply text; call run_code only to actually "
+                "compute something.")
     slug = await require_project()
     try:
         return _fmt(await run_in_project(slug, "python3 -", timeout=timeout, input=code))

@@ -19,4 +19,6 @@ parameters:
   required: [command]
 ---
 The gate report lands at `runs/gate-<id>/report.md` (staged). Tell the operator
-to review it before approving staged changes from a gated run.
+to review it before approving staged changes from a gated run. Egress is
+deny-by-default: outbound network calls fail unless operator-allowlisted (the
+blocked attempts appear in the report — that's expected, not a bug to fix).

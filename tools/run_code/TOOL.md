@@ -14,3 +14,7 @@ parameters:
       type: number
   required: [code]
 ---
+The VM has NO internet access except operator-allowlisted destinations —
+network calls from code WILL fail. Gather web data with web_search / web_read /
+read_and_summarize (host-side) and feed it into the code as inputs. Only call
+run_code to actually execute something; reasoning belongs in your reply text.

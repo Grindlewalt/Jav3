@@ -17,6 +17,8 @@ def _fmt(r: dict) -> str:
 
 
 async def run(command: str, timeout: float | None = None) -> str:
+    if not (command or "").strip():
+        return "error: empty command — pass the shell command to run."
     slug = await require_project()
     try:
         return _fmt(await run_in_project(slug, command, timeout=timeout))

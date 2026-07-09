@@ -135,6 +135,83 @@ async def test_hard_streak_withdraws_tools_and_concludes(tmp_env, monkeypatch):
     assert model.call < 10
 
 
+class _StubbornThenAnswers(_ScriptedModel):
+    """Returns tool calls even when tools are withdrawn — except the very
+    last (conclusion) call, which answers in text like the real model does
+    when handed the tool-budget-exhausted nudge."""
+    async def complete(self, messages, tools=None, **kw):
+        if tools is None and "tool budget for this turn is exhausted" in \
+                str(messages[-1].get("content", "")):
+            self.tools_seen.append(tools)
+            yield {"type": "message",
+                   "content": "Here is what I found; X remains unknown.",
+                   "tool_calls": [], "usage": None}
+            return
+        async for ev in super().complete(messages, tools=tools, **kw):
+            yield ev
+
+
+async def test_exhaustion_forces_text_conclusion_not_bare_stop(tmp_env, monkeypatch):
+    """Convo-31 regression: tools withdrawn, model emits tool calls anyway
+    (DSML recovery) — those calls must NOT execute, and the turn must end
+    with a real answer synthesized from the transcript."""
+    await init_db()
+    monkeypatch.setattr(settings, "dead_end_error_streak", 2)
+    monkeypatch.setattr(settings, "dead_end_force_answer", 3)
+    dispatched = []
+
+    async def dispatch(name, args):
+        dispatched.append(name)
+        return "error: nope"
+
+    model = _StubbornThenAnswers([[("probe", f'{{"q": "{i}"}}')] for i in range(10)])
+    events, _ = await _run(monkeypatch, model, dispatch)
+    assert events[-1] == {"type": "final",
+                          "content": "Here is what I found; X remains unknown."}
+    # exactly the 3 pre-breaker rounds dispatched; the post-withdrawal tool
+    # calls were dropped, not executed
+    assert len(dispatched) == 3
+
+
+async def test_iteration_cap_forces_text_conclusion(tmp_env, monkeypatch):
+    """The plain cap-exhaustion path (no breaker): the final round has no
+    tools; if calls come back anyway the loop must still produce an answer."""
+    await init_db()
+    monkeypatch.setattr(settings, "max_react_iterations", 3)
+
+    async def dispatch(name, args):
+        return "useful finding"
+
+    model = _StubbornThenAnswers(
+        [[("probe", f'{{"q": "{i}"}}')] for i in range(10)])
+    events, _ = await _run(monkeypatch, model, dispatch)
+    assert events[-1]["content"] == "Here is what I found; X remains unknown."
+
+
+# --- run tool guards (F8) ------------------------------------------------------
+
+async def test_run_code_rejects_comment_only(tmp_env):
+    import importlib.util as iu
+    spec = iu.spec_from_file_location(
+        "t_run_code", settings.base_dir / "tools" / "run_code" / "handler.py")
+    m = iu.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    out = await m.run("# just thinking\n\n# more notes\n")
+    assert out.startswith("error:") and "not a notepad" in out
+    assert m._has_executable("x = 1  # set x")
+    assert not m._has_executable("")
+
+
+async def test_run_command_rejects_empty(tmp_env):
+    import importlib.util as iu
+    spec = iu.spec_from_file_location(
+        "t_run_command", settings.base_dir / "tools" / "run_command" / "handler.py")
+    m = iu.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    out = await m.run("   ")
+    assert out.startswith("error:") and "empty command" in out
+
+
 async def test_success_resets_streak(tmp_env, monkeypatch):
     await init_db()
     monkeypatch.setattr(settings, "dead_end_error_streak", 3)

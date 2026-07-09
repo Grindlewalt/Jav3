@@ -129,13 +129,40 @@ async def run_turn(
             yield {"type": "final", "content": content}
             return
 
-        if force_conclude:
-            # tools were withdrawn but calls came back anyway (DSML text
-            # recovery can do this) — stop rather than keep grinding
-            yield {"type": "final", "content":
-                   "(stopped: too many consecutive failed tool calls without "
-                   "reaching a conclusion — try rephrasing the task or point "
-                   "me at where the answer lives)"}
+        if call_tools is None:
+            # Tools were withheld (final round, or the dead-end breaker) but
+            # calls came back anyway — DSML text recovery can do that. Don't
+            # execute them: force a text answer from what's been gathered, so
+            # the operator gets a real summary instead of a bare "(stopped)".
+            # (Convo 31: the news agent burned its cap on good reads, then
+            # answered the answer-forcing round with more tool markup and the
+            # operator got nothing.)
+            conclusion = ""
+            try:
+                async for ev in model.complete(
+                    messages + [{"role": "user", "content":
+                        "Your tool budget for this turn is exhausted. Using "
+                        "only what you already learned above, give your best "
+                        "answer now. Be explicit about anything you could not "
+                        "determine."}],
+                    conversation_id=conversation_id,
+                    model_name=model_name, base_url=base_url,
+                ):
+                    if ev["type"] == "token":
+                        yield ev
+                    else:
+                        conclusion = ev["content"] or ""
+            except Exception:  # noqa: BLE001 — conclusion is best-effort
+                conclusion = ""
+            if conclusion.strip():
+                if rules:
+                    conclusion = await _enforce_rules(conclusion, rules)
+                yield {"type": "final", "content": conclusion}
+            else:
+                yield {"type": "final", "content":
+                       "(stopped: hit the tool budget for this turn without "
+                       "reaching a conclusion — try rephrasing the task or "
+                       "point me at where the answer lives)"}
             return
 
         messages.append({
