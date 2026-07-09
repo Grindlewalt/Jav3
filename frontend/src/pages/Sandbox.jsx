@@ -62,8 +62,9 @@ function EgressRow({ row, busy, onDecide }) {
   const label = row.host || row.ip
   const blocked = row.status === 'blocked'
   const attempts = row.attempts || 0
+  const bad = row.blocklisted            // known-bad by a threat feed
   return (
-    <div className={`sbx-row sev-${row.sev || 'ok'}`}>
+    <div className={`sbx-row sev-${bad ? 'crit' : row.sev || 'ok'}`}>
       <div className="grow" style={{ minWidth: 0 }}>
         <div className="mono ellipsis">
           {label}<span className="dim">:{row.port}</span>
@@ -72,13 +73,22 @@ function EgressRow({ row, busy, onDecide }) {
         <div className="sbx-sub">
           {row.rule && <span className="sbx-rule-chip">{row.rule}</span>}
           <span className="dim small">
-            {blocked
-              ? 'not in allowlist'
-              : row.learned ? 'learned this session' : 'allowlisted'}
+            {bad
+              ? 'on a threat-intel blocklist'
+              : blocked
+                ? 'not in allowlist'
+                : row.learned ? 'learned this session' : 'allowlisted'}
           </span>
         </div>
       </div>
-      {blocked ? (
+      {bad ? (
+        <div className="sbx-right">
+          <span className="sbx-pill crit">known-bad · threat feed</span>
+          {blocked
+            ? <span className="dim small">blocked · {attempts} attempt{attempts === 1 ? '' : 's'}</span>
+            : <span className="dim small">{dirArrow(row.dir)} {fmtBytes(row.bytes)} delivered</span>}
+        </div>
+      ) : blocked ? (
         <div className="sbx-right">
           <span className="sbx-pill crit">blocked</span>
           <span className="dim small">
@@ -139,6 +149,8 @@ export default function Sandbox() {
   const [runCmd, setRunCmd] = useState('')
   const [running, setRunning] = useState(false)
   const [runErr, setRunErr] = useState('')
+  const [ti, setTi] = useState(null)          // threat-intel feed status
+  const [tiBusy, setTiBusy] = useState(false)
 
   const toast = (msg) => {
     const id = Date.now() + Math.random()
@@ -150,13 +162,27 @@ export default function Sandbox() {
     api('/api/sandbox/sessions').then((r) => setSessions(r.sessions)).catch(() => {})
   const refreshRules = () =>
     api('/api/sandbox/rules').then((r) => setRules(r.rules)).catch(() => {})
+  const refreshTi = () =>
+    api('/api/sandbox/threatintel').then(setTi).catch(() => {})
   const refreshDetail = (id) =>
     api(`/api/sandbox/sessions/${id}`)
       .then((d) => { if (selectedRef.current === id) setDetail(d) })
       .catch(() => {})
 
+  async function refreshFeeds() {
+    setTiBusy(true)
+    try {
+      await api('/api/sandbox/threatintel/refresh', { method: 'POST' })
+      toast('Threat-intel feeds refreshed')
+      refreshTi()
+      if (selectedRef.current != null) refreshDetail(selectedRef.current)
+    } catch (e) {
+      toast(`Feed refresh failed: ${e.detail || e.message}`)
+    } finally { setTiBusy(false) }
+  }
+
   useEffect(() => {
-    refreshSessions(); refreshRules()
+    refreshSessions(); refreshRules(); refreshTi()
     api('/api/projects')
       .then((r) => {
         const list = r.projects || []
@@ -357,6 +383,8 @@ export default function Sandbox() {
                 <Tile label="Processes" value={facts.execs ?? 0} />
                 <Tile label="Behavioral flags" value={facts.behavior ?? 0}
                       bad={(facts.behavior ?? 0) > 0} />
+                <Tile label="Threat hits" value={facts.threat ?? 0}
+                      bad={(facts.threat ?? 0) > 0} />
               </div>
             </div>
 
@@ -504,6 +532,20 @@ export default function Sandbox() {
           Every verdict on this page is computed by deterministic rules over the
           captured evidence (nftables · dnsmasq · auditd · tcpdump · staging) —
           never a model.
+        </p>
+
+        <div className="side-title">Threat-intel feeds</div>
+        <div className="dim small">
+          {ti && ti.loaded
+            ? `${(ti.ips + ti.cidrs).toLocaleString()} bad IPs · ${ti.domains.toLocaleString()} bad domains`
+            : 'no feeds loaded yet'}
+          {ti?.meta?.fetched_at && <div>updated {relTime(ti.meta.fetched_at)}</div>}
+        </div>
+        <button className="ghost" disabled={tiBusy} onClick={refreshFeeds}>
+          {tiBusy ? 'Refreshing…' : 'Refresh feeds'}</button>
+        <p className="dim small" style={{ margin: 0 }}>
+          Known-bad hosts (abuse.ch · Spamhaus) — a match is critical and cannot
+          be allowlisted. Feeds fetch host-side, never through the agent.
         </p>
 
         {detail && (

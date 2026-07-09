@@ -185,6 +185,45 @@ def test_match_sensitive_globs():
     assert sandbox.match_sensitive("src/app.py") is None
 
 
+# ---- threat-intel blocklist ------------------------------------------------
+
+def test_threatintel_build_and_match():
+    from backend import threatintel
+    bl = threatintel.build_from(
+        ip_text="# feodo\n44.44.44.44\n185.100.0.0/16 ; a /16\n",
+        domain_text="# urlhaus\nevil.example.com\n")
+    assert bl.match_ip("44.44.44.44")
+    assert bl.match_ip("185.100.5.9")            # inside the CIDR
+    assert not bl.match_ip("8.8.8.8")
+    assert bl.match_host("evil.example.com")
+    assert bl.match_host("sub.evil.example.com")  # parent-domain match
+    assert not bl.match_host("example.com")       # a parent isn't listed
+    assert bl.hit(ip="44.44.44.44") and bl.hit(host="evil.example.com")
+
+
+def test_classify_threat_intel_forces_critical_and_nonclearable():
+    from backend import threatintel
+    bl = threatintel.build_from("44.44.44.44\n", "")
+    # even a *delivered* (allowlisted) flow to a known-bad host must flag
+    ev = _ev(flows=[{"ip": "44.44.44.44", "port": 443, "proto": "tcp",
+                     "host": "cdn.bad.net", "bytes_down": 500, "bytes_up": 100}])
+    idx = {("44.44.44.44", 443, "tcp"): {"ip": "44.44.44.44", "port": 443,
+                                         "proto": "tcp", "dest": "cdn.bad.net"}}
+    c = sandbox.classify(ev, idx, bl)
+    assert c["verdict"] == "crit" and "threat-intel" in c["rule"]
+    assert c["facts"]["threat"] == 1
+    row = c["egress"][0]
+    assert row["blocklisted"] and row["sev"] == "crit"
+    assert "known-bad" in c["headline"]
+
+
+def test_classify_without_blocklist_has_no_threat():
+    ev = _ev(flows=[{"ip": "44.44.44.44", "port": 443, "proto": "tcp",
+                     "host": "cdn.bad.net", "bytes_down": 500, "bytes_up": 100}])
+    c = sandbox.classify(ev, {})           # no blocklist arg -> pure, no matching
+    assert c["threat"] == [] and c["facts"]["threat"] == 0
+
+
 # ---- gate parsers ----------------------------------------------------------
 
 def test_pcap_bytes_accounts_per_peer():

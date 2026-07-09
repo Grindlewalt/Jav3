@@ -103,11 +103,17 @@ async def decide_connection(run_id: int, body: ConnDecision):
     if ev is None:
         raise HTTPException(status_code=404, detail="no such session")
     idx = await sandbox.rules_index()
-    c = sandbox.classify(ev, idx)
+    c = sandbox.classify(ev, idx, threatintel.load())
     row = next((e for e in c["egress"] if e["key"] == body.key), None)
     if row is None:
         raise HTTPException(status_code=404, detail="no such connection in session")
     if body.decision == "allow":
+        if row.get("blocklisted"):
+            # known-bad by a threat feed — never auto-clearable.
+            raise HTTPException(
+                status_code=409,
+                detail="destination is on a threat-intel blocklist; refusing to "
+                       "allowlist a known-bad host")
         rule = await sandbox.add_rule(
             dest=row["host"], ip=row["ip"], port=row["port"], proto=row["proto"],
             scope=row["scope"], note=f"run {run_id}")
@@ -183,3 +189,21 @@ async def revoke_rule(rule_id: int):
     if not ok:
         raise HTTPException(status_code=404, detail="no such rule")
     return {"ok": True}
+
+
+@router.get("/threatintel")
+async def threatintel_status():
+    """Loaded feed counts + last-refresh metadata for the console."""
+    bl = threatintel.load()
+    return {"loaded": bool(bl), "ips": len(bl.ips), "cidrs": len(bl.cidrs),
+            "domains": len(bl.domains), "meta": bl.meta}
+
+
+@router.post("/threatintel/refresh")
+async def threatintel_refresh():
+    """Pull the public feeds host-side (offline from the agent's view). Slow;
+    best-effort per feed. Requires host network — no-ops cleanly on failure."""
+    try:
+        return {"ok": True, **await threatintel.refresh()}
+    except Exception as e:                       # noqa: BLE001 (surface to operator)
+        raise HTTPException(status_code=502, detail=f"refresh failed: {e}")
