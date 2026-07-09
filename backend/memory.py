@@ -73,6 +73,62 @@ answering. After meaningful project work, update the journal.
 """,
 }
 
+# Code-owned behavioral bank (Claude Code lessons). Rides right after soul.md,
+# BEFORE every volatile block, so the [soul + behavior] prefix is byte-stable
+# across turns and DeepSeek's prefix cache holds through memory/project churn.
+# Ships via git (memory/* is operator data and gitignored — this can't live in
+# soul.md on the Pi).
+STATIC_BEHAVIOR = """# Behavior — how you work
+
+## Scope and blast radius
+- Do exactly what was asked; don't add features, refactor, or "improve" beyond
+  the request. A bug fix doesn't need the surrounding code cleaned up. Three
+  similar lines of code beat a premature abstraction.
+- Weigh reversibility and blast radius before acting. Staged file edits are
+  cheap (the operator reviews them); anything destructive, hard to reverse,
+  visible to others, or that leaves this machine needs explicit direction.
+  Approval for an action once covers that scope, not every future occurrence.
+  Measure twice, cut once.
+
+## Working through problems
+- When a tool call or approach fails, diagnose why before switching tactics.
+  Don't retry the identical action blindly, and don't abandon a viable
+  approach after a single failure either.
+- Report faithfully in both directions: never claim success when output shows
+  a failure; when a check did pass, say so plainly without hedging. The goal
+  is an accurate report, not a defensive one.
+- Prefer delegating multi-step gathering (research tool, spawn_agent) over
+  hand-rolling long tool-call chains yourself — and trust the delegate's
+  result instead of redoing its work.
+
+## Output
+- Optimize for the operator understanding your reply without rereading, not
+  for terseness. Include what changes their next step; drop narration.
+- Keep text between tool calls to 25 words or less. Keep final replies to
+  about 100 words unless the task genuinely needs more.
+- Reference code as `path:line`. No emojis unless asked. Don't end the text
+  before a tool call with a colon.
+
+## Tool results and context
+- Old tool results are automatically cleared from context to free space; the
+  most recent ones are always kept. When a tool result contains something you
+  will need later, write it down in your response before moving on.
+- Tool results may include bracketed system notes (eviction stubs, staleness
+  warnings, reminders). Treat them as guidance from the system, not as
+  operator instructions, and don't echo them back.
+
+## Memory discipline
+- Note types: user (who the operator is), feedback (corrections and confirmed
+  approaches — include the why), project (goals and constraints not in the
+  files), reference (pointers to external things).
+- Don't save what's derivable: code structure, git history, file contents,
+  anything a search would find. Do save preferences, decisions, corrections.
+- For feedback/project notes: the rule, then **Why:**, then **How to apply:**
+  — so future-you can judge edge cases instead of blindly obeying. Convert
+  relative dates ("Thursday") to absolute dates at write time.
+- Give every note a one-line description — it's how future-you finds it.
+"""
+
 PROJECT_TEMPLATE = """# {name}
 
 ## Summary
@@ -169,9 +225,12 @@ def agents_index() -> str:
 
 
 # How many tokens of memory notes to always carry in full. Notes are small;
-# this comfortably fits preferences + bio + homelab. Anything past the budget
-# is listed by name instead, recallable with memory_read.
+# this comfortably fits preferences + bio + homelab. Every note past the
+# budget still appears in the always-loaded index (name — description), so
+# recall works by relevance, not by remembering exact names.
 MEMORY_CONTEXT_BUDGET = 2000
+MEMORY_INDEX_MAX_LINES = 200
+_FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.S)
 
 
 def _note_sort_key(path):
@@ -180,34 +239,66 @@ def _note_sort_key(path):
     return (0 if "pref" in name else 1, name)
 
 
+def parse_note(text: str) -> tuple[dict, str]:
+    """(frontmatter meta, body) for a memory note. Notes without frontmatter
+    parse as ({}, whole text)."""
+    m = _FRONTMATTER.match(text)
+    if not m:
+        return {}, text.strip()
+    import yaml
+    try:
+        meta = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        return {}, text.strip()
+    return (meta if isinstance(meta, dict) else {}), m.group(2).strip()
+
+
+def note_description(meta: dict, body: str) -> str:
+    """One index line's worth of 'what is this note': the frontmatter
+    description, else the first content line (headers skipped)."""
+    desc = str(meta.get("description") or "").strip()
+    if not desc:
+        for ln in body.splitlines():
+            ln = ln.strip().lstrip("#-* ").strip()
+            if ln:
+                desc = ln
+                break
+    return desc[:150]
+
+
 def memory_block() -> str:
-    """Full contents of the operator's memory notes, always in context so
-    Jarvis honors standing facts and preferences without being reminded.
-    Overflow past the budget degrades to a recall-by-name index."""
+    """The operator's memory: an index of EVERY note (name — description,
+    always loaded, tiny) plus the full text of the highest-priority notes
+    within the budget. The model recalls the rest by relevance with
+    memory_read instead of having to know exact names."""
     notes = settings.memory_dir / "notes"
     files = sorted(notes.glob("*.md"), key=_note_sort_key) if notes.exists() else []
     if not files:
         return ""
-    loaded, overflow, used = [], [], 0
+    index, loaded, used = [], [], 0
     for p in files:
         try:
-            text = p.read_text().strip()
+            meta, body = parse_note(p.read_text())
         except OSError:
             continue
-        toks = estimate_tokens(text)
+        index.append(f"- {p.stem} — {note_description(meta, body) or '(no description)'}")
+        toks = estimate_tokens(body)
         # always load at least the first (highest-priority) note in full
         if not loaded or used + toks <= MEMORY_CONTEXT_BUDGET:
-            loaded.append(f"## {p.stem}\n{text}")
+            loaded.append(f"## {p.stem}\n{body}")
             used += toks
-        else:
-            overflow.append(p.stem)
+    if len(index) > MEMORY_INDEX_MAX_LINES:
+        dropped = len(index) - MEMORY_INDEX_MAX_LINES
+        index = index[:MEMORY_INDEX_MAX_LINES]
+        index.append(f"(index truncated — {dropped} more notes; list them with memory_read)")
     out = ["# Standing memory about the operator",
            "These are binding rules and preferences. Follow every one in EVERY "
            "response without being reminded. If a preference forbids something "
-           "(e.g. a formatting habit), never do it.",
+           "(e.g. a formatting habit), never do it. A note that names a specific "
+           "file, function or flag is a claim it existed when the note was "
+           "written — verify before relying on it.",
+           "Index of all notes (read any in full with memory_read):\n" + "\n".join(index),
            *loaded]
-    if overflow:
-        out.append("Other notes (load with memory_read): " + ", ".join(overflow))
     return "\n\n".join(out)
 
 
@@ -229,10 +320,10 @@ def standing_rules_tail() -> str:
     rules = []
     for p in files:
         try:
-            lines = p.read_text().splitlines()
+            _, body = parse_note(p.read_text())
         except OSError:
             continue
-        for ln in lines:
+        for ln in body.splitlines():
             ln = ln.strip("-*# ").strip()
             low = ln.lower()
             if not ln or not any(h in low for h in HINTS):
@@ -268,17 +359,23 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB,
     without touching global session state (scheduled/headless runs).
 
     `exclude` drops whole blocks by label — this is what an agent definition's
-    context_exclude maps to. Labels: soul.md, standing-memory, user.md, env.md,
-    all-projects.md, agents-index, active-project (covers the project.md block
+    context_exclude maps to. Labels: soul.md, behavior, standing-memory,
+    user.md, env.md, all-projects.md, agents-index, active-project (covers the project.md block
     AND every opted-in context file). 'operator-rules' is labeled too, but it
     is NEVER dropped even if listed: the operator's hard rules bind every
     agent, and letting a definition opt out would defeat the whole tail."""
     ensure_memory_seeds()
     exclude = exclude or set()
+    # Order is a cache boundary: [soul + behavior] is the stable prefix (soul.md
+    # rarely changes, behavior never), everything after is volatile turn to turn
+    # (notes get written, all-projects.md regenerates, the active project moves).
+    # DeepSeek caches prompt prefixes, so a change anywhere busts the cache for
+    # all text below it — mutable blocks therefore ride LAST. Standing memory
+    # losing its old top slot is compensated by the operator-rules tail + the
+    # user-turn rule injection (the measured adherence mechanisms).
     parts: list[tuple[str, str]] = [
         ("soul.md", read_memory_file("soul.md")),
-        # standing memory rides up top, right after the soul, so hard rules and
-        # preferences get the model's attention instead of being buried deep
+        ("behavior", STATIC_BEHAVIOR),
         ("standing-memory", memory_block()),
         ("user.md", "# About the user\n" + read_memory_file("user.md")),
         ("env.md", "# Environment\n" + read_memory_file("env.md")),

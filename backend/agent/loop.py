@@ -6,7 +6,9 @@ is what M3+ tools plug into. Yields SSE-ready events:
   {"type": "tool", "name", "args"}        a tool is being called
   {"type": "final", "content": ...}       the finished assistant message
 """
+import asyncio
 import json
+from collections import OrderedDict
 from typing import AsyncIterator
 
 import aiosqlite
@@ -16,6 +18,42 @@ from ..memory import standing_rules_tail
 from .budget import BudgetExceeded
 from .model import model
 from .tools import registry
+
+# Tools that mutate durable state: their results are the model's record of
+# what it changed, so eviction never touches them (reads are disposable,
+# writes are load-bearing).
+WRITE_PINNED = frozenset({"write_file", "edit_file", "journal_update",
+                          "memory_write", "git_commit_request"})
+
+# conversation_id -> project paths the model has read (read_file) or written
+# (write_file) there — the read-before-edit guard. In-memory and bounded; a
+# restart just costs one extra read per file.
+_files_seen: OrderedDict[int, set[str]] = OrderedDict()
+_FILES_SEEN_MAX_CONVOS = 256
+
+
+def _note_seen(conversation_id: int, path: str) -> None:
+    paths = _files_seen.setdefault(conversation_id, set())
+    paths.add(path)
+    _files_seen.move_to_end(conversation_id)
+    while len(_files_seen) > _FILES_SEEN_MAX_CONVOS:
+        _files_seen.popitem(last=False)
+
+
+def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None:
+    """An instructional error instead of dispatching an edit of a file the
+    model never read here — prevents whole-class bad edits (stale find text,
+    wrong file). write_file is exempt: full overwrites are staged + reviewed."""
+    if name != "edit_file":
+        return None
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    if path in _files_seen.get(conversation_id, set()):
+        return None
+    return (f"error: you haven't read '{path}' in this conversation. Call "
+            "read_file on it first so 'find' matches the current text, then "
+            "retry the edit.")
 
 
 async def run_turn(
@@ -52,6 +90,7 @@ async def run_turn(
                 break
 
     n_iter = max_iterations or settings.max_react_iterations
+    read_only = registry.read_only_names()   # once per turn; hot-reload can wait
     tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
     for i in range(n_iter):
         # on the final allowed round, drop tools so the model must produce an
@@ -89,14 +128,39 @@ async def run_turn(
             "content": final["content"] or None,
             "tool_calls": final["tool_calls"],
         })
+        parsed = []
         for tc in final["tool_calls"]:
             name = tc["function"]["name"]
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 args = {}
+            parsed.append((tc, name, args))
             yield {"type": "tool", "name": name, "args": args}
+
+        async def _run_one(name: str, args: dict) -> str:
+            blocked = _guard_blind_edit(conversation_id, name, args)
+            if blocked is not None:
+                return blocked
             result = await registry.dispatch(name, args)
+            path = args.get("path")
+            if (name in ("read_file", "write_file") and isinstance(path, str)
+                    and not result.startswith("error:")):
+                _note_seen(conversation_id, path)
+            return result
+
+        # a round whose calls are ALL flagged read-only runs them concurrently
+        # (three reads cost one round-trip, not three); anything unflagged is
+        # assumed to write — fail closed — and keeps the serial path
+        if len(parsed) > 1 and all(n in read_only for _, n, _ in parsed):
+            results = await asyncio.gather(
+                *(_run_one(n, a) for _, n, a in parsed))
+        else:
+            results = [await _run_one(n, a) for _, n, a in parsed]
+
+        # DB writes + message appends stay sequential and ordered — the single
+        # aiosqlite connection must never be used concurrently
+        for (tc, name, args), result in zip(parsed, results):
             await db.execute(
                 "INSERT INTO tool_calls (conversation_id, tool, args, result) VALUES (?, ?, ?, ?)",
                 (conversation_id, name, json.dumps(args), result[:10000]),
@@ -132,6 +196,8 @@ def _evict_stale_results(messages: list[dict], tool_msgs: list[dict],
     for t in tool_msgs:
         if t["round"] > horizon or t.get("evicted"):
             continue
+        if t["name"] in WRITE_PINNED:
+            continue  # the model's record of what it changed — never dropped
         content = messages[t["idx"]]["content"]
         if len(content) <= settings.tool_result_evict_chars:
             continue

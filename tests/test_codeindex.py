@@ -149,7 +149,7 @@ async def test_search_codebase(client):
     assert "code/src/app.py (" in out and "  4: " in out
 
     out = await registry.dispatch("search_codebase", {"query": "not_here_at_all"})
-    assert out == "no matches"
+    assert out.startswith("no matches for ")   # fix-shaped: names the next step
 
     out = await registry.dispatch("search_codebase",
                                   {"query": "[bad", "regex": True})

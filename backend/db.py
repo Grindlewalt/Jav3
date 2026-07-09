@@ -143,7 +143,11 @@ async def init_db() -> None:
             ccols = [r["name"] for r in await cur.fetchall()]
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
-                          ("rollup", "TEXT"), ("job_id", "TEXT")):
+                          ("rollup", "TEXT"), ("job_id", "TEXT"),
+                          # tier-2 compaction checkpoint: the structured
+                          # summary + id of the last message it covers
+                          ("compact_summary", "TEXT"),
+                          ("compact_upto", "INTEGER")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(

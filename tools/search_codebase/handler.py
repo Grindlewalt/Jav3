@@ -12,7 +12,8 @@ async def run(query: str, subdir: str | None = None, regex: bool = False) -> str
     except ValueError as e:
         return f"error: {e}"
     if not hits:
-        return "no matches"
+        return (f"no matches for '{query}'. Try a shorter or broader term, drop subdir "
+                "to search the whole project, or set regex=true for patterns.")
     truncated = len(hits) > CAP
     hits = hits[:CAP]
 

@@ -4,6 +4,7 @@ description: List all files in the active project, marking which have unapproved
 when_to_use: To see what exists before reading, editing or running anything.
 enabled: true
 requires_project: true
+read_only: true
 parameters:
   type: object
   properties: {}

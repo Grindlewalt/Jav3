@@ -51,6 +51,20 @@ class Settings(BaseSettings):
     subagent_max_iterations: int = 8
     recent_message_limit: int = 40
 
+    # Tier-2 conversation compaction: when system prompt + history approach
+    # the model's context window, the older portion is summarized into a
+    # structured brief persisted on the conversation, and only the recent
+    # ~compact_recent_fraction of tokens rides verbatim. The trigger is an
+    # EFFECTIVE window: context − reserved output (model_max_tokens) − buffer
+    # (tool specs, rule injection, chars/4 estimate error). After
+    # compact_failures_max consecutive summarize failures a conversation
+    # falls back to the plain recent_message_limit window.
+    model_context_window: int = 64_000
+    compact_buffer_tokens: int = 8_000
+    compact_recent_fraction: float = 0.3
+    compact_failures_max: int = 3
+    compact_transcript_max_chars: int = 200_000
+
     # Tool results inside the ReAct loop. A result is re-sent on EVERY later
     # iteration of the turn, so an uncapped read_file dump is the one quadratic
     # cost in the system: cap what enters the message list, and once a result
@@ -106,6 +120,10 @@ class Settings(BaseSettings):
     # research subagent reads a few pages and re-sends them each loop, so a
     # smaller slice cuts token throughput hard while keeping the useful content.
     web_max_chars: int = 6_000
+    # short-TTL cache of fetched page text (and summaries keyed by focus), so a
+    # re-read within a task skips the download AND the summarize model call.
+    web_cache_ttl_seconds: int = 900
+    web_cache_max_entries: int = 50
 
     # Sandbox VM (M3). Persistent: boots once and stays up; nuke is a
     # recovery action (recreate the overlay), not a per-run ritual.

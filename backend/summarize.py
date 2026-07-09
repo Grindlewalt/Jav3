@@ -10,6 +10,11 @@ metered like everything else.
 """
 from .agent.model import model
 from .config import settings
+from .webtools import _cache_get, _cache_put
+
+# (url, focus) -> summary, same TTL/size settings as the page cache: a cached
+# page re-summarized with the same focus skips the model call too
+_summary_cache: dict[tuple[str, str], tuple[float, str]] = {}
 
 
 async def complete_text(system: str, user: str, temperature: float = 0.3) -> str:
@@ -23,8 +28,14 @@ async def complete_text(system: str, user: str, temperature: float = 0.3) -> str
 
 
 async def summarize_page(text: str, url: str, focus: str = "") -> str:
+    key = (url, focus)
+    cached = _cache_get(_summary_cache, key)
+    if cached is not None:
+        return cached
     lens = f"what is relevant to: {focus}" if focus.strip() else "the key facts"
-    return await complete_text(
+    out = await complete_text(
         f"Summarize {lens} from this page in 3-6 tight bullet points. Only facts "
         "stated on the page. No preamble, no fluff.",
         f"URL: {url}\n\n{text[:settings.web_max_chars]}")
+    _cache_put(_summary_cache, key, out)
+    return out

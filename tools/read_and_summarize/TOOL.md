@@ -3,6 +3,7 @@ name: read_and_summarize
 description: Fetch one or more web pages and return only a short bullet summary of each — the full page text is summarized inside the tool and never enters the conversation. Far cheaper than web_read when you are surveying many sources.
 when_to_use: Reading several pages, or any page you don't need verbatim. Pass a list of urls to read them all in one call (one step, not one per page). Give a `focus` so each summary keeps only what matters. Prefer this over web_read whenever you are gathering information across multiple sources; use the research tool for a full multi-source report.
 enabled: true
+read_only: true
 parameters:
   type: object
   properties:

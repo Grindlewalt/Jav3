@@ -68,6 +68,7 @@ def _parse_md(path: Path) -> dict | None:
         return None
     meta["body"] = m.group(2).strip()
     meta["source"] = str(path)
+    meta["kind"] = "skill" if path.name == "SKILL.md" else "tool"
     return meta
 
 
@@ -105,6 +106,13 @@ def load_registry() -> list[dict]:
     return json.loads(path.read_text())
 
 
+def read_only_names(entries: list[dict] | None = None) -> frozenset[str]:
+    """Tools that declared `read_only: true` in frontmatter — the loop may run
+    a round of these concurrently. Absent flag = assumed to write (fail closed)."""
+    entries = entries if entries is not None else load_registry()
+    return frozenset(e["name"] for e in entries if e.get("read_only") is True)
+
+
 def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
     """Registry entries in the wire format Model.complete expects.
     Entries with `enabled: false` are catalogued but not granted to the model."""
@@ -117,8 +125,12 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
         if e.get("when_to_use"):
             desc += f" Use when: {e['when_to_use']}"
         # every enabled tool's spec ships on every turn, so the body slice is a
-        # per-turn tax across the whole registry — keep it tight
-        if e.get("body"):
+        # per-turn tax across the whole registry — keep it tight. Skills ship
+        # NO body at all (progressive disclosure): the listing is for
+        # discovery; invoking the skill returns the full SKILL.md.
+        if e.get("kind") == "skill":
+            desc += " (Invoking this skill loads its full instructions.)"
+        elif e.get("body"):
             desc += f"\nNotes: {e['body'][:300]}"
         specs.append({
             "type": "function",
@@ -134,11 +146,22 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
 async def dispatch(name: str, args: dict) -> str:
     handler = _load_dynamic(name)
     if handler is None:
+        entry = next((e for e in load_registry() if e["name"] == name), None)
+        if entry and entry.get("kind") == "skill":
+            # a skill IS its instructions: invoking it injects the full
+            # SKILL.md body the spec deliberately left out
+            body = entry.get("body") or "(this skill has no instructions yet)"
+            return (f"[skill {name} loaded — follow these instructions now, "
+                    f"using the arguments you passed: {json.dumps(args)}]\n{body}")
         return f"error: tool '{name}' is registered but has no handler"
     try:
         return await handler(**args)
     except TypeError as e:
-        return f"error: bad arguments for '{name}': {e}"
-    except Exception:
-        # The loop must observe failures, not die on them.
-        return f"error: tool '{name}' raised:\n{traceback.format_exc(limit=4)}"
+        return (f"error: bad arguments for '{name}': {e}. Check the tool's "
+                "parameter schema and retry with corrected arguments.")
+    except Exception as e:
+        # The loop must observe failures, not die on them — and the message
+        # should read as the first half of the fix, not just the fault.
+        return (f"error: {name} failed with {type(e).__name__}: {e}. Adjust "
+                "the arguments or try a different approach.\n"
+                f"{traceback.format_exc(limit=4)}")

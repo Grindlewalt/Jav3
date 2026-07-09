@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import runtime
+from . import compaction, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import run_turn
@@ -209,12 +209,10 @@ async def chat(body: ChatRequest):
             if not await get_active_project(db):
                 entries = [e for e in entries if not e.get("requires_project")]
             tools = openai_tool_specs(entries)
-            async with db.execute(
-                "SELECT role, content FROM messages WHERE conversation_id = ? "
-                "ORDER BY id DESC LIMIT ?", (conversation_id, settings.recent_message_limit)
-            ) as cur:
-                rows = await cur.fetchall()
-            history = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+            # tier-2 compaction: summary (if any) + verbatim tail, compacting
+            # first when the effective context window demands it — the old
+            # LIMIT-40 cliff survives only as the fallback path
+            history = await compaction.assemble(db, conversation_id, system_prompt)
 
             final_content = ""
             async for event in run_turn(db, conversation_id, system_prompt,

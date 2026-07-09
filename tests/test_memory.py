@@ -84,7 +84,7 @@ async def test_memory_overflow_degrades_to_index(tmp_env, monkeypatch):
     finally:
         await db.close()
     assert "never use em dashes" in prompt          # priority note loaded in full
-    assert "load with memory_read" in prompt         # overflow degraded to index
+    assert "memory_read" in prompt                   # index names the recall tool
     assert "long-note" in prompt
 
 

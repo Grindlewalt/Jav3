@@ -26,6 +26,42 @@ router = APIRouter(prefix="/api/schedules", tags=["schedules"],
 POLL_SECONDS = 60
 MIN_INTERVAL = 15  # floor on interval schedules, so a typo can't hammer the Pi
 
+# The nightly memory-consolidation ("dreaming") pass: merge duplicates, prune
+# stale facts, keep every note described. Seeded DISABLED — the operator
+# flips it on in the GUI when ready to spend nightly tokens on it.
+DREAM_SCHEDULE_NAME = "Memory consolidation (dream)"
+DREAM_TASK = """Consolidate your memory notes (nightly dream pass). Use only \
+memory_read and memory_write; do not touch project files or the web.
+Phase 1 — orient: list all notes, then read every note whose description \
+overlaps another's or is missing.
+Phase 2 — gather: note duplicates, contradictions, stale/superseded facts, \
+relative dates, and notes without a description.
+Phase 3 — consolidate: merge each duplicate set into ONE note (mode=replace, \
+with a one-line description), then delete the leftovers (mode=delete). Prefer \
+updating an existing note over creating a new one. Convert relative dates to \
+absolute. Never weaken or drop an operator preference or rule.
+Phase 4 — verify: list the notes again — every note has a clear description, \
+no two cover the same topic. Reply with a short changelog of what you merged, \
+deleted or rewrote (or "no changes needed")."""
+
+
+async def ensure_default_schedules() -> None:
+    """Idempotent seed, called from app startup after init_db."""
+    db = await get_db()
+    try:
+        async with db.execute("SELECT 1 FROM schedules WHERE name = ?",
+                              (DREAM_SCHEDULE_NAME,)) as cur:
+            if await cur.fetchone():
+                return
+        nxt = compute_next("daily", "03:30", None, _now())
+        await db.execute(
+            "INSERT INTO schedules (name, kind, task, cadence_kind, daily_at, "
+            "enabled, next_run) VALUES (?, 'jarvis', ?, 'daily', '03:30', 0, ?)",
+            (DREAM_SCHEDULE_NAME, DREAM_TASK, nxt.isoformat(timespec="minutes")))
+        await db.commit()
+    finally:
+        await db.close()
+
 
 def _now() -> dt.datetime:
     return dt.datetime.now()
@@ -103,6 +139,17 @@ async def create_schedule(body: CreateSchedule):
 async def toggle_schedule(sid: int, enabled: bool):
     db = await get_db()
     try:
+        if enabled:
+            # recompute next_run on enable: a schedule that sat disabled past
+            # its next_run would otherwise fire the moment it's switched on
+            async with db.execute("SELECT * FROM schedules WHERE id = ?",
+                                  (sid,)) as cur:
+                row = await cur.fetchone()
+            if row is not None:
+                nxt = compute_next(row["cadence_kind"], row["daily_at"],
+                                   row["interval_minutes"], _now())
+                await db.execute("UPDATE schedules SET next_run = ? WHERE id = ?",
+                                 (nxt.isoformat(timespec="minutes"), sid))
         await db.execute("UPDATE schedules SET enabled = ? WHERE id = ?",
                          (1 if enabled else 0, sid))
         await db.commit()

@@ -4,6 +4,7 @@ description: Search the project's files (code + notes) for a string or regex. Re
 when_to_use: Finding where a symbol, string or pattern lives in an uploaded codebase. Run crawl_codebase first for an overview; use read_file to open the files this finds.
 enabled: true
 requires_project: true
+read_only: true
 parameters:
   type: object
   properties:

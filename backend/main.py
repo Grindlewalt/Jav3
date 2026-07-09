@@ -20,6 +20,7 @@ async def lifespan(app: FastAPI):
     ensure_dirs()
     await init_db()
     ensure_memory_seeds()
+    await schedules.ensure_default_schedules()
     compile_registry()
     # re-program the learned egress allowlist into nftables (empty on boot);
     # best-effort so a dev host without the table starts fine
