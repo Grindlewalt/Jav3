@@ -178,7 +178,7 @@ async def run_turn(
             except json.JSONDecodeError:
                 args = {}
             parsed.append((tc, name, args))
-            yield {"type": "tool", "name": name, "args": args}
+            yield {"type": "tool", "id": tc["id"], "name": name, "args": args}
 
         async def _run_one(name: str, args: dict) -> str:
             blocked = _guard_blind_edit(conversation_id, name, args)
@@ -220,6 +220,11 @@ async def run_turn(
             messages.append({"role": "tool", "tool_call_id": tc["id"],
                              "content": _cap_result(name, result)})
             tool_msgs.append({"idx": len(messages) - 1, "round": i, "name": name})
+            # the GUI renders live activity rows from this: pair to the tool
+            # event by id, mark ok/err, carry the result for click-to-expand
+            yield {"type": "tool_result", "id": tc["id"], "name": name,
+                   "ok": not result.startswith(("error:", "duplicate call:")),
+                   "result": result[:10_000]}
             if name in read_only:
                 seen_calls[(name, json.dumps(args, sort_keys=True))] = tool_msgs[-1]
             else:

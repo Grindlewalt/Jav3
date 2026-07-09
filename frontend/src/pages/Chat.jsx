@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from '../api.js'
-import Md from '../Md.jsx'
+import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 
 export default function Chat() {
   const [conversations, setConversations] = useState([])
@@ -27,30 +27,21 @@ export default function Chat() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // one handler for both paths: the live POST stream and a resumed tail
+  // one handler for both paths: the live POST stream and a resumed tail.
+  // token/tool/tool_result fold into the streaming message's parts; final
+  // swaps in the reply with the activity collapsed above it.
   function handleTurnEvent(ev) {
     if (ev.type === 'start' && !incognito) setConversationId(ev.conversation_id)
-    if (ev.type === 'token')
+    if (ev.type === 'token' || ev.type === 'tool' || ev.type === 'tool_result')
       setMessages((m) => {
         const copy = [...m]
-        const last = copy[copy.length - 1]
-        copy[copy.length - 1] = { ...last, content: last.content + ev.text }
-        return copy
-      })
-    if (ev.type === 'tool')
-      setMessages((m) => {
-        const copy = [...m]
-        const last = copy[copy.length - 1]
-        copy[copy.length - 1] = {
-          ...last,
-          content: last.content + `\n[tool: ${ev.name}]\n`,
-        }
+        copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
         return copy
       })
     if (ev.type === 'final')
       setMessages((m) => {
         const copy = [...m]
-        copy[copy.length - 1] = { role: 'assistant', content: ev.content }
+        copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
         return copy
       })
     if (ev.type === 'error')
@@ -69,7 +60,7 @@ export default function Chat() {
     if (!r.running) return
     // a turn is still executing server-side — re-attach and watch it finish
     setBusy(true)
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true }])
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: [] }])
     const ctl = new AbortController()
     tailAbort.current = ctl
     try {
@@ -111,7 +102,7 @@ export default function Chat() {
     if (!text || busy) return
     setBusy(true)
     setMessages((m) => [...m, { role: 'user', content: text },
-                        { role: 'assistant', content: '', streaming: true }])
+                        { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
       await chatStream(
         { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
@@ -181,7 +172,7 @@ export default function Chat() {
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>
               {m.role === 'assistant'
-                ? <div className="bubble"><Md text={m.content || (m.streaming ? '…' : '')} /></div>
+                ? <MessageBody m={m} />
                 : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
             </div>
           ))}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, chatStream } from './api.js'
-import Md from './Md.jsx'
+import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
 // conversations are filtered to that project and new ones are linked to it.
@@ -54,7 +54,7 @@ export default function ChatBox({ projectSlug }) {
     setBusy(true)
     const wasNew = cid === null
     setMessages((m) => [...m, { role: 'user', content: text },
-                        { role: 'assistant', content: '', streaming: true }])
+                        { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
       await chatStream(
         { message: text, conversation_id: cid, confirm_peak: confirmPeak },
@@ -67,25 +67,16 @@ export default function ChatBox({ projectSlug }) {
                 body: JSON.stringify({ project: projectSlug }),
               }).then(refresh)
           }
-          if (ev.type === 'tool')
+          if (ev.type === 'token' || ev.type === 'tool' || ev.type === 'tool_result')
             setMessages((m) => {
               const copy = [...m]
-              const last = copy[copy.length - 1]
-              copy[copy.length - 1] = {
-                ...last, content: last.content + `\n\`⚙ ${ev.name}\`\n` }
-              return copy
-            })
-          if (ev.type === 'token')
-            setMessages((m) => {
-              const copy = [...m]
-              const last = copy[copy.length - 1]
-              copy[copy.length - 1] = { ...last, content: last.content + ev.text }
+              copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
               return copy
             })
           if (ev.type === 'final')
             setMessages((m) => {
               const copy = [...m]
-              copy[copy.length - 1] = { role: 'assistant', content: ev.content }
+              copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
               return copy
             })
           if (ev.type === 'error')
@@ -146,7 +137,7 @@ export default function ChatBox({ projectSlug }) {
         {messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
             {m.role === 'assistant'
-              ? <div className="bubble"><Md text={m.content || (m.streaming ? '…' : '')} /></div>
+              ? <MessageBody m={m} />
               : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
           </div>
         ))}

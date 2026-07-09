@@ -605,3 +605,23 @@ kbd {
   border: 1px solid var(--border); border-radius: 7px; white-space: pre-wrap;
   word-break: break-word; font: 12px/1.5 ui-monospace, Menlo, monospace; }
 .log-result { max-height: 300px; overflow: auto; }
+
+/* --- live tool activity in chat (ToolActivity.jsx) --- */
+.tool-row { border: 1px solid var(--border); border-radius: 7px;
+  background: var(--panel); margin: 4px 0; font-size: 12.5px; overflow: hidden; }
+.tool-row-head { display: flex; align-items: center; gap: 8px;
+  padding: 4px 10px; cursor: pointer; color: var(--dim); }
+.tool-row-head:hover { background: var(--panel-2); }
+.tool-row.live .tool-row-head { color: var(--fg); }
+.tool-row.err { border-color: #e5534b66; }
+.tool-row.err .tool-row-head { color: var(--red); }
+.tool-row-spin { color: var(--accent); animation: tool-pulse 1.2s ease-in-out infinite; }
+@keyframes tool-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+.tool-row-detail { padding: 6px 10px 10px; border-top: 1px solid var(--border);
+  font-size: 11px; }
+.tool-pre { margin: 2px 0 6px; padding: 6px 8px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap;
+  word-break: break-word; font: 11.5px/1.5 ui-monospace, Menlo, monospace;
+  max-height: 240px; overflow: auto; }
+.activity-group { margin-bottom: 8px; }
+.activity-group > .tool-row-head { padding: 2px 4px; font-size: 12px; }

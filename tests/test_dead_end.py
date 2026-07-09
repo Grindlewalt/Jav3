@@ -188,6 +188,26 @@ async def test_iteration_cap_forces_text_conclusion(tmp_env, monkeypatch):
     assert events[-1]["content"] == "Here is what I found; X remains unknown."
 
 
+async def test_tool_events_carry_id_and_results_stream(tmp_env, monkeypatch):
+    """F1: every tool event has an id, and a matching tool_result event
+    follows execution with ok/err classification + the result payload."""
+    await init_db()
+
+    async def dispatch(name, args):
+        return "error: nope" if args.get("q") == "bad" else "found: 42"
+
+    model = _ScriptedModel([[("probe", '{"q": "good"}'), ("probe", '{"q": "bad"}')]])
+    events, _ = await _run(monkeypatch, model, dispatch)
+    tools = [e for e in events if e["type"] == "tool"]
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert len(tools) == 2 and len(results) == 2
+    assert all(e.get("id") for e in tools)
+    by_id = {e["id"]: e for e in results}
+    assert by_id[tools[0]["id"]]["ok"] is True
+    assert by_id[tools[0]["id"]]["result"] == "found: 42"
+    assert by_id[tools[1]["id"]]["ok"] is False
+
+
 # --- run tool guards (F8) ------------------------------------------------------
 
 async def test_run_code_rejects_comment_only(tmp_env):
