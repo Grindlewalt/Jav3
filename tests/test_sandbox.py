@@ -285,8 +285,12 @@ def test_parse_suricata_eve_alerts():
         '"alert":{"signature_id":2000001,"signature":"ET MALWARE CnC Beacon",'
         '"category":"A Network Trojan was detected","severity":1}}\n'
     )
+    # a built-in engine anomaly (checksum) that must be filtered out as noise
+    text += ('{"event_type":"alert","src_ip":"10.66.0.10","dest_ip":"10.66.0.1",'
+             '"alert":{"signature_id":2200073,"signature":"SURICATA TCPv4 invalid checksum",'
+             '"category":"Generic Protocol Command Decode","severity":3}}\n')
     alerts = scanners.parse_suricata_eve(text)
-    assert len(alerts) == 1
+    assert len(alerts) == 1                            # engine anomaly dropped
     assert alerts[0]["signature"] == "ET MALWARE CnC Beacon"
     assert alerts[0]["sev"] == "crit" and alerts[0]["dest"] == "44.44.44.44"
 

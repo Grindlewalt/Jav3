@@ -155,7 +155,12 @@ def suricata_ready() -> bool:
 def parse_suricata_eve(text: str) -> list[dict]:
     """eve.json alert records -> deduped findings. Suricata severity: 1 = most
     severe (crit), 2/3 = advisory (warn). Untrusted signature/category strings
-    are echoed as data, never interpreted."""
+    are echoed as data, never interpreted.
+
+    Suricata's own engine-anomaly events (signature prefixed `SURICATA ` — decode
+    errors, stream/checksum anomalies) are dropped: on a tap capture with NIC
+    checksum offload they fire on every run and are capture artifacts, not
+    threats. Only rule-based threat signatures (ET/GPL/custom) are kept."""
     seen, out = set(), []
     for line in text.splitlines():
         try:
@@ -165,6 +170,9 @@ def parse_suricata_eve(text: str) -> list[dict]:
         if ev.get("event_type") != "alert":
             continue
         a = ev.get("alert", {})
+        sig = a.get("signature", "")
+        if sig.startswith("SURICATA "):        # engine anomaly, not a threat rule
+            continue
         sid = a.get("signature_id")
         dest = ev.get("dest_ip", "")
         key = (sid, dest)
