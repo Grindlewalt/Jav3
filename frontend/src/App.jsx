@@ -15,6 +15,48 @@ import Jobs from './pages/Jobs.jsx'
 import Sandbox from './pages/Sandbox.jsx'
 import Logs from './pages/Logs.jsx'
 
+function NotificationBell() {
+  const [data, setData] = useState(null)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    const load = () => api('/api/notifications').then(setData).catch(() => {})
+    load()
+    const t = setInterval(load, 15000)
+    return () => clearInterval(t)
+  }, [])
+  const count = data?.count || 0
+  const close = () => setOpen(false)
+  return (
+    <div className="notif-wrap">
+      <button className="notif-bell" onClick={() => setOpen((o) => !o)}
+              title="Pending approvals">
+        🔔{count > 0 && <span className="notif-badge">{count}</span>}
+      </button>
+      {open && (
+        <div className="notif-drop">
+          {count === 0 && <div className="dim small notif-empty">Nothing waiting on you</div>}
+          {(data?.sandbox || []).map((s) => (
+            <NavLink key={`s${s.run_id}`} to="/sandbox" className="notif-item" onClick={close}>
+              <span className={`sbx-pill ${s.verdict}`}>{s.verdict}</span>
+              <span className="grow ellipsis">sandbox · {s.project} · {s.headline}</span>
+            </NavLink>
+          ))}
+          {(data?.staged || []).map((s) => (
+            <NavLink key={`st${s.project}`} to={`/projects/${s.project}`} className="notif-item" onClick={close}>
+              <span className="grow ellipsis">staged changes · {s.project} · {s.files} file{s.files === 1 ? '' : 's'}</span>
+            </NavLink>
+          ))}
+          {(data?.git || []).map((g) => (
+            <NavLink key={`g${g.id}`} to={`/projects/${g.project}`} className="notif-item" onClick={close}>
+              <span className="grow ellipsis">git push · {g.project} · {g.message}</span>
+            </NavLink>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
   const location = useLocation()
@@ -43,6 +85,7 @@ export default function App() {
           <NavLink to="/schedules">Schedules</NavLink>
           <NavLink to="/skills">Skills</NavLink>
           <NavLink to="/tools">Tools</NavLink>
+          <NotificationBell />
           <button
             className="link"
             onClick={async () => {

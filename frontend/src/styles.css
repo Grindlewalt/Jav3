@@ -43,6 +43,31 @@ nav a {
 nav a:hover { color: var(--text); background: var(--panel); }
 nav a.active { color: var(--text); background: var(--panel-2); }
 
+/* ---- notification bell ---- */
+.notif-wrap { position: relative; margin-left: auto; }
+.notif-bell {
+  background: none; border: 0; padding: 4px 8px; font-size: 16px;
+  cursor: pointer; position: relative; line-height: 1;
+}
+.notif-badge {
+  position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px;
+  padding: 0 4px; border-radius: 8px; background: var(--red); color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+}
+.notif-drop {
+  position: absolute; top: 100%; right: 0; margin-top: 6px; z-index: 50;
+  width: 340px; max-height: 60vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.notif-drop .notif-item {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-radius: 7px; color: var(--text); font-size: 13px; min-width: 0;
+}
+.notif-drop .notif-item:hover { background: var(--panel-2); }
+.notif-empty { padding: 12px 10px; text-align: center; }
+
 /* ---- controls ---- */
 button {
   background: linear-gradient(135deg, var(--accent), #4a7fd4);
