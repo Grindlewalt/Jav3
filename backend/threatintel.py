@@ -87,6 +87,26 @@ def _parse_lines(text: str) -> list[str]:
     return out
 
 
+def _parse_domain_lines(text: str) -> list[str]:
+    """Domain feeds come plain (one host per line) or in /etc/hosts format
+    (`0.0.0.0 baddomain`). Take the domain token, never the redirect IP."""
+    out = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        toks = line.split()
+        cand = toks[-1] if len(toks) >= 2 else toks[0]   # hostfile -> last tok
+        try:
+            ipaddress.ip_address(cand)                    # a bare IP is not a domain
+            continue
+        except ValueError:
+            pass
+        if "." in cand and "/" not in cand:
+            out.append(cand.lower().rstrip("."))
+    return out
+
+
 def build_from(ip_text: str, domain_text: str, meta: dict | None = None) -> Blocklist:
     """Pure builder — used by the loader and directly by tests."""
     ips, cidrs = set(), []
@@ -158,7 +178,7 @@ async def refresh(timeout: float = 30) -> dict:
                 sources.append({"name": name, "url": url, "error": str(e)})
                 continue
             if kind == "domain":
-                dom_lines += [t for t in toks if "." in t and "/" not in t]
+                dom_lines += _parse_domain_lines(r.text)
             else:
                 ip_lines += toks
             sources.append({"name": name, "url": url, "count": len(toks)})

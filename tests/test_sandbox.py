@@ -201,6 +201,14 @@ def test_threatintel_build_and_match():
     assert bl.hit(ip="44.44.44.44") and bl.hit(host="evil.example.com")
 
 
+def test_threatintel_hostfile_domain_parse():
+    from backend import threatintel
+    # URLhaus-style /etc/hosts format: redirect IP + the bad domain
+    text = "# urlhaus hostfile\n127.0.0.1\tbad.example\n0.0.0.0 evil.test\n"
+    doms = threatintel._parse_domain_lines(text)
+    assert doms == ["bad.example", "evil.test"]        # domains, not the IPs
+
+
 def test_classify_threat_intel_forces_critical_and_nonclearable():
     from backend import threatintel
     bl = threatintel.build_from("44.44.44.44\n", "")
