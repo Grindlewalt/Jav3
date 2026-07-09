@@ -41,12 +41,12 @@ async def list_projects():
     try:
         async with db.execute(
             "SELECT id, slug, name, github_remote, created_at FROM projects "
-            "WHERE deleted_at IS NULL ORDER BY created_at DESC"
+            "WHERE deleted_at IS NULL AND is_hidden = 0 ORDER BY created_at DESC"
         ) as cur:
             rows = await cur.fetchall()
         async with db.execute(
             "SELECT id, slug, name, deleted_at FROM projects "
-            "WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+            "WHERE deleted_at IS NOT NULL AND is_hidden = 0 ORDER BY deleted_at DESC"
         ) as cur:
             deleted = await cur.fetchall()
         active = await get_active_project(db)

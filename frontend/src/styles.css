@@ -628,3 +628,6 @@ kbd {
 .md-preview { overflow: auto; padding: 10px 14px; border: 1px solid var(--border);
   border-radius: var(--radius); background: var(--panel);
   white-space: pre-wrap; word-break: break-word; }
+
+.artifact-group { margin-bottom: 14px; }
+.artifact-group .row { gap: 6px; margin-top: 4px; }

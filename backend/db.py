@@ -138,6 +138,12 @@ async def init_db() -> None:
             cols = [r["name"] for r in await cur.fetchall()]
         if "deleted_at" not in cols:
             await db.execute("ALTER TABLE projects ADD COLUMN deleted_at TEXT")
+        if "is_hidden" not in cols:
+            # artifact stores: per-chat projects that hold files made in
+            # project-less chats — invisible on the Projects dashboard until
+            # converted or merged (the Artifacts page is their view)
+            await db.execute(
+                "ALTER TABLE projects ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")
         # run-tree columns on an already-created conversations table
         async with db.execute("PRAGMA table_info(conversations)") as cur:
             ccols = [r["name"] for r in await cur.fetchall()]

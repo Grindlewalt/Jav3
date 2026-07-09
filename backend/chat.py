@@ -155,6 +155,11 @@ def _chan(conversation_id: int) -> str:
     return f"chat:{conversation_id}"
 
 
+# file tools that may fall back to a chat's hidden artifact store; run/git/
+# search tools stay strictly project-only
+ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files"})
+
+
 async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                          user_msg: str = "") -> None:
     """One whole chat turn, detached from any HTTP connection: clicking off
@@ -167,18 +172,25 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         settings.max_op_input_tokens, settings.max_op_output_tokens)
     btoken = budget.active_budget.set(the_budget)
     chan = _chan(conversation_id)
+    atoken = None
     db = await get_db()
     try:
         bus.publish(chan, {"type": "start", "conversation_id": conversation_id})
         system_prompt = await assemble_system_prompt(db)
-        # tool subsetting: with no project loaded, the project-scoped tools
-        # (file edits, runs, git, search...) can only error — withholding
-        # them trims the per-turn spec tax and steers the model to
-        # load_project first. The set is stable within a project state, so
-        # the provider's prefix cache survives.
+        # tool subsetting: with no project loaded, project-scoped run/git/
+        # search tools can only error — withhold them. The FILE tools stay:
+        # they fall back to the chat's hidden artifact store (persistent
+        # chats only; incognito leaves no trace). The set is stable within a
+        # project state, so the provider's prefix cache survives.
         entries = load_registry()
         if not await get_active_project(db):
-            entries = [e for e in entries if not e.get("requires_project")]
+            if ephemeral:
+                entries = [e for e in entries if not e.get("requires_project")]
+            else:
+                atoken = runtime.artifact_slug.set(f"chat-{conversation_id}")
+                entries = [e for e in entries
+                           if not e.get("requires_project")
+                           or e["name"] in ARTIFACT_TOOLS]
         tools = openai_tool_specs(entries)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it
@@ -229,6 +241,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 await db.commit()
             except Exception:
                 pass
+        if atoken is not None:
+            runtime.artifact_slug.reset(atoken)
         runtime.ephemeral.reset(token)
         budget.active_budget.reset(btoken)
         await db.close()

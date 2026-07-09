@@ -23,8 +23,16 @@ def _staging_dir(slug: str) -> Path:
     return settings.projects_dir / slug / STAGING
 
 
+def is_artifact(slug: str) -> bool:
+    """Hidden per-chat artifact stores auto-approve their writes: chat
+    outputs are documents, not code that runs anywhere. The marker file is
+    written at creation (toolctx._ensure_artifact_project)."""
+    return (settings.projects_dir / slug / ".artifact").exists()
+
+
 def stage_write(slug: str, rel: str, content: bytes) -> Path:
-    """Stage new content for <rel>. The canonical file is untouched."""
+    """Stage new content for <rel>. The canonical file is untouched — except
+    in artifact stores, where the write applies immediately."""
     base = _staging_dir(slug)
     base.mkdir(parents=True, exist_ok=True)
     dest = safe_join(base, rel)
@@ -34,6 +42,8 @@ def stage_write(slug: str, rel: str, content: bytes) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
     dest.chmod(0o644)  # staged bytes never carry exec bits
+    if is_artifact(slug):
+        approve(slug, [rel])
     return dest
 
 

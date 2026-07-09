@@ -9,3 +9,8 @@ import contextvars
 # True during an incognito/ephemeral turn: nothing is persisted and memory
 # writes are redirected to a throwaway dir. Set at the top of the turn.
 ephemeral = contextvars.ContextVar("jarvis_ephemeral", default=False)
+
+# Artifact store for a project-less chat turn: the hidden per-conversation
+# project slug the file tools fall back to when no project is loaded. An
+# explicitly loaded project always wins (see toolctx.require_project).
+artifact_slug = contextvars.ContextVar("jarvis_artifact_slug", default=None)

@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 import asyncio
 
-from . import (agents_api, agents_run, auth, chat, git_api, logs_api,
+from . import (agents_api, agents_run, artifacts_api, auth, chat, git_api, logs_api,
                memory_api, projects, runs_api, sandbox, sandbox_api, schedules,
                skills_api, vm_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
@@ -52,6 +52,7 @@ app.include_router(git_api.router)
 app.include_router(sandbox_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)
+app.include_router(artifacts_api.router)
 
 
 @app.get("/api/health")

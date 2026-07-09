@@ -6,7 +6,8 @@ async def run(slug: str) -> str:
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT slug, name FROM projects WHERE deleted_at IS NULL ORDER BY slug"
+            "SELECT slug, name FROM projects "
+            "WHERE deleted_at IS NULL AND is_hidden = 0 ORDER BY slug"
         ) as cur:
             rows = await cur.fetchall()
         valid = {r["slug"]: r["name"] for r in rows}

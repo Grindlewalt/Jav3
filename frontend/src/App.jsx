@@ -4,6 +4,7 @@ import { api } from './api.js'
 import Login from './pages/Login.jsx'
 import Chat from './pages/Chat.jsx'
 import Projects from './pages/Projects.jsx'
+import Artifacts from './pages/Artifacts.jsx'
 import Workspace from './pages/Workspace.jsx'
 import Context from './pages/Context.jsx'
 import Skills from './pages/Skills.jsx'
@@ -34,6 +35,7 @@ export default function App() {
           <span className="brand">Jarvis</span>
           <NavLink to="/" end>Chat</NavLink>
           <NavLink to="/projects">Projects</NavLink>
+          <NavLink to="/artifacts">Artifacts</NavLink>
           <NavLink to="/context">Context</NavLink>
           <NavLink to="/agents">Agents</NavLink>
           <NavLink to="/sandbox">Sandbox</NavLink>
@@ -59,6 +61,7 @@ export default function App() {
         <Route path="/" element={<Chat />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/projects/:slug" element={<Workspace />} />
+        <Route path="/artifacts" element={<Artifacts />} />
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />
         <Route path="/sandbox" element={<Sandbox />} />
