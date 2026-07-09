@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import compaction, runtime
+from . import bus, compaction, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import run_turn
@@ -140,7 +140,139 @@ async def get_messages(conversation_id: int):
             rows = await cur.fetchall()
     finally:
         await db.close()
-    return {"messages": [dict(r) for r in rows]}
+    # `running` lets the GUI re-attach to an in-flight turn after a reload
+    return {"messages": [dict(r) for r in rows],
+            "running": conversation_id in _active_turns}
+
+
+# In-flight turns, keyed by conversation. The dict entry is both the "is a
+# turn running" flag and the strong reference that keeps the task alive after
+# the HTTP connection that started it goes away.
+_active_turns: dict[int, asyncio.Task] = {}
+
+
+def _chan(conversation_id: int) -> str:
+    return f"chat:{conversation_id}"
+
+
+async def _run_chat_turn(conversation_id: int, ephemeral: bool,
+                         user_msg: str = "") -> None:
+    """One whole chat turn, detached from any HTTP connection: clicking off
+    the tab no longer kills the work. Every event is published to the
+    conversation's bus channel; any number of SSE tails (the original POST,
+    a reconnect) just watch. Persistence happens here regardless."""
+    token = runtime.ephemeral.set(ephemeral)
+    # one token budget for the whole turn, shared by any tools/agents it spawns
+    the_budget = budget.Budget(
+        settings.max_op_input_tokens, settings.max_op_output_tokens)
+    btoken = budget.active_budget.set(the_budget)
+    chan = _chan(conversation_id)
+    db = await get_db()
+    try:
+        bus.publish(chan, {"type": "start", "conversation_id": conversation_id})
+        system_prompt = await assemble_system_prompt(db)
+        # tool subsetting: with no project loaded, the project-scoped tools
+        # (file edits, runs, git, search...) can only error — withholding
+        # them trims the per-turn spec tax and steers the model to
+        # load_project first. The set is stable within a project state, so
+        # the provider's prefix cache survives.
+        entries = load_registry()
+        if not await get_active_project(db):
+            entries = [e for e in entries if not e.get("requires_project")]
+        tools = openai_tool_specs(entries)
+        # tier-2 compaction: summary (if any) + verbatim tail, compacting
+        # first when the effective context window demands it
+        history = await compaction.assemble(db, conversation_id, system_prompt)
+
+        final_content = ""
+        async for event in run_turn(db, conversation_id, system_prompt,
+                                    history, tools=tools):
+            if event["type"] == "final":
+                final_content = event["content"]
+            else:
+                bus.publish(chan, event)
+
+        await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', ?)",
+            (conversation_id, final_content),
+        )
+        await db.commit()
+        if not ephemeral:
+            async with db.execute(
+                "SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?",
+                (conversation_id,),
+            ) as cur:
+                count = (await cur.fetchone())["c"]
+            if count == 2:  # first exchange done — try to give it a real name
+                asyncio.create_task(
+                    _name_conversation(conversation_id, user_msg, final_content))
+        bus.publish(chan, {"type": "final", "content": final_content,
+                           "conversation_id": conversation_id})
+    except Exception as exc:  # surfaced to any tail rather than lost
+        bus.publish(chan, {"type": "error", "message": str(exc)})
+    finally:
+        if ephemeral:
+            # incognito: leave zero trace — drop the convo and any temp notes
+            for tbl in ("tool_calls", "messages", "conversations"):
+                col = "id" if tbl == "conversations" else "conversation_id"
+                await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
+            await db.commit()
+            shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
+        else:
+            try:
+                await db.execute(
+                    "INSERT INTO usage_log (conversation_id, input_tokens, "
+                    "output_tokens, cache_hit, cache_miss) VALUES (?,?,?,?,?)",
+                    (conversation_id, the_budget.input_tokens,
+                     the_budget.output_tokens, the_budget.cache_hit,
+                     the_budget.cache_miss))
+                await db.commit()
+            except Exception:
+                pass
+        runtime.ephemeral.reset(token)
+        budget.active_budget.reset(btoken)
+        await db.close()
+        # order matters for the reconnect race: drop the running flag, THEN
+        # signal end — a subscriber that still sees the flag is guaranteed
+        # the job_end is ahead of it in the queue (both happen in this tick)
+        _active_turns.pop(conversation_id, None)
+        bus.close_job(chan)
+
+
+def _tail(conversation_id: int, q) -> "StreamingResponse":
+    """SSE-forward a conversation's bus channel until the turn ends. Client
+    disconnect cancels only this tail, never the turn."""
+    chan = _chan(conversation_id)
+
+    async def event_stream():
+        try:
+            while True:
+                ev = await q.get()
+                if ev.get("type") == "job_end":
+                    break
+                yield sse(ev)
+                if ev.get("type") in ("final", "error"):
+                    break
+        finally:
+            bus.unsubscribe(chan, q)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/chat/{conversation_id}/stream")
+async def resume_chat_stream(conversation_id: int):
+    """Re-attach to an in-flight turn (page reload, coming back to the tab).
+    Tokens streamed before attaching are gone, but the final event carries the
+    complete reply, so the GUI ends up whole either way."""
+    q = bus.subscribe(_chan(conversation_id))
+    if conversation_id not in _active_turns:
+        # subscribe-then-check closes the race with the turn's finally block
+        bus.unsubscribe(_chan(conversation_id), q)
+
+        async def idle():
+            yield sse({"type": "idle"})
+        return StreamingResponse(idle(), media_type="text/event-stream")
+    return _tail(conversation_id, q)
 
 
 @router.post("/chat")
@@ -148,6 +280,8 @@ async def chat(body: ChatRequest):
     db = await get_db()
     try:
         conversation_id = body.conversation_id
+        if conversation_id is not None and conversation_id in _active_turns:
+            raise HTTPException(status_code=409, detail="turn_in_progress")
         if conversation_id is None:
             active = await get_active_project(db)
             project_id = None
@@ -190,77 +324,9 @@ async def chat(body: ChatRequest):
     finally:
         await db.close()
 
-    async def event_stream():
-        token = runtime.ephemeral.set(body.ephemeral)
-        # one token budget for the whole turn, shared by any tools/agents it spawns
-        the_budget = budget.Budget(
-            settings.max_op_input_tokens, settings.max_op_output_tokens)
-        btoken = budget.active_budget.set(the_budget)
-        db = await get_db()
-        try:
-            yield sse({"type": "start", "conversation_id": conversation_id})
-            system_prompt = await assemble_system_prompt(db)
-            # tool subsetting: with no project loaded, the project-scoped tools
-            # (file edits, runs, git, search...) can only error — withholding
-            # them trims the per-turn spec tax and steers the model to
-            # load_project first. The set is stable within a project state, so
-            # the provider's prefix cache survives.
-            entries = load_registry()
-            if not await get_active_project(db):
-                entries = [e for e in entries if not e.get("requires_project")]
-            tools = openai_tool_specs(entries)
-            # tier-2 compaction: summary (if any) + verbatim tail, compacting
-            # first when the effective context window demands it — the old
-            # LIMIT-40 cliff survives only as the fallback path
-            history = await compaction.assemble(db, conversation_id, system_prompt)
-
-            final_content = ""
-            async for event in run_turn(db, conversation_id, system_prompt,
-                                        history, tools=tools):
-                if event["type"] == "final":
-                    final_content = event["content"]
-                else:
-                    yield sse(event)
-
-            await db.execute(
-                "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', ?)",
-                (conversation_id, final_content),
-            )
-            await db.commit()
-            if not body.ephemeral:
-                async with db.execute(
-                    "SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?",
-                    (conversation_id,),
-                ) as cur:
-                    count = (await cur.fetchone())["c"]
-                if count == 2:  # first exchange done — try to give it a real name
-                    asyncio.create_task(
-                        _name_conversation(conversation_id, body.message, final_content))
-            yield sse({"type": "final", "content": final_content,
-                       "conversation_id": conversation_id})
-        except Exception as exc:  # surfaced to the GUI rather than a dropped stream
-            yield sse({"type": "error", "message": str(exc)})
-        finally:
-            if body.ephemeral:
-                # incognito: leave zero trace — drop the convo and any temp notes
-                for tbl in ("tool_calls", "messages", "conversations"):
-                    col = "id" if tbl == "conversations" else "conversation_id"
-                    await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
-                await db.commit()
-                shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
-            if not body.ephemeral:
-                try:
-                    await db.execute(
-                        "INSERT INTO usage_log (conversation_id, input_tokens, "
-                        "output_tokens, cache_hit, cache_miss) VALUES (?,?,?,?,?)",
-                        (conversation_id, the_budget.input_tokens,
-                         the_budget.output_tokens, the_budget.cache_hit,
-                         the_budget.cache_miss))
-                    await db.commit()
-                except Exception:
-                    pass
-            runtime.ephemeral.reset(token)
-            budget.active_budget.reset(btoken)
-            await db.close()
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    # subscribe BEFORE spawning so this tail can't miss the first events, then
+    # run the turn as a detached task: it outlives this HTTP connection
+    q = bus.subscribe(_chan(conversation_id))
+    _active_turns[conversation_id] = asyncio.create_task(
+        _run_chat_turn(conversation_id, body.ephemeral, body.message))
+    return _tail(conversation_id, q)

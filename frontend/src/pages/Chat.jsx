@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, chatStream } from '../api.js'
+import { api, chatStream, tailStream } from '../api.js'
 import Md from '../Md.jsx'
 
 export default function Chat() {
@@ -12,6 +12,7 @@ export default function Chat() {
   const [projects, setProjects] = useState([])
   const [incognito, setIncognito] = useState(false)
   const bottomRef = useRef(null)
+  const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
 
   const refreshConvos = () =>
     api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -19,19 +20,75 @@ export default function Chat() {
   useEffect(() => {
     refreshConvos()
     api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
+    return () => tailAbort.current?.abort()
   }, [])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // one handler for both paths: the live POST stream and a resumed tail
+  function handleTurnEvent(ev) {
+    if (ev.type === 'start' && !incognito) setConversationId(ev.conversation_id)
+    if (ev.type === 'token')
+      setMessages((m) => {
+        const copy = [...m]
+        const last = copy[copy.length - 1]
+        copy[copy.length - 1] = { ...last, content: last.content + ev.text }
+        return copy
+      })
+    if (ev.type === 'tool')
+      setMessages((m) => {
+        const copy = [...m]
+        const last = copy[copy.length - 1]
+        copy[copy.length - 1] = {
+          ...last,
+          content: last.content + `\n[tool: ${ev.name}]\n`,
+        }
+        return copy
+      })
+    if (ev.type === 'final')
+      setMessages((m) => {
+        const copy = [...m]
+        copy[copy.length - 1] = { role: 'assistant', content: ev.content }
+        return copy
+      })
+    if (ev.type === 'error')
+      setMessages((m) => {
+        const copy = [...m]
+        copy[copy.length - 1] = { role: 'error', content: ev.message }
+        return copy
+      })
+  }
+
   async function openConversation(id) {
+    tailAbort.current?.abort()
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
+    if (!r.running) return
+    // a turn is still executing server-side — re-attach and watch it finish
+    setBusy(true)
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true }])
+    const ctl = new AbortController()
+    tailAbort.current = ctl
+    try {
+      await tailStream(`/api/chat/${id}/stream`, (ev) => {
+        if (ev.type === 'idle') {
+          // turn ended between the messages fetch and the tail — reload
+          api(`/api/conversations/${id}/messages`).then((r2) => setMessages(r2.messages))
+          return
+        }
+        handleTurnEvent(ev)
+      }, ctl.signal)
+      refreshConvos()
+    } catch { /* tail aborted or dropped; messages reload on next open */ }
+    setBusy(false)
   }
 
   function newConversation() {
+    tailAbort.current?.abort()
+    setBusy(false)
     setConversationId(null)
     setMessages([])
   }
@@ -59,38 +116,7 @@ export default function Chat() {
       await chatStream(
         { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
           ephemeral: incognito },
-        (ev) => {
-          if (ev.type === 'start' && !incognito) setConversationId(ev.conversation_id)
-          if (ev.type === 'token')
-            setMessages((m) => {
-              const copy = [...m]
-              const last = copy[copy.length - 1]
-              copy[copy.length - 1] = { ...last, content: last.content + ev.text }
-              return copy
-            })
-          if (ev.type === 'tool')
-            setMessages((m) => {
-              const copy = [...m]
-              const last = copy[copy.length - 1]
-              copy[copy.length - 1] = {
-                ...last,
-                content: last.content + `\n[tool: ${ev.name}]\n`,
-              }
-              return copy
-            })
-          if (ev.type === 'final')
-            setMessages((m) => {
-              const copy = [...m]
-              copy[copy.length - 1] = { role: 'assistant', content: ev.content }
-              return copy
-            })
-          if (ev.type === 'error')
-            setMessages((m) => {
-              const copy = [...m]
-              copy[copy.length - 1] = { role: 'error', content: ev.message }
-              return copy
-            })
-        },
+        handleTurnEvent,
       )
       setInput('')
       api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -105,6 +131,9 @@ export default function Chat() {
           await send(true)
           return
         }
+      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+        setMessages((m) => [...m, { role: 'error',
+          content: 'a turn is still running in this chat — wait for it to finish' }])
       } else {
         setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
       }
