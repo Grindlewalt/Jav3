@@ -322,6 +322,27 @@ def test_parse_audit_paths_hex_name():
     assert parse_audit_paths(text) == [".env"]
 
 
+def test_parse_audit_paths_serial_scope_drops_boot_reads():
+    from backend.gate import marker_serial, parse_audit_paths
+    text = (
+        # boot read (low serial) — the VM's own systemd credential file
+        'type=SYSCALL msg=audit(1.0:50): syscall=257 success=yes key="jread"\n'
+        'type=PATH msg=audit(1.0:50): item=0 name="/run/credentials/x"\n'
+        # the run's marker exec (defines the cut point)
+        'type=EXECVE msg=audit(1.0:100): argc=2 a0="/bin/echo" a1="JARVISGATEMARK7"\n'
+        # command read (high serial) — the real secret
+        'type=SYSCALL msg=audit(1.0:120): syscall=257 success=yes key="jread"\n'
+        'type=PATH msg=audit(1.0:120): item=0 name="/home/agent/.aws/credentials"\n'
+    )
+    ms = marker_serial(text, "JARVISGATEMARK7")
+    assert ms == 100
+    paths = parse_audit_paths(text, min_serial=ms)
+    assert paths == ["/home/agent/.aws/credentials"]      # boot read excluded
+    # without scoping, both leak in
+    assert set(parse_audit_paths(text)) == {"/run/credentials/x",
+                                            "/home/agent/.aws/credentials"}
+
+
 def test_build_evidence_populates_sensitive_from_reads():
     from backend.gate import _build_evidence
     ev = _build_evidence(1, "slug", "cmd", {"exit_status": 0, "staged": []},

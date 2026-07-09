@@ -120,26 +120,41 @@ def execs_after_marker(execs: list[str], marker: str) -> list[str]:
     return execs
 
 
-_AUDIT_EVENT = re.compile(r"audit\((\d+\.\d+:\d+)\)")
+_AUDIT_EVENT = re.compile(r"audit\((\d+\.\d+:(\d+))\)")
 _JREAD_KEY = re.compile(r'key="?(?:jread|6A72656164)"?', re.I)   # "jread" plain or hex
 _PATH_NAME = re.compile(r'\bname=("[^"]*"|[0-9A-Fa-f]+|\(null\))')
 
 
-def parse_audit_paths(text: str) -> list[str]:
+def marker_serial(text: str, marker: str) -> int:
+    """Audit event serial of the run's sentinel exec (0 if not seen). Audit
+    serials increase monotonically, so it's a clean cut point: the run's own
+    reads carry a serial >= this, the fresh VM's boot/login reads carry less."""
+    for line in text.splitlines():
+        if "type=EXECVE" in line and marker in line:
+            m = _AUDIT_EVENT.search(line)
+            if m:
+                return int(m.group(2))
+    return 0
+
+
+def parse_audit_paths(text: str, min_serial: int = 0) -> list[str]:
     """auditd open/openat records keyed `jread` -> the file paths actually read.
 
     A read is a SYSCALL record carrying our `jread` key plus one or more PATH
     records under the same event id; we group by that id so only opens tagged by
-    the guest's read watch surface (not every PATH record in the stream). Paths
-    are quoted or hex-encoded exactly like EXECVE argv, so they decode the same
-    way. Deduped, order-preserving; matching against sensitive globs is the
+    the guest's read watch surface (not every PATH record in the stream). Events
+    with a serial below `min_serial` (the run's marker) are the fresh VM's own
+    boot/login reads and are dropped — the same scoping the exec rules get.
+    Paths are quoted or hex-encoded exactly like EXECVE argv, so they decode the
+    same way. Deduped, order-preserving; matching against sensitive globs is the
     caller's job (kept pure here)."""
     groups: dict[str, dict] = {}
     for line in text.splitlines():
         m = _AUDIT_EVENT.search(line)
         if not m:
             continue
-        g = groups.setdefault(m.group(1), {"read": False, "paths": []})
+        g = groups.setdefault(m.group(1),
+                              {"read": False, "paths": [], "serial": int(m.group(2))})
         if "type=SYSCALL" in line and _JREAD_KEY.search(line):
             g["read"] = True
         if "type=PATH" in line:
@@ -149,7 +164,7 @@ def parse_audit_paths(text: str) -> list[str]:
                 g["paths"].append(_decode_audit_arg(raw))
     seen, out = set(), []
     for g in groups.values():
-        if not g["read"]:
+        if not g["read"] or g["serial"] < min_serial:
             continue
         for p in g["paths"]:
             if p and p not in seen:
@@ -481,7 +496,7 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     dns = parse_dns_slice(dns_text)
     audit_text = _slice(audit_path, audit_off)
     execs = execs_after_marker(parse_audit_slice(audit_text), marker)
-    read_paths = parse_audit_paths(audit_text)
+    read_paths = parse_audit_paths(audit_text, min_serial=marker_serial(audit_text, marker))
     drops = await _journal_drops(since)
     flows = await _pcap_flows(pcap_path)
     have_pcap = pcap_path.is_file() and pcap_path.stat().st_size > 0
