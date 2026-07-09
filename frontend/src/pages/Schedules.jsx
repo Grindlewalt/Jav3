@@ -133,12 +133,13 @@ export default function Schedules() {
                 <span className="grow"><strong>{s.name}</strong>
                   <span className="tag">{s.kind === 'agent' ? s.agent_slug : 'jarvis'}</span>
                   {s.project_slug && <span className="tag">{s.project_slug}</span>}
+                  {!!s.pending_approval && <span className="tag pending">awaiting approval</span>}
                 </span>
                 <button className="ghost" disabled={busy === s.id}
                         onClick={() => runNow(s)}>{busy === s.id ? '…' : 'run now'}</button>
                 <button className="ghost" onClick={() => openEdit(s)}>edit</button>
                 <button className="ghost" onClick={() => toggle(s)}>
-                  {s.enabled ? 'pause' : 'resume'}</button>
+                  {s.enabled ? 'pause' : (s.pending_approval ? 'approve' : 'resume')}</button>
                 <button className="ghost danger" onClick={() => del(s)}>delete</button>
               </div>
               <div className="dim small">{s.task}</div>

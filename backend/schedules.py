@@ -180,8 +180,12 @@ async def toggle_schedule(sid: int, enabled: bool):
                                    row["interval_minutes"], _now())
                 await db.execute("UPDATE schedules SET next_run = ? WHERE id = ?",
                                  (nxt.isoformat(timespec="minutes"), sid))
-        await db.execute("UPDATE schedules SET enabled = ? WHERE id = ?",
-                         (1 if enabled else 0, sid))
+        # toggling is the operator's decision on a Jarvis-proposed schedule
+        # (resume = approve, pause = keep it parked) — either way it's no
+        # longer awaiting one, so the bell stops showing it
+        await db.execute(
+            "UPDATE schedules SET enabled = ?, pending_approval = 0 WHERE id = ?",
+            (1 if enabled else 0, sid))
         await db.commit()
     finally:
         await db.close()

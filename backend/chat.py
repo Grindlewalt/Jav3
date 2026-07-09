@@ -180,9 +180,12 @@ def _chan(conversation_id: int) -> str:
     return f"chat:{conversation_id}"
 
 
-# file tools that may fall back to a chat's hidden artifact store; run/git/
-# search tools stay strictly project-only
-ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files"})
+# tools that may fall back to a chat's hidden artifact store (via
+# toolctx.require_project): the file tools, plus the plan/orchestrate pair so
+# a big ask in plain chat still gets a todo plan and an agent team instead of
+# a hand-rolled turn. run/git/search tools stay strictly project-only.
+ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files",
+                            "todo_update", "deploy_agents"})
 
 # a turn that used any of these did real project work — journal-worthy
 _JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request",

@@ -23,7 +23,8 @@ from .tools import registry
 # what it changed, so eviction never touches them (reads are disposable,
 # writes are load-bearing).
 WRITE_PINNED = frozenset({"write_file", "edit_file", "journal_update",
-                          "memory_write", "git_commit_request"})
+                          "memory_write", "git_commit_request",
+                          "create_agent", "schedule_update"})
 
 # conversation_id -> project paths the model has read (read_file) or written
 # (write_file) there — the read-before-edit guard. In-memory and bounded; a
@@ -38,6 +39,31 @@ def _note_seen(conversation_id: int, path: str) -> None:
     _files_seen.move_to_end(conversation_id)
     while len(_files_seen) > _FILES_SEEN_MAX_CONVOS:
         _files_seen.popitem(last=False)
+
+
+def _triage_note(tool_names: set[str]) -> str:
+    """Round-1 triage: the orchestrate-or-not fork happens on the FIRST model
+    call, so the steering has to already be in context — the mid-flight
+    delegation nudge below only rescues turns that have gone long. Rides the
+    latest user turn (same channel as the operator rules) because tool
+    schemas pull attention off the system prompt, where the behavior bank
+    says the same thing to little effect."""
+    if "todo_update" not in tool_names:
+        return ""
+    routes = [r for name, r in (
+        ("research", "web gathering goes to research in ONE call"),
+        ("spawn_agent", "a self-contained subtask goes to spawn_agent"),
+        ("deploy_agents",
+         "several independent workstreams go to a deploy_agents team"),
+    ) if name in tool_names]
+    if not routes:
+        return ""
+    return ("[triage — size the task before your first tool call. A question "
+            "you can already answer: answer it, no tools. A small task (up to "
+            "~3 steps): just do it. Anything bigger: FIRST write the plan with "
+            "todo_update (one item per step), then execute items in order, "
+            "checking each off; delegate the heavy items — "
+            + "; ".join(routes) + ".]")
 
 
 def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None:
@@ -76,23 +102,28 @@ async def run_turn(
     # enforcing operator formatting on it just burns tokens.
     rules = standing_rules_tail() if self_check else ""
 
+    tool_names = {t["function"]["name"] for t in (tools or [])}
+    can_delegate = bool(tool_names & {"research", "spawn_agent", "deploy_agents"})
+
     # Tool schemas pull the model's attention off the system-prompt rules:
     # measured on deepseek-v4-flash, em-dash violations run ~0% with no tools
     # but ~65% once tools are attached. Restating the rules in the latest user
     # turn (closest to generation) roughly halves that to ~33% — it helps but
     # doesn't fully solve it, so the final answer also goes through a no-tools
-    # self-check below. Model-only; persisted DB history stays clean.
-    if tools and rules:
+    # self-check below. The triage note (operator-facing turns only) shares
+    # the ride, ahead of the rules so those stay closest to generation.
+    # Model-only; persisted DB history stays clean.
+    triage = _triage_note(tool_names) if (tools and self_check) else ""
+    inject = "\n\n".join(x for x in (triage, rules) if x)
+    if tools and inject:
         for i in range(len(messages) - 1, -1, -1):
             if messages[i]["role"] == "user":
                 messages[i] = {**messages[i],
-                               "content": (messages[i]["content"] or "") + "\n\n" + rules}
+                               "content": (messages[i]["content"] or "") + "\n\n" + inject}
                 break
 
     n_iter = max_iterations or settings.max_react_iterations
     read_only = registry.read_only_names()   # once per turn; hot-reload can wait
-    tool_names = {t["function"]["name"] for t in (tools or [])}
-    can_delegate = bool(tool_names & {"research", "spawn_agent", "deploy_agents"})
     tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
     err_streak = 0               # consecutive failed/empty/duplicate results
     force_conclude = False       # dead-end breaker tripped: withdraw tools

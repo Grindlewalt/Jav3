@@ -5,6 +5,7 @@ live behind their own page (or, for git, behind no page at all):
   - git push requests awaiting approval   (git_requests table)
   - staged changes awaiting review        (.staging/ per project)
   - undecided sandbox sessions            (gated runs not yet approved/quarantined)
+  - schedules Jarvis proposed             (schedules with pending_approval = 1)
 
 Read-only aggregation — it never approves anything, just surfaces a count + list
 so the nav can show a badge. Each source is wrapped so one failing store does not
@@ -81,6 +82,22 @@ async def _sandbox_pending() -> list[dict]:
     return out
 
 
+async def _schedules_pending() -> list[dict]:
+    """Schedules Jarvis proposed via schedule_update: paused until the
+    operator resumes (approve) or pauses (park) them in the GUI."""
+    try:
+        db = await get_db()
+        try:
+            async with db.execute(
+                "SELECT id, name, task, kind, agent_slug FROM schedules "
+                "WHERE pending_approval = 1 ORDER BY id DESC") as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        finally:
+            await db.close()
+    except Exception:                           # noqa: BLE001
+        return []
+
+
 @router.get("")
 async def notifications():
     try:
@@ -91,7 +108,8 @@ async def notifications():
     git = await _git_pending(slugs)
     staged = _staged_pending(slugs)
     sbx = await _sandbox_pending()
+    sched = await _schedules_pending()
     return {
-        "count": len(git) + len(staged) + len(sbx),
-        "git": git, "staged": staged, "sandbox": sbx,
+        "count": len(git) + len(staged) + len(sbx) + len(sched),
+        "git": git, "staged": staged, "sandbox": sbx, "schedules": sched,
     }

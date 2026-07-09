@@ -198,7 +198,12 @@ async def test_deploy_agents_tool_wired_and_guarded(client, monkeypatch):
     mod = iu.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    async def fake_run_job(job_id, brief, project, *, peak=False, title=""):
+    async def fake_run_job(job_id, brief, project, *, peak=False,
+                           leaf_tools=None, title=""):
+        # workers never get the spawn/deploy/create/schedule tools
+        names = {s["function"]["name"] for s in (leaf_tools or [])}
+        assert not names & {"spawn_agent", "deploy_agents",
+                            "create_agent", "schedule_update"}
         return {"root_id": 1, "rollup": f"did: {brief}", "doc_path": None}
 
     monkeypatch.setattr(mod, "run_job", fake_run_job)

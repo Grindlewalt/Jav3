@@ -42,9 +42,13 @@ def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
 
 def _agent_tools(agent: dict) -> list[dict]:
     excluded = set(agent.get("tools_exclude") or [])
-    # an agent never spawns further agents or teams — no recursion, no fork bombs
+    # an agent never spawns further agents or teams — no recursion, no fork
+    # bombs — and never mints persistent infrastructure (new agents,
+    # schedules): that stays a head-of-conversation decision
     excluded.add("spawn_agent")
     excluded.add("deploy_agents")
+    excluded.add("create_agent")
+    excluded.add("schedule_update")
     entries = [e for e in load_registry() if e["name"] not in excluded]
     return openai_tool_specs(entries)
 

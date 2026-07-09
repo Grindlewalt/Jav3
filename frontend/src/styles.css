@@ -487,6 +487,7 @@ kbd {
   border: 1px solid var(--border); border-radius: 7px; background: var(--panel);
   font-size: 13px; cursor: default; }
 .run-row:has(+ .run-rollup), .run-node:hover .run-row { border-color: #37404d; }
+.tag.pending { color: var(--amber); border-color: var(--amber); }
 .tag.planning { color: var(--amber); border-color: var(--amber); }
 .tag.running { color: var(--accent); border-color: var(--accent); }
 .tag.done { color: var(--green); border-color: var(--green); }

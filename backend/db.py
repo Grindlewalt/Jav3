@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     daily_at TEXT,                   -- 'HH:MM' local, when cadence = daily
     interval_minutes INTEGER,        -- when cadence = interval
     enabled INTEGER NOT NULL DEFAULT 1,
+    pending_approval INTEGER NOT NULL DEFAULT 0,  -- Jarvis-proposed, not yet decided
     next_run TEXT NOT NULL,          -- ISO local
     last_run TEXT,
     last_result TEXT,
@@ -147,6 +148,14 @@ async def init_db() -> None:
         # run-tree columns on an already-created conversations table
         async with db.execute("PRAGMA table_info(conversations)") as cur:
             ccols = [r["name"] for r in await cur.fetchall()]
+        # schedules proposed by Jarvis (schedule_update tool) land disabled
+        # with this flag set; the bell surfaces them and the operator's
+        # enable/pause decision clears it
+        async with db.execute("PRAGMA table_info(schedules)") as cur:
+            scols = [r["name"] for r in await cur.fetchall()]
+        if "pending_approval" not in scols:
+            await db.execute("ALTER TABLE schedules ADD COLUMN "
+                             "pending_approval INTEGER NOT NULL DEFAULT 0")
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
                           ("rollup", "TEXT"), ("job_id", "TEXT"),
