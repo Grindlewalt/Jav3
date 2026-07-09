@@ -92,10 +92,16 @@ async def run_turn(
     n_iter = max_iterations or settings.max_react_iterations
     read_only = registry.read_only_names()   # once per turn; hot-reload can wait
     tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
+    err_streak = 0               # consecutive failed/empty/duplicate results
+    force_conclude = False       # dead-end breaker tripped: withdraw tools
+    # (name, canonical args) -> tool_msgs entry, for duplicate read-only calls.
+    # Cleared whenever a mutating tool runs — state may have changed under it.
+    seen_calls: dict[tuple, dict] = {}
     for i in range(n_iter):
-        # on the final allowed round, drop tools so the model must produce an
-        # answer from what it has instead of another tool call it can't act on
-        call_tools = None if i == n_iter - 1 else (tools or None)
+        # on the final allowed round — or once the dead-end breaker trips —
+        # drop tools so the model must produce an answer from what it has
+        # instead of another tool call it can't act on
+        call_tools = None if (i == n_iter - 1 or force_conclude) else (tools or None)
         final: dict | None = None
         try:
             async for event in model.complete(
@@ -123,6 +129,15 @@ async def run_turn(
             yield {"type": "final", "content": content}
             return
 
+        if force_conclude:
+            # tools were withdrawn but calls came back anyway (DSML text
+            # recovery can do this) — stop rather than keep grinding
+            yield {"type": "final", "content":
+                   "(stopped: too many consecutive failed tool calls without "
+                   "reaching a conclusion — try rephrasing the task or point "
+                   "me at where the answer lives)"}
+            return
+
         messages.append({
             "role": "assistant",
             "content": final["content"] or None,
@@ -142,6 +157,15 @@ async def run_turn(
             blocked = _guard_blind_edit(conversation_id, name, args)
             if blocked is not None:
                 return blocked
+            if name in read_only:
+                prev = seen_calls.get((name, json.dumps(args, sort_keys=True)))
+                if prev is not None and not prev.get("evicted"):
+                    # CC's re-read lesson: point at the earlier result instead
+                    # of re-sending the bytes (an evicted result re-dispatches)
+                    return (f"duplicate call: you already ran {name} with these "
+                            "exact arguments this turn — the result is unchanged, "
+                            "see above. Change the arguments or take a different "
+                            "approach.")
             result = await registry.dispatch(name, args)
             path = args.get("path")
             if (name in ("read_file", "write_file") and isinstance(path, str)
@@ -169,7 +193,32 @@ async def run_turn(
             messages.append({"role": "tool", "tool_call_id": tc["id"],
                              "content": _cap_result(name, result)})
             tool_msgs.append({"idx": len(messages) - 1, "round": i, "name": name})
+            if name in read_only:
+                seen_calls[(name, json.dumps(args, sort_keys=True))] = tool_msgs[-1]
+            else:
+                seen_calls.clear()   # a mutating call may invalidate any read
+            failed = (not result.strip() or result.startswith(
+                ("error:", "no matches", "note:", "duplicate call:")))
+            err_streak = err_streak + 1 if failed else 0
         _evict_stale_results(messages, tool_msgs, i)
+
+        # dead-end breaker: a grinding turn gets steered, then stopped —
+        # the note rides the last tool result so it's adjacent to the failure
+        if err_streak >= settings.dead_end_force_answer:
+            force_conclude = True
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                            f"\n\n[system note: {err_streak} consecutive tool "
+                            "calls failed or returned nothing — tools are now "
+                            "disabled. Summarize what you tried, what failed, "
+                            "and what you could not determine. If the thing "
+                            "you're looking for may simply not exist, say so.]"}
+        elif err_streak >= settings.dead_end_error_streak:
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                            f"\n\n[system note: {err_streak} consecutive tool "
+                            "calls failed or returned nothing. Diagnose why "
+                            "before retrying: change strategy, delegate "
+                            "(research / spawn_agent), or report honestly what "
+                            "can't be found. Do not repeat similar calls.]"}
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}

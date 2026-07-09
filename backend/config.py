@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     tool_result_evict_chars: int = 4_000
     tool_result_keep_recent: int = 2
 
+    # Dead-end circuit-breaker (the convo-12 post-mortem: 173 tool calls of
+    # near-duplicate searches and failing installs, never concluding). After
+    # `error_streak` consecutive failed/empty tool calls the model gets a
+    # corrective note; at `force_answer` tools are withdrawn so it must stop
+    # and report what it couldn't find. Identical repeats of a read-only call
+    # within a turn short-circuit without dispatching.
+    dead_end_error_streak: int = 4
+    dead_end_force_answer: int = 8
+
     # Transient model-API failures (connect errors, 5xx) retry with exponential
     # backoff — but only if no tokens have streamed to the client yet, so a
     # retry can never duplicate visible output.

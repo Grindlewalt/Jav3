@@ -256,7 +256,8 @@ class _ScriptedModel:
                    "usage": None}
 
 
-async def _run_scripted(monkeypatch, model, dispatch, read_only=frozenset()):
+async def _run_scripted(monkeypatch, model, dispatch, read_only=frozenset(),
+                        seed_read_paths=None):
     from backend.agent import loop as loop_mod
     from backend.agent.tools import registry
     monkeypatch.setattr(loop_mod, "model", model)
@@ -268,6 +269,8 @@ async def _run_scripted(monkeypatch, model, dispatch, read_only=frozenset()):
         cur = await db.execute("INSERT INTO conversations (summary) VALUES ('t')")
         cid = cur.lastrowid
         await db.commit()
+        if seed_read_paths:
+            loop_mod._files_seen[cid] = set(seed_read_paths)
         events = []
         async for ev in loop_mod.run_turn(
                 db, cid, "system", [{"role": "user", "content": "go"}],
@@ -331,18 +334,14 @@ async def test_write_results_pinned_from_eviction(tmp_env, monkeypatch):
             async for ev in super().complete(messages, tools=tools, **kw):
                 yield ev
 
+    # distinct reader args each round — identical repeats would short-circuit
+    # on the duplicate-call breaker instead of exercising eviction
     model = Spy([[("edit_file", '{"path": "a.py", "find": "x", "replace": "y"}')],
-                 [("reader", "{}")], [("reader", "{}")], [("reader", "{}")]])
-    # pre-mark a.py as read so the guard lets the edit through
-    from backend.db import get_db as _g
-    db = await _g()
-    cur = await db.execute("SELECT MAX(id) AS m FROM conversations")
-    row = await cur.fetchone()
-    await db.close()
-    next_cid = (row["m"] or 0) + 1
-    loop_mod._files_seen[next_cid] = {"a.py"}
+                 [("reader", '{"i": 1}')], [("reader", '{"i": 2}')],
+                 [("reader", '{"i": 3}')]])
     await _run_scripted(monkeypatch, model, dispatch,
-                        read_only=frozenset({"reader"}))
+                        read_only=frozenset({"reader"}),
+                        seed_read_paths={"a.py"})   # guard lets the edit through
     final_view = seen[-1]
     # the edit_file result (a write) survived; reader results got evicted
     assert any(m == "w" * 500 for m in final_view)
