@@ -484,7 +484,9 @@ function EditorPanel({ slug, state, setState }) {
   const [content, setContent] = useState('')
   const [binary, setBinary] = useState(false)
   const [dirty, setDirty] = useState(false)
+  const [preview, setPreview] = useState(false)
   const path = state.path || ''
+  const previewable = /\.(md|txt)$/i.test(path)
 
   const refresh = useCallback(() =>
     api(`/api/projects/${slug}/files`).then((r) =>
@@ -521,11 +523,19 @@ function EditorPanel({ slug, state, setState }) {
         </select>
         <button className="ghost" onClick={refresh} title="refresh">↻</button>
         <button className="ghost" onClick={newFile}>+ new</button>
+        {previewable && (
+          <button className="ghost" title={preview ? 'edit' : 'rendered preview'}
+                  onClick={() => setPreview((v) => !v)}>{preview ? '✎' : '👁'}</button>
+        )}
         <button onClick={save} disabled={!dirty || !path}>{dirty ? 'Save' : 'Saved'}</button>
       </div>
       {binary
         ? <div className="dim center-pad">binary file</div>
-        : <textarea className="md-editor grow" spellCheck={false} value={content}
+        : preview && previewable
+          ? (/\.md$/i.test(path)
+              ? <div className="md-preview grow"><Md text={content} /></div>
+              : <pre className="md-preview grow">{content}</pre>)
+          : <textarea className="md-editor grow" spellCheck={false} value={content}
                     disabled={!path}
                     placeholder="pick or create a file…"
                     onChange={(e) => { setContent(e.target.value); setDirty(true) }} />}

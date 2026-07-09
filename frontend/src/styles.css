@@ -625,3 +625,6 @@ kbd {
   max-height: 240px; overflow: auto; }
 .activity-group { margin-bottom: 8px; }
 .activity-group > .tool-row-head { padding: 2px 4px; font-size: 12px; }
+.md-preview { overflow: auto; padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--panel);
+  white-space: pre-wrap; word-break: break-word; }

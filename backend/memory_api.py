@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from .auth import require_user
 from .config import settings
 from .fsutil import list_tree, read_text_or_binary, safe_join
-from .memory import ensure_memory_seeds
+from .memory import ensure_memory_seeds, estimate_tokens
 
 router = APIRouter(prefix="/api/memory", tags=["memory"],
                    dependencies=[Depends(require_user)])
@@ -25,6 +25,11 @@ async def list_memory():
     files = list_tree(settings.memory_dir)
     for f in files:
         f["auto_generated"] = f["path"] in AUTO_GENERATED
+        try:  # ≈input-token cost of the file if it rides the context
+            f["tokens"] = estimate_tokens(
+                (settings.memory_dir / f["path"]).read_text())
+        except (UnicodeDecodeError, OSError):
+            f["tokens"] = None
     return {"files": files}
 
 

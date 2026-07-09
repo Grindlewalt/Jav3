@@ -64,8 +64,9 @@ export default function Context() {
           {files.map((f) => (
             <li key={f.path} className={selected === f.path ? 'active' : ''}
                 onClick={() => setSelected(f.path)}>
-              {f.path}
+              <span className="grow">{f.path}</span>
               {f.auto_generated && <span className="tag">auto</span>}
+              {f.tokens != null && <span className="dim small">≈{f.tokens.toLocaleString()} tok</span>}
             </li>
           ))}
         </ul>
@@ -80,6 +81,8 @@ export default function Context() {
                 {assembled?.active_project
                   ? `project loaded: ${assembled.active_project}`
                   : 'no project loaded'}
+                {assembled?.tokens != null &&
+                  ` · ≈${assembled.tokens.toLocaleString()} input tokens ride every turn`}
               </span>
             </div>
             <pre className="context-view">{assembled?.system_prompt || '…'}</pre>

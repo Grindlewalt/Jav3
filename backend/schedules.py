@@ -135,6 +135,36 @@ async def create_schedule(body: CreateSchedule):
     return {"id": sid, "next_run": next_run.isoformat(timespec="minutes")}
 
 
+@router.put("/{sid}")
+async def update_schedule(sid: int, body: CreateSchedule):
+    """Full edit. next_run is recomputed from the (possibly new) cadence so an
+    edited schedule never fires off its stale timetable."""
+    if body.kind not in ("agent", "jarvis"):
+        raise HTTPException(status_code=400, detail="kind must be 'agent' or 'jarvis'")
+    if body.kind == "agent" and not body.agent_slug:
+        raise HTTPException(status_code=400, detail="agent schedules need an agent_slug")
+    if body.cadence_kind not in ("daily", "interval"):
+        raise HTTPException(status_code=400, detail="cadence_kind must be 'daily' or 'interval'")
+    if not body.task.strip():
+        raise HTTPException(status_code=400, detail="task is required")
+    nxt = compute_next(body.cadence_kind, body.daily_at, body.interval_minutes, _now())
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "UPDATE schedules SET name = ?, kind = ?, agent_slug = ?, "
+            "project_slug = ?, task = ?, cadence_kind = ?, daily_at = ?, "
+            "interval_minutes = ?, next_run = ? WHERE id = ?",
+            (body.name, body.kind, body.agent_slug, body.project_slug, body.task,
+             body.cadence_kind, body.daily_at, body.interval_minutes,
+             nxt.isoformat(timespec="minutes"), sid))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="no such schedule")
+    finally:
+        await db.close()
+    return {"ok": True, "next_run": nxt.isoformat(timespec="minutes")}
+
+
 @router.patch("/{sid}")
 async def toggle_schedule(sid: int, enabled: bool):
     db = await get_db()

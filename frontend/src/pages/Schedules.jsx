@@ -15,6 +15,7 @@ export default function Schedules() {
   const [projects, setProjects] = useState([])
   const [form, setForm] = useState(BLANK)
   const [busy, setBusy] = useState(null)
+  const [editing, setEditing] = useState(null)   // schedule id being edited
 
   const refresh = () => api('/api/schedules').then((r) => setSchedules(r.schedules))
   useEffect(() => {
@@ -25,20 +26,37 @@ export default function Schedules() {
 
   const set = (p) => setForm((f) => ({ ...f, ...p }))
 
-  async function create(e) {
+  async function save(e) {
     e.preventDefault()
     if (!form.name.trim() || !form.task.trim()) return
     if (form.kind === 'agent' && !form.agent_slug) { window.alert('pick an agent'); return }
+    const body = JSON.stringify({
+      ...form,
+      interval_minutes: Number(form.interval_minutes) || 360,
+      agent_slug: form.kind === 'agent' ? form.agent_slug : null,
+      project_slug: form.project_slug || null,
+    })
     try {
-      await api('/api/schedules', { method: 'POST', body: JSON.stringify({
-        ...form,
-        interval_minutes: Number(form.interval_minutes) || 360,
-        agent_slug: form.kind === 'agent' ? form.agent_slug : null,
-        project_slug: form.project_slug || null,
-      }) })
-      setForm(BLANK)
+      if (editing) await api(`/api/schedules/${editing}`, { method: 'PUT', body })
+      else await api('/api/schedules', { method: 'POST', body })
+      cancelEdit()
       refresh()
     } catch (err) { window.alert(err.detail || String(err)) }
+  }
+
+  function openEdit(s) {
+    setEditing(s.id)
+    setForm({
+      name: s.name, kind: s.kind, agent_slug: s.agent_slug || '',
+      project_slug: s.project_slug || '', task: s.task,
+      cadence_kind: s.cadence_kind, daily_at: s.daily_at || '09:00',
+      interval_minutes: s.interval_minutes || 360,
+    })
+  }
+
+  function cancelEdit() {
+    setEditing(null)
+    setForm(BLANK)
   }
 
   async function toggle(s) {
@@ -65,8 +83,8 @@ export default function Schedules() {
   return (
     <div className="split-layout">
       <aside>
-        <div className="side-title">New schedule</div>
-        <form className="sched-form" onSubmit={create}>
+        <div className="side-title">{editing ? `Edit schedule #${editing}` : 'New schedule'}</div>
+        <form className="sched-form" onSubmit={save}>
           <input placeholder="name (e.g. morning briefing)" value={form.name}
                  onChange={(e) => set({ name: e.target.value })} />
           <label className="mini">what runs
@@ -101,7 +119,8 @@ export default function Schedules() {
             ? <input type="time" value={form.daily_at} onChange={(e) => set({ daily_at: e.target.value })} />
             : <input type="number" min="15" value={form.interval_minutes}
                      onChange={(e) => set({ interval_minutes: e.target.value })} />}
-          <button type="submit">+ create</button>
+          <button type="submit">{editing ? 'save changes' : '+ create'}</button>
+          {editing && <button type="button" className="ghost" onClick={cancelEdit}>cancel</button>}
         </form>
       </aside>
       <main className="editor-pane">
@@ -117,6 +136,7 @@ export default function Schedules() {
                 </span>
                 <button className="ghost" disabled={busy === s.id}
                         onClick={() => runNow(s)}>{busy === s.id ? '…' : 'run now'}</button>
+                <button className="ghost" onClick={() => openEdit(s)}>edit</button>
                 <button className="ghost" onClick={() => toggle(s)}>
                   {s.enabled ? 'pause' : 'resume'}</button>
                 <button className="ghost danger" onClick={() => del(s)}>delete</button>

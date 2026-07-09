@@ -211,4 +211,6 @@ async def debug_context():
         active = await get_active_project(db)
     finally:
         await db.close()
-    return {"active_project": active, "system_prompt": prompt}
+    from .memory import estimate_tokens
+    return {"active_project": active, "system_prompt": prompt,
+            "tokens": estimate_tokens(prompt)}
