@@ -227,6 +227,45 @@ def test_build_evidence_delivered_needs_reply():
     assert ("10.66.0.1", 53) not in flows      # infra filtered out
 
 
+def test_parse_audit_paths_reads_only_jread_events():
+    from backend.gate import parse_audit_paths
+    text = (
+        # a jread event: SYSCALL tagged jread + its PATH record
+        'type=SYSCALL msg=audit(1700000000.111:42): syscall=257 success=yes key="jread"\n'
+        'type=PATH msg=audit(1700000000.111:42): item=0 name="/home/agent/.aws/credentials" nametype=NORMAL\n'
+        # an exec event (jexec) — its PATH must NOT be treated as a read
+        'type=SYSCALL msg=audit(1700000000.222:43): syscall=59 success=yes key="jexec"\n'
+        'type=PATH msg=audit(1700000000.222:43): item=0 name="/usr/bin/python3" nametype=NORMAL\n'
+    )
+    paths = parse_audit_paths(text)
+    assert paths == ["/home/agent/.aws/credentials"]
+
+
+def test_parse_audit_paths_hex_name():
+    from backend.gate import parse_audit_paths
+    # ".env" hex-encoded (auditd encodes names with special chars)
+    hexname = ".env".encode().hex().upper()
+    text = (
+        'type=SYSCALL msg=audit(1.1:9): syscall=257 success=yes key="jread"\n'
+        f'type=PATH msg=audit(1.1:9): item=0 name={hexname} nametype=NORMAL\n'
+    )
+    assert parse_audit_paths(text) == [".env"]
+
+
+def test_build_evidence_populates_sensitive_from_reads():
+    from backend.gate import _build_evidence
+    ev = _build_evidence(1, "slug", "cmd", {"exit_status": 0, "staged": []},
+                         True, True, "", ["cat"], since_drops=[], pcap_text="",
+                         read_paths=["/home/agent/.aws/credentials",
+                                     "/home/agent/app.py"])
+    paths = {s["path"] for s in ev["sensitive"]}
+    assert "/home/agent/.aws/credentials" in paths      # matches **/.aws/**
+    assert "/home/agent/app.py" not in paths            # ordinary file, ignored
+    # and the classifier escalates it to critical
+    c = sandbox.classify(ev, {})
+    assert c["verdict"] == "crit" and c["facts"]["sensitive"] >= 1
+
+
 def test_parse_dns_replies_and_typed():
     text = ("query[A] pypi.org from 10.66.0.10\n"
             "reply pypi.org is 151.101.0.223\n")

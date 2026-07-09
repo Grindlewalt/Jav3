@@ -24,7 +24,7 @@ from pathlib import Path
 from .agent.tools import vm, vmexec
 from .config import settings
 from .db import get_db
-from .sandbox import classify, rules_index
+from .sandbox import classify, match_sensitive, rules_index
 from .staging import stage_write
 
 TAP = "jvtap0"
@@ -100,6 +100,44 @@ def parse_audit_slice(text: str) -> list[str]:
         argv = [_decode_audit_arg(a) for a in args]
         if argv:
             out.append(" ".join(argv))
+    return out
+
+
+_AUDIT_EVENT = re.compile(r"audit\((\d+\.\d+:\d+)\)")
+_JREAD_KEY = re.compile(r'key="?(?:jread|6A72656164)"?', re.I)   # "jread" plain or hex
+_PATH_NAME = re.compile(r'\bname=("[^"]*"|[0-9A-Fa-f]+|\(null\))')
+
+
+def parse_audit_paths(text: str) -> list[str]:
+    """auditd open/openat records keyed `jread` -> the file paths actually read.
+
+    A read is a SYSCALL record carrying our `jread` key plus one or more PATH
+    records under the same event id; we group by that id so only opens tagged by
+    the guest's read watch surface (not every PATH record in the stream). Paths
+    are quoted or hex-encoded exactly like EXECVE argv, so they decode the same
+    way. Deduped, order-preserving; matching against sensitive globs is the
+    caller's job (kept pure here)."""
+    groups: dict[str, dict] = {}
+    for line in text.splitlines():
+        m = _AUDIT_EVENT.search(line)
+        if not m:
+            continue
+        g = groups.setdefault(m.group(1), {"read": False, "paths": []})
+        if "type=SYSCALL" in line and _JREAD_KEY.search(line):
+            g["read"] = True
+        if "type=PATH" in line:
+            for raw in _PATH_NAME.findall(line):
+                if raw == "(null)":
+                    continue
+                g["paths"].append(_decode_audit_arg(raw))
+    seen, out = set(), []
+    for g in groups.values():
+        if not g["read"]:
+            continue
+        for p in g["paths"]:
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
     return out
 
 
@@ -310,10 +348,22 @@ def parse_render_attempts(stdout: str) -> list[dict]:
 def _build_evidence(run_id: int, slug: str, command: str, result: dict,
                     locked: bool, fresh: bool, dns_text: str, execs: list[str],
                     since_drops: list[dict], pcap_text: str,
-                    render: dict | None = None) -> dict:
+                    render: dict | None = None,
+                    read_paths: list[str] | None = None) -> dict:
     """Raw capture assembled into one record. No verdict, no severity — that is
     sandbox.classify()'s job against the live allowlist."""
     ip2host = parse_dns_replies(dns_text)
+
+    # Real sensitive-read detection: auditd tagged these paths as opened for
+    # read (key `jread`); match them against the operator's sensitive globs here
+    # so classify() sees genuine reads, not just argv/staged approximations.
+    sensitive = []
+    seen = set()
+    for p in (read_paths or []):
+        g = match_sensitive(p)
+        if g and p not in seen:
+            seen.add(p)
+            sensitive.append({"path": p, "glob": g})
 
     # The tap sees the guest's outbound SYNs even for connections nftables
     # drops, so packet-presence does NOT mean "allowed". A connection was only
@@ -344,7 +394,7 @@ def _build_evidence(run_id: int, slug: str, command: str, result: dict,
         "timed_out": bool(result.get("timed_out")),
         "egress_locked": locked, "fresh": fresh,
         "flows": flows, "blocked": blocked, "dns": parse_dns_typed(dns_text),
-        "execs": execs, "sensitive": [], "staged": result.get("staged", []),
+        "execs": execs, "sensitive": sensitive, "staged": result.get("staged", []),
         "render": render,
     }
 
@@ -403,7 +453,9 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
 
     dns_text = _slice(DNS_LOG, dns_off)
     dns = parse_dns_slice(dns_text)
-    execs = parse_audit_slice(_slice(audit_path, audit_off))
+    audit_text = _slice(audit_path, audit_off)
+    execs = parse_audit_slice(audit_text)
+    read_paths = parse_audit_paths(audit_text)
     drops = await _journal_drops(since)
     flows = await _pcap_flows(pcap_path)
     have_pcap = pcap_path.is_file() and pcap_path.stat().st_size > 0
@@ -422,7 +474,7 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     evidence = _build_evidence(
         run_id, slug, command, result, locked, fresh,
         dns_text, execs, since_drops=parse_drops_counted(await _drop_text(since)),
-        pcap_text=await _pcap_dump(pcap_path), render=render)
+        pcap_text=await _pcap_dump(pcap_path), render=render, read_paths=read_paths)
     evidence_path = cap_dir / f"gate-{run_id}-evidence.json"
     evidence_path.write_text(json.dumps(evidence, indent=1))
 
