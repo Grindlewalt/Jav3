@@ -367,6 +367,13 @@ async def chat(body: ChatRequest):
         if conversation_id is not None and conversation_id in _active_turns:
             raise HTTPException(status_code=409, detail="turn_in_progress")
         if conversation_id is None:
+            # Peak-cost gate (spec §4) BEFORE the conversation exists: the old
+            # order created the row first, so this 409 left an orphan,
+            # blank-rendering conversation behind (and the retry opened a
+            # fresh one — twin entries in the sidebar).
+            if in_peak_window() and not body.confirm_peak:
+                raise HTTPException(status_code=409,
+                                    detail="peak_confirmation_required")
             active = await get_active_project(db)
             project_id = None
             if active:
@@ -383,22 +390,24 @@ async def chat(body: ChatRequest):
                 (project_id, title))
             conversation_id = cur.lastrowid
             await db.commit()
+            if body.confirm_peak:
+                confirm_peak(conversation_id)
         else:
             async with db.execute(
                 "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
             ) as cur:
                 if not await cur.fetchone():
                     raise HTTPException(status_code=404, detail="no such conversation")
-
-        # Peak-cost gate (spec §4): inside a peak window the user must opt in.
-        if body.confirm_peak:
-            confirm_peak(conversation_id)
-        if in_peak_window() and not peak_confirmed(conversation_id):
-            raise HTTPException(
-                status_code=409,
-                detail="peak_confirmation_required",
-                headers={"X-Conversation-Id": str(conversation_id)},
-            )
+            # Peak-cost gate for an existing conversation: confirmation is
+            # keyed to its id, so it can (and must) be checked after lookup.
+            if body.confirm_peak:
+                confirm_peak(conversation_id)
+            if in_peak_window() and not peak_confirmed(conversation_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="peak_confirmation_required",
+                    headers={"X-Conversation-Id": str(conversation_id)},
+                )
 
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",

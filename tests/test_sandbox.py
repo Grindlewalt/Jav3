@@ -232,6 +232,46 @@ def test_classify_without_blocklist_has_no_threat():
     assert c["threat"] == [] and c["facts"]["threat"] == 0
 
 
+# ---- offline scanners (ClamAV / YARA) --------------------------------------
+
+def test_parse_clamscan_found_lines():
+    from pathlib import Path
+
+    from backend import scanners
+    base = Path("/proj/.staging")
+    out = ("/proj/.staging/drop.sh: Unix.Trojan.Generic FOUND\n"
+           "/proj/.staging/ok.py: OK\n")
+    hits = scanners.parse_clamscan(out, base)
+    assert hits == [{"path": "drop.sh", "signature": "Unix.Trojan.Generic"}]
+
+
+def test_parse_yara_matches():
+    from pathlib import Path
+
+    from backend import scanners
+    base = Path("/proj/.staging")
+    out = "Linux_Reverse_Shell /proj/.staging/eb.py\nEICAR_Test_File /proj/.staging/x\n"
+    hits = scanners.parse_yara(out, base)
+    assert {"rule": "Linux_Reverse_Shell", "path": "eb.py"} in hits
+    assert {"rule": "EICAR_Test_File", "path": "x"} in hits
+
+
+def test_classify_scan_hit_is_critical():
+    ev = _ev(staged=["drop.sh"],
+             scan={"clamav": [{"path": "drop.sh", "signature": "Unix.Trojan.X"}],
+                   "yara": [], "ran": ["clamav", "yara"]})
+    c = sandbox.classify(ev, {})
+    assert c["verdict"] == "crit" and c["rule"] == "malware-signature:clamav"
+    assert c["facts"]["scan"] == 1
+    assert c["scan"][0]["signature"] == "Unix.Trojan.X"
+    assert "malware signature" in c["headline"]
+
+
+def test_classify_no_scan_key_is_safe():
+    c = sandbox.classify(_ev(), {})       # evidence without a scan field
+    assert c["scan"] == [] and c["facts"]["scan"] == 0
+
+
 # ---- gate parsers ----------------------------------------------------------
 
 def test_pcap_bytes_accounts_per_peer():

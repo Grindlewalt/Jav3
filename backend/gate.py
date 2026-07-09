@@ -24,7 +24,7 @@ from pathlib import Path
 from .agent.tools import vm, vmexec
 from .config import settings
 from .db import get_db
-from . import threatintel
+from . import scanners, threatintel
 from .sandbox import classify, match_sensitive, rules_index
 from .staging import stage_write
 
@@ -516,6 +516,12 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
         run_id, slug, command, result, locked, fresh,
         dns_text, execs, since_drops=parse_drops_counted(await _drop_text(since)),
         pcap_text=await _pcap_dump(pcap_path), render=render, read_paths=read_paths)
+    # offline signature/pattern scan of what the run wrote or fetched (ClamAV +
+    # YARA, host-side, deterministic). Degrades to empty when scanners absent.
+    try:
+        evidence["scan"] = await scanners.scan_staged(slug, result.get("staged", []))
+    except Exception:                          # noqa: BLE001 (a scanner must never fail the run)
+        evidence["scan"] = {"clamav": [], "yara": [], "ran": []}
     evidence_path = cap_dir / f"gate-{run_id}-evidence.json"
     evidence_path.write_text(json.dumps(evidence, indent=1))
 

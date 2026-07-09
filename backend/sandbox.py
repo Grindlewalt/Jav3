@@ -442,10 +442,20 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
     behavior_crit = next((b for b in behavior if b["sev"] == "crit"), None)
     behavior_warn = next((b for b in behavior if b["sev"] == "warn"), None)
 
+    # offline scanner hits (ClamAV signatures, YARA patterns) over the run's
+    # output files — a signature match is a hard critical.
+    scan = evidence.get("scan") or {}
+    scan_hits = ([{"engine": "clamav", "path": h.get("path", ""),
+                   "signature": h.get("signature", "")} for h in scan.get("clamav", [])]
+                 + [{"engine": "yara", "path": h.get("path", ""),
+                     "signature": h.get("rule", "")} for h in scan.get("yara", [])])
+
     # deterministic verdict = worst signal present
     crit_sens = any(s["sev"] == "crit" for s in sensitive)
     if threat:
         verdict, rule = "crit", "threat-intel:known-bad-destination"
+    elif scan_hits:
+        verdict, rule = "crit", f"malware-signature:{scan_hits[0]['engine']}"
     elif beacon_ext:
         verdict, rule = "crit", "dashboard-beacon"
     elif behavior_crit:
@@ -465,14 +475,14 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
         "blocked_attempts": blocked_attempts, "delivered_bytes": _human(delivered_bytes),
         "sensitive": len(sensitive), "execs": len(execs), "staged": len(staged),
         "lan_hosts": lan_hosts, "beacons": len(beacons), "beacons_external": beacon_ext,
-        "behavior": len(behavior), "threat": len(threat),
+        "behavior": len(behavior), "threat": len(threat), "scan": len(scan_hits),
     }
     return {
         "verdict": verdict, "rule": rule, "headline": _headline(facts, verdict),
         "facts": facts, "egress": egress, "dns": dns,
         "sensitive": sensitive, "execs": execs, "staged": staged,
         "beacons": beacons, "artifact": artifact, "behavior": behavior,
-        "threat": threat,
+        "threat": threat, "scan": scan_hits, "scan_ran": scan.get("ran", []),
     }
 
 
@@ -491,6 +501,9 @@ def is_lan_host(host: str) -> bool:
 
 def _headline(f: dict, verdict: str) -> str:
     p = []
+    if f.get("scan"):
+        n = f["scan"]
+        p.append(f"{n} malware signature hit{'s' if n > 1 else ''}")
     if f.get("threat"):
         n = f["threat"]
         p.append(f"{n} known-bad destination{'s' if n > 1 else ''} (threat feed)")

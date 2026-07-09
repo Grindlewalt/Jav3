@@ -115,9 +115,9 @@ export default function Chat() {
       // drop the two optimistic messages; a peak-retry re-adds them
       setMessages((m) => m.slice(0, -2))
       if (err.status === 409 && err.detail === 'peak_confirmation_required') {
+        // a new conversation doesn't exist yet on this 409 (the backend
+        // gates before creating it), so the retry just re-sends confirmed
         if (window.confirm('Peak pricing right now — 2x cost. Use the API?')) {
-          if (err.conversationId && !conversationId)
-            setConversationId(Number(err.conversationId))
           setBusy(false)
           await send(true)
           return
