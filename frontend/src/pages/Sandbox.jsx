@@ -385,8 +385,27 @@ export default function Sandbox() {
                       bad={(facts.behavior ?? 0) > 0} />
                 <Tile label="Threat hits" value={facts.threat ?? 0}
                       bad={(facts.threat ?? 0) > 0} />
+                <Tile label="Malware scan" value={facts.scan ?? 0}
+                      bad={(facts.scan ?? 0) > 0} />
               </div>
             </div>
+
+            {(detail.scan || []).length > 0 && (
+              <Section title="Malware scan">
+                {detail.scan.map((s, i) => (
+                  <div key={i} className="sbx-row sev-crit">
+                    <div className="grow" style={{ minWidth: 0 }}>
+                      <div className="ellipsis">
+                        <span className="sbx-rule-chip">{s.engine}</span>{' '}
+                        <span className="mono">{s.signature}</span>
+                      </div>
+                      <div className="mono small ellipsis" title={s.path}>{s.path}</div>
+                    </div>
+                    <span className="sbx-pill crit">critical</span>
+                  </div>
+                ))}
+              </Section>
+            )}
 
             {behaviors.length > 0 && (
               <Section title="Behavioral flags">
