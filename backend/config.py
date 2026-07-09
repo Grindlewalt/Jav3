@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     max_op_input_tokens: int = 5_000_000
     max_op_output_tokens: int = 1_000_000
 
+    # F5 interim: a chat turn that changed project files but never called
+    # journal_update gets one auto-written journal line, so project.md stays
+    # current without relying on the model remembering.
+    auto_journal: bool = True
+
     # Auto-approve the FINAL research document (research/<topic>.md) so it goes
     # straight to canonical instead of waiting in the approval queue. Node
     # scratch files under runs/ stay staged regardless.

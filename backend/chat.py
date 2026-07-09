@@ -159,6 +159,36 @@ def _chan(conversation_id: int) -> str:
 # search tools stay strictly project-only
 ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files"})
 
+# a turn that used any of these did real project work — journal-worthy
+_JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request",
+                             "run_command", "run_code", "run_gated"})
+
+
+async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
+                        before_id: int) -> None:
+    """F5 interim: if this turn mutated the active project and never called
+    journal_update itself, write one auto line so project.md stays current.
+    Best-effort — a failure here never touches the turn. (The fuller design
+    waits on the claude-code-expert consult.)"""
+    if not settings.auto_journal:
+        return
+    if not await get_active_project(db):
+        return
+    async with db.execute(
+        "SELECT DISTINCT tool FROM tool_calls WHERE conversation_id = ? AND id > ?",
+        (conversation_id, before_id)) as cur:
+        tools = {r["tool"] for r in await cur.fetchall()}
+    if "journal_update" in tools or not tools & _JOURNAL_WORTHY:
+        return
+    from .agent.tools import registry
+    from .summarize import complete_text
+    line = " ".join((await complete_text(
+        "Write ONE tight project-journal line (max 20 words) describing what "
+        "was just done. Past tense, no preamble, no quotes.",
+        f"Request: {user_msg[:400]}\n\nOutcome: {final[:800]}")).split())
+    if line:
+        await registry.dispatch("journal_update", {"entry": f"(auto) {line[:200]}"})
+
 
 async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                          user_msg: str = "") -> None:
@@ -197,6 +227,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # first when the effective context window demands it
         history = await compaction.assemble(db, conversation_id, system_prompt)
 
+        async with db.execute(
+            "SELECT COALESCE(MAX(id), 0) AS m FROM tool_calls "
+            "WHERE conversation_id = ?", (conversation_id,)) as cur:
+            tools_before = (await cur.fetchone())["m"]
+
         final_content = ""
         async for event in run_turn(db, conversation_id, system_prompt,
                                     history, tools=tools):
@@ -219,6 +254,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             if count == 2:  # first exchange done — try to give it a real name
                 asyncio.create_task(
                     _name_conversation(conversation_id, user_msg, final_content))
+            try:
+                await _auto_journal(db, conversation_id, user_msg,
+                                    final_content, tools_before)
+            except Exception:  # noqa: BLE001 — journaling never breaks a turn
+                pass
         bus.publish(chan, {"type": "final", "content": final_content,
                            "conversation_id": conversation_id})
     except Exception as exc:  # surfaced to any tail rather than lost
