@@ -104,6 +104,22 @@ def parse_audit_slice(text: str) -> list[str]:
     return out
 
 
+def execs_after_marker(execs: list[str], marker: str) -> list[str]:
+    """Drop everything up to and including the run's sentinel exec.
+
+    The fresh VM's own boot (cloud-init, `systemctl enable`, writes under
+    /lib/systemd) runs as the same `agent` uid as the command, so it can't be
+    told apart by user — but it all happens *before* the command. We prepend a
+    unique marker exec to the command; only execs after it are the run's own,
+    which keeps boot activity from tripping the behavioral rules. If the marker
+    never surfaced (audit flush lag dropped it) we keep the full list rather
+    than silently dropping real activity."""
+    for i, e in enumerate(execs):
+        if marker in e:
+            return execs[i + 1:]
+    return execs
+
+
 _AUDIT_EVENT = re.compile(r"audit\((\d+\.\d+:\d+)\)")
 _JREAD_KEY = re.compile(r'key="?(?:jread|6A72656164)"?', re.I)   # "jread" plain or hex
 _PATH_NAME = re.compile(r'\bname=("[^"]*"|[0-9A-Fa-f]+|\(null\))')
@@ -442,9 +458,14 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     since = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     pcap_proc = await _start_pcap(pcap_path)
 
+    # A unique sentinel exec prepended to the command so we can separate the
+    # run's own execs from the fresh VM's boot activity (both run as `agent`).
+    marker = f"JARVISGATEMARK{run_id}"
+    run_command = f"/bin/echo {marker} >/dev/null 2>&1 ; {command}"
+
     status, error = "done", None
     try:
-        result = await vmexec.run_in_project(slug, command, timeout=timeout,
+        result = await vmexec.run_in_project(slug, run_command, timeout=timeout,
                                              input=input)
     except Exception as e:
         status, error = "error", str(e)
@@ -452,10 +473,14 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
     finally:
         await _stop_pcap(pcap_proc)
 
+    # let auditd flush the tail of the run to the host stream before slicing
+    # (execve/openat records lag the process exit by up to a second or two).
+    await asyncio.sleep(2)
+
     dns_text = _slice(DNS_LOG, dns_off)
     dns = parse_dns_slice(dns_text)
     audit_text = _slice(audit_path, audit_off)
-    execs = parse_audit_slice(audit_text)
+    execs = execs_after_marker(parse_audit_slice(audit_text), marker)
     read_paths = parse_audit_paths(audit_text)
     drops = await _journal_drops(since)
     flows = await _pcap_flows(pcap_path)

