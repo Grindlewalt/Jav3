@@ -86,12 +86,12 @@ write_files:
       ## audit-stream.service; the guest deleting its copy changes nothing.
       -a always,exit -F arch=b64 -S execve,execveat -k jexec
       ## Log sensitive-file READS (M4 sensitive-file coverage). A successful
-      ## open/openat by a non-system user (the workspace runs as `agent`, uid
-      ## >=1000); the host correlates the PATH records for these events and keeps
-      ## only names matching the operator's sensitive globs (key `jread`), so the
-      ## stream is broad but the retained evidence is scoped. If run-time volume
-      ## is a problem, narrow this to `-w`-style dir watches on the fixed secret
-      ## locations — the host parser keys off `jread` either way.
+      ## open/openat by a non-system user (the workspace runs as the agent user,
+      ## uid >=1000); the host correlates the PATH records for these events and
+      ## keeps only names matching the operator sensitive globs (key jread), so
+      ## the stream is broad but the retained evidence is scoped. If run-time
+      ## volume is a problem, narrow this to dir watches on the fixed secret
+      ## locations -- the host parser keys off jread either way.
       -a always,exit -F arch=b64 -S openat,open -F auid>=1000 -F success=1 -k jread
   - path: /etc/systemd/system/audit-stream.service
     content: |
