@@ -1,7 +1,7 @@
-"""Token/latency optimizations: tool-result cap + eviction, rules pre-filter,
-model retry, project-context budget, headless-agent discipline, report
-compaction, registry staleness, chat tool subsetting, research parallel reads,
-and the funnel endpoint wiring."""
+"""Token/latency optimizations: tool-result cap + eviction, model retry,
+project-context budget, headless-agent discipline, report compaction, registry
+staleness, chat tool subsetting, research parallel reads, and the funnel
+endpoint wiring."""
 import httpx
 import pytest
 
@@ -113,20 +113,6 @@ async def test_small_tool_results_not_evicted(tmp_env, monkeypatch):
     fake = _FakeModel(rounds=3)
     await _run_loop(monkeypatch, fake, "small")
     assert not any("dropped to keep context" in m for m in fake.seen[-1])
-
-
-# --- loop: rules pre-filter ----------------------------------------------------
-
-def test_quick_rules_verdict():
-    from backend.agent.loop import _quick_rules_verdict
-    rules = ("# Operator rules (non-negotiable): apply to THIS reply\n"
-             "Follow every rule below exactly.\n"
-             '- Never use em dashes. Wrong: "a — b". Right: "a, b".')
-    assert _quick_rules_verdict("clean text, no dash", rules) is False
-    assert _quick_rules_verdict("bad — text", rules) is True
-    # an uncheckable rule forces the model pass
-    rules2 = rules + "\n- Always answer in pirate speak"
-    assert _quick_rules_verdict("clean text", rules2) is None
 
 
 # --- model: retry with backoff -------------------------------------------------

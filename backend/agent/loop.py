@@ -78,11 +78,8 @@ async def run_turn(
             # (tools are what break adherence), so it cleans up anything the
             # tool-laden turn let slip. General — it checks against whatever
             # rules are in memory, nothing rule-specific is hardcoded. `rules`
-            # is already empty when self_check is off, so this no-ops for
-            # subagents. When every rule is mechanically checkable and none is
-            # violated, the pass is skipped — no reason to pay a model call to
-            # confirm what a substring check already proved.
-            if rules and content.strip() and _quick_rules_verdict(content, rules) is not False:
+            # is already empty when self_check is off, so this no-ops for subagents.
+            if rules and content.strip():
                 content = await _enforce_rules(content, rules)
             yield {"type": "final", "content": content}
             return
@@ -144,34 +141,6 @@ def _evict_stale_results(messages: list[dict], tool_msgs: list[dict],
                               "context small. Call the tool again if you still "
                               "need it.]"}
         t["evicted"] = True
-
-
-# Mechanically checkable operator rules: (does this rule line match, is the
-# content in violation). Anything not covered here forces the model pass.
-_RULE_CHECKS = [
-    (lambda rule: "em dash" in rule, lambda text: "—" in text),
-]
-
-
-def _quick_rules_verdict(content: str, rules: str) -> bool | None:
-    """Cheap pre-filter for the copy-editor pass. False = every rule line is
-    checkable here and none is violated (safe to skip the model call); True =
-    a checkable rule IS violated; None = some rule can't be checked mechanically,
-    so the model pass must run."""
-    unknown = False
-    for ln in rules.splitlines():
-        ln = ln.strip()
-        if not ln.startswith("- "):     # headers/preamble, not rules
-            continue
-        rule = ln[2:].strip().lower()
-        for matches, violated in _RULE_CHECKS:
-            if matches(rule):
-                if violated(content):
-                    return True
-                break
-        else:
-            unknown = True
-    return None if unknown else False
 
 
 async def _enforce_rules(content: str, rules: str) -> str:
