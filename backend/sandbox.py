@@ -191,6 +191,128 @@ def _hosts_in_exec(cmd: str) -> list[str]:
     return _URL_HOST.findall(cmd)
 
 
+# ---- behavioral rules (deterministic, injection-safe) ----------------------
+# Detonation heuristics over the streams we already capture (auditd argv, the
+# net drop/flow tables, DNS, staged writes). Each rule is a compiled pattern or
+# an arithmetic threshold; matched strings are only compared/counted and echoed
+# back as data (escaped by the JSON layer), never interpreted. These catch the
+# classic malware behaviours the operator listed: download-and-exec, reverse
+# shells, persistence, LAN scanning, C2 beaconing.
+
+_INTERP = r"(?:ba|z|k|da|a)?sh|python[0-9.]*|perl|ruby|node|php|lua"
+
+# a fetch tool whose output is piped straight into an interpreter, or fetched to
+# a file that is then made executable — the download-and-run pattern.
+_DOWNLOAD_EXEC = [
+    re.compile(r"\b(?:curl|wget|fetch)\b[^\n|]*\|\s*(?:" + _INTERP + r")\b", re.I),
+    re.compile(r"\b(?:curl|wget)\b[^\n]*-o\s*\S+[^\n]*&&[^\n]*\bchmod\b[^\n]*\+x", re.I),
+    re.compile(r"\bbase64\b[^\n|]*-d[^\n|]*\|\s*(?:" + _INTERP + r")\b", re.I),
+]
+
+# interactive shell handed to a remote socket.
+_REVERSE_SHELL = [
+    re.compile(r"/dev/(?:tcp|udp)/", re.I),                       # bash builtin
+    re.compile(r"\bn(?:c|cat|etcat)\b[^\n]*\s-[a-z]*e\b", re.I),  # nc -e / ncat -e
+    re.compile(r"\bsocat\b[^\n]*\bexec:", re.I),
+    re.compile(r"\bmkfifo\b[^\n]*(?:\bnc\b|\|\s*(?:" + _INTERP + r")\b)", re.I),
+    re.compile(r"\bpython[0-9.]*\b[^\n]*\bsocket\b[^\n]*(?:subprocess|/bin/sh|dup2|pty)", re.I),
+]
+
+# writes/edits to a location that survives a reboot / re-run.
+_PERSISTENCE_GLOBS = [
+    "**/.ssh/authorized_keys", "**/authorized_keys",
+    "**/.bashrc", "**/.bash_profile", "**/.profile", "**/.zshrc",
+    "/etc/cron*/**", "/etc/cron*", "/var/spool/cron/**",
+    "/etc/systemd/**", "**/.config/systemd/user/**", "/lib/systemd/system/**",
+    "/etc/rc.local", "/etc/ld.so.preload", "/etc/profile.d/**",
+]
+_PERSIST_EXEC = re.compile(
+    r"\b(?:crontab\s+-|systemctl\s+enable|update-rc\.d|"
+    r"echo[^\n]*>>[^\n]*(?:authorized_keys|\.bashrc|\.profile|rc\.local))", re.I)
+
+# thresholds for the fan-out / repetition rules (kept generous to avoid noise)
+_LANSCAN_HOSTS = 8          # distinct LAN dests in one run == sweep
+_LANSCAN_PORTS = 12         # distinct ports on a single host == port scan
+_BEACON_ATTEMPTS = 10       # repeated hits to one dropped dest == beaconing
+
+
+_PERSIST_RES = None
+
+
+def _persist_globs():
+    global _PERSIST_RES
+    if _PERSIST_RES is None:
+        _PERSIST_RES = [(g, _glob_to_re(g)) for g in _PERSISTENCE_GLOBS]
+    return _PERSIST_RES
+
+
+def match_persistence(path: str) -> str | None:
+    p = path.strip()
+    if p.startswith("./"):
+        p = p[2:]
+    for glob, rx in _persist_globs():
+        if rx.match(p) or rx.match(p.split("/")[-1]):
+            return glob
+    return None
+
+
+def behavior_findings(evidence: dict) -> list[dict]:
+    """Rule hits over the captured streams. Pure: evidence dict -> findings.
+    Each finding = {kind, sev, rule, evidence}. `evidence` is untrusted data
+    (an argv line, a path, or a count) shown as text, never interpreted."""
+    out: list[dict] = []
+
+    def add(kind, sev, rule, ev):
+        out.append({"kind": kind, "sev": sev, "rule": rule, "evidence": ev})
+
+    execs = evidence.get("execs", [])
+    for cmd in execs:
+        if any(rx.search(cmd) for rx in _DOWNLOAD_EXEC):
+            add("download-exec", "crit", "fetch piped to an interpreter", cmd)
+        if any(rx.search(cmd) for rx in _REVERSE_SHELL):
+            add("reverse-shell", "crit", "interactive shell to a socket", cmd)
+        if _PERSIST_EXEC.search(cmd):
+            add("persistence", "crit", "persistence-establishing command", cmd)
+
+    # persistence via staged writes / argv path tokens
+    persist_paths = set()
+    for p in evidence.get("staged", []):
+        g = match_persistence(p)
+        if g and p not in persist_paths:
+            persist_paths.add(p)
+            add("persistence", "crit", f"writes {g}", p)
+    for cmd in execs:
+        for tok in _PATHISH.findall(cmd):
+            g = match_persistence(tok)
+            if g and tok not in persist_paths:
+                persist_paths.add(tok)
+                add("persistence", "crit", f"touches {g}", tok)
+
+    # LAN sweep / port scan over the drop + flow tables
+    net = list(evidence.get("blocked", [])) + list(evidence.get("flows", []))
+    lan_hosts, ports_per_host = set(), {}
+    for n in net:
+        ip = n.get("ip", "")
+        if is_lan(ip):
+            lan_hosts.add(ip)
+            ports_per_host.setdefault(ip, set()).add(n.get("port"))
+    if len(lan_hosts) >= _LANSCAN_HOSTS:
+        sev = "crit" if len(lan_hosts) >= _LANSCAN_HOSTS * 2 else "warn"
+        add("lan-scan", sev, f"reached {len(lan_hosts)} LAN hosts", str(len(lan_hosts)))
+    for ip, ports in ports_per_host.items():
+        if len(ports) >= _LANSCAN_PORTS:
+            add("port-scan", "warn", f"{len(ports)} ports on one host", ip)
+
+    # C2 beaconing: many repeated attempts to a single dropped dest
+    for b in evidence.get("blocked", []):
+        att = int(b.get("attempts", 0))
+        if att >= _BEACON_ATTEMPTS and not is_lan(b.get("ip", "")):
+            host = b.get("host") or b.get("ip", "")
+            add("beaconing", "warn", f"{att} repeated attempts to one host", host)
+
+    return out
+
+
 def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
     """Raw capture + current allowlist -> the console's session view."""
     allow_hosts = {r["dest"] for r in rule_index.values()}
@@ -291,13 +413,22 @@ def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
     egress_new = sum(1 for e in egress if not e["learned"])
     lan_hosts = sum(1 for e in egress if e["scope"] == "lan")
 
+    # behavioral detonation rules over the same captured streams
+    behavior = behavior_findings(evidence)
+    behavior_crit = next((b for b in behavior if b["sev"] == "crit"), None)
+    behavior_warn = next((b for b in behavior if b["sev"] == "warn"), None)
+
     # deterministic verdict = worst signal present
     crit_sens = any(s["sev"] == "crit" for s in sensitive)
     if beacon_ext:
         verdict, rule = "crit", "dashboard-beacon"
+    elif behavior_crit:
+        verdict, rule = "crit", f"behavior:{behavior_crit['kind']}"
     elif crit_sens or exec_crit:
         verdict, rule = "crit", ("sensitive-path-read" if crit_sens
                                  else "exec-reaches-untrusted-host")
+    elif behavior_warn:
+        verdict, rule = "warn", f"behavior:{behavior_warn['kind']}"
     elif egress_new:
         verdict, rule = "warn", "new-destination-blocked"
     else:
@@ -308,12 +439,13 @@ def classify(evidence: dict, rule_index: dict[tuple, dict]) -> dict:
         "blocked_attempts": blocked_attempts, "delivered_bytes": _human(delivered_bytes),
         "sensitive": len(sensitive), "execs": len(execs), "staged": len(staged),
         "lan_hosts": lan_hosts, "beacons": len(beacons), "beacons_external": beacon_ext,
+        "behavior": len(behavior),
     }
     return {
         "verdict": verdict, "rule": rule, "headline": _headline(facts, verdict),
         "facts": facts, "egress": egress, "dns": dns,
         "sensitive": sensitive, "execs": execs, "staged": staged,
-        "beacons": beacons, "artifact": artifact,
+        "beacons": beacons, "artifact": artifact, "behavior": behavior,
     }
 
 
@@ -335,6 +467,9 @@ def _headline(f: dict, verdict: str) -> str:
     if f.get("beacons_external"):
         n = f["beacons_external"]
         p.append(f"artifact beaconed to {n} external host{'s' if n > 1 else ''}")
+    if f.get("behavior"):
+        n = f["behavior"]
+        p.append(f"{n} behavioral flag{'s' if n > 1 else ''}")
     if f["egress_new"]:
         p.append(f"{f['egress_new']} new destination{'s' if f['egress_new'] > 1 else ''} blocked")
     if f["sensitive"]:

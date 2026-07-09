@@ -493,6 +493,7 @@ kbd {
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px; }
 .sbx-newrun select, .sbx-newrun input { width: 100%; }
+.sbx-newrun-help { line-height: 1.4; margin: -2px 0 2px; }
 .sbx-session-list { list-style: none; margin: 0; padding: 0; display: flex;
   flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; }
 .sbx-session { padding: 8px 10px; background: var(--panel);

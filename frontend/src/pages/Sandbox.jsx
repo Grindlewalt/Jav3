@@ -209,9 +209,9 @@ export default function Sandbox() {
         body: JSON.stringify({ key: row.key, decision }),
       })
       toast(decision === 'allow'
-        ? `Allowed ${label} — future runs may reach it; nothing was released now`
+        ? `Allowed ${label} — added to the allowlist; this destination is now cleared`
         : `Kept ${label} blocked`)
-      refreshDetail(detail.id); refreshRules()
+      refreshDetail(detail.id); refreshRules(); refreshSessions()
     } catch (e) {
       toast(`Failed: ${e.detail || e.message}`)
     } finally { setBusy(false) }
@@ -259,14 +259,26 @@ export default function Sandbox() {
   const shown = filter === 'undecided' ? sessions.filter((s) => !s.decided) : sessions
   const facts = detail?.facts || {}
   const beacons = detail?.beacons || []
-  const wan = (detail?.egress || []).filter((r) => r.scope === 'wan')
-  const lan = (detail?.egress || []).filter((r) => r.scope === 'lan')
+  const behaviors = detail?.behavior || []
+  // Actionable (still-blocked) rows sort first; allowed/delivered ones sink to the
+  // bottom so the operator sees what still needs a decision. Stable within a group.
+  const blockedFirst = (rows) =>
+    rows.map((r, i) => [r, i])
+      .sort((a, b) => ((b[0].status === 'blocked') - (a[0].status === 'blocked')) || (a[1] - b[1]))
+      .map(([r]) => r)
+  const wan = blockedFirst((detail?.egress || []).filter((r) => r.scope === 'wan'))
+  const lan = blockedFirst((detail?.egress || []).filter((r) => r.scope === 'lan'))
 
   return (
     <div className="sbx-layout">
       <aside className="sbx-queue">
         <div className="sbx-newrun">
           <div className="side-title">New sandbox run</div>
+          <div className="dim small sbx-newrun-help">
+            Boots a fresh throwaway VM and runs this command with egress locked and
+            every exec, DNS query and packet captured (~90s), then stages a report to
+            review before anything goes live.
+          </div>
           <select value={runProject} disabled={running}
                   onChange={(e) => setRunProject(e.target.value)}>
             {projects.length === 0 && <option value="">no projects</option>}
@@ -343,15 +355,31 @@ export default function Sandbox() {
                 <Tile label="Beacons" value={facts.beacons ?? 0}
                       bad={(facts.beacons_external ?? 0) > 0} />
                 <Tile label="Processes" value={facts.execs ?? 0} />
-              </div>
-              <div className="dim small sbx-prov">
-                Signals: nftables · dnsmasq · auditd · tcpdump · staging — computed by rules, no model
+                <Tile label="Behavioral flags" value={facts.behavior ?? 0}
+                      bad={(facts.behavior ?? 0) > 0} />
               </div>
             </div>
 
+            {behaviors.length > 0 && (
+              <Section title="Behavioral flags">
+                {behaviors.map((b, i) => (
+                  <div key={i} className={`sbx-row sev-${b.sev || 'warn'}`}>
+                    <div className="grow" style={{ minWidth: 0 }}>
+                      <div className="ellipsis">
+                        <span className="sbx-rule-chip">{b.kind}</span>{' '}
+                        <span className="dim small">{b.rule}</span>
+                      </div>
+                      <div className="mono small ellipsis" title={b.evidence}>{b.evidence}</div>
+                    </div>
+                    <span className={`sbx-pill ${b.sev === 'crit' ? 'crit' : 'warn'}`}>
+                      {b.sev === 'crit' ? 'critical' : 'suspicious'}</span>
+                  </div>
+                ))}
+              </Section>
+            )}
+
             {(detail.artifact || beacons.length > 0) && (
-              <Section title="Artifact it wants you to open"
-                       note="Rendered in the sandbox · jsdom + tap · nothing reached your browser">
+              <Section title="Artifact it wants you to open">
                 {detail.artifact && (
                   <div className="sbx-row sev-ok">
                     <span className="mono grow ellipsis" title={detail.artifact}>
@@ -371,7 +399,7 @@ export default function Sandbox() {
             )}
 
             {wan.length > 0 && (
-              <Section title="Internet egress" note="deny-by-default · blocked rows never carried a payload">
+              <Section title="Internet egress">
                 {wan.map((r) => (
                   <EgressRow key={r.key} row={r} busy={busy} onDecide={decide} />
                 ))}
@@ -379,7 +407,7 @@ export default function Sandbox() {
             )}
 
             {lan.length > 0 && (
-              <Section title="Local network" note="hosts on your LAN · RFC-1918">
+              <Section title="Local network">
                 {lan.map((r) => (
                   <EgressRow key={r.key} row={r} busy={busy} onDecide={decide} />
                 ))}
@@ -387,7 +415,7 @@ export default function Sandbox() {
             )}
 
             {(detail.sensitive || []).length > 0 && (
-              <Section title="Sensitive file & secret access" note="auditd path-watch · operator globs">
+              <Section title="Sensitive file & secret access">
                 {detail.sensitive.map((f, i) => (
                   <div key={`${f.path}-${i}`} className={`sbx-row sev-${f.sev || 'ok'}`}>
                     <span className="mono grow ellipsis" title={f.path}>{f.path}</span>
@@ -400,7 +428,7 @@ export default function Sandbox() {
             )}
 
             {(detail.execs || []).length > 0 && (
-              <Section title="Processes executed" note="auditd execve">
+              <Section title="Processes executed">
                 {detail.execs.map((x, i) => (
                   <div key={i} className={`sbx-row sev-${x.sev || 'ok'}`}>
                     <span className="mono grow ellipsis" title={x.cmd}>{x.cmd}</span>
@@ -416,7 +444,7 @@ export default function Sandbox() {
             )}
 
             {(detail.dns || []).length > 0 && (
-              <Section title="DNS lookups" note="dnsmasq query log">
+              <Section title="DNS lookups">
                 {detail.dns.map((d, i) => (
                   <div key={`${d.name}-${d.type}-${i}`} className="sbx-row sev-ok">
                     <span className="mono grow ellipsis">
@@ -429,7 +457,7 @@ export default function Sandbox() {
             )}
 
             {(detail.staged || []).length > 0 && (
-              <Section title="Staged changes" note="staging diff">
+              <Section title="Staged changes">
                 {detail.staged.map((f) => (
                   <div key={f.path} className="sbx-row sev-ok">
                     <span className="mono grow ellipsis" title={f.path}>{f.path}</span>
@@ -472,8 +500,10 @@ export default function Sandbox() {
           ))}
           {rules.length === 0 && <li className="dim small">no destinations trusted yet</li>}
         </ul>
-        <p className="dim small" style={{ margin: 0 }}>
-          Set-membership, checked in the firewall — never a model.
+        <p className="dim small sbx-prov" style={{ margin: 0 }}>
+          Every verdict on this page is computed by deterministic rules over the
+          captured evidence (nftables · dnsmasq · auditd · tcpdump · staging) —
+          never a model.
         </p>
 
         {detail && (
