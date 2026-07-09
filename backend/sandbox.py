@@ -449,6 +449,8 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
                    "signature": h.get("signature", "")} for h in scan.get("clamav", [])]
                  + [{"engine": "yara", "path": h.get("path", ""),
                      "signature": h.get("rule", "")} for h in scan.get("yara", [])])
+    # capa is informational only (lists what a binary can do; never a verdict driver)
+    capa = [c for c in scan.get("capa", []) if c.get("capabilities")]
 
     # Suricata network signatures over the captured pcap (typed by the parser)
     suricata = list(evidence.get("suricata") or [])
@@ -492,7 +494,7 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
         "sensitive": sensitive, "execs": execs, "staged": staged,
         "beacons": beacons, "artifact": artifact, "behavior": behavior,
         "threat": threat, "scan": scan_hits, "scan_ran": scan.get("ran", []),
-        "suricata": suricata,
+        "suricata": suricata, "capa": capa,
     }
 
 

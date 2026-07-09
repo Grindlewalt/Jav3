@@ -273,6 +273,31 @@ def test_classify_no_scan_key_is_safe():
     assert c["suricata"] == [] and c["facts"]["suricata"] == 0
 
 
+def test_parse_capa_capabilities():
+    import json as _json
+
+    from backend import scanners
+    doc = {"rules": {
+        "create TCP socket": {"meta": {"name": "create TCP socket"}},
+        "encrypt data using RC4": {"meta": {"name": "encrypt data using RC4"}},
+        "internal-helper": {"meta": {"name": "helper", "lib": True}},  # dropped
+    }}
+    caps = scanners.parse_capa(_json.dumps(doc))
+    assert "create TCP socket" in caps and "encrypt data using RC4" in caps
+    assert "helper" not in caps
+    assert scanners.parse_capa("not json") == []
+
+
+def test_classify_capa_is_informational_not_a_verdict():
+    ev = _ev(scan={"clamav": [], "yara": [], "capa": [
+        {"path": "dropper", "capabilities": ["create TCP socket", "spawn shell"]}],
+        "ran": ["clamav", "yara", "capa"]})
+    c = sandbox.classify(ev, {})
+    assert c["verdict"] == "ok"                    # capa never flips the verdict
+    assert c["capa"] and c["capa"][0]["path"] == "dropper"
+    assert "spawn shell" in c["capa"][0]["capabilities"]
+
+
 def test_parse_suricata_eve_alerts():
     from backend import scanners
     text = (

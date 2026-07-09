@@ -392,6 +392,26 @@ export default function Sandbox() {
               </div>
             </div>
 
+            {(detail.capa || []).length > 0 && (
+              <Section title="Binary capabilities (capa)">
+                {detail.capa.map((b, i) => (
+                  <div key={i} className="sbx-row sev-ok">
+                    <div className="grow" style={{ minWidth: 0 }}>
+                      <div className="mono ellipsis" title={b.path}>{b.path}</div>
+                      <div className="sbx-sub">
+                        {(b.capabilities || []).slice(0, 12).map((c, j) => (
+                          <span key={j} className="tag">{c}</span>
+                        ))}
+                        {(b.capabilities || []).length > 12 &&
+                          <span className="dim small">+{b.capabilities.length - 12} more</span>}
+                      </div>
+                    </div>
+                    <span className="dim small">informational</span>
+                  </div>
+                ))}
+              </Section>
+            )}
+
             {(detail.suricata || []).length > 0 && (
               <Section title="Network signatures (Suricata)">
                 {detail.suricata.map((s, i) => (

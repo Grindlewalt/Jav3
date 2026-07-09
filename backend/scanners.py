@@ -14,12 +14,14 @@ data, never interpreted.
 import asyncio
 import json
 import shutil
+import sys
 from pathlib import Path
 
 from .config import settings
 from .staging import _staging_dir
 
 SURICATA_RULES = Path("/var/lib/suricata/rules/suricata.rules")
+CAPA_MAX_BINARIES = 3              # capa is slow; bound per-run work
 
 # Curated committed ruleset ships in the repo; an operator can drop extra .yar
 # files in data/yara/ to extend coverage offline.
@@ -211,10 +213,65 @@ async def suricata_scan(pcap_path: Path, out_dir: Path) -> list[dict]:
         return []
 
 
+def _capa_bin() -> str | None:
+    p = Path(sys.executable).parent / "capa"
+    if p.exists():
+        return str(p)
+    return shutil.which("capa")
+
+
+def _is_elf(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def parse_capa(text: str) -> list[str]:
+    """capa -j output -> the matched capability rule names (deduped, sorted).
+    Informational: capa explains what a binary *can* do, it does not judge."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    caps = set()
+    rules = data.get("rules", {})
+    if isinstance(rules, dict):
+        for rname, rule in rules.items():
+            meta = rule.get("meta", {}) if isinstance(rule, dict) else {}
+            # skip capa's internal lib/subscope helper rules
+            if meta.get("lib") or meta.get("is_subscope_rule"):
+                continue
+            caps.add(meta.get("name") or rname)
+    return sorted(c for c in caps if c)
+
+
+async def capa_scan(paths: list[Path], base: Path) -> list[dict]:
+    """Run capa over any ELF binaries the run produced; list their capabilities.
+    Skips scripts/text (only real ELFs), bounded in count, degrades to empty."""
+    capa = _capa_bin()
+    if not capa:
+        return []
+    elves = [p for p in paths if _is_elf(p)][:CAPA_MAX_BINARIES]
+    out = []
+    for p in elves:
+        r = await _run([capa, "-j", "-q", str(p)], timeout=120)
+        if r is None:
+            continue
+        caps = parse_capa(r[1])
+        try:
+            rel = str(p.relative_to(base))
+        except ValueError:
+            rel = str(p)
+        out.append({"path": rel, "capabilities": caps})
+    return out
+
+
 async def scan_staged(slug: str, relpaths: list[str]) -> dict:
-    """Scan a run's staged output. Returns {clamav, yara, ran} — `ran` lists which
-    engines actually executed so the console can distinguish 'clean' from 'not
-    scanned'. Never raises: a scanner failure yields empty findings."""
+    """Scan a run's staged output. Returns {clamav, yara, capa, ran} — `ran` lists
+    which engines actually executed so the console can distinguish 'clean' from
+    'not scanned'. Never raises: a scanner failure yields empty findings."""
     base = _staging_dir(slug)
     paths = _staged_abs(slug, relpaths or [])
     ran = []
@@ -222,7 +279,11 @@ async def scan_staged(slug: str, relpaths: list[str]) -> dict:
         ran.append("clamav")
     if have("yara") and yara_rulesets():
         ran.append("yara")
+    if _capa_bin():
+        ran.append("capa")
     if not paths or not ran:
-        return {"clamav": [], "yara": [], "ran": ran}
-    cav, yar = await asyncio.gather(clamscan(paths, base), yara_scan(paths, base))
-    return {"clamav": cav, "yara": yar, "ran": ran}
+        return {"clamav": [], "yara": [], "capa": [], "ran": ran}
+    cav, yar, cap = await asyncio.gather(clamscan(paths, base),
+                                         yara_scan(paths, base),
+                                         capa_scan(paths, base))
+    return {"clamav": cav, "yara": yar, "capa": cap, "ran": ran}
