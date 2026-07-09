@@ -85,15 +85,20 @@ async def test_skills_and_tools(client):
     assert slug == "organize-project"
     r = await client.get("/api/skills")
     skills = {s["slug"]: s for s in r.json()["skills"]}
-    assert skills[slug]["enabled"] is False
+    assert skills[slug]["enabled"] is True   # granted by default (operator, 2026-07-09)
 
     r = await client.get(f"/api/skills/{slug}")
-    assert "TODO" in r.json()["content"]
+    assert "(instructions the model follows" in r.json()["content"]
     new = r.json()["content"].replace("(describe what this skill does)", "organizes files")
     r = await client.put(f"/api/skills/{slug}", json={"content": new})
     assert r.status_code == 200
 
-    # catalogued in /api/tools but NOT granted to the model
+    # untick "granted" via the fields editor -> catalogued in /api/tools but
+    # NOT granted to the model
+    r = await client.get(f"/api/skills/{slug}")
+    fields = {**r.json()["fields"], "enabled": False}
+    r = await client.put(f"/api/skills/{slug}/fields", json=fields)
+    assert r.status_code == 200
     r = await client.get("/api/tools")
     tools = {t["name"]: t for t in r.json()["tools"]}
     assert tools["organize-project"]["enabled"] is False
