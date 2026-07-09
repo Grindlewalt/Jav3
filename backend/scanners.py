@@ -127,10 +127,14 @@ async def yara_scan(paths: list[Path], base: Path) -> list[dict]:
     if not have("yara") or not rulesets or not paths:
         return []
     hits = []
-    for rules in rulesets:
-        r = await _run(["yara", "--no-warnings", str(rules)] + [str(p) for p in paths])
-        if r is not None:
-            hits += parse_yara(r[1], base)
+    # yara's CLI is `yara RULES... TARGET` — extra args are read as MORE rules
+    # files, not more targets, so a batch of files makes it try to compile the
+    # second file as rules and abort. Scan one target file per invocation.
+    for p in paths:
+        for rules in rulesets:
+            r = await _run(["yara", "--no-warnings", str(rules), str(p)])
+            if r is not None:
+                hits += parse_yara(r[1], base)
     # dedupe (rule, path)
     seen, out = set(), []
     for h in hits:
