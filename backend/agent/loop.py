@@ -91,6 +91,8 @@ async def run_turn(
 
     n_iter = max_iterations or settings.max_react_iterations
     read_only = registry.read_only_names()   # once per turn; hot-reload can wait
+    tool_names = {t["function"]["name"] for t in (tools or [])}
+    can_delegate = bool(tool_names & {"research", "spawn_agent", "deploy_agents"})
     tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
     err_streak = 0               # consecutive failed/empty/duplicate results
     force_conclude = False       # dead-end breaker tripped: withdraw tools
@@ -138,22 +140,31 @@ async def run_turn(
             # answered the answer-forcing round with more tool markup and the
             # operator got nothing.)
             conclusion = ""
-            try:
-                async for ev in model.complete(
-                    messages + [{"role": "user", "content":
-                        "Your tool budget for this turn is exhausted. Using "
-                        "only what you already learned above, give your best "
-                        "answer now. Be explicit about anything you could not "
-                        "determine."}],
-                    conversation_id=conversation_id,
-                    model_name=model_name, base_url=base_url,
-                ):
-                    if ev["type"] == "token":
-                        yield ev
-                    else:
-                        conclusion = ev["content"] or ""
-            except Exception:  # noqa: BLE001 — conclusion is best-effort
-                conclusion = ""
+            nudge = ("Your tool budget for this turn is exhausted. Using only "
+                     "what you already learned above, give your best answer "
+                     "now. Be explicit about anything you could not determine.")
+            # two attempts: a tool-fixated model sometimes answers the first
+            # nudge with MORE tool markup (DSML recovery leaves content empty
+            # — convo 33), so the retry demands plain prose outright
+            for attempt in range(2):
+                try:
+                    async for ev in model.complete(
+                        messages + [{"role": "user", "content": nudge}],
+                        conversation_id=conversation_id,
+                        model_name=model_name, base_url=base_url,
+                    ):
+                        if ev["type"] == "token":
+                            yield ev
+                        else:
+                            conclusion = ev["content"] or ""
+                except Exception:  # noqa: BLE001 — conclusion is best-effort
+                    conclusion = ""
+                if conclusion.strip():
+                    break
+                nudge = ("STOP. No more tool calls — they are disabled and any "
+                         "tool syntax is discarded. Reply in PLAIN PROSE only: "
+                         "summarize what you found above and what remains "
+                         "unknown.")
             if conclusion.strip():
                 if rules:
                     conclusion = await _enforce_rules(conclusion, rules)
@@ -251,6 +262,25 @@ async def run_turn(
                             "before retrying: change strategy, delegate "
                             "(research / spawn_agent), or report honestly what "
                             "can't be found. Do not repeat similar calls.]"}
+
+        # delegation pressure (convo-33 post-mortem: 42 hand-rolled web calls
+        # with the research tool sitting unused): steer a long turn mid-flight,
+        # then tell it to start landing the plane
+        if i + 1 == settings.delegate_nudge_round and can_delegate:
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                            f"\n\n[system note: {i + 1} tool rounds used of "
+                            f"{n_iter}. If substantial gathering or multi-step "
+                            "work remains, STOP hand-rolling calls: hand web "
+                            "gathering to the research tool in one call, hand "
+                            "subtasks to spawn_agent or a deploy_agents team, "
+                            "and keep a todo_update "
+                            "plan so you execute in a straight line.]"}
+        elif i + 1 == (n_iter * 2) // 3:
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                            f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
+                            "used — start concluding. Finish the current step, "
+                            "then answer with what you have and say plainly "
+                            "what you could not determine.]"}
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}

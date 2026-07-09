@@ -51,9 +51,15 @@ class Settings(BaseSettings):
     # a research subagent reading 1-3 sources needs a handful of rounds, not 60
     # — leaving it high let subagents read 40-85 pages and burn millions of
     # tokens re-sending the pile each iteration.
-    max_react_iterations: int = 40
-    subagent_max_iterations: int = 8
+    max_react_iterations: int = 60
+    subagent_max_iterations: int = 12
     recent_message_limit: int = 40
+
+    # Delegation pressure: a long turn gets steered mid-flight. At
+    # `delegate_nudge_round` a note pushes the model to hand remaining
+    # gathering to research/spawn_agent and to work a todo plan; at 2/3 of
+    # the round cap a wrap-up note tells it to start concluding.
+    delegate_nudge_round: int = 12
 
     # Tier-2 conversation compaction: when system prompt + history approach
     # the model's context window, the older portion is summarized into a

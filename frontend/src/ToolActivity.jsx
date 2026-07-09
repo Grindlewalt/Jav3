@@ -36,6 +36,7 @@ export function humanizeTool(name, args = {}) {
     case 'run_command': return `▶ ${trunc(args.command)}`
     case 'run_gated': return `🛡 gated run: ${trunc(args.command, 50)}`
     case 'spawn_agent': return `🤖 ${args.agent}: ${trunc(args.task)}`
+    case 'deploy_agents': return `🌳 deploying agents: ${trunc(args.title || args.brief)}`
     case 'journal_update': return '📓 updating journal'
     case 'todo_update': return '☑ updating todos'
     case 'memory_write': return `🧠 remembering: ${args.name}`

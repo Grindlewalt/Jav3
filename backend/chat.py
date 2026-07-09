@@ -137,12 +137,37 @@ async def get_messages(conversation_id: int):
             "SELECT id, role, content, created_at FROM messages "
             "WHERE conversation_id = ? ORDER BY id", (conversation_id,)
         ) as cur:
-            rows = await cur.fetchall()
+            rows = [dict(r) for r in await cur.fetchall()]
+        async with db.execute(
+            "SELECT tool, args, result, created_at FROM tool_calls "
+            "WHERE conversation_id = ? ORDER BY id", (conversation_id,)
+        ) as cur:
+            calls = [dict(r) for r in await cur.fetchall()]
     finally:
         await db.close()
+    # attach each turn's tool calls to the assistant message that closed the
+    # turn (calls always precede it), so the activity dropdown survives a
+    # reload instead of existing only in the live stream
+    ci = 0
+    for m in rows:
+        if m["role"] != "assistant":
+            continue
+        acts = []
+        while ci < len(calls) and calls[ci]["created_at"] <= m["created_at"]:
+            c = calls[ci]
+            try:
+                args = json.loads(c["args"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            result = c["result"] or ""
+            acts.append({"name": c["tool"], "args": args, "result": result,
+                         "ok": not result.startswith(("error:", "duplicate call:")),
+                         "done": True})
+            ci += 1
+        if acts:
+            m["activity"] = acts
     # `running` lets the GUI re-attach to an in-flight turn after a reload
-    return {"messages": [dict(r) for r in rows],
-            "running": conversation_id in _active_turns}
+    return {"messages": rows, "running": conversation_id in _active_turns}
 
 
 # In-flight turns, keyed by conversation. The dict entry is both the "is a

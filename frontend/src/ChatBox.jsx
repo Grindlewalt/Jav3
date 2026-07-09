@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, chatStream } from './api.js'
+import { api, chatStream, tailStream } from './api.js'
 import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
@@ -12,6 +12,31 @@ export default function ChatBox({ projectSlug }) {
   const [busy, setBusy] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const bottomRef = useRef(null)
+  const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
+
+  useEffect(() => () => tailAbort.current?.abort(), [])
+
+  // shared by the live POST stream and a resumed background-turn tail
+  function handleTurnEvent(ev) {
+    if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
+      setMessages((m) => {
+        const copy = [...m]
+        copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
+        return copy
+      })
+    if (ev.type === 'final')
+      setMessages((m) => {
+        const copy = [...m]
+        copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
+        return copy
+      })
+    if (ev.type === 'error')
+      setMessages((m) => {
+        const copy = [...m]
+        copy[copy.length - 1] = { role: 'error', content: ev.message }
+        return copy
+      })
+  }
 
   const refresh = () =>
     api(`/api/conversations${projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : ''}`)
@@ -42,10 +67,27 @@ export default function ChatBox({ projectSlug }) {
   }, [messages])
 
   async function open(id) {
+    tailAbort.current?.abort()
     setCid(id)
     if (!id) { setMessages([]); return }
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
+    if (!r.running) return
+    // a turn is still executing server-side — re-attach and watch it finish
+    setBusy(true)
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: [] }])
+    const ctl = new AbortController()
+    tailAbort.current = ctl
+    try {
+      await tailStream(`/api/chat/${id}/stream`, (ev) => {
+        if (ev.type === 'idle') {
+          api(`/api/conversations/${id}/messages`).then((r2) => setMessages(r2.messages))
+          return
+        }
+        handleTurnEvent(ev)
+      }, ctl.signal)
+    } catch { /* tail aborted; messages reload on next open */ }
+    setBusy(false)
   }
 
   async function send(confirmPeak = false) {
@@ -67,24 +109,7 @@ export default function ChatBox({ projectSlug }) {
                 body: JSON.stringify({ project: projectSlug }),
               }).then(refresh)
           }
-          if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
-            setMessages((m) => {
-              const copy = [...m]
-              copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
-              return copy
-            })
-          if (ev.type === 'final')
-            setMessages((m) => {
-              const copy = [...m]
-              copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
-              return copy
-            })
-          if (ev.type === 'error')
-            setMessages((m) => {
-              const copy = [...m]
-              copy[copy.length - 1] = { role: 'error', content: ev.message }
-              return copy
-            })
+          handleTurnEvent(ev)
         },
       )
       setInput('')
@@ -98,6 +123,9 @@ export default function ChatBox({ projectSlug }) {
           await send(true)
           return
         }
+      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+        setMessages((m) => [...m, { role: 'error',
+          content: 'a turn is still running in this chat — wait for it to finish' }])
       } else {
         setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
       }
