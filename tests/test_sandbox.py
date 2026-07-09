@@ -270,6 +270,35 @@ def test_classify_scan_hit_is_critical():
 def test_classify_no_scan_key_is_safe():
     c = sandbox.classify(_ev(), {})       # evidence without a scan field
     assert c["scan"] == [] and c["facts"]["scan"] == 0
+    assert c["suricata"] == [] and c["facts"]["suricata"] == 0
+
+
+def test_parse_suricata_eve_alerts():
+    from backend import scanners
+    text = (
+        '{"event_type":"flow","src_ip":"10.66.0.10"}\n'
+        '{"event_type":"alert","src_ip":"10.66.0.10","dest_ip":"44.44.44.44",'
+        '"alert":{"signature_id":2000001,"signature":"ET MALWARE CnC Beacon",'
+        '"category":"A Network Trojan was detected","severity":1}}\n'
+        # duplicate (same sid+dest) is deduped
+        '{"event_type":"alert","src_ip":"10.66.0.10","dest_ip":"44.44.44.44",'
+        '"alert":{"signature_id":2000001,"signature":"ET MALWARE CnC Beacon",'
+        '"category":"A Network Trojan was detected","severity":1}}\n'
+    )
+    alerts = scanners.parse_suricata_eve(text)
+    assert len(alerts) == 1
+    assert alerts[0]["signature"] == "ET MALWARE CnC Beacon"
+    assert alerts[0]["sev"] == "crit" and alerts[0]["dest"] == "44.44.44.44"
+
+
+def test_classify_suricata_crit_and_warn():
+    crit = sandbox.classify(_ev(suricata=[
+        {"signature": "ET EXPLOIT x", "severity": 1, "sev": "crit", "dest": "1.2.3.4"}]), {})
+    assert crit["verdict"] == "crit" and crit["rule"] == "suricata:network-signature"
+    assert "network signature" in crit["headline"]
+    warn = sandbox.classify(_ev(suricata=[
+        {"signature": "ET INFO x", "severity": 2, "sev": "warn", "dest": "1.2.3.4"}]), {})
+    assert warn["verdict"] == "warn" and warn["rule"] == "suricata:network-signature"
 
 
 # ---- gate parsers ----------------------------------------------------------

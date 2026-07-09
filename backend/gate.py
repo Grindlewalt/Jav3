@@ -522,6 +522,12 @@ async def run_gated(slug: str, command: str, timeout: float | None = None,
         evidence["scan"] = await scanners.scan_staged(slug, result.get("staged", []))
     except Exception:                          # noqa: BLE001 (a scanner must never fail the run)
         evidence["scan"] = {"clamav": [], "yara": [], "ran": []}
+    # Suricata over the pcap we already captured (C2 / exploit network signatures)
+    try:
+        evidence["suricata"] = await scanners.suricata_scan(
+            pcap_path, cap_dir / f"gate-{run_id}-suricata") if have_pcap else []
+    except Exception:                          # noqa: BLE001
+        evidence["suricata"] = []
     evidence_path = cap_dir / f"gate-{run_id}-evidence.json"
     evidence_path.write_text(json.dumps(evidence, indent=1))
 

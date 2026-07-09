@@ -387,8 +387,28 @@ export default function Sandbox() {
                       bad={(facts.threat ?? 0) > 0} />
                 <Tile label="Malware scan" value={facts.scan ?? 0}
                       bad={(facts.scan ?? 0) > 0} />
+                <Tile label="Network sigs" value={facts.suricata ?? 0}
+                      bad={(facts.suricata ?? 0) > 0} />
               </div>
             </div>
+
+            {(detail.suricata || []).length > 0 && (
+              <Section title="Network signatures (Suricata)">
+                {detail.suricata.map((s, i) => (
+                  <div key={i} className={`sbx-row sev-${s.sev || 'warn'}`}>
+                    <div className="grow" style={{ minWidth: 0 }}>
+                      <div className="ellipsis mono">{s.signature}</div>
+                      <div className="sbx-sub">
+                        {s.category && <span className="sbx-rule-chip">{s.category}</span>}
+                        <span className="dim small">{s.src} → {s.dest}</span>
+                      </div>
+                    </div>
+                    <span className={`sbx-pill ${s.sev === 'crit' ? 'crit' : 'warn'}`}>
+                      {s.sev === 'crit' ? 'critical' : 'suspicious'}</span>
+                  </div>
+                ))}
+              </Section>
+            )}
 
             {(detail.scan || []).length > 0 && (
               <Section title="Malware scan">

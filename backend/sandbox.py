@@ -450,12 +450,18 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
                  + [{"engine": "yara", "path": h.get("path", ""),
                      "signature": h.get("rule", "")} for h in scan.get("yara", [])])
 
+    # Suricata network signatures over the captured pcap (typed by the parser)
+    suricata = list(evidence.get("suricata") or [])
+    suricata_crit = any(s.get("sev") == "crit" for s in suricata)
+
     # deterministic verdict = worst signal present
     crit_sens = any(s["sev"] == "crit" for s in sensitive)
     if threat:
         verdict, rule = "crit", "threat-intel:known-bad-destination"
     elif scan_hits:
         verdict, rule = "crit", f"malware-signature:{scan_hits[0]['engine']}"
+    elif suricata_crit:
+        verdict, rule = "crit", "suricata:network-signature"
     elif beacon_ext:
         verdict, rule = "crit", "dashboard-beacon"
     elif behavior_crit:
@@ -465,6 +471,8 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
                                  else "exec-reaches-untrusted-host")
     elif behavior_warn:
         verdict, rule = "warn", f"behavior:{behavior_warn['kind']}"
+    elif suricata:
+        verdict, rule = "warn", "suricata:network-signature"
     elif egress_new:
         verdict, rule = "warn", "new-destination-blocked"
     else:
@@ -476,6 +484,7 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
         "sensitive": len(sensitive), "execs": len(execs), "staged": len(staged),
         "lan_hosts": lan_hosts, "beacons": len(beacons), "beacons_external": beacon_ext,
         "behavior": len(behavior), "threat": len(threat), "scan": len(scan_hits),
+        "suricata": len(suricata),
     }
     return {
         "verdict": verdict, "rule": rule, "headline": _headline(facts, verdict),
@@ -483,6 +492,7 @@ def classify(evidence: dict, rule_index: dict[tuple, dict],
         "sensitive": sensitive, "execs": execs, "staged": staged,
         "beacons": beacons, "artifact": artifact, "behavior": behavior,
         "threat": threat, "scan": scan_hits, "scan_ran": scan.get("ran", []),
+        "suricata": suricata,
     }
 
 
@@ -504,6 +514,9 @@ def _headline(f: dict, verdict: str) -> str:
     if f.get("scan"):
         n = f["scan"]
         p.append(f"{n} malware signature hit{'s' if n > 1 else ''}")
+    if f.get("suricata"):
+        n = f["suricata"]
+        p.append(f"{n} network signature{'s' if n > 1 else ''} (Suricata)")
     if f.get("threat"):
         n = f["threat"]
         p.append(f"{n} known-bad destination{'s' if n > 1 else ''} (threat feed)")

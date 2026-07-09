@@ -12,11 +12,14 @@ own output files and emit typed findings; matched signature names are echoed as
 data, never interpreted.
 """
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
 from .config import settings
 from .staging import _staging_dir
+
+SURICATA_RULES = Path("/var/lib/suricata/rules/suricata.rules")
 
 # Curated committed ruleset ships in the repo; an operator can drop extra .yar
 # files in data/yara/ to extend coverage offline.
@@ -143,6 +146,57 @@ async def yara_scan(paths: list[Path], base: Path) -> list[dict]:
             seen.add(k)
             out.append(h)
     return out
+
+
+def suricata_ready() -> bool:
+    return have("suricata") and SURICATA_RULES.is_file()
+
+
+def parse_suricata_eve(text: str) -> list[dict]:
+    """eve.json alert records -> deduped findings. Suricata severity: 1 = most
+    severe (crit), 2/3 = advisory (warn). Untrusted signature/category strings
+    are echoed as data, never interpreted."""
+    seen, out = set(), []
+    for line in text.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("event_type") != "alert":
+            continue
+        a = ev.get("alert", {})
+        sid = a.get("signature_id")
+        dest = ev.get("dest_ip", "")
+        key = (sid, dest)
+        if key in seen:
+            continue
+        seen.add(key)
+        sev = int(a.get("severity", 3) or 3)
+        out.append({
+            "signature": a.get("signature", ""), "category": a.get("category", ""),
+            "severity": sev, "sev": "crit" if sev <= 1 else "warn",
+            "src": ev.get("src_ip", ""), "dest": dest,
+        })
+    return out
+
+
+async def suricata_scan(pcap_path: Path, out_dir: Path) -> list[dict]:
+    """Run Suricata offline over a captured pcap; parse its eve.json alerts.
+    Empty when Suricata/rules absent or the pcap is empty."""
+    if not suricata_ready() or not pcap_path.is_file() or pcap_path.stat().st_size == 0:
+        return []
+    out_dir.mkdir(parents=True, exist_ok=True)
+    r = await _run(["suricata", "-r", str(pcap_path), "-l", str(out_dir),
+                    "-S", str(SURICATA_RULES), "--runmode", "single"], timeout=180)
+    if r is None:
+        return []
+    eve = out_dir / "eve.json"
+    if not eve.is_file():
+        return []
+    try:
+        return parse_suricata_eve(eve.read_text(errors="replace"))
+    except OSError:
+        return []
 
 
 async def scan_staged(slug: str, relpaths: list[str]) -> dict:
