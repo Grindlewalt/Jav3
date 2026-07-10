@@ -238,11 +238,18 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
         confirm_peak(conversation_id)
         active = project_slug if project_slug else None
         system_prompt = await assemble_system_prompt(db, active=active)
+        # own fetch-ledger scope per run — a daily schedule re-reads the same
+        # pages every morning by design
+        from . import runtime
+        wtoken = runtime.web_session.set(f"run:{conversation_id}")
         final = ""
-        async for ev in run_turn(db, conversation_id, system_prompt,
-                                 [{"role": "user", "content": task}]):
-            if ev["type"] == "final":
-                final = ev["content"]
+        try:
+            async for ev in run_turn(db, conversation_id, system_prompt,
+                                     [{"role": "user", "content": task}]):
+                if ev["type"] == "final":
+                    final = ev["content"]
+        finally:
+            runtime.web_session.reset(wtoken)
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) "
             "VALUES (?, 'assistant', ?)", (conversation_id, final))

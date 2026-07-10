@@ -101,9 +101,14 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
     they get the tight subagent iteration cap unless the agent's definition
     grants more via max_iterations — the full 40-round chat cap is what let a
     subagent read dozens of pages and snowball its context."""
+    from . import runtime
     db = await get_db()
     try:
         agent, conversation_id = await _open_agent_run(db, slug, task, active=active)
+        # own fetch-ledger scope: the agent hasn't seen its parent's reads, so
+        # it must be able to re-fetch them — and a scheduled run must never be
+        # starved by yesterday's claims (the 06:45 news-agent post-mortem)
+        wtoken = runtime.web_session.set(f"run:{conversation_id}")
         confirm_peak(conversation_id)
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent)
@@ -111,11 +116,14 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
         cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
         final_content = ""
-        async for event in run_turn(db, conversation_id, system_prompt,
-                                    history, tools=tools, model_name=mdl,
-                                    base_url=burl, max_iterations=cap):
-            if event["type"] == "final":
-                final_content = event["content"]
+        try:
+            async for event in run_turn(db, conversation_id, system_prompt,
+                                        history, tools=tools, model_name=mdl,
+                                        base_url=burl, max_iterations=cap):
+                if event["type"] == "final":
+                    final_content = event["content"]
+        finally:
+            runtime.web_session.reset(wtoken)
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) "
             "VALUES (?, 'assistant', ?)", (conversation_id, final_content))

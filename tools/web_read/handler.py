@@ -1,5 +1,5 @@
 from backend import summarize, webtools
-from backend.agent.tools.toolctx import active_slug
+from backend.agent.tools.toolctx import web_session
 
 EXTRACT_SYSTEM = (
     "Extract exactly what the request asks for from this page text. Return only "
@@ -8,8 +8,7 @@ EXTRACT_SYSTEM = (
 
 
 async def run(url: str, extract: str = "") -> str:
-    session = (await active_slug()) or "global"
-    text = await webtools.read(url, session)
+    text = await webtools.read(url, await web_session())
     if isinstance(extract, str) and extract.strip() and not text.startswith("error:"):
         try:
             answer = await summarize.complete_text(

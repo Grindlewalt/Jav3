@@ -56,3 +56,54 @@ def test_web_tools_registered(tmp_env):
     assert "web_search" in names and "web_read" in names
     granted = {s["function"]["name"] for s in registry.openai_tool_specs()}
     assert "web_search" in granted and "web_read" in granted
+
+
+# --- the ledger scopes to the OPERATION, not the project (06:45 post-mortem) ---
+# Keying claims by project slug made them permanent: a scheduled morning run
+# found every feed URL claimed by yesterday's chat turn and starved. The web
+# tools now key by runtime.web_session (set per chat turn / agent run / job),
+# with the project slug only as an out-of-operation fallback.
+
+async def test_claims_are_per_operation(tmp_env):
+    await init_db()
+    url = "https://feeds.example.com/rss.xml"
+    assert await webtools.claim("turn:1:aaa", url) is True
+    assert await webtools.claim("turn:1:aaa", url) is False   # dedup within op
+    assert await webtools.claim("run:99", url) is True        # next run is fresh
+
+
+async def test_web_session_prefers_operation_scope(tmp_env):
+    from backend import runtime
+    from backend.agent.tools.toolctx import web_session
+
+    await init_db()
+    assert await web_session() == "global"          # no op, no project
+    tok = runtime.web_session.set("run:42")
+    try:
+        assert await web_session() == "run:42"
+    finally:
+        runtime.web_session.reset(tok)
+
+
+async def test_headless_agent_run_gets_own_session(tmp_env, monkeypatch):
+    """Two runs of the same agent must not share a ledger scope."""
+    from backend import agents_run
+    from backend import runtime as runtime_mod
+    from backend.config import settings
+
+    await init_db()
+    (settings.agents_dir / "probe").mkdir(parents=True)
+    (settings.agents_dir / "probe" / "AGENT.md").write_text(
+        "---\nname: probe\ndescription: t\n---\n\nYou are probe.\n")
+
+    seen = []
+
+    async def stub_turn(db, cid, system_prompt, history, tools=None, **kw):
+        seen.append(runtime_mod.web_session.get())
+        yield {"type": "final", "content": "ok"}
+    monkeypatch.setattr(agents_run, "run_turn", stub_turn)
+
+    await agents_run.run_agent_headless("probe", "go", active=None)
+    await agents_run.run_agent_headless("probe", "go", active=None)
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert all(s and s.startswith("run:") for s in seen)

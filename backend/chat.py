@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shutil
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -231,6 +232,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     btoken = budget.active_budget.set(the_budget)
     chan = _chan(conversation_id)
     ctoken = runtime.event_chan.set(chan)
+    # fresh fetch-ledger scope per turn: parallel reads inside the turn (and
+    # any team it deploys) dedup, while tomorrow's turn can re-read the page
+    wtoken = runtime.web_session.set(f"turn:{conversation_id}:{uuid.uuid4().hex[:8]}")
     atoken = None
     db = await get_db()
     try:
@@ -312,6 +316,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 pass
         if atoken is not None:
             runtime.artifact_slug.reset(atoken)
+        runtime.web_session.reset(wtoken)
         runtime.event_chan.reset(ctoken)
         runtime.ephemeral.reset(token)
         budget.active_budget.reset(btoken)

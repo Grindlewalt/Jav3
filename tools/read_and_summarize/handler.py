@@ -1,13 +1,13 @@
 import asyncio
 
 from backend import summarize, webtools
-from backend.agent.tools.toolctx import active_slug
+from backend.agent.tools.toolctx import web_session
 
 MAX_URLS = 8
 
 
 async def run(urls=None, url=None, focus: str = "") -> str:
-    session = (await active_slug()) or "global"
+    session = await web_session()
     targets = []
     if isinstance(urls, list):
         targets += [u for u in urls if isinstance(u, str) and u.strip()]

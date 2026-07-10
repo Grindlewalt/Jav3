@@ -261,11 +261,16 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
 
     ncap = _Budget(MAX_NODES)
     ncap.take()  # the head itself
+    # job-scoped fetch ledger (same scheme as research): every worker in this
+    # tree dedups against its siblings, and the next job starts fresh
+    from . import runtime
+    wtoken = runtime.web_session.set(f"job:{job_id}")
     try:
         result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
                                 project=project, depth=0, budget=ncap,
                                 leaf_tools=leaf_tools, peak=peak, deliverable=deliverable)
     finally:
+        runtime.web_session.reset(wtoken)
         if tok is not None:
             budget_mod.active_budget.reset(tok)
 

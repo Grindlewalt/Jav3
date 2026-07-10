@@ -55,3 +55,16 @@ async def require_project() -> str:
             f"active project '{slug}' has no files on disk — "
             "call load_project with a different slug, or ask the operator to restore it")
     return slug
+
+
+async def web_session() -> str:
+    """Fetch-ledger scope for web tools: the running operation's key (set per
+    chat turn / agent run / funnel job), falling back to the project slug for
+    any caller outside an operation. The old project-slug-only keying made
+    claims permanent — a scheduled run could never re-read a page an earlier
+    turn in the same project had already fetched."""
+    from ... import runtime
+    op = runtime.web_session.get()
+    if op:
+        return op
+    return (await active_slug()) or "global"

@@ -38,12 +38,15 @@ async def requests(slug: str):
 
 
 @router.post("/requests/{rid}/approve")
-async def approve(slug: str, rid: int):
+async def approve(slug: str, rid: int, force: bool = False):
     _check_project(slug)
     try:
-        return await gitgate.approve_request(rid)
+        return await gitgate.approve_request(rid, force=force)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        # anti-malware gate blocked the push; operator can retry with ?force=true
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:

