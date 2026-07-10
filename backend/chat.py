@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import bus, compaction, runtime
+from . import autonomy, bus, compaction, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import run_turn
@@ -193,6 +193,14 @@ _JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request",
                              "run_command", "run_code", "run_gated"})
 
 
+async def _project_autonomy(db, slug: str) -> str | None:
+    """The project's autonomy level (None == full/unrestricted)."""
+    async with db.execute("SELECT autonomy FROM projects WHERE slug = ?",
+                          (slug,)) as cur:
+        row = await cur.fetchone()
+    return row["autonomy"] if row else None
+
+
 async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
                         before_id: int) -> None:
     """F5 interim: if this turn mutated the active project and never called
@@ -246,7 +254,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # chats only; incognito leaves no trace). The set is stable within a
         # project state, so the provider's prefix cache survives.
         entries = load_registry()
-        if not await get_active_project(db):
+        active = await get_active_project(db)
+        if not active:
             if ephemeral:
                 entries = [e for e in entries if not e.get("requires_project")]
             else:
@@ -254,6 +263,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 entries = [e for e in entries
                            if not e.get("requires_project")
                            or e["name"] in ARTIFACT_TOOLS]
+        else:
+            # per-project autonomy dial: withhold tools above the project's level
+            entries = autonomy.filter_entries(entries, await _project_autonomy(db, active))
         tools = openai_tool_specs(entries)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it

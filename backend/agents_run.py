@@ -40,7 +40,8 @@ def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
     return (agent.get("model") or None, agent.get("base_url") or None)
 
 
-def _agent_tools(agent: dict) -> list[dict]:
+def _agent_tools(agent: dict, autonomy_level: str | None = None) -> list[dict]:
+    from . import autonomy
     excluded = set(agent.get("tools_exclude") or [])
     # an agent never spawns further agents or teams — no recursion, no fork
     # bombs — and never mints persistent infrastructure (new agents,
@@ -50,7 +51,18 @@ def _agent_tools(agent: dict) -> list[dict]:
     excluded.add("create_agent")
     excluded.add("schedule_update")
     entries = [e for e in load_registry() if e["name"] not in excluded]
+    # a headless run is the unattended case — honour the project's autonomy dial
+    entries = autonomy.filter_entries(entries, autonomy_level)
     return openai_tool_specs(entries)
+
+
+async def _project_autonomy(db, slug: str | None) -> str | None:
+    if not slug:
+        return None
+    async with db.execute("SELECT autonomy FROM projects WHERE slug = ?",
+                          (slug,)) as cur:
+        row = await cur.fetchone()
+    return row["autonomy"] if row else None
 
 
 _USE_DB = object()
@@ -111,7 +123,7 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
         wtoken = runtime.web_session.set(f"run:{conversation_id}")
         confirm_peak(conversation_id)
         system_prompt = await _agent_system_prompt(db, agent, active=active)
-        tools = _agent_tools(agent)
+        tools = _agent_tools(agent, await _project_autonomy(db, active))
         mdl, burl = _agent_overrides(agent)
         cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
@@ -205,7 +217,7 @@ async def run_agent(slug: str, body: RunAgent):
             yield sse({"type": "start", "conversation_id": conversation_id,
                        "agent": agent["name"]})
             system_prompt = await _agent_system_prompt(db, agent)
-            tools = _agent_tools(agent)
+            tools = _agent_tools(agent, await _project_autonomy(db, active))
             mdl, burl = _agent_overrides(agent)
             history = [{"role": "user", "content": body.task}]
             final_content = ""

@@ -53,6 +53,12 @@ export default function Projects() {
     await api(`/api/projects/${slug}/purge`, { method: 'DELETE' })
     refresh()
   }
+  async function setAutonomy(slug, level) {
+    await api(`/api/projects/${slug}/autonomy`, {
+      method: 'PUT', body: JSON.stringify({ level }),
+    })
+    refresh()
+  }
 
   return (
     <div className="page">
@@ -74,6 +80,14 @@ export default function Projects() {
               ? <button onClick={unload}>Unload from context</button>
               : <button onClick={() => load(p.slug)}>Load into context</button>}
             {active === p.slug && <span className="badge">in context</span>}
+            <select className="autonomy-sel" value={p.autonomy || 'full'}
+                    title="how much the agent may do unattended in this project"
+                    onChange={(e) => setAutonomy(p.slug, e.target.value)}>
+              <option value="read_only">read-only</option>
+              <option value="stage">stage edits</option>
+              <option value="gated">run gated</option>
+              <option value="full">full (commit)</option>
+            </select>
             <button className="ghost danger" onClick={() => softDelete(p.slug)}>delete</button>
           </li>
         ))}

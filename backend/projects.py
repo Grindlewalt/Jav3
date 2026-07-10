@@ -96,6 +96,29 @@ async def get_project(slug: str):
     return {**dict(row), "project_md": read_project_md(slug), "loaded": active == slug}
 
 
+class SetAutonomy(BaseModel):
+    level: str | None      # read_only | stage | gated | full  (None/full = unrestricted)
+
+
+@router.put("/projects/{slug}/autonomy")
+async def set_autonomy(slug: str, body: SetAutonomy):
+    from . import autonomy
+    if body.level not in (None, *autonomy.LEVELS):
+        raise HTTPException(status_code=400, detail="invalid autonomy level")
+    # store None for 'full' so the default stays unrestricted
+    value = None if body.level in (None, "full") else body.level
+    db = await get_db()
+    try:
+        cur = await db.execute("UPDATE projects SET autonomy = ? WHERE slug = ?",
+                               (value, slug))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="no such project")
+    finally:
+        await db.close()
+    return {"ok": True, "autonomy": value or "full"}
+
+
 @router.put("/projects/{slug}/md")
 async def update_project_md(slug: str, body: UpdateProjectMd):
     if not project_md_path(slug).parent.exists():

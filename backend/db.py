@@ -145,6 +145,9 @@ async def init_db() -> None:
             # converted or merged (the Artifacts page is their view)
             await db.execute(
                 "ALTER TABLE projects ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")
+        if "autonomy" not in cols:
+            # autonomy dial: read_only|stage|gated|full (NULL == full, unrestricted)
+            await db.execute("ALTER TABLE projects ADD COLUMN autonomy TEXT")
         # run-tree columns on an already-created conversations table
         async with db.execute("PRAGMA table_info(conversations)") as cur:
             ccols = [r["name"] for r in await cur.fetchall()]
