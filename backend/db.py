@@ -156,6 +156,12 @@ async def init_db() -> None:
         if "pending_approval" not in scols:
             await db.execute("ALTER TABLE schedules ADD COLUMN "
                              "pending_approval INTEGER NOT NULL DEFAULT 0")
+        # egress-allowlist hardening: a rule can carry an expiry (NULL = never)
+        # so temporary allowances (e.g. "PyPI for this session") auto-revoke.
+        async with db.execute("PRAGMA table_info(sandbox_rules)") as cur:
+            srcols = [r["name"] for r in await cur.fetchall()]
+        if "expires_at" not in srcols:
+            await db.execute("ALTER TABLE sandbox_rules ADD COLUMN expires_at TEXT")
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
                           ("rollup", "TEXT"), ("job_id", "TEXT"),

@@ -23,6 +23,19 @@ function relTime(iso) {
   return `${Math.floor(h / 24)}d ago`
 }
 
+// time remaining until a future ISO timestamp (for rule expiry)
+function untilTime(iso) {
+  let s = String(iso).replace(' ', 'T')
+  if (!/[zZ]$|[+-]\d\d:?\d\d$/.test(s)) s += 'Z'
+  const t = new Date(s).getTime()
+  if (Number.isNaN(t)) return ''
+  const mins = Math.round((t - Date.now()) / 60000)
+  if (mins <= 0) return 'expiring'
+  if (mins < 60) return `${mins}m`
+  const h = Math.floor(mins / 60)
+  return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`
+}
+
 function fmtBytes(n) {
   if (n == null) return '0 B'
   if (n < 1024) return `${n} B`
@@ -96,6 +109,8 @@ function EgressRow({ row, busy, onDecide }) {
           <span className="sbx-actions">
             <button className="ghost" disabled={busy}
                     onClick={() => onDecide(row, 'allow')}>Allow</button>
+            <button className="ghost" disabled={busy} title="allow for one hour, then auto-revoke"
+                    onClick={() => onDecide(row, 'allow', 60)}>1h</button>
             <button className="ghost danger" disabled={busy}
                     onClick={() => onDecide(row, 'deny')}>Deny</button>
           </span>
@@ -226,16 +241,16 @@ export default function Sandbox() {
     }
   }
 
-  async function decide(row, decision) {
+  async function decide(row, decision, ttl = null) {
     const label = row.host || row.ip
     setBusy(true)
     try {
       await api(`/api/sandbox/sessions/${detail.id}/connection`, {
         method: 'POST',
-        body: JSON.stringify({ key: row.key, decision }),
+        body: JSON.stringify({ key: row.key, decision, ttl_minutes: ttl }),
       })
       toast(decision === 'allow'
-        ? `Allowed ${label} — added to the allowlist; this destination is now cleared`
+        ? `Allowed ${label}${ttl ? ` for ${ttl}m` : ''} — added to the allowlist; this destination is now cleared`
         : `Kept ${label} blocked`)
       refreshDetail(detail.id); refreshRules(); refreshSessions()
     } catch (e) {
@@ -579,6 +594,10 @@ export default function Sandbox() {
                 <span className="mono grow ellipsis" title={`${r.dest}:${r.port}`}>
                   {r.dest}<span className="dim">:{r.port}</span></span>
                 {r.scope && <span className="tag">{r.scope}</span>}
+                {r.expires_at && (
+                  <span className="tag" title={`auto-revokes at ${r.expires_at} UTC`}>
+                    ⏱ {untilTime(r.expires_at)}</span>
+                )}
                 <button className="win-btn" title="revoke — block again on future runs"
                         disabled={busy} onClick={() => revoke(r)}>✕</button>
               </div>

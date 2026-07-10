@@ -95,6 +95,7 @@ async def session_detail(run_id: int):
 class ConnDecision(BaseModel):
     key: str                 # "host:port" as shown in the row
     decision: str            # "allow" | "deny"
+    ttl_minutes: int | None = None   # allow: time-limited (None = permanent)
 
 
 @router.post("/sessions/{run_id}/connection")
@@ -116,7 +117,7 @@ async def decide_connection(run_id: int, body: ConnDecision):
                        "allowlist a known-bad host")
         rule = await sandbox.add_rule(
             dest=row["host"], ip=row["ip"], port=row["port"], proto=row["proto"],
-            scope=row["scope"], note=f"run {run_id}")
+            scope=row["scope"], note=f"run {run_id}", ttl_minutes=body.ttl_minutes)
         return {"ok": True, "rule": rule}
     if body.decision == "deny":
         # deny-by-default already blocks it; nothing to program. Recorded as a

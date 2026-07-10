@@ -300,9 +300,14 @@ async def _tick() -> None:
 
 async def scheduler_loop() -> None:
     """Background heartbeat. Never lets one bad tick stop the clock."""
+    from . import sandbox
     while True:
         try:
             await _tick()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await sandbox.sweep_expired()   # revoke lapsed egress allowances
         except Exception:  # noqa: BLE001
             pass
         await asyncio.sleep(POLL_SECONDS)

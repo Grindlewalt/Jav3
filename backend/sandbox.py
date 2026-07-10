@@ -60,9 +60,10 @@ async def _nft_del(ip: str, port: int, proto: str) -> None:
 
 
 async def sync_nft() -> int:
-    """Re-program every persisted rule into the live nft sets. Best-effort:
-    on a host without the table (dev laptop) this quietly does nothing."""
-    rules = await list_rules()
+    """Re-program every live (non-expired) rule into the nft sets. Sweeps expired
+    ones first. Best-effort: on a host without the table this quietly does nothing."""
+    await sweep_expired()
+    rules = await list_rules(include_expired=False)
     n = 0
     for r in rules:
         try:
@@ -74,31 +75,66 @@ async def sync_nft() -> int:
     return n
 
 
-async def list_rules() -> list[dict]:
+_RULE_COLS = ("id, dest, ip, port, proto, scope, note, created_at, expires_at, "
+              "(expires_at IS NOT NULL AND expires_at <= datetime('now')) AS expired")
+
+
+async def list_rules(include_expired: bool = True) -> list[dict]:
+    where = ("" if include_expired
+             else "WHERE expires_at IS NULL OR expires_at > datetime('now')")
     db = await get_db()
     try:
         cur = await db.execute(
-            "SELECT id, dest, ip, port, proto, scope, note, created_at "
-            "FROM sandbox_rules ORDER BY created_at DESC, id DESC")
+            f"SELECT {_RULE_COLS} FROM sandbox_rules {where} "
+            f"ORDER BY created_at DESC, id DESC")
         return [dict(r) for r in await cur.fetchall()]
     finally:
         await db.close()
 
 
+async def sweep_expired() -> int:
+    """Delete expired rules and pull them out of the live nft set. This is what
+    actually revokes a time-limited allowance at the firewall (rules_index only
+    stops *counting* it); run periodically."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT ip, port, proto FROM sandbox_rules "
+            "WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')")
+        expired = [dict(r) for r in await cur.fetchall()]
+        if expired:
+            await db.execute("DELETE FROM sandbox_rules WHERE expires_at IS NOT NULL "
+                             "AND expires_at <= datetime('now')")
+            await db.commit()
+    finally:
+        await db.close()
+    for r in expired:
+        await _nft_del(r["ip"], r["port"], r["proto"])
+    return len(expired)
+
+
 async def add_rule(dest: str, ip: str, port: int, proto: str = "tcp",
-                   scope: str = "wan", note: str | None = None) -> dict:
+                   scope: str = "wan", note: str | None = None,
+                   ttl_minutes: int | None = None) -> dict:
     ipaddress.ip_address(ip)          # reject anything that isn't an address
     port = int(port)
     proto = "udp" if proto == "udp" else "tcp"
+    ttl = int(ttl_minutes) if ttl_minutes else 0
+    exp_expr, exp_param = (("datetime('now', ?)", (f"+{ttl} minutes",))
+                           if ttl > 0 else ("NULL", ()))
     db = await get_db()
     try:
+        # upsert: a re-allow of the same dest refreshes the expiry/note
         await db.execute(
-            "INSERT OR IGNORE INTO sandbox_rules (dest, ip, port, proto, scope, note) "
-            "VALUES (?, ?, ?, ?, ?, ?)", (dest, ip, port, proto, scope, note))
+            f"INSERT INTO sandbox_rules (dest, ip, port, proto, scope, note, expires_at) "
+            f"VALUES (?, ?, ?, ?, ?, ?, {exp_expr}) "
+            f"ON CONFLICT(ip, port, proto) DO UPDATE SET "
+            f"expires_at=excluded.expires_at, note=excluded.note, dest=excluded.dest",
+            (dest, ip, port, proto, scope, note) + exp_param)
         await db.commit()
         cur = await db.execute(
-            "SELECT id, dest, ip, port, proto, scope, note, created_at "
-            "FROM sandbox_rules WHERE ip=? AND port=? AND proto=?", (ip, port, proto))
+            f"SELECT {_RULE_COLS} FROM sandbox_rules WHERE ip=? AND port=? AND proto=?",
+            (ip, port, proto))
         row = dict(await cur.fetchone())
     finally:
         await db.close()
@@ -123,8 +159,11 @@ async def delete_rule(rule_id: int) -> bool:
 
 
 async def rules_index() -> dict[tuple, dict]:
-    """(ip, port, proto) -> rule, for O(1) allowlist membership in classify()."""
-    return {(r["ip"], r["port"], r["proto"]): r for r in await list_rules()}
+    """(ip, port, proto) -> rule, for O(1) allowlist membership in classify().
+    Expired rules are excluded so a lapsed allowance stops granting access
+    immediately, even before the periodic nft sweep removes it."""
+    return {(r["ip"], r["port"], r["proto"]): r
+            for r in await list_rules(include_expired=False)}
 
 
 # ---- classification (pure, given the rule index) ---------------------------

@@ -505,6 +505,53 @@ async def test_rule_crud_roundtrip(tmp_env, monkeypatch):
     assert not await sandbox.delete_rule(999)
 
 
+async def test_rule_expiry_and_sweep(tmp_env, monkeypatch):
+    await init_db()
+    calls = []
+    async def _add(ip, port, proto): calls.append(("add", ip, port))
+    async def _del(ip, port, proto): calls.append(("del", ip, port))
+    monkeypatch.setattr(sandbox, "_nft_add", _add)
+    monkeypatch.setattr(sandbox, "_nft_del", _del)
+
+    # a time-limited allowance is active and counted while fresh
+    r = await sandbox.add_rule("pypi.org", "1.2.3.4", 443, ttl_minutes=60)
+    assert r["expires_at"] and r["expired"] == 0
+    assert ("1.2.3.4", 443, "tcp") in await sandbox.rules_index()
+
+    # a permanent rule has no expiry
+    perm = await sandbox.add_rule("gh.com", "5.6.7.8", 443)
+    assert perm["expires_at"] is None
+
+    # force the pypi rule to have lapsed, then it stops counting immediately
+    db = await get_db()
+    try:
+        await db.execute("UPDATE sandbox_rules SET expires_at = datetime('now','-1 minute') "
+                         "WHERE ip = '1.2.3.4'")
+        await db.commit()
+    finally:
+        await db.close()
+    idx = await sandbox.rules_index()
+    assert ("1.2.3.4", 443, "tcp") not in idx        # excluded while expired
+    assert ("5.6.7.8", 443, "tcp") in idx            # permanent survives
+
+    # the sweep deletes it from the DB and pulls it from nft
+    n = await sandbox.sweep_expired()
+    assert n == 1 and ("del", "1.2.3.4", 443) in calls
+    remaining = {(r["ip"]) for r in await sandbox.list_rules()}
+    assert "1.2.3.4" not in remaining and "5.6.7.8" in remaining
+
+
+async def test_re_allow_refreshes_ttl(tmp_env, monkeypatch):
+    await init_db()
+    async def _noop(*a): pass
+    monkeypatch.setattr(sandbox, "_nft_add", _noop)
+    monkeypatch.setattr(sandbox, "_nft_del", _noop)
+    await sandbox.add_rule("x.com", "9.9.9.9", 443, ttl_minutes=10)
+    again = await sandbox.add_rule("x.com", "9.9.9.9", 443, ttl_minutes=120)
+    rows = await sandbox.list_rules()
+    assert len(rows) == 1 and again["expires_at"]     # upsert, not a duplicate
+
+
 async def test_sandbox_api_empty(client):
     assert (await client.get("/api/sandbox/sessions")).json() == {"sessions": []}
     assert (await client.get("/api/sandbox/rules")).json() == {"rules": []}
