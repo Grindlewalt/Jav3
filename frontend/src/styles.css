@@ -343,6 +343,31 @@ kbd {
   font: 13px/1.5 ui-monospace, Menlo, monospace; max-height: 300px; overflow-y: auto;
 }
 .console.err { color: #f0938d; border-color: #5c2626; }
+
+/* ---- sandbox terminal ---- */
+.vm-term {
+  flex: 1; min-height: 160px; overflow-y: auto; margin: 8px 0 0;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px 8px 0 0;
+  padding: 10px 12px; font: 12.5px/1.5 ui-monospace, Menlo, monospace;
+}
+.vm-term-entry { margin-bottom: 6px; }
+.vm-term-cmd { color: var(--text); white-space: pre-wrap; word-break: break-all; }
+.vm-prompt { color: var(--green); user-select: none; }
+.vm-term-out {
+  margin: 2px 0 0; white-space: pre-wrap; word-wrap: break-word; color: var(--dim);
+  font: inherit;
+}
+.vm-term-out.err { color: #f0938d; }
+.vm-term-input {
+  display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+  background: var(--bg); border: 1px solid var(--border); border-top: 0;
+  border-radius: 0 0 8px 8px;
+}
+.vm-term-input input {
+  border: 0; background: none; padding: 0; border-radius: 0;
+  color: var(--text); font: 12.5px/1.5 ui-monospace, Menlo, monospace;
+}
+.vm-term-input input:focus { border: 0; outline: none; }
 .artifacts { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 .artifact a { color: var(--accent); font-family: ui-monospace, Menlo, monospace;
               font-size: 13px; }

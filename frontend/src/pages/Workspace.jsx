@@ -1081,14 +1081,36 @@ function StagingPanel({ slug }) {
   )
 }
 
-// The persistent QEMU sandbox. Push the project in, run things, pull results
-// back into <project>/vm-results. Nuke throws the whole disk away — recovery
-// only, not routine.
+// The persistent QEMU sandbox as a terminal. Push the project in, run a shell
+// session (working dir persists across commands), pull results back into
+// <project>/vm-results. Nuke throws the whole disk away — recovery only.
+//
+// Each command is still a fresh non-interactive `vm.run`, so it isn't a live
+// PTY (no vim/htop, env exports don't carry over) — but we prefix `cd <cwd>`
+// and read `pwd` back out via a marker, so `cd` sticks and it reads like a shell.
+const _CWD_MARK = '__JCWD__'
+
+function _parseCwd(stdout, prev) {
+  let cwd = prev
+  const kept = []
+  for (const ln of (stdout || '').split('\n')) {
+    const m = ln.match(/^__JCWD__(.*)$/)
+    if (m) cwd = m[1] || cwd
+    else kept.push(ln)
+  }
+  return { cwd, stdout: kept.join('\n').replace(/\s+$/, '') }
+}
+
 function VmPanel({ slug, state, setState }) {
+  const base = `/workspace/${slug}`
   const [st, setSt] = useState(null)
-  const [out, setOut] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [lines, setLines] = useState([])          // transcript (ephemeral)
+  const [histIdx, setHistIdx] = useState(-1)
   const cmd = state.cmd ?? ''
+  const cwd = state.cwd ?? base
+  const history = state.history ?? []
+  const bodyRef = useRef(null)
 
   const refresh = () => api('/api/vm/status').then(setSt).catch(() => setSt(null))
   useEffect(() => {
@@ -1096,20 +1118,63 @@ function VmPanel({ slug, state, setState }) {
     const t = setInterval(refresh, 15000)
     return () => clearInterval(t)
   }, [])
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [lines])
+
+  const prompt = (dir) => (dir || base).replace(base, '~') || '~'
 
   async function act(path, body) {
     setBusy(true)
-    setOut(null)
     try {
       const r = await api(`/api/vm/${path}`, {
         method: 'POST', body: JSON.stringify(body || {}) })
-      if (path === 'run') setOut(r)
-      else setOut({ note: JSON.stringify(r) })
+      setLines((l) => [...l, { note: `${path}: ${JSON.stringify(r)}` }])
       refresh()
     } catch (err) {
-      setOut({ error: err.detail || String(err) })
+      setLines((l) => [...l, { error: err.detail || String(err) }])
     }
     setBusy(false)
+  }
+
+  async function runCmd() {
+    const c = cmd.trim()
+    if (!c || busy) return
+    const at = cwd
+    setState({ cmd: '', history: [...history.filter((h) => h !== c), c].slice(-100) })
+    setHistIdx(-1)
+    setLines((l) => [...l, { prompt: prompt(at), cmd: c, running: true }])
+    setBusy(true)
+    // run in the tracked cwd; report the resulting pwd back via a marker
+    const wrapped = `cd "${at}" 2>/dev/null\n${c}\n__jrc=$?; printf '\\n${_CWD_MARK}%s\\n' "$(pwd)"; exit $__jrc`
+    try {
+      const r = await api('/api/vm/run', {
+        method: 'POST', body: JSON.stringify({ command: wrapped }) })
+      const { cwd: newCwd, stdout } = _parseCwd(r.stdout, at)
+      setState({ cwd: newCwd })                 // merge: keeps cmd + history
+      setLines((l) => l.map((e, i) => i === l.length - 1
+        ? { ...e, running: false, exit: r.exit_status, timed_out: r.timed_out,
+            timeout: r.timeout, stdout, stderr: r.stderr }
+        : e))
+    } catch (err) {
+      setLines((l) => l.map((e, i) => i === l.length - 1
+        ? { ...e, running: false, error: err.detail || String(err) } : e))
+    }
+    setBusy(false)
+  }
+
+  function onKey(e) {
+    if (e.key === 'Enter') { e.preventDefault(); runCmd(); return }
+    if (e.key === 'ArrowUp' && history.length) {
+      e.preventDefault()
+      const i = Math.min(histIdx + 1, history.length - 1)
+      setHistIdx(i); setState({ cmd: history[history.length - 1 - i] })
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      const i = histIdx - 1
+      setHistIdx(i)
+      setState({ cmd: i < 0 ? '' : history[history.length - 1 - i] })
+    }
   }
 
   const light = !st ? 'off' : st.ssh_ready ? 'on' : st.unit_active ? 'mid' : 'off'
@@ -1127,6 +1192,8 @@ function VmPanel({ slug, state, setState }) {
                 onClick={() => act('start')}>start</button>
         <button className="ghost" disabled={busy || !st?.unit_active}
                 onClick={() => act('stop')}>stop</button>
+        <button className="ghost" disabled={!lines.length}
+                onClick={() => setLines([])}>clear</button>
         <button className="ghost danger" disabled={busy || !st?.base_built}
                 onClick={() => {
                   if (window.confirm('Nuke the VM? Its entire disk is thrown away and it reboots fresh from the golden image.'))
@@ -1140,27 +1207,42 @@ function VmPanel({ slug, state, setState }) {
                 onClick={() => act('pull', { project: slug, remote_path: slug })}>
           ⇤ pull results</button>
       </div>
-      <form className="row" onSubmit={(e) => {
-        e.preventDefault()
-        if (cmd.trim()) act('run', { command: cmd, cwd: `/workspace/${slug}` })
-      }}>
-        <input className="grow mono" placeholder={`run in /workspace/${slug}…`}
-               value={cmd} onChange={(e) => setState({ cmd: e.target.value })} />
-        <button type="submit" disabled={busy || !st?.ssh_ready}>▶</button>
-      </form>
-      {busy && <div className="dim">working…</div>}
-      {out?.error && <pre className="console err">{out.error}</pre>}
-      {out?.note && <pre className="console">{out.note}</pre>}
-      {out && 'exit_status' in out && (
-        <div className="run-result">
-          <div className="dim">exit {out.exit_status}
-            {out.timed_out && <span className="warn"> · timed out after {out.timeout}s</span>}</div>
-          {out.stdout && <pre className="console">{out.stdout}</pre>}
-          {out.stderr && <pre className="console err">{out.stderr}</pre>}
-        </div>
-      )}
-      <p className="dim small">pushed to <code>/workspace/{slug}</code> · pulls land in
-        <code> vm-results/</code> · nothing in the VM is durable</p>
+
+      <div className="vm-term" ref={bodyRef}>
+        {lines.length === 0 && (
+          <div className="dim small">a shell in the sandbox — <code>cd</code> sticks;
+            nothing here is durable. Push the project in first.</div>
+        )}
+        {lines.map((e, i) => (
+          <div key={i} className="vm-term-entry">
+            {e.cmd && (
+              <div className="vm-term-cmd">
+                <span className="vm-prompt">{e.prompt}$</span> {e.cmd}
+                {e.running && <span className="dim"> …</span>}
+              </div>
+            )}
+            {e.note && <div className="dim small">{e.note}</div>}
+            {e.stdout && <pre className="vm-term-out">{e.stdout}</pre>}
+            {e.stderr && <pre className="vm-term-out err">{e.stderr}</pre>}
+            {e.error && <pre className="vm-term-out err">{e.error}</pre>}
+            {typeof e.exit === 'number' && e.exit !== 0 && (
+              <div className="dim small">exit {e.exit}
+                {e.timed_out && <span className="warn"> · timed out after {e.timeout}s</span>}</div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="vm-term-input">
+        <span className="vm-prompt">{prompt(cwd)}$</span>
+        <input className="grow mono" autoComplete="off" spellCheck="false"
+               placeholder={st?.ssh_ready ? '' : 'start the VM to get a shell'}
+               disabled={!st?.ssh_ready}
+               value={cmd} onKeyDown={onKey}
+               onChange={(e) => setState({ cmd: e.target.value })} />
+      </div>
+      <p className="dim small">pushed to <code>{base}</code> · pulls land in
+        <code> vm-results/</code> · direct runs aren't gated/staged — use the Sandbox
+        page for a monitored run</p>
     </div>
   )
 }
