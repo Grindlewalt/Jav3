@@ -307,6 +307,7 @@ async def scheduler_loop() -> None:
         except Exception:  # noqa: BLE001
             pass
         try:
+            await egress.ensure_dns_readable()  # keep the guest DNS log readable
             await sandbox.sweep_expired()   # revoke lapsed egress allowances
             await egress.sweep_yolo()       # auto-close YOLO when its TTL lapses
             await egress.refresh_domains()  # track CDN IPs for allowlisted hostnames

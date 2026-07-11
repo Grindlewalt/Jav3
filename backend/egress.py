@@ -60,6 +60,20 @@ async def resolve_host(host: str) -> list[str]:
     return sorted({i[4][0] for i in infos})
 
 
+async def ensure_dns_readable() -> None:
+    """dnsmasq writes the guest DNS log root-only (nobody:root 0660), so the
+    backend user can't read it — which silently broke the gate's host<->IP
+    correlation *and* this feature. Make it readable, best-effort via sudo. On a
+    single-operator box the query log holding resolved names is not sensitive."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "chmod", "a+r", str(DNS_LOG),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.communicate(), 10)
+    except (OSError, asyncio.TimeoutError):
+        pass
+
+
 def guest_resolved(host: str, tail_bytes: int = 262144) -> list[str]:
     """The IPs the *guest* actually resolved `host` to, from the dnsmasq log —
     exactly what the guest will connect to (immune to host/guest DNS divergence

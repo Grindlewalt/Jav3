@@ -28,6 +28,11 @@ async def lifespan(app: FastAPI):
         await sandbox.sync_nft()
     except Exception:
         pass
+    try:
+        from . import egress
+        await egress.ensure_dns_readable()   # unbreak the gate's DNS correlation
+    except Exception:
+        pass
     task = asyncio.create_task(schedules.scheduler_loop())
     try:
         yield
