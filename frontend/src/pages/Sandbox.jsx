@@ -351,9 +351,13 @@ export default function Sandbox() {
   return (
     <div className="sbx-layout">
       <aside className="sbx-queue">
-        {egressReqs.length > 0 && (
+        {(
           <div className="sbx-egress-reqs">
             <div className="side-title">Connection requests</div>
+            {egressReqs.length === 0 && (
+              <div className="dim small">None pending. When the agent's sandbox code
+                needs the internet it asks here, and you allow the host.</div>
+            )}
             {egressReqs.map((r) => (
               <div key={r.id} className="sbx-egress-req">
                 <div className="mono ellipsis" title={`${r.host}:${r.port}`}>

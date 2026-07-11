@@ -20,6 +20,7 @@ connection request to approve — no worse than today.
 import asyncio
 import ipaddress
 import re
+from pathlib import Path
 
 from . import sandbox
 from .config import settings
@@ -28,6 +29,8 @@ from .db import get_db
 GUEST_IP = settings.vm_ssh_host                 # 10.66.0.10
 YOLO_KEY = "yolo_expires_at"
 YOLO_COMMENT = "jarvis-yolo"
+DNS_LOG = Path("/var/log/jarvis-vm/dns.log")    # dnsmasq guest query/reply log
+_REPLY_RE = re.compile(r"reply (\S+) is (\d+\.\d+\.\d+\.\d+)")
 
 # curated dev destinations for the preset (host, port)
 DEV_HOSTS = [
@@ -55,6 +58,35 @@ async def resolve_host(host: str) -> list[str]:
     except OSError:
         return []
     return sorted({i[4][0] for i in infos})
+
+
+def guest_resolved(host: str, tail_bytes: int = 262144) -> list[str]:
+    """The IPs the *guest* actually resolved `host` to, from the dnsmasq log —
+    exactly what the guest will connect to (immune to host/guest DNS divergence
+    and matching the CDN edge the guest got). Reads only the recent tail."""
+    try:
+        with open(DNS_LOG, errors="replace") as f:
+            size = DNS_LOG.stat().st_size
+            if size > tail_bytes:
+                f.seek(size - tail_bytes)
+            text = f.read()
+    except OSError:
+        return []
+    h = host.lower().rstrip(".")
+    out = []
+    for m in _REPLY_RE.finditer(text):
+        if m.group(1).lower().rstrip(".") == h:
+            out.append(m.group(2))
+    return list(dict.fromkeys(out))         # unique, resolve-order
+
+
+async def ips_for(host: str) -> list[str]:
+    """Prefer the guest's own resolutions; supplement with a host-side lookup."""
+    ips = guest_resolved(host)
+    for ip in await resolve_host(host):
+        if ip not in ips:
+            ips.append(ip)
+    return ips
 
 
 # ---- request / approve -----------------------------------------------------
@@ -130,7 +162,7 @@ async def approve_request(rid: int, ttl_minutes: int | None = None) -> dict:
     if row is None:
         raise KeyError(f"no egress request #{rid}")
     req = dict(row)
-    ips = await resolve_host(req["host"])
+    ips = await ips_for(req["host"])
     for ip in ips:
         await sandbox.add_rule(dest=req["host"], ip=ip, port=req["port"],
                                proto=req["proto"], scope="wan",
@@ -151,12 +183,39 @@ async def apply_dev_preset(slug: str, ttl_minutes: int | None = None) -> dict:
     """Resolve + allowlist the curated dev hosts for a project."""
     added = []
     for host, port in DEV_HOSTS:
-        for ip in await resolve_host(host):
+        for ip in await ips_for(host):
             await sandbox.add_rule(dest=host, ip=ip, port=port, proto="tcp",
                                    scope="wan", note=f"dev preset ({slug})",
                                    ttl_minutes=ttl_minutes)
             added.append({"host": host, "ip": ip, "port": port})
     return {"added": len(added), "hosts": sorted({h for h, _ in DEV_HOSTS})}
+
+
+async def refresh_domains() -> int:
+    """Keep allowlisted *hostnames* current as the guest re-resolves them (CDN
+    rotation): for each rule whose dest is a domain, add any freshly guest-
+    resolved IP not already allowlisted (short TTL; the sweep prunes the old).
+    This is what makes 'allow by DNS name' hold up over time."""
+    rules = await sandbox.list_rules(include_expired=False)
+    have = {(r["ip"], r["port"], r["proto"]) for r in rules}
+    domains: dict[tuple, None] = {}
+    for r in rules:
+        try:
+            ipaddress.ip_address(r["dest"])          # dest is a bare IP -> skip
+            continue
+        except ValueError:
+            pass
+        domains[(r["dest"], r["port"], r["proto"])] = None
+    added = 0
+    for host, port, proto in domains:
+        for ip in guest_resolved(host):
+            if (ip, port, proto) not in have:
+                await sandbox.add_rule(dest=host, ip=ip, port=port, proto=proto,
+                                       scope="wan", note=f"dns-refresh {host}",
+                                       ttl_minutes=180)
+                have.add((ip, port, proto))
+                added += 1
+    return added
 
 
 async def set_project_mode(slug: str, mode: str | None) -> None:

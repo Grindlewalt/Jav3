@@ -49,6 +49,31 @@ async def test_resolve_host_passthrough_ip():
     assert await egress.resolve_host("8.8.8.8") == ["8.8.8.8"]
 
 
+def test_guest_resolved_reads_dns_log(tmp_path, monkeypatch):
+    log = tmp_path / "dns.log"
+    log.write_text(
+        "query[A] pypi.org from 10.66.0.10\n"
+        "reply pypi.org is 151.101.0.223\n"
+        "reply pypi.org is 151.101.64.223\n"
+        "reply other.com is 1.1.1.1\n")
+    monkeypatch.setattr(egress, "DNS_LOG", log)
+    assert egress.guest_resolved("pypi.org") == ["151.101.0.223", "151.101.64.223"]
+    assert egress.guest_resolved("nope.com") == []
+
+
+async def test_refresh_domains_adds_guest_ips(tmp_env, monkeypatch, _no_nft):
+    await init_db()
+    # an allowlisted hostname rule (dest is a domain, one known IP)
+    await sandbox.add_rule("cdn.example", "1.1.1.1", 443)
+    log = tmp_env / "dns.log"
+    log.write_text("reply cdn.example is 1.1.1.1\nreply cdn.example is 2.2.2.2\n")
+    monkeypatch.setattr(egress, "DNS_LOG", log)
+    added = await egress.refresh_domains()
+    assert added == 1                                 # only the new 2.2.2.2
+    idx = await sandbox.rules_index()
+    assert ("2.2.2.2", 443, "tcp") in idx
+
+
 async def test_yolo_status_off_by_default(tmp_env, monkeypatch):
     await init_db()
     # nft unavailable in tests -> _yolo_handle returns None (off)

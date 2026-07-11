@@ -309,6 +309,7 @@ async def scheduler_loop() -> None:
         try:
             await sandbox.sweep_expired()   # revoke lapsed egress allowances
             await egress.sweep_yolo()       # auto-close YOLO when its TTL lapses
+            await egress.refresh_domains()  # track CDN IPs for allowlisted hostnames
         except Exception:  # noqa: BLE001
             pass
         await asyncio.sleep(POLL_SECONDS)
