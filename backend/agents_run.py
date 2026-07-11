@@ -79,9 +79,11 @@ async def _agent_system_prompt(db, agent: dict, active=_USE_DB) -> str:
     return f"{agent['prompt']}\n\n---\n\n{base}"
 
 
-async def _open_agent_run(db, slug: str, task: str, active=_USE_DB) -> tuple[dict, int]:
+async def _open_agent_run(db, slug: str, task: str,
+                          active=_USE_DB) -> tuple[dict, int, str | None]:
     """Create the conversation for an agent run and record the task. Returns
-    (agent def, conversation_id)."""
+    (agent def, conversation_id, resolved project slug) — the caller needs the
+    resolved slug (not the _USE_DB sentinel) for the autonomy lookup."""
     agent = _read(slug)  # 404s if missing
     if active is _USE_DB:
         active = await get_active_project(db)
@@ -100,7 +102,7 @@ async def _open_agent_run(db, slug: str, task: str, active=_USE_DB) -> tuple[dic
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
     await db.commit()
-    return agent, conversation_id
+    return agent, conversation_id, active
 
 
 async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
@@ -116,7 +118,10 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
     from . import runtime
     db = await get_db()
     try:
-        agent, conversation_id = await _open_agent_run(db, slug, task, active=active)
+        # take the RESOLVED slug back: _project_autonomy below binds `active`
+        # as an SQL parameter, and the raw _USE_DB object() crashes aiosqlite
+        agent, conversation_id, active = await _open_agent_run(
+            db, slug, task, active=active)
         # own fetch-ledger scope: the agent hasn't seen its parent's reads, so
         # it must be able to re-fetch them — and a scheduled run must never be
         # starved by yesterday's claims (the 06:45 news-agent post-mortem)
