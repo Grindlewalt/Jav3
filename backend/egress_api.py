@@ -13,8 +13,8 @@ router = APIRouter(prefix="/api/egress", tags=["egress"],
 
 
 @router.get("/requests")
-async def list_requests(status: str = "pending"):
-    return {"requests": await egress.list_requests(status=status)}
+async def list_requests(status: str = "pending", project: str | None = None):
+    return {"requests": await egress.list_requests(status=status, slug=project)}
 
 
 class ApproveBody(BaseModel):

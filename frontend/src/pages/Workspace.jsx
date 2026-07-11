@@ -14,6 +14,7 @@ const PANEL_TYPES = {
   run: { label: 'Run — python sandbox', w: 560, h: 470 },
   todos: { label: 'To-dos', w: 360, h: 380 },
   vm: { label: 'Sandbox VM', w: 560, h: 470 },
+  network: { label: 'Network — egress control', w: 460, h: 500 },
   staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
@@ -348,6 +349,7 @@ function PanelBody(props) {
     case 'run': return <RunPanel {...props} />
     case 'todos': return <TodoPanel {...props} />
     case 'vm': return <VmPanel {...props} />
+    case 'network': return <NetworkPanel {...props} />
     case 'staging': return <StagingPanel {...props} />
     case 'context': return <ContextPanel {...props} />
     case 'agent': return <AgentPanel {...props} />
@@ -1243,6 +1245,86 @@ function VmPanel({ slug, state, setState }) {
       <p className="dim small">pushed to <code>{base}</code> · pulls land in
         <code> vm-results/</code> · direct runs aren't gated/staged — use the Sandbox
         page for a monitored run</p>
+    </div>
+  )
+}
+
+// Per-project egress control: approve the connections the agent asks for, clear
+// the common dev hosts in one click, or open the whole VM (YOLO). Everything
+// here lands in the same deny-by-default allowlist the Sandbox console manages.
+function NetworkPanel({ slug }) {
+  const [reqs, setReqs] = useState([])
+  const [yolo, setYolo] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+
+  const refresh = () => {
+    api(`/api/egress/requests?project=${slug}`).then((r) => setReqs(r.requests)).catch(() => {})
+    api('/api/egress/yolo').then(setYolo).catch(() => {})
+  }
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 4000)
+    return () => clearInterval(t)
+  }, [slug])
+
+  async function act(fn, note) {
+    setBusy(true); setMsg(null)
+    try { await fn(); setMsg(note); refresh() }
+    catch (e) { setMsg(`error: ${e.detail || e.message}`) }
+    setBusy(false)
+  }
+  const decide = (id, action, ttl = null) => act(
+    () => api(`/api/egress/requests/${id}/${action}`, {
+      method: 'POST', body: JSON.stringify(action === 'approve' ? { ttl_minutes: ttl } : {}) }),
+    action === 'approve' ? `Allowed${ttl ? ` for ${ttl}m` : ''}` : 'Denied')
+  const devPreset = () => act(
+    () => api(`/api/egress/preset/${slug}`, { method: 'POST', body: '{}' }),
+    'Dev hosts (PyPI/GitHub/npm/apt) pre-approved for ~8h')
+  const toggleYolo = () => {
+    if (!yolo?.on && !window.confirm(
+      'YOLO opens the sandbox VM to the whole internet for 1 hour — it defeats the '
+      + 'exfiltration guard, so anything in the VM could be sent out. Only on a VM with '
+      + 'nothing sensitive. Continue?')) return
+    act(() => api('/api/egress/yolo', yolo?.on
+      ? { method: 'DELETE' }
+      : { method: 'POST', body: JSON.stringify({ ttl_minutes: 60 }) }),
+      yolo?.on ? 'Egress locked again' : 'Open egress for 1h')
+  }
+
+  return (
+    <div className="pane-col net-panel">
+      <div className="side-title">Connection requests</div>
+      {reqs.length === 0
+        ? <div className="dim small">None pending. When the agent's sandbox code needs
+            the internet it asks here, and pauses until you decide.</div>
+        : reqs.map((r) => (
+          <div key={r.id} className="net-req">
+            <div className="mono ellipsis" title={`${r.host}:${r.port}`}>
+              {r.host}<span className="dim">:{r.port}</span></div>
+            {r.reason && <div className="dim small">{r.reason}</div>}
+            <div className="row" style={{ margin: '2px 0 0' }}>
+              <button className="ghost" disabled={busy} onClick={() => decide(r.id, 'approve')}>Allow</button>
+              <button className="ghost" disabled={busy} onClick={() => decide(r.id, 'approve', 60)}>1h</button>
+              <button className="ghost danger" disabled={busy} onClick={() => decide(r.id, 'deny')}>Deny</button>
+            </div>
+          </div>
+        ))}
+
+      <div className="side-title">Dev preset</div>
+      <button className="ghost" disabled={busy} onClick={devPreset}>Pre-approve dev hosts</button>
+      <p className="dim small" style={{ margin: 0 }}>
+        Clears PyPI · GitHub · npm · apt so pip/git/npm work in the sandbox (~8h).</p>
+
+      <div className="side-title">Open egress (YOLO)</div>
+      <button className={yolo?.on ? 'danger' : 'ghost'} disabled={busy} onClick={toggleYolo}>
+        {yolo?.on ? 'YOLO on — lock egress' : 'Open egress (1h)'}</button>
+      <p className="dim small" style={{ margin: 0 }}>
+        {yolo?.on
+          ? 'The VM can reach the whole internet. Anything in it can be exfiltrated.'
+          : 'Drops the egress lock for the whole VM — defeats the exfiltration guard. Use only on a VM with nothing sensitive.'}</p>
+
+      {msg && <div className={`dim small ${msg.startsWith('error') ? 'error' : ''}`}>{msg}</div>}
     </div>
   )
 }

@@ -551,6 +551,10 @@ kbd {
   padding: 10px; }
 .sbx-egress-req { display: flex; flex-direction: column; gap: 3px; }
 .sbx-egress-req .sbx-actions { margin-top: 2px; }
+.net-panel { gap: 6px; overflow-y: auto; }
+.net-panel .side-title { margin-top: 6px; }
+.net-req { border: 1px solid var(--amber); border-radius: 8px; padding: 8px 10px;
+  background: var(--panel); margin-bottom: 4px; }
 .sbx-session-list { list-style: none; margin: 0; padding: 0; display: flex;
   flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; }
 .sbx-session { padding: 8px 10px; background: var(--panel);

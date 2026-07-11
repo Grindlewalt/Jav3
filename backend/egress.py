@@ -151,6 +151,37 @@ async def list_requests(status: str | None = "pending",
         await db.close()
 
 
+# in-process events so a paused agent turn can wait on the operator's decision
+_waiters: dict[int, asyncio.Event] = {}
+
+
+def _waiter(rid: int) -> asyncio.Event:
+    ev = _waiters.get(rid)
+    if ev is None:
+        ev = _waiters[rid] = asyncio.Event()
+    return ev
+
+
+async def wait_for_decision(rid: int, timeout: float = 300) -> str:
+    """Block until the operator approves/denies request `rid` (or timeout), then
+    return its final status. This is the agent's 'pause until approval': the turn
+    parks here — no model tokens burn while waiting — and resumes on the decision."""
+    ev = _waiter(rid)
+    try:
+        await asyncio.wait_for(ev.wait(), timeout)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        _waiters.pop(rid, None)
+    db = await get_db()
+    try:
+        async with db.execute("SELECT status FROM egress_requests WHERE id=?", (rid,)) as cur:
+            row = await cur.fetchone()
+    finally:
+        await db.close()
+    return row["status"] if row else "pending"
+
+
 async def _decide(rid: int, status: str) -> dict:
     db = await get_db()
     try:
@@ -164,6 +195,9 @@ async def _decide(rid: int, status: str) -> dict:
         await db.close()
     if row is None:
         raise KeyError(f"no egress request #{rid}")
+    ev = _waiters.get(rid)
+    if ev is not None:
+        ev.set()                    # wake a paused agent waiting on this request
     return dict(row)
 
 

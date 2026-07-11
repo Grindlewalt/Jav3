@@ -37,6 +37,27 @@ async def test_approve_allowlists_resolved_ip(tmp_env, _no_nft):
     assert await egress.list_requests(status="pending") == []
 
 
+async def test_pause_resumes_on_decision(tmp_env, _no_nft):
+    import asyncio
+    await init_db()
+    r = await egress.file_request("proj", "9.9.9.9", 443, reason="pip")
+
+    async def approve_soon():
+        await asyncio.sleep(0.05)
+        await egress.approve_request(r["id"])
+    asyncio.create_task(approve_soon())
+    # the "agent" parks here until the operator decides
+    status = await egress.wait_for_decision(r["id"], timeout=5)
+    assert status == "approved"
+
+
+async def test_pause_times_out_when_undecided(tmp_env):
+    await init_db()
+    r = await egress.file_request("proj", "1.1.1.1", 443)
+    status = await egress.wait_for_decision(r["id"], timeout=0.1)
+    assert status == "pending"
+
+
 async def test_deny_leaves_no_rule(tmp_env):
     await init_db()
     r = await egress.file_request("proj", "5.5.5.5", 443)
