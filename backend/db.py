@@ -105,6 +105,17 @@ CREATE TABLE IF NOT EXISTS usage_log (
     cache_miss INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER,             -- NULL: utility calls (naming, summarize) or incognito
+    model TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    cache_miss INTEGER NOT NULL DEFAULT 0,
+    context TEXT,                        -- JSON {messages, n_tools}; only when capture is on
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS sandbox_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dest TEXT NOT NULL,              -- human label (hostname if known, else ip)
@@ -194,6 +205,10 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_conv_parent ON conversations(parent_conversation_id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_conv_job ON conversations(job_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_calls_conv ON model_calls(conversation_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)")
         await db.commit()
     finally:
         await db.close()

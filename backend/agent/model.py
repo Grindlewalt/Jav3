@@ -94,6 +94,48 @@ def check_peak_gate(conversation_id: int) -> None:
         raise PeakPricingConfirmationRequired()
 
 
+CAPTURE_STATE_KEY = "capture_context"
+
+
+async def record_model_call(conversation_id: int | None, model_name: str,
+                            usage: dict | None, messages: list[dict],
+                            tools: list[dict] | None) -> None:
+    """Ledger every API call: exact usage always (the Logs cost tab sums
+    this — usage_log only covers chat turns, this covers everything), plus
+    the raw message array when the operator flipped capture on. Incognito
+    records usage unattributed (spend is real money) but never content.
+    Must never fail the model call — best effort by design."""
+    from ..db import get_db, get_state
+    from .. import runtime
+    u = usage or {}
+    ephemeral = runtime.ephemeral.get()
+    if ephemeral:
+        conversation_id = None
+    db = await get_db()
+    try:
+        context = None
+        if not ephemeral and await get_state(db, CAPTURE_STATE_KEY) == "1":
+            context = json.dumps({"messages": messages,
+                                  "n_tools": len(tools or [])})
+        await db.execute(
+            "INSERT INTO model_calls (conversation_id, model, input_tokens, "
+            "output_tokens, cache_hit, cache_miss, context) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (conversation_id, model_name,
+             u.get("prompt_tokens", 0), u.get("completion_tokens", 0),
+             u.get("prompt_cache_hit_tokens", 0),
+             u.get("prompt_cache_miss_tokens", 0), context))
+        # retention: usage rows are tiny and kept forever; context blobs are
+        # the heavy part and age out
+        await db.execute(
+            "UPDATE model_calls SET context = NULL WHERE context IS NOT NULL "
+            "AND created_at < datetime('now', ?)",
+            (f"-{settings.context_capture_keep_days} days",))
+        await db.commit()
+    finally:
+        await db.close()
+
+
 class Model:
     """DeepSeek behind an OpenAI-compatible chat-completions API."""
 
@@ -171,6 +213,10 @@ class Model:
         usage = raw["usage"]
         if budget is not None:
             budget.add(usage or {})
+        try:
+            await record_model_call(conversation_id, name, usage, messages, tools)
+        except Exception:  # noqa: BLE001 — the ledger must never fail a call
+            pass
         content = raw["content"]
         tcs = raw["tool_calls"]
         # recover native-markup tool calls the serving layer failed to parse

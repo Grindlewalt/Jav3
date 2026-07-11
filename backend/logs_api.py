@@ -8,12 +8,116 @@ the real token usage recorded per turn. Read-only.
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
+from .agent.model import CAPTURE_STATE_KEY
 from .auth import require_user
-from .db import get_db
+from .config import settings
+from .db import get_db, get_state, set_state
 
 router = APIRouter(prefix="/api/logs", tags=["logs"],
                    dependencies=[Depends(require_user)])
+
+
+def _cost_usd(cache_hit: int, cache_miss: int, output: int) -> float:
+    return (cache_hit * settings.price_cache_hit_per_m
+            + cache_miss * settings.price_cache_miss_per_m
+            + output * settings.price_output_per_m) / 1_000_000
+
+
+# --- cost accounting: every API call ledgered at the Model.complete choke
+# point (model_calls), so headless agents / schedules / research / funnel
+# nodes are all counted — usage_log only ever saw chat turns.
+
+_WINDOWS = (("24h", "-1 day"), ("7d", "-7 days"), ("30d", "-30 days"),
+            ("all", None))
+
+
+@router.get("/costs")
+async def costs():
+    db = await get_db()
+    try:
+        out = {}
+        for label, offset in _WINDOWS:
+            q = ("SELECT COUNT(*) n, COALESCE(SUM(cache_hit),0) ch, "
+                 "COALESCE(SUM(cache_miss),0) cm, "
+                 "COALESCE(SUM(output_tokens),0) o FROM model_calls")
+            args: tuple = ()
+            if offset:
+                q += " WHERE created_at >= datetime('now', ?)"
+                args = (offset,)
+            async with db.execute(q, args) as cur:
+                r = await cur.fetchone()
+            out[label] = {"calls": r["n"], "cache_hit": r["ch"],
+                          "cache_miss": r["cm"], "output": r["o"],
+                          "cost_usd": round(_cost_usd(r["ch"], r["cm"], r["o"]), 4)}
+        capture = await get_state(db, CAPTURE_STATE_KEY) == "1"
+    finally:
+        await db.close()
+    return {"windows": out, "capture_context": capture,
+            "prices_per_m": {"cache_hit": settings.price_cache_hit_per_m,
+                             "cache_miss": settings.price_cache_miss_per_m,
+                             "output": settings.price_output_per_m}}
+
+
+class CaptureToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/capture-context")
+async def capture_context(body: CaptureToggle):
+    """Opt into storing the exact message array sent per model call. Heavy
+    (each ReAct iteration re-sends the grown context), so blobs age out after
+    settings.context_capture_keep_days."""
+    db = await get_db()
+    try:
+        await set_state(db, CAPTURE_STATE_KEY, "1" if body.enabled else "0")
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": True, "enabled": body.enabled}
+
+
+@router.get("/conversations/{cid}/calls")
+async def model_calls(cid: int):
+    """Per-API-call breakdown for one conversation: turn N = the Nth call,
+    each carrying the exact token bill the provider reported."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id, model, input_tokens, output_tokens, cache_hit, "
+            "cache_miss, LENGTH(context) AS context_bytes, created_at "
+            "FROM model_calls WHERE conversation_id=? ORDER BY id", (cid,))
+        rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+    for r in rows:
+        r["cost_usd"] = round(
+            _cost_usd(r["cache_hit"], r["cache_miss"], r["output_tokens"]), 6)
+        r["has_context"] = bool(r.pop("context_bytes"))
+    return {"calls": rows}
+
+
+@router.get("/calls/{call_id}/context")
+async def call_context(call_id: int):
+    """The raw context of one captured call — exactly what went to the API."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT context, input_tokens, cache_hit, cache_miss "
+            "FROM model_calls WHERE id=?", (call_id,))
+        row = await cur.fetchone()
+    finally:
+        await db.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such call")
+    if not row["context"]:
+        raise HTTPException(status_code=404,
+                            detail="no context captured for this call "
+                            "(capture was off, or the blob aged out)")
+    payload = json.loads(row["context"])
+    return {**payload, "input_tokens": row["input_tokens"],
+            "cache_hit": row["cache_hit"], "cache_miss": row["cache_miss"]}
 
 
 @router.get("/conversations")

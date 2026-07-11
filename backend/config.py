@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     # the main turn doesn't need to run cold. Tunable via JARVIS_MODEL_TEMPERATURE.
     model_temperature: float = 0.7
 
+    # DeepSeek pricing per 1M tokens (USD), for the Logs cost tab. Input is
+    # split by the API into cache hit/miss; output is flat. Override via
+    # JARVIS_PRICE_* when the provider reprices.
+    price_cache_hit_per_m: float = 0.0028
+    price_cache_miss_per_m: float = 0.14
+    price_output_per_m: float = 0.28
+    # Raw-context capture (the exact message array sent per model call) is
+    # opt-in and heavy; captured blobs older than this are nulled out.
+    context_capture_keep_days: int = 7
+
     # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
     peak_windows: list[str] = ["18:00-21:00", "23:00-03:00"]
     # How long a user's "yes, use the API" answer stays valid.
