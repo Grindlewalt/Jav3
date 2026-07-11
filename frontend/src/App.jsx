@@ -51,6 +51,11 @@ function NotificationBell() {
               <span className="grow ellipsis">git push · {g.project} · {g.message}</span>
             </NavLink>
           ))}
+          {(data?.egress || []).map((e) => (
+            <NavLink key={`e${e.id}`} to="/sandbox" className="notif-item" onClick={close}>
+              <span className="grow ellipsis">connection · {e.host}:{e.port} · {e.project_slug}</span>
+            </NavLink>
+          ))}
           {(data?.schedules || []).map((s) => (
             <NavLink key={`sc${s.id}`} to="/schedules" className="notif-item" onClick={close}>
               <span className="grow ellipsis">proposed schedule · {s.name} · {s.kind === 'agent' ? s.agent_slug : 'jarvis'}</span>

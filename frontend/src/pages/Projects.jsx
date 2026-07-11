@@ -59,6 +59,13 @@ export default function Projects() {
     })
     refresh()
   }
+  async function devPreset(slug) {
+    if (!window.confirm(`Pre-approve the common dev hosts (PyPI, GitHub, npm, apt) for "${slug}" so pip/git/npm work in the sandbox? They're allowlisted for ~8h.`)) return
+    const r = await api(`/api/egress/preset/${slug}`, { method: 'POST', body: '{}' })
+    setError(null)
+    window.alert(`Allowed ${r.added} addresses across ${r.hosts.length} dev hosts.`)
+    refresh()
+  }
 
   return (
     <div className="page">
@@ -88,6 +95,8 @@ export default function Projects() {
               <option value="gated">run gated</option>
               <option value="full">full (commit)</option>
             </select>
+            <button className="ghost" title="pre-approve PyPI/GitHub/npm/apt egress for the sandbox"
+                    onClick={() => devPreset(p.slug)}>dev net</button>
             <button className="ghost danger" onClick={() => softDelete(p.slug)}>delete</button>
           </li>
         ))}

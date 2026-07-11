@@ -148,6 +148,22 @@ async def init_db() -> None:
         if "autonomy" not in cols:
             # autonomy dial: read_only|stage|gated|full (NULL == full, unrestricted)
             await db.execute("ALTER TABLE projects ADD COLUMN autonomy TEXT")
+        if "egress_mode" not in cols:
+            # per-project egress preset: locked (default) | dev (dev hosts pre-cleared)
+            await db.execute("ALTER TABLE projects ADD COLUMN egress_mode TEXT")
+        # the agent's in-VM code can ask for an outbound destination it needs;
+        # the operator approves it into the allowlist (request/approve flow).
+        await db.execute("""CREATE TABLE IF NOT EXISTS egress_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_slug TEXT NOT NULL,
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            proto TEXT NOT NULL DEFAULT 'tcp',
+            reason TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            decided_at TEXT
+        )""")
         # run-tree columns on an already-created conversations table
         async with db.execute("PRAGMA table_info(conversations)") as cur:
             ccols = [r["name"] for r in await cur.fetchall()]

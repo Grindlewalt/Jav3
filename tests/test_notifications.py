@@ -34,7 +34,7 @@ async def test_notifications_empty(client):
     assert r.status_code == 200
     body = r.json()
     assert body == {"count": 0, "git": [], "staged": [], "sandbox": [],
-                    "schedules": []}
+                    "schedules": [], "egress": []}
 
 
 async def test_notifications_surfaces_pending_git(client):

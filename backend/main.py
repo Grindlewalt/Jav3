@@ -6,9 +6,9 @@ from fastapi.staticfiles import StaticFiles
 
 import asyncio
 
-from . import (agents_api, agents_run, artifacts_api, auth, chat, git_api, logs_api,
-               memory_api, notifications_api, projects, runs_api, sandbox, sandbox_api,
-               schedules, skills_api, vm_api, workspace, secrets)
+from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api, git_api,
+               logs_api, memory_api, notifications_api, projects, runs_api, sandbox,
+               sandbox_api, schedules, skills_api, vm_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -50,6 +50,7 @@ app.include_router(runs_api.jobs_router)
 app.include_router(vm_api.router)
 app.include_router(git_api.router)
 app.include_router(sandbox_api.router)
+app.include_router(egress_api.router)
 app.include_router(notifications_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)

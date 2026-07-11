@@ -28,6 +28,7 @@ _READ = {
 _STAGE = {
     "write_file", "edit_file", "dashboard", "crawl_codebase", "journal_update",
     "todo_update", "memory_write", "create_agent", "schedule_update",
+    "request_egress",
 }
 _GATED = {
     "run_code", "run_command", "run_gated", "research", "spawn_agent",

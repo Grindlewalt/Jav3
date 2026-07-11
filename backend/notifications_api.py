@@ -98,6 +98,15 @@ async def _schedules_pending() -> list[dict]:
         return []
 
 
+async def _egress_pending() -> list[dict]:
+    """The agent's outbound-connection requests awaiting the operator."""
+    try:
+        from . import egress
+        return await egress.list_requests(status="pending")
+    except Exception:                           # noqa: BLE001
+        return []
+
+
 @router.get("")
 async def notifications():
     try:
@@ -109,7 +118,9 @@ async def notifications():
     staged = _staged_pending(slugs)
     sbx = await _sandbox_pending()
     sched = await _schedules_pending()
+    egr = await _egress_pending()
     return {
-        "count": len(git) + len(staged) + len(sbx) + len(sched),
+        "count": len(git) + len(staged) + len(sbx) + len(sched) + len(egr),
         "git": git, "staged": staged, "sandbox": sbx, "schedules": sched,
+        "egress": egr,
     }

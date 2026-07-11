@@ -166,6 +166,8 @@ export default function Sandbox() {
   const [runErr, setRunErr] = useState('')
   const [ti, setTi] = useState(null)          // threat-intel feed status
   const [tiBusy, setTiBusy] = useState(false)
+  const [egressReqs, setEgressReqs] = useState([])   // agent connection requests
+  const [yolo, setYolo] = useState(null)             // global open-egress switch
 
   const toast = (msg) => {
     const id = Date.now() + Math.random()
@@ -179,6 +181,10 @@ export default function Sandbox() {
     api('/api/sandbox/rules').then((r) => setRules(r.rules)).catch(() => {})
   const refreshTi = () =>
     api('/api/sandbox/threatintel').then(setTi).catch(() => {})
+  const refreshEgress = () =>
+    api('/api/egress/requests').then((r) => setEgressReqs(r.requests)).catch(() => {})
+  const refreshYolo = () =>
+    api('/api/egress/yolo').then(setYolo).catch(() => {})
   const refreshDetail = (id) =>
     api(`/api/sandbox/sessions/${id}`)
       .then((d) => { if (selectedRef.current === id) setDetail(d) })
@@ -197,7 +203,7 @@ export default function Sandbox() {
   }
 
   useEffect(() => {
-    refreshSessions(); refreshRules(); refreshTi()
+    refreshSessions(); refreshRules(); refreshTi(); refreshEgress(); refreshYolo()
     api('/api/projects')
       .then((r) => {
         const list = r.projects || []
@@ -206,11 +212,43 @@ export default function Sandbox() {
       })
       .catch(() => {})
     const t = setInterval(() => {
-      refreshSessions(); refreshRules()
+      refreshSessions(); refreshRules(); refreshEgress(); refreshYolo()
       if (selectedRef.current != null) refreshDetail(selectedRef.current)
     }, 5000)
     return () => clearInterval(t)
   }, [])
+
+  async function decideEgress(id, action, ttl = null) {
+    setBusy(true)
+    try {
+      await api(`/api/egress/requests/${id}/${action}`, {
+        method: 'POST', body: JSON.stringify(action === 'approve' ? { ttl_minutes: ttl } : {}) })
+      toast(action === 'approve'
+        ? `Allowed the connection${ttl ? ` for ${ttl}m` : ''}`
+        : 'Denied the connection')
+      refreshEgress(); refreshRules()
+    } catch (e) {
+      toast(`Failed: ${e.detail || e.message}`)
+    } finally { setBusy(false) }
+  }
+
+  async function toggleYolo() {
+    const on = yolo?.on
+    if (!on && !window.confirm(
+      'YOLO opens the sandbox VM to the whole internet for 1 hour. This defeats the '
+      + 'exfiltration guard — anything in the VM could be sent out. Only do this on a '
+      + 'VM holding nothing sensitive. Continue?')) return
+    setBusy(true)
+    try {
+      await api('/api/egress/yolo', on
+        ? { method: 'DELETE' }
+        : { method: 'POST', body: JSON.stringify({ ttl_minutes: 60 }) })
+      toast(on ? 'YOLO off — egress locked again' : 'YOLO on — open egress for 1h')
+      refreshYolo()
+    } catch (e) {
+      toast(`Failed: ${e.detail || e.message}`)
+    } finally { setBusy(false) }
+  }
 
   function openSession(id) {
     selectedRef.current = id
@@ -313,6 +351,26 @@ export default function Sandbox() {
   return (
     <div className="sbx-layout">
       <aside className="sbx-queue">
+        {egressReqs.length > 0 && (
+          <div className="sbx-egress-reqs">
+            <div className="side-title">Connection requests</div>
+            {egressReqs.map((r) => (
+              <div key={r.id} className="sbx-egress-req">
+                <div className="mono ellipsis" title={`${r.host}:${r.port}`}>
+                  {r.host}<span className="dim">:{r.port}</span></div>
+                <div className="dim small">{r.project_slug}{r.reason ? ` · ${r.reason}` : ''}</div>
+                <div className="sbx-actions">
+                  <button className="ghost" disabled={busy}
+                          onClick={() => decideEgress(r.id, 'approve')}>Allow</button>
+                  <button className="ghost" disabled={busy}
+                          onClick={() => decideEgress(r.id, 'approve', 60)}>1h</button>
+                  <button className="ghost danger" disabled={busy}
+                          onClick={() => decideEgress(r.id, 'deny')}>Deny</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="sbx-newrun">
           <div className="side-title">New sandbox run</div>
           <div className="dim small sbx-newrun-help">
@@ -624,6 +682,16 @@ export default function Sandbox() {
         <p className="dim small" style={{ margin: 0 }}>
           Known-bad hosts (abuse.ch · Spamhaus) — a match is critical and cannot
           be allowlisted. Feeds fetch host-side, never through the agent.
+        </p>
+
+        <div className="side-title">Open egress (YOLO)</div>
+        <button className={yolo?.on ? 'danger' : 'ghost'} disabled={busy}
+                onClick={toggleYolo}>
+          {yolo?.on ? 'YOLO on — lock egress' : 'Open egress (1h)'}</button>
+        <p className="dim small" style={{ margin: 0 }}>
+          {yolo?.on
+            ? `The VM can reach the whole internet${yolo.expires_at ? ` — auto-locks ${relTime(yolo.expires_at).replace(' ago', '')}` : ''}. Anything in it can be exfiltrated.`
+            : 'Drops the egress lock for the whole VM — defeats the exfiltration guard. Use only on a VM with nothing sensitive.'}
         </p>
 
         {detail && (
