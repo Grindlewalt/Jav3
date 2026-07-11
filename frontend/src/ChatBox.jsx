@@ -40,8 +40,17 @@ export default function ChatBox({ projectSlug }) {
 
   const refresh = () =>
     api(`/api/conversations${projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : ''}`)
-      .then((r) => setConvos(r.conversations))
-  useEffect(() => { refresh() }, [projectSlug]) // eslint-disable-line
+      .then((r) => { setConvos(r.conversations); return r.conversations })
+  useEffect(() => {
+    // a board panel remounts on every open: resume where the operator left
+    // off — a running turn always wins, else the project's latest chat —
+    // instead of amnesia into "new chat" while work continues server-side
+    refresh().then((list) => {
+      const running = list.find((c) => c.running)
+      const target = running || (projectSlug ? list[0] : null)
+      if (target) open(target.id)
+    }).catch(() => {})
+  }, [projectSlug]) // eslint-disable-line
 
   async function pick(id) {
     setShowHistory(false)
@@ -73,9 +82,11 @@ export default function ChatBox({ projectSlug }) {
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
     if (!r.running) return
-    // a turn is still executing server-side — re-attach and watch it finish
+    // a turn is still executing server-side — re-attach and watch it finish,
+    // seeding the placeholder with the tool calls it already made
     setBusy(true)
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: [] }])
+    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: seed }])
     const ctl = new AbortController()
     tailAbort.current = ctl
     try {

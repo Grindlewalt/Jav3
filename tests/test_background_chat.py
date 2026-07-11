@@ -135,3 +135,44 @@ async def test_job_announce_reaches_chat_channel(client, monkeypatch):
     # outside a chat turn the announce is a silent no-op
     assert runtime.event_chan.get() is None
     bus.announce_job("jobxyz", 1, "orphan")   # must not raise
+
+
+async def test_reopen_mid_turn_shows_history_and_pending_calls(client, monkeypatch):
+    """Reopening a chat mid-generation must return the prior messages AND the
+    in-flight turn's already-persisted tool calls (pending_activity) — the
+    workspace panel reseeds its streaming placeholder from them."""
+    from backend import chat as chat_mod
+    post, cid, release = await _start_blocked_turn(client, monkeypatch, "done")
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO tool_calls (conversation_id, tool, args, result) "
+            "VALUES (?, 'web_search', '{\"query\": \"pi\"}', 'results')", (cid,))
+        await db.execute(
+            "INSERT INTO tool_calls (conversation_id, tool, args, result) "
+            "VALUES (?, 'web_read', '{}', 'error: nope')", (cid,))
+        await db.commit()
+    finally:
+        await db.close()
+
+    r = (await client.get(f"/api/conversations/{cid}/messages")).json()
+    assert r["running"] is True
+    assert r["messages"][-1]["role"] == "user"     # history is present
+    names = [(a["name"], a["ok"]) for a in r["pending_activity"]]
+    assert names == [("web_search", True), ("web_read", False)]
+
+    # the list annotates the running conversation so a remounted panel finds it
+    lst = (await client.get("/api/conversations")).json()["conversations"]
+    assert next(c for c in lst if c["id"] == cid)["running"] is True
+
+    release.set()
+    task = chat_mod._active_turns.get(cid)
+    if task:
+        await task
+    r = (await client.get(f"/api/conversations/{cid}/messages")).json()
+    assert r["running"] is False and r["pending_activity"] == []
+    # the finished turn absorbed those calls into its assistant message
+    assert [a["name"] for a in r["messages"][-1]["activity"]] == \
+        ["web_search", "web_read"]
+    lst = (await client.get("/api/conversations")).json()["conversations"]
+    assert next(c for c in lst if c["id"] == cid)["running"] is False

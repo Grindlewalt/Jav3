@@ -80,7 +80,9 @@ async def list_conversations(project: str | None = None):
             rows = await cur.fetchall()
     finally:
         await db.close()
-    return {"conversations": [dict(r) for r in rows]}
+    # `running` lets a remounted panel find and re-attach to an in-flight turn
+    return {"conversations": [{**dict(r), "running": r["id"] in _active_turns}
+                              for r in rows]}
 
 
 @router.delete("/conversations/{conversation_id}")
@@ -149,26 +151,33 @@ async def get_messages(conversation_id: int):
     # attach each turn's tool calls to the assistant message that closed the
     # turn (calls always precede it), so the activity dropdown survives a
     # reload instead of existing only in the live stream
+    def _act(c: dict) -> dict:
+        try:
+            args = json.loads(c["args"] or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        result = c["result"] or ""
+        return {"name": c["tool"], "args": args, "result": result,
+                "ok": not result.startswith(("error:", "duplicate call:")),
+                "done": True}
+
     ci = 0
     for m in rows:
         if m["role"] != "assistant":
             continue
         acts = []
         while ci < len(calls) and calls[ci]["created_at"] <= m["created_at"]:
-            c = calls[ci]
-            try:
-                args = json.loads(c["args"] or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            result = c["result"] or ""
-            acts.append({"name": c["tool"], "args": args, "result": result,
-                         "ok": not result.startswith(("error:", "duplicate call:")),
-                         "done": True})
+            acts.append(_act(calls[ci]))
             ci += 1
         if acts:
             m["activity"] = acts
-    # `running` lets the GUI re-attach to an in-flight turn after a reload
-    return {"messages": rows, "running": conversation_id in _active_turns}
+    # `running` lets the GUI re-attach to an in-flight turn after a reload;
+    # calls past the last assistant message belong to that in-flight turn —
+    # without them a reopened chat shows the current turn as a bare spinner
+    # even though half its work is already persisted
+    running = conversation_id in _active_turns
+    pending = [_act(c) for c in calls[ci:]] if running else []
+    return {"messages": rows, "running": running, "pending_activity": pending}
 
 
 # In-flight turns, keyed by conversation. The dict entry is both the "is a

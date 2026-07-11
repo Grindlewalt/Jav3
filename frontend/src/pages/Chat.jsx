@@ -58,9 +58,11 @@ export default function Chat() {
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
     if (!r.running) return
-    // a turn is still executing server-side — re-attach and watch it finish
+    // a turn is still executing server-side — re-attach and watch it finish,
+    // seeding the placeholder with the tool calls it already made
     setBusy(true)
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: [] }])
+    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: seed }])
     const ctl = new AbortController()
     tailAbort.current = ctl
     try {
