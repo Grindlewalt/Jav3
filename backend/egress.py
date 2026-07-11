@@ -74,10 +74,12 @@ async def ensure_dns_readable() -> None:
         pass
 
 
-def guest_resolved(host: str, tail_bytes: int = 262144) -> list[str]:
+def guest_resolved(host: str, tail_bytes: int = 262144, limit: int = 16) -> list[str]:
     """The IPs the *guest* actually resolved `host` to, from the dnsmasq log —
     exactly what the guest will connect to (immune to host/guest DNS divergence
-    and matching the CDN edge the guest got). Reads only the recent tail."""
+    and matching the CDN edge the guest got). Reads only the recent tail and
+    returns at most `limit` of the most-recent unique IPs, so a rotating pool
+    (NTP, big CDNs) can't balloon the allowlist."""
     try:
         with open(DNS_LOG, errors="replace") as f:
             size = DNS_LOG.stat().st_size
@@ -91,7 +93,8 @@ def guest_resolved(host: str, tail_bytes: int = 262144) -> list[str]:
     for m in _REPLY_RE.finditer(text):
         if m.group(1).lower().rstrip(".") == h:
             out.append(m.group(2))
-    return list(dict.fromkeys(out))         # unique, resolve-order
+    recent = list(dict.fromkeys(reversed(out)))     # unique, most-recent first
+    return recent[:limit]
 
 
 async def ips_for(host: str) -> list[str]:

@@ -57,7 +57,7 @@ def test_guest_resolved_reads_dns_log(tmp_path, monkeypatch):
         "reply pypi.org is 151.101.64.223\n"
         "reply other.com is 1.1.1.1\n")
     monkeypatch.setattr(egress, "DNS_LOG", log)
-    assert egress.guest_resolved("pypi.org") == ["151.101.0.223", "151.101.64.223"]
+    assert set(egress.guest_resolved("pypi.org")) == {"151.101.0.223", "151.101.64.223"}
     assert egress.guest_resolved("nope.com") == []
 
 
