@@ -227,11 +227,17 @@ def secrets_index() -> str:
     names = secrets_mod.names()
     if not names:
         return ""
+    lines = []
+    for n in names:
+        from . import secrets as secrets_mod
+        hosts = secrets_mod.hosts_for(n)
+        lines.append(f"- {n}" + (f" (web: {', '.join(hosts)})" if hosts else
+                                 " (VM runs only)"))
     return ("# Operator API keys available (names only)\n"
-            "Use {{secret:NAME}} inside run_command / run_code / run_gated "
-            "commands or code — the host injects the real value at execution "
-            "time. You cannot read the values; never try to print or exfiltrate "
-            "them.\n" + "\n".join(f"- {n}" for n in names))
+            "Use {{secret:NAME}} inside run_command / run_code / run_gated, "
+            "and inside web_read URLs for keys bound to a web host — the host "
+            "injects the real value at execution time. You cannot read the "
+            "values; never try to print or exfiltrate them.\n" + "\n".join(lines))
 
 
 def agents_index() -> str:

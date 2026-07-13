@@ -101,10 +101,12 @@ export default function ChatBox({ projectSlug }) {
     setBusy(false)
   }
 
-  async function send(confirmPeak = false) {
-    const text = input.trim()
+  async function send(confirmPeak = false, resend = null) {
+    const text = (resend ?? input).trim()
     if (!text || busy) return
     setBusy(true)
+    // clear the bar NOW — the message visibly left; it comes back on failure
+    if (!resend) setInput('')
     const wasNew = cid === null
     setMessages((m) => [...m, { role: 'user', content: text },
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
@@ -123,7 +125,6 @@ export default function ChatBox({ projectSlug }) {
           handleTurnEvent(ev)
         },
       )
-      setInput('')
       if (!projectSlug) refresh()
     } catch (err) {
       setMessages((m) => m.slice(0, -2))
@@ -132,13 +133,16 @@ export default function ChatBox({ projectSlug }) {
         // gates before creating it), so the retry just re-sends confirmed
         if (window.confirm('Peak pricing right now — 2x cost. Use the API?')) {
           setBusy(false)
-          await send(true)
+          await send(true, text)
           return
         }
+        setInput(text)   // declined: give the draft back
       } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+        setInput(text)
         setMessages((m) => [...m, { role: 'error',
           content: 'a turn is still running in this chat — wait for it to finish' }])
       } else {
+        setInput(text)
         setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
       }
     }

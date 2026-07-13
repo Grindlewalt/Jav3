@@ -18,3 +18,8 @@ parameters:
 You never touch the raw internet — the host fetches and sanitizes the page for
 you. If a URL was already fetched this session it won't be pulled again; choose
 a different source to keep the gathered knowledge diverse.
+
+API keys: write {{secret:NAME}} in the URL (e.g. ...?apiKey={{secret:NEWSAPI}})
+and the host substitutes the real value at fetch time — but only toward the
+hosts the operator bound that secret to. You never see the value; responses
+that echo it come back scrubbed.

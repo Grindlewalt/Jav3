@@ -114,11 +114,29 @@ async def search(query: str, session: str) -> str:
 async def read(url: str, session: str) -> str:
     """Fetch a page and return inert plain text. SSRF-guarded. Claims the URL
     in the shared ledger BEFORE fetching, so parallel bots never pull the same
-    page; a failed fetch releases the claim so it can be retried."""
+    page; a failed fetch releases the claim so it can be retried.
+
+    {{secret:NAME}} placeholders are substituted for the fetch ONLY — and only
+    onto the secret's bound hosts (see secrets.substitute_url). The ledger,
+    cache, and everything returned to the model keep the placeholder form;
+    fetched bodies and error strings are scrubbed because APIs love echoing
+    the key back in error payloads."""
+    from . import secrets as secrets_mod
+    fetch_url = url
+    if "{{secret:" in url:
+        try:
+            fetch_url = secrets_mod.substitute_url(url)
+        except (KeyError, ValueError) as e:
+            return f"error: {str(e).strip(chr(39))}"
+    substituted = fetch_url != url
+
+    def _out(text: str) -> str:
+        return secrets_mod.scrub(text) if substituted else text
+
     try:
-        is_safe_url(url)
+        is_safe_url(fetch_url)
     except UnsafeURL as e:
-        return f"error: refused to fetch — {e}"
+        return _out(f"error: refused to fetch — {e}")
 
     # still record the claim on a cache hit: the ledger keeps flagging the URL
     # as fetched in search results (source diversity), but the re-read is free
@@ -138,23 +156,23 @@ async def read(url: str, session: str) -> str:
             # manual redirect loop: same-host 3xx are followed (SSRF-rechecked
             # each hop); a cross-host redirect is handed back to the model so
             # an open redirect can't be laundered into a fetch we never vetted
-            current, raw, ctype = url, b"", ""
+            current, raw, ctype = fetch_url, b"", ""
             for _ in range(10):
                 async with c.stream("GET", current, headers=HEADERS) as r:
                     if 300 <= r.status_code < 400:
                         loc = r.headers.get("location")
                         if not loc:
-                            return (f"error: {current} answered with redirect "
-                                    f"status {r.status_code} but no Location header")
+                            return _out(f"error: {current} answered with redirect "
+                                        f"status {r.status_code} but no Location header")
                         target = str(httpx.URL(current).join(loc))
                         if not _same_host(current, target):
-                            return (f"error: not followed — {url} redirects to a "
-                                    f"different host: {target}. If that destination "
-                                    "is what you want, call the tool again with that URL.")
+                            return _out(f"error: not followed — {url} redirects to a "
+                                        f"different host: {target}. If that destination "
+                                        "is what you want, call the tool again with that URL.")
                         try:
                             is_safe_url(target)
                         except UnsafeURL as e:
-                            return f"error: refused after redirect — {e}"
+                            return _out(f"error: refused after redirect — {e}")
                         current = target
                         continue
                     r.raise_for_status()
@@ -168,7 +186,7 @@ async def read(url: str, session: str) -> str:
                     raw = b"".join(chunks)
                     break
             else:
-                return f"error: too many redirects (>10) fetching {url}"
+                return _out(f"error: too many redirects (>10) fetching {url}")
         body = raw.decode("utf-8", errors="replace")
         if "html" in ctype or "<html" in body[:2000].lower():
             title, text = html_to_text(body)
@@ -177,11 +195,11 @@ async def read(url: str, session: str) -> str:
         text = text[:settings.web_max_chars]
         ok = True
         head = f"# {title}\n{url}\n\n" if title else f"{url}\n\n"
-        out = head + (text or "(no readable text extracted)")
+        out = _out(head + (text or "(no readable text extracted)"))
         _cache_put(_page_cache, url, out)  # keyed by the URL as requested
         return out
     except httpx.HTTPError as e:
-        return f"error: fetch failed: {e}"
+        return _out(f"error: fetch failed: {e}")
     finally:
         if not ok:
             await release(session, url)  # let a failed/refused fetch be retried

@@ -99,10 +99,12 @@ export default function Chat() {
     refreshConvos()
   }
 
-  async function send(confirmPeak = false) {
-    const text = input.trim()
+  async function send(confirmPeak = false, resend = null) {
+    const text = (resend ?? input).trim()
     if (!text || busy) return
     setBusy(true)
+    // clear the bar NOW — the message visibly left; it comes back on failure
+    if (!resend) setInput('')
     setMessages((m) => [...m, { role: 'user', content: text },
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
@@ -111,7 +113,6 @@ export default function Chat() {
           ephemeral: incognito },
         handleTurnEvent,
       )
-      setInput('')
       api('/api/conversations').then((r) => setConversations(r.conversations))
     } catch (err) {
       // drop the two optimistic messages; a peak-retry re-adds them
@@ -121,13 +122,16 @@ export default function Chat() {
         // gates before creating it), so the retry just re-sends confirmed
         if (window.confirm('Peak pricing right now — 2x cost. Use the API?')) {
           setBusy(false)
-          await send(true)
+          await send(true, text)
           return
         }
+        setInput(text)   // declined: give the draft back
       } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+        setInput(text)
         setMessages((m) => [...m, { role: 'error',
           content: 'a turn is still running in this chat — wait for it to finish' }])
       } else {
+        setInput(text)
         setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
       }
     }

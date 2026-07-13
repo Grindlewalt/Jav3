@@ -24,9 +24,26 @@ export default function Context() {
     if (!name) return
     const value = window.prompt(`value for ${name.toUpperCase()} (stored host-side; the agent only ever sees the name)`)
     if (!value) return
+    const hostsRaw = window.prompt(
+      'web hosts this key may be sent to, comma-separated (e.g. newsapi.org).\n'
+      + 'Leave empty for VM-only — web_read will refuse the key everywhere.') || ''
+    const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
     try {
       await api(`/api/secrets/${encodeURIComponent(name)}`, {
-        method: 'PUT', body: JSON.stringify({ value }) })
+        method: 'PUT', body: JSON.stringify({ value, hosts }) })
+      refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+  }
+
+  async function editHosts(s) {
+    const hostsRaw = window.prompt(
+      `web hosts ${s.name} may be sent to (comma-separated; empty = VM-only)`,
+      (s.hosts || []).join(', '))
+    if (hostsRaw === null) return
+    const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
+    try {
+      await api(`/api/secrets/${encodeURIComponent(s.name)}`, {
+        method: 'PUT', body: JSON.stringify({ value: '', hosts }) })
       refresh()
     } catch (err) { window.alert(err.detail || String(err)) }
   }
@@ -92,14 +109,18 @@ export default function Context() {
         </ul>
         <button className="ghost" onClick={newNote}>+ new note</button>
         <div className="side-title" style={{ marginTop: 16 }}
-             title="API keys the agent can use via {{secret:NAME}} in VM runs but never read">
+             title="API keys the agent can use via {{secret:NAME}} in VM runs and web_read (on bound hosts) but never read">
           Secrets</div>
         <ul className="file-list">
           {secrets.length === 0 && <li className="dim">none saved</li>}
           {secrets.map((s) => (
-            <li key={s.name}>
-              <span className="grow">{s.name}</span>
+            <li key={s.name} title={s.hosts?.length
+                  ? `web: ${s.hosts.join(', ')}` : 'VM-only (no web hosts bound)'}>
+              <span className="grow">{s.name}
+                {s.hosts?.length > 0 && <span className="tag">web</span>}</span>
               <span className="dim small">…{s.last4}</span>
+              <button className="win-btn" title="edit web hosts"
+                      onClick={() => editHosts(s)}>✎</button>
               <button className="win-btn" title="delete"
                       onClick={() => delSecret(s.name)}>×</button>
             </li>

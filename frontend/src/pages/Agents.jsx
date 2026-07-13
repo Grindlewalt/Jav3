@@ -15,6 +15,7 @@ export default function Agents() {
   const [skillItems, setSkillItems] = useState([])
   const [quiz, setQuiz] = useState(null)        // [{question, kind, options, answer}]
   const [genBusy, setGenBusy] = useState(false)
+  const [secrets, setSecrets] = useState([])
   const nameRef = useRef(null)
 
   const refresh = () => {
@@ -29,6 +30,7 @@ export default function Agents() {
     ]))
     api('/api/tools').then((r) => setToolItems(r.tools.map((t) => t.name)))
     api('/api/skills').then((r) => setSkillItems(r.skills.map((s) => s.name)))
+    api('/api/secrets').then((r) => setSecrets(r.secrets)).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -241,6 +243,24 @@ export default function Agents() {
               <textarea className="md-editor" rows={7} spellCheck={false}
                         value={agent.prompt}
                         onChange={(e) => patch({ prompt: e.target.value })} />
+              {secrets.length > 0 && (
+                <div className="dim small" style={{ marginTop: 4 }}>
+                  API keys — click to reference (the agent uses the key, never
+                  sees its value):{' '}
+                  {secrets.map((s) => (
+                    <button key={s.name} type="button" className="ghost"
+                            style={{ marginRight: 4 }}
+                            title={s.hosts?.length
+                              ? `usable in web_read on ${s.hosts.join(', ')} and in VM runs`
+                              : 'VM runs only — bind web hosts on the Context page to allow web_read'}
+                            onClick={() => patch({ prompt:
+                              `${agent.prompt.trimEnd()}\n{{secret:${s.name}}}` })}>
+                      {`{{secret:${s.name}}}`}
+                    </button>
+                  ))}
+                  — new keys are added in the Secrets panel on the Context page.
+                </div>
+              )}
             </label>
             {quiz && (
               <div className="quiz">
