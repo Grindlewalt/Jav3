@@ -149,6 +149,18 @@ class Settings(BaseSettings):
     run_timeout_seconds: int = 60
     run_max_mem_mb: int = 768
 
+    # Sandbox VM (Phase 2: a disposable KVM/QEMU guest reachable ONLY over vsock).
+    # The guest has no NIC; its one path off-box is the host model gateway, which
+    # listens on vsock port `vm_vsock_port`. base-<version>.qcow2 is the read-only
+    # golden image (built by vm/build_base.sh); guests run a qcow2 overlay on it.
+    vm_dir: Path = BASE_DIR / "data" / "vm"
+    vm_image_version: str = "v1"
+    vm_vsock_port: int = 5555            # host gateway; guest dials CID 2 : this
+    vm_guest_cid: int = 3                # guest CID (>=3); host is always CID 2
+    vm_memory_mb: int = 768
+    vm_cpus: int = 2
+    vm_boot_timeout_seconds: int = 120
+
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,
     # and refuse internal/private targets (SSRF guard).
@@ -172,7 +184,7 @@ settings = Settings()
 def ensure_dirs() -> None:
     for d in (settings.data_dir, settings.memory_dir, settings.memory_dir / "notes",
               settings.projects_dir, settings.skills_dir, settings.agents_dir,
-              settings.tools_dir):
+              settings.tools_dir, settings.vm_dir):
         d.mkdir(parents=True, exist_ok=True)
 
 

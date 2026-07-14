@@ -8,11 +8,13 @@ import asyncio
 
 from . import (agents_api, agents_run, artifacts_api, auth, chat, git_api,
                logs_api, memory_api, notifications_api, projects, runs_api,
-               schedules, skills_api, workspace, secrets)
+               schedules, skills_api, vm_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
 from .memory import ensure_memory_seeds
+from .vm.gateway_server import gateway
+from .vm.lifecycle import vm
 
 
 @asynccontextmanager
@@ -23,10 +25,13 @@ async def lifespan(app: FastAPI):
     await schedules.ensure_default_schedules()
     compile_registry()
     task = asyncio.create_task(schedules.scheduler_loop())
+    await gateway.start()          # host vsock model gateway (no-op if no vsock)
     try:
         yield
     finally:
         task.cancel()
+        await gateway.stop()
+        await vm.teardown()        # never leave a guest running past shutdown
 
 
 app = FastAPI(title="Jarvis v3", lifespan=lifespan)
@@ -46,6 +51,7 @@ app.include_router(notifications_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)
 app.include_router(artifacts_api.router)
+app.include_router(vm_api.router)
 
 
 @app.get("/api/health")
