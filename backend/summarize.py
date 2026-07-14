@@ -8,23 +8,15 @@ is spent exactly once (this model call) and only a few bullets ride along in
 the loop. The internal call shares the operation's Budget contextvar, so it's
 metered like everything else.
 """
-from .agent.model import model
+# re-exported so `summarize.complete_text` stays the shared entry point (and
+# stays monkeypatchable in tests); the implementation lives at the model choke point
+from .agent.model import complete_text
 from .config import settings
 from .webtools import _cache_get, _cache_put
 
 # (url, focus) -> summary, same TTL/size settings as the page cache: a cached
 # page re-summarized with the same focus skips the model call too
 _summary_cache: dict[tuple[str, str], tuple[float, str]] = {}
-
-
-async def complete_text(system: str, user: str, temperature: float = 0.3) -> str:
-    parts = []
-    async for ev in model.complete(
-        [{"role": "system", "content": system},
-         {"role": "user", "content": user}], temperature=temperature):
-        if ev["type"] == "message":
-            parts.append(ev["content"])
-    return "".join(parts).strip()
 
 
 async def summarize_page(text: str, url: str, focus: str = "") -> str:

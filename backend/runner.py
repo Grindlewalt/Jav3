@@ -1,4 +1,4 @@
-"""Light execution sandbox for workspace runs on the Pi host.
+"""Light execution runner for workspace runs on the Pi host.
 
 This is NOT an agent execution sandbox — it's a convenience runner, driven
 only by the operator from the Workspace Run panel: subprocess with

@@ -3,15 +3,10 @@ import uuid
 
 from backend.agent.tools.registry import load_registry, openai_tool_specs
 from backend.agent.tools.toolctx import require_project
+from backend.autonomy import NON_DELEGABLE
 from backend.orchestrator import run_job
 
-# team workers never spawn further agents/teams and never mint persistent
-# infrastructure (new agents, schedule proposals) — those stay decisions of
-# the conversation head that deployed them
-_WORKER_EXCLUDE = frozenset({"spawn_agent", "deploy_agents",
-                             "create_agent", "schedule_update"})
-
-# belt for the _WORKER_EXCLUDE suspenders: even if a spec leaks back in (a
+# belt for the NON_DELEGABLE suspenders: even if a spec leaks back in (a
 # node falling through with tools=None gets the full registry), a worker
 # can't deploy another team under itself — contextvars propagate into the
 # job's task tree, making this a cheap whole-subtree recursion fence
@@ -29,7 +24,7 @@ async def run(brief: str, title: str = "") -> str:
     try:
         job_id = uuid.uuid4().hex
         leaf_tools = openai_tool_specs(
-            [e for e in load_registry() if e["name"] not in _WORKER_EXCLUDE])
+            [e for e in load_registry() if e["name"] not in NON_DELEGABLE])
         r = await run_job(job_id, brief, slug, peak=True, leaf_tools=leaf_tools,
                           title=(title or brief)[:60])
         return (f"Agent team finished (job {job_id}); node rollups staged "

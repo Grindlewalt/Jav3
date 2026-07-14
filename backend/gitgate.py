@@ -112,7 +112,7 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
         await db.close()
 
 
-async def approve_request(rid: int, force: bool = False) -> dict:
+async def approve_request(rid: int) -> dict:
     db = await get_db()
     try:
         row = await _fetch_request(db, rid)

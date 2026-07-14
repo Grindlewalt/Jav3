@@ -292,9 +292,10 @@ async def _run_scripted(monkeypatch, model, dispatch, read_only=frozenset(),
             loop_mod._files_seen[cid] = set(seed_read_paths)
         events = []
         async for ev in loop_mod.run_turn(
-                db, cid, "system", [{"role": "user", "content": "go"}],
+                cid, "system", [{"role": "user", "content": "go"}],
                 tools=[{"type": "function",
-                        "function": {"name": "x", "parameters": {}}}]):
+                        "function": {"name": "x", "parameters": {}}}],
+                on_tool_call=loop_mod.db_tool_sink(db, cid)):
             events.append(ev)
         return events, cid
     finally:

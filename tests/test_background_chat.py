@@ -38,7 +38,7 @@ async def client(tmp_env):
 
 
 def _slow_turn(release: asyncio.Event, started: asyncio.Event, text: str):
-    async def turn(db, cid, system_prompt, history, tools=None, **kw):
+    async def turn(cid, system_prompt, history, tools=None, **kw):
         started.set()
         await release.wait()
         yield {"type": "final", "content": text}
@@ -117,7 +117,7 @@ async def test_job_announce_reaches_chat_channel(client, monkeypatch):
     channel so the GUI mounts a live tree inline."""
     from backend import bus, chat as chat_mod, runtime
 
-    async def turn_that_launches_a_job(db, cid, system_prompt, history,
+    async def turn_that_launches_a_job(cid, system_prompt, history,
                                        tools=None, **kw):
         # simulate what run_research does inside a tool dispatch
         bus.announce_job("jobabc", 4242, "Research: pi facts")

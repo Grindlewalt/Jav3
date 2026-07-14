@@ -12,8 +12,8 @@ existing behavior. Enforcement is an **allowlist**: `read_only` exposes only the
 explicit read set, and any tool we don't recognise defaults to `full`-only, so a
 new or unknown tool is never accidentally handed to a restricted project.
 
-The verdict/firewall boundary is unchanged; this only narrows which tools the
-model is even offered on a turn.
+This dial only narrows which tools the model is even offered on a turn; the
+durable boundaries (staging quarantine, commit approval) enforce independently.
 """
 
 LEVELS = ("read_only", "stage", "gated", "full")
@@ -33,6 +33,16 @@ _GATED = {
     "research", "spawn_agent", "deploy_agents",
 }
 _COMMIT = {"git_commit_request"}
+
+# Tools a subagent or team worker is NEVER handed, regardless of the autonomy
+# dial above: they never spawn further agents/teams (no recursion, no fork
+# bombs) and never mint persistent infrastructure (new agents, schedules) —
+# those stay a conversation-head decision. Enforced where subagent/worker tool
+# sets are built (agents_run._agent_tools, deploy_agents); deploy_agents' own
+# _in_funnel contextvar is a second, whole-subtree fence.
+NON_DELEGABLE = frozenset({
+    "spawn_agent", "deploy_agents", "create_agent", "schedule_update",
+})
 
 
 def tool_min_rank(name: str) -> int:

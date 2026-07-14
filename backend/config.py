@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     upload_max_uncompressed_mb: int = 200
     upload_max_files: int = 5000
 
-    # Workspace runner (light host-side sandbox: rlimits + timeout)
+    # Workspace runner (light host-side runner: rlimits + timeout)
     run_python: str = "python3"
     run_timeout_seconds: int = 60
     run_max_mem_mb: int = 768

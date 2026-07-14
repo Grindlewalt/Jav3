@@ -5,8 +5,8 @@
 #
 # What's backed up: memory/, projects/, skills/, agents/, and a text dump of
 # the SQLite DB (conversations, schedules, fetch ledger). Deliberately NOT
-# backed up: the code (already in the GitHub repo), the VM images (huge,
-# rebuildable), the JWT secret and API key (secrets), derived files.
+# backed up: the code (already in the GitHub repo), the JWT secret and API key
+# (secrets), derived files.
 set -euo pipefail
 
 JARVIS="$HOME/jarvis"
@@ -70,8 +70,8 @@ is a restore point.
 - `memory/` `projects/` `skills/` `agents/` — mirrored files
 - `data/jarvis.sql` — text dump of the SQLite DB (conversations, schedules, ledger)
 
-Code lives in the separate Jarvis repo; VM images and secrets are intentionally
-excluded. Restore: check out a commit and rsync the dirs back / reload the DB.
+Code lives in the separate Jarvis repo; secrets are intentionally excluded.
+Restore: check out a commit and rsync the dirs back / reload the DB.
 EOF
 
 git -C "$BACKUP" add -A

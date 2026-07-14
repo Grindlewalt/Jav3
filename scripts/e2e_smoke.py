@@ -3,8 +3,7 @@
 
 Exercises the real HTTP surfaces an autonomous agent depends on: auth,
 chat (SSE messaging with a real model turn), memory, projects, the tool
-registry, the git gate (request -> approve -> commit), the jobs view, and —
-if the VM is up — a monitored gate run with egress-lock verification.
+registry, the git gate (request -> approve -> commit), and the jobs view.
 
 Pure-logic features (crawl/search indexing, context_exclude, research
 auto-approve, staging) are covered by the pytest suite; this drives the

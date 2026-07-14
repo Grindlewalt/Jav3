@@ -1,4 +1,4 @@
-"""Project workspace: files, a light run sandbox, and a todo.md checklist.
+"""Project workspace: files, a light code runner, and a todo.md checklist.
 
 Deliberately file-based — everything the GUI touches here is a plain file in
 projects/<slug>/, so the agent can read and edit the same workspace with

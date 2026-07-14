@@ -13,13 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .agent.loop import run_turn
+from .agent.loop import db_tool_sink, run_turn
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .agents_api import _read
 from .auth import require_user
 from .config import settings
-from .db import get_db
+from .db import get_db, open_conversation
 from .memory import assemble_system_prompt, get_active_project
 
 router = APIRouter(prefix="/api/agents", tags=["agents"],
@@ -43,13 +43,9 @@ def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
 def _agent_tools(agent: dict, autonomy_level: str | None = None) -> list[dict]:
     from . import autonomy
     excluded = set(agent.get("tools_exclude") or [])
-    # an agent never spawns further agents or teams — no recursion, no fork
-    # bombs — and never mints persistent infrastructure (new agents,
-    # schedules): that stays a head-of-conversation decision
-    excluded.add("spawn_agent")
-    excluded.add("deploy_agents")
-    excluded.add("create_agent")
-    excluded.add("schedule_update")
+    # a subagent never spawns further agents/teams or mints persistent
+    # infrastructure — see autonomy.NON_DELEGABLE
+    excluded |= autonomy.NON_DELEGABLE
     entries = [e for e in load_registry() if e["name"] not in excluded]
     # a headless run is the unattended case — honour the project's autonomy dial
     entries = autonomy.filter_entries(entries, autonomy_level)
@@ -87,17 +83,9 @@ async def _open_agent_run(db, slug: str, task: str,
     agent = _read(slug)  # 404s if missing
     if active is _USE_DB:
         active = await get_active_project(db)
-    project_id = None
-    if active:
-        async with db.execute(
-            "SELECT id FROM projects WHERE slug = ?", (active,)) as cur:
-            row = await cur.fetchone()
-        project_id = row["id"] if row else None
     title = f"[{agent['name']}] " + " ".join(task.split())[:40]
-    cur = await db.execute(
-        "INSERT INTO conversations (project_id, summary, kind) VALUES (?, ?, 'agent')",
-        (project_id, title))
-    conversation_id = cur.lastrowid
+    conversation_id = await open_conversation(
+        db, project=active, title=title, kind="agent", commit=False)
     await db.execute(
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
@@ -134,9 +122,10 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
         history = [{"role": "user", "content": task}]
         final_content = ""
         try:
-            async for event in run_turn(db, conversation_id, system_prompt,
-                                        history, tools=tools, model_name=mdl,
-                                        base_url=burl, max_iterations=cap):
+            async for event in run_turn(conversation_id, system_prompt, history,
+                                        tools=tools, model_name=mdl,
+                                        base_url=burl, max_iterations=cap,
+                                        on_tool_call=db_tool_sink(db, conversation_id)):
                 if event["type"] == "final":
                     final_content = event["content"]
         finally:
@@ -189,18 +178,9 @@ async def run_agent(slug: str, body: RunAgent):
     db = await get_db()
     try:
         active = await get_active_project(db)
-        project_id = None
-        if active:
-            async with db.execute(
-                "SELECT id FROM projects WHERE slug = ?", (active,)) as cur:
-                row = await cur.fetchone()
-            project_id = row["id"] if row else None
         title = f"[{agent['name']}] " + " ".join(body.task.split())[:40]
-        cur = await db.execute(
-            "INSERT INTO conversations (project_id, summary, kind) VALUES (?, ?, 'agent')",
-            (project_id, title))
-        conversation_id = cur.lastrowid
-        await db.commit()
+        conversation_id = await open_conversation(
+            db, project=active, title=title, kind="agent")
 
         if body.confirm_peak:
             confirm_peak(conversation_id)
@@ -226,8 +206,9 @@ async def run_agent(slug: str, body: RunAgent):
             mdl, burl = _agent_overrides(agent)
             history = [{"role": "user", "content": body.task}]
             final_content = ""
-            async for event in run_turn(db, conversation_id, system_prompt,
-                                        history, tools=tools, model_name=mdl, base_url=burl):
+            async for event in run_turn(conversation_id, system_prompt, history,
+                                        tools=tools, model_name=mdl, base_url=burl,
+                                        on_tool_call=db_tool_sink(db, conversation_id)):
                 if event["type"] == "final":
                     final_content = event["content"]
                 else:

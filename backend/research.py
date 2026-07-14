@@ -23,9 +23,9 @@ from urllib.parse import urlparse
 from . import bus, staging, webtools
 from .agent import budget as budget_mod
 from .agent.loop import _enforce_rules
-from .agent.model import confirm_peak, model
+from .agent.model import complete_text, confirm_peak
 from .config import settings
-from .db import get_db
+from .db import get_db, open_conversation
 from .memory import standing_rules_tail
 from .staging import stage_write
 
@@ -33,16 +33,6 @@ MAX_QUERIES = 8
 RESULTS_PER_QUERY = 6
 MAX_SOURCES_TO_FILTER = 40
 MAX_URLS_PER_READER = 4
-
-
-async def _complete_text(system: str, user: str, temperature: float = 0.3) -> str:
-    parts = []
-    async for ev in model.complete(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=temperature):
-        if ev["type"] == "message":
-            parts.append(ev["content"])
-    return "".join(parts).strip()
 
 
 def _slugify(text: str) -> str:
@@ -71,16 +61,8 @@ def _write_doc(project: str, doc_path: str, doc: str) -> str:
 async def _node(project, parent, job_id, kind, title) -> int:
     db = await get_db()
     try:
-        pid = None
-        if project:
-            async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
-                row = await cur.fetchone()
-            pid = row["id"] if row else None
-        cur = await db.execute(
-            "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, job_id) "
-            "VALUES (?, ?, ?, ?, ?)", (pid, f"[{kind}] {title[:60]}", kind, parent, job_id))
-        await db.commit()
-        return cur.lastrowid
+        return await open_conversation(db, project=project, title=f"[{kind}] {title[:60]}",
+                                       kind=kind, parent=parent, job_id=job_id)
     finally:
         await db.close()
 
@@ -97,7 +79,7 @@ async def _save_rollup(cid: int, rollup: str) -> None:
 # --- phase 1: scout ----------------------------------------------------------
 
 async def _gen_queries(topic: str) -> list[str]:
-    text = await _complete_text(
+    text = await complete_text(
         f"Generate up to {MAX_QUERIES} diverse web search queries that together "
         "cover this research topic well (different angles, not rephrasings). One "
         "query per line, no numbering, no preamble.", f"Topic: {topic}")
@@ -147,7 +129,7 @@ async def _filter_and_assign(topic: str, results: list[dict], n_groups: int) -> 
         return []
     listing = "\n".join(
         f"{i}. {r['title']} — {r['url']}\n   {r['snippet']}" for i, r in enumerate(results))
-    text = await _complete_text(
+    text = await complete_text(
         f"From the search results below for the topic '{topic}', pick the most "
         f"relevant and DIVERSE sources worth reading (about {n_groups * 3} total). "
         "Discard duplicates, low-quality, and off-topic results. Group the kept "
@@ -165,7 +147,7 @@ async def _filter_and_assign(topic: str, results: list[dict], n_groups: int) -> 
 # --- phase 2: readers (compaction) -------------------------------------------
 
 async def _summarize_page(topic: str, theme: str, url: str, text: str) -> str:
-    return await _complete_text(
+    return await complete_text(
         f"Summarize what this page says that is relevant to '{theme}' (overall "
         f"topic: {topic}) in 3-5 tight bullet points. Only facts stated on the "
         "page. No preamble.", f"URL: {url}\n\n{text[:settings.web_max_chars]}")
@@ -203,7 +185,7 @@ async def _reader(project, parent, job_id, group, topic, session) -> str:
 
 async def _synthesize(topic: str, findings: list[str]) -> str:
     joined = "\n\n".join(findings)
-    body = await _complete_text(
+    body = await complete_text(
         "Synthesize the research findings below into one clean, well-structured "
         "markdown document: a short intro, clear sections, and a final 'Sources' "
         "list of the URLs cited. Use only what the findings support. No preamble.",
