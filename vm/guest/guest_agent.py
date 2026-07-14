@@ -11,12 +11,29 @@ the guest can reach nothing but the gateway.
 Phase 3 replaces this stub with the real ReAct loop; the vsock protocol stays.
 """
 import json
+import os
 import socket
 import time
 
 HOST_CID = socket.VMADDR_CID_HOST          # 2 — the host, from inside the guest
 PORT = 5555                                 # must match settings.vm_vsock_port
 CONNECT_RETRIES = 40                        # host gateway may bind just after boot
+
+
+def report_isolation() -> None:
+    """Prove the guest has no way off-box except vsock: list its network
+    interfaces (should be loopback only) and confirm a plain internet connect
+    fails (no NIC, no route). Printed to the console so the host can assert it."""
+    ifaces = sorted(os.listdir("/sys/class/net"))
+    external_reachable = False
+    try:
+        c = socket.create_connection(("1.1.1.1", 53), timeout=3)
+        c.close()
+        external_reachable = True
+    except OSError:
+        external_reachable = False
+    print(f"GUEST-NET-IFACES: {ifaces}", flush=True)
+    print(f"GUEST-NET-EXTERNAL-REACHABLE: {external_reachable}", flush=True)
 
 
 def _connect() -> socket.socket:
@@ -31,6 +48,7 @@ def _connect() -> socket.socket:
 
 
 def main() -> None:
+    report_isolation()
     s = _connect()
     req = {
         "op": "model_call",

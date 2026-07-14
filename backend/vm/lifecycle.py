@@ -35,6 +35,8 @@ def _console_log() -> Path:
 
 _REPLY_RE = re.compile(r"GUEST-SELFTEST-REPLY: '(.*?)'")
 _ERROR_RE = re.compile(r"GUEST-SELFTEST-(?:ERROR|CRASH): (.*)")
+_IFACES_RE = re.compile(r"GUEST-NET-IFACES: (\[.*?\])")
+_EXTERNAL_RE = re.compile(r"GUEST-NET-EXTERNAL-REACHABLE: (True|False)")
 
 
 class GuestVM:
@@ -109,6 +111,7 @@ class GuestVM:
         await self.boot()
         deadline = asyncio.get_event_loop().time() + settings.vm_boot_timeout_seconds
         reply = err = None
+        text = ""
         try:
             while asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(1.5)
@@ -124,7 +127,13 @@ class GuestVM:
             await self.teardown()
         if reply is None and err is None:
             raise VMError("guest self-test timed out (no reply on the console)")
-        return {"reply": reply, "error": err, "guest_connected": connected}
+        ifaces = _IFACES_RE.search(text)
+        external = _EXTERNAL_RE.search(text)
+        return {"reply": reply, "error": err, "guest_connected": connected,
+                "isolation": {
+                    "interfaces": ifaces.group(1) if ifaces else None,
+                    "external_reachable": (external.group(1) == "True") if external else None,
+                }}
 
 
 # module-level singleton, driven by the vm_api router
