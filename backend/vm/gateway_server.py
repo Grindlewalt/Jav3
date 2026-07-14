@@ -30,15 +30,23 @@ async def _handle_model_call(loop, conn, req: dict) -> None:
     messages = req.get("messages") or []
     tools = req.get("tools")
     temperature = req.get("temperature")
-    # Register the operation's budget before the call. The guest can't be trusted
-    # to meter itself, and this connection is not the task that opened the turn,
-    # so enforcement must be keyed by the explicit op_id (budget.get(op_id)), not
-    # the active_op_id contextvar.
-    budget_mod.register(op_id, Budget(settings.max_op_input_tokens,
-                                      settings.max_op_output_tokens))
+    model_name = req.get("model_name")
+    base_url = req.get("base_url")
+    conversation_id = req.get("conversation_id")
+    # Register the operation's budget IF the host hasn't already (guest_turn
+    # registers it for a real turn). The guest can't be trusted to meter itself,
+    # and this connection is not the task that opened the turn, so enforcement is
+    # keyed by the explicit op_id (budget.get(op_id)), not the active_op_id
+    # contextvar. A self-test op_id arrives unregistered → register it here.
+    owned = budget_mod.get(op_id) is None
+    if owned:
+        budget_mod.register(op_id, Budget(settings.max_op_input_tokens,
+                                          settings.max_op_output_tokens))
     try:
         async for ev in model.complete(messages, tools=tools,
-                                        temperature=temperature, op_id=op_id):
+                                        conversation_id=conversation_id,
+                                        temperature=temperature, op_id=op_id,
+                                        model_name=model_name, base_url=base_url):
             await _send(loop, conn, ev)
     except (PeakPricingConfirmationRequired, BudgetExceeded, ModelError) as e:
         await _send(loop, conn, {"type": "error",
@@ -47,7 +55,8 @@ async def _handle_model_call(loop, conn, req: dict) -> None:
         await _send(loop, conn, {"type": "error",
                                  "error": type(e).__name__, "message": str(e)})
     finally:
-        budget_mod.release(op_id)
+        if owned:                       # leave a host-owned turn budget for guest_turn
+            budget_mod.release(op_id)
 
 
 async def handle_conn(loop, conn) -> None:
@@ -72,6 +81,11 @@ async def handle_conn(loop, conn) -> None:
             op = req.get("op")
             if op == "model_call":
                 await _handle_model_call(loop, conn, req)
+            elif op == "get_guest_package":
+                import base64
+                from .guest_pkg import build_package_tar
+                tar = base64.b64encode(build_package_tar()).decode()
+                await _send(loop, conn, {"type": "guest_package", "tar_b64": tar})
             elif op == "ping":
                 await _send(loop, conn, {"type": "pong"})
             else:

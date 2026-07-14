@@ -100,40 +100,46 @@ class GuestVM:
         await self.teardown()
         await self.boot()
 
+    def _isolation(self) -> dict:
+        text = _console_log().read_text(errors="replace") if _console_log().exists() else ""
+        ifaces = _IFACES_RE.search(text)
+        external = _EXTERNAL_RE.search(text)
+        return {"interfaces": ifaces.group(1) if ifaces else None,
+                "external_reachable": (external.group(1) == "True") if external else None}
+
     async def selftest(self) -> dict:
-        """Boot the guest, let its stub dial the gateway for one model call, and
-        return the reply it printed to the console. Tears the guest down after."""
+        """Boot the guest and run ONE real no-tools reasoning turn INSIDE it via
+        guest_turn (the loop runs in the guest, its model calls dialing back to
+        the host gateway). Returns the guest's answer + the isolation report.
+        Tears the guest down after."""
         if not base_built():
             raise VMError("no golden image — run vm/build_base.sh on the Pi first")
         if not gateway.enabled:
             raise VMError("vsock gateway not running (no vsock on this host?)")
-        seen_before = gateway.connections
+        from .guest_turn import guest_turn
         await self.boot()
         deadline = asyncio.get_event_loop().time() + settings.vm_boot_timeout_seconds
-        reply = err = None
-        text = ""
+        final = None
         try:
             while asyncio.get_event_loop().time() < deadline:
-                await asyncio.sleep(1.5)
-                text = _console_log().read_text(errors="replace") if _console_log().exists() else ""
-                if (m := _REPLY_RE.search(text)):
-                    reply = m.group(1)
+                try:
+                    async for ev in guest_turn(
+                            conversation_id=0,
+                            system_prompt="You are terse.",
+                            history=[{"role": "user",
+                                      "content": "Reply with exactly the word PONG and nothing else."}],
+                            op_id="vm-selftest-loop", self_check=False):
+                        if ev.get("type") == "final":
+                            final = ev.get("content")
                     break
-                if (m := _ERROR_RE.search(text)):
-                    err = m.group(1)
-                    break
+                except (ConnectionError, OSError):
+                    await asyncio.sleep(2)      # guest run-turn server not up yet
+            isolation = self._isolation()
         finally:
-            connected = gateway.connections > seen_before
             await self.teardown()
-        if reply is None and err is None:
-            raise VMError("guest self-test timed out (no reply on the console)")
-        ifaces = _IFACES_RE.search(text)
-        external = _EXTERNAL_RE.search(text)
-        return {"reply": reply, "error": err, "guest_connected": connected,
-                "isolation": {
-                    "interfaces": ifaces.group(1) if ifaces else None,
-                    "external_reachable": (external.group(1) == "True") if external else None,
-                }}
+        if final is None:
+            raise VMError("guest run-turn server did not become reachable in time")
+        return {"reply": final, "isolation": isolation}
 
 
 # module-level singleton, driven by the vm_api router

@@ -36,8 +36,8 @@ if [[ ! -f pristine.qcow2 ]]; then
   mv pristine.qcow2.part pristine.qcow2
 fi
 
-echo "== [2/5] cloud-init seed (bakes guest_agent.py + boot unit, no SSH/network) =="
-guest_agent_b64=$(base64 -w0 "$SCRIPT_DIR/guest/guest_agent.py")
+echo "== [2/5] cloud-init seed (bakes the guest bootstrap + boot unit, no SSH/network) =="
+bootstrap_b64=$(base64 -w0 "$SCRIPT_DIR/guest/bootstrap.py")
 cat > meta-data <<EOF
 instance-id: jarvis-guest-golden
 local-hostname: jarvis-guest
@@ -49,10 +49,10 @@ hostname: jarvis-guest
 package_update: false
 package_upgrade: false
 write_files:
-  - path: /opt/jarvis/guest_agent.py
+  - path: /opt/jarvis/bootstrap.py
     encoding: b64
     permissions: '0755'
-    content: ${guest_agent_b64}
+    content: ${bootstrap_b64}
   - path: /etc/modules-load.d/vsock.conf
     content: |
       vmw_vsock_virtio_transport
@@ -62,11 +62,11 @@ write_files:
   - path: /etc/systemd/system/jarvis-guest.service
     content: |
       [Unit]
-      Description=Jarvis guest agent (Phase 2 vsock self-test)
+      Description=Jarvis guest runtime bootstrap (fetch package over vsock, run loop)
       After=multi-user.target
       [Service]
       Type=simple
-      ExecStart=/usr/bin/python3 /opt/jarvis/guest_agent.py
+      ExecStart=/usr/bin/python3 /opt/jarvis/bootstrap.py
       Restart=no
       StandardOutput=journal+console
       StandardError=journal+console

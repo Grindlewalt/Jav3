@@ -11,8 +11,6 @@ import json
 from collections import OrderedDict
 from typing import AsyncIterator
 
-import aiosqlite
-
 from ..config import settings
 from ..memory import standing_rules_tail
 from .budget import BudgetExceeded
@@ -82,12 +80,13 @@ def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None
             "retry the edit.")
 
 
-def db_tool_sink(db: aiosqlite.Connection, conversation_id: int):
+def db_tool_sink(db, conversation_id: int):
     """The standard persistence sink for run_turn: record each tool call to the
     tool_calls table (result truncated for storage). run_turn holds no db handle
-    of its own — the caller supplies this, which keeps the loop storage-agnostic
-    (the seam the VM inversion needs: a guest loop ships results out instead of
-    writing them here)."""
+    of its own — the caller supplies this, which keeps the loop storage-agnostic.
+    This is the host sink; a guest loop passes on_tool_call=None and its host-side
+    guest_turn reconstructs the same record from the streamed tool events, so the
+    guest never carries a db handle (the VM-inversion seam)."""
     async def sink(name: str, args: dict, result: str) -> None:
         await db.execute(
             "INSERT INTO tool_calls (conversation_id, tool, args, result) "
