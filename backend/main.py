@@ -53,6 +53,13 @@ async def health():
     return {"ok": True}
 
 
+@app.get("/api/config")
+async def client_config():
+    # Non-sensitive client config the SPA needs at boot. media_hosts is the
+    # allowlist the render surfaces use to decide which remote media may load.
+    return {"media_hosts": settings.media_hosts}
+
+
 # Built SPA. In dev (no dist yet) the API still runs; the GUI just isn't served.
 if (settings.frontend_dist / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=settings.frontend_dist / "assets"),

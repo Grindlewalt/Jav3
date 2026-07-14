@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # opt-in and heavy; captured blobs older than this are nulled out.
     context_capture_keep_days: int = 7
 
+    # Remote hosts whose images/video the render surfaces (chat markdown + the
+    # dashboard iframe) may auto-load. Everything else is blocked, so a model
+    # can't beacon data out through a resource URL to an arbitrary host. Same
+    # spirit as an egress allowlist; tune via JARVIS_MEDIA_HOSTS (JSON list).
+    media_hosts: list[str] = ["atomosnas", "upload.wikimedia.org", "i.imgur.com"]
+
     # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
     peak_windows: list[str] = ["18:00-21:00", "23:00-03:00"]
     # How long a user's "yes, use the API" answer stays valid.

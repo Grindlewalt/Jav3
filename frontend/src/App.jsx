@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api.js'
+import { setMediaHosts } from './mediaHosts.js'
 import Login from './pages/Login.jsx'
 import Chat from './pages/Chat.jsx'
 import Projects from './pages/Projects.jsx'
@@ -57,10 +58,14 @@ function NotificationBell() {
 
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
+  const [, setCfgReady] = useState(false) // bump once the media allowlist lands
   const location = useLocation()
 
   useEffect(() => {
     api('/api/auth/me').then(setUser).catch(() => setUser(null))
+    api('/api/config')
+      .then((c) => { setMediaHosts(c.media_hosts); setCfgReady(true) })
+      .catch(() => {})
   }, [])
 
   if (user === undefined) return <div className="center">…</div>

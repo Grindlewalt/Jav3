@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { api, chatStream } from '../api.js'
 import ChatBox from '../ChatBox.jsx'
 import Md from '../Md.jsx'
+import { cspMediaSources } from '../mediaHosts.js'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
@@ -543,16 +544,20 @@ function EditorPanel({ slug, state, setState }) {
 
 // The Renderer runs untrusted, agent-authored HTML. sandbox="allow-scripts" lets
 // scripts run but does NOT stop the frame reaching the network, so a script or an
-// <img> could beacon data out. Dashboards are contracted to be fully self-contained
-// (inline script/style, data embedded as JSON), so a strict CSP that forbids every
-// network fetch makes the "no network" guarantee real without breaking them.
-const RENDER_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
-  "img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
+// <img> could beacon data out. The CSP below closes that: scripts/styles may be
+// inline but connect-src is denied (no fetch/XHR/WebSocket), and images/media/
+// fonts load only from data: or the operator's media allowlist — the same policy
+// chat uses, so a dashboard can show trusted media but can't exfiltrate.
+function renderCsp() {
+  const media = cspMediaSources()
+  return "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+    `img-src ${media}; media-src ${media}; font-src ${media}; ` +
+    "base-uri 'none'; form-action 'none'"
+}
 
 function withCsp(html) {
   if (!html) return ''
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${RENDER_CSP}">`
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${renderCsp()}">`
   if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + meta)
   return `<!doctype html><head>${meta}</head>${html}`
 }
