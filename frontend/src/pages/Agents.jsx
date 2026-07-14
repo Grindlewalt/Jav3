@@ -251,8 +251,8 @@ export default function Agents() {
                     <button key={s.name} type="button" className="ghost"
                             style={{ marginRight: 4 }}
                             title={s.hosts?.length
-                              ? `usable in web_read on ${s.hosts.join(', ')} and in VM runs`
-                              : 'VM runs only — bind web hosts on the Context page to allow web_read'}
+                              ? `usable in web_read on ${s.hosts.join(', ')}`
+                              : 'unusable — bind web hosts on the Context page to allow web_read'}
                             onClick={() => patch({ prompt:
                               `${agent.prompt.trimEnd()}\n{{secret:${s.name}}}` })}>
                       {`{{secret:${s.name}}}`}

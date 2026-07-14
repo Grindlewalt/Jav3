@@ -1,5 +1,4 @@
 """Fix-shaped tool errors: every failure string names the next step."""
-import importlib.util
 
 import httpx
 import pytest
@@ -141,25 +140,6 @@ async def test_search_codebase_no_match_is_instructive(client):
     assert out == ("no matches for 'zzz_not_here'. Try a shorter or broader term, "
                    "drop subdir to search the whole project, or set regex=true "
                    "for patterns.")
-
-
-# --- run_command / run_code _fmt ------------------------------------------------
-
-def _load_handler(name: str):
-    path = settings.tools_dir / name / "handler.py"
-    spec = importlib.util.spec_from_file_location(f"under_test_{name}", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def test_run_handlers_label_empty_output():
-    for name in ("run_command", "run_code"):
-        fmt = _load_handler(name)._fmt
-        assert fmt({"exit_status": 0}) == "exit 0 (no output)"
-        assert fmt({"exit_status": 1, "timed_out": True}) == "exit 1 (timed out) (no output)"
-        assert "(no output)" not in fmt({"exit_status": 0, "stdout": "hi"})
-        assert "(no output)" not in fmt({"exit_status": 2, "stderr": "boom"})
 
 
 # --- require_project ------------------------------------------------------------

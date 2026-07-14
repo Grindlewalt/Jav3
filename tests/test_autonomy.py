@@ -5,7 +5,7 @@ from backend import autonomy
 def test_categorisation_ranks():
     assert autonomy.tool_min_rank("read_file") == 0
     assert autonomy.tool_min_rank("write_file") == 1
-    assert autonomy.tool_min_rank("run_gated") == 2
+    assert autonomy.tool_min_rank("spawn_agent") == 2
     assert autonomy.tool_min_rank("git_commit_request") == 3
     # an unknown tool defaults to full-only, never leaked to a restricted project
     assert autonomy.tool_min_rank("some_new_tool") == 3
@@ -22,13 +22,13 @@ def test_allows_by_level():
     # read_only: only reads
     assert autonomy.allows("read_only", "read_file")
     assert not autonomy.allows("read_only", "write_file")
-    assert not autonomy.allows("read_only", "run_gated")
+    assert not autonomy.allows("read_only", "spawn_agent")
     assert not autonomy.allows("read_only", "git_commit_request")
-    # stage: reads + writes, no runs
+    # stage: reads + writes, no agents
     assert autonomy.allows("stage", "write_file")
-    assert not autonomy.allows("stage", "run_command")
-    # gated: + runs, no commit
-    assert autonomy.allows("gated", "run_gated")
+    assert not autonomy.allows("stage", "research")
+    # gated: + agents/research, no commit
+    assert autonomy.allows("gated", "spawn_agent")
     assert not autonomy.allows("gated", "git_commit_request")
     # full/None: everything, including unknowns
     assert autonomy.allows(None, "git_commit_request")
@@ -37,7 +37,7 @@ def test_allows_by_level():
 
 def test_filter_entries():
     entries = [{"name": n} for n in
-               ("read_file", "write_file", "run_gated", "git_commit_request")]
+               ("read_file", "write_file", "spawn_agent", "git_commit_request")]
     ro = [e["name"] for e in autonomy.filter_entries(entries, "read_only")]
     assert ro == ["read_file"]
     st = [e["name"] for e in autonomy.filter_entries(entries, "stage")]

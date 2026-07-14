@@ -116,17 +116,6 @@ CREATE TABLE IF NOT EXISTS model_calls (
     context TEXT,                        -- JSON {messages, n_tools}; only when capture is on
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE TABLE IF NOT EXISTS sandbox_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    dest TEXT NOT NULL,              -- human label (hostname if known, else ip)
-    ip TEXT NOT NULL,               -- the address programmed into nftables
-    port INTEGER NOT NULL,
-    proto TEXT NOT NULL DEFAULT 'tcp',
-    scope TEXT NOT NULL DEFAULT 'wan',   -- wan | lan
-    note TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(ip, port, proto)
-);
 """
 
 
@@ -159,22 +148,6 @@ async def init_db() -> None:
         if "autonomy" not in cols:
             # autonomy dial: read_only|stage|gated|full (NULL == full, unrestricted)
             await db.execute("ALTER TABLE projects ADD COLUMN autonomy TEXT")
-        if "egress_mode" not in cols:
-            # per-project egress preset: locked (default) | dev (dev hosts pre-cleared)
-            await db.execute("ALTER TABLE projects ADD COLUMN egress_mode TEXT")
-        # the agent's in-VM code can ask for an outbound destination it needs;
-        # the operator approves it into the allowlist (request/approve flow).
-        await db.execute("""CREATE TABLE IF NOT EXISTS egress_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_slug TEXT NOT NULL,
-            host TEXT NOT NULL,
-            port INTEGER NOT NULL,
-            proto TEXT NOT NULL DEFAULT 'tcp',
-            reason TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT DEFAULT (datetime('now')),
-            decided_at TEXT
-        )""")
         # run-tree columns on an already-created conversations table
         async with db.execute("PRAGMA table_info(conversations)") as cur:
             ccols = [r["name"] for r in await cur.fetchall()]
@@ -186,12 +159,6 @@ async def init_db() -> None:
         if "pending_approval" not in scols:
             await db.execute("ALTER TABLE schedules ADD COLUMN "
                              "pending_approval INTEGER NOT NULL DEFAULT 0")
-        # egress-allowlist hardening: a rule can carry an expiry (NULL = never)
-        # so temporary allowances (e.g. "PyPI for this session") auto-revoke.
-        async with db.execute("PRAGMA table_info(sandbox_rules)") as cur:
-            srcols = [r["name"] for r in await cur.fetchall()]
-        if "expires_at" not in srcols:
-            await db.execute("ALTER TABLE sandbox_rules ADD COLUMN expires_at TEXT")
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
                           ("rollup", "TEXT"), ("job_id", "TEXT"),

@@ -300,17 +300,9 @@ async def _tick() -> None:
 
 async def scheduler_loop() -> None:
     """Background heartbeat. Never lets one bad tick stop the clock."""
-    from . import egress, sandbox
     while True:
         try:
             await _tick()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            await egress.ensure_dns_readable()  # keep the guest DNS log readable
-            await sandbox.sweep_expired()   # revoke lapsed egress allowances
-            await egress.sweep_yolo()       # auto-close YOLO when its TTL lapses
-            await egress.refresh_domains()  # track CDN IPs for allowlisted hostnames
         except Exception:  # noqa: BLE001
             pass
         await asyncio.sleep(POLL_SECONDS)

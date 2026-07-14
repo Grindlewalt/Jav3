@@ -10,7 +10,7 @@ Pure-logic features (crawl/search indexing, context_exclude, research
 auto-approve, staging) are covered by the pytest suite; this drives the
 live wire.
 
-Usage:  .venv/bin/python scripts/e2e_smoke.py --password PW [--vm]
+Usage:  .venv/bin/python scripts/e2e_smoke.py --password PW
 """
 import argparse
 import json
@@ -94,7 +94,6 @@ def main():
     ap.add_argument("--base", default=BASE)
     ap.add_argument("--user", default="operator")
     ap.add_argument("--password", required=True)
-    ap.add_argument("--vm", action="store_true", help="require the gated VM run")
     args = ap.parse_args()
     BASE = args.base.rstrip("/")
 
@@ -133,7 +132,7 @@ def main():
     print("== tool registry ==")
     tools = json.load(_req("GET", "/api/tools")).get("tools", [])
     names = {t["name"] for t in tools}
-    for want in ("run_command", "run_gated", "git_status", "git_commit_request",
+    for want in ("git_status", "git_commit_request",
                  "crawl_codebase", "search_codebase", "dashboard"):
         check(f"tool registered: {want}", want in names)
 
@@ -164,25 +163,6 @@ def main():
         check("jobs endpoint returns list", isinstance(jobs, list))
     except urllib.error.HTTPError as e:
         check("jobs endpoint", False, f"HTTP {e.code}")
-
-    print("== VM monitored gate run ==")
-    try:
-        st = json.load(_req("GET", "/api/vm/status"))
-        if not st.get("ssh_ready"):
-            (check("VM ssh ready", False, "VM not reachable")
-             if args.vm else skip("VM gate run", "VM ssh not ready"))
-        else:
-            g = json.load(_req("POST", "/api/vm/gate/run",
-                  {"project": slug, "command": "python3 -c \"print('gate-ok')\"",
-                   "fresh": False}, timeout=300))
-            check("gate run exit 0", g.get("exit_status") == 0, str(g)[:120])
-            check("gate report staged", str(g.get("report", "")).endswith("report.md"))
-            check("egress lock verified", g.get("egress_locked") is True,
-                  "nftables deny-by-default not detected")
-            print(f"        (dns={g.get('dns_lookups')} "
-                  f"blocked={g.get('blocked_attempts')} execs={g.get('execs_logged')})")
-    except urllib.error.HTTPError as e:
-        check("VM gate run", False, f"HTTP {e.code}: {e.read()[:120]}")
 
     print(f"\n== RESULT ==  {PASS} passed, {FAIL} failed, {SKIP} skipped")
     sys.exit(1 if FAIL else 0)

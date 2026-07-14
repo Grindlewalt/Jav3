@@ -13,8 +13,6 @@ const PANEL_TYPES = {
   organizer: { label: 'File organizer', w: 580, h: 460 },
   run: { label: 'Run — python sandbox', w: 560, h: 470 },
   todos: { label: 'To-dos', w: 360, h: 380 },
-  vm: { label: 'Sandbox VM', w: 560, h: 470 },
-  network: { label: 'Network — egress control', w: 460, h: 500 },
   staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
@@ -348,8 +346,6 @@ function PanelBody(props) {
     case 'organizer': return <OrganizerPanel {...props} />
     case 'run': return <RunPanel {...props} />
     case 'todos': return <TodoPanel {...props} />
-    case 'vm': return <VmPanel {...props} />
-    case 'network': return <NetworkPanel {...props} />
     case 'staging': return <StagingPanel {...props} />
     case 'context': return <ContextPanel {...props} />
     case 'agent': return <AgentPanel {...props} />
@@ -548,22 +544,7 @@ function EditorPanel({ slug, state, setState }) {
 function RendererPanel({ slug, state, setState, onToggleExpand }) {
   const [files, setFiles] = useState([])
   const [html, setHtml] = useState('')
-  const [scanning, setScanning] = useState(false)
   const path = state.path || ''
-  const isHtml = /\.html?$/i.test(path)
-
-  async function scanBeacons() {
-    setScanning(true)
-    try {
-      const r = await api('/api/sandbox/render', {
-        method: 'POST', body: JSON.stringify({ project: slug, path }) })
-      window.alert(r.verdict === 'crit'
-        ? '⚠ This artifact tried to beacon out — open the Sandbox tab to review before trusting it'
-        : '✓ Scan clean — no external beacons. See the Sandbox tab for details.')
-    } catch (err) {
-      window.alert(`Scan failed: ${err.detail || err.message || err}`)
-    } finally { setScanning(false) }
-  }
 
   const refresh = useCallback(() =>
     api(`/api/projects/${slug}/files`).then((r) =>
@@ -587,11 +568,6 @@ function RendererPanel({ slug, state, setState, onToggleExpand }) {
           {files.map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
         <button className="ghost" onClick={refresh} title="refresh">↻</button>
-        {isHtml && (
-          <button className="ghost" onClick={scanBeacons} disabled={scanning}
-                  title="render in the sandbox VM and report any network beacons (~90s)">
-            {scanning ? 'Scanning…' : '🛡 Scan for beacons'}</button>
-        )}
         {url && <a className="ghost-link" href={url} target="_blank" rel="noreferrer">raw</a>}
       </div>
       <div className="render-area" onDoubleClick={onToggleExpand}>
@@ -1079,252 +1055,6 @@ function StagingPanel({ slug }) {
           </div>
         </div>
       )}
-    </div>
-  )
-}
-
-// The persistent QEMU sandbox as a terminal. Push the project in, run a shell
-// session (working dir persists across commands), pull results back into
-// <project>/vm-results. Nuke throws the whole disk away — recovery only.
-//
-// Each command is still a fresh non-interactive `vm.run`, so it isn't a live
-// PTY (no vim/htop, env exports don't carry over) — but we prefix `cd <cwd>`
-// and read `pwd` back out via a marker, so `cd` sticks and it reads like a shell.
-const _CWD_MARK = '__JCWD__'
-
-function _parseCwd(stdout, prev) {
-  let cwd = prev
-  const kept = []
-  for (const ln of (stdout || '').split('\n')) {
-    const m = ln.match(/^__JCWD__(.*)$/)
-    if (m) cwd = m[1] || cwd
-    else kept.push(ln)
-  }
-  return { cwd, stdout: kept.join('\n').replace(/\s+$/, '') }
-}
-
-function VmPanel({ slug, state, setState }) {
-  const base = `/workspace/${slug}`
-  const [st, setSt] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [lines, setLines] = useState([])          // transcript (ephemeral)
-  const [histIdx, setHistIdx] = useState(-1)
-  const cmd = state.cmd ?? ''
-  const cwd = state.cwd ?? base
-  const history = state.history ?? []
-  const bodyRef = useRef(null)
-
-  const refresh = () => api('/api/vm/status').then(setSt).catch(() => setSt(null))
-  useEffect(() => {
-    refresh()
-    const t = setInterval(refresh, 15000)
-    return () => clearInterval(t)
-  }, [])
-  useEffect(() => {
-    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
-  }, [lines])
-
-  const prompt = (dir) => (dir || base).replace(base, '~') || '~'
-
-  async function act(path, body) {
-    setBusy(true)
-    try {
-      const r = await api(`/api/vm/${path}`, {
-        method: 'POST', body: JSON.stringify(body || {}) })
-      setLines((l) => [...l, { note: `${path}: ${JSON.stringify(r)}` }])
-      refresh()
-    } catch (err) {
-      setLines((l) => [...l, { error: err.detail || String(err) }])
-    }
-    setBusy(false)
-  }
-
-  async function runCmd() {
-    const c = cmd.trim()
-    if (!c || busy) return
-    const at = cwd
-    setState({ cmd: '', history: [...history.filter((h) => h !== c), c].slice(-100) })
-    setHistIdx(-1)
-    setLines((l) => [...l, { prompt: prompt(at), cmd: c, running: true }])
-    setBusy(true)
-    // run in the tracked cwd; report the resulting pwd back via a marker
-    const wrapped = `cd "${at}" 2>/dev/null\n${c}\n__jrc=$?; printf '\\n${_CWD_MARK}%s\\n' "$(pwd)"; exit $__jrc`
-    try {
-      const r = await api('/api/vm/run', {
-        method: 'POST', body: JSON.stringify({ command: wrapped }) })
-      const { cwd: newCwd, stdout } = _parseCwd(r.stdout, at)
-      setState({ cwd: newCwd })                 // merge: keeps cmd + history
-      setLines((l) => l.map((e, i) => i === l.length - 1
-        ? { ...e, running: false, exit: r.exit_status, timed_out: r.timed_out,
-            timeout: r.timeout, stdout, stderr: r.stderr }
-        : e))
-    } catch (err) {
-      setLines((l) => l.map((e, i) => i === l.length - 1
-        ? { ...e, running: false, error: err.detail || String(err) } : e))
-    }
-    setBusy(false)
-  }
-
-  function onKey(e) {
-    if (e.key === 'Enter') { e.preventDefault(); runCmd(); return }
-    if (e.key === 'ArrowUp' && history.length) {
-      e.preventDefault()
-      const i = Math.min(histIdx + 1, history.length - 1)
-      setHistIdx(i); setState({ cmd: history[history.length - 1 - i] })
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      const i = histIdx - 1
-      setHistIdx(i)
-      setState({ cmd: i < 0 ? '' : history[history.length - 1 - i] })
-    }
-  }
-
-  const light = !st ? 'off' : st.ssh_ready ? 'on' : st.unit_active ? 'mid' : 'off'
-  const label = !st ? 'unknown'
-    : st.ssh_ready ? 'running'
-    : st.unit_active ? 'booting…'
-    : st.base_built ? 'stopped' : 'no golden image'
-
-  return (
-    <div className="pane-col">
-      <div className="row vm-status">
-        <span className={`vm-light ${light}`} />
-        <span className="grow">{label}</span>
-        <button className="ghost" disabled={busy || !st?.base_built || st?.unit_active}
-                onClick={() => act('start')}>start</button>
-        <button className="ghost" disabled={busy || !st?.unit_active}
-                onClick={() => act('stop')}>stop</button>
-        <button className="ghost" disabled={!lines.length}
-                onClick={() => setLines([])}>clear</button>
-        <button className="ghost danger" disabled={busy || !st?.base_built}
-                onClick={() => {
-                  if (window.confirm('Nuke the VM? Its entire disk is thrown away and it reboots fresh from the golden image.'))
-                    act('nuke', { confirm: true })
-                }}>nuke</button>
-      </div>
-      <div className="row">
-        <button disabled={busy || !st?.ssh_ready}
-                onClick={() => act('push', { project: slug })}>⇥ push project</button>
-        <button disabled={busy || !st?.ssh_ready}
-                onClick={() => act('pull', { project: slug, remote_path: slug })}>
-          ⇤ pull results</button>
-      </div>
-
-      <div className="vm-term" ref={bodyRef}>
-        {lines.length === 0 && (
-          <div className="dim small">a shell in the sandbox — <code>cd</code> sticks;
-            nothing here is durable. Push the project in first.</div>
-        )}
-        {lines.map((e, i) => (
-          <div key={i} className="vm-term-entry">
-            {e.cmd && (
-              <div className="vm-term-cmd">
-                <span className="vm-prompt">{e.prompt}$</span> {e.cmd}
-                {e.running && <span className="dim"> …</span>}
-              </div>
-            )}
-            {e.note && <div className="dim small">{e.note}</div>}
-            {e.stdout && <pre className="vm-term-out">{e.stdout}</pre>}
-            {e.stderr && <pre className="vm-term-out err">{e.stderr}</pre>}
-            {e.error && <pre className="vm-term-out err">{e.error}</pre>}
-            {typeof e.exit === 'number' && e.exit !== 0 && (
-              <div className="dim small">exit {e.exit}
-                {e.timed_out && <span className="warn"> · timed out after {e.timeout}s</span>}</div>
-            )}
-          </div>
-        ))}
-      </div>
-      <div className="vm-term-input">
-        <span className="vm-prompt">{prompt(cwd)}$</span>
-        <input className="grow mono" autoComplete="off" spellCheck="false"
-               placeholder={st?.ssh_ready ? '' : 'start the VM to get a shell'}
-               disabled={!st?.ssh_ready}
-               value={cmd} onKeyDown={onKey}
-               onChange={(e) => setState({ cmd: e.target.value })} />
-      </div>
-      <p className="dim small">pushed to <code>{base}</code> · pulls land in
-        <code> vm-results/</code> · direct runs aren't gated/staged — use the Sandbox
-        page for a monitored run</p>
-    </div>
-  )
-}
-
-// Per-project egress control: approve the connections the agent asks for, clear
-// the common dev hosts in one click, or open the whole VM (YOLO). Everything
-// here lands in the same deny-by-default allowlist the Sandbox console manages.
-function NetworkPanel({ slug }) {
-  const [reqs, setReqs] = useState([])
-  const [yolo, setYolo] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState(null)
-
-  const refresh = () => {
-    api(`/api/egress/requests?project=${slug}`).then((r) => setReqs(r.requests)).catch(() => {})
-    api('/api/egress/yolo').then(setYolo).catch(() => {})
-  }
-  useEffect(() => {
-    refresh()
-    const t = setInterval(refresh, 4000)
-    return () => clearInterval(t)
-  }, [slug])
-
-  async function act(fn, note) {
-    setBusy(true); setMsg(null)
-    try { await fn(); setMsg(note); refresh() }
-    catch (e) { setMsg(`error: ${e.detail || e.message}`) }
-    setBusy(false)
-  }
-  const decide = (id, action, ttl = null) => act(
-    () => api(`/api/egress/requests/${id}/${action}`, {
-      method: 'POST', body: JSON.stringify(action === 'approve' ? { ttl_minutes: ttl } : {}) }),
-    action === 'approve' ? `Allowed${ttl ? ` for ${ttl}m` : ''}` : 'Denied')
-  const devPreset = () => act(
-    () => api(`/api/egress/preset/${slug}`, { method: 'POST', body: '{}' }),
-    'Dev hosts (PyPI/GitHub/npm/apt) pre-approved for ~8h')
-  const toggleYolo = () => {
-    if (!yolo?.on && !window.confirm(
-      'YOLO opens the sandbox VM to the whole internet for 1 hour — it defeats the '
-      + 'exfiltration guard, so anything in the VM could be sent out. Only on a VM with '
-      + 'nothing sensitive. Continue?')) return
-    act(() => api('/api/egress/yolo', yolo?.on
-      ? { method: 'DELETE' }
-      : { method: 'POST', body: JSON.stringify({ ttl_minutes: 60 }) }),
-      yolo?.on ? 'Egress locked again' : 'Open egress for 1h')
-  }
-
-  return (
-    <div className="pane-col net-panel">
-      <div className="side-title">Connection requests</div>
-      {reqs.length === 0
-        ? <div className="dim small">None pending. When the agent's sandbox code needs
-            the internet it asks here, and pauses until you decide.</div>
-        : reqs.map((r) => (
-          <div key={r.id} className="net-req">
-            <div className="mono ellipsis" title={`${r.host}:${r.port}`}>
-              {r.host}<span className="dim">:{r.port}</span></div>
-            {r.reason && <div className="dim small">{r.reason}</div>}
-            <div className="row" style={{ margin: '2px 0 0' }}>
-              <button className="ghost" disabled={busy} onClick={() => decide(r.id, 'approve')}>Allow</button>
-              <button className="ghost" disabled={busy} onClick={() => decide(r.id, 'approve', 60)}>1h</button>
-              <button className="ghost danger" disabled={busy} onClick={() => decide(r.id, 'deny')}>Deny</button>
-            </div>
-          </div>
-        ))}
-
-      <div className="side-title">Dev preset</div>
-      <button className="ghost" disabled={busy} onClick={devPreset}>Pre-approve dev hosts</button>
-      <p className="dim small" style={{ margin: 0 }}>
-        Clears PyPI · GitHub · npm · apt so pip/git/npm work in the sandbox (~8h).</p>
-
-      <div className="side-title">Open egress (YOLO)</div>
-      <button className={yolo?.on ? 'danger' : 'ghost'} disabled={busy} onClick={toggleYolo}>
-        {yolo?.on ? 'YOLO on — lock egress' : 'Open egress (1h)'}</button>
-      <p className="dim small" style={{ margin: 0 }}>
-        {yolo?.on
-          ? 'The VM can reach the whole internet. Anything in it can be exfiltrated.'
-          : 'Drops the egress lock for the whole VM — defeats the exfiltration guard. Use only on a VM with nothing sensitive.'}</p>
-
-      {msg && <div className={`dim small ${msg.startsWith('error') ? 'error' : ''}`}>{msg}</div>}
     </div>
   )
 }

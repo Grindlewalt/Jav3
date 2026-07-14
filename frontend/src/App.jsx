@@ -12,7 +12,6 @@ import Tools from './pages/Tools.jsx'
 import Agents from './pages/Agents.jsx'
 import Schedules from './pages/Schedules.jsx'
 import Jobs from './pages/Jobs.jsx'
-import Sandbox from './pages/Sandbox.jsx'
 import Logs from './pages/Logs.jsx'
 
 function NotificationBell() {
@@ -35,12 +34,6 @@ function NotificationBell() {
       {open && (
         <div className="notif-drop">
           {count === 0 && <div className="dim small notif-empty">Nothing waiting on you</div>}
-          {(data?.sandbox || []).map((s) => (
-            <NavLink key={`s${s.run_id}`} to="/sandbox" className="notif-item" onClick={close}>
-              <span className={`sbx-pill ${s.verdict}`}>{s.verdict}</span>
-              <span className="grow ellipsis">sandbox · {s.project} · {s.headline}</span>
-            </NavLink>
-          ))}
           {(data?.staged || []).map((s) => (
             <NavLink key={`st${s.project}`} to={`/projects/${s.project}`} className="notif-item" onClick={close}>
               <span className="grow ellipsis">staged changes · {s.project} · {s.files} file{s.files === 1 ? '' : 's'}</span>
@@ -49,11 +42,6 @@ function NotificationBell() {
           {(data?.git || []).map((g) => (
             <NavLink key={`g${g.id}`} to={`/projects/${g.project}`} className="notif-item" onClick={close}>
               <span className="grow ellipsis">git push · {g.project} · {g.message}</span>
-            </NavLink>
-          ))}
-          {(data?.egress || []).map((e) => (
-            <NavLink key={`e${e.id}`} to="/sandbox" className="notif-item" onClick={close}>
-              <span className="grow ellipsis">connection · {e.host}:{e.port} · {e.project_slug}</span>
             </NavLink>
           ))}
           {(data?.schedules || []).map((s) => (
@@ -89,7 +77,6 @@ export default function App() {
           <NavLink to="/artifacts">Artifacts</NavLink>
           <NavLink to="/context">Context</NavLink>
           <NavLink to="/agents">Agents</NavLink>
-          <NavLink to="/sandbox">Sandbox</NavLink>
           <NavLink to="/logs">Logs</NavLink>
           <NavLink to="/jobs">Jobs</NavLink>
           <NavLink to="/schedules">Schedules</NavLink>
@@ -115,7 +102,6 @@ export default function App() {
         <Route path="/artifacts" element={<Artifacts />} />
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />
-        <Route path="/sandbox" element={<Sandbox />} />
         <Route path="/logs" element={<Logs />} />
         <Route path="/jobs" element={<Jobs />} />
         <Route path="/schedules" element={<Schedules />} />

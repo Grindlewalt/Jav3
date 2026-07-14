@@ -3,12 +3,14 @@
 A technical walkthrough of every subsystem, followed by concrete LLM-optimization
 recommendations. File references are `path:line` against the tree as analyzed.
 
-> **Status:** the optimization recommendations in §2-§7 and §8.1 (gate verdict
-> feedback) have been applied — see the "Token optimization pass" commit for the
-> item-by-item list — EXCEPT §2.4 (pre-filtering the rules self-check pass),
-> which was considered and rejected: the operator prefers the model pass to
-> always run rather than adding client-side rule-pattern checks. The security
-> hardening items in §8.2-§8.4 are deliberately deferred and tracked in TODO.md.
+> **Status:** historical snapshot — file references are against the tree as it
+> stood when analyzed. The optimization recommendations in §2-§7 and §8.1 (gate
+> verdict feedback) were applied — see the "Token optimization pass" commit —
+> EXCEPT §2.4 (pre-filtering the rules self-check pass), which was considered
+> and rejected: the operator prefers the model pass to always run rather than
+> adding client-side rule-pattern checks. **The entire sandbox/VM/egress layer
+> (§8 and every vm/gate/egress reference) has since been REMOVED** in the
+> sandbox-prune commit to make room for a new execution architecture.
 
 ---
 

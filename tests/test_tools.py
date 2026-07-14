@@ -36,7 +36,7 @@ async def client(tmp_env):
 def test_registry_discovers_folder_tools(tmp_env):
     names = {e["name"] for e in registry.compile_registry()}
     for expected in ("list_files", "read_file", "write_file", "edit_file",
-                     "run_command", "run_code", "memory_write", "memory_read",
+                     "memory_write", "memory_read",
                      "journal_update", "todo_update"):
         assert expected in names
     granted = {s["function"]["name"] for s in registry.openai_tool_specs()}

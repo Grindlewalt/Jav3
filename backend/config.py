@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     upload_max_uncompressed_mb: int = 200
     upload_max_files: int = 5000
 
-    # Workspace runner (light host-side sandbox; the QEMU VM is pass 2)
+    # Workspace runner (light host-side sandbox: rlimits + timeout)
     run_python: str = "python3"
     run_timeout_seconds: int = 60
     run_max_mem_mb: int = 768
@@ -158,30 +158,6 @@ class Settings(BaseSettings):
     # re-read within a task skips the download AND the summarize model call.
     web_cache_ttl_seconds: int = 900
     web_cache_max_entries: int = 50
-
-    # Sandbox VM (M3). Persistent: boots once and stays up; nuke is a
-    # recovery action (recreate the overlay), not a per-run ritual.
-    vm_dir: Path = BASE_DIR / "data" / "vm"
-    # M4 moved the VM onto a tap network — direct address, plain SSH port.
-    vm_ssh_host: str = "10.66.0.10"
-    vm_ssh_port: int = 22
-    vm_ssh_user: str = "agent"
-    vm_unit: str = "jarvis-vm.service"
-    vm_workspace: str = "/workspace"
-    vm_run_timeout_seconds: int = 300
-    vm_boot_timeout_seconds: int = 120
-    vm_push_max_mb: int = 64
-
-    # M4 sandbox review console. The nft table + drop-log prefixes the gate
-    # analysis keys off; RFC-1918 defines what counts as "your LAN"; the globs
-    # flag a run touching secrets / proprietary / financial paths.
-    nft_table: str = "jarvis_vm"
-    lan_cidrs: list[str] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-    sandbox_sensitive_globs: list[str] = [
-        "**/.env", "**/.env.*", "**/secrets/**", "**/*.pem", "**/*.key",
-        "**/id_rsa", "**/id_ed25519", "**/credentials*", "**/.aws/**",
-        "finance/**", "**/proprietary/**",
-    ]
 
 
 settings = Settings()

@@ -6,9 +6,9 @@ from fastapi.staticfiles import StaticFiles
 
 import asyncio
 
-from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api, git_api,
-               logs_api, memory_api, notifications_api, projects, runs_api, sandbox,
-               sandbox_api, schedules, skills_api, vm_api, workspace, secrets)
+from . import (agents_api, agents_run, artifacts_api, auth, chat, git_api,
+               logs_api, memory_api, notifications_api, projects, runs_api,
+               schedules, skills_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -22,17 +22,6 @@ async def lifespan(app: FastAPI):
     ensure_memory_seeds()
     await schedules.ensure_default_schedules()
     compile_registry()
-    # re-program the learned egress allowlist into nftables (empty on boot);
-    # best-effort so a dev host without the table starts fine
-    try:
-        await sandbox.sync_nft()
-    except Exception:
-        pass
-    try:
-        from . import egress
-        await egress.ensure_dns_readable()   # unbreak the gate's DNS correlation
-    except Exception:
-        pass
     task = asyncio.create_task(schedules.scheduler_loop())
     try:
         yield
@@ -52,10 +41,7 @@ app.include_router(agents_run.router)
 app.include_router(schedules.router)
 app.include_router(runs_api.router)
 app.include_router(runs_api.jobs_router)
-app.include_router(vm_api.router)
 app.include_router(git_api.router)
-app.include_router(sandbox_api.router)
-app.include_router(egress_api.router)
 app.include_router(notifications_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)

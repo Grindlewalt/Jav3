@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 
-from . import sandbox, threatintel
 from .config import settings
 from .db import get_db
 
@@ -113,32 +112,6 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
         await db.close()
 
 
-async def latest_run_verdict(slug: str) -> dict | None:
-    """Deterministic verdict of the project's most recent gated sandbox run
-    (None if it never ran). Same classifier the console uses — never an LLM."""
-    db = await get_db()
-    try:
-        async with db.execute(
-            "SELECT r.id FROM runs r JOIN projects p ON p.id = r.project_id "
-            "WHERE p.slug = ? ORDER BY r.id DESC LIMIT 1", (slug,)) as cur:
-            row = await cur.fetchone()
-    finally:
-        await db.close()
-    if not row:
-        return None
-    rid = row["id"] if not isinstance(row, tuple) else row[0]
-    p = settings.vm_dir / "captures" / f"gate-{rid}-evidence.json"
-    if not p.is_file():
-        return None
-    try:
-        ev = json.loads(p.read_text())
-    except (OSError, ValueError):
-        return None
-    c = sandbox.classify(ev, await sandbox.rules_index(), threatintel.load())
-    return {"run_id": rid, "verdict": c["verdict"], "rule": c["rule"],
-            "headline": c["headline"]}
-
-
 async def approve_request(rid: int, force: bool = False) -> dict:
     db = await get_db()
     try:
@@ -146,17 +119,6 @@ async def approve_request(rid: int, force: bool = False) -> dict:
         if row["status"] != "pending":
             raise ValueError(f"request #{rid} is {row['status']}, not pending")
         slug, message = row["project_slug"], row["message"]
-        # Anti-malware gate (M4): refuse to commit/push if the project's last
-        # sandbox run detonated as critical, unless the operator forces it. The
-        # verdict is deterministic (classifier over host captures), so this is a
-        # hard safety check, not an advisory one. Nothing is committed on block.
-        if not force:
-            v = await latest_run_verdict(slug)
-            if v and v["verdict"] == "crit":
-                raise PermissionError(
-                    f"blocked — last sandbox run #{v['run_id']} was CRITICAL "
-                    f"({v['rule']}): {v['headline']}. Re-run it clean in the sandbox, "
-                    f"or approve with force to override.")
         paths = json.loads(row["paths"]) if row["paths"] else None
         await ensure_repo(slug)
         if paths:

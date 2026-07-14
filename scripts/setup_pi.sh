@@ -8,9 +8,7 @@ cd "$REPO_DIR"
 
 echo "== apt deps =="
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-venv nodejs npm \
-  qemu-system-arm qemu-utils qemu-efi-aarch64 cloud-image-utils \
-  nftables tcpdump dnsmasq-base
+sudo apt-get install -y -qq python3-venv nodejs npm
 
 echo "== python venv =="
 [ -d .venv ] || python3 -m venv .venv
@@ -29,26 +27,15 @@ grep -q DEEPSEEK ~/.config/jarvis/env || \
 echo "== systemd user unit =="
 mkdir -p ~/.config/systemd/user
 cp scripts/jarvis.service ~/.config/systemd/user/jarvis.service
-cp scripts/jarvis-vm.service ~/.config/systemd/user/jarvis-vm.service
 cp scripts/jarvis-backup.service ~/.config/systemd/user/jarvis-backup.service
 cp scripts/jarvis-backup.timer ~/.config/systemd/user/jarvis-backup.timer
 chmod +x scripts/backup.sh
 systemctl --user daemon-reload
 systemctl --user enable jarvis.service
-systemctl --user enable jarvis-vm.service 2>/dev/null || true
 systemctl --user enable --now jarvis-backup.timer 2>/dev/null || true
 loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER"
-
-echo "== systemd system units (VM tap network + logged DNS, need root) =="
-chmod +x vm/net/vm-net.sh
-for u in jarvis-vm-net jarvis-vm-dns; do
-  sed "s|@HOME@|$HOME|g; s|@USER@|$USER|g" "scripts/$u.service" | sudo tee "/etc/systemd/system/$u.service" >/dev/null
-done
-sudo systemctl daemon-reload
-sudo systemctl enable --now jarvis-vm-net.service jarvis-vm-dns.service
 
 echo "== done =="
 echo "create the login user:   .venv/bin/python -m backend.cli create-user <name>"
 echo "start:                   systemctl --user restart jarvis"
 echo "logs:                    journalctl --user -u jarvis -f"
-echo "sandbox VM (once):       bash vm/build_base.sh && systemctl --user start jarvis-vm"

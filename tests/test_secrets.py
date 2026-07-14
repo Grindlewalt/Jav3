@@ -1,12 +1,11 @@
 """Secrets vault: the agent uses {{secret:NAME}} placeholders; the host
-substitutes at VM-execution time, scrubs echoes from outputs, and flags staged
+substitutes at execution time, scrubs echoes from outputs, and flags staged
 files carrying a value. The API never returns a value."""
 import httpx
 import pytest
 
 from backend import secrets
 from backend.auth import hash_password
-from backend.config import settings
 from backend.db import get_db, init_db
 from backend.main import app
 from backend.memory import assemble_system_prompt, ensure_memory_seeds
@@ -52,50 +51,6 @@ def test_substitute_noop_without_placeholders(tmp_env):
     assert secrets.substitute("plain command") == "plain command"
     assert secrets.substitute(None) is None
     assert secrets.scrub(None) is None
-
-
-async def test_vmexec_substitutes_and_scrubs(tmp_env, monkeypatch):
-    """run_in_project (shared by run_command/run_code/run_gated) is the
-    chokepoint: real value goes into the VM, placeholder comes back out."""
-    from backend.agent.tools import vmexec
-
-    secrets.save({"API_KEY": "sekrit-value-42"})
-    proj = settings.projects_dir / "demo"
-    proj.mkdir(parents=True)
-    (proj / "project.md").write_text("# demo")
-    seen = {}
-
-    async def fake_push(merged, slug):
-        return {"bytes": 0}
-
-    async def fake_run(command, timeout=None, cwd=None, input=None):
-        seen["command"], seen["input"] = command, input
-        return {"exit_status": 0, "timed_out": False,
-                "stdout": "your key sekrit-value-42 works", "stderr": ""}
-
-    async def fake_pull(slug, dest):
-        (dest / slug).mkdir(parents=True, exist_ok=True)
-        return {"bytes": 0}
-
-    monkeypatch.setattr(vmexec.vm, "push", fake_push)
-    monkeypatch.setattr(vmexec.vm, "run", fake_run)
-    monkeypatch.setattr(vmexec.vm, "pull", fake_pull)
-
-    r = await vmexec.run_in_project(
-        "demo", 'curl -H "K: {{secret:API_KEY}}"', input="x = '{{secret:API_KEY}}'")
-    assert seen["command"] == 'curl -H "K: sekrit-value-42"'
-    assert seen["input"] == "x = 'sekrit-value-42'"
-    # echoed value scrubbed back to the placeholder before the model sees it
-    assert "sekrit-value-42" not in r["stdout"]
-    assert "{{secret:API_KEY}}" in r["stdout"]
-
-
-async def test_vmexec_unknown_secret_is_vmerror(tmp_env, monkeypatch):
-    from backend.agent.tools import vm, vmexec
-    secrets.save({"REAL": "abcdefgh"})
-    with pytest.raises(vm.VMError) as e:
-        await vmexec.run_in_project("demo", "echo {{secret:FAKE}}")
-    assert "unknown secret 'FAKE'" in str(e.value) and "REAL" in str(e.value)
 
 
 async def test_secrets_api_never_returns_values(client):

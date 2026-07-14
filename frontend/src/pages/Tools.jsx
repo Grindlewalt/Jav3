@@ -4,12 +4,8 @@ import { api } from '../api.js'
 // The grant list Jarvis will eventually get — placeholder catalogue until the
 // tool layer is designed. Registered entries below come live from the registry.
 const PLANNED = [
-  { name: 'run_in_vm', phase: 'pass 2 · M3',
-    desc: 'Execute code inside the nukeable QEMU sandbox — push files in, run, pull results back to the host.' },
-  { name: 'monitored_run', phase: 'pass 2 · M4',
-    desc: 'The final gate: run with host-side exec + network telemetry; trips nuke the VM instead of pushing.' },
   { name: 'git_push', phase: 'pass 2 · M5',
-    desc: 'Host-side push after operator review of code + logs + diffs. The VM never pushes.' },
+    desc: 'Host-side push after operator review of code + logs + diffs. The agent never pushes.' },
   { name: 'crawl_codebase', phase: 'pass 2 · M6',
     desc: 'Crawl uploaded code and write up what it does into project memory.' },
   { name: 'journal_update', phase: 'pass 2 · M6',

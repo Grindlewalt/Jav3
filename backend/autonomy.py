@@ -4,7 +4,7 @@ Four levels, increasing capability:
 
   read_only  only observe (read files, search, browse the web)
   stage      + writes, but everything lands in the staging quarantine
-  gated      + run code in the monitored sandbox, spawn agents/research
+  gated      + spawn agents/research
   full       + propose git commits (the current, unrestricted default)
 
 A project with no setting is `full` — so this is opt-in and never regresses
@@ -28,11 +28,9 @@ _READ = {
 _STAGE = {
     "write_file", "edit_file", "dashboard", "crawl_codebase", "journal_update",
     "todo_update", "memory_write", "create_agent", "schedule_update",
-    "request_egress",
 }
 _GATED = {
-    "run_code", "run_command", "run_gated", "research", "spawn_agent",
-    "deploy_agents",
+    "research", "spawn_agent", "deploy_agents",
 }
 _COMMIT = {"git_commit_request"}
 

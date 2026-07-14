@@ -88,11 +88,11 @@ async def test_duplicate_allowed_after_mutating_call(tmp_env, monkeypatch):
 
     model = _ScriptedModel([
         [("read_file", '{"path": "a.py"}')],
-        [("run_command", '{"command": "sed -i s/x/y/ a.py"}')],  # mutates
+        [("edit_file", '{"path": "a.py", "find": "x", "replace": "y"}')],  # mutates
         [("read_file", '{"path": "a.py"}')],        # re-read must re-dispatch
     ])
     await _run(monkeypatch, model, dispatch, read_only=frozenset({"read_file"}))
-    assert dispatched == ["read_file", "run_command", "read_file"]
+    assert dispatched == ["read_file", "edit_file", "read_file"]
 
 
 async def test_error_streak_injects_corrective_note(tmp_env, monkeypatch):
@@ -206,30 +206,6 @@ async def test_tool_events_carry_id_and_results_stream(tmp_env, monkeypatch):
     assert by_id[tools[0]["id"]]["ok"] is True
     assert by_id[tools[0]["id"]]["result"] == "found: 42"
     assert by_id[tools[1]["id"]]["ok"] is False
-
-
-# --- run tool guards (F8) ------------------------------------------------------
-
-async def test_run_code_rejects_comment_only(tmp_env):
-    import importlib.util as iu
-    spec = iu.spec_from_file_location(
-        "t_run_code", settings.base_dir / "tools" / "run_code" / "handler.py")
-    m = iu.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    out = await m.run("# just thinking\n\n# more notes\n")
-    assert out.startswith("error:") and "not a notepad" in out
-    assert m._has_executable("x = 1  # set x")
-    assert not m._has_executable("")
-
-
-async def test_run_command_rejects_empty(tmp_env):
-    import importlib.util as iu
-    spec = iu.spec_from_file_location(
-        "t_run_command", settings.base_dir / "tools" / "run_command" / "handler.py")
-    m = iu.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    out = await m.run("   ")
-    assert out.startswith("error:") and "empty command" in out
 
 
 async def test_success_resets_streak(tmp_env, monkeypatch):

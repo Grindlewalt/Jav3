@@ -198,8 +198,7 @@ ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files"
                             "todo_update", "deploy_agents"})
 
 # a turn that used any of these did real project work — journal-worthy
-_JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request",
-                             "run_command", "run_code", "run_gated"})
+_JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request"})
 
 
 async def _project_autonomy(db, slug: str) -> str | None:

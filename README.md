@@ -2,8 +2,8 @@
 
 Personal agent: durable memory + project journals on the host, ReAct loop over
 DeepSeek behind a single `Model.complete` choke point, login'd web GUI.
-Execution sandbox (nukeable QEMU VM + host-side monitoring) lands in pass 2
-(M3–M7); the seams for it are in place.
+(The pass-2 execution sandbox — QEMU VM + monitored egress — was removed to
+make room for a new execution architecture; see git history for the old one.)
 
 ## Layout
 

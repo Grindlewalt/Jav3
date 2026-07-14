@@ -25,5 +25,5 @@ operator you created it so they can review the prompt.
 If the agent needs an API key, never put a real value in the prompt —
 reference {{secret:NAME}} instead (available names are in your context; the
 operator adds keys and binds their web hosts in the Secrets panel on the
-Context page). Placeholders work in run_command/run_code and in web_read URLs
-on the secret's bound hosts.
+Context page). Placeholders work in web_read URLs on the secret's bound
+hosts.

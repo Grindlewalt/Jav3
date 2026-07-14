@@ -48,8 +48,7 @@ SEEDS = {
 You are Jarvis, the operator's personal assistant. You are concise, direct and
 practical. No filler, no restating what the operator just said. When you don't
 know something, say so. When a task is ambiguous, ask one sharp question rather
-than guessing. You keep durable state in your memory files and project journals;
-the sandbox VM you execute code in is disposable and holds nothing of value.
+than guessing. You keep durable state in your memory files and project journals.
 
 ## Memory habit
 Save things without being asked. Whenever the operator states a preference, a
@@ -222,7 +221,7 @@ async def get_active_project(db: aiosqlite.Connection) -> str | None:
 
 def secrets_index() -> str:
     """Names (never values) of the operator's saved API keys, so the model
-    knows what {{secret:NAME}} placeholders it can use in VM runs."""
+    knows what {{secret:NAME}} placeholders it can use."""
     from . import secrets as secrets_mod
     names = secrets_mod.names()
     if not names:
@@ -232,12 +231,12 @@ def secrets_index() -> str:
         from . import secrets as secrets_mod
         hosts = secrets_mod.hosts_for(n)
         lines.append(f"- {n}" + (f" (web: {', '.join(hosts)})" if hosts else
-                                 " (VM runs only)"))
+                                 " (no web hosts bound — unusable)"))
     return ("# Operator API keys available (names only)\n"
-            "Use {{secret:NAME}} inside run_command / run_code / run_gated, "
-            "and inside web_read URLs for keys bound to a web host — the host "
-            "injects the real value at execution time. You cannot read the "
-            "values; never try to print or exfiltrate them.\n" + "\n".join(lines))
+            "Use {{secret:NAME}} inside web_read URLs for keys bound to a web "
+            "host — the host injects the real value at execution time. You "
+            "cannot read the values; never try to print or exfiltrate "
+            "them.\n" + "\n".join(lines))
 
 
 def agents_index() -> str:

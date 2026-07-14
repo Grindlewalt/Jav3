@@ -1,32 +1,23 @@
 """Approval notification center — one place that answers "what is Jarvis waiting
-on me for?" Aggregates the three independent pending stores that otherwise each
+on me for?" Aggregates the independent pending stores that otherwise each
 live behind their own page (or, for git, behind no page at all):
 
   - git push requests awaiting approval   (git_requests table)
   - staged changes awaiting review        (.staging/ per project)
-  - undecided sandbox sessions            (gated runs not yet approved/quarantined)
   - schedules Jarvis proposed             (schedules with pending_approval = 1)
 
 Read-only aggregation — it never approves anything, just surfaces a count + list
 so the nav can show a badge. Each source is wrapped so one failing store does not
-blank the whole panel. Sandbox verdicts come from the same deterministic
-classifier the console uses (never a model)."""
-import json
-
+blank the whole panel."""
 from fastapi import APIRouter, Depends
 
-from . import gitgate, sandbox, staging, threatintel
+from . import gitgate, staging
 from .auth import require_user
-from .config import settings
 from .db import get_db
 from .projects import list_projects
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"],
                    dependencies=[Depends(require_user)])
-
-
-def _evidence_path(run_id: int):
-    return settings.vm_dir / "captures" / f"gate-{run_id}-evidence.json"
 
 
 async def _git_pending(slugs: list[str]) -> list[dict]:
@@ -55,33 +46,6 @@ def _staged_pending(slugs: list[str]) -> list[dict]:
     return out
 
 
-async def _sandbox_pending() -> list[dict]:
-    db = await get_db()
-    try:
-        cur = await db.execute(
-            "SELECT r.id, p.slug FROM runs r JOIN projects p ON p.id = r.project_id "
-            "WHERE r.status NOT IN ('approved', 'quarantined') "
-            "ORDER BY r.id DESC LIMIT 40")
-        rows = [dict(x) for x in await cur.fetchall()]
-    finally:
-        await db.close()
-    idx = await sandbox.rules_index()
-    bl = threatintel.load()
-    out = []
-    for r in rows:
-        p = _evidence_path(r["id"])
-        if not p.is_file():
-            continue
-        try:
-            ev = json.loads(p.read_text())
-        except (OSError, ValueError):
-            continue
-        c = sandbox.classify(ev, idx, bl)
-        out.append({"run_id": r["id"], "project": r["slug"],
-                    "verdict": c["verdict"], "headline": c["headline"]})
-    return out
-
-
 async def _schedules_pending() -> list[dict]:
     """Schedules Jarvis proposed via schedule_update: paused until the
     operator resumes (approve) or pauses (park) them in the GUI."""
@@ -98,15 +62,6 @@ async def _schedules_pending() -> list[dict]:
         return []
 
 
-async def _egress_pending() -> list[dict]:
-    """The agent's outbound-connection requests awaiting the operator."""
-    try:
-        from . import egress
-        return await egress.list_requests(status="pending")
-    except Exception:                           # noqa: BLE001
-        return []
-
-
 @router.get("")
 async def notifications():
     try:
@@ -116,11 +71,8 @@ async def notifications():
     slugs = [p["slug"] for p in proj]
     git = await _git_pending(slugs)
     staged = _staged_pending(slugs)
-    sbx = await _sandbox_pending()
     sched = await _schedules_pending()
-    egr = await _egress_pending()
     return {
-        "count": len(git) + len(staged) + len(sbx) + len(sched) + len(egr),
-        "git": git, "staged": staged, "sandbox": sbx, "schedules": sched,
-        "egress": egr,
+        "count": len(git) + len(staged) + len(sched),
+        "git": git, "staged": staged, "schedules": sched,
     }

@@ -26,7 +26,7 @@ export default function Context() {
     if (!value) return
     const hostsRaw = window.prompt(
       'web hosts this key may be sent to, comma-separated (e.g. newsapi.org).\n'
-      + 'Leave empty for VM-only — web_read will refuse the key everywhere.') || ''
+      + 'Leave empty to keep it unusable — web_read refuses unbound keys.') || ''
     const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
     try {
       await api(`/api/secrets/${encodeURIComponent(name)}`, {
@@ -37,7 +37,7 @@ export default function Context() {
 
   async function editHosts(s) {
     const hostsRaw = window.prompt(
-      `web hosts ${s.name} may be sent to (comma-separated; empty = VM-only)`,
+      `web hosts ${s.name} may be sent to (comma-separated; empty = unusable)`,
       (s.hosts || []).join(', '))
     if (hostsRaw === null) return
     const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
@@ -109,13 +109,13 @@ export default function Context() {
         </ul>
         <button className="ghost" onClick={newNote}>+ new note</button>
         <div className="side-title" style={{ marginTop: 16 }}
-             title="API keys the agent can use via {{secret:NAME}} in VM runs and web_read (on bound hosts) but never read">
+             title="API keys the agent can use via {{secret:NAME}} in web_read (on bound hosts) but never read">
           Secrets</div>
         <ul className="file-list">
           {secrets.length === 0 && <li className="dim">none saved</li>}
           {secrets.map((s) => (
             <li key={s.name} title={s.hosts?.length
-                  ? `web: ${s.hosts.join(', ')}` : 'VM-only (no web hosts bound)'}>
+                  ? `web: ${s.hosts.join(', ')}` : 'no web hosts bound — unusable'}>
               <span className="grow">{s.name}
                 {s.hosts?.length > 0 && <span className="tag">web</span>}</span>
               <span className="dim small">…{s.last4}</span>

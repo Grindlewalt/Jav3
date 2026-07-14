@@ -279,7 +279,7 @@ def test_registry_recompiles_when_toolmd_newer(tmp_env, monkeypatch):
 def test_project_tools_flagged(tmp_env):
     from backend.agent.tools import registry
     by_name = {e["name"]: e for e in registry.compile_registry()}
-    for name in ("read_file", "write_file", "run_gated", "search_codebase"):
+    for name in ("read_file", "write_file", "search_codebase"):
         assert by_name[name].get("requires_project") is True, name
     for name in ("load_project", "memory_read", "web_search"):
         assert not by_name[name].get("requires_project"), name

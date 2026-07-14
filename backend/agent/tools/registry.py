@@ -9,9 +9,9 @@ approval.)
 TOOL.md frontmatter:
 
     ---
-    name: run_command
-    description: Run a shell command in the sandbox VM.
-    when_to_use: When code must be executed.
+    name: web_search
+    description: Search the web via SearXNG.
+    when_to_use: When the answer needs live information.
     enabled: false
     parameters:            # JSON schema for the arguments
       type: object
