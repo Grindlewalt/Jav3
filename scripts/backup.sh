@@ -58,7 +58,6 @@ PY
 
 cat > "$BACKUP/.gitignore" <<'EOF'
 # never back these up (secrets / huge / derived)
-data/vm/
 data/jwt_secret
 data/registry.json
 EOF
