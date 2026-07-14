@@ -72,11 +72,20 @@ if (settings.frontend_dist / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=settings.frontend_dist / "assets"),
               name="assets")
 
+    # The HTML shell carries no content hash, so it must never be heuristically
+    # cached: without this, browsers guess a freshness window from Last-Modified
+    # and keep serving a stale index.html (pointing at an old, also-cached JS
+    # hash) across reloads — so a deploy silently never reaches the browser.
+    # no-cache = may store, but must revalidate first (cheap 304 when unchanged).
+    _shell_headers = {"Cache-Control": "no-cache"}
+
     @app.get("/{full_path:path}")
     async def spa(full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
         candidate = settings.frontend_dist / full_path
         if full_path and candidate.is_file():
-            return FileResponse(candidate)
-        return FileResponse(settings.frontend_dist / "index.html")
+            headers = _shell_headers if candidate.suffix == ".html" else None
+            return FileResponse(candidate, headers=headers)
+        return FileResponse(settings.frontend_dist / "index.html",
+                            headers=_shell_headers)
