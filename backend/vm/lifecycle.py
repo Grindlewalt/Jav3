@@ -116,7 +116,11 @@ class GuestVM:
             raise VMError("no golden image — run vm/build_base.sh on the Pi first")
         if not gateway.enabled:
             raise VMError("vsock gateway not running (no vsock on this host?)")
+        from ..agent.model import confirm_peak
         from .guest_turn import guest_turn
+        confirm_peak(0)                        # the turn-level peak decision is the
+        # caller's (here, the operator running the selftest); the guest's per-call
+        # model_calls then pass the gateway's peak gate, as a host chat turn does.
         await self.boot()
         deadline = asyncio.get_event_loop().time() + settings.vm_boot_timeout_seconds
         final = None
