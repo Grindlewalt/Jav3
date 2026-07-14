@@ -11,12 +11,15 @@ def _safe_name(name: str) -> str:
 
 
 def _with_frontmatter(description: str | None, body: str) -> str:
-    text = body.rstrip() + "\n"
+    # Every note this tool writes is agent-authored, so it is stamped untrusted:
+    # memory.note_trusted() keeps it out of the binding system prompt until the
+    # operator approves it (flips approved: true). This is what stops laundered
+    # web content from being promoted to a standing rule by writing it to memory.
+    lines = ["source: agent", "approved: false"]
     if description:
         # single-line YAML value; a stray colon/quote must not break parsing
-        desc = " ".join(description.split())
-        text = f"---\ndescription: {desc!r}\n---\n{text}"
-    return text
+        lines.append(f"description: {' '.join(description.split())!r}")
+    return "---\n" + "\n".join(lines) + "\n---\n" + body.rstrip() + "\n"
 
 
 async def run(name: str, content: str, mode: str = "append",
