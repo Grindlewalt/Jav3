@@ -25,6 +25,7 @@ cp "$AAVMF_VARS" efi_vars_run.fd     # fresh UEFI vars every boot (disposable)
 exec qemu-system-aarch64 \
   -machine virt,gic-version=host -accel kvm -cpu host \
   -smp "$CPUS" -m "$MEM_MB" \
+  -nic none \
   -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
   -drive if=pflash,format=raw,file=efi_vars_run.fd \
   -drive file=overlay.qcow2,if=virtio,format=qcow2 \
