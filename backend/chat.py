@@ -245,7 +245,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     # one token budget for the whole turn, shared by any tools/agents it spawns
     the_budget = budget.Budget(
         settings.max_op_input_tokens, settings.max_op_output_tokens)
-    btoken = budget.active_budget.set(the_budget)
+    op_id = f"chat:{conversation_id}"
+    budget.register(op_id, the_budget)
+    optoken = budget.active_op_id.set(op_id)
     chan = _chan(conversation_id)
     ctoken = runtime.event_chan.set(chan)
     # fresh fetch-ledger scope per turn: parallel reads inside the turn (and
@@ -340,7 +342,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         runtime.web_session.reset(wtoken)
         runtime.event_chan.reset(ctoken)
         runtime.ephemeral.reset(token)
-        budget.active_budget.reset(btoken)
+        budget.active_op_id.reset(optoken)
+        budget.release(op_id)
         await db.close()
         # order matters for the reconnect race: drop the running flag, THEN
         # signal end — a subscriber that still sees the flag is guaranteed

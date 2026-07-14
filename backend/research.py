@@ -204,11 +204,12 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
     job_id = job_id or uuid.uuid4().hex
     doc_path = f"research/{_slugify(topic)}.md"
 
-    tok = None
-    b = budget_mod.active_budget.get()
+    optok = None
+    b = budget_mod.current()
     if b is None:
         b = budget_mod.Budget(settings.max_op_input_tokens, settings.max_op_output_tokens)
-        tok = budget_mod.active_budget.set(b)
+        budget_mod.register(job_id, b)
+        optok = budget_mod.active_op_id.set(job_id)
     try:
         head = await _node(project, None, job_id, "head", f"Research: {topic}")
         confirm_peak(head)
@@ -268,5 +269,6 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         return {"topic": topic, "job_id": job_id, "root_id": head,
                 "doc_path": doc_path, "doc_status": doc_status}
     finally:
-        if tok is not None:
-            budget_mod.active_budget.reset(tok)
+        if optok is not None:
+            budget_mod.active_op_id.reset(optok)
+            budget_mod.release(job_id)

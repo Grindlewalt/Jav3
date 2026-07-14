@@ -292,17 +292,22 @@ class ModelGateway:
         temperature: float | None = None,
         model_name: str | None = None,
         base_url: str | None = None,
+        op_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"}. Raises
         PeakPricingConfirmationRequired / BudgetExceeded before any network I/O.
+
+        The token budget is resolved by op_id (an explicit id, else the operation
+        in scope via the active_op_id contextvar) so enforcement is keyed, not
+        ambient — the seam Phase 3 uses to meter host-side across the VM boundary.
 
         model_name/base_url override the defaults so an agent can run on a
         different model or a local endpoint (e.g. ollama). A custom endpoint
         usually needs no key, so the DeepSeek-key requirement is relaxed there."""
         if conversation_id is not None:
             check_peak_gate(conversation_id)
-        budget = budget_mod.active_budget.get()
+        budget = budget_mod.get(op_id) if op_id else budget_mod.current()
         if budget is not None and budget.over():
             raise budget_mod.BudgetExceeded(
                 f"token budget spent ({budget.summary()})")

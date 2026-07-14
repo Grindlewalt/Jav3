@@ -226,12 +226,13 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     # one token budget across every node of this job (contextvar propagates into
     # the gathered child tasks). Inherit a caller's budget if there is one, else
     # create the job's own; only reset what we created.
-    tok = None
-    tbudget = budget_mod.active_budget.get()
+    optok = None
+    tbudget = budget_mod.current()
     if tbudget is None:
         tbudget = budget_mod.Budget(settings.max_op_input_tokens,
                                     settings.max_op_output_tokens)
-        tok = budget_mod.active_budget.set(tbudget)
+        budget_mod.register(job_id, tbudget)
+        optok = budget_mod.active_op_id.set(job_id)
 
     ncap = _Budget(MAX_NODES)
     ncap.take()  # the head itself
@@ -245,8 +246,9 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
                                 leaf_tools=leaf_tools, peak=peak, deliverable=deliverable)
     finally:
         runtime.web_session.reset(wtoken)
-        if tok is not None:
-            budget_mod.active_budget.reset(tok)
+        if optok is not None:
+            budget_mod.active_op_id.reset(optok)
+            budget_mod.release(job_id)
 
     bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": root_id,
                          "rollup": result["rollup"], "doc_path": result.get("doc_path"),
