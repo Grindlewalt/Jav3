@@ -59,9 +59,13 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
     }
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    s.setblocking(False)
     try:
-        await loop.sock_connect(s, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+        # blocking connect in an executor: uvloop's sock_connect runs getaddrinfo
+        # on the address and chokes on an AF_VSOCK (cid, port) tuple. Once
+        # connected, sock_sendall/sock_recv work fine under uvloop.
+        await loop.run_in_executor(
+            None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+        s.setblocking(False)
         await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
         buf = b""
         while True:

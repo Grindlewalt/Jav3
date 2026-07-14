@@ -31,8 +31,10 @@ class VsockModelClient:
                        temperature=None, model_name=None, base_url=None):
         loop = asyncio.get_running_loop()
         s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        # blocking connect in an executor (works under any event loop, incl.
+        # uvloop whose sock_connect getaddrinfo-chokes on a vsock (cid,port))
+        await loop.run_in_executor(None, s.connect, (HOST_CID, self.gateway_port))
         s.setblocking(False)
-        await loop.sock_connect(s, (HOST_CID, self.gateway_port))
         req = {"op": "model_call", "op_id": self.op_id, "messages": messages,
                "tools": tools, "temperature": temperature,
                "conversation_id": conversation_id, "model_name": model_name,
