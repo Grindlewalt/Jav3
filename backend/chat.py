@@ -11,11 +11,11 @@ from . import autonomy, bus, compaction, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink, run_turn
-from .agent.tools.registry import load_registry, openai_tool_specs
+from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
 from .auth import require_user
 from .config import settings
 from .db import get_db, open_conversation
-from .memory import assemble_system_prompt, get_active_project
+from .memory import assemble_system_prompt, get_active_project, standing_rules_tail
 
 router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_user)])
 
@@ -287,13 +287,41 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             tools_before = (await cur.fetchone())["m"]
 
         final_content = ""
-        async for event in run_turn(conversation_id, system_prompt, history,
-                                    tools=tools,
-                                    on_tool_call=db_tool_sink(db, conversation_id)):
+        if settings.use_guest_loop:
+            # run the ReAct loop INSIDE the guest; host tools brokered over vsock.
+            from .vm.broker import TurnEnvelope
+            from .vm.guest_turn import guest_turn
+            from .vm.lifecycle import vm as guest_vm
+            await guest_vm.ensure_ready()
+            envelope = TurnEnvelope(
+                op_id=op_id, conversation_id=conversation_id, active_project=active,
+                artifact_slug=(f"chat-{conversation_id}" if atoken is not None else None),
+                web_session=runtime.web_session.get(), ephemeral=ephemeral,
+                event_chan=chan)
+            source = guest_turn(conversation_id, system_prompt, history,
+                                rules=standing_rules_tail(), tool_specs=tools,
+                                read_only=list(read_only_names(entries)),
+                                op_id=op_id, envelope=envelope)
+        else:
+            source = run_turn(conversation_id, system_prompt, history, tools=tools,
+                              on_tool_call=db_tool_sink(db, conversation_id))
+
+        sink = db_tool_sink(db, conversation_id)
+        pending_tool: dict = {}
+        async for event in source:
             if event["type"] == "final":
                 final_content = event["content"]
-            else:
-                bus.publish(chan, event)
+                continue
+            if settings.use_guest_loop:
+                # the guest loop runs with on_tool_call=None, so persist tool_calls
+                # here by pairing each tool (args) event with its tool_result.
+                if event["type"] == "tool":
+                    pending_tool[event.get("id")] = (event.get("name"),
+                                                     event.get("args") or {})
+                elif event["type"] == "tool_result":
+                    nm, ar = pending_tool.pop(event.get("id"), (event.get("name"), {}))
+                    await sink(nm, ar, event.get("result", ""))
+            bus.publish(chan, event)
 
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', ?)",

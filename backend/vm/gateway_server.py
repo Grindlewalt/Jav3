@@ -16,9 +16,10 @@ import json
 import socket
 
 from ..agent import budget as budget_mod
-from ..agent.budget import Budget, BudgetExceeded
+from ..agent.budget import BudgetExceeded
 from ..agent.model import ModelError, PeakPricingConfirmationRequired, model
 from ..config import settings
+from . import broker
 
 
 async def _send(loop, conn, obj: dict) -> None:
@@ -27,21 +28,19 @@ async def _send(loop, conn, obj: dict) -> None:
 
 async def _handle_model_call(loop, conn, req: dict) -> None:
     op_id = req.get("op_id") or "vm-anon"
+    # op_id pinning: only a turn the host already registered (guest_turn) may
+    # spend. The gateway never opens a budget itself — a compromised guest can't
+    # invent op_ids to escape the per-operation cap by rotating ids.
+    if budget_mod.get(op_id) is None:
+        await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
+                                 "message": f"op_id {op_id!r} is not a registered turn"})
+        return
     messages = req.get("messages") or []
     tools = req.get("tools")
     temperature = req.get("temperature")
     model_name = req.get("model_name")
     base_url = req.get("base_url")
     conversation_id = req.get("conversation_id")
-    # Register the operation's budget IF the host hasn't already (guest_turn
-    # registers it for a real turn). The guest can't be trusted to meter itself,
-    # and this connection is not the task that opened the turn, so enforcement is
-    # keyed by the explicit op_id (budget.get(op_id)), not the active_op_id
-    # contextvar. A self-test op_id arrives unregistered → register it here.
-    owned = budget_mod.get(op_id) is None
-    if owned:
-        budget_mod.register(op_id, Budget(settings.max_op_input_tokens,
-                                          settings.max_op_output_tokens))
     try:
         async for ev in model.complete(messages, tools=tools,
                                         conversation_id=conversation_id,
@@ -54,9 +53,17 @@ async def _handle_model_call(loop, conn, req: dict) -> None:
     except Exception as e:  # noqa: BLE001 — one bad call must not kill the server
         await _send(loop, conn, {"type": "error",
                                  "error": type(e).__name__, "message": str(e)})
-    finally:
-        if owned:                       # leave a host-owned turn budget for guest_turn
-            budget_mod.release(op_id)
+
+
+async def _handle_tool_broker_call(loop, conn, req: dict) -> None:
+    op_id = req.get("op_id") or "vm-anon"
+    if broker.get_turn(op_id) is None:      # same pinning as model_call
+        await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
+                                 "message": f"op_id {op_id!r} has no broker turn context"})
+        return
+    res = await broker.broker_dispatch(op_id, req.get("name") or "", req.get("args") or {})
+    await _send(loop, conn, {"type": "broker_result",
+                             "result": res["result"], "taint": res["taint"]})
 
 
 async def handle_conn(loop, conn) -> None:
@@ -81,6 +88,8 @@ async def handle_conn(loop, conn) -> None:
             op = req.get("op")
             if op == "model_call":
                 await _handle_model_call(loop, conn, req)
+            elif op == "tool_broker_call":
+                await _handle_tool_broker_call(loop, conn, req)
             elif op == "get_guest_package":
                 import base64
                 from .guest_pkg import build_package_tar

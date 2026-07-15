@@ -35,6 +35,7 @@ async def _handle(loop, conn) -> None:
         guest_config.apply(spec.get("config"))
         guest_memory.set_rules(spec.get("rules", ""))
         guest_registry.set_registry(spec.get("tool_specs"), spec.get("read_only"))
+        guest_registry.set_turn(spec.get("op_id"), spec.get("gateway_port"))
         guest_model.model.set_turn(spec.get("op_id"), spec.get("gateway_port"))
 
         async def send(ev: dict) -> None:

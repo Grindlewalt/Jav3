@@ -17,6 +17,7 @@ import socket
 from ..agent import budget as budget_mod
 from ..agent.budget import Budget
 from ..config import settings
+from . import broker
 
 GUEST_RUNTURN_PORT = 5556                   # must match jarvis_guest.server.PORT
 
@@ -32,16 +33,21 @@ def config_snapshot() -> dict:
 
 
 async def guest_turn(conversation_id, system_prompt, history, *, rules="",
-                     tool_specs=None, read_only=None, op_id=None,
+                     tool_specs=None, read_only=None, op_id=None, envelope=None,
                      model_name=None, base_url=None, self_check=True,
                      max_iterations=None):
     """Run one turn in the guest, yielding its events. Raises on a transport
-    failure (connect/read) so the caller can fall back or surface an error."""
+    failure (connect/read) so the caller can fall back or surface an error.
+
+    `envelope` (a broker.TurnEnvelope) is registered host-side by op_id for the
+    turn's tool_broker_calls; the guest never carries it."""
     op_id = op_id or f"guest:{conversation_id}"
     owns_budget = budget_mod.get(op_id) is None
     if owns_budget:
         budget_mod.register(op_id, Budget(settings.max_op_input_tokens,
                                           settings.max_op_output_tokens))
+    if envelope is not None:
+        broker.register_turn(envelope)
     spec = {
         "conversation_id": conversation_id,
         "system_prompt": system_prompt,
@@ -83,5 +89,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                 return
     finally:
         s.close()
+        if envelope is not None:
+            broker.release_turn(op_id)
         if owns_budget:
             budget_mod.release(op_id)

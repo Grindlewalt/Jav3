@@ -160,6 +160,10 @@ class Settings(BaseSettings):
     vm_memory_mb: int = 768
     vm_cpus: int = 2
     vm_boot_timeout_seconds: int = 120
+    # When true, chat turns run the ReAct loop INSIDE the guest (Phase 3), with
+    # host tools brokered over vsock. Off by default until the guest path is the
+    # proven default (cutover in M4); flip per-turn tests via the flag.
+    use_guest_loop: bool = False
 
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,

@@ -11,6 +11,7 @@ import asyncio
 import os
 import re
 import signal
+import socket
 from pathlib import Path
 
 from ..config import settings
@@ -99,6 +100,30 @@ class GuestVM:
     async def nuke(self) -> None:
         await self.teardown()
         await self.boot()
+
+    async def ensure_ready(self) -> None:
+        """Boot the guest if it isn't running and wait until its run-turn server
+        accepts a connection. Idempotent — a persistent guest serves many turns
+        (a warm pool replaces this in M4)."""
+        if not base_built():
+            raise VMError("no golden image — run vm/build_base.sh on the Pi first")
+        if not gateway.enabled:
+            raise VMError("vsock gateway not running (no vsock on this host?)")
+        from .guest_turn import GUEST_RUNTURN_PORT
+        await self.boot()
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + settings.vm_boot_timeout_seconds
+        while loop.time() < deadline:
+            s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+                return
+            except OSError:
+                await asyncio.sleep(1)
+            finally:
+                s.close()
+        raise VMError("guest run-turn server did not become ready in time")
 
     def _isolation(self) -> dict:
         text = _console_log().read_text(errors="replace") if _console_log().exists() else ""

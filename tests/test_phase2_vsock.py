@@ -16,29 +16,42 @@ def _script_transport(monkeypatch, *, content="PONG", usage=None):
     monkeypatch.setattr(Model, "_stream_once", fake_stream_once)
 
 
-async def _roundtrip(monkeypatch, request: dict):
+async def _roundtrip(monkeypatch, request: dict, register_op=True):
+    from backend.agent import budget as bmod
+    from backend.agent.budget import Budget
     monkeypatch.setattr(model, "api_key", "sk-secret")
     monkeypatch.setattr(model.transport, "api_key", "sk-secret")
+    op_id = request.get("op_id")
+    # op_id pinning: the gateway only serves turns the host registered. Tests that
+    # want to hit a real model_call register first; register_op=False exercises the
+    # rejection path.
+    if op_id and register_op:
+        bmod.register(op_id, Budget(10**9, 10**9))
     a, b = socket.socketpair()
     a.setblocking(False)
     b.setblocking(False)
     loop = asyncio.get_running_loop()
     server = asyncio.create_task(handle_conn(loop, b))
-    await loop.sock_sendall(a, (json.dumps(request) + "\n").encode())
-    data = b""
     try:
-        while True:
-            chunk = await asyncio.wait_for(loop.sock_recv(a, 65536), timeout=5)
-            if not chunk:
-                break
-            data += chunk
-            if any(t in data for t in (b'"message"', b'"error"', b'"pong"')):
-                break
-    except asyncio.TimeoutError:
-        pass
-    a.close()
-    await asyncio.wait_for(server, timeout=5)
-    return [json.loads(line) for line in data.splitlines() if line.strip()]
+        await loop.sock_sendall(a, (json.dumps(request) + "\n").encode())
+        data = b""
+        try:
+            while True:
+                chunk = await asyncio.wait_for(loop.sock_recv(a, 65536), timeout=5)
+                if not chunk:
+                    break
+                data += chunk
+                if any(t in data for t in (b'"message"', b'"error"', b'"pong"',
+                                           b'"broker_result"')):
+                    break
+        except asyncio.TimeoutError:
+            pass
+        a.close()
+        await asyncio.wait_for(server, timeout=5)
+        return [json.loads(line) for line in data.splitlines() if line.strip()]
+    finally:
+        if op_id and register_op:
+            bmod.release(op_id)
 
 
 async def test_model_call_streams_a_message(monkeypatch):
@@ -82,3 +95,44 @@ async def test_bad_json_is_an_error(monkeypatch):
     await asyncio.wait_for(server, timeout=5)
     ev = json.loads(chunk.splitlines()[0])
     assert ev["type"] == "error" and ev["error"] == "bad_json"
+
+
+# --- Phase 3 M2: op_id pinning + the tool broker ------------------------------
+
+async def test_unregistered_op_id_is_rejected(monkeypatch):
+    # a compromised guest inventing an op_id gets nothing — the gateway only
+    # serves turns the host registered.
+    _script_transport(monkeypatch)
+    events = await _roundtrip(monkeypatch, {
+        "op": "model_call", "op_id": "not-registered",
+        "messages": [{"role": "user", "content": "hi"}]}, register_op=False)
+    assert events and events[0]["type"] == "error"
+    assert events[0]["error"] == "unknown_op_id"
+
+
+async def test_tool_broker_call_dispatches_and_stamps_taint(monkeypatch):
+    from backend.agent.tools import registry
+    from backend.vm import broker
+
+    async def fake_dispatch(name, args):
+        return f"ran {name} args={args}"
+    monkeypatch.setattr(registry, "dispatch", fake_dispatch)
+
+    broker.register_turn(broker.TurnEnvelope(op_id="op-b", web_session="ws"))
+    try:
+        events = await _roundtrip(monkeypatch, {
+            "op": "tool_broker_call", "op_id": "op-b",
+            "name": "web_read", "args": {"url": "x"}}, register_op=False)
+    finally:
+        broker.release_turn("op-b")
+    ev = events[0]
+    assert ev["type"] == "broker_result"
+    assert "ran web_read" in ev["result"]
+    assert ev["taint"] == "untrusted"          # web_read pulls untrusted content
+
+
+async def test_tool_broker_call_unregistered_op_rejected(monkeypatch):
+    events = await _roundtrip(monkeypatch, {
+        "op": "tool_broker_call", "op_id": "nope", "name": "read_file",
+        "args": {}}, register_op=False)
+    assert events and events[0]["type"] == "error" and events[0]["error"] == "unknown_op_id"
