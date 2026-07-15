@@ -17,3 +17,7 @@ parameters:
       description: Only commit these paths. Omit to commit all changes.
   required: [message]
 ---
+Commits the CANONICAL, already-approved files — NOT your staged edits. So get
+your write_file/edit_file changes approved first, then request the commit;
+otherwise it records nothing new. Nothing commits or pushes until the operator
+approves this request too.

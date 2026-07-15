@@ -19,3 +19,7 @@ parameters:
       description: Replace every occurrence (default false = find must be unique).
   required: [path, find, replace]
 ---
+`find` must match the current file text EXACTLY, whitespace included — so read
+the file first (the loop blocks an edit to a file you haven't read this turn).
+`find` must be unique in the file unless you pass all:true. Staged: takes effect
+after the operator approves.

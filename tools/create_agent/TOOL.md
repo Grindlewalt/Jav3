@@ -17,13 +17,12 @@ parameters:
       description: "The agent's full system prompt (150-300 words): who it is, its exact scope, how it works, output format, and what it must NOT do. Second person (\"You are...\")."
   required: [name, prompt]
 ---
-The new agent gets every tool and context section by default (exclusions are
-edited by the operator in the Agents tab) and works under the same staging
-quarantine as you. It is available to spawn_agent immediately — tell the
-operator you created it so they can review the prompt.
+If the agent needs an API key, NEVER put a real value in the prompt — reference
+{{secret:NAME}} instead (available names are in your context; the operator adds
+keys and binds their web hosts in the Secrets panel). Placeholders resolve only
+in web_read URLs on the secret's bound hosts.
 
-If the agent needs an API key, never put a real value in the prompt —
-reference {{secret:NAME}} instead (available names are in your context; the
-operator adds keys and binds their web hosts in the Secrets panel on the
-Context page). Placeholders work in web_read URLs on the secret's bound
-hosts.
+The new agent gets every tool and context section by default (the operator
+trims exclusions in the Agents tab) and works under the same staging quarantine
+as you. It is spawnable immediately — tell the operator you created it so they
+can review the prompt.

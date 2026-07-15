@@ -14,3 +14,7 @@ parameters:
       type: string
   required: [path, content]
 ---
+Full-file create/overwrite, NOT a merge — the content you pass becomes the
+ENTIRE file, so include everything, not just the changed lines. Staged: the file
+changes only after the operator approves it. For a small change to a file that
+already exists, edit_file is cheaper and less error-prone.

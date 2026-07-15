@@ -35,6 +35,12 @@ import yaml
 
 from ...config import settings
 
+# How much of a tool's TOOL.md body ships in its spec. Bounds a runaway body
+# while fitting the curated guidance the complex tools (spawn_agent, research,
+# create_agent, ...) genuinely need — 300 silently truncated their most important
+# lines. Authors still keep bodies tight and lead with what matters most.
+SPEC_NOTES_MAX = 600
+
 # handler.py modules loaded from tool folders, keyed by name, with the file
 # mtime so an edited handler reloads without a restart.
 _DYNAMIC: dict[str, tuple[float, Callable[..., Awaitable[str]]]] = {}
@@ -125,13 +131,15 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
         if e.get("when_to_use"):
             desc += f" Use when: {e['when_to_use']}"
         # every enabled tool's spec ships on every turn, so the body slice is a
-        # per-turn tax across the whole registry — keep it tight. Skills ship
-        # NO body at all (progressive disclosure): the listing is for
-        # discovery; invoking the skill returns the full SKILL.md.
+        # per-turn tax across the whole registry — keep it tight, and put the most
+        # important line FIRST (a truncated tail is guidance the model never sees).
+        # The cap only bites the few complex tools with long bodies; simple tools
+        # pay nothing. Skills ship NO body (progressive disclosure): the listing is
+        # for discovery; invoking the skill returns the full SKILL.md.
         if e.get("kind") == "skill":
             desc += " (Invoking this skill loads its full instructions.)"
         elif e.get("body"):
-            desc += f"\nNotes: {e['body'][:300]}"
+            desc += f"\nNotes: {e['body'][:SPEC_NOTES_MAX]}"
         specs.append({
             "type": "function",
             "function": {
