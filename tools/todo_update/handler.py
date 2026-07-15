@@ -1,5 +1,5 @@
 from backend.config import settings
-from backend.workspace import _parse_todos, _write_todos
+from backend.agent.tools.todostore import _parse_todos, _write_todos
 from backend.agent.tools.toolctx import require_project
 
 

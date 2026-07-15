@@ -61,7 +61,7 @@ def main() -> None:
     print("BOOTSTRAP: guest package unpacked, starting run-turn server", flush=True)
     os.chdir(DEST)
     env = {**os.environ, "PYTHONPATH": DEST}
-    os.execve(sys.executable, [sys.executable, "-m", "jarvis_guest.server"], env)
+    os.execve(sys.executable, [sys.executable, "-m", "backend.server"], env)
 
 
 if __name__ == "__main__":

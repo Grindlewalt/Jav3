@@ -359,30 +359,8 @@ async def save_layout(slug: str, layout: dict = Body(...)):
 
 
 # --- todo.md checklist ------------------------------------------------------
-
-TODO_RE = re.compile(r"^- \[([ x])\] (.*)$")
-
-
-def _todo_path(base: Path) -> Path:
-    return base / "todo.md"
-
-
-def _parse_todos(base: Path) -> list[dict]:
-    path = _todo_path(base)
-    if not path.exists():
-        return []
-    todos = []
-    for line in path.read_text().splitlines():
-        m = TODO_RE.match(line.strip())
-        if m:
-            todos.append({"done": m.group(1) == "x", "text": m.group(2)})
-    return todos
-
-
-def _write_todos(base: Path, todos: list[dict]) -> None:
-    lines = ["# Todo", ""]
-    lines += [f"- [{'x' if t['done'] else ' '}] {t['text']}" for t in todos]
-    _todo_path(base).write_text("\n".join(lines) + "\n")
+# helpers extracted to a pure module so the guest can run todo_update in-guest
+from .agent.tools.todostore import _parse_todos, _todo_path, _write_todos  # noqa: F401,E402
 
 
 @router.get("/todos")

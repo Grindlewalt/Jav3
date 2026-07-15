@@ -11,13 +11,14 @@ M1 runs no-tools turns; M2 adds tool_specs + host tool-brokering + tool-call
 persistence reconstructed here from the tool/tool_result events.
 """
 import asyncio
+import base64
 import json
 import socket
 
 from ..agent import budget as budget_mod
 from ..agent.budget import Budget
 from ..config import settings
-from . import broker
+from . import broker, workspace_xfer
 
 GUEST_RUNTURN_PORT = 5556                   # must match jarvis_guest.server.PORT
 
@@ -34,8 +35,8 @@ def config_snapshot() -> dict:
 
 async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                      tool_specs=None, read_only=None, op_id=None, envelope=None,
-                     model_name=None, base_url=None, self_check=True,
-                     max_iterations=None):
+                     workspace_slug=None, model_name=None, base_url=None,
+                     self_check=True, max_iterations=None):
     """Run one turn in the guest, yielding its events. Raises on a transport
     failure (connect/read) so the caller can fall back or surface an error.
 
@@ -63,6 +64,12 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         "max_iterations": max_iterations,
         "config": config_snapshot(),
     }
+    if workspace_slug:
+        # push the effective workspace (canonical + Jarvis's staged edits) so the
+        # in-guest file tools work on a copy; staged edits come back after the turn.
+        spec["workspace_slug"] = workspace_slug
+        spec["workspace_tar_b64"] = base64.b64encode(
+            workspace_xfer.build_merged_tar(workspace_slug)).decode()
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     try:
@@ -84,9 +91,15 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             if not line.strip():
                 continue
             ev = json.loads(line)
+            if ev.get("type") == "staged":
+                # the guest's staged edits, sent AFTER `final` — reconcile them
+                # host-side (host stage_write + secret scan) and don't surface it
+                # to the caller. The stream ends when the guest closes.
+                if workspace_slug:
+                    workspace_xfer.reconcile_staged(
+                        workspace_slug, base64.b64decode(ev.get("tar_b64") or ""))
+                continue
             yield ev
-            if ev.get("type") == "final":
-                return
     finally:
         s.close()
         if envelope is not None:

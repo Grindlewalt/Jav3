@@ -5,19 +5,44 @@ this runs the real ReAct loop in the guest and streams its four event types
 dial back out to the host gateway (see agent/model.py). Nothing durable lives
 here — the guest holds no key, no DB, no memory.
 
-Run as: python3 -m jarvis_guest.server
+Run as: python3 -m backend.server
 """
 import asyncio
+import base64
+import io
 import json
+import shutil
 import socket
+import tarfile
 
 from . import config as guest_config
 from . import memory as guest_memory
 from .agent import model as guest_model
 from .agent.loop import run_turn
 from .agent.tools import registry as guest_registry
+from .agent.tools import toolctx as guest_toolctx
 
 PORT = 5556                                 # guest run-turn server (host dials this)
+
+
+def _unpack_workspace(slug: str, tar_b64: str) -> None:
+    dest = guest_config.settings.projects_dir / slug
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(tar_b64)), mode="r:gz") as t:
+        t.extractall(dest, filter="data")
+
+
+def _pack_staging(slug: str) -> str:
+    staging_dir = guest_config.settings.projects_dir / slug / ".staging"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        if staging_dir.is_dir():
+            for p in sorted(staging_dir.rglob("*")):
+                if p.is_file():
+                    tar.add(p, arcname=str(p.relative_to(staging_dir)))
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 async def _handle(loop, conn) -> None:
@@ -38,6 +63,12 @@ async def _handle(loop, conn) -> None:
         guest_registry.set_turn(spec.get("op_id"), spec.get("gateway_port"))
         guest_model.model.set_turn(spec.get("op_id"), spec.get("gateway_port"))
 
+        # the pushed workspace copy the in-guest file tools operate on
+        slug = spec.get("workspace_slug")
+        if slug and spec.get("workspace_tar_b64"):
+            _unpack_workspace(slug, spec["workspace_tar_b64"])
+            guest_toolctx.set_active(slug)
+
         async def send(ev: dict) -> None:
             await loop.sock_sendall(conn, (json.dumps(ev) + "\n").encode())
 
@@ -56,6 +87,10 @@ async def _handle(loop, conn) -> None:
         except Exception as e:  # noqa: BLE001 — surface any loop crash as a final
             await send({"type": "final",
                         "content": f"(guest loop error: {type(e).__name__}: {e})"})
+
+        # ship the guest's staged edits back for host-side reconcile + approval
+        if slug:
+            await send({"type": "staged", "slug": slug, "tar_b64": _pack_staging(slug)})
     except (ConnectionError, OSError):
         pass
     finally:
