@@ -101,7 +101,7 @@ async def test_headless_agent_run_gets_own_session(tmp_env, monkeypatch):
     async def stub_turn(cid, system_prompt, history, tools=None, **kw):
         seen.append(runtime_mod.web_session.get())
         yield {"type": "final", "content": "ok"}
-    monkeypatch.setattr(agents_run, "run_turn", stub_turn)
+    monkeypatch.setattr(agents_run, "run_agent_turn", stub_turn)
 
     await agents_run.run_agent_headless("probe", "go", active=None)
     await agents_run.run_agent_headless("probe", "go", active=None)

@@ -13,8 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .agent.loop import db_tool_sink, run_turn
+from .agent.loop import db_tool_sink
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
+from .vm.turn import run_agent_turn
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .agents_api import _read
 from .auth import require_user
@@ -122,10 +123,11 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
         history = [{"role": "user", "content": task}]
         final_content = ""
         try:
-            async for event in run_turn(conversation_id, system_prompt, history,
-                                        tools=tools, model_name=mdl,
-                                        base_url=burl, max_iterations=cap,
-                                        on_tool_call=db_tool_sink(db, conversation_id)):
+            async for event in run_agent_turn(conversation_id, system_prompt, history,
+                                              tools=tools, model_name=mdl,
+                                              base_url=burl, max_iterations=cap,
+                                              active_project=active,
+                                              on_tool_call=db_tool_sink(db, conversation_id)):
                 if event["type"] == "final":
                     final_content = event["content"]
         finally:
@@ -206,9 +208,10 @@ async def run_agent(slug: str, body: RunAgent):
             mdl, burl = _agent_overrides(agent)
             history = [{"role": "user", "content": body.task}]
             final_content = ""
-            async for event in run_turn(conversation_id, system_prompt, history,
-                                        tools=tools, model_name=mdl, base_url=burl,
-                                        on_tool_call=db_tool_sink(db, conversation_id)):
+            async for event in run_agent_turn(conversation_id, system_prompt, history,
+                                              tools=tools, model_name=mdl, base_url=burl,
+                                              active_project=active,
+                                              on_tool_call=db_tool_sink(db, conversation_id)):
                 if event["type"] == "final":
                     final_content = event["content"]
                 else:

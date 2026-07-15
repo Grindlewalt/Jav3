@@ -170,6 +170,14 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             db = await get_db()
             try:
                 final = ""
+                # NOTE (M4): orchestrator leaves still run the loop host-side. A
+                # deploy_agents team fans out many leaf turns CONCURRENTLY on one
+                # project, so guest-routing them needs a single per-operation
+                # workspace prime (run_job pushes once, leaves reuse) instead of
+                # per-turn push — otherwise concurrent fresh-unpacks race on the
+                # shared guest workspace dir. Tracked as the M4c follow-up; the
+                # other four callers (chat, spawn_agent x2, schedules) are on the
+                # guest via run_agent_turn.
                 async for ev in run_turn(cid, system_prompt,
                                          [{"role": "user", "content": brief}],
                                          tools=leaf_tools, self_check=False,

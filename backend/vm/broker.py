@@ -16,6 +16,7 @@ active_project / web_session / ephemeral.
 from dataclasses import dataclass
 
 from .. import runtime
+from ..agent import budget as budget_mod
 from ..agent.tools import registry
 
 
@@ -66,6 +67,10 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
              runtime.event_chan)
     vals = (env.web_session, env.ephemeral, env.artifact_slug, env.event_chan)
     tokens = [v.set(val) for v, val in zip(vars_, vals)]
+    # also restore the operation's budget id: a tool that itself runs a turn
+    # (spawn_agent, deploy_agents) must resolve THIS operation's Budget so the
+    # nested loop meters into it and knows it is nested (shares the guest).
+    optok = budget_mod.active_op_id.set(env.op_id)
     try:
         # tier-4 hook (pre-dispatch): policy / deterministic diff-gate on
         # (name, args, env) — halt-for-human or reject goes here.
@@ -74,5 +79,6 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
         # volume accounting goes here, keyed off `name` + `env`.
         return {"result": result, "taint": classify_taint(name)}
     finally:
+        budget_mod.active_op_id.reset(optok)
         for v, tok in zip(vars_, tokens):
             v.reset(tok)

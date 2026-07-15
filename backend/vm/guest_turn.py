@@ -35,18 +35,33 @@ def config_snapshot() -> dict:
 
 async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                      tool_specs=None, read_only=None, op_id=None, envelope=None,
-                     workspace_slug=None, model_name=None, base_url=None,
-                     self_check=True, max_iterations=None):
+                     active_slug=None, push_workspace=False, model_name=None,
+                     base_url=None, self_check=True, max_iterations=None):
     """Run one turn in the guest, yielding its events. Raises on a transport
     failure (connect/read) so the caller can fall back or surface an error.
 
     `envelope` (a broker.TurnEnvelope) is registered host-side by op_id for the
-    turn's tool_broker_calls; the guest never carries it."""
+    turn's tool_broker_calls; the guest never carries it.
+
+    `active_slug` is the project the guest's in-guest file tools operate on.
+    `push_workspace` ships that project's effective workspace (a fresh copy) and
+    pulls the staged edits back at turn end — set for a TOP-LEVEL turn. A NESTED
+    turn (spawn_agent/deploy_agents child) leaves it False: it reuses the copy its
+    parent already pushed into the same guest, so it must not re-push (which would
+    wipe the parent's in-flight staged edits), and its edits ride home on the
+    parent's turn-end pack.
+
+    A nested turn passes an op_id already carrying the operation's Budget; a
+    top-level turn's op_id is fresh, and it inherits the operation's Budget if one
+    is in scope (contextvar) so every turn in one operation meters into one Budget."""
     op_id = op_id or f"guest:{conversation_id}"
     owns_budget = budget_mod.get(op_id) is None
     if owns_budget:
-        budget_mod.register(op_id, Budget(settings.max_op_input_tokens,
-                                          settings.max_op_output_tokens))
+        # share the operation's Budget object if we're inside one (nested), else
+        # open this operation's own — release() later drops only this id's alias.
+        inherited = budget_mod.current()
+        budget_mod.register(op_id, inherited or Budget(
+            settings.max_op_input_tokens, settings.max_op_output_tokens))
     if envelope is not None:
         broker.register_turn(envelope)
     spec = {
@@ -63,13 +78,13 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         "self_check": self_check,
         "max_iterations": max_iterations,
         "config": config_snapshot(),
+        "active_slug": active_slug,
     }
-    if workspace_slug:
+    if push_workspace and active_slug:
         # push the effective workspace (canonical + Jarvis's staged edits) so the
         # in-guest file tools work on a copy; staged edits come back after the turn.
-        spec["workspace_slug"] = workspace_slug
         spec["workspace_tar_b64"] = base64.b64encode(
-            workspace_xfer.build_merged_tar(workspace_slug)).decode()
+            workspace_xfer.build_merged_tar(active_slug)).decode()
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     try:
@@ -94,10 +109,12 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             if ev.get("type") == "staged":
                 # the guest's staged edits, sent AFTER `final` — reconcile them
                 # host-side (host stage_write + secret scan) and don't surface it
-                # to the caller. The stream ends when the guest closes.
-                if workspace_slug:
+                # to the caller. Only a top-level turn receives this (it owns the
+                # workspace); nested edits ride home on it. The stream ends when
+                # the guest closes.
+                if push_workspace and active_slug:
                     workspace_xfer.reconcile_staged(
-                        workspace_slug, base64.b64decode(ev.get("tar_b64") or ""))
+                        active_slug, base64.b64decode(ev.get("tar_b64") or ""))
                 continue
             yield ev
     finally:

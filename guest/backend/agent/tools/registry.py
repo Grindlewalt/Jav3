@@ -12,6 +12,7 @@ import json
 import socket
 import traceback
 
+from ... import turnctx
 from ...config import settings
 
 HOST_CID = socket.VMADDR_CID_HOST          # 2
@@ -21,32 +22,30 @@ IN_GUEST_TOOLS = frozenset({"read_file", "list_files", "search_codebase",
                             "crawl_codebase", "write_file", "edit_file",
                             "dashboard", "todo_update"})
 
-_specs: list[dict] = []
-_read_only: frozenset[str] = frozenset()
-_op_id: str | None = None
-_gateway_port = 5555
+# handler modules are stateless and keyed by name, so this cache is safely shared
+# across turns; the per-turn state (specs, op_id, ...) lives in turnctx.
 _handlers: dict[str, object] = {}
 
 
 def set_registry(specs, read_only) -> None:
-    global _specs, _read_only
-    _specs = specs or []
-    _read_only = frozenset(read_only or [])
+    """Test/direct-use setter: bind the tool snapshot into the turn context.
+    The run-turn server uses turnctx.enter() instead."""
+    turnctx.specs.set(tuple(specs or ()))
+    turnctx.read_only.set(frozenset(read_only or []))
 
 
 def set_turn(op_id, gateway_port=None) -> None:
-    global _op_id, _gateway_port
-    _op_id = op_id
+    turnctx.op_id.set(op_id)
     if gateway_port:
-        _gateway_port = gateway_port
+        turnctx.gateway_port.set(gateway_port)
 
 
 def openai_tool_specs(entries=None) -> list[dict]:
-    return _specs
+    return list(turnctx.specs.get())
 
 
 def read_only_names(entries=None) -> frozenset[str]:
-    return _read_only
+    return turnctx.read_only.get()
 
 
 async def dispatch(name: str, args: dict) -> str:
@@ -88,10 +87,11 @@ async def _local_dispatch(name: str, args: dict) -> str:
 async def _broker_dispatch(name: str, args: dict) -> str:
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    await loop.run_in_executor(None, s.connect, (HOST_CID, _gateway_port))
+    await loop.run_in_executor(None, s.connect, (HOST_CID, turnctx.gateway_port.get()))
     s.setblocking(False)
     try:
-        req = {"op": "tool_broker_call", "op_id": _op_id, "name": name, "args": args}
+        req = {"op": "tool_broker_call", "op_id": turnctx.op_id.get(),
+               "name": name, "args": args}
         await loop.sock_sendall(s, (json.dumps(req) + "\n").encode())
         buf = b""
         while b"\n" not in buf:

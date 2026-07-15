@@ -12,7 +12,8 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .agent.loop import db_tool_sink, run_turn
+from .agent.loop import db_tool_sink
+from .vm.turn import run_agent_turn
 from .agent.model import confirm_peak
 from .agents_run import run_agent_headless
 from .auth import require_user
@@ -236,9 +237,10 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
         wtoken = runtime.web_session.set(f"run:{conversation_id}")
         final = ""
         try:
-            async for ev in run_turn(conversation_id, system_prompt,
-                                     [{"role": "user", "content": task}],
-                                     on_tool_call=db_tool_sink(db, conversation_id)):
+            async for ev in run_agent_turn(conversation_id, system_prompt,
+                                           [{"role": "user", "content": task}],
+                                           active_project=active,
+                                           on_tool_call=db_tool_sink(db, conversation_id)):
                 if ev["type"] == "final":
                     final = ev["content"]
         finally:

@@ -3,11 +3,15 @@
 (guest -> host, CID 2) and relays its streamed events. The DeepSeek key, peak
 gate, budget metering, and DSML recovery all stay host-side in the gateway — this
 is a thin relay that attaches the turn's op_id and re-raises a budget/model stop.
+
+The op_id and gateway port are read from `turnctx` (task-local), not instance
+state, so concurrent turns sharing this one client never cross their op_ids.
 """
 import asyncio
 import json
 import socket
 
+from .. import turnctx
 from .budget import BudgetExceeded
 
 HOST_CID = socket.VMADDR_CID_HOST          # 2 — the host, from inside the guest
@@ -18,24 +22,16 @@ class ModelError(Exception):
 
 
 class VsockModelClient:
-    def __init__(self):
-        self.op_id: str | None = None
-        self.gateway_port = 5555            # settings.vm_vsock_port; set per turn
-
-    def set_turn(self, op_id: str | None, gateway_port: int | None = None) -> None:
-        self.op_id = op_id
-        if gateway_port:
-            self.gateway_port = gateway_port
-
     async def complete(self, messages, tools=None, conversation_id=None,
                        temperature=None, model_name=None, base_url=None):
         loop = asyncio.get_running_loop()
         s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
         # blocking connect in an executor (works under any event loop, incl.
         # uvloop whose sock_connect getaddrinfo-chokes on a vsock (cid,port))
-        await loop.run_in_executor(None, s.connect, (HOST_CID, self.gateway_port))
+        await loop.run_in_executor(None, s.connect,
+                                   (HOST_CID, turnctx.gateway_port.get()))
         s.setblocking(False)
-        req = {"op": "model_call", "op_id": self.op_id, "messages": messages,
+        req = {"op": "model_call", "op_id": turnctx.op_id.get(), "messages": messages,
                "tools": tools, "temperature": temperature,
                "conversation_id": conversation_id, "model_name": model_name,
                "base_url": base_url}

@@ -16,11 +16,8 @@ import socket
 import tarfile
 
 from . import config as guest_config
-from . import memory as guest_memory
-from .agent import model as guest_model
+from . import turnctx
 from .agent.loop import run_turn
-from .agent.tools import registry as guest_registry
-from .agent.tools import toolctx as guest_toolctx
 
 PORT = 5556                                 # guest run-turn server (host dials this)
 
@@ -46,6 +43,7 @@ def _pack_staging(slug: str) -> str:
 
 
 async def _handle(loop, conn) -> None:
+    tokens = None
     try:
         buf = b""
         while b"\n" not in buf:
@@ -56,18 +54,21 @@ async def _handle(loop, conn) -> None:
         line, _ = buf.split(b"\n", 1)
         spec = json.loads(line)
 
-        # apply the pushed turn context to the shims the loop reads
+        # process-global config knobs (identical every turn); the per-turn state
+        # (op_id, tool specs, rules, active slug) is bound task-local below so
+        # concurrent turns in this one guest never overwrite each other's.
         guest_config.apply(spec.get("config"))
-        guest_memory.set_rules(spec.get("rules", ""))
-        guest_registry.set_registry(spec.get("tool_specs"), spec.get("read_only"))
-        guest_registry.set_turn(spec.get("op_id"), spec.get("gateway_port"))
-        guest_model.model.set_turn(spec.get("op_id"), spec.get("gateway_port"))
 
-        # the pushed workspace copy the in-guest file tools operate on
-        slug = spec.get("workspace_slug")
-        if slug and spec.get("workspace_tar_b64"):
+        # the active project the in-guest file tools operate on. A top-level turn
+        # ships the workspace tar and we unpack a fresh copy; a nested turn reuses
+        # the copy its parent already pushed (same slug), so it carries only the
+        # slug and we neither unpack (which would wipe the parent's staged edits)
+        # nor pack — the top-level turn packs the shared .staging at its end.
+        slug = spec.get("active_slug")
+        owns_workspace = bool(slug and spec.get("workspace_tar_b64"))
+        if owns_workspace:
             _unpack_workspace(slug, spec["workspace_tar_b64"])
-            guest_toolctx.set_active(slug)
+        tokens = turnctx.enter(spec, slug)
 
         async def send(ev: dict) -> None:
             await loop.sock_sendall(conn, (json.dumps(ev) + "\n").encode())
@@ -89,11 +90,13 @@ async def _handle(loop, conn) -> None:
                         "content": f"(guest loop error: {type(e).__name__}: {e})"})
 
         # ship the guest's staged edits back for host-side reconcile + approval
-        if slug:
+        if owns_workspace:
             await send({"type": "staged", "slug": slug, "tar_b64": _pack_staging(slug)})
     except (ConnectionError, OSError):
         pass
     finally:
+        if tokens is not None:
+            turnctx.reset(tokens)
         try:
             conn.close()
         except OSError:

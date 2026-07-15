@@ -301,7 +301,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             source = guest_turn(conversation_id, system_prompt, history,
                                 rules=standing_rules_tail(), tool_specs=tools,
                                 read_only=list(read_only_names(entries)),
-                                op_id=op_id, envelope=envelope, workspace_slug=active)
+                                op_id=op_id, envelope=envelope,
+                                active_slug=active, push_workspace=True)
         else:
             source = run_turn(conversation_id, system_prompt, history, tools=tools,
                               on_tool_call=db_tool_sink(db, conversation_id))

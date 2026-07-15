@@ -216,7 +216,7 @@ async def test_headless_agent_gets_subagent_cap(client, monkeypatch):
         seen.update(kw)
         yield {"type": "final", "content": "ok"}
 
-    monkeypatch.setattr(agents_run, "run_turn", fake_run_turn)
+    monkeypatch.setattr(agents_run, "run_agent_turn", fake_run_turn)
     await client.post("/api/agents", json={"name": "Scout"})
     r = await agents_run.run_agent_headless("scout", "look around")
     assert r["final"] == "ok"
