@@ -38,9 +38,7 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
     from ..memory import standing_rules_tail
     from . import broker
     from .guest_turn import guest_turn
-    from .lifecycle import vm as guest_vm
 
-    await guest_vm.ensure_ready()
     nested = budget_mod.current() is not None    # already inside an operation?
     op_id = f"guest:{conversation_id}"
     if tools is None:

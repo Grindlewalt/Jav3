@@ -291,8 +291,6 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # run the ReAct loop INSIDE the guest; host tools brokered over vsock.
             from .vm.broker import TurnEnvelope
             from .vm.guest_turn import guest_turn
-            from .vm.lifecycle import vm as guest_vm
-            await guest_vm.ensure_ready()
             envelope = TurnEnvelope(
                 op_id=op_id, conversation_id=conversation_id, active_project=active,
                 artifact_slug=(f"chat-{conversation_id}" if atoken is not None else None),

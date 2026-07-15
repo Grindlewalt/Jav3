@@ -164,6 +164,14 @@ class Settings(BaseSettings):
     # host tools brokered over vsock. Off by default until the guest path is the
     # proven default (cutover in M4); flip per-turn tests via the flag.
     use_guest_loop: bool = False
+    # Idle scrub (M4c): reboot the single guest once it has been idle (no in-flight
+    # turn) for this many seconds, so the next operation batch lands in a FRESH
+    # guest instead of inheriting the previous one's state. The reboot happens
+    # during idle time, so it costs no per-turn latency and needs no second guest
+    # (a warm pool is the wrong fit for this Pi's memory). 0 disables it — the
+    # guest then persists across operations until a manual /api/vm/nuke.
+    vm_idle_scrub_seconds: int = 0
+    vm_reaper_interval_seconds: int = 30
 
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,

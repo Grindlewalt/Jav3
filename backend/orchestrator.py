@@ -19,7 +19,8 @@ import asyncio
 from . import bus
 from .agent import budget as budget_mod
 from .agent.agent import Agent
-from .agent.loop import db_tool_sink, run_turn
+from .agent.loop import db_tool_sink
+from .vm.turn import run_agent_turn
 from .agent.model import complete_text, confirm_peak
 from .config import settings
 from .db import get_db, open_conversation
@@ -170,19 +171,15 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             db = await get_db()
             try:
                 final = ""
-                # NOTE (M4): orchestrator leaves still run the loop host-side. A
-                # deploy_agents team fans out many leaf turns CONCURRENTLY on one
-                # project, so guest-routing them needs a single per-operation
-                # workspace prime (run_job pushes once, leaves reuse) instead of
-                # per-turn push — otherwise concurrent fresh-unpacks race on the
-                # shared guest workspace dir. Tracked as the M4c follow-up; the
-                # other four callers (chat, spawn_agent x2, schedules) are on the
-                # guest via run_agent_turn.
-                async for ev in run_turn(cid, system_prompt,
-                                         [{"role": "user", "content": brief}],
-                                         tools=leaf_tools, self_check=False,
-                                         max_iterations=cap,
-                                         on_tool_call=db_tool_sink(db, cid)):
+                # leaves run the loop in the guest too (run_agent_turn). They are
+                # nested (the job's Budget is in scope), so they reuse the single
+                # workspace copy run_job primed up front — see run_job below.
+                async for ev in run_agent_turn(cid, system_prompt,
+                                               [{"role": "user", "content": brief}],
+                                               tools=leaf_tools, self_check=False,
+                                               max_iterations=cap,
+                                               active_project=project,
+                                               on_tool_call=db_tool_sink(db, cid)):
                     if ev["type"] in ("token", "tool"):
                         bus.publish(job_id, {**ev, "node_id": cid})
                     elif ev["type"] == "final":
@@ -248,12 +245,36 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     # tree dedups against its siblings, and the next job starts fresh
     from . import runtime
     wtoken = runtime.web_session.set(f"job:{job_id}")
+
+    # guest workspace: a TOP-LEVEL job (we created the budget) owns the workspace
+    # lifecycle — prime one copy the concurrent leaves reuse, reconcile it at the
+    # end. A NESTED job (under a guest chat that already pushed + will pack) skips
+    # both. Best-effort: a guest hiccup must not sink the whole job.
+    prime_guest = (settings.use_guest_loop and optok is not None and bool(project))
+    acquired = False
+    if prime_guest:
+        from .vm.guest_turn import prime_workspace
+        from .vm.lifecycle import vm as guest_vm
+        try:
+            await guest_vm.acquire()        # pin the guest for the whole job
+            acquired = True
+            await prime_workspace(project)
+        except Exception:  # noqa: BLE001 — fall through; leaves surface guest errors
+            pass
     try:
         result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
                                 project=project, depth=0, budget=ncap,
                                 leaf_tools=leaf_tools, peak=peak, deliverable=deliverable)
     finally:
         runtime.web_session.reset(wtoken)
+        if acquired:
+            from .vm.guest_turn import pull_staging
+            from .vm.lifecycle import vm as guest_vm
+            try:
+                await pull_staging(project)
+            except Exception:  # noqa: BLE001 — reconcile is best-effort
+                pass
+            guest_vm.release()
         if optok is not None:
             budget_mod.active_op_id.reset(optok)
             budget_mod.release(job_id)

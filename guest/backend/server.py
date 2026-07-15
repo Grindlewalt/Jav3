@@ -54,6 +54,26 @@ async def _handle(loop, conn) -> None:
         line, _ = buf.split(b"\n", 1)
         spec = json.loads(line)
 
+        async def send(ev: dict) -> None:
+            await loop.sock_sendall(conn, (json.dumps(ev) + "\n").encode())
+
+        # prime / pull: an operation that fans out many concurrent leaf turns on one
+        # project (an orchestrator team) pushes the workspace ONCE up front and pulls
+        # the accumulated .staging ONCE at the end, so the leaves reuse a single copy
+        # instead of each racing a fresh unpack.
+        mode = spec.get("mode")
+        if mode == "prime":
+            slug = spec.get("active_slug")
+            if slug and spec.get("workspace_tar_b64"):
+                _unpack_workspace(slug, spec["workspace_tar_b64"])
+            await send({"type": "primed"})
+            return
+        if mode == "pull":
+            slug = spec.get("active_slug")
+            await send({"type": "staged", "slug": slug,
+                        "tar_b64": _pack_staging(slug) if slug else ""})
+            return
+
         # process-global config knobs (identical every turn); the per-turn state
         # (op_id, tool specs, rules, active slug) is bound task-local below so
         # concurrent turns in this one guest never overwrite each other's.
@@ -69,9 +89,6 @@ async def _handle(loop, conn) -> None:
         if owns_workspace:
             _unpack_workspace(slug, spec["workspace_tar_b64"])
         tokens = turnctx.enter(spec, slug)
-
-        async def send(ev: dict) -> None:
-            await loop.sock_sendall(conn, (json.dumps(ev) + "\n").encode())
 
         try:
             async for ev in run_turn(

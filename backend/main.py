@@ -14,7 +14,7 @@ from .config import settings, ensure_dirs
 from .db import init_db
 from .memory import ensure_memory_seeds
 from .vm.gateway_server import gateway
-from .vm.lifecycle import vm
+from .vm.lifecycle import reaper_loop, vm
 
 
 @asynccontextmanager
@@ -25,11 +25,13 @@ async def lifespan(app: FastAPI):
     await schedules.ensure_default_schedules()
     compile_registry()
     task = asyncio.create_task(schedules.scheduler_loop())
+    reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
     await gateway.start()          # host vsock model gateway (no-op if no vsock)
     try:
         yield
     finally:
         task.cancel()
+        reaper.cancel()
         await gateway.stop()
         await vm.teardown()        # never leave a guest running past shutdown
 

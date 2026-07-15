@@ -85,6 +85,8 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         # in-guest file tools work on a copy; staged edits come back after the turn.
         spec["workspace_tar_b64"] = base64.b64encode(
             workspace_xfer.build_merged_tar(active_slug)).decode()
+    from .lifecycle import vm as guest_vm
+    await guest_vm.acquire()          # boot + pin the guest for this turn's life
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     try:
@@ -119,7 +121,45 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             yield ev
     finally:
         s.close()
+        guest_vm.release()
         if envelope is not None:
             broker.release_turn(op_id)
         if owns_budget:
             budget_mod.release(op_id)
+
+
+async def _guest_rpc(spec: dict) -> dict | None:
+    """One short request/response to the guest run-turn server (prime / pull)."""
+    loop = asyncio.get_running_loop()
+    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    try:
+        await loop.run_in_executor(
+            None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+        s.setblocking(False)
+        await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = await loop.sock_recv(s, 65536)
+            if not chunk:
+                return None
+            buf += chunk
+        return json.loads(buf.split(b"\n", 1)[0])
+    finally:
+        s.close()
+
+
+async def prime_workspace(slug: str) -> None:
+    """Push ONE fresh workspace copy for an operation whose turns will reuse it
+    (orchestrator leaves fan out concurrently on one project — priming once up
+    front avoids each leaf racing a fresh unpack of the shared guest dir)."""
+    tar_b64 = base64.b64encode(workspace_xfer.build_merged_tar(slug)).decode()
+    await _guest_rpc({"mode": "prime", "active_slug": slug,
+                      "workspace_tar_b64": tar_b64})
+
+
+async def pull_staging(slug: str) -> None:
+    """Pull the operation's accumulated guest .staging and reconcile it host-side
+    (stage_write + secret scan) — the counterpart to prime_workspace."""
+    ev = await _guest_rpc({"mode": "pull", "active_slug": slug})
+    if ev and ev.get("type") == "staged":
+        workspace_xfer.reconcile_staged(slug, base64.b64decode(ev.get("tar_b64") or ""))

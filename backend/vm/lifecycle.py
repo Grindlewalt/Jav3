@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import socket
+import time
 from pathlib import Path
 
 from ..config import settings
@@ -43,15 +44,27 @@ _EXTERNAL_RE = re.compile(r"GUEST-NET-EXTERNAL-REACHABLE: (True|False)")
 class GuestVM:
     def __init__(self):
         self._proc: asyncio.subprocess.Process | None = None
+        # lifecycle transitions (boot/teardown/reap) are serialized so the idle
+        # reaper can never nuke a guest a turn is starting on, and two turns never
+        # double-boot. `_inflight` counts turns holding the guest; `_idle_since`
+        # is when it last fell to zero (the reaper's clock).
+        self._lock = asyncio.Lock()
+        self._inflight = 0
+        self._idle_since: float | None = None
+        self._booted_at: float | None = None
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
     def status(self) -> dict:
+        age = int(time.monotonic() - self._booted_at) if self._booted_at else None
         return {"image_version": settings.vm_image_version,
                 "base_built": base_built(),
                 "running": self.running(),
-                "gateway": gateway.enabled}
+                "gateway": gateway.enabled,
+                "inflight": self._inflight,
+                "age_seconds": age,
+                "idle_scrub_seconds": settings.vm_idle_scrub_seconds}
 
     async def _build_overlay(self) -> None:
         base = _base_image()
@@ -67,9 +80,24 @@ class GuestVM:
         if proc.returncode != 0:
             raise VMError(f"overlay create failed: {err.decode(errors='replace')}")
 
+    async def _kill_orphans(self) -> None:
+        """Kill any qemu still holding OUR overlay (hence the guest CID) that we no
+        longer track — a guest orphaned across an app restart (setsid detaches it
+        from the process group teardown kills). Without this, a reboot's fresh guest
+        can't bind the CID and the host would keep talking to the stale one."""
+        overlay = str(settings.vm_dir / "overlay.qcow2")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-9", "-f", overlay,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+        except (FileNotFoundError, OSError):
+            pass
+
     async def boot(self) -> None:
         if self.running():
             return
+        await self._kill_orphans()
         await self._build_overlay()
         _console_log().unlink(missing_ok=True)
         run_vm = settings.base_dir / "vm" / "run_vm.sh"
@@ -82,6 +110,8 @@ class GuestVM:
         self._proc = await asyncio.create_subprocess_exec(
             "bash", str(run_vm), env=env, preexec_fn=os.setsid,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        self._booted_at = time.monotonic()
+        self._idle_since = time.monotonic()
 
     async def teardown(self) -> None:
         if self._proc is not None and self._proc.returncode is None:
@@ -94,17 +124,50 @@ class GuestVM:
             except asyncio.TimeoutError:
                 pass
         self._proc = None
+        self._booted_at = None
+        await self._kill_orphans()
         for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log"):
             (settings.vm_dir / name).unlink(missing_ok=True)
 
     async def nuke(self) -> None:
-        await self.teardown()
-        await self.boot()
+        async with self._lock:
+            await self.teardown()
+            await self.boot()
 
-    async def ensure_ready(self) -> None:
+    # --- refcount + idle scrub -------------------------------------------------
+
+    async def acquire(self) -> None:
+        """Ensure the guest is up and pin it for one turn. Serialized so the reaper
+        can't tear down between the readiness check and the pin."""
+        async with self._lock:
+            await self._ensure_ready_locked()
+            self._inflight += 1
+
+    def release(self) -> None:
+        """Release one turn's hold; start the idle clock when the last one leaves."""
+        self._inflight = max(0, self._inflight - 1)
+        if self._inflight == 0:
+            self._idle_since = time.monotonic()
+
+    async def reap_if_idle(self) -> None:
+        """If scrubbing is on and the guest has sat idle past the threshold, reboot
+        it so the next operation batch starts fresh. No-op while a turn is in
+        flight or scrubbing is disabled."""
+        window = settings.vm_idle_scrub_seconds
+        if not window or not self.running() or self._inflight > 0:
+            return
+        if self._idle_since is None or time.monotonic() - self._idle_since < window:
+            return
+        async with self._lock:
+            if self._inflight > 0:          # a turn arrived while we waited
+                return
+            await self.teardown()
+            await self.boot()
+
+    async def _ensure_ready_locked(self) -> None:
         """Boot the guest if it isn't running and wait until its run-turn server
-        accepts a connection. Idempotent — a persistent guest serves many turns
-        (a warm pool replaces this in M4)."""
+        accepts a connection. Caller holds `_lock`. Idempotent — one guest serves
+        many turns; the idle reaper reboots it between operation batches."""
         if not base_built():
             raise VMError("no golden image — run vm/build_base.sh on the Pi first")
         if not gateway.enabled:
@@ -124,6 +187,10 @@ class GuestVM:
             finally:
                 s.close()
         raise VMError("guest run-turn server did not become ready in time")
+
+    async def ensure_ready(self) -> None:
+        async with self._lock:
+            await self._ensure_ready_locked()
 
     def _isolation(self) -> dict:
         text = _console_log().read_text(errors="replace") if _console_log().exists() else ""
@@ -173,3 +240,16 @@ class GuestVM:
 
 # module-level singleton, driven by the vm_api router
 vm = GuestVM()
+
+
+async def reaper_loop() -> None:
+    """Background: scrub the guest once it has gone idle (M4c). Cheap and inert
+    while vm_idle_scrub_seconds is 0. Started from the app lifespan."""
+    while True:
+        try:
+            await asyncio.sleep(settings.vm_reaper_interval_seconds)
+            await vm.reap_if_idle()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a reaper hiccup must never kill the loop
+            pass
