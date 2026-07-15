@@ -1,7 +1,7 @@
-"""Light execution sandbox for workspace runs on the Pi host.
+"""Light execution runner for workspace runs on the Pi host.
 
-This is NOT the monitored QEMU sandbox (that's pass 2, M3-M4) — it's a
-convenience runner for the operator's own workspace code: subprocess with
+This is NOT an agent execution sandbox — it's a convenience runner, driven
+only by the operator from the Workspace Run panel: subprocess with
 rlimits, a timeout, and process-group kill. Artifacts (plots, PDFs, anything
 written to the project dir) are detected by mtime and surfaced to the GUI.
 """

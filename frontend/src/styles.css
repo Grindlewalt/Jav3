@@ -344,30 +344,6 @@ kbd {
 }
 .console.err { color: #f0938d; border-color: #5c2626; }
 
-/* ---- sandbox terminal ---- */
-.vm-term {
-  flex: 1; min-height: 160px; overflow-y: auto; margin: 8px 0 0;
-  background: var(--bg); border: 1px solid var(--border); border-radius: 8px 8px 0 0;
-  padding: 10px 12px; font: 12.5px/1.5 ui-monospace, Menlo, monospace;
-}
-.vm-term-entry { margin-bottom: 6px; }
-.vm-term-cmd { color: var(--text); white-space: pre-wrap; word-break: break-all; }
-.vm-prompt { color: var(--green); user-select: none; }
-.vm-term-out {
-  margin: 2px 0 0; white-space: pre-wrap; word-wrap: break-word; color: var(--dim);
-  font: inherit;
-}
-.vm-term-out.err { color: #f0938d; }
-.vm-term-input {
-  display: flex; align-items: center; gap: 6px; padding: 6px 12px;
-  background: var(--bg); border: 1px solid var(--border); border-top: 0;
-  border-radius: 0 0 8px 8px;
-}
-.vm-term-input input {
-  border: 0; background: none; padding: 0; border-radius: 0;
-  color: var(--text); font: 12.5px/1.5 ui-monospace, Menlo, monospace;
-}
-.vm-term-input input:focus { border: 0; outline: none; }
 .artifacts { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 .artifact a { color: var(--accent); font-family: ui-monospace, Menlo, monospace;
               font-size: 13px; }
@@ -434,12 +410,6 @@ kbd {
                                     width: 16px; height: 16px; }
 .todo-list li button { margin-left: auto; }
 
-/* ---- sandbox vm panel ---- */
-.vm-status { align-items: center; }
-.vm-light { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
-            background: var(--dim); }
-.vm-light.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.vm-light.mid { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
 .mono { font-family: ui-monospace, Menlo, monospace; }
 
 /* ---- staged changes panel ---- */
@@ -535,50 +505,7 @@ kbd {
 .run-doc { overflow-y: auto; padding: 4px 6px; }
 .run-doc h1 { font-size: 20px; } .run-doc h2 { font-size: 16px; }
 
-/* ---- sandbox review console ---- */
-.sbx-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr) 320px;
-  flex: 1; min-height: 0; }
-.sbx-queue { padding: 14px; border-right: 1px solid var(--border);
-  background: var(--bg-soft); display: flex; flex-direction: column; gap: 10px;
-  overflow-y: auto; min-height: 0; }
-.sbx-newrun { display: flex; flex-direction: column; gap: 8px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 8px; padding: 10px; }
-.sbx-newrun select, .sbx-newrun input { width: 100%; }
-.sbx-newrun-help { line-height: 1.4; margin: -2px 0 2px; }
-.sbx-egress-reqs { display: flex; flex-direction: column; gap: 6px;
-  background: var(--panel); border: 1px solid var(--amber); border-radius: 8px;
-  padding: 10px; }
-.sbx-egress-req { display: flex; flex-direction: column; gap: 3px; }
-.sbx-egress-req .sbx-actions { margin-top: 2px; }
-.net-panel { gap: 6px; overflow-y: auto; }
-.net-panel .side-title { margin-top: 6px; }
-.net-req { border: 1px solid var(--amber); border-radius: 8px; padding: 8px 10px;
-  background: var(--panel); margin-bottom: 4px; }
-.sbx-session-list { list-style: none; margin: 0; padding: 0; display: flex;
-  flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; }
-.sbx-session { padding: 8px 10px; background: var(--panel);
-  border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
-  font-size: 13px; transition: border-color 0.15s; }
-.sbx-session:hover { border-color: #37404d; }
-.sbx-session.active { border-color: var(--accent); }
-.sbx-session-top { display: flex; align-items: center; gap: 8px; }
-.sbx-headline { font: 11.5px/1.5 ui-monospace, Menlo, monospace;
-  color: var(--dim); margin: 2px 0; }
-.sbx-main { overflow-y: auto; min-height: 0; padding: 18px 22px; }
-.sbx-rail { padding: 14px; border-left: 1px solid var(--border);
-  background: var(--bg-soft); display: flex; flex-direction: column; gap: 10px;
-  overflow-y: auto; min-height: 0; }
-.sbx-pill { border-radius: 20px; padding: 1px 9px; font-size: 11px;
-  font-weight: 600; white-space: nowrap; flex-shrink: 0; }
-.sbx-pill.lg { font-size: 12.5px; padding: 2px 12px; }
-.sbx-pill.crit { background: #e5534b26; color: var(--red); }
-.sbx-pill.warn { background: #d9a94a26; color: var(--amber); }
-.sbx-pill.ok { background: #3fb95026; color: var(--green); }
-.sbx-pill.muted { background: var(--panel-2); color: var(--dim); }
-.sbx-rule-chip { font: 11px ui-monospace, Menlo, monospace;
-  color: var(--accent); background: #5b9cf514; border: 1px solid #5b9cf53a;
-  border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+/* ---- stat cards / verdict tiles (shared by the Logs cost & activity view) ---- */
 .sbx-card { background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px; }
 .sbx-verdict-top { display: flex; align-items: center; gap: 10px;
@@ -620,13 +547,6 @@ kbd {
 .sbx-toast { background: var(--panel-2); border: 1px solid var(--border);
   border-radius: 8px; padding: 9px 14px; font-size: 13px; max-width: 380px;
   box-shadow: 0 10px 32px #0008; }
-@media (max-width: 1000px) {
-  .sbx-layout { display: flex; flex-direction: column; overflow-y: auto; }
-  .sbx-queue, .sbx-rail { border-right: 0; border-left: 0;
-    border-bottom: 1px solid var(--border); overflow-y: visible; }
-  .sbx-queue { max-height: 40vh; overflow-y: auto; }
-  .sbx-main { overflow-y: visible; }
-}
 
 /* ---- logs transcript viewer ---- */
 .log-row { display: block; }

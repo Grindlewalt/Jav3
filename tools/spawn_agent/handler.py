@@ -1,11 +1,11 @@
 from backend import agents_run
-from backend.agent.budget import active_budget
+from backend.agent.budget import current as current_budget
 from backend.db import get_db
 
 
 async def run(agent: str, task: str) -> str:
     from fastapi import HTTPException
-    b = active_budget.get()
+    b = current_budget()
     before = (b.input_tokens + b.output_tokens) if b else None
     try:
         result = await agents_run.run_agent_headless(agent, task)

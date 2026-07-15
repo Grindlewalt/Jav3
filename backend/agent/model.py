@@ -136,8 +136,12 @@ async def record_model_call(conversation_id: int | None, model_name: str,
         await db.close()
 
 
-class Model:
-    """DeepSeek behind an OpenAI-compatible chat-completions API."""
+class ModelClient:
+    """Pure transport to the OpenAI-compatible chat-completions endpoint: it
+    builds the request, streams it (with retry + DSML recovery), and yields
+    events. It holds NO key policy, budget, peak gate, or ledger — those are the
+    host nucleus (ModelGateway). The auth key is passed in per call, so this
+    layer can run keyless when a gateway drives it (the VM-inversion seam)."""
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or settings.deepseek_api_key
@@ -148,31 +152,18 @@ class Model:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
-        conversation_id: int | None = None,
         temperature: float | None = None,
         model_name: str | None = None,
         base_url: str | None = None,
+        key: str | None = None,
     ) -> AsyncIterator[dict]:
-        """Stream events: {"type": "token", "text": str} per delta, then one
-        {"type": "message", "content": str, "tool_calls": list}. Raises
-        PeakPricingConfirmationRequired before any network I/O if gated.
-
-        model_name/base_url override the defaults so an agent can run on a
-        different model or a local endpoint (e.g. ollama). A custom endpoint
-        usually needs no key, so the DeepSeek-key requirement is relaxed there."""
-        if conversation_id is not None:
-            check_peak_gate(conversation_id)
-        budget = budget_mod.active_budget.get()
-        if budget is not None and budget.over():
-            raise budget_mod.BudgetExceeded(
-                f"token budget spent ({budget.summary()})")
+        """Stream {"type": "token", "text": str} per delta, then one
+        {"type": "message", "content", "tool_calls", "usage"} with any DSML
+        tool-call markup already recovered. Transport only — no metering, no
+        gate; those live in ModelGateway."""
         base = (base_url or self.base_url).rstrip("/")
         name = model_name or self.name
-        key = self.api_key
-        if base_url:                       # custom endpoint (ollama etc.)
-            key = self.api_key or "local"  # local servers ignore the auth header
-        elif not key:
-            raise ModelError("DEEPSEEK_API_KEY is not set (~/.config/jarvis/env, JARVIS_DEEPSEEK_API_KEY=...)")
+        key = key or self.api_key
 
         payload: dict = {
             "model": name,
@@ -210,13 +201,6 @@ class Model:
                     settings.model_retry_backoff_seconds * (2 ** attempt))
 
         assert raw is not None
-        usage = raw["usage"]
-        if budget is not None:
-            budget.add(usage or {})
-        try:
-            await record_model_call(conversation_id, name, usage, messages, tools)
-        except Exception:  # noqa: BLE001 — the ledger must never fail a call
-            pass
         content = raw["content"]
         tcs = raw["tool_calls"]
         # recover native-markup tool calls the serving layer failed to parse
@@ -225,7 +209,8 @@ class Model:
             if recovered:
                 tcs = recovered
                 content = ""   # the markup was the tool call, not a message
-        yield {"type": "message", "content": content, "tool_calls": tcs, "usage": usage}
+        yield {"type": "message", "content": content, "tool_calls": tcs,
+               "usage": raw["usage"]}
 
     async def _stream_once(self, base: str, key: str, payload: dict) -> AsyncIterator[dict]:
         """One streaming HTTP attempt: token events, then a single raw
@@ -283,4 +268,90 @@ class Model:
                "usage": usage}
 
 
-model = Model()
+# Back-compat alias: tests construct Model(api_key=...) and patch Model._stream_once.
+Model = ModelClient
+
+
+class ModelGateway:
+    """The host nucleus in front of the transport: the one place that holds the
+    API-key policy, enforces the peak-pricing gate, meters the shared token
+    Budget, and writes the model_calls ledger. `complete(...)` keeps the exact
+    public contract every caller relies on (token events, then one message
+    event). Wrapping the transport this way is the seam the VM inversion splits
+    along — the transport can move guest-side while this stays on the host."""
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or settings.deepseek_api_key
+        self.transport = ModelClient(api_key=self.api_key)
+
+    async def complete(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        conversation_id: int | None = None,
+        temperature: float | None = None,
+        model_name: str | None = None,
+        base_url: str | None = None,
+        op_id: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Stream events: {"type": "token", "text": str} per delta, then one
+        {"type": "message", "content", "tool_calls", "usage"}. Raises
+        PeakPricingConfirmationRequired / BudgetExceeded before any network I/O.
+
+        The token budget is resolved by op_id (an explicit id, else the operation
+        in scope via the active_op_id contextvar) so enforcement is keyed, not
+        ambient — the seam Phase 3 uses to meter host-side across the VM boundary.
+
+        model_name/base_url override the defaults so an agent can run on a
+        different model or a local endpoint (e.g. ollama). A custom endpoint
+        usually needs no key, so the DeepSeek-key requirement is relaxed there."""
+        if conversation_id is not None:
+            check_peak_gate(conversation_id)
+        budget = budget_mod.get(op_id) if op_id else budget_mod.current()
+        if budget is not None and budget.over():
+            raise budget_mod.BudgetExceeded(
+                f"token budget spent ({budget.summary()})")
+        # key policy: a custom endpoint (ollama etc.) may need no real key
+        if base_url:
+            key = self.api_key or "local"  # local servers ignore the auth header
+        elif not self.api_key:
+            raise ModelError("DEEPSEEK_API_KEY is not set (~/.config/jarvis/env, JARVIS_DEEPSEEK_API_KEY=...)")
+        else:
+            key = self.api_key
+        name = model_name or self.transport.name
+
+        final: dict | None = None
+        async for ev in self.transport.complete(
+                messages, tools=tools, temperature=temperature,
+                model_name=model_name, base_url=base_url, key=key):
+            if ev["type"] == "token":
+                yield ev
+            else:
+                final = ev
+
+        assert final is not None
+        usage = final["usage"]
+        if budget is not None:
+            budget.add(usage or {})
+        try:
+            await record_model_call(conversation_id, name, usage, messages, tools)
+        except Exception:  # noqa: BLE001 — the ledger must never fail a call
+            pass
+        yield final
+
+
+model = ModelGateway()
+
+
+async def complete_text(system: str, user: str, temperature: float = 0.3) -> str:
+    """Drain a no-tools `system + user -> text` model call to a single string —
+    the common helper shared by summarize / research / the funnel. Runs through
+    the same `model.complete` choke point, so it shares the operation's Budget
+    contextvar and is metered like any other call."""
+    parts = []
+    async for ev in model.complete(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}], temperature=temperature):
+        if ev["type"] == "message":
+            parts.append(ev["content"] or "")
+    return "".join(parts).strip()

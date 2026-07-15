@@ -72,9 +72,10 @@ async def _run_loop(monkeypatch, fake_model, tool_result):
         await db.commit()
         events = []
         async for ev in loop_mod.run_turn(
-                db, cid, "system", [{"role": "user", "content": "go"}],
+                cid, "system", [{"role": "user", "content": "go"}],
                 tools=[{"type": "function",
-                        "function": {"name": "fake_tool", "parameters": {}}}]):
+                        "function": {"name": "fake_tool", "parameters": {}}}],
+                on_tool_call=loop_mod.db_tool_sink(db, cid)):
             events.append(ev)
         return events
     finally:
@@ -211,7 +212,7 @@ async def test_headless_agent_gets_subagent_cap(client, monkeypatch):
 
     seen = {}
 
-    async def fake_run_turn(db, cid, system_prompt, history, **kw):
+    async def fake_run_turn(cid, system_prompt, history, **kw):
         seen.update(kw)
         yield {"type": "final", "content": "ok"}
 

@@ -291,6 +291,19 @@ def parse_note(text: str) -> tuple[dict, str]:
     return (meta if isinstance(meta, dict) else {}), m.group(2).strip()
 
 
+def note_trusted(meta: dict) -> bool:
+    """Whether a note may drive the TRUSTED system prompt (binding standing memory
+    and the non-negotiable rules tail). Operator-authored notes are trusted;
+    agent-written ones (source: agent) are untrusted until the operator approves
+    them (approved: true). An untrusted note still lists in the index and is
+    readable with memory_read, but is never auto-injected as a binding rule — so
+    untrusted web content summarized into a note can't launder itself into
+    trusted context. The operator promotes a note by editing its frontmatter."""
+    if str(meta.get("source", "")).lower() != "agent":
+        return True
+    return bool(meta.get("approved"))
+
+
 def note_description(meta: dict, body: str) -> str:
     """One index line's worth of 'what is this note': the frontmatter
     description, else the first content line (headers skipped)."""
@@ -319,9 +332,15 @@ def memory_block() -> str:
             meta, body = parse_note(p.read_text())
         except OSError:
             continue
+        if not note_trusted(meta):
+            # index by NAME only: an untrusted note's description and body are
+            # agent-controlled, so none of that free text may reach the prompt.
+            # The operator reads it with memory_read to review, then approves.
+            index.append(f"- {p.stem}  [pending operator approval — read to review]")
+            continue
         index.append(f"- {p.stem} — {note_description(meta, body) or '(no description)'}")
         toks = estimate_tokens(body)
-        # always load at least the first (highest-priority) note in full
+        # always load at least the first (highest-priority) trusted note in full
         if not loaded or used + toks <= MEMORY_CONTEXT_BUDGET:
             loaded.append(f"## {p.stem}\n{body}")
             used += toks
@@ -358,9 +377,11 @@ def standing_rules_tail() -> str:
     rules = []
     for p in files:
         try:
-            _, body = parse_note(p.read_text())
+            meta, body = parse_note(p.read_text())
         except OSError:
             continue
+        if not note_trusted(meta):
+            continue  # an unapproved agent note must not reach the binding tail
         for ln in body.splitlines():
             ln = ln.strip("-*# ").strip()
             low = ln.lower()

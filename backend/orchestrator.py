@@ -19,10 +19,10 @@ import asyncio
 from . import bus
 from .agent import budget as budget_mod
 from .agent.agent import Agent
-from .agent.loop import run_turn
-from .agent.model import confirm_peak, model
+from .agent.loop import db_tool_sink, run_turn
+from .agent.model import complete_text, confirm_peak
 from .config import settings
-from .db import get_db
+from .db import get_db, open_conversation
 from .memory import assemble_system_prompt
 from .staging import stage_write
 
@@ -50,17 +50,6 @@ class _Budget:
         return self.n
 
 
-async def _complete_text(system: str, user: str, temperature: float = 0.3) -> str:
-    parts = []
-    async for ev in model.complete(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=temperature,
-    ):
-        if ev["type"] == "message":
-            parts.append(ev["content"])
-    return "".join(parts).strip()
-
-
 async def _decompose(brief: str, kind: str, hint: str | None) -> list[dict]:
     """Ask whether this node's work should be split. Returns a list of
     {kind, title} children, or [] to run DIRECT. Head children may be leaders
@@ -68,7 +57,7 @@ async def _decompose(brief: str, kind: str, hint: str | None) -> list[dict]:
     allow_leader = kind == "head"
     kinds = ("LEADER: <task> (needs further breakdown) or SUBAGENT: <task> (one narrow task)"
              if allow_leader else "SUBAGENT: <task>")
-    plan = await _complete_text(
+    plan = await complete_text(
         f"You are a {kind} planner. Decide if the work below should be broken "
         f"into pieces. If it is genuinely simple, reply with only the word "
         f"DIRECT. Otherwise reply one piece per line as:\n{kinds}\n"
@@ -93,7 +82,7 @@ async def _decompose(brief: str, kind: str, hint: str | None) -> list[dict]:
 
 async def _rollup(brief: str, output: str) -> str:
     """A tight process.md: what this node did and the result the next node needs."""
-    return await _complete_text(
+    return await complete_text(
         "Summarize this agent's work into a few tight lines (a process.md): what "
         "it did, the key result/answer, and any sources or pointers the next "
         "agent needs. No preamble.",
@@ -102,17 +91,8 @@ async def _rollup(brief: str, output: str) -> str:
 
 async def _open_child(db, parent_cid: int, job_id: str, project: str,
                       kind: str, title: str) -> int:
-    pid = None
-    if project:
-        async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
-            row = await cur.fetchone()
-        pid = row["id"] if row else None
-    cur = await db.execute(
-        "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, job_id) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (pid, f"[{kind}] {title[:60]}", kind, parent_cid, job_id))
-    await db.commit()
-    return cur.lastrowid
+    return await open_conversation(db, project=project, title=f"[{kind}] {title[:60]}",
+                                   kind=kind, parent=parent_cid, job_id=job_id)
 
 
 async def _node_context(kind: str, project: str, parent_summary: str) -> str:
@@ -190,10 +170,11 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             db = await get_db()
             try:
                 final = ""
-                async for ev in run_turn(db, cid, system_prompt,
+                async for ev in run_turn(cid, system_prompt,
                                          [{"role": "user", "content": brief}],
                                          tools=leaf_tools, self_check=False,
-                                         max_iterations=cap):
+                                         max_iterations=cap,
+                                         on_tool_call=db_tool_sink(db, cid)):
                     if ev["type"] in ("token", "tool"):
                         bus.publish(job_id, {**ev, "node_id": cid})
                     elif ev["type"] == "final":
@@ -228,16 +209,9 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     the head's final product; `_stage_deliverable` stages it if a path is set."""
     db = await get_db()
     try:
-        pid = None
-        if project:
-            async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
-                row = await cur.fetchone()
-            pid = row["id"] if row else None
-        cur = await db.execute(
-            "INSERT INTO conversations (project_id, summary, kind, job_id) "
-            "VALUES (?, ?, 'head', ?)", (pid, f"[head] {(title or brief)[:60]}", job_id))
-        root_id = cur.lastrowid
-        await db.commit()
+        root_id = await open_conversation(
+            db, project=project, title=f"[head] {(title or brief)[:60]}",
+            kind="head", job_id=job_id)
     finally:
         await db.close()
 
@@ -252,12 +226,13 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     # one token budget across every node of this job (contextvar propagates into
     # the gathered child tasks). Inherit a caller's budget if there is one, else
     # create the job's own; only reset what we created.
-    tok = None
-    tbudget = budget_mod.active_budget.get()
+    optok = None
+    tbudget = budget_mod.current()
     if tbudget is None:
         tbudget = budget_mod.Budget(settings.max_op_input_tokens,
                                     settings.max_op_output_tokens)
-        tok = budget_mod.active_budget.set(tbudget)
+        budget_mod.register(job_id, tbudget)
+        optok = budget_mod.active_op_id.set(job_id)
 
     ncap = _Budget(MAX_NODES)
     ncap.take()  # the head itself
@@ -271,8 +246,9 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
                                 leaf_tools=leaf_tools, peak=peak, deliverable=deliverable)
     finally:
         runtime.web_session.reset(wtoken)
-        if tok is not None:
-            budget_mod.active_budget.reset(tok)
+        if optok is not None:
+            budget_mod.active_op_id.reset(optok)
+            budget_mod.release(job_id)
 
     bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": root_id,
                          "rollup": result["rollup"], "doc_path": result.get("doc_path"),

@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # opt-in and heavy; captured blobs older than this are nulled out.
     context_capture_keep_days: int = 7
 
+    # Remote hosts whose images/video the render surfaces (chat markdown + the
+    # dashboard iframe) may auto-load. Everything else is blocked, so a model
+    # can't beacon data out through a resource URL to an arbitrary host. Same
+    # spirit as an egress allowlist; tune via JARVIS_MEDIA_HOSTS (JSON list).
+    media_hosts: list[str] = ["atomosnas", "upload.wikimedia.org", "i.imgur.com"]
+
     # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
     peak_windows: list[str] = ["18:00-21:00", "23:00-03:00"]
     # How long a user's "yes, use the API" answer stays valid.
@@ -138,10 +144,22 @@ class Settings(BaseSettings):
     upload_max_uncompressed_mb: int = 200
     upload_max_files: int = 5000
 
-    # Workspace runner (light host-side sandbox: rlimits + timeout)
+    # Workspace runner (light host-side runner: rlimits + timeout)
     run_python: str = "python3"
     run_timeout_seconds: int = 60
     run_max_mem_mb: int = 768
+
+    # Sandbox VM (Phase 2: a disposable KVM/QEMU guest reachable ONLY over vsock).
+    # The guest has no NIC; its one path off-box is the host model gateway, which
+    # listens on vsock port `vm_vsock_port`. base-<version>.qcow2 is the read-only
+    # golden image (built by vm/build_base.sh); guests run a qcow2 overlay on it.
+    vm_dir: Path = BASE_DIR / "data" / "vm"
+    vm_image_version: str = "v1"
+    vm_vsock_port: int = 5555            # host gateway; guest dials CID 2 : this
+    vm_guest_cid: int = 3                # guest CID (>=3); host is always CID 2
+    vm_memory_mb: int = 768
+    vm_cpus: int = 2
+    vm_boot_timeout_seconds: int = 120
 
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,
@@ -166,7 +184,7 @@ settings = Settings()
 def ensure_dirs() -> None:
     for d in (settings.data_dir, settings.memory_dir, settings.memory_dir / "notes",
               settings.projects_dir, settings.skills_dir, settings.agents_dir,
-              settings.tools_dir):
+              settings.tools_dir, settings.vm_dir):
         d.mkdir(parents=True, exist_ok=True)
 
 

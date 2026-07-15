@@ -51,9 +51,6 @@ CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL REFERENCES projects(id),
     status TEXT NOT NULL DEFAULT 'pending',
-    exec_log_path TEXT,
-    net_log_path TEXT,
-    pushed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS session_state (
@@ -197,3 +194,28 @@ async def set_state(db: aiosqlite.Connection, key: str, value: str | None) -> No
             (key, value),
         )
     await db.commit()
+
+
+async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
+                            title: str, kind: str = "chat",
+                            parent: int | None = None, job_id: str | None = None,
+                            commit: bool = True) -> int:
+    """Create a conversation node and return its id — the one place that resolves
+    a project slug to its id and inserts the row.
+
+    `kind` tags the node for the run tree (chat/head/leader/subagent/scout/reader/
+    agent/scheduled). `title` is stored verbatim as the summary (callers format
+    their own prefixes). Pass commit=False when the caller adds a first message in
+    the same transaction and commits itself. Follow-ups (peak confirmation, the
+    opening user message) are the caller's, using the returned id."""
+    project_id = None
+    if project:
+        async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
+            row = await cur.fetchone()
+        project_id = row["id"] if row else None
+    cur = await db.execute(
+        "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, "
+        "job_id) VALUES (?, ?, ?, ?, ?)", (project_id, title, kind, parent, job_id))
+    if commit:
+        await db.commit()
+    return cur.lastrowid

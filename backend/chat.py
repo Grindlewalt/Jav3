@@ -10,11 +10,11 @@ from pydantic import BaseModel
 from . import autonomy, bus, compaction, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
-from .agent.loop import run_turn
+from .agent.loop import db_tool_sink, run_turn
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .auth import require_user
 from .config import settings
-from .db import get_db
+from .db import get_db, open_conversation
 from .memory import assemble_system_prompt, get_active_project
 
 router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_user)])
@@ -245,7 +245,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     # one token budget for the whole turn, shared by any tools/agents it spawns
     the_budget = budget.Budget(
         settings.max_op_input_tokens, settings.max_op_output_tokens)
-    btoken = budget.active_budget.set(the_budget)
+    op_id = f"chat:{conversation_id}"
+    budget.register(op_id, the_budget)
+    optoken = budget.active_op_id.set(op_id)
     chan = _chan(conversation_id)
     ctoken = runtime.event_chan.set(chan)
     # fresh fetch-ledger scope per turn: parallel reads inside the turn (and
@@ -285,8 +287,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             tools_before = (await cur.fetchone())["m"]
 
         final_content = ""
-        async for event in run_turn(db, conversation_id, system_prompt,
-                                    history, tools=tools):
+        async for event in run_turn(conversation_id, system_prompt, history,
+                                    tools=tools,
+                                    on_tool_call=db_tool_sink(db, conversation_id)):
             if event["type"] == "final":
                 final_content = event["content"]
             else:
@@ -339,7 +342,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         runtime.web_session.reset(wtoken)
         runtime.event_chan.reset(ctoken)
         runtime.ephemeral.reset(token)
-        budget.active_budget.reset(btoken)
+        budget.active_op_id.reset(optoken)
+        budget.release(op_id)
         await db.close()
         # order matters for the reconnect race: drop the running flag, THEN
         # signal end — a subscriber that still sees the flag is guaranteed
@@ -400,21 +404,10 @@ async def chat(body: ChatRequest):
                 raise HTTPException(status_code=409,
                                     detail="peak_confirmation_required")
             active = await get_active_project(db)
-            project_id = None
-            if active:
-                async with db.execute(
-                    "SELECT id FROM projects WHERE slug = ?", (active,)
-                ) as cur:
-                    row = await cur.fetchone()
-                project_id = row["id"] if row else None
             # provisional title: first bit of the opening message; an LLM
             # naming pass upgrades it after the first exchange (best effort)
             title = " ".join(body.message.split())[:48] or "(empty)"
-            cur = await db.execute(
-                "INSERT INTO conversations (project_id, summary) VALUES (?, ?)",
-                (project_id, title))
-            conversation_id = cur.lastrowid
-            await db.commit()
+            conversation_id = await open_conversation(db, project=active, title=title)
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:

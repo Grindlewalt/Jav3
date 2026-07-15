@@ -11,8 +11,6 @@ import json
 from collections import OrderedDict
 from typing import AsyncIterator
 
-import aiosqlite
-
 from ..config import settings
 from ..memory import standing_rules_tail
 from .budget import BudgetExceeded
@@ -82,37 +80,39 @@ def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None
             "retry the edit.")
 
 
-async def run_turn(
-    db: aiosqlite.Connection,
-    conversation_id: int,
-    system_prompt: str,
-    history: list[dict],
-    tools: list[dict] | None = None,
-    model_name: str | None = None,
-    base_url: str | None = None,
-    self_check: bool = True,
-    max_iterations: int | None = None,
-) -> AsyncIterator[dict]:
+def db_tool_sink(db, conversation_id: int):
+    """The standard persistence sink for run_turn: record each tool call to the
+    tool_calls table (result truncated for storage). run_turn holds no db handle
+    of its own — the caller supplies this, which keeps the loop storage-agnostic.
+    This is the host sink; a guest loop passes on_tool_call=None and its host-side
+    guest_turn reconstructs the same record from the streamed tool events, so the
+    guest never carries a db handle (the VM-inversion seam)."""
+    async def sink(name: str, args: dict, result: str) -> None:
+        await db.execute(
+            "INSERT INTO tool_calls (conversation_id, tool, args, result) "
+            "VALUES (?, ?, ?, ?)",
+            (conversation_id, name, json.dumps(args), result[:10000]))
+        await db.commit()
+    return sink
+
+
+def _assemble_messages(system_prompt: str, history: list[dict],
+                       tools: list[dict] | None, self_check: bool):
+    """Build the turn's message array and the round-1 steering. Returns
+    (messages, tools, rules, can_delegate). Tool schemas pull the model's
+    attention off the system-prompt rules (measured on deepseek-v4-flash:
+    em-dash violations ~0% with no tools, ~65% with tools), so the operator's
+    standing rules + the triage note are restated in the latest user turn,
+    closest to generation — model-only; persisted DB history stays clean.
+    `rules` is empty for internal subagents (self_check=False), whose output is
+    intermediate and gets synthesized, so enforcing operator formatting on it
+    just burns tokens."""
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
     if tools is None:
         tools = registry.openai_tool_specs()
-
-    # Standing rules from the operator's memory. Skipped for internal subagents
-    # (self_check=False): their output is intermediate and gets synthesized, so
-    # enforcing operator formatting on it just burns tokens.
     rules = standing_rules_tail() if self_check else ""
-
     tool_names = {t["function"]["name"] for t in (tools or [])}
     can_delegate = bool(tool_names & {"research", "spawn_agent", "deploy_agents"})
-
-    # Tool schemas pull the model's attention off the system-prompt rules:
-    # measured on deepseek-v4-flash, em-dash violations run ~0% with no tools
-    # but ~65% once tools are attached. Restating the rules in the latest user
-    # turn (closest to generation) roughly halves that to ~33% — it helps but
-    # doesn't fully solve it, so the final answer also goes through a no-tools
-    # self-check below. The triage note (operator-facing turns only) shares
-    # the ride, ahead of the rules so those stay closest to generation.
-    # Model-only; persisted DB history stays clean.
     triage = _triage_note(tool_names) if (tools and self_check) else ""
     inject = "\n\n".join(x for x in (triage, rules) if x)
     if tools and inject:
@@ -121,6 +121,108 @@ async def run_turn(
                 messages[i] = {**messages[i],
                                "content": (messages[i]["content"] or "") + "\n\n" + inject}
                 break
+    return messages, tools, rules, can_delegate
+
+
+async def _force_conclusion(messages: list[dict], conversation_id: int,
+                            model_name: str | None, base_url: str | None,
+                            rules: str) -> AsyncIterator[dict]:
+    """Tools were withheld (final round or dead-end breaker) but the model still
+    emitted calls — DSML text recovery can do that. Don't execute them: nudge for
+    a plain-prose answer from what's already gathered, so the operator gets a real
+    summary instead of a bare "(stopped)" (convo 31). Yields token events, then
+    one final."""
+    conclusion = ""
+    nudge = ("Your tool budget for this turn is exhausted. Using only "
+             "what you already learned above, give your best answer "
+             "now. Be explicit about anything you could not determine.")
+    # two attempts: a tool-fixated model sometimes answers the first nudge with
+    # MORE tool markup (DSML recovery leaves content empty — convo 33), so the
+    # retry demands plain prose outright
+    for attempt in range(2):
+        try:
+            async for ev in model.complete(
+                messages + [{"role": "user", "content": nudge}],
+                conversation_id=conversation_id,
+                model_name=model_name, base_url=base_url,
+            ):
+                if ev["type"] == "token":
+                    yield ev
+                else:
+                    conclusion = ev["content"] or ""
+        except Exception:  # noqa: BLE001 — conclusion is best-effort
+            conclusion = ""
+        if conclusion.strip():
+            break
+        nudge = ("STOP. No more tool calls — they are disabled and any "
+                 "tool syntax is discarded. Reply in PLAIN PROSE only: "
+                 "summarize what you found above and what remains "
+                 "unknown.")
+    if conclusion.strip():
+        if rules:
+            conclusion = await _enforce_rules(conclusion, rules)
+        yield {"type": "final", "content": conclusion}
+    else:
+        yield {"type": "final", "content":
+               "(stopped: hit the tool budget for this turn without "
+               "reaching a conclusion — try rephrasing the task or "
+               "point me at where the answer lives)"}
+
+
+def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
+           can_delegate: bool) -> bool:
+    """Mid-flight nudges appended to the last tool result (adjacent to the
+    failure). Two axes: a dead-end breaker on consecutive failed/empty results,
+    and delegation/wrap-up pressure as the round budget runs down. Returns True
+    if the breaker tripped this round — the caller withdraws tools next round."""
+    force = False
+    if err_streak >= settings.dead_end_force_answer:
+        force = True
+        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                        f"\n\n[system note: {err_streak} consecutive tool "
+                        "calls failed or returned nothing — tools are now "
+                        "disabled. Summarize what you tried, what failed, "
+                        "and what you could not determine. If the thing "
+                        "you're looking for may simply not exist, say so.]"}
+    elif err_streak >= settings.dead_end_error_streak:
+        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                        f"\n\n[system note: {err_streak} consecutive tool "
+                        "calls failed or returned nothing. Diagnose why "
+                        "before retrying: change strategy, delegate "
+                        "(research / spawn_agent), or report honestly what "
+                        "can't be found. Do not repeat similar calls.]"}
+
+    if i + 1 == settings.delegate_nudge_round and can_delegate:
+        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                        f"\n\n[system note: {i + 1} tool rounds used of "
+                        f"{n_iter}. If substantial gathering or multi-step "
+                        "work remains, STOP hand-rolling calls: hand web "
+                        "gathering to the research tool in one call, hand "
+                        "subtasks to spawn_agent or a deploy_agents team, "
+                        "and keep a todo_update "
+                        "plan so you execute in a straight line.]"}
+    elif i + 1 == (n_iter * 2) // 3:
+        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                        f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
+                        "used — start concluding. Finish the current step, "
+                        "then answer with what you have and say plainly "
+                        "what you could not determine.]"}
+    return force
+
+
+async def run_turn(
+    conversation_id: int,
+    system_prompt: str,
+    history: list[dict],
+    tools: list[dict] | None = None,
+    model_name: str | None = None,
+    base_url: str | None = None,
+    self_check: bool = True,
+    max_iterations: int | None = None,
+    on_tool_call=None,
+) -> AsyncIterator[dict]:
+    messages, tools, rules, can_delegate = _assemble_messages(
+        system_prompt, history, tools, self_check)
 
     n_iter = max_iterations or settings.max_react_iterations
     read_only = registry.read_only_names()   # once per turn; hot-reload can wait
@@ -163,48 +265,11 @@ async def run_turn(
             return
 
         if call_tools is None:
-            # Tools were withheld (final round, or the dead-end breaker) but
-            # calls came back anyway — DSML text recovery can do that. Don't
-            # execute them: force a text answer from what's been gathered, so
-            # the operator gets a real summary instead of a bare "(stopped)".
-            # (Convo 31: the news agent burned its cap on good reads, then
-            # answered the answer-forcing round with more tool markup and the
-            # operator got nothing.)
-            conclusion = ""
-            nudge = ("Your tool budget for this turn is exhausted. Using only "
-                     "what you already learned above, give your best answer "
-                     "now. Be explicit about anything you could not determine.")
-            # two attempts: a tool-fixated model sometimes answers the first
-            # nudge with MORE tool markup (DSML recovery leaves content empty
-            # — convo 33), so the retry demands plain prose outright
-            for attempt in range(2):
-                try:
-                    async for ev in model.complete(
-                        messages + [{"role": "user", "content": nudge}],
-                        conversation_id=conversation_id,
-                        model_name=model_name, base_url=base_url,
-                    ):
-                        if ev["type"] == "token":
-                            yield ev
-                        else:
-                            conclusion = ev["content"] or ""
-                except Exception:  # noqa: BLE001 — conclusion is best-effort
-                    conclusion = ""
-                if conclusion.strip():
-                    break
-                nudge = ("STOP. No more tool calls — they are disabled and any "
-                         "tool syntax is discarded. Reply in PLAIN PROSE only: "
-                         "summarize what you found above and what remains "
-                         "unknown.")
-            if conclusion.strip():
-                if rules:
-                    conclusion = await _enforce_rules(conclusion, rules)
-                yield {"type": "final", "content": conclusion}
-            else:
-                yield {"type": "final", "content":
-                       "(stopped: hit the tool budget for this turn without "
-                       "reaching a conclusion — try rephrasing the task or "
-                       "point me at where the answer lives)"}
+            # tools withheld but calls came back (DSML recovery) — nudge to a
+            # plain-prose answer instead of executing them
+            async for ev in _force_conclusion(messages, conversation_id,
+                                               model_name, base_url, rules):
+                yield ev
             return
 
         messages.append({
@@ -254,11 +319,8 @@ async def run_turn(
         # DB writes + message appends stay sequential and ordered — the single
         # aiosqlite connection must never be used concurrently
         for (tc, name, args), result in zip(parsed, results):
-            await db.execute(
-                "INSERT INTO tool_calls (conversation_id, tool, args, result) VALUES (?, ?, ?, ?)",
-                (conversation_id, name, json.dumps(args), result[:10000]),
-            )
-            await db.commit()
+            if on_tool_call is not None:
+                await on_tool_call(name, args, result)
             messages.append({"role": "tool", "tool_call_id": tc["id"],
                              "content": _cap_result(name, result)})
             tool_msgs.append({"idx": len(messages) - 1, "round": i, "name": name})
@@ -276,42 +338,10 @@ async def run_turn(
             err_streak = err_streak + 1 if failed else 0
         _evict_stale_results(messages, tool_msgs, i)
 
-        # dead-end breaker: a grinding turn gets steered, then stopped —
-        # the note rides the last tool result so it's adjacent to the failure
-        if err_streak >= settings.dead_end_force_answer:
+        # mid-flight steering: dead-end breaker + delegation/wrap-up nudges,
+        # appended to the last tool result so they sit adjacent to the failure
+        if _steer(messages, i, n_iter, err_streak, can_delegate):
             force_conclude = True
-            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                            f"\n\n[system note: {err_streak} consecutive tool "
-                            "calls failed or returned nothing — tools are now "
-                            "disabled. Summarize what you tried, what failed, "
-                            "and what you could not determine. If the thing "
-                            "you're looking for may simply not exist, say so.]"}
-        elif err_streak >= settings.dead_end_error_streak:
-            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                            f"\n\n[system note: {err_streak} consecutive tool "
-                            "calls failed or returned nothing. Diagnose why "
-                            "before retrying: change strategy, delegate "
-                            "(research / spawn_agent), or report honestly what "
-                            "can't be found. Do not repeat similar calls.]"}
-
-        # delegation pressure (convo-33 post-mortem: 42 hand-rolled web calls
-        # with the research tool sitting unused): steer a long turn mid-flight,
-        # then tell it to start landing the plane
-        if i + 1 == settings.delegate_nudge_round and can_delegate:
-            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                            f"\n\n[system note: {i + 1} tool rounds used of "
-                            f"{n_iter}. If substantial gathering or multi-step "
-                            "work remains, STOP hand-rolling calls: hand web "
-                            "gathering to the research tool in one call, hand "
-                            "subtasks to spawn_agent or a deploy_agents team, "
-                            "and keep a todo_update "
-                            "plan so you execute in a straight line.]"}
-        elif i + 1 == (n_iter * 2) // 3:
-            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                            f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
-                            "used — start concluding. Finish the current step, "
-                            "then answer with what you have and say plainly "
-                            "what you could not determine.]"}
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}

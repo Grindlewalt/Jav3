@@ -234,8 +234,9 @@ async def _first_call_msgs(monkeypatch, tools, self_check=True):
         cid = cur.lastrowid
         await db.commit()
         async for _ in loop_mod.run_turn(
-                db, cid, "system", [{"role": "user", "content": "big task"}],
-                tools=tools, self_check=self_check):
+                cid, "system", [{"role": "user", "content": "big task"}],
+                tools=tools, self_check=self_check,
+                on_tool_call=loop_mod.db_tool_sink(db, cid)):
             pass
     finally:
         await db.close()

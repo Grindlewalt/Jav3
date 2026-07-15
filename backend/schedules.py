@@ -12,12 +12,12 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .agent.loop import run_turn
+from .agent.loop import db_tool_sink, run_turn
 from .agent.model import confirm_peak
 from .agents_run import run_agent_headless
 from .auth import require_user
 from .config import settings
-from .db import get_db
+from .db import get_db, open_conversation
 from .memory import assemble_system_prompt
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"],
@@ -220,17 +220,9 @@ async def run_now(sid: int):
 async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
     db = await get_db()
     try:
-        project_id = None
-        if project_slug:
-            async with db.execute(
-                "SELECT id FROM projects WHERE slug = ?", (project_slug,)) as cur:
-                r = await cur.fetchone()
-            project_id = r["id"] if r else None
-        cur = await db.execute(
-            "INSERT INTO conversations (project_id, summary, kind) "
-            "VALUES (?, ?, 'scheduled')",
-            (project_id, "[scheduled] " + " ".join(task.split())[:40]))
-        conversation_id = cur.lastrowid
+        title = "[scheduled] " + " ".join(task.split())[:40]
+        conversation_id = await open_conversation(
+            db, project=project_slug, title=title, kind="scheduled", commit=False)
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
             (conversation_id, task))
@@ -244,8 +236,9 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
         wtoken = runtime.web_session.set(f"run:{conversation_id}")
         final = ""
         try:
-            async for ev in run_turn(db, conversation_id, system_prompt,
-                                     [{"role": "user", "content": task}]):
+            async for ev in run_turn(conversation_id, system_prompt,
+                                     [{"role": "user", "content": task}],
+                                     on_tool_call=db_tool_sink(db, conversation_id)):
                 if ev["type"] == "final":
                     final = ev["content"]
         finally:

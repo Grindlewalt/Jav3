@@ -48,9 +48,10 @@ async def _run(monkeypatch, model, dispatch, tools=None):
         await db.commit()
         events = []
         async for ev in loop_mod.run_turn(
-                db, cid, "system", [{"role": "user", "content": "go"}],
+                cid, "system", [{"role": "user", "content": "go"}],
                 tools=tools or [{"type": "function",
-                                 "function": {"name": "x", "parameters": {}}}]):
+                                 "function": {"name": "x", "parameters": {}}}],
+                on_tool_call=loop_mod.db_tool_sink(db, cid)):
             events.append(ev)
         return events
     finally:
