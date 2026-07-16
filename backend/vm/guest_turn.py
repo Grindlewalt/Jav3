@@ -26,6 +26,7 @@ _CONFIG_KNOBS = (
     "max_react_iterations", "subagent_max_iterations", "dead_end_force_answer",
     "dead_end_error_streak", "delegate_nudge_round", "tool_result_max_chars",
     "tool_result_keep_recent", "tool_result_evict_chars",
+    "plan_recheck_every", "web_handroll_nudge",
 )
 
 
