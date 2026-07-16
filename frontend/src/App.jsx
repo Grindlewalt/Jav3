@@ -12,7 +12,6 @@ import Skills from './pages/Skills.jsx'
 import Tools from './pages/Tools.jsx'
 import Agents from './pages/Agents.jsx'
 import Schedules from './pages/Schedules.jsx'
-import Jobs from './pages/Jobs.jsx'
 import Logs from './pages/Logs.jsx'
 
 function NotificationBell() {
@@ -83,7 +82,6 @@ export default function App() {
           <NavLink to="/context">Context</NavLink>
           <NavLink to="/agents">Agents</NavLink>
           <NavLink to="/logs">Logs</NavLink>
-          <NavLink to="/jobs">Jobs</NavLink>
           <NavLink to="/schedules">Schedules</NavLink>
           <NavLink to="/skills">Skills</NavLink>
           <NavLink to="/tools">Tools</NavLink>
@@ -108,7 +106,6 @@ export default function App() {
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />
         <Route path="/logs" element={<Logs />} />
-        <Route path="/jobs" element={<Jobs />} />
         <Route path="/schedules" element={<Schedules />} />
         <Route path="/skills" element={<Skills />} />
         <Route path="/tools" element={<Tools />} />

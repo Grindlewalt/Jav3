@@ -22,8 +22,9 @@ export function humanizeTool(name, args = {}) {
     case 'web_read': return `📄 reading ${host(args.url)}${args.extract ? ' (extracting)' : ''}`
     case 'read_and_summarize': {
       const urls = args.urls || (args.url ? [args.url] : [])
-      return urls.length > 1 ? `📄 summarizing ${urls.length} pages`
-        : `📄 summarizing ${host(urls[0] || '')}`
+      const mode = args.triage ? ' (triage)' : ''
+      return urls.length > 1 ? `📄 summarizing ${urls.length} pages${mode}`
+        : `📄 summarizing ${host(urls[0] || '')}${mode}`
     }
     case 'research': return `🔬 researching: ${trunc(args.topic || args.query)}`
     case 'read_file': return `📄 reading ${args.path}${args.offset ? ` (line ${args.offset}+)` : ''}`
@@ -34,6 +35,9 @@ export function humanizeTool(name, args = {}) {
     case 'edit_file': return `✏️ editing ${args.path}`
     case 'spawn_agent': return `🤖 ${args.agent}: ${trunc(args.task)}`
     case 'deploy_agents': return `🌳 deploying agents: ${trunc(args.title || args.brief)}`
+    case 'create_agent': return `🤖 creating agent: ${trunc(args.name, 40)}`
+    case 'schedule_update':
+      return `⏰ schedule ${args.action || 'update'}${args.name ? `: ${trunc(args.name, 40)}` : ''}`
     case 'journal_update': return '📓 updating journal'
     case 'todo_update': return '☑ updating todos'
     case 'memory_write': return `🧠 remembering: ${args.name}`
