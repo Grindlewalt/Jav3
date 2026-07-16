@@ -170,14 +170,18 @@ async def _force_conclusion(messages: list[dict], conversation_id: int,
 
 
 def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
-           can_delegate: bool) -> bool:
+           can_delegate: bool, has_todo: bool = False) -> bool:
     """Mid-flight nudges appended to the last tool result (adjacent to the
-    failure). Two axes: a dead-end breaker on consecutive failed/empty results,
-    and delegation/wrap-up pressure as the round budget runs down. Returns True
-    if the breaker tripped this round — the caller withdraws tools next round."""
+    failure). Three axes: a dead-end breaker on consecutive failed/empty
+    results (with a one-line course-correct on the FIRST failure, before a
+    streak forms), delegation/wrap-up pressure as the round budget runs down,
+    and a periodic plan re-check so the next call follows the plan instead of
+    free-associating. Returns True if the breaker tripped this round — the
+    caller withdraws tools next round."""
     force = False
+    noted = False
     if err_streak >= settings.dead_end_force_answer:
-        force = True
+        force = noted = True
         messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
                         f"\n\n[system note: {err_streak} consecutive tool "
                         "calls failed or returned nothing — tools are now "
@@ -185,12 +189,23 @@ def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
                         "and what you could not determine. If the thing "
                         "you're looking for may simply not exist, say so.]"}
     elif err_streak >= settings.dead_end_error_streak:
+        noted = True
         messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
                         f"\n\n[system note: {err_streak} consecutive tool "
                         "calls failed or returned nothing. Diagnose why "
                         "before retrying: change strategy, delegate "
                         "(research / spawn_agent), or report honestly what "
                         "can't be found. Do not repeat similar calls.]"}
+    elif err_streak == 1:
+        # first failure of a streak: one cheap line so the next call is a
+        # deliberate correction, not a shrug-and-move-on
+        noted = True
+        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                        "\n\n[system note: that call failed or returned "
+                        "nothing. Read the message above and make ONE "
+                        "deliberate adjustment (path, arguments, or approach) "
+                        "toward the same goal — don't repeat the call "
+                        "unchanged and don't move on as if it succeeded.]"}
 
     if i + 1 == settings.delegate_nudge_round and can_delegate:
         messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
@@ -207,6 +222,16 @@ def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
                         "used — start concluding. Finish the current step, "
                         "then answer with what you have and say plainly "
                         "what you could not determine.]"}
+    elif (not noted and has_todo and settings.plan_recheck_every
+          and (i + 1) % settings.plan_recheck_every == 0):
+        # periodic progress check against the model's own plan; suppressed on
+        # rounds that already carry a note so nudges never stack
+        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                        "\n\n[system note: progress check — against your "
+                        "todo plan: mark finished items done (todo_update) "
+                        "and make the next call serve the next open item. If "
+                        "what you've learned changed the plan, revise it "
+                        "first, then continue.]"}
     return force
 
 
@@ -225,6 +250,7 @@ async def run_turn(
         system_prompt, history, tools, self_check)
 
     n_iter = max_iterations or settings.max_react_iterations
+    has_todo = any(t["function"]["name"] == "todo_update" for t in (tools or []))
     read_only = registry.read_only_names()   # once per turn; hot-reload can wait
     tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
     err_streak = 0               # consecutive failed/empty/duplicate results
@@ -340,7 +366,7 @@ async def run_turn(
 
         # mid-flight steering: dead-end breaker + delegation/wrap-up nudges,
         # appended to the last tool result so they sit adjacent to the failure
-        if _steer(messages, i, n_iter, err_streak, can_delegate):
+        if _steer(messages, i, n_iter, err_streak, can_delegate, has_todo):
             force_conclude = True
 
     yield {"type": "final",

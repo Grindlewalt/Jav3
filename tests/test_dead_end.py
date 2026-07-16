@@ -209,6 +209,91 @@ async def test_tool_events_carry_id_and_results_stream(tmp_env, monkeypatch):
     assert by_id[tools[1]["id"]]["ok"] is False
 
 
+async def test_first_failure_gets_course_correct_note(tmp_env, monkeypatch):
+    """A single failed/empty result draws a one-line adjustment nudge before
+    any streak forms — the next call should be a correction, not a shrug."""
+    await init_db()
+    monkeypatch.setattr(settings, "dead_end_error_streak", 4)
+    monkeypatch.setattr(settings, "dead_end_force_answer", 99)
+    results = iter(["error: nope", "found it"])
+
+    async def dispatch(name, args):
+        return next(results)
+
+    seen = []
+    class Spy(_ScriptedModel):
+        async def complete(self, messages, tools=None, **kw):
+            seen.append([str(m.get("content")) for m in messages])
+            async for ev in super().complete(messages, tools=tools, **kw):
+                yield ev
+
+    model = Spy([[("probe", '{"q": "a"}')], [("probe", '{"q": "b"}')]])
+    await _run(monkeypatch, model, dispatch)
+    # the nudge rides the failed result into the 2nd model call...
+    assert any("ONE deliberate adjustment" in m for m in seen[1])
+    # ...and the successful round draws no nudge
+    assert not any("ONE deliberate adjustment" in m for m in seen[2][-1:])
+
+
+async def test_plan_recheck_fires_when_todo_tool_present(tmp_env, monkeypatch):
+    await init_db()
+    monkeypatch.setattr(settings, "plan_recheck_every", 2)
+
+    async def dispatch(name, args):
+        return "fine result"
+
+    seen = []
+    class Spy(_ScriptedModel):
+        async def complete(self, messages, tools=None, **kw):
+            seen.append([str(m.get("content")) for m in messages])
+            async for ev in super().complete(messages, tools=tools, **kw):
+                yield ev
+
+    from backend.agent import loop as loop_mod
+    from backend.agent.tools import registry
+    model = Spy([[("probe", f'{{"q": "{i}"}}')] for i in range(4)])
+    monkeypatch.setattr(loop_mod, "model", model)
+    monkeypatch.setattr(registry, "dispatch", dispatch)
+    monkeypatch.setattr(registry, "read_only_names", lambda: frozenset())
+    loop_mod._files_seen.clear()
+    db = await get_db()
+    try:
+        cur = await db.execute("INSERT INTO conversations (summary) VALUES ('t')")
+        cid = cur.lastrowid
+        await db.commit()
+        tools = [{"type": "function", "function": {"name": n, "parameters": {}}}
+                 for n in ("probe", "todo_update")]
+        async for _ in loop_mod.run_turn(cid, "system",
+                                         [{"role": "user", "content": "go"}],
+                                         tools=tools):
+            pass
+    finally:
+        await db.close()
+    # rounds 2 and 4 (every 2nd) end with the progress check riding the result
+    assert any("progress check" in m for m in seen[2])
+    assert not any("progress check" in m for m in seen[1])
+
+
+async def test_plan_recheck_absent_without_todo_tool(tmp_env, monkeypatch):
+    await init_db()
+    monkeypatch.setattr(settings, "plan_recheck_every", 2)
+
+    async def dispatch(name, args):
+        return "fine result"
+
+    seen = []
+    class Spy(_ScriptedModel):
+        async def complete(self, messages, tools=None, **kw):
+            seen.append([str(m.get("content")) for m in messages])
+            async for ev in super().complete(messages, tools=tools, **kw):
+                yield ev
+
+    model = Spy([[("probe", f'{{"q": "{i}"}}')] for i in range(4)])
+    await _run(monkeypatch, model, dispatch)   # tools = just "x"/probe, no todo
+    assert not any("progress check" in m for round_msgs in seen
+                   for m in round_msgs)
+
+
 async def test_success_resets_streak(tmp_env, monkeypatch):
     await init_db()
     monkeypatch.setattr(settings, "dead_end_error_streak", 3)

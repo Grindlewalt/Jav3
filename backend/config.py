@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     dead_end_error_streak: int = 4
     dead_end_force_answer: int = 8
 
+    # Post-tool plan re-check: every N tool rounds (when the todo tool is
+    # offered and no other nudge fired that round) a one-line progress check
+    # rides the last tool result — mark done items, aim the next call at the
+    # next open item. Counters the drift where a long turn free-associates
+    # its next call instead of following its own plan. 0 disables.
+    plan_recheck_every: int = 6
+
     # Transient model-API failures (connect errors, 5xx) retry with exponential
     # backoff — but only if no tokens have streamed to the client yet, so a
     # retry can never duplicate visible output.
