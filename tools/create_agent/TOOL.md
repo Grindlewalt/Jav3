@@ -14,7 +14,7 @@ parameters:
       description: One line for the roster — what this agent is for.
     prompt:
       type: string
-      description: "The agent's full system prompt (150-300 words): who it is, its exact scope, how it works, output format, and what it must NOT do. Second person (\"You are...\")."
+      description: "The agent's full system prompt (150-300 words), second person (\"You are...\"), structured with these markdown headings in order — # Context (who it is, runs headless), # Objective (exact scope, what done looks like, what it must NOT do), # Style (method, tools), # Tone, # Audience, # Response (exact output format)."
   required: [name, prompt]
 ---
 If the agent needs an API key, NEVER put a real value in the prompt — reference
