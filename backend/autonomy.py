@@ -31,6 +31,9 @@ _STAGE = {
 }
 _GATED = {
     "research", "spawn_agent", "deploy_agents",
+    # code execution: contained in the no-key/no-net guest and its writes are
+    # staged, but running code is still more than staging edits — gated tier
+    "run_code",
 }
 _COMMIT = {"git_commit_request"}
 

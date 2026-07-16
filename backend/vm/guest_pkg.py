@@ -23,9 +23,11 @@ _COPY_MODULES = {
 }
 
 # clean tools that run IN the guest (against the pushed workspace); their handler
-# is loaded locally. Everything else brokers to the host.
+# is loaded locally. Everything else brokers to the host. run_code lives here and
+# ONLY here — code execution exists nowhere on the host.
 IN_GUEST_TOOLS = ("read_file", "list_files", "search_codebase", "crawl_codebase",
-                  "write_file", "edit_file", "dashboard", "todo_update")
+                  "write_file", "edit_file", "dashboard", "todo_update",
+                  "run_code")
 
 
 def _guest_src():

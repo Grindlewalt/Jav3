@@ -20,7 +20,7 @@ HOST_CID = socket.VMADDR_CID_HOST          # 2
 # tools safe to run in the disposable guest against the pushed workspace
 IN_GUEST_TOOLS = frozenset({"read_file", "list_files", "search_codebase",
                             "crawl_codebase", "write_file", "edit_file",
-                            "dashboard", "todo_update"})
+                            "dashboard", "todo_update", "run_code"})
 
 # handler modules are stateless and keyed by name, so this cache is safely shared
 # across turns; the per-turn state (specs, op_id, ...) lives in turnctx.

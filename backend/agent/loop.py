@@ -22,7 +22,7 @@ from .tools import registry
 # writes are load-bearing).
 WRITE_PINNED = frozenset({"write_file", "edit_file", "journal_update",
                           "memory_write", "git_commit_request",
-                          "create_agent", "schedule_update"})
+                          "create_agent", "schedule_update", "run_code"})
 
 # Delegation tools whose successful results carry a trust note: the observed
 # failure mode is the head re-fetching a subagent's sources to "verify" —

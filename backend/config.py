@@ -177,6 +177,10 @@ class Settings(BaseSettings):
     # host tools brokered over vsock. Off by default until the guest path is the
     # proven default (cutover in M4); flip per-turn tests via the flag.
     use_guest_loop: bool = False
+    # True only inside the guest (the guest config shim overrides it). run_code
+    # keys on this: on the host it is always False, so the tool refuses to run
+    # code anywhere the sandbox isn't.
+    in_guest: bool = False
     # Idle scrub (M4c): reboot the single guest once it has been idle (no in-flight
     # turn) for this many seconds, so the next operation batch lands in a FRESH
     # guest instead of inheriting the previous one's state. The reboot happens
