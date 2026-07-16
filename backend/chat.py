@@ -185,6 +185,10 @@ async def get_messages(conversation_id: int):
 # the HTTP connection that started it goes away.
 _active_turns: dict[int, asyncio.Task] = {}
 
+# what an operator-stopped turn leaves behind, in the transcript and the
+# final event — the GUI shows it verbatim
+INTERRUPTED_MARKER = "[Request interrupted by operator]"
+
 
 def _chan(conversation_id: int) -> str:
     return f"chat:{conversation_id}"
@@ -343,6 +347,23 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 pass
         bus.publish(chan, {"type": "final", "content": final_content,
                            "conversation_id": conversation_id})
+    except asyncio.CancelledError:
+        # the operator hit stop. Leave the interruption in the transcript
+        # (persistent chats — the ephemeral wipe in finally covers incognito)
+        # and give every tail a final event so the UI settles, then re-raise
+        # so the task ends properly cancelled.
+        if not ephemeral:
+            try:
+                await db.execute(
+                    "INSERT INTO messages (conversation_id, role, content) "
+                    "VALUES (?, 'assistant', ?)",
+                    (conversation_id, INTERRUPTED_MARKER))
+                await db.commit()
+            except Exception:  # noqa: BLE001 — the marker is best-effort
+                pass
+        bus.publish(chan, {"type": "final", "content": INTERRUPTED_MARKER,
+                           "conversation_id": conversation_id})
+        raise
     except Exception as exc:  # surfaced to any tail rather than lost
         bus.publish(chan, {"type": "error", "message": str(exc)})
     finally:
@@ -413,6 +434,18 @@ async def resume_chat_stream(conversation_id: int):
             yield sse({"type": "idle"})
         return StreamingResponse(idle(), media_type="text/event-stream")
     return _tail(conversation_id, q)
+
+
+@router.post("/chat/{conversation_id}/stop")
+async def stop_chat_turn(conversation_id: int):
+    """Cancel an in-flight turn. The turn's CancelledError handler records
+    the interruption and publishes a final event, so every attached tail
+    (and the transcript) settles on its own — nothing else to clean up here."""
+    task = _active_turns.get(conversation_id)
+    if task is None or task.done():
+        return {"stopped": False}
+    task.cancel()
+    return {"stopped": True}
 
 
 @router.post("/chat")

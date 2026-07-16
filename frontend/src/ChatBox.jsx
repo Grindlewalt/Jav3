@@ -101,6 +101,13 @@ export default function ChatBox({ projectSlug }) {
     setBusy(false)
   }
 
+  async function stop() {
+    // ends the turn server-side; the tail's final "[Request interrupted]"
+    // event settles the UI through the normal finish path
+    if (!cid) return
+    try { await api(`/api/chat/${cid}/stop`, { method: 'POST' }) } catch { /* already done */ }
+  }
+
   async function send(confirmPeak = false, resend = null) {
     const text = (resend ?? input).trim()
     if (!text || busy) return
@@ -194,7 +201,10 @@ export default function ChatBox({ projectSlug }) {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
                   }} />
-        <button type="submit" disabled={busy}>{busy ? '…' : '↑'}</button>
+        {busy
+          ? <button type="button" className="ghost danger" title="stop this turn"
+                    onClick={stop}>⏹</button>
+          : <button type="submit">↑</button>}
       </form>
     </div>
   )

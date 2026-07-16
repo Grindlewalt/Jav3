@@ -13,6 +13,7 @@ export default function Chat() {
   const [incognito, setIncognito] = useState(false)
   const bottomRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
+  const liveId = useRef(null)      // id of the turn in flight (set even incognito)
 
   const refreshConvos = () =>
     api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -31,6 +32,7 @@ export default function Chat() {
   // token/tool/tool_result fold into the streaming message's parts; final
   // swaps in the reply with the activity collapsed above it.
   function handleTurnEvent(ev) {
+    if (ev.type === 'start') liveId.current = ev.conversation_id
     if (ev.type === 'start' && !incognito) setConversationId(ev.conversation_id)
     if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
       setMessages((m) => {
@@ -97,6 +99,14 @@ export default function Chat() {
     await api(`/api/conversations/${conversationId}`, {
       method: 'PATCH', body: JSON.stringify({ project: slug || null }) })
     refreshConvos()
+  }
+
+  async function stop() {
+    // the turn ends server-side and every tail gets a final "[Request
+    // interrupted]" event — the normal finish path settles the UI
+    const id = conversationId ?? liveId.current
+    if (!id) return
+    try { await api(`/api/chat/${id}/stop`, { method: 'POST' }) } catch { /* already done */ }
   }
 
   async function send(confirmPeak = false, resend = null) {
@@ -194,7 +204,10 @@ export default function Chat() {
             placeholder="Message Jarvis… (Enter to send, Shift+Enter for newline)"
             rows={3}
           />
-          <button type="submit" disabled={busy}>{busy ? '…' : 'Send'}</button>
+          {busy
+            ? <button type="button" className="ghost danger" title="stop this turn"
+                      onClick={stop}>⏹ Stop</button>
+            : <button type="submit">Send</button>}
         </form>
       </main>
     </div>
