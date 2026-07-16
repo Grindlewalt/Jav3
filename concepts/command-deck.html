@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concept — Command Deck</title>
+<style>
+  :root {
+    --bg:#0e1013; --bg-soft:#13161b; --panel:#171b21; --panel-2:#1e242c;
+    --border:#262d37; --text:#d7dde5; --dim:#7a8494; --accent:#5b9cf5;
+    --accent-2:#8b6cf0; --green:#4cc38a; --red:#e5534b; --amber:#d9a13d;
+    color-scheme: dark;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 system-ui, sans-serif; height:100vh; display:flex;
+    overflow:hidden; }
+  .dim { color:var(--dim); }
+  .deck { flex:1; display:flex; flex-direction:column; min-width:0;
+    max-width:860px; margin:0 auto; }
+  .top { display:flex; align-items:center; gap:12px; padding:12px 20px;
+    font-size:13px; }
+  .top .crumb b { color:var(--text); }
+  .msgs { flex:1; overflow-y:auto; padding:8px 20px 20px; }
+  .m { margin:0 0 22px; max-width:92%; }
+  .m .who { font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--dim); margin-bottom:5px; }
+  .m.user { margin-left:auto; }
+  .m.user .body { background:var(--panel-2); border-radius:12px 12px 4px 12px;
+    padding:10px 14px; }
+  .m.jarvis .body { font-size:14.5px; }
+  .steps { border:1px solid var(--border); border-radius:10px;
+    background:var(--panel); margin:10px 0; overflow:hidden; font-size:13px; }
+  .steps .hd { padding:7px 12px; color:var(--dim); cursor:pointer; }
+  .steps .s { display:flex; gap:8px; padding:6px 12px;
+    border-top:1px solid var(--border); align-items:center; }
+  .ok { color:var(--green); } .run { color:var(--accent); }
+  .spin { animation:pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity:.35 } }
+  .inline-ask { display:flex; gap:10px; align-items:center; margin:10px 0;
+    border:1px solid var(--amber); border-radius:10px; padding:9px 13px;
+    background:rgba(217,161,61,.07); font-size:13px; }
+  .inline-ask button { border-radius:7px; padding:4px 12px; cursor:pointer;
+    background:none; }
+  .inline-ask .y { border:1px solid var(--green); color:var(--green); }
+  .inline-ask .n { border:1px solid var(--border); color:var(--dim); }
+  .palette { margin:0 20px 18px; position:relative; }
+  .palette input { width:100%; padding:13px 46px 13px 44px; font-size:15px;
+    background:var(--panel); color:var(--text); border:1px solid var(--border);
+    border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.35); }
+  .palette .k { position:absolute; left:15px; top:13px; font-size:16px; }
+  .palette .go { position:absolute; right:9px; top:8px;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    color:#fff; border:0; border-radius:9px; padding:6px 13px; cursor:pointer; }
+  .palette .hints { display:flex; gap:8px; margin-top:8px; font-size:12px; }
+  .palette .hints span { border:1px solid var(--border); border-radius:14px;
+    padding:2px 10px; color:var(--dim); cursor:pointer; }
+  .rail { width:300px; border-left:1px solid var(--border);
+    background:var(--bg-soft); padding:12px; overflow-y:auto; display:flex;
+    flex-direction:column; gap:10px; }
+  .cardlet { border:1px solid var(--border); border-radius:10px;
+    background:var(--panel); font-size:13px; }
+  .cardlet .hd { display:flex; gap:8px; align-items:center; padding:8px 11px;
+    cursor:pointer; }
+  .cardlet .hd .n { margin-left:auto; font-size:11px; color:var(--dim); }
+  .cardlet .bd { border-top:1px solid var(--border); padding:8px 11px;
+    display:flex; flex-direction:column; gap:7px; }
+  .row { display:flex; gap:8px; align-items:center; min-width:0; }
+  .row .grow { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; }
+  .b { border-radius:6px; padding:1px 9px; font-size:12px; cursor:pointer;
+    background:none; }
+  .b.ok { border:1px solid var(--green); color:var(--green); }
+  .b.no { border:1px solid var(--red); color:var(--red); }
+  .dot { width:8px; height:8px; border-radius:50%; }
+  .dot.g { background:var(--green); } .dot.a { background:var(--accent);
+    box-shadow:0 0 6px var(--accent); animation:pulse 1.4s infinite; }
+  .badge { min-width:17px; text-align:center; background:var(--red); color:#fff;
+    border-radius:9px; font-size:10px; font-weight:700; padding:1px 4px; }
+</style>
+</head>
+<body>
+  <div class="deck">
+    <div class="top">
+      <span class="crumb dim">jarvis / <b>pi-cluster</b></span>
+      <span class="dim">·</span><span class="dim">chat #61</span>
+      <span style="margin-left:auto"></span>
+      <span class="dim">⌘K commands</span>
+    </div>
+
+    <div class="msgs">
+      <div class="m user"><div class="who">you</div>
+        <div class="body">Refactor the sensor poller so failures back off
+          exponentially, and write tests.</div></div>
+
+      <div class="m jarvis"><div class="who">jarvis</div>
+        <div class="body">
+          On it. Backoff doubles per failure, capped — door sensor gets a
+          lower cap (it flaps on cold nights).
+          <div class="steps">
+            <div class="hd">▾ 6 steps · 2 running</div>
+            <div class="s"><span class="ok">✓</span> read code/poller.py</div>
+            <div class="s"><span class="ok">✓</span> plan written — 5 todos</div>
+            <div class="s"><span class="ok">✓</span> ✏️ staged code/poller.py <span class="dim">+41 −17</span></div>
+            <div class="s"><span class="run spin">●</span> 🤖 test-writer: pytest scaffold</div>
+            <div class="s"><span class="run spin">●</span> ✏️ staging tests/test_poller.py</div>
+            <div class="s dim">◻ commit request</div>
+          </div>
+          <div class="inline-ask">⚠ Two files staged — review now or when the
+            tests finish? <button class="y">review now</button>
+            <button class="n">when done</button></div>
+        </div></div>
+    </div>
+
+    <div class="palette">
+      <span class="k">✦</span>
+      <input value="/stop  ·  /research mqtt battery drain  ·  or just talk">
+      <button class="go">↑</button>
+      <div class="hints"><span>/stop</span><span>/plan</span><span>/research</span>
+        <span>/agent test-writer</span><span>/approve all</span></div>
+    </div>
+  </div>
+
+  <div class="rail">
+    <div class="cardlet"><div class="hd">🔔 Approvals <span class="badge">3</span></div>
+      <div class="bd">
+        <div class="row"><span class="grow">✏️ code/poller.py</span>
+          <button class="b ok">✓</button><button class="b no">✕</button></div>
+        <div class="row"><span class="grow">✏️ tests/test_poller.py</span>
+          <button class="b ok">✓</button><button class="b no">✕</button></div>
+        <div class="row"><span class="grow">🌿 "Poller: exponential backoff"</span>
+          <button class="b ok">✓</button><button class="b no">✕</button></div>
+      </div></div>
+
+    <div class="cardlet"><div class="hd">⚙ Runs <span class="n">1 live</span></div>
+      <div class="bd">
+        <div class="row"><span class="dot a"></span><span class="grow">test-writer — pytest scaffold</span><span class="dim">3m</span></div>
+        <div class="row dim"><span class="dot g"></span><span class="grow">research — MQTT vs HTTP</span><span>done</span></div>
+      </div></div>
+
+    <div class="cardlet"><div class="hd">☑ Plan <span class="n">2/5</span></div>
+      <div class="bd dim">
+        <div>☑ read current poller</div><div>☑ design backoff</div>
+        <div>◻ stage refactor</div><div>◻ tests via agent</div><div>◻ commit</div>
+      </div></div>
+
+    <div class="cardlet"><div class="hd">🖥 System <span class="n">ok</span></div>
+      <div class="bd dim">
+        <div class="row"><span class="dot a"></span>VM up · 2 in-flight · 11m</div>
+        <div class="row">tokens 312k / 5M · cache 97%</div>
+        <div class="row">off-peak · autonomy: stage</div>
+      </div></div>
+  </div>
+</body>
+</html>

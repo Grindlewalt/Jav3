@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concept — Mission Control</title>
+<style>
+  :root {
+    --bg:#0e1013; --bg-soft:#13161b; --panel:#171b21; --panel-2:#1e242c;
+    --border:#262d37; --text:#d7dde5; --dim:#7a8494; --accent:#5b9cf5;
+    --accent-2:#8b6cf0; --green:#4cc38a; --red:#e5534b; --amber:#d9a13d;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.45 system-ui, sans-serif; height:100vh; display:flex;
+    flex-direction:column; overflow:hidden; }
+  .strip { display:flex; gap:18px; align-items:center; padding:8px 16px;
+    background:var(--bg-soft); border-bottom:1px solid var(--border);
+    font-size:12px; }
+  .strip .brand { font-weight:700; font-size:14px;
+    background:linear-gradient(90deg,var(--accent),var(--accent-2));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .pill { display:flex; gap:6px; align-items:center; padding:3px 10px;
+    border:1px solid var(--border); border-radius:20px; background:var(--panel); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); }
+  .dot.on { background:var(--green); box-shadow:0 0 6px var(--green); }
+  .dot.run { background:var(--accent); box-shadow:0 0 6px var(--accent);
+    animation:pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity:.4 } }
+  .dim { color:var(--dim); } .grow { flex:1; }
+  main { flex:1; display:grid; min-height:0;
+    grid-template-columns: 340px 1fr 320px; gap:10px; padding:10px; }
+  .col { display:flex; flex-direction:column; gap:10px; min-height:0; }
+  .card { background:var(--panel); border:1px solid var(--border);
+    border-radius:10px; display:flex; flex-direction:column; min-height:0; }
+  .card h3 { margin:0; padding:9px 12px; font-size:11px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--dim);
+    border-bottom:1px solid var(--border); display:flex; gap:8px; }
+  .card .body { padding:10px 12px; overflow-y:auto; flex:1; }
+  .msg { margin-bottom:10px; } .msg .who { font-size:11px; color:var(--dim); }
+  .msg.user .bubble { background:var(--panel-2); }
+  .bubble { background:var(--bg-soft); border:1px solid var(--border);
+    border-radius:8px; padding:8px 10px; margin-top:2px; }
+  .tool { font-size:12px; color:var(--dim); padding:3px 8px; margin:3px 0;
+    border-left:2px solid var(--accent); background:var(--bg-soft); }
+  .composer { display:flex; gap:8px; padding:10px; border-top:1px solid var(--border); }
+  .composer input { flex:1; background:var(--bg); color:var(--text);
+    border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+  button { background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    color:#fff; border:0; border-radius:8px; padding:7px 14px; cursor:pointer; }
+  button.ghost { background:none; border:1px solid var(--border); color:var(--dim); }
+  .tree { font-size:13px; }
+  .node { display:flex; gap:8px; align-items:center; padding:5px 8px;
+    border-radius:6px; }
+  .node:hover { background:var(--panel-2); }
+  .node .tag { font-size:10px; padding:1px 8px; border-radius:10px;
+    border:1px solid var(--border); color:var(--dim); }
+  .tag.run { color:var(--accent); border-color:var(--accent); }
+  .tag.done { color:var(--green); border-color:var(--green); }
+  .d1 { margin-left:20px; } .d2 { margin-left:40px; }
+  .feed { font-size:12px; }
+  .feed div { padding:4px 0; border-bottom:1px dashed var(--border); }
+  .feed .t { color:var(--dim); margin-right:8px; font-variant-numeric:tabular-nums; }
+  .q { display:flex; gap:8px; align-items:center; padding:7px 9px;
+    border:1px solid var(--border); border-radius:8px; margin-bottom:6px;
+    background:var(--bg-soft); font-size:13px; }
+  .q .ok { background:none; border:1px solid var(--green); color:var(--green);
+    border-radius:6px; padding:2px 9px; }
+  .q .no { background:none; border:1px solid var(--red); color:var(--red);
+    border-radius:6px; padding:2px 9px; }
+  .meter { height:6px; border-radius:3px; background:var(--panel-2);
+    overflow:hidden; margin-top:6px; }
+  .meter span { display:block; height:100%; width:34%;
+    background:linear-gradient(90deg,var(--accent),var(--accent-2)); }
+</style>
+</head>
+<body>
+  <div class="strip">
+    <span class="brand">JARVIS · MISSION CONTROL</span>
+    <span class="pill"><span class="dot run"></span> turn running · 42s</span>
+    <span class="pill"><span class="dot on"></span> VM up · 2 in-flight · 11m</span>
+    <span class="pill">budget <b>&nbsp;312k / 5M&nbsp;</b> tokens</span>
+    <span class="pill dim">off-peak · next window 18:00</span>
+    <span class="grow"></span>
+    <span class="pill">🔔 3 waiting</span>
+    <span class="dim">project: <b>pi-cluster</b></span>
+  </div>
+
+  <main>
+    <div class="col">
+      <div class="card" style="flex:1">
+        <h3>Conversation</h3>
+        <div class="body">
+          <div class="msg user"><div class="who">operator</div>
+            <div class="bubble">Refactor the sensor poller so failures back off exponentially, and write tests.</div></div>
+          <div class="msg"><div class="who">jarvis</div>
+            <div class="bubble">Plan written — 5 steps. Delegating the test scaffold to an agent while I do the refactor.</div>
+            <div class="tool">📄 reading code/poller.py</div>
+            <div class="tool">✏️ staging code/poller.py</div>
+            <div class="tool">🤖 test-writer: scaffold pytest for poller backoff</div>
+          </div>
+        </div>
+        <div class="composer"><input placeholder="Message Jarvis…"><button>⏹</button></div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card" style="flex:1.2">
+        <h3>Live agents <span class="dim">— job 7f3a</span></h3>
+        <div class="body tree">
+          <div class="node"><span class="dot run"></span> head — refactor poller + tests <span class="grow"></span><span class="tag run">running</span></div>
+          <div class="node d1"><span class="dot on"></span> jarvis — edit poller.py <span class="grow"></span><span class="tag done">done</span></div>
+          <div class="node d1"><span class="dot run"></span> test-writer — pytest scaffold <span class="grow"></span><span class="tag run">running</span></div>
+          <div class="node d2"><span class="dot run"></span> ⚙ read_file tests/conftest.py</div>
+          <div class="node d1"><span class="dot"></span> reviewer — sanity pass <span class="grow"></span><span class="tag">queued</span></div>
+        </div>
+      </div>
+      <div class="card" style="flex:1">
+        <h3>Tool feed</h3>
+        <div class="body feed">
+          <div><span class="t">14:02:11</span>✏️ staged code/poller.py <span class="dim">(+41 −17)</span></div>
+          <div><span class="t">14:02:04</span>📄 read code/poller.py</div>
+          <div><span class="t">14:01:58</span>☑ todos: 2/5 done</div>
+          <div><span class="t">14:01:40</span>🔎 search_codebase "poll_interval"</div>
+          <div><span class="t">14:01:12</span>🧠 recalled note backoff-policy</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <h3>Awaiting approval</h3>
+        <div class="body">
+          <div class="q">✏️ code/poller.py <span class="dim">modified</span><span class="grow"></span><button class="ok">✓</button><button class="no">✕</button></div>
+          <div class="q">✏️ tests/test_poller.py <span class="dim">new</span><span class="grow"></span><button class="ok">✓</button><button class="no">✕</button></div>
+          <div class="q">🌿 commit: "Poller: exponential backoff"<span class="grow"></span><button class="ok">✓</button><button class="no">✕</button></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Plan</h3>
+        <div class="body" style="font-size:13px">
+          <div>☑ read current poller</div>
+          <div>☑ design backoff (cap 5m)</div>
+          <div>◻ stage refactor</div>
+          <div>◻ tests via agent</div>
+          <div>◻ commit request</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Turn cost</h3>
+        <div class="body">
+          <div class="dim" style="font-size:12px">input 289k · output 23k · cache hit 97%</div>
+          <div class="meter"><span></span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
