@@ -55,6 +55,50 @@ function NotificationBell() {
   )
 }
 
+// Read-only guest-VM status (GET /api/vm/status). Deliberately no controls
+// here — boot/teardown/nuke stay operator-driven elsewhere.
+function VmStatus() {
+  const [s, setS] = useState(null)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    const load = () => api('/api/vm/status').then(setS).catch(() => setS(null))
+    load()
+    const t = setInterval(load, 10000)
+    return () => clearInterval(t)
+  }, [])
+  if (!s) return null
+  const age = s.age_seconds != null
+    ? (s.age_seconds < 90 ? `${s.age_seconds}s` : `${Math.round(s.age_seconds / 60)}m`)
+    : null
+  return (
+    <div className="notif-wrap vm-wrap">
+      <button className="notif-bell" onClick={() => setOpen((o) => !o)}
+              title="guest VM status (read-only)">
+        <span className={`run-dot ${s.running ? 'running' : ''}`} /> VM
+      </button>
+      {open && (
+        <div className="notif-drop vm-drop">
+          <div className="notif-item"><span className="grow">state</span>
+            <span className={s.running ? '' : 'dim'}>
+              {s.running ? 'running' : (s.base_built ? 'off' : 'no image')}</span></div>
+          {s.running && age && (
+            <div className="notif-item"><span className="grow">age</span><span>{age}</span></div>)}
+          {s.running && (
+            <div className="notif-item"><span className="grow">in-flight turns</span>
+              <span>{s.inflight}</span></div>)}
+          <div className="notif-item"><span className="grow">gateway</span>
+            <span className={s.gateway ? '' : 'dim'}>{s.gateway ? 'on' : 'off'}</span></div>
+          <div className="notif-item"><span className="grow">image</span>
+            <span className="dim">{s.image_version}</span></div>
+          {s.idle_scrub_seconds > 0 && (
+            <div className="notif-item"><span className="grow">idle scrub</span>
+              <span className="dim">{s.idle_scrub_seconds}s</span></div>)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
   const [, setCfgReady] = useState(false) // bump once the media allowlist lands
@@ -86,6 +130,7 @@ export default function App() {
           <NavLink to="/skills">Skills</NavLink>
           <NavLink to="/tools">Tools</NavLink>
           <NotificationBell />
+          <VmStatus />
           <button
             className="link"
             onClick={async () => {

@@ -68,6 +68,16 @@ nav a.active { color: var(--text); background: var(--panel-2); }
 .notif-drop .notif-item:hover { background: var(--panel-2); }
 .notif-empty { padding: 12px 10px; text-align: center; }
 
+/* ---- VM status widget (read-only) ---- */
+.notif-bell .run-dot {
+  display: inline-block; vertical-align: middle; margin-right: 4px;
+  background: var(--dim);
+}
+.notif-bell .run-dot.running { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.vm-wrap { margin-left: 0; }
+.vm-drop { width: 230px; }
+.vm-drop .notif-item { cursor: default; }
+
 /* ---- controls ---- */
 button {
   background: linear-gradient(135deg, var(--accent), #4a7fd4);
