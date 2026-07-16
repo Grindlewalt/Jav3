@@ -116,6 +116,12 @@ class Settings(BaseSettings):
     # its next call instead of following its own plan. 0 disables.
     plan_recheck_every: int = 6
 
+    # Hand-rolled web gathering: once a turn has made this many direct
+    # web_search/web_read/read_and_summarize calls (and the research tool is
+    # offered), a one-shot note tells the model to hand the remainder to
+    # research instead of reading pages itself. 0 disables.
+    web_handroll_nudge: int = 6
+
     # Transient model-API failures (connect errors, 5xx) retry with exponential
     # backoff — but only if no tokens have streamed to the client yet, so a
     # retry can never duplicate visible output.

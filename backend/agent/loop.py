@@ -24,6 +24,21 @@ WRITE_PINNED = frozenset({"write_file", "edit_file", "journal_update",
                           "memory_write", "git_commit_request",
                           "create_agent", "schedule_update"})
 
+# Delegation tools whose successful results carry a trust note: the observed
+# failure mode is the head re-fetching a subagent's sources to "verify" —
+# which re-spends every token the delegation saved.
+DELEGATION_TOOLS = frozenset({"research", "spawn_agent", "deploy_agents"})
+
+_TRUST_NOTE = ("\n\n[system note: this is a delegated result — trust it and "
+               "build on it; do NOT re-fetch or re-verify its sources "
+               "yourself. If a specific gap remains, name it and delegate "
+               "that gap too, or answer with what you have.]")
+
+# Hand-rolled web gathering: past a threshold of these in one turn, the model
+# is told once to hand the remainder to research (the convo-12 failure shape:
+# dozens of one-page web_reads where one research call was the right move).
+WEB_HANDROLLED = frozenset({"web_search", "web_read", "read_and_summarize"})
+
 # conversation_id -> project paths the model has read (read_file) or written
 # (write_file) there — the read-before-edit guard. In-memory and bounded; a
 # restart just costs one extra read per file.
@@ -250,7 +265,11 @@ async def run_turn(
         system_prompt, history, tools, self_check)
 
     n_iter = max_iterations or settings.max_react_iterations
-    has_todo = any(t["function"]["name"] == "todo_update" for t in (tools or []))
+    offered = {t["function"]["name"] for t in (tools or [])}
+    has_todo = "todo_update" in offered
+    has_research = "research" in offered
+    web_calls = 0                # hand-rolled web gathering calls this turn
+    web_nudged = False
     read_only = registry.read_only_names()   # once per turn; hot-reload can wait
     tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
     err_streak = 0               # consecutive failed/empty/duplicate results
@@ -347,8 +366,13 @@ async def run_turn(
         for (tc, name, args), result in zip(parsed, results):
             if on_tool_call is not None:
                 await on_tool_call(name, args, result)
+            failed = (not result.strip() or result.startswith(
+                ("error:", "no matches", "note:", "duplicate call:")))
+            content = _cap_result(name, result)
+            if name in DELEGATION_TOOLS and not failed:
+                content += _TRUST_NOTE
             messages.append({"role": "tool", "tool_call_id": tc["id"],
-                             "content": _cap_result(name, result)})
+                             "content": content})
             tool_msgs.append({"idx": len(messages) - 1, "round": i, "name": name})
             # the GUI renders live activity rows from this: pair to the tool
             # event by id, mark ok/err, carry the result for click-to-expand
@@ -359,15 +383,24 @@ async def run_turn(
                 seen_calls[(name, json.dumps(args, sort_keys=True))] = tool_msgs[-1]
             else:
                 seen_calls.clear()   # a mutating call may invalidate any read
-            failed = (not result.strip() or result.startswith(
-                ("error:", "no matches", "note:", "duplicate call:")))
             err_streak = err_streak + 1 if failed else 0
+            if name in WEB_HANDROLLED:
+                web_calls += 1
         _evict_stale_results(messages, tool_msgs, i)
 
         # mid-flight steering: dead-end breaker + delegation/wrap-up nudges,
         # appended to the last tool result so they sit adjacent to the failure
         if _steer(messages, i, n_iter, err_streak, can_delegate, has_todo):
             force_conclude = True
+        if (has_research and not web_nudged
+                and web_calls >= settings.web_handroll_nudge > 0):
+            web_nudged = True
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
+                            f"\n\n[system note: {web_calls} hand-rolled web "
+                            "calls this turn. If more gathering remains, hand "
+                            "the remainder to the research tool in ONE call "
+                            "and continue from its report instead of reading "
+                            "pages yourself.]"}
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}
