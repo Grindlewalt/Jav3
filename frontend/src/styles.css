@@ -437,6 +437,31 @@ kbd {
 .diff-col pre { flex: 1; overflow: auto; margin: 0; padding: 8px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
   font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.diff-line { min-height: 1.35em; padding: 0 3px; border-radius: 2px; }
+.diff-line.del { background: color-mix(in srgb, var(--red) 20%, transparent); }
+.diff-line.add { background: color-mix(in srgb, var(--green) 18%, transparent); }
+.diff-line.mod { background: color-mix(in srgb, var(--amber) 16%, transparent); }
+.diff-line.pad { opacity: 0.25; }
+
+/* ---- git gate panel ---- */
+.git-status { max-height: 90px; overflow: auto; margin: 0; padding: 8px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.git-diff { flex: 1; min-height: 60px; overflow: auto; margin: 0; padding: 8px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+
+/* ---- task board panel ---- */
+.board-goal { resize: vertical; }
+.board-runs { list-style: none; padding: 0; margin: 0; }
+.board-runs li { display: flex; align-items: center; gap: 8px; padding: 5px 9px;
+  border: 1px solid var(--border); border-radius: 7px; margin-bottom: 4px;
+  background: var(--panel); font-size: 13px; }
+.grow-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* ---- autonomy dial ---- */
+.ws-head label { display: flex; align-items: center; gap: 6px; }
+.autonomy-dial { font-size: 12px; padding: 3px 6px; }
 
 /* ---- context files panel ---- */
 .ctx-total { font-size: 12px; color: var(--accent); white-space: nowrap; }

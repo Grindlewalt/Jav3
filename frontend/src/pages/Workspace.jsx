@@ -15,6 +15,8 @@ const PANEL_TYPES = {
   run: { label: 'Run — python sandbox', w: 560, h: 470 },
   todos: { label: 'To-dos', w: 360, h: 380 },
   staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
+  git: { label: 'Git — review, approve, push', w: 560, h: 480 },
+  board: { label: 'Task board — goal / plan / runs', w: 400, h: 540 },
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
   research: { label: 'Research bots — live', w: 620, h: 560 },
@@ -301,6 +303,20 @@ export default function Workspace() {
           : <button className="ghost" onClick={async () => {
               await api(`/api/projects/${slug}/load`, { method: 'POST' }); refreshProject() }}>
               load into context</button>}
+        <label className="dim small" title="which tools Jarvis is offered here — enforced server-side per turn">
+          autonomy
+          <select className="autonomy-dial" value={project.autonomy || 'full'}
+                  onChange={async (e) => {
+                    await api(`/api/projects/${slug}/autonomy`, {
+                      method: 'PUT', body: JSON.stringify({ level: e.target.value }) })
+                    refreshProject()
+                  }}>
+            <option value="read_only">read-only — observe</option>
+            <option value="stage">stage — quarantined writes</option>
+            <option value="gated">gated — + agents & research</option>
+            <option value="full">full — + commit proposals</option>
+          </select>
+        </label>
         <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close ·
           <kbd> ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add ·
           <kbd> esc</kbd> collapse</span>
@@ -348,6 +364,8 @@ function PanelBody(props) {
     case 'run': return <RunPanel {...props} />
     case 'todos': return <TodoPanel {...props} />
     case 'staging': return <StagingPanel {...props} />
+    case 'git': return <GitPanel {...props} />
+    case 'board': return <TaskBoardPanel {...props} />
     case 'context': return <ContextPanel {...props} />
     case 'agent': return <AgentPanel {...props} />
     case 'research': return <ResearchPanel {...props} />
@@ -818,10 +836,26 @@ function ContextPanel({ slug }) {
 
   const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`)
 
+  async function setAll(on) {
+    setBusy(true)
+    try {
+      await api(`/api/projects/${slug}/context`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          files: on ? files.filter((f) => !f.binary).map((f) => f.path) : [] }) })
+      await refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
+
   return (
     <div className="pane-col">
       <div className="row">
         <span className="grow dim">nothing loads by default — tick to include</span>
+        <button className="ghost" disabled={busy || files.length === 0}
+                onClick={() => setAll(true)}>all</button>
+        <button className="ghost" disabled={busy || files.length === 0}
+                onClick={() => setAll(false)}>none</button>
         <span className="ctx-total">≈{fmt(total)} tokens loaded</span>
       </div>
       <ul className="ctx-list">
@@ -1001,8 +1035,76 @@ function upLast(list, fn) {
   return copy
 }
 
+// Line-level diff for the staged-vs-canonical review: plain LCS on lines,
+// adjacent del+add pairs folded into "changed" rows. Bounded — big files fall
+// back to the plain side-by-side text. Content is UNTRUSTED and only ever
+// rendered as text nodes, never markup.
+const DIFF_MAX_LINES = 400
+function lineDiff(a, b) {
+  const A = a.split('\n'), B = b.split('\n')
+  if (A.length > DIFF_MAX_LINES || B.length > DIFF_MAX_LINES) return null
+  const n = A.length, m = B.length
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1))
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1])
+  const rows = []
+  let i = 0, j = 0
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { rows.push({ l: A[i], r: B[j], t: 'same' }); i++; j++ }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ l: A[i], r: null, t: 'del' }); i++ }
+    else { rows.push({ l: null, r: B[j], t: 'add' }); j++ }
+  }
+  while (i < n) rows.push({ l: A[i++], r: null, t: 'del' })
+  while (j < m) rows.push({ l: null, r: B[j++], t: 'add' })
+  const out = []
+  for (let k = 0; k < rows.length; k++) {
+    if (rows[k].t === 'del' && rows[k + 1]?.t === 'add') {
+      out.push({ l: rows[k].l, r: rows[k + 1].r, t: 'mod' }); k++
+    } else out.push(rows[k])
+  }
+  return out
+}
+
+function DiffView({ oldText, newText }) {
+  const rows = (oldText != null && newText != null)
+    ? lineDiff(oldText, newText) : null
+  if (!rows) {
+    return (
+      <div className="diff-view">
+        <div className="diff-col">
+          <div className="dim small">current</div>
+          <pre>{oldText ?? '(new file)'}</pre>
+        </div>
+        <div className="diff-col">
+          <div className="dim small">staged</div>
+          <pre>{newText ?? '(deleted)'}</pre>
+        </div>
+      </div>
+    )
+  }
+  const changed = rows.filter((r) => r.t !== 'same').length
+  return (
+    <div className="diff-view">
+      <div className="diff-col">
+        <div className="dim small">current · {changed} line{changed !== 1 && 's'} differ</div>
+        <pre>{rows.map((r, i) => (
+          <div key={i} className={`diff-line ${r.t === 'add' ? 'pad' : r.t}`}>
+            {r.l ?? ' '}</div>))}</pre>
+      </div>
+      <div className="diff-col">
+        <div className="dim small">staged</div>
+        <pre>{rows.map((r, i) => (
+          <div key={i} className={`diff-line ${r.t === 'del' ? 'pad' : r.t}`}>
+            {r.r ?? ' '}</div>))}</pre>
+      </div>
+    </div>
+  )
+}
+
 // Jarvis's pending edits: everything it writes lands here first, inert, and
-// only touches the real files when approved. Diffs are shown as plain text.
+// only touches the real files when approved.
 function StagingPanel({ slug }) {
   const [staged, setStaged] = useState([])
   const [sel, setSel] = useState(null)
@@ -1064,18 +1166,172 @@ function StagingPanel({ slug }) {
           </li>
         ))}
       </ul>
-      {sel && diff && (
-        <div className="diff-view">
-          <div className="diff-col">
-            <div className="dim small">current</div>
-            <pre>{diff.old ?? '(new file)'}</pre>
-          </div>
-          <div className="diff-col">
-            <div className="dim small">staged</div>
-            <pre>{diff.new}</pre>
-          </div>
-        </div>
-      )}
+      {sel && diff && <DiffView oldText={diff.old} newText={diff.new} />}
+    </div>
+  )
+}
+
+// Git gate: the working tree, the diff, and Jarvis's pending commit requests
+// with approve (commit + push) / reject — all through the existing gitgate
+// endpoints (this panel only *uses* the gate; the semantics live server-side).
+function GitPanel({ slug }) {
+  const [status, setStatus] = useState('')
+  const [requests, setRequests] = useState([])
+  const [diff, setDiff] = useState(null)     // null = hidden
+  const [busy, setBusy] = useState(false)
+
+  const refresh = () => Promise.all([
+    api(`/api/projects/${slug}/git/status`)
+      .then((r) => setStatus(r.status || '(clean)'))
+      .catch((e) => setStatus(`error: ${e.detail || e}`)),
+    api(`/api/projects/${slug}/git/requests`)
+      .then((r) => setRequests(r.requests)).catch(() => {}),
+  ])
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 10000)
+    const h = () => refresh()
+    window.addEventListener('jarvis-files-changed', h)
+    return () => { clearInterval(t); window.removeEventListener('jarvis-files-changed', h) }
+  }, [slug]) // eslint-disable-line
+
+  async function toggleDiff() {
+    if (diff != null) { setDiff(null); return }
+    try {
+      const r = await api(`/api/projects/${slug}/git/diff`)
+      setDiff(r.diff || '(no unstaged changes)')
+    } catch (err) { setDiff(`error: ${err.detail || err}`) }
+  }
+
+  async function act(rid, verb) {
+    if (verb === 'reject' && !window.confirm(`reject commit request #${rid}?`)) return
+    setBusy(true)
+    try {
+      await api(`/api/projects/${slug}/git/requests/${rid}/${verb}`, { method: 'POST' })
+      await refresh()
+      window.dispatchEvent(new Event('jarvis-files-changed'))
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
+
+  const pending = requests.filter((r) => r.status === 'pending')
+  const decided = requests.filter((r) => r.status !== 'pending').slice(0, 6)
+  return (
+    <div className="pane-col">
+      <div className="row">
+        <span className="grow dim">working tree</span>
+        <button className="ghost" onClick={toggleDiff}>{diff != null ? 'hide diff' : 'diff'}</button>
+        <button className="ghost" onClick={refresh}>↻</button>
+      </div>
+      <pre className="git-status">{status || '…'}</pre>
+      {diff != null && <pre className="git-diff">{diff}</pre>}
+      <div className="dim small">commit requests — approving commits (and pushes, when a
+        remote is set) on the host</div>
+      <ul className="staged-list">
+        {pending.length === 0 && <li className="dim">nothing waiting on you</li>}
+        {pending.map((r) => (
+          <li key={r.id}>
+            <span className="tag new">#{r.id}</span>
+            <span className="grow ellipsis" title={r.message}>{r.message}</span>
+            {r.error && <span className="tag error" title={r.error}>retry</span>}
+            <button className="win-btn ok" title="approve: commit + push" disabled={busy}
+                    onClick={() => act(r.id, 'approve')}>✓</button>
+            <button className="win-btn" title="reject" disabled={busy}
+                    onClick={() => act(r.id, 'reject')}>✕</button>
+          </li>
+        ))}
+        {decided.map((r) => (
+          <li key={r.id} className="dim">
+            <span className={`tag ${r.status === 'approved' ? 'done' : 'error'}`}>{r.status}</span>
+            <span className="grow ellipsis" title={r.message}>{r.message}</span>
+            {r.commit_sha && <span className="mono small">{r.commit_sha.slice(0, 7)}</span>}
+            {r.error && <span className="tag error" title={r.error}>push failed</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+// The session spine: the goal, the plan (shared todos), and this project's
+// live runs — one glance says what we're doing, where we are, what's moving.
+// The goal persists with the board layout (.workspace.json panel state).
+function TaskBoardPanel({ slug, state, setState }) {
+  const [todos, setTodos] = useState([])
+  const [text, setText] = useState('')
+  const [jobs, setJobs] = useState([])
+
+  const refreshTodos = () =>
+    api(`/api/projects/${slug}/todos`).then((r) => setTodos(r.todos))
+  const refreshJobs = () =>
+    api('/api/jobs').then((r) =>
+      setJobs((r.jobs || []).filter((j) => j.project === slug))).catch(() => {})
+  useEffect(() => {
+    refreshTodos(); refreshJobs()
+    const t = setInterval(refreshJobs, 5000)
+    const h = () => refreshTodos()
+    window.addEventListener('jarvis-files-changed', h)
+    return () => { clearInterval(t); window.removeEventListener('jarvis-files-changed', h) }
+  }, [slug]) // eslint-disable-line
+
+  async function act(body) {
+    const r = await api(`/api/projects/${slug}/todos`, {
+      method: 'POST', body: JSON.stringify(body) })
+    setTodos(r.todos)
+  }
+
+  const running = jobs.filter((j) => !j.done)
+  const recent = jobs.filter((j) => j.done).slice(0, 3)
+  const doneCount = todos.filter((t) => t.done).length
+  return (
+    <div className="pane-col">
+      <div className="dim small">goal</div>
+      <textarea className="board-goal" rows={2} value={state.goal || ''}
+                placeholder="what is this session trying to achieve?"
+                onChange={(e) => setState({ goal: e.target.value })} />
+      <div className="row">
+        <span className="dim small grow">plan · {doneCount}/{todos.length} done</span>
+      </div>
+      <ul className="todo-list grow-scroll">
+        {todos.map((t, i) => (
+          <li key={i} className={t.done ? 'done' : ''}>
+            <label>
+              <input type="checkbox" checked={t.done}
+                     onChange={() => act({ action: 'toggle', index: i })} />
+              <span>{t.text}</span>
+            </label>
+            <button className="win-btn" onClick={() => act({ action: 'delete', index: i })}>×</button>
+          </li>
+        ))}
+        {todos.length === 0 && <li className="dim">no plan yet — Jarvis writes one with todo_update</li>}
+      </ul>
+      <form className="row" onSubmit={(e) => {
+        e.preventDefault()
+        if (text.trim()) { act({ action: 'add', text }); setText('') }
+      }}>
+        <input className="grow" placeholder="add a step…" value={text}
+               onChange={(e) => setText(e.target.value)} />
+        <button type="submit">Add</button>
+      </form>
+      <div className="dim small">runs</div>
+      <ul className="board-runs">
+        {running.length === 0 && recent.length === 0 &&
+          <li className="dim">nothing running</li>}
+        {running.map((j) => (
+          <li key={j.id}>
+            <span className="run-dot running" />
+            <span className="grow ellipsis" title={j.summary}>{j.summary || `#${j.id}`}</span>
+            <span className="tag running">{j.kind}</span>
+          </li>
+        ))}
+        {recent.map((j) => (
+          <li key={j.id} className="dim">
+            <span className="run-dot done" />
+            <span className="grow ellipsis" title={j.summary}>{j.summary || `#${j.id}`}</span>
+            <span className="tag done">{j.kind}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
