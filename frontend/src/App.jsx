@@ -55,17 +55,37 @@ function NotificationBell() {
   )
 }
 
-// Read-only guest-VM status (GET /api/vm/status). Deliberately no controls
-// here — boot/teardown/nuke stay operator-driven elsewhere.
+// Guest-VM status (GET /api/vm/status) plus the one operator control: nuke —
+// discard the overlay and reboot fresh from the golden image. Nuke is
+// double-confirmed and refuses while a turn is in flight; boot/teardown stay
+// elsewhere. The status read itself never mutates.
 function VmStatus() {
   const [s, setS] = useState(null)
   const [open, setOpen] = useState(false)
+  const [nuking, setNuking] = useState(false)
+  const load = () => api('/api/vm/status').then(setS).catch(() => setS(null))
   useEffect(() => {
-    const load = () => api('/api/vm/status').then(setS).catch(() => setS(null))
     load()
     const t = setInterval(load, 10000)
     return () => clearInterval(t)
   }, [])
+
+  async function nuke() {
+    if (s?.inflight > 0) {
+      window.alert(`${s.inflight} turn(s) in flight — wait for them to finish before nuking.`)
+      return
+    }
+    if (!window.confirm('Nuke the guest VM? Its overlay disk is discarded and it '
+      + 'reboots fresh from the golden image. In-flight work is lost.')) return
+    setNuking(true)
+    try {
+      const r = await api('/api/vm/nuke', {
+        method: 'POST', body: JSON.stringify({ confirm: true }) })
+      setS(r)
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setNuking(false)
+  }
+
   if (!s) return null
   const age = s.age_seconds != null
     ? (s.age_seconds < 90 ? `${s.age_seconds}s` : `${Math.round(s.age_seconds / 60)}m`)
@@ -73,7 +93,7 @@ function VmStatus() {
   return (
     <div className="notif-wrap vm-wrap">
       <button className="notif-bell" onClick={() => setOpen((o) => !o)}
-              title="guest VM status (read-only)">
+              title="guest VM status">
         <span className={`run-dot ${s.running ? 'running' : ''}`} /> VM
       </button>
       {open && (
@@ -93,6 +113,12 @@ function VmStatus() {
           {s.idle_scrub_seconds > 0 && (
             <div className="notif-item"><span className="grow">idle scrub</span>
               <span className="dim">{s.idle_scrub_seconds}s</span></div>)}
+          <div className="vm-nuke-row">
+            <button className="ghost danger" disabled={nuking || !s.running}
+                    title={s.running ? 'discard the overlay, reboot fresh'
+                                     : 'nothing to nuke — guest is off'}
+                    onClick={nuke}>{nuking ? 'nuking…' : '☢ nuke guest'}</button>
+          </div>
         </div>
       )}
     </div>

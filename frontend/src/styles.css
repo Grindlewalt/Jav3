@@ -77,6 +77,9 @@ nav a.active { color: var(--text); background: var(--panel-2); }
 .vm-wrap { margin-left: 0; }
 .vm-drop { width: 230px; }
 .vm-drop .notif-item { cursor: default; }
+.vm-nuke-row { padding: 6px 4px 2px; border-top: 1px solid var(--border);
+  margin-top: 4px; display: flex; }
+.vm-nuke-row button { flex: 1; font-size: 12px; }
 
 /* ---- controls ---- */
 button {
