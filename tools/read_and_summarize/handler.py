@@ -6,7 +6,7 @@ from backend.agent.tools.toolctx import web_session
 MAX_URLS = 8
 
 
-async def run(urls=None, url=None, focus: str = "") -> str:
+async def run(urls=None, url=None, focus: str = "", triage: bool = False) -> str:
     session = await web_session()
     targets = []
     if isinstance(urls, list):
@@ -32,6 +32,13 @@ async def run(urls=None, url=None, focus: str = "") -> str:
             return f"Source: {u}\n(could not read: {e})"
         if text.startswith("error:") or not text.strip():
             return f"Source: {u}\n({text[:150] or 'empty page'})"
+        if triage:
+            try:
+                skip = await summarize.triage_page(text, u, focus)
+            except Exception:  # noqa: BLE001 - triage is best-effort, keep the page
+                skip = ""
+            if skip:
+                return f"Source: {u}\n(skipped by triage: {skip[:150]})"
         try:
             s = await summarize.summarize_page(text, u, focus)
         except Exception as e:  # noqa: BLE001

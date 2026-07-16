@@ -18,6 +18,46 @@ from .webtools import _cache_get, _cache_put
 # page re-summarized with the same focus skips the model call too
 _summary_cache: dict[tuple[str, str], tuple[float, str]] = {}
 
+# (url, focus) -> skip-reason or "" (keep); triage verdicts are cheap but so is
+# caching them, and a re-read within the TTL shouldn't flip-flop
+_triage_cache: dict[tuple[str, str], tuple[float, str]] = {}
+
+# how much of the page the triage skim sees — roughly the first paragraph or
+# two of stripped text; the whole point is spending ~1k chars to decide whether
+# to spend web_max_chars on the full summary
+TRIAGE_HEAD_CHARS = 1_000
+
+
+async def triage_page(text: str, url: str, focus: str = "") -> str:
+    """Skim the head of a page and decide whether it's worth summarizing.
+
+    Returns "" to keep the page, or a short reason string to skip it. Fails
+    open: anything unparseable keeps the page — wrongly skipping loses
+    information, wrongly keeping only costs one summary call.
+    """
+    key = (url, focus)
+    cached = _cache_get(_triage_cache, key)
+    if cached is not None:
+        return cached
+    lens = (f"information relevant to: {focus}" if focus.strip()
+            else "substantive informational content")
+    out = await complete_text(
+        "You skim the opening of a web page and judge whether the full page is "
+        f"worth reading for {lens}. Error pages, paywalls, login walls, cookie "
+        "boilerplate, link farms and pages plainly about something else are not "
+        "worth reading. Reply with exactly one line: KEEP, or "
+        "SKIP: <short reason>.",
+        f"URL: {url}\n\nOpening of the page:\n{text[:TRIAGE_HEAD_CHARS]}",
+        temperature=0.0)
+    verdict = out.strip().splitlines()[0] if out.strip() else "KEEP"
+    if verdict.upper().startswith("SKIP"):
+        reason = verdict.split(":", 1)[1].strip() if ":" in verdict else "low value"
+        result = reason or "low value"
+    else:
+        result = ""          # KEEP (or anything unrecognized — fail open)
+    _cache_put(_triage_cache, key, result)
+    return result
+
 
 async def summarize_page(text: str, url: str, focus: str = "") -> str:
     key = (url, focus)
