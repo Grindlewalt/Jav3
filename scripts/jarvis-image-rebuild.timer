@@ -1,0 +1,10 @@
+[Unit]
+Description=Rebuild the Jarvis golden image monthly (security-patch refresh)
+
+[Timer]
+# first of each month at 04:00 local; catch up if the Pi was off (Persistent)
+OnCalendar=*-*-01 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

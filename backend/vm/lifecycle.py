@@ -23,8 +23,43 @@ class VMError(Exception):
     pass
 
 
+_VERSION_RE = re.compile(r"base-v(\d+)\.qcow2$")
+
+
 def _base_image() -> Path:
+    """The active golden image: the HIGHEST base-v<N>.qcow2 present, so a rebuild
+    (which creates the next version, never mutating in place) auto-activates on
+    the next guest boot. Falls back to the configured version when none exist."""
+    versions = [(int(m.group(1)), p) for p in settings.vm_dir.glob("base-v*.qcow2")
+                if (m := _VERSION_RE.search(p.name))]
+    if versions:
+        return max(versions)[1]
     return settings.vm_dir / f"base-{settings.vm_image_version}.qcow2"
+
+
+def _active_version() -> str:
+    m = _VERSION_RE.search(_base_image().name)
+    return f"v{m.group(1)}" if m else settings.vm_image_version
+
+
+def _next_version() -> int:
+    versions = [int(m.group(1)) for p in settings.vm_dir.glob("base-v*.qcow2")
+                if (m := _VERSION_RE.search(p.name))]
+    return (max(versions) if versions else 0) + 1
+
+
+def _image_meta() -> dict:
+    """Wall-clock build time + age of the active image (its file mtime), and
+    whether it is past vm_image_max_age_days — the VM widget's amber signal."""
+    p = _base_image()
+    if not p.exists():
+        return {"image_built_at": None, "image_age_days": None, "image_stale": False}
+    import datetime
+    built = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+    age = (datetime.datetime.now() - built).total_seconds() / 86400
+    return {"image_built_at": built.isoformat(timespec="seconds"),
+            "image_age_days": round(age, 1),
+            "image_stale": age > settings.vm_image_max_age_days}
 
 
 def base_built() -> bool:
@@ -52,19 +87,23 @@ class GuestVM:
         self._inflight = 0
         self._idle_since: float | None = None
         self._booted_at: float | None = None
+        self._rebuilding = False
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
     def status(self) -> dict:
         age = int(time.monotonic() - self._booted_at) if self._booted_at else None
-        return {"image_version": settings.vm_image_version,
+        return {"image_version": _active_version(),
                 "base_built": base_built(),
                 "running": self.running(),
                 "gateway": gateway.enabled,
                 "inflight": self._inflight,
                 "age_seconds": age,
-                "idle_scrub_seconds": settings.vm_idle_scrub_seconds}
+                "idle_scrub_seconds": settings.vm_idle_scrub_seconds,
+                "egress": settings.vm_egress,
+                "rebuilding": self._rebuilding,
+                **_image_meta()}
 
     async def _build_overlay(self) -> None:
         base = _base_image()
@@ -163,6 +202,40 @@ class GuestVM:
         async with self._lock:
             await self.teardown()
             await self.boot()
+
+    async def rebuild_image(self) -> dict:
+        """Build the NEXT golden-image version in the background (vm/build_base.sh,
+        ~20 min on the Pi). It never touches the running guest or the current base;
+        on success the higher version auto-activates on the next boot. Returns
+        immediately — progress streams on the 'vm-rebuild' bus channel."""
+        if self._rebuilding:
+            return {"started": False, "reason": "a rebuild is already running"}
+        version = f"v{_next_version()}"
+        self._rebuilding = True
+        asyncio.create_task(self._run_rebuild(version))
+        return {"started": True, "version": version}
+
+    async def _run_rebuild(self, version: str) -> None:
+        from .. import bus
+        chan, script = "vm-rebuild", settings.base_dir / "vm" / "build_base.sh"
+        env = {**os.environ, "JARVIS_VM_IMAGE_VERSION": version}
+        bus.publish(chan, {"type": "rebuild", "phase": "start", "version": version})
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash", str(script), env=env, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            if proc.stdout is not None:
+                async for line in proc.stdout:
+                    bus.publish(chan, {"type": "rebuild", "phase": "log",
+                                       "line": line.decode(errors="replace").rstrip()})
+            rc = await proc.wait()
+            ok = rc == 0 and (settings.vm_dir / f"base-{version}.qcow2").exists()
+            bus.publish(chan, {"type": "rebuild", "phase": "done",
+                               "version": version, "ok": ok, "returncode": rc})
+        except (FileNotFoundError, OSError) as e:
+            bus.publish(chan, {"type": "rebuild", "phase": "error", "error": str(e)})
+        finally:
+            self._rebuilding = False
 
     # --- refcount + idle scrub -------------------------------------------------
 
