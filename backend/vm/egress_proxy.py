@@ -208,11 +208,16 @@ async def _handle_http(method, host, port, head, cr, cw):
         path = urlsplit(path).path or "/"
     url = f"http://{host}:{port}{path}"
     hdr_block = injected.split("\r\n\r\n", 1)[0]
+    # hop-by-hop + length/host headers are recomputed by httpx from the (possibly
+    # injection-resized) body and target URL; forwarding the stale originals would
+    # conflict or misframe the request.
+    _drop = ("proxy-connection", "connection", "content-length", "host",
+             "transfer-encoding", "keep-alive", "proxy-authorization")
     headers = {}
     for ln in hdr_block.split("\r\n")[1:]:
         if ":" in ln:
             k, v = ln.split(":", 1)
-            if k.lower() not in ("proxy-connection", "connection"):
+            if k.lower() not in _drop:
                 headers[k.strip()] = v.strip()
     send_body = injected.split("\r\n\r\n", 1)[1].encode("latin-1") if "\r\n\r\n" in injected else b""
     bo = len(injected)
