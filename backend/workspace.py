@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from .auth import require_user
 from .config import settings
+from . import diffgate
 from .db import get_db
 from .fsutil import SKIP_DIRS, list_tree, read_text_or_binary, safe_join
 from .runner import run_python
@@ -398,7 +399,14 @@ class StagingAction(BaseModel):
 @router.get("/staging")
 async def staged_list(slug: str):
     await project_dir(slug)
-    return {"staged": _staging.list_staged(slug)}
+    db = await get_db()
+    try:
+        flags = await diffgate.rescan_project(db, slug)
+        blocked = await diffgate.blocking_paths(db, slug)
+    finally:
+        await db.close()
+    return {"staged": _staging.list_staged(slug), "flags": flags,
+            "blocked": sorted(blocked)}
 
 
 @router.get("/staging/diff")
@@ -423,7 +431,41 @@ async def staged_diff(slug: str, path: str):
 @router.post("/staging/approve")
 async def staged_approve(slug: str, body: StagingAction):
     await project_dir(slug)
-    return {"applied": _staging.approve(slug, body.paths)}
+    db = await get_db()
+    try:
+        # soft-flag gate (Layer 6): a file with an unacknowledged flag cannot be
+        # approved. The write already landed in staging; the operator must clear
+        # each flag first. Everything unflagged approves normally.
+        await diffgate.rescan_project(db, slug)
+        blocked = await diffgate.blocking_paths(db, slug, body.paths)
+    finally:
+        await db.close()
+    to_apply = None if body.paths is None else [p for p in body.paths if p not in blocked]
+    if body.paths is None:
+        # "approve all" still skips blocked files
+        to_apply = [e["path"] for e in _staging.list_staged(slug) if e["path"] not in blocked]
+    applied = _staging.approve(slug, to_apply)
+    return {"applied": applied, "blocked": sorted(blocked)}
+
+
+@router.get("/staging/flags")
+async def staged_flags(slug: str):
+    await project_dir(slug)
+    db = await get_db()
+    try:
+        return {"flags": await diffgate.rescan_project(db, slug)}
+    finally:
+        await db.close()
+
+
+@router.post("/staging/flags/{flag_id}/ack")
+async def staged_flag_ack(slug: str, flag_id: int):
+    await project_dir(slug)
+    db = await get_db()
+    try:
+        return await diffgate.acknowledge(db, flag_id)
+    finally:
+        await db.close()
 
 
 @router.post("/staging/reject")

@@ -67,6 +67,13 @@ _PROMOTION_TOOLS = frozenset({"memory_write"})
 # the moment it happens and records the provenance on the result.
 _tainted: set[str] = set()
 
+# Tools whose result is a staged file mutation. After one runs we re-scan the
+# project's staging with the deterministic diff gate (Layer 6), so a flag +
+# alert fires the moment the write lands — not only when the operator opens the
+# panel (the approve path re-scans regardless, so enforcement never depends on
+# this proactive pass).
+_STAGING_TOOLS = frozenset({"write_file", "edit_file", "dashboard", "run_code"})
+
 _PROMOTION_QUARANTINE_NOTE = (
     "\n\n[taint: this write happened in a turn that already consumed untrusted "
     "external content (web/research). It is quarantined — stored but NOT binding "
@@ -81,6 +88,21 @@ def classify_taint(name: str) -> str:
 def op_tainted(op_id: str) -> bool:
     """Whether this operation has consumed untrusted tool output yet."""
     return op_id in _tainted
+
+
+async def _gate_scan(slug: str) -> None:
+    """Best-effort proactive diff-gate scan after a staging write. Never lets a
+    gate error break the tool call it rides on."""
+    try:
+        from .. import diffgate
+        from ..db import get_db
+        db = await get_db()
+        try:
+            await diffgate.rescan_project(db, slug)
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — a gate failure must not fail the tool
+        pass
 
 
 async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
@@ -111,6 +133,8 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
             _tainted.add(op_id)
         if launder and not result.startswith("error:"):
             result += _PROMOTION_QUARANTINE_NOTE
+        if name in _STAGING_TOOLS and env.active_project and not result.startswith("error:"):
+            await _gate_scan(env.active_project)
         return {"result": result, "taint": classify_taint(name)}
     finally:
         budget_mod.active_op_id.reset(optok)
