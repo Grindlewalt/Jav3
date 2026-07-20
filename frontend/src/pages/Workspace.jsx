@@ -5,6 +5,7 @@ import ChatBox from '../ChatBox.jsx'
 import Md from '../Md.jsx'
 import DiffView from '../DiffView.jsx'
 import { ReviewQueue } from './Review.jsx'
+import { NetworkPanel } from './Network.jsx'
 import { cspMediaSources } from '../mediaHosts.js'
 
 // ---- panel registry: add a capability = one component + one entry here ----
@@ -22,13 +23,17 @@ const PANEL_TYPES = {
   agent: { label: 'Run an agent', w: 460, h: 520 },
   research: { label: 'Research bots — live', w: 620, h: 560 },
   review: { label: 'Review — approvals & alerts', w: 480, h: 540 },
+  network: { label: 'Network — egress & host approvals', w: 480, h: 560 },
 }
 
+// Default board: chat + the session spine (board = goal/plan/runs), with git as
+// the review/undo surface (writes are live now — no staging panel) and network
+// for approving the hosts the agent asks to reach.
 const DEFAULT_PANELS = [
-  { id: 'p1', type: 'chat', x: 16, y: 16, w: 440, h: 520, z: 1, state: {} },
-  { id: 'p2', type: 'journal', x: 472, y: 16, w: 440, h: 300, z: 2, state: {} },
-  { id: 'p3', type: 'todos', x: 928, y: 16, w: 340, h: 300, z: 3, state: {} },
-  { id: 'p4', type: 'git', x: 472, y: 332, w: 620, h: 204, z: 4, state: {} },
+  { id: 'p1', type: 'chat', x: 16, y: 16, w: 460, h: 560, z: 1, state: {} },
+  { id: 'p2', type: 'board', x: 492, y: 16, w: 400, h: 560, z: 2, state: {} },
+  { id: 'p3', type: 'git', x: 908, y: 16, w: 540, h: 300, z: 3, state: {} },
+  { id: 'p4', type: 'network', x: 908, y: 332, w: 540, h: 244, z: 4, state: {} },
 ]
 
 const TEXT_EXT = /\.(md|txt|py|js|jsx|ts|json|html|css|csv|toml|yaml|yml|sh|tex)$/i
@@ -126,9 +131,13 @@ export default function Workspace() {
     // where you live, so what you're looking at is what Jarvis is thinking about
     api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
     api(`/api/projects/${slug}/layout`).then((r) => {
-      const p = r.layout?.panels?.length ? r.layout.panels : DEFAULT_PANELS
-      zRef.current = Math.max(10, ...p.map((x) => x.z || 0))
-      setPanels(p)
+      const saved = r.layout?.panels?.length ? r.layout.panels : DEFAULT_PANELS
+      // drop panel types that no longer exist (e.g. the removed 'staging'
+      // panel on an old saved board) so they don't render "unknown panel"
+      const p = saved.filter((x) => PANEL_TYPES[x.type])
+      const clean = p.length ? p : DEFAULT_PANELS
+      zRef.current = Math.max(10, ...clean.map((x) => x.z || 0))
+      setPanels(clean)
     })
   }, [slug, refreshProject])
 
@@ -371,6 +380,7 @@ function PanelBody(props) {
     case 'agent': return <AgentPanel {...props} />
     case 'research': return <ResearchPanel {...props} />
     case 'review': return <ReviewPanel {...props} />
+    case 'network': return <NetworkPanel slug={props.slug} />
     default: return <div className="dim">unknown panel</div>
   }
 }

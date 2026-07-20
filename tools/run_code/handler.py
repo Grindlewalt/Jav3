@@ -164,6 +164,30 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
     if not out.strip() and not err.strip():
         lines.append("(no output)")
 
+    # network failures here are almost always the monitored-egress gate, not a
+    # permanent wall — surface the fix instead of letting the model give up.
+    combined = (out + "\n" + err).lower()
+    net_markers = ("temporary failure resolving", "could not resolve host",
+                   "name or service not known", "network is unreachable",
+                   "connection refused", "failed to establish a new connection",
+                   "no route to host", "proxyerror", "connection timed out",
+                   "could not resolve proxy")
+    proxy_on = bool(os.environ.get("JARVIS_EGRESS_PROXY"))
+    if proc.returncode != 0 and any(m in combined for m in net_markers):
+        if proxy_on:
+            lines.append(
+                "[network blocked: the VM has monitored egress ON, but the host(s) "
+                "this command reached are not on the project's allowlist yet — they "
+                "are now QUEUED for the operator to approve in the Network tab. Name "
+                "the exact hosts you need and ask the operator to approve them, then "
+                "re-run this command.]")
+        else:
+            lines.append(
+                "[network blocked: the VM has no internet right now (monitored egress "
+                "is OFF). Name the exact hosts this needs (e.g. github.com, pypi.org) "
+                "and tell the operator to enable egress + approve them in the Network "
+                "tab. Do NOT just conclude the sandbox has no network and stop.]")
+
     if before is not None:
         captured, skipped = await _capture_artifacts(cwd, before, slug)
         if captured:

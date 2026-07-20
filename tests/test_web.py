@@ -107,3 +107,16 @@ async def test_headless_agent_run_gets_own_session(tmp_env, monkeypatch):
     await agents_run.run_agent_headless("probe", "go", active=None)
     assert len(seen) == 2 and seen[0] != seen[1]
     assert all(s and s.startswith("run:") for s in seen)
+
+
+def test_search_params_pins_working_engines(monkeypatch):
+    """web_search must pin the engines that actually return results — the Pi's
+    default SearXNG mix is mostly blocked (0 results). See the 07-21 fix."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "searxng_engines", "bing,mojeek,wikipedia")
+    p = webtools._search_params("kevin durant")
+    assert p["q"] == "kevin durant" and p["format"] == "json"
+    assert p["engines"] == "bing,mojeek,wikipedia"
+    # empty setting -> let SearXNG choose (no engines param)
+    monkeypatch.setattr(settings, "searxng_engines", "")
+    assert "engines" not in webtools._search_params("x")

@@ -201,6 +201,12 @@ class Settings(BaseSettings):
     # host-side tools query SearXNG and fetch pages, strip them to plain text,
     # and refuse internal/private targets (SSRF guard).
     searxng_url: str = "http://10.0.0.58:8080"
+    # SearXNG is a metasearch proxy; its default engine mix on the main server
+    # is mostly rate-limited/blocked (google/ddg/brave/startpage/qwant all
+    # return 0 results — measured 2026-07-21). Pin the engines that still work
+    # so web_search returns real links instead of just Wikipedia infoboxes.
+    # Empty string = let SearXNG use its own default set.
+    searxng_engines: str = "bing,mojeek,wikipedia"
     web_search_results: int = 8
     web_fetch_timeout: int = 15
     web_max_bytes: int = 2_000_000      # stop reading a page past this

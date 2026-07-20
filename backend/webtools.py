@@ -53,6 +53,15 @@ def _same_host(a: str, b: str) -> bool:
     return ha.removeprefix("www.") == hb.removeprefix("www.")
 
 
+def _search_params(query: str) -> dict:
+    """SearXNG query params, pinning the working engines (config searxng_engines)
+    so blocked defaults don't silently return zero results."""
+    params = {"q": query, "format": "json"}
+    if settings.searxng_engines.strip():
+        params["engines"] = settings.searxng_engines.strip()
+    return params
+
+
 async def search_results(query: str, limit: int = 6) -> list[dict]:
     """Structured SearXNG results [{url, title, snippet}] — for the research
     pipeline's batch-search phase (as data, not a text blob)."""
@@ -60,7 +69,7 @@ async def search_results(query: str, limit: int = 6) -> list[dict]:
         async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
                                      http2=True) as c:
             r = await c.get(f"{settings.searxng_url}/search",
-                            params={"q": query, "format": "json"}, headers=HEADERS)
+                            params=_search_params(query), headers=HEADERS)
             r.raise_for_status()
             data = r.json()
     except (httpx.HTTPError, ValueError):
@@ -81,7 +90,7 @@ async def search(query: str, session: str) -> str:
         async with httpx.AsyncClient(timeout=settings.web_fetch_timeout,
                                      http2=True) as c:
             r = await c.get(f"{settings.searxng_url}/search",
-                            params={"q": query, "format": "json"},
+                            params=_search_params(query),
                             headers=HEADERS)
             r.raise_for_status()
             data = r.json()
@@ -101,7 +110,14 @@ async def search(query: str, session: str) -> str:
             lines.append(f"[infobox] {box['content'][:400]}")
     results = data.get("results") or []
     if not results:
-        lines.append("(no results)")
+        # a genuinely empty index for this term — re-running the SAME query
+        # won't change that (the loop in the 07-21 Kevin-Rindal chat). Say so.
+        has_info = bool(data.get("answers") or data.get("infoboxes"))
+        lines.append(
+            "(no web results for this exact query. Retrying the same terms will "
+            "not help — either broaden/rephrase ONCE, or accept the person/topic "
+            "has no indexed presence and report that."
+            + (" An infobox above may still hold the answer." if has_info else ""))
     for i, res in enumerate(results[:settings.web_search_results], 1):
         url = res.get("url", "")
         flag = "  [already fetched — pick a different source]" if url in seen else ""

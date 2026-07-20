@@ -142,6 +142,76 @@ function Grants({ slug }) {
   )
 }
 
+// Compact, project-scoped egress view for a Workspace panel: the live feed
+// filtered to this project, its host-approval queue, policy + grants. Same data
+// and endpoints as the full Network page, no project picker.
+export function NetworkPanel({ slug }) {
+  const [feed, setFeed] = useState([])
+  const [pending, setPending] = useState([])
+  const keyRef = useRef(0)
+
+  useEffect(() => {
+    let live = true
+    api('/api/egress/events?limit=200').then((r) => {
+      const evs = (Array.isArray(r) ? r : r.events) || []
+      if (live) setFeed(evs.filter((e) => e.project === slug)
+        .map((e) => ({ ...e, _k: ++keyRef.current })))
+    }).catch(() => {})
+    const stop = subscribeSse('/api/egress/stream', (ev) => {
+      if (ev.type !== 'egress' || ev.project !== slug) return
+      setFeed((f) => [{ ...ev, _k: ++keyRef.current }, ...f].slice(0, FEED_CAP))
+    })
+    return () => { live = false; stop() }
+  }, [slug])
+
+  const reloadPending = () =>
+    api(`/api/egress/pending?project=${encodeURIComponent(slug)}`)
+      .then((r) => setPending(r.pending || [])).catch(() => {})
+  useEffect(() => {
+    reloadPending()
+    const t = setInterval(reloadPending, 10000)
+    return () => clearInterval(t)
+  }, [slug]) // eslint-disable-line
+  async function decide(id, verb) {
+    try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); reloadPending() }
+    catch (err) { window.alert(err.detail || String(err)) }
+  }
+
+  return (
+    <div className="pane-col net-panel">
+      <div className="sbx-card">
+        <div className="sbx-sec-head"><h3>Host approvals</h3>
+          <span className="dim small">{pending.length} waiting</span></div>
+        <div className="dim small">hosts the agent's code tried to reach — approve to
+          let it through (trains the allowlist), reject to keep it out</div>
+        <ul className="staged-list rev-list">
+          {pending.length === 0 && <li className="dim" style={{ cursor: 'default' }}>nothing waiting</li>}
+          {pending.map((p) => (
+            <li key={p.id}>
+              <span className="tag pending">{p.hit_count}×</span>
+              <span className="grow ellipsis mono" title={p.host}>{p.host}</span>
+              <button className="win-btn ok" title="approve" onClick={() => decide(p.id, 'approve')}>✓</button>
+              <button className="win-btn" title="reject" onClick={() => decide(p.id, 'reject')}>✕</button>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <PolicyEditor slug={slug} />
+      <Grants slug={slug} />
+      <div className="dim small" style={{ marginTop: 8 }}>live egress ·
+        {' '}{feed.length} event{feed.length !== 1 && 's'}</div>
+      <div className="net-feed-list grow-scroll">
+        {feed.length === 0 && (
+          <div className="dim center-pad">no egress yet — outbound requests the
+            agent's code makes stream in here</div>
+        )}
+        {feed.map((e) => <FeedRow key={e._k} e={e} />)}
+      </div>
+    </div>
+  )
+}
+
+
 export default function Network() {
   const [projects, setProjects] = useState([])
   const [filter, setFilter] = useState('')      // '' = all projects
