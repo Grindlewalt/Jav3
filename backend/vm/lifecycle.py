@@ -94,19 +94,47 @@ class GuestVM:
         except (FileNotFoundError, OSError):
             pass
 
+    async def _net(self, action: str) -> None:
+        """Run net_up.sh up|down via passwordless sudo (Pi). Best-effort: a
+        failure to bring the net up is logged to console but doesn't wedge boot —
+        the guest then simply has no working egress (fails closed)."""
+        script = settings.base_dir / "vm" / "net" / "net_up.sh"
+        env = {**os.environ,
+               "JARVIS_VM_TAP": settings.vm_egress_tap,
+               "JARVIS_VM_HOST_IP": settings.vm_egress_host_ip,
+               "JARVIS_VM_PCAP": "1" if settings.vm_egress_pcap else "0"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", "bash", str(script), action, env=env,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, err = await proc.communicate()
+            if proc.returncode:
+                print(f"[egress] net {action} failed: {err.decode(errors='replace')[:300]}")
+        except (FileNotFoundError, OSError) as e:
+            print(f"[egress] net {action} unavailable: {e}")
+
+    async def _net_up(self) -> None:
+        await self._net("up")
+
+    async def _net_down(self) -> None:
+        await self._net("down")
+
     async def boot(self) -> None:
         if self.running():
             return
         await self._kill_orphans()
         await self._build_overlay()
         _console_log().unlink(missing_ok=True)
+        if settings.vm_egress:
+            await self._net_up()               # tap + nftables + dnsmasq + pcap
         run_vm = settings.base_dir / "vm" / "run_vm.sh"
         env = {**os.environ,
                "VM_DIR": str(settings.vm_dir),
                "JARVIS_VM_BASE": _base_image().name,
                "JARVIS_VM_MEM_MB": str(settings.vm_memory_mb),
                "JARVIS_VM_CPUS": str(settings.vm_cpus),
-               "JARVIS_VM_CID": str(settings.vm_guest_cid)}
+               "JARVIS_VM_CID": str(settings.vm_guest_cid),
+               "JARVIS_VM_EGRESS": "1" if settings.vm_egress else "0"}
         self._proc = await asyncio.create_subprocess_exec(
             "bash", str(run_vm), env=env, preexec_fn=os.setsid,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -126,6 +154,8 @@ class GuestVM:
         self._proc = None
         self._booted_at = None
         await self._kill_orphans()
+        if settings.vm_egress:
+            await self._net_down()
         for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log"):
             (settings.vm_dir / name).unlink(missing_ok=True)
 

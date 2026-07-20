@@ -108,6 +108,14 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
     argv = (["python3", "-c", code] if code else ["/bin/sh", "-c", command])
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(cwd),
            "PYTHONUNBUFFERED": "1", "LANG": "C.UTF-8"}
+    # Monitored egress: point every subprocess (pip/npm/curl/git) at the host
+    # egress proxy so its traffic is policy-checked, secret-injected and watched.
+    # Set by the guest boot when JARVIS_VM_EGRESS is on; absent = netless guest,
+    # where direct sockets fail closed anyway.
+    _proxy = os.environ.get("JARVIS_EGRESS_PROXY")
+    if _proxy:
+        env.update(HTTP_PROXY=_proxy, HTTPS_PROXY=_proxy,
+                   http_proxy=_proxy, https_proxy=_proxy)
     t0 = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
