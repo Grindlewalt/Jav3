@@ -141,12 +141,14 @@ async def record_event(db: aiosqlite.Connection, *, slug: str | None, host: str,
 # --- approval queue (trains the allowlist up) --------------------------------
 
 async def _append_host(db: aiosqlite.Connection, slug: str, host: str) -> str:
-    """Add a host to the allowlist that governs `slug`. A normal (inheriting)
-    project trains up the GENERAL list; a scoped project trains up its own.
-    Returns the slug of the row that was extended."""
+    """Add a host to the allowlist that governs `slug`. A project that has its OWN
+    allowlist policy trains up THAT list (kept isolated from other projects); a
+    pure-default project (no policy row) trains up the shared GENERAL list — the
+    intended shared-allowlist behaviour. Returns the slug of the row extended, so
+    the caller/UI can show whether an approval widened the shared list."""
     await ensure_general(db)
     own = await _row(db, slug) if slug and slug != GENERAL else None
-    target = slug if (own and not own["inherit_general"] and own["mode"] == "allowlist") else GENERAL
+    target = slug if (own and own["mode"] == "allowlist") else GENERAL
     row = await _row(db, target)
     hosts = json.loads(row["hosts"] or "[]") if row else []
     if host not in hosts:

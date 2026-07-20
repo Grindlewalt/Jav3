@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .. import egress, secrets as secrets_mod
-from .. import anomaly, security
+from .. import anomaly, security, websec
 from ..config import settings
 from ..db import get_db
 
@@ -47,8 +47,12 @@ def parse_target(head: bytes) -> tuple[str, str, str] | None:
         host, _, port = target.partition(":")
         return method, host.lower(), (port or "443")
     if "://" in target:                     # absolute-form: GET http://host/path
-        u = urlsplit(target)
-        return method, (u.hostname or "").lower(), str(u.port or 80)
+        try:
+            u = urlsplit(target)
+            port = u.port or 80             # .port raises ValueError on a bad port
+        except ValueError:
+            return None
+        return method, (u.hostname or "").lower(), str(port)
     hm = _HOST_HDR.search(head)             # origin-form: Host header
     if hm:
         host, _, port = hm.group(1).decode().strip().partition(":")
@@ -56,10 +60,13 @@ def parse_target(head: bytes) -> tuple[str, str, str] | None:
     return None
 
 
-async def inject_secrets(db, slug: str | None, text: str) -> tuple[str, list[str]]:
+async def inject_secrets(db, slug: str | None, host: str, text: str) -> tuple[str, list[str]]:
     """Replace {{secret:X}} in an outbound request with the real value, but ONLY
-    for secrets the project is granted. Returns (text, refused_names). An ungranted
-    or unknown placeholder is left intact (so it fails at the origin, not leaks)."""
+    if (a) a project owns the request, (b) that project is granted the secret, and
+    (c) the secret's host binding — when set — covers the destination host. A
+    missing project or grant refuses ALL secrets (fail CLOSED); the placeholder is
+    left intact so it fails at the origin rather than leaking. Returns
+    (text, refused_names)."""
     if _SECRET_PLACEHOLDER not in text:
         return text, []
     values = secrets_mod.load()
@@ -68,7 +75,12 @@ async def inject_secrets(db, slug: str | None, text: str) -> tuple[str, list[str
     async def _allowed(name: str) -> bool:
         if name not in values:
             return False
-        if slug and not await egress.may_use_secret(db, slug, name):
+        if not slug:                        # no project context -> no injection at all
+            return False
+        if not await egress.may_use_secret(db, slug, name):
+            return False
+        bound = secrets_mod.hosts_for(name)  # respect an explicit host binding, if any
+        if bound and not secrets_mod._host_allowed(host, bound):
             return False
         return True
 
@@ -133,9 +145,19 @@ async def _authorize(host: str) -> tuple[str, str]:
     ctx = egress.current_context()
     db = await get_db()
     try:
-        return await egress.decide(db, ctx["project"] or egress.GENERAL, host)
+        verdict, reason = await egress.decide(db, ctx["project"] or egress.GENERAL, host)
     finally:
         await db.close()
+    # Host-side SSRF floor: the proxy dials out from the HOST, so an allowlisted
+    # name that resolves (or DNS-rebinds) to a private/LAN address would let the
+    # proxy reach internal infra, bypassing the guest's nftables LAN drop. Refuse
+    # any host that resolves to a non-public address, matching webtools' guard.
+    if verdict == "allow":
+        try:
+            websec.is_safe_url(f"http://{host}")
+        except websec.UnsafeURL as e:
+            return "deny", f"blocked non-public target: {e}"
+    return verdict, reason
 
 
 async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> int:
@@ -198,7 +220,7 @@ async def _handle_http(method, host, port, head, cr, cw):
     db = await get_db()
     try:
         raw = (head + body).decode("latin-1")
-        injected, _refused = await inject_secrets(db, ctx["project"], raw)
+        injected, _refused = await inject_secrets(db, ctx["project"], host, raw)
     finally:
         await db.close()
     # split head/body back apart, rebuild target URL

@@ -42,7 +42,15 @@ async def run(name: str, content: str, mode: str = "append",
         return f"memory note '{path.stem}' deleted"
     op_taint = write_taint.get()
     if mode == "replace" or not path.exists():
-        path.write_text(_with_frontmatter(description, content, taint=op_taint))
+        # taint is STICKY: a clean-turn replace of an already-tainted note keeps
+        # the untrusted provenance (only the operator's promote clears it).
+        prior = None
+        if path.exists():
+            try:
+                prior = parse_note(path.read_text())[0].get("taint")
+            except OSError:
+                pass
+        path.write_text(_with_frontmatter(description, content, taint=op_taint or prior))
         return f"memory note '{path.stem}' written"
     # append: keep (or update) the existing frontmatter, never duplicate it, and
     # carry the taint forward (a new untrusted write escalates a clean note).
