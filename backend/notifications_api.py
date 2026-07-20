@@ -11,7 +11,7 @@ so the nav can show a badge. Each source is wrapped so one failing store does no
 blank the whole panel."""
 from fastapi import APIRouter, Depends
 
-from . import gitgate, staging
+from . import egress, gitgate, security, staging
 from .auth import require_user
 from .db import get_db
 from .projects import list_projects
@@ -62,6 +62,22 @@ async def _schedules_pending() -> list[dict]:
         return []
 
 
+async def _security_pending() -> dict:
+    """Unacknowledged security alerts + open egress host approvals — the
+    monitored-egress / diff-gate signals for the bell and Review Center."""
+    out = {"alerts": 0, "egress_pending": 0}
+    try:
+        db = await get_db()
+        try:
+            out["alerts"] = await security.count_unacknowledged(db)
+            out["egress_pending"] = len(await egress.list_pending(db))
+        finally:
+            await db.close()
+    except Exception:                           # noqa: BLE001
+        pass
+    return out
+
+
 @router.get("")
 async def notifications():
     try:
@@ -72,7 +88,10 @@ async def notifications():
     git = await _git_pending(slugs)
     staged = _staged_pending(slugs)
     sched = await _schedules_pending()
+    sec = await _security_pending()
     return {
-        "count": len(git) + len(staged) + len(sched),
+        "count": (len(git) + len(staged) + len(sched)
+                  + sec["alerts"] + sec["egress_pending"]),
         "git": git, "staged": staged, "schedules": sched,
+        "alerts": sec["alerts"], "egress_pending": sec["egress_pending"],
     }
