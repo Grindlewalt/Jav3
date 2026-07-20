@@ -120,7 +120,33 @@ async def _handle(loop, conn) -> None:
             pass
 
 
+def _detect_egress_proxy() -> None:
+    """Monitored-egress mode: the guest has a tap NIC (10.201.0.2, gateway
+    10.201.0.1 — mirrors host vm_egress_host_ip/proxy_port). Point every
+    subprocess (pip/npm/curl/git via run_code) at the host proxy. A netless guest
+    has only lo, so this stays unset and direct sockets fail closed as before."""
+    import os
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("10.201.0.1", 9))     # no packet sent; resolves src addr
+            local = probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        local = ""
+    if local.startswith("10.201."):
+        proxy = "http://10.201.0.1:8443"
+        os.environ["JARVIS_EGRESS_PROXY"] = proxy
+        os.environ.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy,
+                          http_proxy=proxy, https_proxy=proxy)
+        print(f"GUEST-EGRESS-PROXY: {proxy}", flush=True)
+    else:
+        print("GUEST-EGRESS-PROXY: none (netless)", flush=True)
+
+
 async def serve() -> None:
+    _detect_egress_proxy()
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     s.bind((socket.VMADDR_CID_ANY, PORT))
