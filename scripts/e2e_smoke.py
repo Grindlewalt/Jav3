@@ -156,6 +156,41 @@ def main():
     except Exception as e:  # noqa: BLE001 - smoke test, surface anything
         check("git commit flow", False, repr(e)[:160])
 
+    print("== monitored egress + security surfaces ==")
+    try:
+        pol = json.load(_req("GET", f"/api/egress/policy/{slug}"))
+        check("egress policy resolves (general seed)",
+              "pypi.org" in pol.get("effective", []), str(pol)[:100])
+        ev = json.load(_req("GET", "/api/egress/events?limit=5"))
+        check("egress events endpoint", "events" in ev)
+        pend = json.load(_req("GET", "/api/egress/pending"))
+        check("egress pending queue endpoint", "pending" in pend)
+        gr = json.load(_req("POST", f"/api/egress/grants/{slug}",
+                            {"secret": "SMOKE_KEY", "status": "granted"}))
+        check("secret grant set", gr.get("ok") is True, str(gr)[:80])
+        sec = json.load(_req("GET", "/api/security/events"))
+        check("security events endpoint", "events" in sec)
+    except urllib.error.HTTPError as e:
+        check("egress/security surfaces", False, f"HTTP {e.code}")
+
+    print("== diff-gate flags + taint notes ==")
+    try:
+        st = json.load(_req("GET", f"/api/projects/{slug}/staging"))
+        check("staging exposes gate flags + blocked",
+              "flags" in st and "blocked" in st, str(list(st))[:80])
+        notes = json.load(_req("GET", "/api/memory/notes")).get("notes")
+        check("memory notes metadata endpoint", isinstance(notes, list))
+    except urllib.error.HTTPError as e:
+        check("gate/taint surfaces", False, f"HTTP {e.code}")
+
+    print("== vm status (image lifecycle fields) ==")
+    try:
+        vs = json.load(_req("GET", "/api/vm/status"))
+        for f in ("image_version", "image_stale", "egress", "rebuilding"):
+            check(f"vm status has {f}", f in vs)
+    except urllib.error.HTTPError as e:
+        check("vm status fields", False, f"HTTP {e.code}")
+
     print("== jobs view ==")
     try:
         jobs = json.load(_req("GET", "/api/jobs")).get("jobs")
