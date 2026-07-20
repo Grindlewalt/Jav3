@@ -36,6 +36,9 @@ _envelopes: dict[str, TurnEnvelope] = {}
 
 def register_turn(env: TurnEnvelope) -> None:
     _envelopes[env.op_id] = env
+    # attribute the guest's egress (which carries no op_id) to this turn's project
+    from .. import egress
+    egress.set_context(env.active_project, env.op_id, env.conversation_id)
 
 
 def release_turn(op_id: str) -> None:

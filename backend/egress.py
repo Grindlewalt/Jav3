@@ -26,6 +26,22 @@ from .config import settings
 GENERAL = "__general__"          # the shared baseline policy row's slug
 EGRESS_CHAN = "egress"           # bus channel the live Network view subscribes to
 
+# The proxy sees raw guest requests with no op_id, so egress is attributed to the
+# operation currently driving the single guest. The broker sets this on
+# register_turn (innermost/most-recent wins; nested turns share the project). A
+# plain module global — not a contextvar — because the proxy runs on a different
+# asyncio task than the turn.
+_context: dict = {"project": None, "op_id": None, "conversation_id": None}
+
+
+def set_context(project: str | None, op_id: str | None = None,
+                conversation_id: int | None = None) -> None:
+    _context.update(project=project, op_id=op_id, conversation_id=conversation_id)
+
+
+def current_context() -> dict:
+    return dict(_context)
+
 # (project_slug, host) pairs auto-cut this process. The nft drop (Pi-side) is
 # the hard block; this in-memory set is what the proxy checks synchronously so a
 # cut takes effect on the very next request without a DB round-trip.
@@ -203,3 +219,36 @@ def mark_cut(slug: str | None, host: str) -> None:
 
 def clear_cut(slug: str | None, host: str) -> None:
     _cut.discard((slug or GENERAL, host))
+
+
+# --- per-project secret grants (B1) ------------------------------------------
+# The proxy injects a {{secret:X}} into an outbound request only if the project
+# holds a granted row for X — so a compromised project can't reach for every key
+# the operator owns. This is the Layer-2 blast-radius control for wire injection.
+
+async def may_use_secret(db: aiosqlite.Connection, slug: str, name: str) -> bool:
+    async with db.execute(
+            "SELECT 1 FROM project_secret_grants WHERE project_slug = ? AND "
+            "secret_name = ? AND status = 'granted'", (slug, name.upper())) as cur:
+        return await cur.fetchone() is not None
+
+
+async def grant_secret(db: aiosqlite.Connection, slug: str, name: str,
+                       status: str = "granted") -> dict:
+    await db.execute(
+        "INSERT INTO project_secret_grants(project_slug, secret_name, status) VALUES (?,?,?) "
+        "ON CONFLICT(project_slug, secret_name) DO UPDATE SET status = excluded.status",
+        (slug, name.upper(), status))
+    await db.commit()
+    return {"ok": True, "project": slug, "secret": name.upper(), "status": status}
+
+
+async def revoke_secret(db: aiosqlite.Connection, slug: str, name: str) -> dict:
+    return await grant_secret(db, slug, name, status="revoked")
+
+
+async def project_secrets(db: aiosqlite.Connection, slug: str) -> list[dict]:
+    async with db.execute(
+            "SELECT secret_name, status FROM project_secret_grants WHERE project_slug = ? "
+            "ORDER BY secret_name", (slug,)) as cur:
+        return [dict(r) for r in await cur.fetchall()]
