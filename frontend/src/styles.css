@@ -660,3 +660,76 @@ kbd {
   cursor: pointer; }
 .quiz-opt:hover { color: var(--fg); }
 .skill-form { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+
+/* ---- taint / trust tags (Context notes) ---- */
+.tag.untrusted { color: var(--amber); border-color: var(--amber); }
+.vm-stale-badge { background: var(--amber); }
+
+/* ---- Network page (live egress) ---- */
+.net-page { display: flex; flex-direction: column; flex: 1; min-height: 0;
+  padding: 16px 20px; gap: 12px; }
+.net-head { display: flex; align-items: center; gap: 10px; }
+.net-head h2 { margin: 0; font-size: 18px; }
+.net-head select { padding: 4px 8px; font-size: 13px; }
+.net-body { display: flex; gap: 16px; flex: 1; min-height: 0; }
+.net-feed { flex: 2; min-width: 0; display: flex; flex-direction: column;
+  min-height: 0; gap: 6px; }
+.net-feed-list { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.net-side { flex: 1; min-width: 300px; max-width: 400px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px; }
+.net-hint { padding: 8px 2px; }
+.net-side .sbx-card { margin-bottom: 0; }
+.net-policy { display: flex; flex-direction: column; gap: 8px; }
+.net-policy label.mini { display: flex; flex-direction: column; gap: 3px;
+  font-size: 12px; color: var(--dim); }
+.net-policy label.mini select, .net-policy label.mini textarea { width: 100%; }
+.net-policy .row { margin: 0; }
+
+.egr-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: 8px; margin-bottom: 5px; font-size: 12.5px; }
+.egr-row.deny { border-left-color: var(--amber); }
+.egr-row.cut { border-left-color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent); }
+.egr-chip { border: 1px solid; border-radius: 8px; padding: 1px 8px; font-size: 10.5px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+.egr-chip.allow { color: var(--green); border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent); }
+.egr-chip.deny { color: var(--amber); border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent); }
+.egr-chip.cut { color: var(--red); border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent); }
+.egr-host { font-family: ui-monospace, Menlo, monospace; font-weight: 600;
+  white-space: nowrap; }
+.egr-path { flex: 1; min-width: 0; color: var(--dim);
+  font-family: ui-monospace, Menlo, monospace; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.egr-reason { color: var(--amber); font-size: 11.5px; white-space: nowrap; }
+.egr-bytes { color: var(--dim); font-size: 11.5px; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+
+/* ---- Review Center ---- */
+.review-page { max-width: 1080px; }
+.review-queue { display: flex; flex-direction: column; gap: 20px; }
+.review-scrollwrap { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.review-queue .sbx-sec { margin-bottom: 0; }
+.review-queue .sbx-row { align-items: flex-start; }
+.rev-list { max-height: none; }
+.rev-list li { cursor: default; }
+.rev-group { margin-bottom: 10px; }
+.rev-group-head { font-size: 12px; color: var(--dim); margin: 6px 0 4px;
+  font-family: ui-monospace, Menlo, monospace; }
+.staged-list li.rev-staged { display: block; cursor: default; }
+.rev-staged-row { display: flex; align-items: center; gap: 8px; }
+.rev-flag { display: flex; align-items: flex-start; gap: 8px; margin: 5px 0 2px 10px;
+  padding: 6px 9px; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: color-mix(in srgb, var(--amber) 8%, transparent); border-radius: 7px;
+  font-size: 12px; }
+.rev-flag .grow { min-width: 0; word-break: break-word; }
+.rev-diff { display: flex; height: 300px; margin: 6px 0 2px; }
+.rev-alert-summary { font-size: 13px; word-break: break-word; }
+.rev-alert-detail { margin: 6px 0 0; max-height: 220px; overflow: auto; }
+.sbx-row.sev-info { border-left-color: var(--accent); }
+.tag.sev-info-tag { color: var(--accent); border-color: var(--accent); }
+.tag.sev-warn-tag { color: var(--amber); border-color: var(--amber); }
+.tag.sev-crit-tag { color: var(--red); border-color: var(--red); }

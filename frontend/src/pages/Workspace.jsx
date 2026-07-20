@@ -3,6 +3,8 @@ import { useParams } from 'react-router-dom'
 import { api, chatStream } from '../api.js'
 import ChatBox from '../ChatBox.jsx'
 import Md from '../Md.jsx'
+import DiffView from '../DiffView.jsx'
+import { ReviewQueue } from './Review.jsx'
 import { cspMediaSources } from '../mediaHosts.js'
 
 // ---- panel registry: add a capability = one component + one entry here ----
@@ -20,6 +22,7 @@ const PANEL_TYPES = {
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
   research: { label: 'Research bots — live', w: 620, h: 560 },
+  review: { label: 'Review — approvals & alerts', w: 480, h: 540 },
 }
 
 const DEFAULT_PANELS = [
@@ -369,6 +372,7 @@ function PanelBody(props) {
     case 'context': return <ContextPanel {...props} />
     case 'agent': return <AgentPanel {...props} />
     case 'research': return <ResearchPanel {...props} />
+    case 'review': return <ReviewPanel {...props} />
     default: return <div className="dim">unknown panel</div>
   }
 }
@@ -1035,70 +1039,13 @@ function upLast(list, fn) {
   return copy
 }
 
-// Line-level diff for the staged-vs-canonical review: plain LCS on lines,
-// adjacent del+add pairs folded into "changed" rows. Bounded — big files fall
-// back to the plain side-by-side text. Content is UNTRUSTED and only ever
-// rendered as text nodes, never markup.
-const DIFF_MAX_LINES = 400
-function lineDiff(a, b) {
-  const A = a.split('\n'), B = b.split('\n')
-  if (A.length > DIFF_MAX_LINES || B.length > DIFF_MAX_LINES) return null
-  const n = A.length, m = B.length
-  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1))
-  for (let i = n - 1; i >= 0; i--)
-    for (let j = m - 1; j >= 0; j--)
-      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1
-        : Math.max(dp[i + 1][j], dp[i][j + 1])
-  const rows = []
-  let i = 0, j = 0
-  while (i < n && j < m) {
-    if (A[i] === B[j]) { rows.push({ l: A[i], r: B[j], t: 'same' }); i++; j++ }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ l: A[i], r: null, t: 'del' }); i++ }
-    else { rows.push({ l: null, r: B[j], t: 'add' }); j++ }
-  }
-  while (i < n) rows.push({ l: A[i++], r: null, t: 'del' })
-  while (j < m) rows.push({ l: null, r: B[j++], t: 'add' })
-  const out = []
-  for (let k = 0; k < rows.length; k++) {
-    if (rows[k].t === 'del' && rows[k + 1]?.t === 'add') {
-      out.push({ l: rows[k].l, r: rows[k + 1].r, t: 'mod' }); k++
-    } else out.push(rows[k])
-  }
-  return out
-}
-
-function DiffView({ oldText, newText }) {
-  const rows = (oldText != null && newText != null)
-    ? lineDiff(oldText, newText) : null
-  if (!rows) {
-    return (
-      <div className="diff-view">
-        <div className="diff-col">
-          <div className="dim small">current</div>
-          <pre>{oldText ?? '(new file)'}</pre>
-        </div>
-        <div className="diff-col">
-          <div className="dim small">staged</div>
-          <pre>{newText ?? '(deleted)'}</pre>
-        </div>
-      </div>
-    )
-  }
-  const changed = rows.filter((r) => r.t !== 'same').length
+// The unified Review Center, scoped to this one project: the same staged
+// diffs + gate flags, commit requests, egress host approvals and security
+// alerts the global /review page shows, filtered to this slug.
+function ReviewPanel({ slug }) {
   return (
-    <div className="diff-view">
-      <div className="diff-col">
-        <div className="dim small">current · {changed} line{changed !== 1 && 's'} differ</div>
-        <pre>{rows.map((r, i) => (
-          <div key={i} className={`diff-line ${r.t === 'add' ? 'pad' : r.t}`}>
-            {r.l ?? ' '}</div>))}</pre>
-      </div>
-      <div className="diff-col">
-        <div className="dim small">staged</div>
-        <pre>{rows.map((r, i) => (
-          <div key={i} className={`diff-line ${r.t === 'del' ? 'pad' : r.t}`}>
-            {r.r ?? ' '}</div>))}</pre>
-      </div>
+    <div className="pane-col">
+      <div className="review-scrollwrap"><ReviewQueue slug={slug} /></div>
     </div>
   )
 }

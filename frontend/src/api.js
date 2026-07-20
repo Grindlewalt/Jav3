@@ -63,3 +63,22 @@ export async function tailStream(url, onEvent, signal) {
   if (!res.ok) throw new ApiError(res.status, res.statusText, res)
   await readSse(res, onEvent)
 }
+
+// Persistent subscription to a GET SSE feed (egress / security live streams).
+// Auto-reconnects with a short backoff until the returned unsubscribe runs.
+// Transport errors are swallowed on purpose: a live feed is a convenience layer
+// over a REST seed, never the source of truth — a dropped socket just retries.
+export function subscribeSse(url, onEvent) {
+  const ctl = new AbortController()
+  let stopped = false
+  ;(async () => {
+    while (!stopped) {
+      try {
+        await tailStream(url, onEvent, ctl.signal)
+      } catch { /* aborted or a network hiccup — fall through to backoff */ }
+      if (stopped) break
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+  })()
+  return () => { stopped = true; ctl.abort() }
+}
