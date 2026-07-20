@@ -35,6 +35,14 @@ class Settings(BaseSettings):
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
+    # The guest loop may request an alternate model base_url (e.g. a local
+    # ollama), but the HOST attaches the real key to that request — so an
+    # unchecked guest-supplied base_url is a key-exfil seam (point the host at
+    # an attacker endpoint, harvest the Bearer key). Only these hosts are
+    # honored; anything else is refused and the call falls back to the default.
+    # deepseek_base_url is always allowed on top of this list.
+    model_base_url_allowlist: list[str] = ["http://127.0.0.1:11434",
+                                           "http://localhost:11434"]
     model_name: str = "deepseek-v4-flash"
     model_max_tokens: int = 4096
     # Main generation temperature. 0.7 keeps personality and fluency; the
@@ -205,6 +213,53 @@ class Settings(BaseSettings):
     # re-read within a task skips the download AND the summarize model call.
     web_cache_ttl_seconds: int = 900
     web_cache_max_entries: int = 50
+
+    # --- Monitored egress (Layer 3) ---------------------------------------
+    # OFF by default: the guest stays netless (`-nic none`) until this is flipped
+    # on and soaked, exactly like the use_guest_loop cutover. When true the guest
+    # gets a tap NIC bridged to the host; ALL egress crosses the host proxy on
+    # vm_egress_proxy_port, the LAN is dropped by nftables, and DNS is forced
+    # through the host resolver (backend/vm/egress_proxy.py + vm/net_up.sh). The
+    # guest still holds no key — secrets are injected at the proxy, on the wire.
+    vm_egress: bool = False
+    vm_egress_bridge: str = "jvbr0"
+    vm_egress_tap: str = "jvtap0"
+    vm_egress_host_ip: str = "10.201.0.1"     # host side of the point-to-point
+    vm_egress_guest_ip: str = "10.201.0.2"    # the guest's only address
+    vm_egress_proxy_port: int = 8443          # host TLS-terminating forward proxy
+    vm_egress_dns_port: int = 5353            # host dnsmasq the guest is forced onto
+    vm_egress_pcap: bool = True               # tcpdump ring buffer on the tap
+    # LAN the guest may NEVER reach (RFC1918 + link-local). The operator's own
+    # servers sit inside these ranges; listing the ranges keeps a compromised
+    # guest from pivoting onto main/git/test regardless of their exact IPs.
+    vm_egress_lan_denied: list[str] = ["10.0.0.0/8", "172.16.0.0/12",
+                                       "192.168.0.0/16", "169.254.0.0/16"]
+    # A brand-new project inherits this shared "general" allowlist (deny-by-
+    # default vs the open internet), which trains up as new hosts are approved.
+    # Seeded with the developer toolchain so pip/npm/git work on day one;
+    # everything else is denied + queued. Sensitive projects get a scoped policy
+    # (their own egress_policy row) instead of inheriting this.
+    egress_seed_hosts: list[str] = [
+        "pypi.org", "files.pythonhosted.org", "registry.npmjs.org",
+        "github.com", "codeload.github.com", "objects.githubusercontent.com",
+        "raw.githubusercontent.com", "api.github.com", "deb.debian.org",
+        "security.debian.org", "crates.io", "static.crates.io", "proxy.golang.org",
+    ]
+
+    # --- Egress anomaly detection (Layer 3) -------------------------------
+    # A trip auto-cuts the offending host (nftables drop) and raises a
+    # security_event. A new/unapproved host does NOT trip these — it is simply
+    # denied and queued for approval; only exfil-shaped behaviour alerts.
+    egress_entropy_threshold: float = 3.8     # Shannon bits/char of the hostname; DGA / DNS-tunnel tell
+    egress_volume_multiple: float = 8.0       # bytes-to-host over this * baseline = a spike
+    egress_volume_min_bytes: int = 1_000_000  # ignore spikes below this (tiny-baseline noise)
+    egress_beacon_min_hits: int = 6           # regular hits to one host before cadence is judged
+    egress_beacon_cv_max: float = 0.15        # inter-arrival coefficient-of-variation below this = beacon
+
+    # --- Golden image lifecycle (Layer 1) ---------------------------------
+    # The VM widget goes amber when the running image is older than this; a
+    # monthly systemd timer rebuilds a fresh versioned base (never in place).
+    vm_image_max_age_days: int = 35
 
 
 settings = Settings()
