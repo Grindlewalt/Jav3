@@ -7,7 +7,11 @@ set -euo pipefail
 
 TAP="${JARVIS_VM_TAP:-jvtap0}"
 HOST_IP="${JARVIS_VM_HOST_IP:-10.201.0.1}"
-OWNER="${JARVIS_VM_USER:-$(id -un)}"
+# The tap MUST be owned by the user QEMU runs as (the app user), or the
+# unprivileged guest can't attach ("could not configure /dev/net/tun: Operation
+# not permitted"). This script runs under `sudo -n`, so $(id -un) is root — the
+# wrong owner. sudo sets $SUDO_USER to the real invoking user, so prefer it.
+OWNER="${JARVIS_VM_USER:-${SUDO_USER:-$(id -un)}}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NFT="$HERE/jarvis-egress.nft"
 DNSCONF="$HERE/dnsmasq-egress.conf"
@@ -16,7 +20,11 @@ TCPDUMP_PIDF=/run/jarvis-tcpdump.pid
 PCAP_DIR=/var/log/jarvis-vm
 
 up() {
-  ip tuntap add dev "$TAP" mode tap user "$OWNER" 2>/dev/null || true
+  # recreate the tap fresh: a leftover tap from a prior run may be owned by the
+  # wrong user, and `tuntap add` on an existing device is a silent no-op — so a
+  # stale root-owned tap would persist and block the guest. Delete then add.
+  ip tuntap del dev "$TAP" mode tap 2>/dev/null || true
+  ip tuntap add dev "$TAP" mode tap user "$OWNER"
   ip addr replace "$HOST_IP/24" dev "$TAP"
   ip link set "$TAP" up
   sysctl -qw net.ipv4.ip_forward=1
