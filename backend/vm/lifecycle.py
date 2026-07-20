@@ -152,10 +152,13 @@ class GuestVM:
         except (FileNotFoundError, OSError) as e:
             print(f"[egress] net {action} unavailable: {e}")
 
-    async def _net_up(self) -> None:
+    async def net_up(self) -> None:
+        """Bring the monitored-egress network up. Called ONCE from the app
+        lifespan when vm_egress is on — before the proxy binds its host IP and
+        before any guest boots."""
         await self._net("up")
 
-    async def _net_down(self) -> None:
+    async def net_down(self) -> None:
         await self._net("down")
 
     async def boot(self) -> None:
@@ -164,8 +167,10 @@ class GuestVM:
         await self._kill_orphans()
         await self._build_overlay()
         _console_log().unlink(missing_ok=True)
-        if settings.vm_egress:
-            await self._net_up()               # tap + nftables + dnsmasq + pcap
+        # the monitored-egress network (tap/nft/dnsmasq/proxy) is APP-lifecycle,
+        # not per-boot — it's up before any guest and survives idle-scrub reboots,
+        # so the proxy's host-IP binding never flaps mid-operation. run_vm.sh
+        # attaches to the pre-existing jvtap0.
         run_vm = settings.base_dir / "vm" / "run_vm.sh"
         env = {**os.environ,
                "VM_DIR": str(settings.vm_dir),
@@ -193,8 +198,6 @@ class GuestVM:
         self._proc = None
         self._booted_at = None
         await self._kill_orphans()
-        if settings.vm_egress:
-            await self._net_down()
         for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log"):
             (settings.vm_dir / name).unlink(missing_ok=True)
 

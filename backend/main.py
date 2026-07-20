@@ -28,6 +28,8 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(schedules.scheduler_loop())
     reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
     await gateway.start()          # host vsock model gateway (no-op if no vsock)
+    if settings.vm_egress:
+        await vm.net_up()          # tap/nft/dnsmasq/pcap up BEFORE the proxy binds
     await egress_proxy.start()     # monitored-egress proxy (no-op unless vm_egress)
     try:
         yield
@@ -37,6 +39,8 @@ async def lifespan(app: FastAPI):
         await gateway.stop()
         await egress_proxy.stop()
         await vm.teardown()        # never leave a guest running past shutdown
+        if settings.vm_egress:
+            await vm.net_down()
 
 
 app = FastAPI(title="Jarvis v3", lifespan=lifespan)
