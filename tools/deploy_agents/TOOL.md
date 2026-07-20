@@ -15,5 +15,5 @@ parameters:
       description: Short display title for the job (defaults to the brief's first words).
   required: [brief]
 ---
-Node rollups are staged under runs/<job>/ in the active project. Trust the
+Node rollups are written under runs/<job>/ in the active project. Trust the
 returned rollup — don't redo the team's work call-by-call.

@@ -1,8 +1,8 @@
-// Line-level diff for staged-vs-canonical review: plain LCS on lines, adjacent
+// Line-level old-vs-new diff: plain LCS on lines, adjacent
 // del+add pairs folded into "changed" rows. Bounded — big files fall back to
 // the plain side-by-side text. Content is UNTRUSTED (it is whatever the agent
 // wrote) and is only ever rendered as text nodes, never markup. Shared by the
-// Workspace staging panel and the Review Center.
+// Currently unmounted — kept for the planned release-gate diff review.
 const DIFF_MAX_LINES = 400
 function lineDiff(a, b) {
   const A = a.split('\n'), B = b.split('\n')

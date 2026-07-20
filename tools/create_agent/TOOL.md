@@ -23,6 +23,6 @@ keys and binds their web hosts in the Secrets panel). Placeholders resolve only
 in web_read URLs on the secret's bound hosts.
 
 The new agent gets every tool and context section by default (the operator
-trims exclusions in the Agents tab) and works under the same staging quarantine
+trims exclusions in the Agents tab) and works under the same write scans
 as you. It is spawnable immediately — tell the operator you created it so they
 can review the prompt.

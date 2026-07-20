@@ -26,6 +26,22 @@ event_chan = contextvars.ContextVar("jarvis_event_chan", default=None)
 # could never re-read a page any earlier turn in the project had touched.
 web_session = contextvars.ContextVar("jarvis_web_session", default=None)
 
+# The project this operation is PINNED to, resolved at turn start (a chat's
+# assigned project, an agent run's explicit project, a schedule's project_slug —
+# falling back to the GUI's global active project). Tools prefer this over the
+# DB global (toolctx.active_slug), which is what lets turns in different
+# projects run concurrently without stomping each other. UNSET (the default)
+# means "not inside a pinned operation" — distinct from None, which means the
+# operation resolved to no project at all (artifact-store chat).
+ACTIVE_UNSET = object()
+active_project = contextvars.ContextVar("jarvis_active_project",
+                                        default=ACTIVE_UNSET)
+
+# The conversation the running turn belongs to, so a tool that rebinds the
+# project mid-conversation (load_project) can pin the change onto the
+# conversation row instead of yanking the global session state.
+conversation_id = contextvars.ContextVar("jarvis_conversation_id", default=None)
+
 # Taint stamp for a memory_write happening in an operation that has ALREADY
 # consumed untrusted external content (web/research). The broker sets this to
 # "untrusted" before brokering such a write; the memory_write handler stamps

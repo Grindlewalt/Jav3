@@ -40,16 +40,15 @@ async def artifact_store(client):
     out = await registry.dispatch(
         "write_file", {"path": "notes/plan.md", "content": "# The plan\nstep 1"})
     runtime.artifact_slug.reset(token)
-    assert "staged write" in out
+    assert "wrote" in out
     return "chat-77"
 
 
 async def test_write_lands_canonical_without_approval(client, artifact_store):
     p = settings.projects_dir / artifact_store / "notes/plan.md"
     assert p.read_text() == "# The plan\nstep 1\n" or p.read_text() == "# The plan\nstep 1"
-    # nothing left waiting in the approval queue
-    from backend.staging import list_staged
-    assert list_staged(artifact_store) == []
+    # no quarantine dir appears
+    assert not (settings.projects_dir / artifact_store / ".staging").exists()
 
 
 async def test_no_fallback_without_contextvar(client):
@@ -96,20 +95,17 @@ async def test_convert_to_project(client, artifact_store):
     r = await client.get("/api/projects")
     assert any(p["slug"] == artifact_store and p["name"] == "Budget"
                for p in r.json()["projects"])
-    # marker gone -> future writes stage for approval again
-    from backend.staging import is_artifact
-    assert not is_artifact(artifact_store)
+    # marker gone -> it is a plain project now
+    assert not (settings.projects_dir / artifact_store / ".artifact").exists()
 
 
-async def test_merge_stages_into_target(client, artifact_store):
+async def test_merge_copies_into_target(client, artifact_store):
     await client.post("/api/projects", json={"name": "Real"})
     r = await client.post(f"/api/artifacts/{artifact_store}/merge",
                           json={"target": "real"})
-    assert r.json()["staged"] == ["notes/plan.md"]
-    from backend.staging import list_staged
-    assert [e["path"] for e in list_staged("real")] == ["notes/plan.md"]
-    # canonical target file untouched until the operator approves
-    assert not (settings.projects_dir / "real" / "notes/plan.md").exists()
+    assert r.json()["merged"] == ["notes/plan.md"]
+    # files land in the target directly
+    assert (settings.projects_dir / "real" / "notes" / "plan.md").is_file()
 
 
 async def test_ensure_artifact_project_idempotent(client):

@@ -235,6 +235,10 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
         # pages every morning by design
         from . import runtime
         wtoken = runtime.web_session.set(f"run:{conversation_id}")
+        # pin the schedule's project so its tools hit it, not the GUI's
+        # globally active project (host loop path; the guest envelope pins it)
+        ptoken = runtime.active_project.set(active)
+        cidtoken = runtime.conversation_id.set(conversation_id)
         final = ""
         try:
             async for ev in run_agent_turn(conversation_id, system_prompt,
@@ -244,6 +248,8 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
                 if ev["type"] == "final":
                     final = ev["content"]
         finally:
+            runtime.conversation_id.reset(cidtoken)
+            runtime.active_project.reset(ptoken)
             runtime.web_session.reset(wtoken)
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) "

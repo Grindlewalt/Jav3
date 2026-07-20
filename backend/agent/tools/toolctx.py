@@ -5,6 +5,14 @@ from ...memory import get_active_project
 
 
 async def active_slug() -> str | None:
+    """The running operation's pinned project when inside one (set per turn by
+    chat/agent/schedule from the conversation's binding — this is what keeps
+    concurrent turns in different projects apart), else the GUI's global
+    active project."""
+    from ... import runtime
+    pinned = runtime.active_project.get()
+    if pinned is not runtime.ACTIVE_UNSET:
+        return pinned
     db = await get_db()
     try:
         return await get_active_project(db)
@@ -14,9 +22,8 @@ async def active_slug() -> str | None:
 
 async def _ensure_artifact_project(slug: str) -> None:
     """Lazily create the hidden per-chat artifact project the first time a
-    file tool touches it. Idempotent. The `.artifact` marker is what tells
-    staging to auto-approve writes (chat outputs never execute anywhere;
-    approval friction returns when the store is converted/merged)."""
+    file tool touches it. Idempotent. The `.artifact` marker distinguishes
+    these hidden stores from real projects in listings."""
     project_dir = settings.projects_dir / slug
     if not (project_dir / "project.md").exists():
         project_dir.mkdir(parents=True, exist_ok=True)

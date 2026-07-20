@@ -4,7 +4,7 @@ What the architecture is, what it actually buys, and — the point of this
 document — what it does **not** cover. Written to be read by someone deciding
 whether to trust the agent with a new capability. Last updated 2026-07-19,
 covering the monitored-egress build (Layers 1–6; deploy separation / Layer 7 is
-out of scope). **This supersedes the netless posture** — the guest now has a
+out of scope), amended 2026-07-20 for the **staging-quarantine removal** (operator decision: writes land live; git is the review/undo surface). **This supersedes the netless posture** — the guest now has a
 real, monitored internet path, a deliberate trade of maximal containment for
 watchability and genuine developer autonomy.
 
@@ -19,8 +19,13 @@ so a process that ignores the proxy fails closed. The proxy applies a per-projec
 allow/deny policy, **injects `{{secret:X}}` the project is granted** (so the
 guest still never holds a key), meters every byte, streams a live feed, and runs
 anomaly detection that **auto-cuts** a host on an exfil-shaped signal. File edits
-still land in the host **staging quarantine** behind deterministic **diff gates**
-and touch canonical files only on operator approval; untrusted-derived memory
+now land **directly on the canonical project files** (the per-file staging
+quarantine was removed 2026-07-20): every write still crosses one host chokepoint
+(`backend/writes.py`) that refuses path escapes and **refuses any write containing
+a real secret value**, and runs the deterministic **diff gates** as an ADVISORY
+tripwire — flagged writes land but raise deduped security events. Git is the
+review/undo surface (projects are repos from creation with a baseline commit;
+commits/pushes remain operator-approved). Untrusted-derived memory
 carries a **persisted taint** that keeps it out of binding context. A prompt
 injection that reaches code execution lands in a box with no secrets, no LAN, and
 a watched, policy-gated, cuttable pipe to the internet.
@@ -40,9 +45,10 @@ a watched, policy-gated, cuttable pipe to the internet.
 - **Fast exfil / beaconing.** High-entropy hosts, volume spikes and beacon
   cadence auto-cut the destination (nftables drop on both guest-forward and
   host-output) and raise a critical alert.
-- **Canonical/repo corruption + laundered memory.** Guest edits go to a workspace
-  copy → host staging behind diff gates; memory promotions made after untrusted
-  content is consumed are taint-stamped and excluded from binding context.
+- **Laundered memory.** Memory promotions made after untrusted content is
+  consumed are taint-stamped and excluded from binding context. (Canonical-file
+  protection CHANGED 2026-07-20: guest edits now apply to the real files at turn
+  end — see residual #5/#6.)
 - **base_url key-exfil seam.** The model gateway now refuses any guest-supplied
   base_url off the allowlist and sends the real key only to the DeepSeek endpoint.
 - **Persistence.** Idle-scrub reboots the single guest from the read-only golden
@@ -79,24 +85,33 @@ a watched, policy-gated, cuttable pipe to the internet.
    self-replacing and gated on `vm_egress`; treat changes to it as security-
    critical.
 
-5. **Diff gates are heuristic.** The deterministic checks (imports, network
-   primitives, entropy blobs, secret values, removed logging/asserts) catch the
-   obvious and force human review, but are **evadable** (import via `importlib`/
-   `__import__`, a network call via `getattr`/`exec`, a blob under the entropy/
-   length floor, a value split across lines). They raise the cost of hiding
-   malice and gate the trusted baseline; the operator's review of the staged diff
-   is the real control, not the grep.
+5. **Diff gates are heuristic AND now advisory.** The deterministic checks
+   (imports, network primitives, entropy blobs, removed logging/asserts) are
+   **evadable** (import via `importlib`/`__import__`, a network call via
+   `getattr`/`exec`, a blob under the entropy/length floor), and since the
+   quarantine removal they no longer block anything except secret-value writes —
+   a flagged write lands and alerts. They are a tripwire, not a wall. The
+   planned **release gate** (deterministic malware/obfuscation scan + diff
+   review before commit) is the intended replacement control and is NOT built.
 
-6. **Malicious approved output.** Everything the guest produces becomes real once
-   the operator approves it. `run_code` can write a plausible script with a subtle
-   backdoor that passes every gate; staging + gates make it **reviewable**, not
-   **safe**.
+6. **Malicious output is live immediately.** Everything the agent writes becomes
+   a real project file the moment it writes it — the human-review step between
+   "agent wrote it" and "it's on disk" is gone by operator decision. What keeps
+   this from being remote-execution: canonical files are not executed by the
+   host (execution stays guest-only), dashboards render in a sandboxed iframe,
+   and commits/pushes still require operator approval. The real exposure is the
+   operator themselves running a project file that an injected agent poisoned —
+   review `git diff` before running project code you didn't write.
 
-7. **Egress attribution is coarse.** The proxy sees raw guest requests with no
-   op_id and attributes them to the operation currently driving the single guest
-   (a process global set by the broker). With overlapping top-level operations the
-   attribution can be wrong; the single-guest Pi makes true concurrency rare, and
-   the LAN/secret/cut controls do not depend on attribution being exact.
+7. **Egress attribution is coarse — and concurrency is now common.** The proxy
+   sees raw guest requests with no op_id and attributes them to the operation
+   that most recently registered a turn (a process global set by the broker).
+   Per-project chats/agent panels (added 2026-07-20) make overlapping top-level
+   operations a normal pattern, so cross-project mis-attribution is likelier
+   than under the old single-active-project flow. The LAN/secret/cut controls
+   do not depend on attribution being exact, but per-project egress POLICY does
+   pick the wrong project's allowlist in a race — treat allowlists as
+   operator-wide rather than strictly per-project until this is fixed.
 
 8. **Bigger host-side surface / confused deputy.** The proxy and model gateway now
    process guest-controlled bytes on the host. A parsing bug in the proxy
@@ -121,12 +136,12 @@ a watched, policy-gated, cuttable pipe to the internet.
 | HTTPS payload exfil / no injection | High | Medium | Host/bytes/cadence still watched + cuttable; payload opaque until MITM lands. Authenticated HTTPS via host tools. |
 | DNS covert channel | Medium | Medium | Forced through logged host resolver + entropy alert; tunnelling physically possible. |
 | Memory poisoning / laundering | Critical | Low–Med | Persisted taint + static approved:false keep it out of binding context; semantic influence on tainted context remains. |
-| Generated-code backdoor | Critical | Medium | Deterministic gates (heuristic) + staging + human review; a gate-passing backdoor is possible. |
+| Generated-code backdoor | Critical | **Medium-High** | Advisory gates + git history only — no pre-landing human review since 2026-07-20; execution stays guest-only and commits stay gated. Release gate (planned) is the compensating control. |
 | Secret exposure | Critical | Very Low | No secrets in guest; wire injection is grant-scoped per project; key never crosses to a non-DeepSeek endpoint. |
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. |
 | Hypervisor / kernel escape | Critical | Low | No passthrough, minimal devices, monthly patched image; unpatched-CVE window only. |
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
-| Egress mis-attribution | Low | Low | Single-guest serialisation; core controls don't depend on it. |
+| Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
 
 **Closing frame:** the netless design made the room have no phone; this design
 gives the room a **monitored, policy-gated, cuttable phone with no address book of

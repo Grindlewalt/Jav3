@@ -31,7 +31,7 @@ export function humanizeTool(name, args = {}) {
     case 'list_files': return '📂 listing files'
     case 'search_codebase': return `🔎 searching code: ${trunc(args.query)}`
     case 'crawl_codebase': return '🗺 indexing codebase'
-    case 'write_file': return `✏️ staging ${args.path}`
+    case 'write_file': return `✏️ writing ${args.path}`
     case 'edit_file': return `✏️ editing ${args.path}`
     case 'spawn_agent': return `🤖 ${args.agent}: ${trunc(args.task)}`
     case 'deploy_agents': return `🌳 deploying agents: ${trunc(args.title || args.brief)}`

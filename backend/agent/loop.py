@@ -82,7 +82,7 @@ def _triage_note(tool_names: set[str]) -> str:
 def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None:
     """An instructional error instead of dispatching an edit of a file the
     model never read here — prevents whole-class bad edits (stale find text,
-    wrong file). write_file is exempt: full overwrites are staged + reviewed."""
+    wrong file). write_file is exempt: a full overwrite needs no prior read."""
     if name != "edit_file":
         return None
     path = args.get("path")

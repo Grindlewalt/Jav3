@@ -3,7 +3,6 @@ on me for?" Aggregates the independent pending stores that otherwise each
 live behind their own page (or, for git, behind no page at all):
 
   - git push requests awaiting approval   (git_requests table)
-  - staged changes awaiting review        (.staging/ per project)
   - schedules Jarvis proposed             (schedules with pending_approval = 1)
 
 Read-only aggregation — it never approves anything, just surfaces a count + list
@@ -11,7 +10,7 @@ so the nav can show a badge. Each source is wrapped so one failing store does no
 blank the whole panel."""
 from fastapi import APIRouter, Depends
 
-from . import egress, gitgate, security, staging
+from . import egress, gitgate, security
 from .auth import require_user
 from .db import get_db
 from .projects import list_projects
@@ -31,18 +30,6 @@ async def _git_pending(slugs: list[str]) -> list[dict]:
                                 "created_at": r.get("created_at")})
         except Exception:                       # noqa: BLE001 (one project's failure is not fatal)
             continue
-    return out
-
-
-def _staged_pending(slugs: list[str]) -> list[dict]:
-    out = []
-    for s in slugs:
-        try:
-            files = staging.list_staged(s)
-        except Exception:                       # noqa: BLE001
-            continue
-        if files:
-            out.append({"project": s, "files": len(files)})
     return out
 
 
@@ -86,12 +73,11 @@ async def notifications():
         proj = []
     slugs = [p["slug"] for p in proj]
     git = await _git_pending(slugs)
-    staged = _staged_pending(slugs)
     sched = await _schedules_pending()
     sec = await _security_pending()
     return {
-        "count": (len(git) + len(staged) + len(sched)
+        "count": (len(git) + len(sched)
                   + sec["alerts"] + sec["egress_pending"]),
-        "git": git, "staged": staged, "schedules": sched,
+        "git": git, "schedules": sched,
         "alerts": sec["alerts"], "egress_pending": sec["egress_pending"],
     }

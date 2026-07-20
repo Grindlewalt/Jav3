@@ -30,6 +30,10 @@ router = APIRouter(prefix="/api/agents", tags=["agents"],
 class RunAgent(BaseModel):
     task: str
     confirm_peak: bool = False
+    # run in THIS project (workspace agent panels pass their slug) instead of
+    # whatever project happens to be globally active — several agents can then
+    # work different projects at once.
+    project: str | None = None
 
 
 def sse(event: dict) -> str:
@@ -65,6 +69,25 @@ async def _project_autonomy(db, slug: str | None) -> str | None:
 _USE_DB = object()
 
 
+async def _inherited_or_global(db) -> str | None:
+    """The project an agent run belongs to when the caller didn't pin one: the
+    running operation's own pin (a project-bound chat that spawn_agent'd us),
+    else the GUI's global active project."""
+    from . import runtime
+    pinned = runtime.active_project.get()
+    if pinned is not runtime.ACTIVE_UNSET:
+        return pinned
+    return await get_active_project(db)
+
+
+async def _validate_project(db, slug: str) -> None:
+    async with db.execute(
+        "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL",
+        (slug,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(status_code=404, detail=f"no such project: {slug}")
+
+
 async def _agent_system_prompt(db, agent: dict, active=_USE_DB) -> str:
     """The agent's prompt, then the shared project context minus excluded
     sections. The agent's context_exclude tokens (soul.md, user.md, env.md,
@@ -83,7 +106,7 @@ async def _open_agent_run(db, slug: str, task: str,
     resolved slug (not the _USE_DB sentinel) for the autonomy lookup."""
     agent = _read(slug)  # 404s if missing
     if active is _USE_DB:
-        active = await get_active_project(db)
+        active = await _inherited_or_global(db)
     title = f"[{agent['name']}] " + " ".join(task.split())[:40]
     conversation_id = await open_conversation(
         db, project=active, title=title, kind="agent", commit=False)
@@ -115,6 +138,9 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
         # it must be able to re-fetch them — and a scheduled run must never be
         # starved by yesterday's claims (the 06:45 news-agent post-mortem)
         wtoken = runtime.web_session.set(f"run:{conversation_id}")
+        # pin the run's project for its tools (host loop path) + its own children
+        ptoken = runtime.active_project.set(active)
+        cidtoken = runtime.conversation_id.set(conversation_id)
         confirm_peak(conversation_id)
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent, await _project_autonomy(db, active))
@@ -131,6 +157,8 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
                 if event["type"] == "final":
                     final_content = event["content"]
         finally:
+            runtime.conversation_id.reset(cidtoken)
+            runtime.active_project.reset(ptoken)
             runtime.web_session.reset(wtoken)
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) "
@@ -179,7 +207,11 @@ async def run_agent(slug: str, body: RunAgent):
     agent = _read(slug)  # 404s if missing
     db = await get_db()
     try:
-        active = await get_active_project(db)
+        if body.project:
+            await _validate_project(db, body.project)
+            active = body.project
+        else:
+            active = await get_active_project(db)
         title = f"[{agent['name']}] " + " ".join(body.task.split())[:40]
         conversation_id = await open_conversation(
             db, project=active, title=title, kind="agent")
@@ -199,11 +231,14 @@ async def run_agent(slug: str, body: RunAgent):
         await db.close()
 
     async def event_stream():
+        from . import runtime
+        ptoken = runtime.active_project.set(active)
+        cidtoken = runtime.conversation_id.set(conversation_id)
         db = await get_db()
         try:
             yield sse({"type": "start", "conversation_id": conversation_id,
                        "agent": agent["name"]})
-            system_prompt = await _agent_system_prompt(db, agent)
+            system_prompt = await _agent_system_prompt(db, agent, active=active)
             tools = _agent_tools(agent, await _project_autonomy(db, active))
             mdl, burl = _agent_overrides(agent)
             history = [{"role": "user", "content": body.task}]
@@ -225,5 +260,7 @@ async def run_agent(slug: str, body: RunAgent):
             yield sse({"type": "error", "message": str(e)})
         finally:
             await db.close()
+            runtime.conversation_id.reset(cidtoken)
+            runtime.active_project.reset(ptoken)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -1,5 +1,5 @@
 from backend.agent.tools.toolctx import require_project
-from backend.staging import stage_write
+from backend.writes import SecretLeakError, apply_write
 
 
 async def run(path: str, html: str) -> str:
@@ -14,8 +14,11 @@ async def run(path: str, html: str) -> str:
         return "error: path must not contain '..' or empty segments"
     if parts[0] != "dashboards":
         path = f"dashboards/{path}"
-    stage_write(slug, path, html.encode())  # safe_join inside re-checks escapes
-    return (f"staged dashboard at {path} ({len(html)} chars) — pending operator "
-            "approval. Once approved it renders in the project workspace "
-            "Renderer panel (sandboxed iframe: scripts run, but no network and "
-            "no same-origin access).")
+    try:
+        await apply_write(slug, path, html.encode())  # safe_join inside re-checks escapes
+    except SecretLeakError as e:
+        return (f"error: dashboard refused — it contains the literal value of "
+                f"secret(s): {', '.join(e.names)}. Never embed secret values.")
+    return (f"dashboard written at {path} ({len(html)} chars). It renders in the "
+            "project workspace Renderer panel (sandboxed iframe: scripts run, "
+            "but no network and no same-origin access).")

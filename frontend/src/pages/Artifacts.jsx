@@ -47,7 +47,7 @@ export default function Artifacts() {
     if (!target) return
     const r = await api(`/api/artifacts/${a.slug}/merge`, {
       method: 'POST', body: JSON.stringify({ target }) })
-    window.alert(`staged into ${target} for your review: ${r.staged.join(', ')}`)
+    window.alert(`merged into ${target}: ${r.merged.join(', ')}`)
   }
 
   async function del(a) {

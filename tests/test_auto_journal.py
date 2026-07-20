@@ -39,20 +39,20 @@ async def _turn_with_tools(db, tools: list[str]) -> int:
 
 async def test_auto_journal_after_project_writes(project_db):
     cid = await _turn_with_tools(project_db, ["read_file", "edit_file"])
-    await chat_mod._auto_journal(project_db, cid, "fix the bug", "done", 0)
+    await chat_mod._auto_journal(project_db, cid, "fix the bug", "done", 0, "demo")
     md = read_project_md("demo")
     assert "(auto) Fixed the frobnicator" in md
 
 
 async def test_no_journal_for_read_only_turns(project_db):
     cid = await _turn_with_tools(project_db, ["read_file", "web_search"])
-    await chat_mod._auto_journal(project_db, cid, "look around", "done", 0)
+    await chat_mod._auto_journal(project_db, cid, "look around", "done", 0, "demo")
     assert "(auto)" not in read_project_md("demo")
 
 
 async def test_no_double_journal_when_model_journaled(project_db):
     cid = await _turn_with_tools(project_db, ["edit_file", "journal_update"])
-    await chat_mod._auto_journal(project_db, cid, "fix", "done", 0)
+    await chat_mod._auto_journal(project_db, cid, "fix", "done", 0, "demo")
     assert "(auto)" not in read_project_md("demo")
 
 
@@ -63,12 +63,12 @@ async def test_only_this_turns_tools_count(project_db):
         "SELECT MAX(id) AS m FROM tool_calls WHERE conversation_id = ?",
         (cid,)) as cur:
         before = (await cur.fetchone())["m"]
-    await chat_mod._auto_journal(project_db, cid, "chat", "done", before)
+    await chat_mod._auto_journal(project_db, cid, "chat", "done", before, "demo")
     assert "(auto)" not in read_project_md("demo")
 
 
 async def test_kill_switch(project_db, monkeypatch):
     monkeypatch.setattr(settings, "auto_journal", False)
     cid = await _turn_with_tools(project_db, ["edit_file"])
-    await chat_mod._auto_journal(project_db, cid, "fix", "done", 0)
+    await chat_mod._auto_journal(project_db, cid, "fix", "done", 0, "demo")
     assert "(auto)" not in read_project_md("demo")

@@ -1,11 +1,12 @@
-"""Deterministic diff gates (Layer 6): pure scan heuristics + the persist/
-block/acknowledge flow over real staged files."""
+"""Deterministic diff gates: pure scan heuristics + the advisory write-time
+flow (writes.apply_write lands the file, raises deduped security events, and
+refuses secret leaks outright)."""
 import json
 
 import pytest
 
 from backend import db as db_mod
-from backend import diffgate, staging
+from backend import diffgate, writes
 from backend.config import settings
 
 
@@ -57,7 +58,7 @@ def test_noncode_file_skipped():
     assert diffgate.scan("", "AAAA" * 50, "data.csv") == []
 
 
-# --- persist / block / acknowledge -------------------------------------------
+# --- advisory write-time flow ------------------------------------------------
 
 @pytest.fixture
 async def db(tmp_env):
@@ -68,41 +69,46 @@ async def db(tmp_env):
     await conn.close()
 
 
-async def test_rescan_flags_and_blocks_approval(db):
-    staging.stage_write("proj", "mod.py", b"import subprocess\nsocket.socket()\n")
-    flags = await diffgate.rescan_project(db, "proj")
-    trigs = {f["trigger"] for f in flags}
-    assert "new_import" in trigs and "network_call" in trigs
-    # unacknowledged -> approval blocked for that path
-    assert await diffgate.blocking_paths(db, "proj") == {"mod.py"}
-    # acknowledge every flag -> unblocked
-    for f in flags:
-        await diffgate.acknowledge(db, f["id"])
-    assert await diffgate.blocking_paths(db, "proj") == set()
-
-
-async def test_secret_leak_flagged_and_blocks(db):
-    # save an operator secret, then stage a file that leaks its value
-    (settings.secrets_path).write_text(json.dumps({"API_KEY": "supersecretvalue123"}))
-    staging.stage_write("proj", "leak.py", b"KEY = 'supersecretvalue123'\n")
-    await diffgate.rescan_project(db, "proj")
-    flags = await diffgate.list_flags(db, "proj")
-    assert any(f["trigger"] == "secret_leak" for f in flags)
-    assert "leak.py" in await diffgate.blocking_paths(db, "proj")
-
-
-async def test_rescan_clears_stale_flags(db):
-    staging.stage_write("proj", "mod.py", b"import socket\n")
-    await diffgate.rescan_project(db, "proj")
-    assert await diffgate.blocking_paths(db, "proj") == {"mod.py"}
-    # replace with a clean version, rescan -> flag gone
-    staging.stage_write("proj", "mod.py", b"x = 1\n")
-    await diffgate.rescan_project(db, "proj")
-    assert await diffgate.blocking_paths(db, "proj") == set()
-
-
-async def test_gate_flag_raises_security_event(db):
+async def test_flagged_write_lands_and_alerts(db):
     from backend import security
-    staging.stage_write("proj", "mod.py", b"import socket\n")
-    await diffgate.rescan_project(db, "proj")
+    triggers = await writes.apply_write(
+        "proj", "mod.py", b"import subprocess\nsocket.socket()\n")
+    assert "new_import" in triggers and "network_call" in triggers
+    # ADVISORY: the write landed despite the flags
+    assert (settings.projects_dir / "proj" / "mod.py").exists()
+    # ...and each trigger raised a security event for the Review Center
+    assert await security.count_unacknowledged(db) >= 2
+
+
+async def test_flag_events_dedup_per_path_trigger(db):
+    from backend import security
+    await writes.apply_write("proj", "mod.py", b"import socket\n")
+    first = await security.count_unacknowledged(db)
+    # iterating on the same flagged file must not drown the bell
+    await writes.apply_write("proj", "mod.py", b"import socket\nx = 1\n")
+    assert await security.count_unacknowledged(db) == first
+
+
+async def test_secret_leak_write_refused(db):
+    from backend import security
+    (settings.secrets_path).write_text(json.dumps({"API_KEY": "supersecretvalue123"}))
+    with pytest.raises(writes.SecretLeakError):
+        await writes.apply_write("proj", "leak.py", b"KEY = 'supersecretvalue123'\n")
+    # refused: nothing landed, and the alert fired
+    assert not (settings.projects_dir / "proj" / "leak.py").exists()
     assert await security.count_unacknowledged(db) >= 1
+
+
+async def test_clean_write_no_events(db):
+    from backend import security
+    triggers = await writes.apply_write("proj", "notes.md", b"# hello\n")
+    assert triggers == []
+    assert (settings.projects_dir / "proj" / "notes.md").read_text() == "# hello\n"
+    assert await security.count_unacknowledged(db) == 0
+
+
+async def test_write_refuses_protected_paths(db):
+    with pytest.raises(ValueError):
+        await writes.apply_write("proj", ".git/config", b"x")
+    with pytest.raises(ValueError):
+        await writes.apply_write("proj", ".staging/sneak.py", b"x")

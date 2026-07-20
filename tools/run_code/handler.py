@@ -5,10 +5,11 @@ in-guest tools). The guest holds no key, no DB, no secrets and has no NIC, so
 arbitrary code detonates next to nothing — that inversion is the whole reason
 this tool can exist. On the host the same file self-guards and refuses.
 
-Files the run creates or modifies under the workspace copy are captured into
-`.staging/` via the same stage_write as the file tools, so artifacts ride the
-existing reconcile -> secret-scan -> operator-approval path. The rlimits keep
-the shared guest responsive; they are not the security boundary (the VM is).
+Files the run creates or modifies under the workspace copy are captured via the
+same `writes` buffer as the file tools, so artifacts ride the turn-end
+reconcile -> secret-scan -> advisory-diff-gate path back to the canonical
+project files. The rlimits keep the shared guest responsive; they are not the
+security boundary (the VM is).
 """
 import asyncio
 import os
@@ -16,7 +17,7 @@ import resource
 import signal
 import time
 
-from backend import staging
+from backend import writes
 from backend.agent.tools import toolctx
 from backend.config import settings
 
@@ -64,9 +65,9 @@ def _snapshot(root) -> dict:
     return snap
 
 
-def _capture_artifacts(root, before: dict, slug: str) -> tuple[list[str], list[str]]:
-    """Stage files the run created/changed. Returns (staged, skipped)."""
-    staged, skipped, total = [], [], 0
+async def _capture_artifacts(root, before: dict, slug: str) -> tuple[list[str], list[str]]:
+    """Capture files the run created/changed. Returns (captured, skipped)."""
+    captured, skipped, total = [], [], 0
     for rel, sig in sorted(_snapshot(root).items()):
         if before.get(rel) == sig:
             continue
@@ -76,13 +77,13 @@ def _capture_artifacts(root, before: dict, slug: str) -> tuple[list[str], list[s
             skipped.append(rel)
             continue
         try:
-            staging.stage_write(slug, rel, p.read_bytes())
-        except ValueError:          # protected path — never staged
+            await writes.apply_write(slug, rel, p.read_bytes())
+        except ValueError:          # protected path (or refused) — never kept
             skipped.append(rel)
             continue
         total += size
-        staged.append(rel)
-    return staged, skipped
+        captured.append(rel)
+    return captured, skipped
 
 
 async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> str:
@@ -164,13 +165,13 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         lines.append("(no output)")
 
     if before is not None:
-        staged, skipped = _capture_artifacts(cwd, before, slug)
-        if staged:
-            lines.append(f"staged {len(staged)} changed file(s) for approval: "
-                         + ", ".join(staged[:10])
-                         + (" …" if len(staged) > 10 else ""))
+        captured, skipped = await _capture_artifacts(cwd, before, slug)
+        if captured:
+            lines.append(f"kept {len(captured)} changed file(s): "
+                         + ", ".join(captured[:10])
+                         + (" …" if len(captured) > 10 else ""))
         if skipped:
-            lines.append(f"NOT staged (too big / protected): {', '.join(skipped[:5])}")
+            lines.append(f"NOT kept (too big / protected): {', '.join(skipped[:5])}")
     else:
         lines.append("(no project active — files written by this run are not kept)")
     return "\n".join(lines)

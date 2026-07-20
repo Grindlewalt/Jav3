@@ -1,74 +1,25 @@
 import { useEffect, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
-import DiffView from '../DiffView.jsx'
 
-// One cross-project queue of everything awaiting the operator: staged diffs +
-// gate flags, git commit requests, egress host approvals, and security alerts.
-// Rendered whole on the global /review page and, with a `slug`, filtered to a
-// single project inside a Workspace panel.
+// One cross-project queue of everything awaiting the operator: git commit
+// requests, egress host approvals, and security alerts (which now include the
+// advisory write flags — file writes apply live, the diff gate alerts instead
+// of blocking). Rendered whole on the global /review page and, with a `slug`,
+// filtered to a single project inside a Workspace panel.
 //
-// EVERY string in here — staged paths, flag triggers/details, commit messages,
-// egress hosts, alert summaries/details, diff bodies — is UNTRUSTED (it comes
-// from the agent, from the guest, or from scanned/egress data). All of it is
-// rendered as plain text nodes; nothing here goes through <Md>.
+// EVERY string in here — flag triggers/details, commit messages, egress hosts,
+// alert summaries/details — is UNTRUSTED (it comes from the agent, from the
+// guest, or from scanned/egress data). All of it is rendered as plain text
+// nodes; nothing here goes through <Md>.
 
 const SEV = { info: 'info', warn: 'warn', warning: 'warn', critical: 'crit', crit: 'crit' }
 const sevClass = (s) => SEV[String(s || 'info').toLowerCase()] || 'info'
 
 function ts(s) { return s ? String(s).replace('T', ' ').slice(0, 16) : '' }
 
-// ---- a single staged file: status, gate flags, on-demand diff, actions -------
-function StagedFile({ slug, entry, flags, blocked, busy, onAck, onAct }) {
-  const [open, setOpen] = useState(false)
-  const [diff, setDiff] = useState(null)
-  const isBlocked = blocked.includes(entry.path)
-  const myFlags = flags.filter((f) => f.path === entry.path)
-
-  async function toggle() {
-    if (open) { setOpen(false); return }
-    setOpen(true)
-    if (!diff) {
-      try { setDiff(await api(`/api/projects/${slug}/staging/diff?path=${encodeURIComponent(entry.path)}`)) }
-      catch { setDiff(null) }
-    }
-  }
-
-  return (
-    <li className="rev-staged">
-      <div className="rev-staged-row">
-        <span className={`tag ${entry.status}`}>{entry.status}</span>
-        <span className="grow ellipsis" title={entry.path}>{entry.path}</span>
-        <button className="ghost" onClick={toggle}>{open ? 'hide' : 'diff'}</button>
-        <button className="win-btn ok" title={isBlocked
-                  ? 'blocked — acknowledge its flags first' : 'approve'}
-                disabled={busy || isBlocked}
-                onClick={() => onAct('approve', [entry.path])}>✓</button>
-        <button className="win-btn" title="reject" disabled={busy}
-                onClick={() => onAct('reject', [entry.path])}>✕</button>
-      </div>
-      {myFlags.map((f) => (
-        <div key={f.id} className="rev-flag">
-          <span className="grow">
-            <span className="mono">{f.trigger}</span>
-            {f.detail && <span className="dim"> — {f.detail}</span>}
-          </span>
-          {f.acknowledged
-            ? <span className="tag done">acked</span>
-            : <button className="ghost" disabled={busy}
-                      onClick={() => onAck(f.id)}>acknowledge</button>}
-        </div>
-      ))}
-      {open && diff && (
-        <div className="rev-diff"><DiffView oldText={diff.old} newText={diff.new} /></div>
-      )}
-    </li>
-  )
-}
-
 export function ReviewQueue({ slug }) {
   const [slugs, setSlugs] = useState(slug ? [slug] : null)  // project slugs to cover
   const [names, setNames] = useState({})                     // slug -> display name
-  const [staging, setStaging] = useState({})                 // slug -> {staged,flags,blocked}
   const [gitReqs, setGitReqs] = useState({})                 // slug -> [pending requests]
   const [pending, setPending] = useState([])                 // egress host approvals
   const [alerts, setAlerts] = useState([])                   // unacknowledged security events
@@ -86,9 +37,6 @@ export function ReviewQueue({ slug }) {
   }, [slug])
 
   function loadProject(s) {
-    api(`/api/projects/${s}/staging`).then((r) =>
-      setStaging((m) => ({ ...m, [s]: {
-        staged: r.staged || [], flags: r.flags || [], blocked: r.blocked || [] } }))).catch(() => {})
     api(`/api/projects/${s}/git/requests`).then((r) =>
       setGitReqs((m) => ({ ...m, [s]: (r.requests || []).filter((q) => q.status === 'pending') })))
       .catch(() => {})
@@ -129,20 +77,6 @@ export function ReviewQueue({ slug }) {
     })
   }, [slug])
 
-  async function ackFlag(s, id) {
-    try { await api(`/api/projects/${s}/staging/flags/${id}/ack`, { method: 'POST' }); loadProject(s) }
-    catch (e) { window.alert(e.detail || String(e)) }
-  }
-  async function stageAct(s, verb, paths) {
-    setBusy(true)
-    try {
-      await api(`/api/projects/${s}/staging/${verb}`, {
-        method: 'POST', body: JSON.stringify({ paths }) })
-      loadProject(s)
-      window.dispatchEvent(new Event('jarvis-files-changed'))
-    } catch (e) { window.alert(e.detail || String(e)) }
-    setBusy(false)
-  }
   async function gitAct(s, id, verb) {
     if (verb === 'reject' && !window.confirm(`reject commit request #${id}?`)) return
     setBusy(true)
@@ -165,9 +99,8 @@ export function ReviewQueue({ slug }) {
 
   const multi = !slug && (slugs?.length || 0) > 1
   const projLabel = (s) => names[s] || s
-  const stagedTotal = (slugs || []).reduce((n, s) => n + (staging[s]?.staged?.length || 0), 0)
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
-  const total = alerts.length + stagedTotal + gitTotal + pending.length
+  const total = alerts.length + gitTotal + pending.length
 
   if (!slugs) return <div className="dim center-pad">…</div>
 
@@ -185,34 +118,6 @@ export function ReviewQueue({ slug }) {
             <span className="dim small">{alerts.length} unacknowledged</span>
           </div>
           {alerts.map((a) => <AlertRow key={a.id} a={a} onAck={ackAlert} />)}
-        </section>
-      )}
-
-      {/* ---- staged changes + gate flags ---- */}
-      {stagedTotal > 0 && (
-        <section className="sbx-sec">
-          <div className="sbx-sec-head">
-            <h3>Staged changes</h3>
-            <span className="dim small">{stagedTotal} file{stagedTotal !== 1 && 's'} · a flagged file
-              can't be approved until its flags are acknowledged</span>
-          </div>
-          {(slugs || []).map((s) => {
-            const st = staging[s]
-            if (!st || st.staged.length === 0) return null
-            return (
-              <div key={s} className="rev-group">
-                {multi && <div className="rev-group-head">📁 {projLabel(s)}</div>}
-                <ul className="staged-list rev-list">
-                  {st.staged.map((e) => (
-                    <StagedFile key={e.path} slug={s} entry={e}
-                                flags={st.flags} blocked={st.blocked} busy={busy}
-                                onAck={(id) => ackFlag(s, id)}
-                                onAct={(verb, paths) => stageAct(s, verb, paths)} />
-                  ))}
-                </ul>
-              </div>
-            )
-          })}
         </section>
       )}
 
@@ -301,8 +206,9 @@ export default function Review() {
   return (
     <div className="page review-page">
       <h2>Review Center</h2>
-      <p className="dim small">Everything waiting on you, across every project — staged edits,
-        commit requests, egress approvals and security alerts, with inline actions.</p>
+      <p className="dim small">Everything waiting on you, across every project — commit
+        requests, egress approvals and security alerts (including advisory write
+        flags), with inline actions.</p>
       <ReviewQueue />
     </div>
   )

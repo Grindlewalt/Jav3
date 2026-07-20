@@ -16,7 +16,6 @@ const PANEL_TYPES = {
   organizer: { label: 'File organizer', w: 580, h: 460 },
   run: { label: 'Run — python sandbox', w: 560, h: 470 },
   todos: { label: 'To-dos', w: 360, h: 380 },
-  staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
   git: { label: 'Git — review, approve, push', w: 560, h: 480 },
   board: { label: 'Task board — goal / plan / runs', w: 400, h: 540 },
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
@@ -29,7 +28,7 @@ const DEFAULT_PANELS = [
   { id: 'p1', type: 'chat', x: 16, y: 16, w: 440, h: 520, z: 1, state: {} },
   { id: 'p2', type: 'journal', x: 472, y: 16, w: 440, h: 300, z: 2, state: {} },
   { id: 'p3', type: 'todos', x: 928, y: 16, w: 340, h: 300, z: 3, state: {} },
-  { id: 'p4', type: 'staging', x: 472, y: 332, w: 620, h: 204, z: 4, state: {} },
+  { id: 'p4', type: 'git', x: 472, y: 332, w: 620, h: 204, z: 4, state: {} },
 ]
 
 const TEXT_EXT = /\.(md|txt|py|js|jsx|ts|json|html|css|csv|toml|yaml|yml|sh|tex)$/i
@@ -315,7 +314,7 @@ export default function Workspace() {
                     refreshProject()
                   }}>
             <option value="read_only">read-only — observe</option>
-            <option value="stage">stage — quarantined writes</option>
+            <option value="stage">stage — + file writes</option>
             <option value="gated">gated — + agents & research</option>
             <option value="full">full — + commit proposals</option>
           </select>
@@ -366,7 +365,6 @@ function PanelBody(props) {
     case 'organizer': return <OrganizerPanel {...props} />
     case 'run': return <RunPanel {...props} />
     case 'todos': return <TodoPanel {...props} />
-    case 'staging': return <StagingPanel {...props} />
     case 'git': return <GitPanel {...props} />
     case 'board': return <TaskBoardPanel {...props} />
     case 'context': return <ContextPanel {...props} />
@@ -879,8 +877,9 @@ function ContextPanel({ slug }) {
   )
 }
 
-// Run any defined agent right here in the project. It works in this project's
-// context and its file edits land in the same staging/approval queue.
+// Run any defined agent right here in the project. The run is pinned to THIS
+// project (the slug rides the request), so several boards can run agents in
+// different projects at the same time; edits apply live to the project files.
 function AgentPanel({ slug, state, setState }) {
   const [agents, setAgents] = useState([])
   const [task, setTask] = useState('')
@@ -898,7 +897,7 @@ function AgentPanel({ slug, state, setState }) {
     setLog((l) => [...l, { role: 'task', text: task }, { role: 'out', text: '' }])
     try {
       await chatStream(
-        { task, confirm_peak: confirmPeak }, (ev) => {
+        { task, confirm_peak: confirmPeak, project: slug }, (ev) => {
           if (ev.type === 'tool')
             setLog((l) => upLast(l, (last) => ({ ...last, text: last.text + `\n⚙ ${ev.name}\n` })))
           if (ev.type === 'token')
@@ -1027,7 +1026,7 @@ function ResearchPanel({ slug, state, setState }) {
           )
         })}
       </div>
-      {doc && <div className="dim small">document staged at <code>{doc.path}</code> — approve it in Staged changes
+      {doc && <div className="dim small">document written to <code>{doc.path}</code>
         {doc.usage && <> · {doc.usage}</>}</div>}
     </div>
   )
@@ -1039,81 +1038,13 @@ function upLast(list, fn) {
   return copy
 }
 
-// The unified Review Center, scoped to this one project: the same staged
-// diffs + gate flags, commit requests, egress host approvals and security
-// alerts the global /review page shows, filtered to this slug.
+// The unified Review Center, scoped to this one project: the same commit
+// requests, egress host approvals and security alerts (incl. advisory write
+// flags) the global /review page shows, filtered to this slug.
 function ReviewPanel({ slug }) {
   return (
     <div className="pane-col">
       <div className="review-scrollwrap"><ReviewQueue slug={slug} /></div>
-    </div>
-  )
-}
-
-// Jarvis's pending edits: everything it writes lands here first, inert, and
-// only touches the real files when approved.
-function StagingPanel({ slug }) {
-  const [staged, setStaged] = useState([])
-  const [sel, setSel] = useState(null)
-  const [diff, setDiff] = useState(null)
-  const [busy, setBusy] = useState(false)
-
-  const refresh = () =>
-    api(`/api/projects/${slug}/staging`).then((r) => {
-      setStaged(r.staged)
-      if (sel && !r.staged.some((e) => e.path === sel)) { setSel(null); setDiff(null) }
-    })
-  useEffect(() => {
-    refresh()
-    const t = setInterval(refresh, 8000)
-    const h = () => refresh()
-    window.addEventListener('jarvis-files-changed', h)
-    return () => { clearInterval(t); window.removeEventListener('jarvis-files-changed', h) }
-  }, [slug]) // eslint-disable-line
-
-  useEffect(() => {
-    if (!sel) return
-    api(`/api/projects/${slug}/staging/diff?path=${encodeURIComponent(sel)}`)
-      .then(setDiff).catch(() => setDiff(null))
-  }, [sel, slug])
-
-  async function act(verb, paths) {
-    setBusy(true)
-    try {
-      await api(`/api/projects/${slug}/staging/${verb}`, {
-        method: 'POST', body: JSON.stringify({ paths }) })
-      await refresh()
-      window.dispatchEvent(new Event('jarvis-files-changed'))
-    } catch (err) { window.alert(err.detail || String(err)) }
-    setBusy(false)
-  }
-
-  if (staged.length === 0)
-    return <div className="dim center-pad">no staged changes — Jarvis's edits appear here for approval</div>
-
-  return (
-    <div className="pane-col">
-      <div className="row">
-        <span className="grow dim">{staged.length} pending file{staged.length !== 1 && 's'}</span>
-        <button disabled={busy} onClick={() => act('approve', null)}>✓ approve all</button>
-        <button className="ghost danger" disabled={busy}
-                onClick={() => window.confirm('discard ALL staged changes?') && act('reject', null)}>
-          ✕ reject all</button>
-      </div>
-      <ul className="staged-list">
-        {staged.map((e) => (
-          <li key={e.path} className={sel === e.path ? 'active' : ''}
-              onClick={() => setSel(e.path)}>
-            <span className={`tag ${e.status}`}>{e.status}</span>
-            <span className="grow ellipsis">{e.path}</span>
-            <button className="win-btn ok" title="approve" disabled={busy}
-                    onClick={(ev) => { ev.stopPropagation(); act('approve', [e.path]) }}>✓</button>
-            <button className="win-btn" title="reject" disabled={busy}
-                    onClick={(ev) => { ev.stopPropagation(); act('reject', [e.path]) }}>✕</button>
-          </li>
-        ))}
-      </ul>
-      {sel && diff && <DiffView oldText={diff.old} newText={diff.new} />}
     </div>
   )
 }

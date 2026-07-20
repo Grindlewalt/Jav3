@@ -125,11 +125,11 @@ async def test_edit_file_noop_guard(client):
     assert out == "error: find and replace are identical — no change to make."
 
 
-async def test_edit_file_success_still_stages(client):
+async def test_edit_file_success_applies(client):
     (_project() / "a.txt").write_text("hello world")
     out = await registry.dispatch("edit_file",
                                   {"path": "a.txt", "find": "hello", "replace": "goodbye"})
-    assert "staged" in out
+    assert "edited" in out
     assert "goodbye world" in await registry.dispatch("read_file", {"path": "a.txt"})
 
 

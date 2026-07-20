@@ -6,7 +6,7 @@ chat (SSE messaging with a real model turn), memory, projects, the tool
 registry, the git gate (request -> approve -> commit), and the jobs view.
 
 Pure-logic features (crawl/search indexing, context_exclude, research
-auto-approve, staging) are covered by the pytest suite; this drives the
+auto-approve, writes) are covered by the pytest suite; this drives the
 live wire.
 
 Usage:  .venv/bin/python scripts/e2e_smoke.py --password PW
@@ -173,11 +173,13 @@ def main():
     except urllib.error.HTTPError as e:
         check("egress/security surfaces", False, f"HTTP {e.code}")
 
-    print("== diff-gate flags + taint notes ==")
+    print("== direct writes + taint notes ==")
     try:
-        st = json.load(_req("GET", f"/api/projects/{slug}/staging"))
-        check("staging exposes gate flags + blocked",
-              "flags" in st and "blocked" in st, str(list(st))[:80])
+        try:
+            _req("GET", f"/api/projects/{slug}/staging")
+            check("staging endpoints removed", False, "still answers")
+        except urllib.error.HTTPError as e:
+            check("staging endpoints removed", e.code in (404, 405), f"HTTP {e.code}")
         notes = json.load(_req("GET", "/api/memory/notes")).get("notes")
         check("memory notes metadata endpoint", isinstance(notes, list))
     except urllib.error.HTTPError as e:

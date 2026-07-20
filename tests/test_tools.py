@@ -1,4 +1,4 @@
-"""Tool layer: folder discovery, staged-write semantics, approval flow."""
+"""Tool layer: folder discovery, direct-write semantics, path safety."""
 import httpx
 import pytest
 
@@ -8,7 +8,6 @@ from backend.config import settings
 from backend.db import get_db, init_db
 from backend.main import app
 from backend.memory import ensure_memory_seeds
-from backend.staging import list_staged
 
 
 @pytest.fixture
@@ -43,16 +42,16 @@ def test_registry_discovers_folder_tools(tmp_env):
     assert "write_file" in granted
 
 
-async def test_write_is_staged_not_canonical(client):
+async def test_write_lands_canonical_immediately(client):
     out = await registry.dispatch("write_file",
                                   {"path": "code/x.py", "content": "print(1)\n"})
-    assert "staged" in out
-    assert not (settings.projects_dir / "demo" / "code" / "x.py").exists()
-    assert [e["path"] for e in list_staged("demo")] == ["code/x.py"]
-    # the agent sees its own staged edit
+    assert "wrote" in out
+    p = settings.projects_dir / "demo" / "code" / "x.py"
+    assert p.read_text() == "print(1)\n"
+    assert not (p.stat().st_mode & 0o111)   # never executable
     assert "print(1)" in await registry.dispatch("read_file", {"path": "code/x.py"})
     listing = await registry.dispatch("list_files", {})
-    assert "code/x.py" in listing and "staged" in listing
+    assert "code/x.py" in listing
 
 
 async def test_edit_requires_unique_match(client):
@@ -62,33 +61,27 @@ async def test_edit_requires_unique_match(client):
     assert "matches 2" in out
     out = await registry.dispatch("edit_file",
                                   {"path": "a.txt", "find": "x", "replace": "z", "all": True})
-    assert "staged" in out
-    assert "z y z" in await registry.dispatch("read_file", {"path": "a.txt"})
+    assert "edited" in out
+    assert (settings.projects_dir / "demo" / "a.txt").read_text() == "z y z"
 
 
-async def test_approval_flow(client):
-    await registry.dispatch("write_file", {"path": "b.txt", "content": "hello"})
+async def test_staging_endpoints_are_gone(client):
     r = await client.get("/api/projects/demo/staging")
-    assert [e["path"] for e in r.json()["staged"]] == ["b.txt"]
-    r = await client.get("/api/projects/demo/staging/diff", params={"path": "b.txt"})
-    assert r.json()["old"] is None and r.json()["new"] == "hello"
-    r = await client.post("/api/projects/demo/staging/approve", json={"paths": ["b.txt"]})
-    assert r.json()["applied"] == ["b.txt"]
-    assert (settings.projects_dir / "demo" / "b.txt").read_text() == "hello"
-    assert list_staged("demo") == []
+    assert r.status_code in (404, 405)
+    r = await client.post("/api/projects/demo/staging/approve", json={"paths": None})
+    assert r.status_code in (404, 405)
 
 
-async def test_reject_discards(client):
-    await registry.dispatch("write_file", {"path": "c.txt", "content": "bad"})
-    r = await client.post("/api/projects/demo/staging/reject", json={"paths": None})
-    assert r.json()["rejected"] == ["c.txt"]
-    assert list_staged("demo") == []
-    assert not (settings.projects_dir / "demo" / "c.txt").exists()
-
-
-async def test_staging_cannot_escape(client):
+async def test_write_cannot_escape(client):
     out = await registry.dispatch("write_file",
                                   {"path": "../../evil.txt", "content": "x"})
+    assert "error" in out.lower()
+    assert not (settings.projects_dir.parent / "evil.txt").exists()
+
+
+async def test_write_cannot_touch_git(client):
+    out = await registry.dispatch("write_file",
+                                  {"path": ".git/hooks/pre-commit", "content": "#!/bin/sh\n"})
     assert "error" in out.lower()
 
 
@@ -129,3 +122,33 @@ async def test_load_project_tool(client):
     assert "no project is loaded" not in await registry.dispatch("list_files", {})
     r = await client.get("/api/projects")
     assert r.json()["active"] == "second"
+
+
+async def test_load_project_in_conversation_rebinds_only_that_chat(client):
+    """Inside a turn (conversation_id contextvar set), load_project pins the
+    conversation instead of yanking the global session state."""
+    from backend import runtime
+    from backend.db import get_db, open_conversation
+    db = await get_db()
+    try:
+        cid = await open_conversation(db, project="demo", title="t")
+    finally:
+        await db.close()
+    await client.post("/api/projects", json={"name": "Third", "summary": "three"})
+    tok = runtime.conversation_id.set(cid)
+    try:
+        out = await registry.dispatch("load_project", {"slug": "third"})
+        assert "loaded project 'third'" in out
+    finally:
+        runtime.conversation_id.reset(tok)
+    r = await client.get("/api/projects")
+    assert r.json()["active"] == "demo"          # global untouched
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT p.slug AS slug FROM conversations c JOIN projects p "
+            "ON p.id = c.project_id WHERE c.id = ?", (cid,)) as cur:
+            row = await cur.fetchone()
+    finally:
+        await db.close()
+    assert row["slug"] == "third"                # the chat is rebound

@@ -79,6 +79,15 @@ async def create_project(body: CreateProject):
         await refresh_all_projects(db)
     finally:
         await db.close()
+    # with direct writes (no staging quarantine) git is the review/undo surface,
+    # so every project is a repo from birth with a baseline commit to diff against
+    try:
+        from . import gitgate
+        await gitgate.ensure_repo(slug)
+        await gitgate.run_git(slug, "add", "-A")
+        await gitgate.run_git(slug, "commit", "-q", "-m", "project created")
+    except Exception:  # noqa: BLE001 — a git hiccup must not block project creation
+        pass
     return {"slug": slug, "name": body.name}
 
 

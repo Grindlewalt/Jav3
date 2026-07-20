@@ -3,7 +3,7 @@ pushes, when a remote is configured) after operator approval via the API.
 
 The repo is the project dir itself. Staging metadata and runtime files are
 kept out via a host-written .gitignore, and the agent can never write into
-.git/ (staging + workspace endpoints refuse the path).
+.git/ (writes + workspace endpoints refuse the path).
 """
 import asyncio
 import json

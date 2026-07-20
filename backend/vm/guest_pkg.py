@@ -5,8 +5,9 @@ so guest code == host code with no image rebuild per change. The package is a
 minimal `backend/` tree (named `backend` so the tools' absolute `from backend.X`
 imports AND loop.py's relative imports both resolve to the guest shims): the
 checked-in `guest/backend/` (shims + run-turn server) plus live copies of the
-host modules that run verbatim in the guest (loop.py, staging.py, codeindex.py,
-the todo helpers) and the clean in-guest tool handlers.
+host modules that run verbatim in the guest (loop.py, codeindex.py, the todo
+helpers) and the clean in-guest tool handlers. The guest's own writes.py shim
+(checked in under guest/backend/) buffers file writes for turn-end reconcile.
 """
 import io
 import tarfile
@@ -17,7 +18,6 @@ from ..config import settings
 # pushed workspace; no host state). arcname -> repo path.
 _COPY_MODULES = {
     "backend/agent/loop.py": "backend/agent/loop.py",
-    "backend/staging.py": "backend/staging.py",
     "backend/codeindex.py": "backend/codeindex.py",
     "backend/agent/tools/todostore.py": "backend/agent/tools/todostore.py",
 }

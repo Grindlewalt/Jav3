@@ -119,15 +119,15 @@ export default function ChatBox({ projectSlug }) {
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
       await chatStream(
-        { message: text, conversation_id: cid, confirm_peak: confirmPeak },
+        // a NEW conversation is created pre-pinned to this board's project, so
+        // even its first turn runs in the right context (the old post-hoc PATCH
+        // raced the turn's project resolution)
+        { message: text, conversation_id: cid, confirm_peak: confirmPeak,
+          project: wasNew && projectSlug ? projectSlug : undefined },
         (ev) => {
           if (ev.type === 'start') {
             setCid(ev.conversation_id)
-            if (wasNew && projectSlug)
-              api(`/api/conversations/${ev.conversation_id}`, {
-                method: 'PATCH',
-                body: JSON.stringify({ project: projectSlug }),
-              }).then(refresh)
+            if (wasNew && projectSlug) refresh()
           }
           handleTurnEvent(ev)
         },

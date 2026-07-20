@@ -25,6 +25,9 @@ class ChatRequest(BaseModel):
     conversation_id: int | None = None
     confirm_peak: bool = False
     ephemeral: bool = False   # incognito: persist nothing, memory writes go to a temp dir
+    # pin a NEW conversation to this project (workspace chat panels pass their
+    # slug); ignored for existing conversations — reassign via PATCH instead.
+    project: str | None = None
 
 
 def sse(event: dict) -> str:
@@ -214,14 +217,14 @@ async def _project_autonomy(db, slug: str) -> str | None:
 
 
 async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
-                        before_id: int) -> None:
-    """F5 interim: if this turn mutated the active project and never called
+                        before_id: int, active: str | None) -> None:
+    """F5 interim: if this turn mutated its project and never called
     journal_update itself, write one auto line so project.md stays current.
     Best-effort — a failure here never touches the turn. (The fuller design
     waits on the claude-code-expert consult.)"""
     if not settings.auto_journal:
         return
-    if not await get_active_project(db):
+    if not active:
         return
     async with db.execute(
         "SELECT DISTINCT tool FROM tool_calls WHERE conversation_id = ? AND id > ?",
@@ -257,18 +260,31 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     # fresh fetch-ledger scope per turn: parallel reads inside the turn (and
     # any team it deploys) dedup, while tomorrow's turn can re-read the page
     wtoken = runtime.web_session.set(f"turn:{conversation_id}:{uuid.uuid4().hex[:8]}")
+    cidtoken = runtime.conversation_id.set(conversation_id)
     atoken = None
+    ptoken = None
     db = await get_db()
     try:
         bus.publish(chan, {"type": "start", "conversation_id": conversation_id})
-        system_prompt = await assemble_system_prompt(db)
+        # the conversation's OWN project binding wins; unassigned chats follow
+        # the GUI's global active project. Pinning here (not the global) is what
+        # lets chats in different projects run at the same time.
+        async with db.execute(
+            "SELECT p.slug AS slug FROM conversations c "
+            "JOIN projects p ON p.id = c.project_id "
+            "WHERE c.id = ? AND p.deleted_at IS NULL", (conversation_id,)) as cur:
+            row = await cur.fetchone()
+        active = row["slug"] if row else await get_active_project(db)
+        # tools deep in the loop (and spawn_agent children) resolve this pin
+        # instead of the DB global — see toolctx.active_slug
+        ptoken = runtime.active_project.set(active)
+        system_prompt = await assemble_system_prompt(db, active=active)
         # tool subsetting: with no project loaded, project-scoped run/git/
         # search tools can only error — withhold them. The FILE tools stay:
         # they fall back to the chat's hidden artifact store (persistent
         # chats only; incognito leaves no trace). The set is stable within a
         # project state, so the provider's prefix cache survives.
         entries = load_registry()
-        active = await get_active_project(db)
         if not active:
             if ephemeral:
                 entries = [e for e in entries if not e.get("requires_project")]
@@ -342,7 +358,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                     _name_conversation(conversation_id, user_msg, final_content))
             try:
                 await _auto_journal(db, conversation_id, user_msg,
-                                    final_content, tools_before)
+                                    final_content, tools_before, active)
             except Exception:  # noqa: BLE001 — journaling never breaks a turn
                 pass
         bus.publish(chan, {"type": "final", "content": final_content,
@@ -387,6 +403,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 pass
         if atoken is not None:
             runtime.artifact_slug.reset(atoken)
+        if ptoken is not None:
+            runtime.active_project.reset(ptoken)
+        runtime.conversation_id.reset(cidtoken)
         runtime.web_session.reset(wtoken)
         runtime.event_chan.reset(ctoken)
         runtime.ephemeral.reset(token)
@@ -463,7 +482,16 @@ async def chat(body: ChatRequest):
             if in_peak_window() and not body.confirm_peak:
                 raise HTTPException(status_code=409,
                                     detail="peak_confirmation_required")
-            active = await get_active_project(db)
+            if body.project:
+                async with db.execute(
+                    "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL",
+                    (body.project,)) as cur:
+                    if not await cur.fetchone():
+                        raise HTTPException(status_code=404,
+                                            detail=f"no such project: {body.project}")
+                active = body.project
+            else:
+                active = await get_active_project(db)
             # provisional title: first bit of the opening message; an LLM
             # naming pass upgrades it after the first exchange (best effort)
             title = " ".join(body.message.split())[:48] or "(empty)"

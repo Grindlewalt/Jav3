@@ -1,6 +1,6 @@
 ---
 name: run_code
-description: Execute python code or a shell command inside the disposable sandbox VM and get exit code + stdout/stderr back. Runs against a copy of the active project's files; any files the run creates or changes come back as staged changes for operator approval.
+description: Execute python code or a shell command inside the disposable sandbox VM and get exit code + stdout/stderr back. Runs against a copy of the active project's files; any files the run creates or changes are kept in the project.
 when_to_use: Running or testing code you wrote, quick computations, transforms over project files (parse/convert/plot), or checking that a script actually works before proposing it. Prefer one script that does the whole job over many small runs.
 enabled: true
 requires_guest: true
@@ -20,5 +20,5 @@ parameters:
 The sandbox has NO network and no secrets — pip installs and web fetches will
 fail by design; use web tools for anything remote, then process it here. Your
 working directory is the project copy: read its files directly, write results
-as files (they are staged for approval, never live). stdout/stderr are
+as files (they sync back to the project at turn end). stdout/stderr are
 truncated past ~6k chars — print what matters, write the rest to a file.

@@ -19,6 +19,6 @@ NOT seen this conversation. Never delegate understanding you already have:
 don't write "based on my findings, fix the bug"; give the concrete file paths,
 symbols, and exactly what to change or answer.
 
-It works in the active project; its edits go to the same staging/approval
+It works in the current project; its edits land live, the same as yours
 queue, and it cannot spawn further agents. You get its final report back as the
 tool result — relay the useful parts to the operator.

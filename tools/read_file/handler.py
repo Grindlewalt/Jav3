@@ -1,6 +1,6 @@
 from backend.config import settings
 from backend.fsutil import list_tree
-from backend.staging import effective_read
+from backend.writes import resolve
 from backend.agent.tools.toolctx import require_project
 
 
@@ -35,7 +35,7 @@ async def run(path: str, offset=None, limit=None) -> str:
     if limit is not None and limit < 1:
         return "error: limit must be at least 1 line."
 
-    p = effective_read(slug, path)
+    p = resolve(slug, path)
     if p is None:
         return _missing(slug, path)
     try:

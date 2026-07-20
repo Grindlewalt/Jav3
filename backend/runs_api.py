@@ -20,7 +20,7 @@ from .auth import require_user
 from .config import settings
 from .db import get_db
 from .memory import get_active_project
-from .staging import effective_read
+from .writes import resolve
 
 router = APIRouter(prefix="/api/runs", tags=["runs"], dependencies=[Depends(require_user)])
 
@@ -79,7 +79,7 @@ async def research_run(body: ResearchRun):
     finally:
         await db.close()
     if not project:
-        raise HTTPException(status_code=400, detail="load a project first — research stages into it")
+        raise HTTPException(status_code=400, detail="load a project first — research writes its document into it")
 
     import uuid
     job_id = uuid.uuid4().hex  # minted here so we subscribe before the task runs
@@ -132,7 +132,7 @@ async def funnel_run(body: FunnelRun):
         await db.close()
     if not project:
         raise HTTPException(status_code=400,
-                            detail="load a project first — the funnel stages its rollups into it")
+                            detail="load a project first — the funnel writes its rollups into it")
 
     import uuid
     job_id = uuid.uuid4().hex
@@ -255,7 +255,7 @@ async def run_stream(cid: int):
 
 @router.get("/{cid}/doc")
 async def run_doc(cid: int):
-    """The synthesized research document for a run (staged or approved), so it
+    """The synthesized research document for a run, so it
     can be read straight from the Runs page."""
     db = await get_db()
     try:
@@ -274,16 +274,14 @@ async def run_doc(cid: int):
     topic = (row["summary"] or "").split("Research:", 1)[-1].strip()
     # try the deterministic path, then fall back to the newest research doc
     candidates = [f"research/{research._slugify(topic)}.md"]
-    for base in (settings.projects_dir / slug / ".staging" / "research",
-                 settings.projects_dir / slug / "research"):
-        if base.is_dir():
-            candidates += [f"research/{p.name}" for p in
-                           sorted(base.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True)]
+    base = settings.projects_dir / slug / "research"
+    if base.is_dir():
+        candidates += [f"research/{p.name}" for p in
+                       sorted(base.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True)]
     for rel in candidates:
-        p = effective_read(slug, rel)
+        p = resolve(slug, rel)
         if p is not None:
-            return {"content": p.read_text(), "path": rel,
-                    "staged": ".staging" in str(p)}
+            return {"content": p.read_text(), "path": rel}
     return {"content": None}
 
 

@@ -43,7 +43,7 @@ async def test_host_dispatch_refuses(tmp_env):
     assert "nope" not in out
 
 
-async def test_runs_python_and_stages_artifacts(tmp_env, monkeypatch, tmp_path):
+async def test_runs_python_and_keeps_artifacts(tmp_env, monkeypatch, tmp_path):
     await init_db()
     monkeypatch.setattr(settings, "projects_dir", tmp_path)
     _guest(monkeypatch, tmp_path)
@@ -55,13 +55,11 @@ async def test_runs_python_and_stages_artifacts(tmp_env, monkeypatch, tmp_path):
         "print('doubled to', n * 2)")})
     assert "exit 0" in out
     assert "doubled to 42" in out
-    # the created file was captured into staging, canonical untouched
-    assert (tmp_path / "proj" / ".staging" / "answer.txt").read_text() == "42"
-    assert not (tmp_path / "proj" / "answer.txt").exists() or \
-        (tmp_path / "proj" / "answer.txt").read_text() == "42"  # guest copy may hold it
-    assert "staged 1 changed file(s)" in out
-    # the unchanged input file was NOT staged
-    assert not (tmp_path / "proj" / ".staging" / "input.txt").exists()
+    # the created file was captured through the writes chokepoint
+    assert (tmp_path / "proj" / "answer.txt").read_text() == "42"
+    assert "kept 1 changed file(s): answer.txt" in out
+    # the unchanged input file was NOT captured
+    assert "input.txt" not in out.split("kept 1")[1]
 
 
 async def test_runs_shell_command(tmp_env, monkeypatch, tmp_path):
@@ -125,13 +123,13 @@ async def test_output_truncated_head_and_tail(tmp_env, monkeypatch, tmp_path):
     assert "ENDMARK" in out          # the tail survives truncation
 
 
-async def test_protected_paths_never_staged(tmp_env, monkeypatch, tmp_path):
-    """A run that writes into .git must not smuggle it through staging."""
+async def test_protected_paths_never_captured(tmp_env, monkeypatch, tmp_path):
+    """A run that writes into .git must not smuggle it through the capture."""
     await init_db()
     monkeypatch.setattr(settings, "projects_dir", tmp_path)
     _guest(monkeypatch, tmp_path)
     out = await registry.dispatch("run_code", {"command":
         "mkdir -p .git && echo x > .git/hook && echo ok > fine.txt"})
     assert "exit 0" in out
-    assert (tmp_path / "proj" / ".staging" / "fine.txt").exists()
-    assert not (tmp_path / "proj" / ".staging" / ".git").exists()
+    assert "kept 1 changed file(s): fine.txt" in out
+    assert ".git" not in out.split("kept 1")[1].splitlines()[0]

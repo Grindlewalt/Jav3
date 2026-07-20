@@ -3,7 +3,8 @@
 Four levels, increasing capability:
 
   read_only  only observe (read files, search, browse the web)
-  stage      + writes, but everything lands in the staging quarantine
+  stage      + file writes (live — the quarantine is gone; writes are
+             advisory-scanned and git is the undo surface)
   gated      + spawn agents/research
   full       + propose git commits (the current, unrestricted default)
 
@@ -13,7 +14,7 @@ explicit read set, and any tool we don't recognise defaults to `full`-only, so a
 new or unknown tool is never accidentally handed to a restricted project.
 
 This dial only narrows which tools the model is even offered on a turn; the
-durable boundaries (staging quarantine, commit approval) enforce independently.
+durable boundaries (write scans, commit approval) enforce independently.
 """
 
 LEVELS = ("read_only", "stage", "gated", "full")
@@ -31,8 +32,8 @@ _STAGE = {
 }
 _GATED = {
     "research", "spawn_agent", "deploy_agents",
-    # code execution: contained in the no-key/no-net guest and its writes are
-    # staged, but running code is still more than staging edits — gated tier
+    # code execution: contained in the no-key/no-net guest, but running code
+    # is still more than file edits — gated tier
     "run_code",
 }
 _COMMIT = {"git_commit_request"}

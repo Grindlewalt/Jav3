@@ -159,7 +159,6 @@ class Settings(BaseSettings):
     # Auto-approve the FINAL research document (research/<topic>.md) so it goes
     # straight to canonical instead of waiting in the approval queue. Node
     # scratch files under runs/ stay staged regardless.
-    research_auto_approve: bool = True
 
     # Archive upload caps (POST /upload_archive extraction)
     upload_max_uncompressed_mb: int = 200

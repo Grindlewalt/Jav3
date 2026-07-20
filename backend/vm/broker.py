@@ -3,7 +3,7 @@
 The guest loop can't run host-brokered tools itself — it sends a `tool_broker_call`
 over vsock and the host runs it HERE, behind every existing gate. This is a THIN
 pass-through to `registry.dispatch` (it never reimplements tool logic), so the
-staging quarantine, git-commit approval, SSRF guard, and secret substitution stay
+write scans, git-commit approval, SSRF guard, and secret substitution stay
 authoritative host-side. It is also the single chokepoint every guest tool call
 crosses — the natural home for the tier-4 controls. Their hook points are marked
 below (pre-dispatch policy / diff-gate; post-dispatch taint stamp / scrub) so they
@@ -59,9 +59,10 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
 
 # Tools that promote content INTO a trusted store the agent later relies on.
 # memory_write is the one such store the guest can reach through the broker
-# (canonical files go via staging-approve and git via the commit gate — both
-# operator-gated, not guest-brokered). A promotion made in a turn that has
-# already consumed untrusted content is the laundering path this guards.
+# (git goes via the commit gate — operator-gated, not guest-brokered; file
+# writes land direct but are scanned + advisory-flagged in writes.apply_write).
+# A promotion made in a turn that has already consumed untrusted content is the
+# laundering path this guards.
 _PROMOTION_TOOLS = frozenset({"memory_write"})
 
 # op_ids that have consumed untrusted tool output this turn. The static memory
@@ -69,13 +70,6 @@ _PROMOTION_TOOLS = frozenset({"memory_write"})
 # primary block; this ledger is the runtime half — it catches the promotion at
 # the moment it happens and records the provenance on the result.
 _tainted: set[str] = set()
-
-# Tools whose result is a staged file mutation. After one runs we re-scan the
-# project's staging with the deterministic diff gate (Layer 6), so a flag +
-# alert fires the moment the write lands — not only when the operator opens the
-# panel (the approve path re-scans regardless, so enforcement never depends on
-# this proactive pass).
-_STAGING_TOOLS = frozenset({"write_file", "edit_file", "dashboard", "run_code"})
 
 _PROMOTION_QUARANTINE_NOTE = (
     "\n\n[taint: this write happened in a turn that already consumed untrusted "
@@ -93,21 +87,6 @@ def op_tainted(op_id: str) -> bool:
     return op_id in _tainted
 
 
-async def _gate_scan(slug: str) -> None:
-    """Best-effort proactive diff-gate scan after a staging write. Never lets a
-    gate error break the tool call it rides on."""
-    try:
-        from .. import diffgate
-        from ..db import get_db
-        db = await get_db()
-        try:
-            await diffgate.rescan_project(db, slug)
-        finally:
-            await db.close()
-    except Exception:  # noqa: BLE001 — a gate failure must not fail the tool
-        pass
-
-
 async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
     """Restore the turn's ambient context and run one host tool. Returns a
     structured {result, taint} so metadata can grow without a protocol change."""
@@ -116,8 +95,9 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
         return {"result": f"error: broker has no turn context for op_id {op_id!r}",
                 "taint": "trusted"}
     vars_ = (runtime.web_session, runtime.ephemeral, runtime.artifact_slug,
-             runtime.event_chan)
-    vals = (env.web_session, env.ephemeral, env.artifact_slug, env.event_chan)
+             runtime.event_chan, runtime.active_project, runtime.conversation_id)
+    vals = (env.web_session, env.ephemeral, env.artifact_slug, env.event_chan,
+            env.active_project, env.conversation_id)
     tokens = [v.set(val) for v, val in zip(vars_, vals)]
     # also restore the operation's budget id: a tool that itself runs a turn
     # (spawn_agent, deploy_agents) must resolve THIS operation's Budget so the
@@ -139,8 +119,6 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
             _tainted.add(op_id)
         if launder and not result.startswith("error:"):
             result += _PROMOTION_QUARANTINE_NOTE
-        if name in _STAGING_TOOLS and env.active_project and not result.startswith("error:"):
-            await _gate_scan(env.active_project)
         return {"result": result, "taint": classify_taint(name)}
     finally:
         budget_mod.active_op_id.reset(optok)

@@ -47,11 +47,6 @@ function NotificationBell() {
               <span className="grow ellipsis">⚠ {secCount} security alert{secCount === 1 ? '' : 's'} — review</span>
             </NavLink>
           )}
-          {(data?.staged || []).map((s) => (
-            <NavLink key={`st${s.project}`} to={`/projects/${s.project}`} className="notif-item" onClick={close}>
-              <span className="grow ellipsis">staged changes · {s.project} · {s.files} file{s.files === 1 ? '' : 's'}</span>
-            </NavLink>
-          ))}
           {(data?.git || []).map((g) => (
             <NavLink key={`g${g.id}`} to={`/projects/${g.project}`} className="notif-item" onClick={close}>
               <span className="grow ellipsis">git push · {g.project} · {g.message}</span>

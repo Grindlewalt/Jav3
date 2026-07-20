@@ -25,7 +25,7 @@ from .agent.model import complete_text, confirm_peak
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import assemble_system_prompt
-from .staging import stage_write
+from .writes import apply_write
 
 MAX_DEPTH = 2      # head=0 -> leader=1 -> subagent=2 (terminal)
 MAX_NODES = 24     # total nodes per job
@@ -197,7 +197,7 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             await db.commit()
         finally:
             await db.close()
-        stage_write(project, f"runs/{job_id}/{cid}-{kind}.md", rollup.encode())
+        await apply_write(project, f"runs/{job_id}/{cid}-{kind}.md", rollup.encode())
         bus.publish(job_id, {"type": "node_done", "node_id": cid, "rollup": rollup})
         return {"cid": cid, "kind": kind, "output": output, "rollup": rollup,
                 "doc_path": doc_path}
@@ -252,13 +252,19 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     # both. Best-effort: a guest hiccup must not sink the whole job.
     prime_guest = (settings.use_guest_loop and optok is not None and bool(project))
     acquired = False
+    owns_ws = False
     if prime_guest:
-        from .vm.guest_turn import prime_workspace
+        from .vm.guest_turn import acquire_workspace, prime_workspace
         from .vm.lifecycle import vm as guest_vm
         try:
             await guest_vm.acquire()        # pin the guest for the whole job
             acquired = True
-            await prime_workspace(project)
+            # only prime when first in on this slug — a concurrent chat turn on
+            # the same project may already own the guest copy (re-priming would
+            # wipe its in-flight edits); we then reuse it like a nested turn.
+            owns_ws = acquire_workspace(project)
+            if owns_ws:
+                await prime_workspace(project)
         except Exception:  # noqa: BLE001 — fall through; leaves surface guest errors
             pass
     try:
@@ -268,12 +274,13 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     finally:
         runtime.web_session.reset(wtoken)
         if acquired:
-            from .vm.guest_turn import pull_staging
+            from .vm.guest_turn import pull_writes, release_workspace
             from .vm.lifecycle import vm as guest_vm
-            try:
-                await pull_staging(project)
-            except Exception:  # noqa: BLE001 — reconcile is best-effort
-                pass
+            if release_workspace(project):     # last out sweeps the shared buffer
+                try:
+                    await pull_writes(project)
+                except Exception:  # noqa: BLE001 — reconcile is best-effort
+                    pass
             guest_vm.release()
         if optok is not None:
             budget_mod.active_op_id.reset(optok)

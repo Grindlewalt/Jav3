@@ -18,7 +18,6 @@ from pydantic import BaseModel
 
 from .auth import require_user
 from .config import settings
-from . import diffgate
 from .db import get_db
 from .fsutil import SKIP_DIRS, list_tree, read_text_or_binary, safe_join
 from .runner import run_python
@@ -385,90 +384,6 @@ async def modify_todos(slug: str, body: TodoAction):
     return {"todos": todos}
 
 
-# --- staged changes (Jarvis's pending edits) ---------------------------------
-# Staged content is quarantined: these endpoints return it as text for diff
-# display only; nothing serves, runs or imports it until approved.
-
-from . import staging as _staging  # noqa: E402
-
-
-class StagingAction(BaseModel):
-    paths: list[str] | None = None   # None = everything
-
-
-@router.get("/staging")
-async def staged_list(slug: str):
-    await project_dir(slug)
-    db = await get_db()
-    try:
-        flags = await diffgate.rescan_project(db, slug)
-        blocked = await diffgate.blocking_paths(db, slug)
-    finally:
-        await db.close()
-    return {"staged": _staging.list_staged(slug), "flags": flags,
-            "blocked": sorted(blocked)}
-
-
-@router.get("/staging/diff")
-async def staged_diff(slug: str, path: str):
-    base = await project_dir(slug)
-    staged = safe_join(base / _staging.STAGING, path)
-    if not staged.is_file():
-        raise HTTPException(status_code=404, detail="nothing staged at that path")
-    canonical = safe_join(base, path)
-
-    def _text(p: Path) -> str | None:
-        if not p.is_file():
-            return None
-        try:
-            return p.read_text()
-        except UnicodeDecodeError:
-            return f"(binary, {p.stat().st_size} bytes)"
-
-    return {"path": path, "old": _text(canonical), "new": _text(staged)}
-
-
-@router.post("/staging/approve")
-async def staged_approve(slug: str, body: StagingAction):
-    await project_dir(slug)
-    db = await get_db()
-    try:
-        # soft-flag gate (Layer 6): a file with an unacknowledged flag cannot be
-        # approved. The write already landed in staging; the operator must clear
-        # each flag first. Everything unflagged approves normally.
-        await diffgate.rescan_project(db, slug)
-        blocked = await diffgate.blocking_paths(db, slug, body.paths)
-    finally:
-        await db.close()
-    to_apply = None if body.paths is None else [p for p in body.paths if p not in blocked]
-    if body.paths is None:
-        # "approve all" still skips blocked files
-        to_apply = [e["path"] for e in _staging.list_staged(slug) if e["path"] not in blocked]
-    applied = _staging.approve(slug, to_apply)
-    return {"applied": applied, "blocked": sorted(blocked)}
-
-
-@router.get("/staging/flags")
-async def staged_flags(slug: str):
-    await project_dir(slug)
-    db = await get_db()
-    try:
-        return {"flags": await diffgate.rescan_project(db, slug)}
-    finally:
-        await db.close()
-
-
-@router.post("/staging/flags/{flag_id}/ack")
-async def staged_flag_ack(slug: str, flag_id: int):
-    await project_dir(slug)
-    db = await get_db()
-    try:
-        return await diffgate.acknowledge(db, flag_id)
-    finally:
-        await db.close()
-
-
-@router.post("/staging/reject")
-async def staged_reject(slug: str, body: StagingAction):
-    await project_dir(slug)
-    return {"rejected": _staging.reject(slug, body.paths)}
+# (the staged-changes endpoints lived here until 2026-07-19: writes now apply
+# directly to the canonical files — see backend/writes.py — and the advisory
+# flags surface as security events in the Review Center)
