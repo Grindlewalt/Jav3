@@ -123,6 +123,9 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
     # a promotion is "laundering" only if untrusted content was consumed BEFORE
     # it — evaluate against the ledger as it stood on entry
     launder = name in _PROMOTION_TOOLS and op_id in _tainted
+    # persist the taint onto the written note (not just the in-turn result): the
+    # handler reads this contextvar and stamps `taint: untrusted` into frontmatter.
+    taint_tok = runtime.write_taint.set("untrusted") if launder else None
     try:
         # tier-4 hook (pre-dispatch): policy / deterministic diff-gate on
         # (name, args, env) — halt-for-human or reject goes here.
@@ -138,5 +141,7 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
         return {"result": result, "taint": classify_taint(name)}
     finally:
         budget_mod.active_op_id.reset(optok)
+        if taint_tok is not None:
+            runtime.write_taint.reset(taint_tok)
         for v, tok in zip(vars_, tokens):
             v.reset(tok)

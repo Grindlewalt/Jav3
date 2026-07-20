@@ -25,3 +25,12 @@ event_chan = contextvars.ContextVar("jarvis_event_chan", default=None)
 # it by project (the old fallback) made claims permanent, so a scheduled run
 # could never re-read a page any earlier turn in the project had touched.
 web_session = contextvars.ContextVar("jarvis_web_session", default=None)
+
+# Taint stamp for a memory_write happening in an operation that has ALREADY
+# consumed untrusted external content (web/research). The broker sets this to
+# "untrusted" before brokering such a write; the memory_write handler stamps
+# `taint: untrusted` into the note's frontmatter so it is quarantined out of
+# binding context (memory.note_trusted) until the operator promotes it. This is
+# the persisted half of the broker's runtime taint ledger — the tag survives on
+# the file instead of only annotating the in-turn result.
+write_taint = contextvars.ContextVar("jarvis_write_taint", default=None)

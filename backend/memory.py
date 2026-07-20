@@ -304,17 +304,44 @@ def parse_note(text: str) -> tuple[dict, str]:
     return (meta if isinstance(meta, dict) else {}), m.group(2).strip()
 
 
+def note_taint(meta: dict) -> str:
+    """'untrusted' if the note carries a persisted taint stamp (it was written in
+    a turn that had consumed web/research content), else 'trusted'. Set by the
+    memory_write handler off the broker's runtime taint ledger; cleared only by
+    the operator's promote action."""
+    return "untrusted" if str(meta.get("taint", "")).lower() == "untrusted" else "trusted"
+
+
 def note_trusted(meta: dict) -> bool:
     """Whether a note may drive the TRUSTED system prompt (binding standing memory
     and the non-negotiable rules tail). Operator-authored notes are trusted;
     agent-written ones (source: agent) are untrusted until the operator approves
-    them (approved: true). An untrusted note still lists in the index and is
-    readable with memory_read, but is never auto-injected as a binding rule — so
-    untrusted web content summarized into a note can't launder itself into
-    trusted context. The operator promotes a note by editing its frontmatter."""
+    them (approved: true). A note carrying an untrusted taint stamp is NEVER
+    trusted regardless of approved — the two must both be cleared, which is what
+    promote_note does. An untrusted note still lists in the index and is readable
+    with memory_read, but is never auto-injected as a binding rule — so untrusted
+    web content summarized into a note can't launder itself into trusted context."""
+    if note_taint(meta) == "untrusted":
+        return False
     if str(meta.get("source", "")).lower() != "agent":
         return True
     return bool(meta.get("approved"))
+
+
+def promote_note(name: str) -> bool:
+    """Operator promotes an agent/tainted note to trusted context: approved=true
+    and the taint stamp removed. Returns False if there is no such note."""
+    import yaml
+    p = notes_dir() / f"{name}.md"
+    if not p.is_file():
+        return False
+    meta, body = parse_note(p.read_text())
+    meta["approved"] = True
+    meta.pop("taint", None)
+    meta.setdefault("source", "agent")
+    fm = yaml.safe_dump(meta, default_flow_style=False, sort_keys=False).strip()
+    p.write_text(f"---\n{fm}\n---\n{body.rstrip()}\n")
+    return True
 
 
 def note_description(meta: dict, body: str) -> str:
