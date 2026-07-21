@@ -172,7 +172,11 @@ function VmStatus() {
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
   const [, setCfgReady] = useState(false) // bump once the media allowlist lands
+  const [menuOpen, setMenuOpen] = useState(false) // mobile nav drawer
   const location = useLocation()
+
+  // close the mobile menu whenever the route changes
+  useEffect(() => { setMenuOpen(false) }, [location.pathname])
 
   useEffect(() => {
     api('/api/auth/me').then(setUser).catch(() => setUser(null))
@@ -188,30 +192,37 @@ export default function App() {
   return (
     <div className="app">
       {user && (
-        <nav>
+        <nav className={menuOpen ? 'nav open' : 'nav'}>
           <span className="brand">Jarvis</span>
-          <NavLink to="/" end>Chat</NavLink>
-          <NavLink to="/projects">Projects</NavLink>
-          <NavLink to="/artifacts">Artifacts</NavLink>
-          <NavLink to="/review">Review</NavLink>
-          <NavLink to="/network">Network</NavLink>
-          <NavLink to="/context">Context</NavLink>
-          <NavLink to="/agents">Agents</NavLink>
-          <NavLink to="/logs">Logs</NavLink>
-          <NavLink to="/schedules">Schedules</NavLink>
-          <NavLink to="/skills">Skills</NavLink>
-          <NavLink to="/tools">Tools</NavLink>
+          <button className="nav-toggle" aria-label="menu"
+                  aria-expanded={menuOpen}
+                  onClick={() => setMenuOpen((o) => !o)}>
+            {menuOpen ? '✕' : '☰'}
+          </button>
+          <div className="nav-links">
+            <NavLink to="/" end>Chat</NavLink>
+            <NavLink to="/projects">Projects</NavLink>
+            <NavLink to="/artifacts">Artifacts</NavLink>
+            <NavLink to="/review">Review</NavLink>
+            <NavLink to="/network">Network</NavLink>
+            <NavLink to="/context">Context</NavLink>
+            <NavLink to="/agents">Agents</NavLink>
+            <NavLink to="/logs">Logs</NavLink>
+            <NavLink to="/schedules">Schedules</NavLink>
+            <NavLink to="/skills">Skills</NavLink>
+            <NavLink to="/tools">Tools</NavLink>
+            <button
+              className="link nav-logout"
+              onClick={async () => {
+                await api('/api/auth/logout', { method: 'POST' })
+                setUser(null)
+              }}
+            >
+              Logout
+            </button>
+          </div>
           <NotificationBell />
           <VmStatus />
-          <button
-            className="link"
-            onClick={async () => {
-              await api('/api/auth/logout', { method: 'POST' })
-              setUser(null)
-            }}
-          >
-            Logout
-          </button>
         </nav>
       )}
       <Routes>

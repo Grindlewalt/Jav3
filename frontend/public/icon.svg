@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Jarvis">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b9cf5"/>
+      <stop offset="1" stop-color="#8b6cf0"/>
+    </linearGradient>
+    <radialGradient id="core" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.7" stop-color="#eaf1ff"/>
+      <stop offset="1" stop-color="#cddcff"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- arc-reactor core: outer ring, radial spokes, bright center -->
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#ffffff" stroke-width="26" opacity="0.95"/>
+  <g stroke="#ffffff" stroke-width="26" stroke-linecap="round" opacity="0.9">
+    <line x1="256" y1="106" x2="256" y2="164"/>
+    <line x1="256" y1="348" x2="256" y2="406"/>
+    <line x1="106" y1="256" x2="164" y2="256"/>
+    <line x1="348" y1="256" x2="406" y2="256"/>
+  </g>
+  <circle cx="256" cy="256" r="70" fill="url(#core)"/>
+</svg>

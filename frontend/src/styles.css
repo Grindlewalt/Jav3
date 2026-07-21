@@ -36,12 +36,20 @@ nav .brand {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
+.nav-links { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 nav a {
   color: var(--dim); text-decoration: none; padding: 6px 12px;
-  border-radius: 8px; transition: all 0.15s;
+  border-radius: 8px; transition: all 0.15s; white-space: nowrap;
 }
 nav a:hover { color: var(--text); background: var(--panel); }
 nav a.active { color: var(--text); background: var(--panel-2); }
+.nav-logout { margin-left: 4px; }
+/* hamburger: hidden on desktop, shown on mobile via the media query below */
+.nav-toggle {
+  display: none; background: none; border: 0; color: var(--text);
+  font-size: 20px; line-height: 1; padding: 4px 8px; cursor: pointer;
+  margin-left: auto;
+}
 
 /* ---- notification bell ---- */
 .notif-wrap { position: relative; margin-left: auto; }
@@ -733,3 +741,95 @@ kbd {
 .tag.sev-info-tag { color: var(--accent); border-color: var(--accent); }
 .tag.sev-warn-tag { color: var(--amber); border-color: var(--amber); }
 .tag.sev-crit-tag { color: var(--red); border-color: var(--red); }
+
+/* ============================================================
+   Mobile / phone layout (≤768px). Desktop is untouched above;
+   these rules only take over on narrow screens.
+   ============================================================ */
+@media (max-width: 768px) {
+  /* iOS: use the dynamic viewport height so the composer isn't hidden
+     under the browser chrome */
+  .app { height: 100vh; height: 100dvh; }
+
+  /* ---- nav becomes a hamburger drawer ---- */
+  nav { flex-wrap: wrap; padding: 8px 14px; gap: 8px; }
+  .nav-toggle { display: block; order: 3; margin-left: 0; }
+  nav .brand { margin-right: 0; }
+  .notif-wrap { order: 1; margin-left: auto; }
+  .vm-wrap { order: 2; }
+  .nav-links {
+    order: 4; flex-basis: 100%; flex-direction: column; align-items: stretch;
+    gap: 2px; display: none; padding-top: 6px;
+    border-top: 1px solid var(--border); margin-top: 4px;
+  }
+  nav.open .nav-links { display: flex; }
+  .nav-links a { padding: 11px 12px; font-size: 15px; }
+  .nav-logout { text-align: left; margin: 4px 0 0; padding: 11px 12px; }
+
+  /* dropdowns must never exceed the viewport */
+  .notif-drop { width: min(340px, 92vw); }
+  .vm-drop { width: min(260px, 90vw); }
+
+  /* ---- pages: tighter gutters ---- */
+  .page { padding: 16px 14px; }
+  .review-page, .review-page.page { max-width: 100%; }
+
+  /* ---- chat: stack the conversation list above the thread ---- */
+  .chat-layout { flex-direction: column; }
+  .chat-layout aside {
+    width: 100%; max-height: 34vh; border-right: 0;
+    border-bottom: 1px solid var(--border); padding: 10px;
+  }
+  .chat-toolbar { padding: 8px 14px; flex-wrap: wrap; }
+  .messages { padding: 14px 12px; }
+  .msg { max-width: 92%; }
+  .composer { padding: 10px 12px; gap: 8px; }
+  .composer textarea { min-height: 44px; }
+
+  /* ---- generic split layouts (context / files): aside on top ---- */
+  .split-layout { flex-direction: column; }
+  .split-layout > aside, .panel.split > aside {
+    width: 100%; max-height: 32vh; border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ---- network: single column ---- */
+  .net-page { padding: 12px; }
+  .net-body { flex-direction: column; }
+  .net-side { min-width: 0; max-width: 100%; }
+  .net-head { flex-wrap: wrap; }
+
+  /* ---- workspace board: collapse the free-floating panels into a
+     scrollable vertical stack. The inline left/top/width/height set by the
+     drag logic are overridden here so panels flow in order. ---- */
+  .ws-head { flex-wrap: wrap; padding: 10px 12px; gap: 8px; }
+  .ws-head .hint { display: none; }
+  .board {
+    background-image: none; padding: 10px;
+    -webkit-overflow-scrolling: touch; touch-action: pan-y;
+  }
+  .window {
+    position: relative !important;
+    left: auto !important; top: auto !important;
+    width: 100% !important; height: auto !important;
+    min-height: 300px; max-height: 78vh; margin-bottom: 12px;
+    box-shadow: 0 4px 16px #0006;
+  }
+  .window.dimmed { opacity: 1; pointer-events: auto; }
+  .window.anim { transition: none; }
+  .window-head { cursor: default; touch-action: pan-y; }
+  .resize-handle { display: none; }
+
+  /* wide content (diffs, tables, code) scrolls inside its box, never the page */
+  .diff-view, .md-body table { display: block; overflow-x: auto; max-width: 100%; }
+
+  /* touch targets: give small icon buttons a little more room */
+  .win-btn { padding: 4px 9px; font-size: 16px; }
+}
+
+/* very small phones */
+@media (max-width: 400px) {
+  nav .brand { font-size: 16px; }
+  .page { padding: 14px 10px; }
+  .msg { max-width: 96%; }
+}
