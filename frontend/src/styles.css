@@ -764,7 +764,11 @@ kbd {
   }
   nav.open .nav-links { display: flex; }
   .nav-links a { padding: 11px 12px; font-size: 15px; }
-  .nav-logout { text-align: left; margin: 4px 0 0; padding: 11px 12px; }
+  /* button.link sets margin-left:auto (right-aligns it on the desktop bar) and
+     out-specifies a bare .nav-logout — match its specificity to left-align here */
+  button.link.nav-logout {
+    text-align: left; margin: 4px 0 0; padding: 11px 12px; font-size: 15px;
+  }
 
   /* dropdowns must never exceed the viewport */
   .notif-drop { width: min(340px, 92vw); }
