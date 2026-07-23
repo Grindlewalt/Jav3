@@ -6,6 +6,7 @@ Everything here runs on the trusted host. When Jarvis moves into the VM, these
 become the host proxy the VM calls — the VM never opens a raw socket to the
 internet; it only ever receives the sanitised text these functions return.
 """
+import asyncio
 import datetime
 import time
 from urllib.parse import urlparse
@@ -149,8 +150,15 @@ async def read(url: str, session: str) -> str:
     def _out(text: str) -> str:
         return secrets_mod.scrub(text) if substituted else text
 
+    # the guard's getaddrinfo is synchronous DNS — run it in a worker thread so
+    # a slow resolver can't stall every SSE stream on the shared event loop.
+    # `is_safe_url` is resolved from module globals at call time on purpose
+    # (tests monkeypatch webtools.is_safe_url).
+    async def _check_safe(u: str) -> None:
+        await asyncio.get_running_loop().run_in_executor(None, is_safe_url, u)
+
     try:
-        is_safe_url(fetch_url)
+        await _check_safe(fetch_url)
     except UnsafeURL as e:
         return _out(f"error: refused to fetch — {e}")
 
@@ -186,7 +194,7 @@ async def read(url: str, session: str) -> str:
                                         f"different host: {target}. If that destination "
                                         "is what you want, call the tool again with that URL.")
                         try:
-                            is_safe_url(target)
+                            await _check_safe(target)
                         except UnsafeURL as e:
                             return _out(f"error: refused after redirect — {e}")
                         current = target
@@ -215,7 +223,18 @@ async def read(url: str, session: str) -> str:
         _cache_put(_page_cache, url, out)  # keyed by the URL as requested
         return out
     except httpx.HTTPError as e:
-        return _out(f"error: fetch failed: {e}")
+        msg = f"error: fetch failed: {e}"
+        if substituted and isinstance(e, httpx.HTTPStatusError) \
+                and e.response.status_code in (401, 403):
+            # the scrubbed error looks identical to "never substituted", which
+            # misleads the model into hunting for a substitution problem
+            msg += ("\nnote: the {{secret:...}} placeholder WAS substituted with "
+                    "the real value before this fetch — the ORIGIN rejected the "
+                    "credential itself. Likely a wrong/expired/not-yet-activated "
+                    "key (many APIs take minutes-to-hours to activate new keys). "
+                    "Tell the operator to verify the key in its provider "
+                    "dashboard; do not troubleshoot the placeholder mechanism.")
+        return _out(msg)
     finally:
         if not ok:
             await release(session, url)  # let a failed/refused fetch be retried
@@ -265,16 +284,3 @@ async def release(session: str, url: str) -> None:
         await db.close()
 
 
-async def record(session: str, url: str, title: str) -> None:
-    """Legacy record (kept for tests / direct use). claim() is the fetch path."""
-    from . import runtime
-    if runtime.ephemeral.get():
-        return
-    db = await get_db()
-    try:
-        await db.execute(
-            "INSERT OR IGNORE INTO fetched_urls (session, url, title) VALUES (?, ?, ?)",
-            (session, url, title))
-        await db.commit()
-    finally:
-        await db.close()
