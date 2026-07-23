@@ -42,6 +42,12 @@ active_project = contextvars.ContextVar("jarvis_active_project",
 # conversation row instead of yanking the global session state.
 conversation_id = contextvars.ContextVar("jarvis_conversation_id", default=None)
 
+# How many spawn_agent hops deep the current operation is (head chat = 0; the
+# spawn_agent handler increments around each child run). Read when a headless
+# agent's toolset is built: below autonomy.MAX_SPAWN_DEPTH the child gets
+# spawn_agent back, at the cap it becomes a leaf.
+spawn_depth = contextvars.ContextVar("jarvis_spawn_depth", default=0)
+
 # Taint stamp for a memory_write happening in an operation that has ALREADY
 # consumed untrusted external content (web/research). The broker sets this to
 # "untrusted" before brokering such a write; the memory_write handler stamps

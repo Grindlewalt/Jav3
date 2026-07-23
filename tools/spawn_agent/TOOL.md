@@ -19,6 +19,8 @@ NOT seen this conversation. Never delegate understanding you already have:
 don't write "based on my findings, fix the bug"; give the concrete file paths,
 symbols, and exactly what to change or answer.
 
-It works in the current project; its edits land live, the same as yours
-queue, and it cannot spawn further agents. You get its final report back as the
-tool result — relay the useful parts to the operator.
+It works in the current project; its edits land live, the same as yours. Agents
+can spawn agents two levels deep (you -> agent -> agent, then leaf) on one
+shared token budget — brief a mid-level agent on WHO it may summon or it will
+do everything itself. You get its final report back as the tool result — relay
+the useful parts to the operator.

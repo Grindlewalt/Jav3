@@ -46,11 +46,17 @@ def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
 
 
 def _agent_tools(agent: dict, autonomy_level: str | None = None) -> list[dict]:
-    from . import autonomy
-    excluded = set(agent.get("tools_exclude") or [])
-    # a subagent never spawns further agents/teams or mints persistent
-    # infrastructure — see autonomy.NON_DELEGABLE
+    from . import autonomy, runtime
+    own_exclude = set(agent.get("tools_exclude") or [])
+    excluded = set(own_exclude)
+    # a subagent never launches teams or mints persistent infrastructure —
+    # but spawn_agent itself nests up to MAX_SPAWN_DEPTH (fork-bomb cap;
+    # the shared per-op Budget fences cost). The agent definition's own
+    # exclusion still wins.
     excluded |= autonomy.NON_DELEGABLE
+    if ("spawn_agent" not in own_exclude
+            and runtime.spawn_depth.get() < autonomy.MAX_SPAWN_DEPTH):
+        excluded.discard("spawn_agent")
     entries = [e for e in load_registry() if e["name"] not in excluded]
     # a headless run is the unattended case — honour the project's autonomy dial
     entries = autonomy.filter_entries(entries, autonomy_level)

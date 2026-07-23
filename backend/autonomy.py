@@ -39,14 +39,22 @@ _GATED = {
 _COMMIT = {"git_commit_request"}
 
 # Tools a subagent or team worker is NEVER handed, regardless of the autonomy
-# dial above: they never spawn further agents/teams (no recursion, no fork
-# bombs) and never mint persistent infrastructure (new agents, schedules) —
-# those stay a conversation-head decision. Enforced where subagent/worker tool
-# sets are built (agents_run._agent_tools, deploy_agents); deploy_agents' own
-# _in_funnel contextvar is a second, whole-subtree fence.
+# dial above: they never launch whole teams and never mint persistent
+# infrastructure (new agents, schedules) — those stay a conversation-head
+# decision. Enforced where subagent/worker tool sets are built
+# (agents_run._agent_tools, deploy_agents); deploy_agents' own _in_funnel
+# contextvar is a second, whole-subtree fence.
 NON_DELEGABLE = frozenset({
     "spawn_agent", "deploy_agents", "create_agent", "schedule_update",
 })
+
+# spawn_agent alone nests, capped (2026-07-23 operator ask): an agent at spawn
+# depth d < MAX_SPAWN_DEPTH gets spawn_agent back (head chat = depth 0, so
+# Jarvis -> agent -> agent, then leaf). The cap is the fork-bomb fence; the
+# shared per-op Budget fences total cost. Funnel workers (deploy_agents,
+# runs_api) keep the full NON_DELEGABLE set — the orchestrator builds its own
+# capped tree and workers must not sprout side-trees around it.
+MAX_SPAWN_DEPTH = 2
 
 
 def tool_min_rank(name: str) -> int:

@@ -193,11 +193,21 @@ async def test_schedule_update_blocked_in_incognito(tmp_env):
 # --- exclusions: only the conversation head mints infrastructure ---------------
 
 async def test_subagents_cannot_mint_agents_or_schedules(tmp_env):
-    from backend import agents_run
+    """Infra-minting tools never reach a delegate at ANY depth; spawn_agent
+    alone nests below autonomy.MAX_SPAWN_DEPTH and drops out at the cap
+    (depth-capped nesting, 2026-07-23 operator ask)."""
+    from backend import agents_run, autonomy
     names = {s["function"]["name"]
              for s in agents_run._agent_tools({"tools_exclude": []})}
-    assert not names & {"spawn_agent", "deploy_agents",
-                        "create_agent", "schedule_update"}
+    assert not names & {"deploy_agents", "create_agent", "schedule_update"}
+    assert "spawn_agent" in names          # below the cap it nests
+    tok = runtime.spawn_depth.set(autonomy.MAX_SPAWN_DEPTH)
+    try:
+        at_cap = {s["function"]["name"]
+                  for s in agents_run._agent_tools({"tools_exclude": []})}
+    finally:
+        runtime.spawn_depth.reset(tok)
+    assert "spawn_agent" not in at_cap     # at the cap it is a leaf
 
 
 async def test_projectless_chat_grants_planning_tools():
