@@ -171,6 +171,63 @@ function VmStatus() {
   )
 }
 
+// Jarvis -> browser bridge: one SSE subscription per tab (/api/gui/stream).
+// Tools push actions here: open a URL (popup-blocked -> clickable toast),
+// play media in a floating dock, or nudge an open Workspace to reload its
+// layout. Fire-and-forget — a missed event only matters on-screen.
+function GuiBridge() {
+  const [toasts, setToasts] = useState([])
+  const [player, setPlayer] = useState(null)   // {kind, src, title}
+
+  useEffect(() => {
+    const es = new EventSource('/api/gui/stream')
+    const toast = (t) => {
+      const id = Math.random().toString(36).slice(2)
+      setToasts((ts) => [...ts, { id, ...t }])
+      setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), 15000)
+    }
+    es.onmessage = (m) => {
+      let ev
+      try { ev = JSON.parse(m.data) } catch { return }
+      if (ev.type === 'open_url') {
+        const w = window.open(ev.url, '_blank', 'noopener,noreferrer')
+        if (!w) toast({ text: 'Jarvis wants to open', url: ev.url })
+      } else if (ev.type === 'play_media') {
+        setPlayer(ev)
+      } else if (ev.type === 'layout_changed') {
+        window.dispatchEvent(new CustomEvent('jarvis-layout-changed', { detail: ev }))
+      }
+    }
+    return () => es.close()
+  }, [])
+
+  return (
+    <>
+      {player && (
+        <div className="media-dock">
+          <div className="row">
+            <span className="grow ellipsis" title={player.title}>{player.title}</span>
+            <button className="ghost" onClick={() => setPlayer(null)}>✕</button>
+          </div>
+          {player.kind === 'video'
+            ? <video key={player.src} src={player.src} controls autoPlay />
+            : <audio key={player.src} src={player.src} controls autoPlay />}
+        </div>
+      )}
+      {toasts.length > 0 && (
+        <div className={player ? 'gui-toasts raised' : 'gui-toasts'}>
+          {toasts.map((t) => (
+            <div key={t.id} className="gui-toast">
+              {t.text}{' '}
+              {t.url && <a href={t.url} target="_blank" rel="noopener noreferrer">{t.url}</a>}
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
   const [, setCfgReady] = useState(false) // bump once the media allowlist lands
@@ -227,6 +284,7 @@ export default function App() {
           <VmStatus />
         </nav>
       )}
+      {user && <GuiBridge />}
       <Routes>
         <Route path="/login" element={<Login onLogin={setUser} />} />
         <Route path="/" element={<Chat />} />

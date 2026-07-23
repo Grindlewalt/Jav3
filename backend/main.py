@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 
 from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api,
-               git_api, logs_api, memory_api, notifications_api, projects,
+               git_api, gui, logs_api, memory_api, notifications_api, projects,
                runs_api, schedules, skills_api, vm_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
@@ -63,6 +63,7 @@ app.include_router(artifacts_api.router)
 app.include_router(vm_api.router)
 app.include_router(egress_api.router)
 app.include_router(egress_api.security_router)
+app.include_router(gui.router)
 
 
 @app.get("/api/health")

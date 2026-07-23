@@ -30,6 +30,12 @@ def unsubscribe(job_id: str, q: asyncio.Queue) -> None:
             _subscribers.pop(job_id, None)
 
 
+def subscriber_count(channel: str) -> int:
+    """How many live subscriptions a channel has (e.g. open GUI tabs), so a
+    publisher can report honestly whether anyone was listening."""
+    return len(_subscribers.get(channel, ()))
+
+
 def publish(job_id: str, event: dict) -> None:
     for q in list(_subscribers.get(job_id, ())):
         try:

@@ -126,13 +126,7 @@ export default function Workspace() {
   const refreshProject = useCallback(
     () => api(`/api/projects/${slug}`).then(setProject), [slug])
 
-  useEffect(() => {
-    // reset before loading: a stale panels array must never be debounce-saved
-    // into the NEW slug's layout (cross-project board bleed)
-    setPanels(null)
-    // opening a project's board loads it into Jarvis's context — this tab is
-    // where you live, so what you're looking at is what Jarvis is thinking about
-    api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
+  const loadLayout = useCallback(() =>
     api(`/api/projects/${slug}/layout`).then((r) => {
       const saved = r.layout?.panels?.length ? r.layout.panels : DEFAULT_PANELS
       // drop panel types that no longer exist (e.g. the removed 'staging'
@@ -141,8 +135,24 @@ export default function Workspace() {
       const clean = p.length ? p : DEFAULT_PANELS
       zRef.current = Math.max(10, ...clean.map((x) => x.z || 0))
       setPanels(clean)
-    })
-  }, [slug, refreshProject])
+    }), [slug])
+
+  useEffect(() => {
+    // reset before loading: a stale panels array must never be debounce-saved
+    // into the NEW slug's layout (cross-project board bleed)
+    setPanels(null)
+    // opening a project's board loads it into Jarvis's context — this tab is
+    // where you live, so what you're looking at is what Jarvis is thinking about
+    api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
+    loadLayout()
+  }, [slug, refreshProject, loadLayout])
+
+  // Jarvis rearranged the board server-side (workspace_panel tool) — refetch
+  useEffect(() => {
+    const h = (e) => { if (!e.detail?.slug || e.detail.slug === slug) loadLayout() }
+    window.addEventListener('jarvis-layout-changed', h)
+    return () => window.removeEventListener('jarvis-layout-changed', h)
+  }, [slug, loadLayout])
 
   // debounced layout persistence
   useEffect(() => {
