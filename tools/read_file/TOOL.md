@@ -1,6 +1,6 @@
 ---
 name: read_file
-description: Read a file from the active project (your staged edits included, if any).
+description: Read a file from the active project (your own edits this turn included).
 when_to_use: Before editing a file, or to check contents.
 enabled: true
 requires_project: true

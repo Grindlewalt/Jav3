@@ -12,19 +12,27 @@ def _todo_path(base: Path) -> Path:
     return base / "todo.md"
 
 
-def _parse_todos(base: Path) -> list[dict]:
-    path = _todo_path(base)
-    if not path.exists():
-        return []
+def parse_todo_text(text: str) -> list[dict]:
     todos = []
-    for line in path.read_text().splitlines():
+    for line in text.splitlines():
         m = TODO_RE.match(line.strip())
         if m:
             todos.append({"done": m.group(1) == "x", "text": m.group(2)})
     return todos
 
 
-def _write_todos(base: Path, todos: list[dict]) -> None:
+def render_todos(todos: list[dict]) -> str:
     lines = ["# Todo", ""]
     lines += [f"- [{'x' if t['done'] else ' '}] {t['text']}" for t in todos]
-    _todo_path(base).write_text("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
+
+
+def _parse_todos(base: Path) -> list[dict]:
+    path = _todo_path(base)
+    if not path.exists():
+        return []
+    return parse_todo_text(path.read_text())
+
+
+def _write_todos(base: Path, todos: list[dict]) -> None:
+    _todo_path(base).write_text(render_todos(todos))

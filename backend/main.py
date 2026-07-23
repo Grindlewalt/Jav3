@@ -6,13 +6,14 @@ from fastapi.staticfiles import StaticFiles
 
 import asyncio
 
-from . import (agents_api, agents_run, artifacts_api, auth, chat, git_api,
-               logs_api, memory_api, notifications_api, projects, runs_api,
-               schedules, skills_api, vm_api, workspace, secrets)
+from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api,
+               git_api, gui, logs_api, memory_api, notifications_api, projects,
+               runs_api, schedules, skills_api, vm_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
 from .memory import ensure_memory_seeds
+from .vm.egress_proxy import proxy as egress_proxy
 from .vm.gateway_server import gateway
 from .vm.lifecycle import reaper_loop, vm
 
@@ -27,13 +28,19 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(schedules.scheduler_loop())
     reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
     await gateway.start()          # host vsock model gateway (no-op if no vsock)
+    if settings.vm_egress:
+        await vm.net_up()          # tap/nft/dnsmasq/pcap up BEFORE the proxy binds
+    await egress_proxy.start()     # monitored-egress proxy (no-op unless vm_egress)
     try:
         yield
     finally:
         task.cancel()
         reaper.cancel()
         await gateway.stop()
+        await egress_proxy.stop()
         await vm.teardown()        # never leave a guest running past shutdown
+        if settings.vm_egress:
+            await vm.net_down()
 
 
 app = FastAPI(title="Jarvis v3", lifespan=lifespan)
@@ -54,6 +61,9 @@ app.include_router(logs_api.router)
 app.include_router(secrets.router)
 app.include_router(artifacts_api.router)
 app.include_router(vm_api.router)
+app.include_router(egress_api.router)
+app.include_router(egress_api.security_router)
+app.include_router(gui.router)
 
 
 @app.get("/api/health")

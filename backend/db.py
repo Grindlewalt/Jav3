@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     project_id INTEGER REFERENCES projects(id),
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     summary TEXT,
-    fidelity_tier INTEGER NOT NULL DEFAULT 0,
     -- run-tree (M7): a conversation is a node in an agent job. NULL parent +
     -- kind 'chat' is an ordinary chat; head/leader/subagent are job nodes.
     parent_conversation_id INTEGER REFERENCES conversations(id),
@@ -47,21 +46,14 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     result TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE TABLE IF NOT EXISTS runs (
-    id INTEGER PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES projects(id),
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
 CREATE TABLE IF NOT EXISTS session_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
 CREATE TABLE IF NOT EXISTS fetched_urls (
     id INTEGER PRIMARY KEY,
-    session TEXT NOT NULL,           -- research scope (project slug, or 'global')
+    session TEXT NOT NULL,           -- operation scope (web_session), 'global' fallback
     url TEXT NOT NULL,
-    title TEXT,
     fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(session, url)
 );
@@ -112,6 +104,68 @@ CREATE TABLE IF NOT EXISTS model_calls (
     cache_miss INTEGER NOT NULL DEFAULT 0,
     context TEXT,                        -- JSON {messages, n_tools}; only when capture is on
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Monitored egress (Layer 3). Per-project egress policy. A project with no row
+-- inherits the shared baseline row (slug '__general__', seeded from
+-- egress_seed_hosts). Sensitive projects get their own row with a scoped list.
+CREATE TABLE IF NOT EXISTS egress_policy (
+    project_slug TEXT PRIMARY KEY,       -- project slug, or '__general__' for the shared baseline
+    mode TEXT NOT NULL DEFAULT 'allowlist',    -- allowlist (deny-by-default) | denylist (allow-by-default) | denyall (netless)
+    inherit_general INTEGER NOT NULL DEFAULT 1,  -- also permit the general list (allowlist mode only)
+    hosts TEXT NOT NULL DEFAULT '[]',    -- JSON array of host patterns (allow or deny per mode)
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Denied host -> approval queue. Approving a row promotes the host into the
+-- project's (or the general) allowlist — this is how the list "trains up".
+CREATE TABLE IF NOT EXISTS egress_pending (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT NOT NULL,
+    host TEXT NOT NULL,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',     -- pending | approved | rejected
+    decided_at TEXT,
+    UNIQUE(project_slug, host)
+);
+-- Every request the proxy sees: the live-feed source AND the volume baseline.
+CREATE TABLE IF NOT EXISTS egress_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT,
+    conversation_id INTEGER,
+    op_id TEXT,
+    host TEXT NOT NULL,
+    method TEXT,
+    path TEXT,
+    bytes_out INTEGER NOT NULL DEFAULT 0,
+    bytes_in INTEGER NOT NULL DEFAULT 0,
+    verdict TEXT NOT NULL DEFAULT 'allow',      -- allow | deny | cut
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Which secrets a project's guest may use. The proxy injects a {{secret:X}}
+-- only if the project holds a granted row for X — a compromised project can't
+-- reach every key the operator owns.
+CREATE TABLE IF NOT EXISTS project_secret_grants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT NOT NULL,
+    secret_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'granted',     -- granted | pending | revoked
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(project_slug, secret_name)
+);
+-- Transient security alerts (anomaly, host cut, gate flag, secret leak, stale
+-- image). Persisted + ack-able, unlike the poll-derived notifications aggregate.
+CREATE TABLE IF NOT EXISTS security_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                  -- egress_anomaly | host_cut | gate_flag | secret_leak | image_stale
+    severity TEXT NOT NULL DEFAULT 'warn',      -- info | warn | critical
+    project_slug TEXT,
+    summary TEXT NOT NULL,
+    detail TEXT,                         -- JSON payload
+    acknowledged INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    acknowledged_at TEXT
 );
 """
 
@@ -173,6 +227,16 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_model_calls_conv ON model_calls(conversation_id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)")
+        # monitored-egress query paths: the live feed + volume baseline scan by
+        # (project, host, time); the pending queue and alerts by open status.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_egress_events_proj ON egress_events(project_slug, created_at)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_egress_events_host ON egress_events(host, created_at)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_egress_pending_status ON egress_pending(status)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_security_events_ack ON security_events(acknowledged, created_at)")
         await db.commit()
     finally:
         await db.close()

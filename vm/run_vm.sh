@@ -22,10 +22,22 @@ cd "$VM_DIR"
 [[ -f overlay.qcow2 ]] || qemu-img create -f qcow2 -b "$BASE" -F qcow2 overlay.qcow2 >/dev/null
 cp "$AAVMF_VARS" efi_vars_run.fd     # fresh UEFI vars every boot (disposable)
 
+# Network device: netless by default (vsock-only). When JARVIS_VM_EGRESS=1 the
+# guest gets a tap NIC bridged to the host, where nftables + the egress proxy
+# monitor and broker every byte (A1). The tap (jvtap0) must pre-exist — net_up.sh
+# creates it owned by this user before we boot, so rootless QEMU can open it.
+if [[ "${JARVIS_VM_EGRESS:-0}" == "1" ]]; then
+  ip link show jvtap0 >/dev/null 2>&1 || { echo "jvtap0 missing — net_up.sh must run first" >&2; exit 1; }
+  NETDEV=(-netdev tap,id=n0,ifname=jvtap0,script=no,downscript=no
+          -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:60)
+else
+  NETDEV=(-nic none)
+fi
+
 exec qemu-system-aarch64 \
   -machine virt,gic-version=host -accel kvm -cpu host \
   -smp "$CPUS" -m "$MEM_MB" \
-  -nic none \
+  "${NETDEV[@]}" \
   -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
   -drive if=pflash,format=raw,file=efi_vars_run.fd \
   -drive file=overlay.qcow2,if=virtio,format=qcow2 \

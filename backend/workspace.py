@@ -4,14 +4,13 @@ Deliberately file-based — everything the GUI touches here is a plain file in
 projects/<slug>/, so the agent can read and edit the same workspace with
 tools later without a second data model.
 """
+import asyncio
 import io
 import json
-import re
 import stat
 import zipfile
 from pathlib import Path, PurePosixPath
 
-import aiosqlite
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -82,7 +81,10 @@ async def save_file(slug: str, body: SaveFile):
 
 @router.delete("/file")
 async def delete_file(slug: str, path: str):
-    p = safe_join(await project_dir(slug), path)
+    base = await project_dir(slug)
+    # _refuse_git like every other mutator: git is the only review/undo surface
+    # for live writes, so deleting .git/ internals must be impossible here
+    p = _refuse_git(base, safe_join(base, path))
     if not p.is_file():
         raise HTTPException(status_code=404, detail="no such file")
     if p.name == "project.md":
@@ -146,8 +148,9 @@ async def upload_archive(slug: str, file: UploadFile, dest: str = Form("code")):
                             detail=f"archive exceeds {settings.upload_max_uncompressed_mb} MB uncompressed")
 
     written: list[Path] = []
-    total = 0
-    try:
+
+    def _extract() -> int:  # sync on purpose: runs in a worker thread — a
+        total = 0           # 200 MB unzip must not stall the shared event loop
         for info, rel in members:
             target = safe_join(dest_dir, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +163,10 @@ async def upload_archive(slug: str, file: UploadFile, dest: str = Form("code")):
                             status_code=413,
                             detail=f"archive exceeds {settings.upload_max_uncompressed_mb} MB uncompressed")
                     out.write(chunk)
+        return total
+
+    try:
+        total = await asyncio.get_running_loop().run_in_executor(None, _extract)
     except HTTPException:
         for p in written:
             p.unlink(missing_ok=True)
@@ -194,17 +201,6 @@ async def run(slug: str, body: RunRequest):
     else:
         raise HTTPException(status_code=400, detail="give 'path' or 'code'")
     result = await run_python(base, rel)
-    db = await get_db()
-    try:
-        async with db.execute("SELECT id FROM projects WHERE slug = ?", (slug,)) as cur:
-            row = await cur.fetchone()
-        await db.execute(
-            "INSERT INTO runs (project_id, status) VALUES (?, ?)",
-            (row["id"], "ok" if result["exit_code"] == 0 else "failed"),
-        )
-        await db.commit()
-    finally:
-        await db.close()
     return {"script": rel, **result}
 
 
@@ -251,7 +247,7 @@ async def list_dirs(slug: str):
 @router.post("/mkdir")
 async def mkdir(slug: str, body: MkdirRequest):
     base = await project_dir(slug)
-    p = safe_join(base, body.path)
+    p = _refuse_git(base, safe_join(base, body.path))
     p.mkdir(parents=True, exist_ok=True)
     if body.mark:
         (p / ".about.md").write_text(body.mark.strip() + "\n")
@@ -261,7 +257,7 @@ async def mkdir(slug: str, body: MkdirRequest):
 @router.delete("/dirs")
 async def rmdir(slug: str, path: str):
     base = await project_dir(slug)
-    p = safe_join(base, path)
+    p = _refuse_git(base, safe_join(base, path))
     if not path or not p.is_dir():
         raise HTTPException(status_code=404, detail="no such directory")
     contents = [c for c in p.iterdir() if c.name != ".about.md"]
@@ -275,7 +271,7 @@ async def rmdir(slug: str, path: str):
 @router.put("/dirs/mark")
 async def set_mark(slug: str, body: MarkRequest):
     base = await project_dir(slug)
-    d = safe_join(base, body.path) if body.path else base
+    d = _refuse_git(base, safe_join(base, body.path)) if body.path else base
     if not d.is_dir():
         raise HTTPException(status_code=404, detail="no such directory")
     about = d / ".about.md"
@@ -360,7 +356,7 @@ async def save_layout(slug: str, layout: dict = Body(...)):
 
 # --- todo.md checklist ------------------------------------------------------
 # helpers extracted to a pure module so the guest can run todo_update in-guest
-from .agent.tools.todostore import _parse_todos, _todo_path, _write_todos  # noqa: F401,E402
+from .agent.tools.todostore import _parse_todos, _write_todos  # noqa: E402
 
 
 @router.get("/todos")
@@ -384,49 +380,6 @@ async def modify_todos(slug: str, body: TodoAction):
     return {"todos": todos}
 
 
-# --- staged changes (Jarvis's pending edits) ---------------------------------
-# Staged content is quarantined: these endpoints return it as text for diff
-# display only; nothing serves, runs or imports it until approved.
-
-from . import staging as _staging  # noqa: E402
-
-
-class StagingAction(BaseModel):
-    paths: list[str] | None = None   # None = everything
-
-
-@router.get("/staging")
-async def staged_list(slug: str):
-    await project_dir(slug)
-    return {"staged": _staging.list_staged(slug)}
-
-
-@router.get("/staging/diff")
-async def staged_diff(slug: str, path: str):
-    base = await project_dir(slug)
-    staged = safe_join(base / _staging.STAGING, path)
-    if not staged.is_file():
-        raise HTTPException(status_code=404, detail="nothing staged at that path")
-    canonical = safe_join(base, path)
-
-    def _text(p: Path) -> str | None:
-        if not p.is_file():
-            return None
-        try:
-            return p.read_text()
-        except UnicodeDecodeError:
-            return f"(binary, {p.stat().st_size} bytes)"
-
-    return {"path": path, "old": _text(canonical), "new": _text(staged)}
-
-
-@router.post("/staging/approve")
-async def staged_approve(slug: str, body: StagingAction):
-    await project_dir(slug)
-    return {"applied": _staging.approve(slug, body.paths)}
-
-
-@router.post("/staging/reject")
-async def staged_reject(slug: str, body: StagingAction):
-    await project_dir(slug)
-    return {"rejected": _staging.reject(slug, body.paths)}
+# (the staged-changes endpoints lived here until 2026-07-19: writes now apply
+# directly to the canonical files — see backend/writes.py — and the advisory
+# flags surface as security events in the Review Center)

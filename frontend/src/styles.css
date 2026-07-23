@@ -36,12 +36,22 @@ nav .brand {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
+/* flex:1 lets the Logout button's own margin-left:auto push it to the right of
+   the link row (grouped near the bell/VM) instead of crowding "Tools" */
+.nav-links { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; flex: 1; }
 nav a {
   color: var(--dim); text-decoration: none; padding: 6px 12px;
-  border-radius: 8px; transition: all 0.15s;
+  border-radius: 8px; transition: all 0.15s; white-space: nowrap;
 }
 nav a:hover { color: var(--text); background: var(--panel); }
 nav a.active { color: var(--text); background: var(--panel-2); }
+.nav-logout { margin-left: 4px; }
+/* hamburger: hidden on desktop, shown on mobile via the media query below */
+.nav-toggle {
+  display: none; background: none; border: 0; color: var(--text);
+  font-size: 20px; line-height: 1; padding: 4px 8px; cursor: pointer;
+  margin-left: auto;
+}
 
 /* ---- notification bell ---- */
 .notif-wrap { position: relative; margin-left: auto; }
@@ -67,6 +77,19 @@ nav a.active { color: var(--text); background: var(--panel-2); }
 }
 .notif-drop .notif-item:hover { background: var(--panel-2); }
 .notif-empty { padding: 12px 10px; text-align: center; }
+
+/* ---- VM status widget (read-only) ---- */
+.notif-bell .run-dot {
+  display: inline-block; vertical-align: middle; margin-right: 4px;
+  background: var(--dim);
+}
+.notif-bell .run-dot.running { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.vm-wrap { margin-left: 0; }
+.vm-drop { width: 230px; }
+.vm-drop .notif-item { cursor: default; }
+.vm-nuke-row { padding: 6px 4px 2px; border-top: 1px solid var(--border);
+  margin-top: 4px; display: flex; }
+.vm-nuke-row button { flex: 1; font-size: 12px; }
 
 /* ---- controls ---- */
 button {
@@ -427,6 +450,31 @@ kbd {
 .diff-col pre { flex: 1; overflow: auto; margin: 0; padding: 8px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
   font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.diff-line { min-height: 1.35em; padding: 0 3px; border-radius: 2px; }
+.diff-line.del { background: color-mix(in srgb, var(--red) 20%, transparent); }
+.diff-line.add { background: color-mix(in srgb, var(--green) 18%, transparent); }
+.diff-line.mod { background: color-mix(in srgb, var(--amber) 16%, transparent); }
+.diff-line.pad { opacity: 0.25; }
+
+/* ---- git gate panel ---- */
+.git-status { max-height: 90px; overflow: auto; margin: 0; padding: 8px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.git-diff { flex: 1; min-height: 60px; overflow: auto; margin: 0; padding: 8px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+
+/* ---- task board panel ---- */
+.board-goal { resize: vertical; }
+.board-runs { list-style: none; padding: 0; margin: 0; }
+.board-runs li { display: flex; align-items: center; gap: 8px; padding: 5px 9px;
+  border: 1px solid var(--border); border-radius: 7px; margin-bottom: 4px;
+  background: var(--panel); font-size: 13px; }
+.grow-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* ---- autonomy dial ---- */
+.ws-head label { display: flex; align-items: center; gap: 6px; }
+.autonomy-dial { font-size: 12px; padding: 3px 6px; }
 
 /* ---- context files panel ---- */
 .ctx-total { font-size: 12px; color: var(--accent); white-space: nowrap; }
@@ -622,3 +670,194 @@ kbd {
   cursor: pointer; }
 .quiz-opt:hover { color: var(--fg); }
 .skill-form { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+
+/* ---- taint / trust tags (Context notes) ---- */
+.tag.untrusted { color: var(--amber); border-color: var(--amber); }
+.vm-stale-badge { background: var(--amber); }
+
+/* ---- Network page (live egress) ---- */
+.net-page { display: flex; flex-direction: column; flex: 1; min-height: 0;
+  padding: 16px 20px; gap: 12px; }
+.net-head { display: flex; align-items: center; gap: 10px; }
+.net-head h2 { margin: 0; font-size: 18px; }
+.net-head select { padding: 4px 8px; font-size: 13px; }
+.net-body { display: flex; gap: 16px; flex: 1; min-height: 0; }
+.net-feed { flex: 2; min-width: 0; display: flex; flex-direction: column;
+  min-height: 0; gap: 6px; }
+.net-feed-list { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.net-side { flex: 1; min-width: 300px; max-width: 400px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px; }
+.net-hint { padding: 8px 2px; }
+.net-side .sbx-card { margin-bottom: 0; }
+.net-policy { display: flex; flex-direction: column; gap: 8px; }
+.net-policy label.mini { display: flex; flex-direction: column; gap: 3px;
+  font-size: 12px; color: var(--dim); }
+.net-policy label.mini select, .net-policy label.mini textarea { width: 100%; }
+.net-policy .row { margin: 0; }
+
+.egr-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: 8px; margin-bottom: 5px; font-size: 12.5px; }
+.egr-row.deny { border-left-color: var(--amber); }
+.egr-row.cut { border-left-color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent); }
+.egr-chip { border: 1px solid; border-radius: 8px; padding: 1px 8px; font-size: 10.5px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+.egr-chip.allow { color: var(--green); border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent); }
+.egr-chip.deny { color: var(--amber); border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent); }
+.egr-chip.cut { color: var(--red); border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent); }
+.egr-host { font-family: ui-monospace, Menlo, monospace; font-weight: 600;
+  white-space: nowrap; }
+.egr-path { flex: 1; min-width: 0; color: var(--dim);
+  font-family: ui-monospace, Menlo, monospace; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.egr-reason { color: var(--amber); font-size: 11.5px; white-space: nowrap; }
+.egr-bytes { color: var(--dim); font-size: 11.5px; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+
+/* ---- Review Center ---- */
+.review-page { max-width: 1080px; }
+.review-queue { display: flex; flex-direction: column; gap: 20px; }
+.review-scrollwrap { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.review-queue .sbx-sec { margin-bottom: 0; }
+.review-queue .sbx-row { align-items: flex-start; }
+.rev-list { max-height: none; }
+.rev-list li { cursor: default; }
+.rev-group { margin-bottom: 10px; }
+.rev-group-head { font-size: 12px; color: var(--dim); margin: 6px 0 4px;
+  font-family: ui-monospace, Menlo, monospace; }
+.staged-list li.rev-staged { display: block; cursor: default; }
+.rev-staged-row { display: flex; align-items: center; gap: 8px; }
+.rev-flag { display: flex; align-items: flex-start; gap: 8px; margin: 5px 0 2px 10px;
+  padding: 6px 9px; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: color-mix(in srgb, var(--amber) 8%, transparent); border-radius: 7px;
+  font-size: 12px; }
+.rev-flag .grow { min-width: 0; word-break: break-word; }
+.rev-diff { display: flex; height: 300px; margin: 6px 0 2px; }
+.rev-alert-summary { font-size: 13px; word-break: break-word; }
+.rev-alert-detail { margin: 6px 0 0; max-height: 220px; overflow: auto; }
+.sbx-row.sev-info { border-left-color: var(--accent); }
+.tag.sev-info-tag { color: var(--accent); border-color: var(--accent); }
+.tag.sev-warn-tag { color: var(--amber); border-color: var(--amber); }
+.tag.sev-crit-tag { color: var(--red); border-color: var(--red); }
+
+/* ============================================================
+   Mobile / phone layout (≤768px). Desktop is untouched above;
+   these rules only take over on narrow screens.
+   ============================================================ */
+@media (max-width: 768px) {
+  /* iOS: use the dynamic viewport height so the composer isn't hidden
+     under the browser chrome */
+  .app { height: 100vh; height: 100dvh; }
+
+  /* ---- nav becomes a hamburger drawer ---- */
+  nav { flex-wrap: wrap; padding: 8px 14px; gap: 8px; }
+  .nav-toggle { display: block; order: 3; margin-left: 0; }
+  nav .brand { margin-right: 0; }
+  .notif-wrap { order: 1; margin-left: auto; }
+  .vm-wrap { order: 2; }
+  .nav-links {
+    order: 4; flex-basis: 100%; flex-direction: column; align-items: stretch;
+    gap: 2px; display: none; padding-top: 6px;
+    border-top: 1px solid var(--border); margin-top: 4px;
+  }
+  nav.open .nav-links { display: flex; }
+  .nav-links a { padding: 11px 12px; font-size: 15px; }
+  /* button.link sets margin-left:auto (right-aligns it on the desktop bar) and
+     out-specifies a bare .nav-logout — match its specificity to left-align here */
+  button.link.nav-logout {
+    text-align: left; margin: 4px 0 0; padding: 11px 12px; font-size: 15px;
+  }
+
+  /* dropdowns must never exceed the viewport */
+  .notif-drop { width: min(340px, 92vw); }
+  .vm-drop { width: min(260px, 90vw); }
+
+  /* ---- pages: tighter gutters ---- */
+  .page { padding: 16px 14px; }
+  .review-page, .review-page.page { max-width: 100%; }
+
+  /* ---- chat: stack the conversation list above the thread ---- */
+  .chat-layout { flex-direction: column; }
+  .chat-layout aside {
+    width: 100%; max-height: 34vh; border-right: 0;
+    border-bottom: 1px solid var(--border); padding: 10px;
+  }
+  .chat-toolbar { padding: 8px 14px; flex-wrap: wrap; }
+  .messages { padding: 14px 12px; }
+  .msg { max-width: 92%; }
+  .composer { padding: 10px 12px; gap: 8px; }
+  .composer textarea { min-height: 44px; }
+
+  /* ---- generic split layouts (context / files): aside on top ---- */
+  .split-layout { flex-direction: column; }
+  .split-layout > aside, .panel.split > aside {
+    width: 100%; max-height: 32vh; border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ---- network: single column ---- */
+  .net-page { padding: 12px; }
+  .net-body { flex-direction: column; }
+  .net-side { min-width: 0; max-width: 100%; }
+  .net-head { flex-wrap: wrap; }
+
+  /* ---- workspace board: collapse the free-floating panels into a
+     scrollable vertical stack. The inline left/top/width/height set by the
+     drag logic are overridden here so panels flow in order. ---- */
+  .ws-head { flex-wrap: wrap; padding: 10px 12px; gap: 8px; }
+  .ws-head .hint { display: none; }
+  .board {
+    background-image: none; padding: 10px;
+    -webkit-overflow-scrolling: touch; touch-action: pan-y;
+  }
+  .window {
+    position: relative !important;
+    left: auto !important; top: auto !important;
+    width: 100% !important; height: auto !important;
+    min-height: 300px; max-height: 78vh; margin-bottom: 12px;
+    box-shadow: 0 4px 16px #0006;
+  }
+  .window.dimmed { opacity: 1; pointer-events: auto; }
+  .window.anim { transition: none; }
+  .window-head { cursor: default; touch-action: pan-y; }
+  .resize-handle { display: none; }
+
+  /* wide content (diffs, tables, code) scrolls inside its box, never the page */
+  .diff-view, .md-body table { display: block; overflow-x: auto; max-width: 100%; }
+
+  /* touch targets: give small icon buttons a little more room */
+  .win-btn { padding: 4px 9px; font-size: 16px; }
+}
+
+/* very small phones */
+@media (max-width: 400px) {
+  nav .brand { font-size: 16px; }
+  .page { padding: 14px 10px; }
+  .msg { max-width: 96%; }
+}
+
+/* GUI bridge: Jarvis-driven toasts + floating media player */
+.gui-toasts {
+  position: fixed; right: 16px; bottom: 16px; z-index: 3000;
+  display: flex; flex-direction: column; gap: 8px; max-width: min(420px, 90vw);
+}
+.gui-toast {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 14px; box-shadow: 0 6px 20px #0008;
+  font-size: 14px; overflow-wrap: anywhere;
+}
+.gui-toast a { color: var(--accent); }
+.media-dock {
+  position: fixed; right: 16px; bottom: 16px; z-index: 2900;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px; box-shadow: 0 8px 28px #000a;
+  width: min(480px, 92vw); display: flex; flex-direction: column; gap: 8px;
+}
+.media-dock video { width: 100%; max-height: 60vh; border-radius: 6px; background: #000; }
+.media-dock audio { width: 100%; }
+.media-dock .row { align-items: center; }
+.gui-toasts.raised { bottom: 200px; }

@@ -1,6 +1,6 @@
 ---
 name: edit_file
-description: Replace an exact text snippet in a project file. STAGED — takes effect after operator approval.
+description: Replace an exact text snippet in a project file. Takes effect immediately.
 when_to_use: Targeted changes to an existing file. `find` must match the current file text exactly.
 enabled: true
 requires_project: true
@@ -21,5 +21,5 @@ parameters:
 ---
 `find` must match the current file text EXACTLY, whitespace included — so read
 the file first (the loop blocks an edit to a file you haven't read this turn).
-`find` must be unique in the file unless you pass all:true. Staged: takes effect
-after the operator approves.
+`find` must be unique in the file unless you pass all:true. The edit is live
+immediately (git is the undo).

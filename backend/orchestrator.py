@@ -25,7 +25,7 @@ from .agent.model import complete_text, confirm_peak
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import assemble_system_prompt
-from .staging import stage_write
+from .writes import apply_write
 
 MAX_DEPTH = 2      # head=0 -> leader=1 -> subagent=2 (terminal)
 MAX_NODES = 24     # total nodes per job
@@ -51,7 +51,7 @@ class _Budget:
         return self.n
 
 
-async def _decompose(brief: str, kind: str, hint: str | None) -> list[dict]:
+async def _decompose(brief: str, kind: str) -> list[dict]:
     """Ask whether this node's work should be split. Returns a list of
     {kind, title} children, or [] to run DIRECT. Head children may be leaders
     (complex) or subagents (simple); leader children are always subagents."""
@@ -62,7 +62,7 @@ async def _decompose(brief: str, kind: str, hint: str | None) -> list[dict]:
         f"You are a {kind} planner. Decide if the work below should be broken "
         f"into pieces. If it is genuinely simple, reply with only the word "
         f"DIRECT. Otherwise reply one piece per line as:\n{kinds}\n"
-        f"{hint or ''} Keep pieces distinct and non-overlapping.",
+        f"Keep pieces distinct and non-overlapping.",
         brief)
     if "DIRECT" in plan.split("\n")[0].upper() and len(plan.splitlines()) <= 1:
         return []
@@ -113,14 +113,13 @@ async def _node_context(kind: str, project: str, parent_summary: str) -> str:
 
 async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str,
                    depth: int, budget: _Budget, leaf_tools, peak: bool,
-                   parent_summary: str = "", deliverable=None) -> dict:
+                   parent_summary: str = "") -> dict:
     """Run one node. Returns {"cid","kind","output","rollup"}."""
-    doc_path = None
     try:
         bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "planning"})
         subtasks = []
         if kind in ("head", "leader") and depth < MAX_DEPTH and budget.remaining() > 0:
-            subtasks = await _decompose(brief, kind, None)
+            subtasks = await _decompose(brief, kind)
 
         if subtasks:
             # spawn children in parallel — this is the tree lighting up live
@@ -150,12 +149,7 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             child_rollups = [r["rollup"] for r in results if isinstance(r, dict)]
             # summaries flow up: this node's rollup is a summary of its children's
             rollup_source = "\n\n".join(child_rollups)
-            # the head's deliverable (e.g. the research doc) returns a staged path
-            if deliverable is not None:
-                doc_path = await deliverable(child_outputs)
-                output = doc_path
-            else:
-                output = "\n\n".join(child_outputs)  # a leader hands work up
+            output = "\n\n".join(child_outputs)  # a leader hands work up
         else:
             # DIRECT / subagent — do the work through the shared loop.
             # Build the node via the Agent seam: narrowed context + this layer's
@@ -197,28 +191,34 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             await db.commit()
         finally:
             await db.close()
-        stage_write(project, f"runs/{job_id}/{cid}-{kind}.md", rollup.encode())
+        await apply_write(project, f"runs/{job_id}/{cid}-{kind}.md", rollup.encode())
         bus.publish(job_id, {"type": "node_done", "node_id": cid, "rollup": rollup})
-        return {"cid": cid, "kind": kind, "output": output, "rollup": rollup,
-                "doc_path": doc_path}
+        return {"cid": cid, "kind": kind, "output": output, "rollup": rollup}
     except Exception as e:  # noqa: BLE001 — a node failure must not kill siblings
         bus.publish(job_id, {"type": "error", "node_id": cid, "message": str(e)})
-        return {"cid": cid, "kind": kind, "output": "", "rollup": f"error: {e}",
-                "doc_path": None}
+        return {"cid": cid, "kind": kind, "output": "", "rollup": f"error: {e}"}
 
 
 async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
-                  leaf_tools=None, deliverable=None, title: str = "") -> dict:
+                  leaf_tools=None, title: str = "") -> dict:
     """Open the head node, run the tree, publish job lifecycle events. Returns
-    {"root_id","rollup","doc_path"}. `deliverable(child_outputs)->str` builds
-    the head's final product; `_stage_deliverable` stages it if a path is set."""
-    db = await get_db()
+    {"root_id","rollup","usage"}."""
     try:
-        root_id = await open_conversation(
-            db, project=project, title=f"[head] {(title or brief)[:60]}",
-            kind="head", job_id=job_id)
-    finally:
-        await db.close()
+        db = await get_db()
+        try:
+            root_id = await open_conversation(
+                db, project=project, title=f"[head] {(title or brief)[:60]}",
+                kind="head", job_id=job_id)
+        finally:
+            await db.close()
+    except Exception as e:
+        # runs_api subscribes before this task starts — without a terminal
+        # event a failure here leaves that SSE tail waiting forever
+        bus.publish(job_id, {"type": "error", "node_id": None, "message": str(e)})
+        bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": None,
+                             "rollup": f"error: {e}"})
+        bus.close_job(job_id)
+        raise
 
     if peak:
         confirm_peak(root_id)
@@ -252,36 +252,42 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     # both. Best-effort: a guest hiccup must not sink the whole job.
     prime_guest = (settings.use_guest_loop and optok is not None and bool(project))
     acquired = False
+    owns_ws = False
     if prime_guest:
-        from .vm.guest_turn import prime_workspace
+        from .vm.guest_turn import acquire_workspace, prime_workspace
         from .vm.lifecycle import vm as guest_vm
         try:
             await guest_vm.acquire()        # pin the guest for the whole job
             acquired = True
-            await prime_workspace(project)
+            # only prime when first in on this slug — a concurrent chat turn on
+            # the same project may already own the guest copy (re-priming would
+            # wipe its in-flight edits); we then reuse it like a nested turn.
+            owns_ws = acquire_workspace(project)
+            if owns_ws:
+                await prime_workspace(project)
         except Exception:  # noqa: BLE001 — fall through; leaves surface guest errors
             pass
     try:
         result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
                                 project=project, depth=0, budget=ncap,
-                                leaf_tools=leaf_tools, peak=peak, deliverable=deliverable)
+                                leaf_tools=leaf_tools, peak=peak)
     finally:
         runtime.web_session.reset(wtoken)
         if acquired:
-            from .vm.guest_turn import pull_staging
+            from .vm.guest_turn import pull_writes, release_workspace
             from .vm.lifecycle import vm as guest_vm
-            try:
-                await pull_staging(project)
-            except Exception:  # noqa: BLE001 — reconcile is best-effort
-                pass
+            if release_workspace(project):     # last out sweeps the shared buffer
+                try:
+                    await pull_writes(project)
+                except Exception:  # noqa: BLE001 — reconcile is best-effort
+                    pass
             guest_vm.release()
         if optok is not None:
             budget_mod.active_op_id.reset(optok)
             budget_mod.release(job_id)
 
     bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": root_id,
-                         "rollup": result["rollup"], "doc_path": result.get("doc_path"),
-                         "usage": tbudget.summary()})
+                         "rollup": result["rollup"], "usage": tbudget.summary()})
     bus.close_job(job_id)
     return {"root_id": root_id, "rollup": result["rollup"],
-            "doc_path": result.get("doc_path"), "usage": tbudget.summary()}
+            "usage": tbudget.summary()}

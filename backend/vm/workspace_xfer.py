@@ -1,22 +1,19 @@
 """Workspace transfer for guest-run turns.
 
-The guest edits a COPY of the project, never the operator's canonical files. So:
-- `build_merged_tar(slug)` ships the project's effective workspace into the guest —
-  canonical files with Jarvis's own pending staged edits overlaid, minus junk and
-  the `.staging` dir itself (the guest re-stages its own).
-- `reconcile_staged(slug, tar)` takes back the guest's `.staging` and re-applies
-  each file through the HOST `staging.stage_write`, so the operator's PROTECTED
-  guard, 0644, and artifact auto-approve stay authoritative, and every returned
-  file is scanned for secret leaks (`secrets.find_in_bytes`). Approval
-  (staging -> canonical) remains entirely host-side.
-
-This mirrors the proven push/pull + _stage_changes shape from the old sandbox.
+The guest edits a COPY of the project, never the canonical files directly. So:
+- `build_merged_tar(slug)` ships the project's workspace into the guest, minus
+  junk and any legacy `.staging` dir (the guest uses its own as a write buffer).
+- `apply_guest_writes(slug, tar)` takes back the guest's write buffer and applies
+  each file through the HOST `writes.apply_write` — so the PROTECTED guard, 0644,
+  the secret-leak refusal and the advisory diff-gate scan stay authoritative
+  host-side. With the staging quarantine removed this lands files on canonical
+  immediately; git is the review/undo surface.
 """
 import io
 import tarfile
 from pathlib import Path
 
-from .. import secrets, staging
+from .. import writes
 from ..config import settings
 from ..fsutil import list_tree
 
@@ -29,16 +26,15 @@ def _skip(rel: str) -> bool:
 
 
 def build_merged_tar(slug: str) -> bytes:
-    """The project's effective view (canonical + staged overlay), minus SKIP."""
+    """The project's current files, minus SKIP."""
     proj = settings.projects_dir / slug
-    rels = {e["path"] for e in list_tree(proj)}
-    rels |= {e["path"] for e in staging.list_staged(slug)}
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for rel in sorted(rels):
+        for entry in sorted(list_tree(proj), key=lambda e: e["path"]):
+            rel = entry["path"]
             if _skip(rel):
                 continue
-            p = staging.effective_read(slug, rel)   # staged wins over canonical
+            p = writes.resolve(slug, rel)
             if p is None or not p.is_file():
                 continue
             data = p.read_bytes()
@@ -49,13 +45,15 @@ def build_merged_tar(slug: str) -> bytes:
     return buf.getvalue()
 
 
-def reconcile_staged(slug: str, tar_bytes: bytes) -> dict:
-    """Re-stage the guest's `.staging` files host-side. Returns the staged
-    rel-paths and any secret leaks found (rel -> [secret names])."""
-    staged: list[str] = []
+async def apply_guest_writes(slug: str, tar_bytes: bytes) -> dict:
+    """Apply the guest's write buffer to the canonical files host-side. Returns
+    the applied rel-paths, any refused secret leaks (rel -> [secret names]) and
+    any advisory flags raised (rel -> [triggers])."""
+    applied: list[str] = []
     leaks: dict[str, list[str]] = {}
+    flagged: dict[str, list[str]] = {}
     if not tar_bytes:
-        return {"staged": staged, "secret_files": leaks}
+        return {"applied": applied, "secret_files": leaks, "flags": flagged}
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
         for m in tar.getmembers():
             if not m.isfile():
@@ -67,12 +65,14 @@ def reconcile_staged(slug: str, tar_bytes: bytes) -> dict:
             if f is None:
                 continue
             data = f.read()
-            hits = secrets.find_in_bytes(data)
-            if hits:
-                leaks[rel] = hits
             try:
-                staging.stage_write(slug, rel, data)   # host PROTECTED/0644/auto-approve
-                staged.append(rel)
+                triggers = await writes.apply_write(slug, rel, data)
+            except writes.SecretLeakError as e:
+                leaks[rel] = e.names       # refused — never lands canonical
+                continue
             except Exception:  # noqa: BLE001 — one bad path must not drop the rest
                 continue
-    return {"staged": staged, "secret_files": leaks}
+            if triggers:
+                flagged[rel] = triggers
+            applied.append(rel)
+    return {"applied": applied, "secret_files": leaks, "flags": flagged}

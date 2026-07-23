@@ -12,15 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from pathlib import Path
-
 from . import bus, orchestrator, research
-from .agent.model import in_peak_window, peak_confirmed
+from .agent.model import in_peak_window
+from .agent.tools.registry import load_registry, openai_tool_specs
 from .auth import require_user
-from .config import settings
+from .autonomy import NON_DELEGABLE
 from .db import get_db
 from .memory import get_active_project
-from .staging import effective_read
 
 router = APIRouter(prefix="/api/runs", tags=["runs"], dependencies=[Depends(require_user)])
 
@@ -67,25 +65,41 @@ class ResearchRun(BaseModel):
     topic: str
     angles: int = 4
     confirm_peak: bool = False
+    # run against THIS project (workspace research panels pass their slug)
+    # instead of whatever project happens to be globally active
+    project: str | None = None
+
+
+async def _resolve_project(requested: str | None) -> str:
+    db = await get_db()
+    try:
+        if requested:
+            async with db.execute(
+                "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL",
+                (requested,)) as cur:
+                if not await cur.fetchone():
+                    raise HTTPException(status_code=404,
+                                        detail=f"no such project: {requested}")
+            return requested
+        return await get_active_project(db)
+    finally:
+        await db.close()
 
 
 @router.post("/research")
 async def research_run(body: ResearchRun):
     if not body.topic.strip():
         raise HTTPException(status_code=400, detail="topic is required")
-    db = await get_db()
-    try:
-        project = await get_active_project(db)
-    finally:
-        await db.close()
+    project = await _resolve_project(body.project)
     if not project:
-        raise HTTPException(status_code=400, detail="load a project first — research stages into it")
+        raise HTTPException(status_code=400, detail="load a project first — research writes its document into it")
 
     import uuid
     job_id = uuid.uuid4().hex  # minted here so we subscribe before the task runs
 
-    # Peak gate once for the whole job (nodes auto-confirm once greenlit).
-    if not body.confirm_peak and in_peak_window() and not peak_confirmed(job_id):
+    # Peak gate once for the whole job (a fresh job id can never be
+    # pre-confirmed, so the body flag is the only greenlight).
+    if not body.confirm_peak and in_peak_window():
         raise HTTPException(status_code=409, detail="peak_confirmation_required",
                             headers={"X-Conversation-Id": job_id})
 
@@ -132,18 +146,24 @@ async def funnel_run(body: FunnelRun):
         await db.close()
     if not project:
         raise HTTPException(status_code=400,
-                            detail="load a project first — the funnel stages its rollups into it")
+                            detail="load a project first — the funnel writes its rollups into it")
 
     import uuid
     job_id = uuid.uuid4().hex
 
-    if not body.confirm_peak and in_peak_window() and not peak_confirmed(job_id):
+    if not body.confirm_peak and in_peak_window():
         raise HTTPException(status_code=409, detail="peak_confirmation_required",
                             headers={"X-Conversation-Id": job_id})
 
+    # workers are terminal: a leaf falling through with tools=None would get
+    # the FULL registry (spawn_agent, deploy_agents, create_agent...) — the
+    # deploy_agents handler strips NON_DELEGABLE, and so must this endpoint
+    leaf_tools = openai_tool_specs(
+        [e for e in load_registry() if e["name"] not in NON_DELEGABLE])
     queue = bus.subscribe(job_id)
     task = asyncio.create_task(
-        orchestrator.run_job(job_id, body.brief, project, peak=True))
+        orchestrator.run_job(job_id, body.brief, project, peak=True,
+                             leaf_tools=leaf_tools))
 
     async def event_stream():
         try:
@@ -251,40 +271,6 @@ async def run_stream(cid: int):
             bus.unsubscribe(job_id, queue)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-@router.get("/{cid}/doc")
-async def run_doc(cid: int):
-    """The synthesized research document for a run (staged or approved), so it
-    can be read straight from the Runs page."""
-    db = await get_db()
-    try:
-        async with db.execute(
-            "SELECT c.summary, p.slug FROM conversations c "
-            "LEFT JOIN projects p ON p.id = c.project_id "
-            "WHERE c.id = ? AND c.kind = 'head'", (cid,)) as cur:
-            row = await cur.fetchone()
-    finally:
-        await db.close()
-    if row is None:
-        raise HTTPException(status_code=404, detail="no such run")
-    slug = row["slug"]
-    if not slug:
-        return {"content": None}
-    topic = (row["summary"] or "").split("Research:", 1)[-1].strip()
-    # try the deterministic path, then fall back to the newest research doc
-    candidates = [f"research/{research._slugify(topic)}.md"]
-    for base in (settings.projects_dir / slug / ".staging" / "research",
-                 settings.projects_dir / slug / "research"):
-        if base.is_dir():
-            candidates += [f"research/{p.name}" for p in
-                           sorted(base.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True)]
-    for rel in candidates:
-        p = effective_read(slug, rel)
-        if p is not None:
-            return {"content": p.read_text(), "path": rel,
-                    "staged": ".staging" in str(p)}
-    return {"content": None}
 
 
 @router.get("/{cid}/tree")

@@ -3,6 +3,10 @@ import { api } from '../api.js'
 
 const ASSEMBLED = '::assembled'
 
+// A note file path (notes/foo.md) and the notes-API `name` field don't share a
+// spelling, so key both by the bare stem to line trust metadata up with files.
+const nkey = (p) => String(p || '').replace(/^notes\//, '').replace(/\.md$/, '')
+
 export default function Context() {
   const [files, setFiles] = useState([])
   const [selected, setSelected] = useState('soul.md')
@@ -11,13 +15,25 @@ export default function Context() {
   const [dirty, setDirty] = useState(false)
   const [status, setStatus] = useState('')
   const [secrets, setSecrets] = useState([])
+  const [notes, setNotes] = useState({})   // stem -> {name,source,approved,taint,trusted}
 
   async function refresh() {
     const r = await api('/api/memory')
     setFiles(r.files)
     api('/api/secrets').then((s) => setSecrets(s.secrets)).catch(() => {})
+    api('/api/memory/notes').then((r2) => {
+      const m = {}; (r2.notes || []).forEach((n) => { m[nkey(n.name)] = n })
+      setNotes(m)
+    }).catch(() => {})
   }
   useEffect(() => { refresh() }, [])
+
+  async function promote(name) {
+    try {
+      await api(`/api/memory/notes/${encodeURIComponent(name)}/promote`, { method: 'POST' })
+      await refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+  }
 
   async function addSecret() {
     const name = window.prompt('secret name (e.g. TBA_KEY)')
@@ -64,6 +80,7 @@ export default function Context() {
   }, [selected])
 
   const meta = files.find((f) => f.path === selected)
+  const noteMeta = notes[nkey(selected)]
   const readOnly = selected === ASSEMBLED
 
   async function save() {
@@ -98,14 +115,21 @@ export default function Context() {
               onClick={() => setSelected(ASSEMBLED)}>
             ⚡ assembled context (live)
           </li>
-          {files.map((f) => (
-            <li key={f.path} className={selected === f.path ? 'active' : ''}
-                onClick={() => setSelected(f.path)}>
-              <span className="grow">{f.path}</span>
-              {f.auto_generated && <span className="tag">auto</span>}
-              {f.tokens != null && <span className="dim small">≈{f.tokens.toLocaleString()} tok</span>}
-            </li>
-          ))}
+          {files.map((f) => {
+            const nm = notes[nkey(f.path)]
+            return (
+              <li key={f.path} className={selected === f.path ? 'active' : ''}
+                  onClick={() => setSelected(f.path)}>
+                <span className="grow">{f.path}</span>
+                {nm?.taint === 'untrusted' && (
+                  <span className="tag untrusted" title="from web/research — untrusted">untrusted</span>)}
+                {nm && nm.source === 'agent' && !nm.approved && (
+                  <span className="tag pending" title="agent-created — pending approval">pending</span>)}
+                {f.auto_generated && <span className="tag">auto</span>}
+                {f.tokens != null && <span className="dim small">≈{f.tokens.toLocaleString()} tok</span>}
+              </li>
+            )
+          })}
         </ul>
         <button className="ghost" onClick={newNote}>+ new note</button>
         <div className="side-title" style={{ marginTop: 16 }}
@@ -147,10 +171,17 @@ export default function Context() {
           <>
             <div className="pane-head">
               <h3>{selected}</h3>
+              {noteMeta?.taint === 'untrusted' && (
+                <span className="warn">untrusted — from web/research</span>)}
+              {noteMeta && noteMeta.source === 'agent' && !noteMeta.approved && (
+                <span className="tag pending">pending approval</span>)}
               {meta?.auto_generated && (
                 <span className="warn">regenerated from project summaries — edits will be overwritten</span>
               )}
               <span className="dim">{status}</span>
+              {noteMeta && !noteMeta.trusted && (
+                <button className="ghost" title="mark this note trusted"
+                        onClick={() => promote(noteMeta.name)}>Promote to trusted</button>)}
               <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
             </div>
             <textarea className="md-editor grow" value={content}

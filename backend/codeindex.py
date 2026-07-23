@@ -65,8 +65,9 @@ def _walk(root: Path) -> list[Path]:
             continue
         if p.stat().st_size > MAX_FILE_BYTES:
             continue
-        if b"\x00" in p.read_bytes()[:8192]:
-            continue
+        with p.open("rb") as fh:            # sniff 8 KB, don't slurp the file
+            if b"\x00" in fh.read(8192):
+                continue
         files.append(p)
     return files
 
@@ -177,8 +178,11 @@ def index_stale(slug: str, subdir: str = "code") -> int:
     """How many indexed-scope files changed since notes/codebase/ was built.
     0 = fresh, or no index exists yet (nothing to be stale)."""
     base = settings.projects_dir / slug
-    index = base / NOTES_SUBDIR / "INDEX.md"
-    if not index.is_file():
+    # resolve via writes so an index built earlier THIS guest turn (sitting in
+    # the .staging overlay) counts; on the host resolve() is a plain file check
+    from . import writes
+    index = writes.resolve(slug, f"{NOTES_SUBDIR}/INDEX.md")
+    if index is None:
         return 0
     built = index.stat().st_mtime
     try:

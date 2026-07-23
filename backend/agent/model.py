@@ -9,8 +9,29 @@ from typing import AsyncIterator
 
 import httpx
 
+from urllib.parse import urlsplit
+
 from ..config import settings
 from . import budget as budget_mod
+
+
+def _endpoint(url: str) -> tuple:
+    p = urlsplit(url if "://" in url else "http://" + url)
+    return (p.scheme, (p.hostname or "").lower(), p.port)
+
+
+def base_url_allowed(url: str) -> bool:
+    """A guest-supplied model base_url is honoured only if it matches the
+    configured DeepSeek endpoint or one on model_base_url_allowlist. The host
+    attaches the API key to the request, so an unchecked base_url lets a
+    compromised guest harvest the key by naming an attacker endpoint."""
+    t = _endpoint(url)
+    return any(_endpoint(a) == t
+               for a in [settings.deepseek_base_url, *settings.model_base_url_allowlist])
+
+
+def _is_deepseek_endpoint(url: str) -> bool:
+    return _endpoint(url)[1] == _endpoint(settings.deepseek_base_url)[1]
 
 
 # deepseek-v4-flash sometimes emits tool calls in its native markup as plain
@@ -219,6 +240,8 @@ class ModelClient:
         tool_calls: dict[int, dict] = {}
         usage: dict | None = None
         dsml = False   # once the native tool-call markup starts, stop streaming it
+        tail = ""      # rolling window for mark detection across chunk splits —
+                       # re-joining content_parts per delta was O(n²) per response
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
             async with client.stream(
@@ -246,8 +269,11 @@ class ModelClient:
                     delta = choices[0].get("delta", {})
                     if delta.get("content"):
                         content_parts.append(delta["content"])
-                        if not dsml and _DSML_MARK in "".join(content_parts):
-                            dsml = True   # it's a tool call in disguise, not prose
+                        if not dsml:
+                            probe = tail + delta["content"]
+                            if _DSML_MARK in probe:
+                                dsml = True   # a tool call in disguise, not prose
+                            tail = probe[-(len(_DSML_MARK) - 1):]
                         if not dsml:
                             yield {"type": "token", "text": delta["content"]}
                     for tc in delta.get("tool_calls") or []:
@@ -311,9 +337,16 @@ class ModelGateway:
         if budget is not None and budget.over():
             raise budget_mod.BudgetExceeded(
                 f"token budget spent ({budget.summary()})")
-        # key policy: a custom endpoint (ollama etc.) may need no real key
+        # key policy: a custom endpoint (ollama etc.) may need no real key. The
+        # HOST attaches the key, so a guest-supplied base_url is a key-exfil seam
+        # — reject anything off the allowlist, and send the real key ONLY to the
+        # configured DeepSeek endpoint (a local ollama is sent "local", not the key).
         if base_url:
-            key = self.api_key or "local"  # local servers ignore the auth header
+            if not base_url_allowed(base_url):
+                raise ModelError(
+                    f"refused model base_url {base_url!r}: not on the endpoint "
+                    "allowlist (deepseek_base_url + JARVIS_MODEL_BASE_URL_ALLOWLIST)")
+            key = self.api_key if _is_deepseek_endpoint(base_url) else "local"
         elif not self.api_key:
             raise ModelError("DEEPSEEK_API_KEY is not set (~/.config/jarvis/env, JARVIS_DEEPSEEK_API_KEY=...)")
         else:

@@ -35,6 +35,14 @@ class Settings(BaseSettings):
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
+    # The guest loop may request an alternate model base_url (e.g. a local
+    # ollama), but the HOST attaches the real key to that request — so an
+    # unchecked guest-supplied base_url is a key-exfil seam (point the host at
+    # an attacker endpoint, harvest the Bearer key). Only these hosts are
+    # honored; anything else is refused and the call falls back to the default.
+    # deepseek_base_url is always allowed on top of this list.
+    model_base_url_allowlist: list[str] = ["http://127.0.0.1:11434",
+                                           "http://localhost:11434"]
     model_name: str = "deepseek-v4-flash"
     model_max_tokens: int = 4096
     # Main generation temperature. 0.7 keeps personality and fluency; the
@@ -109,6 +117,19 @@ class Settings(BaseSettings):
     dead_end_error_streak: int = 4
     dead_end_force_answer: int = 8
 
+    # Post-tool plan re-check: every N tool rounds (when the todo tool is
+    # offered and no other nudge fired that round) a one-line progress check
+    # rides the last tool result — mark done items, aim the next call at the
+    # next open item. Counters the drift where a long turn free-associates
+    # its next call instead of following its own plan. 0 disables.
+    plan_recheck_every: int = 6
+
+    # Hand-rolled web gathering: once a turn has made this many direct
+    # web_search/web_read/read_and_summarize calls (and the research tool is
+    # offered), a one-shot note tells the model to hand the remainder to
+    # research instead of reading pages itself. 0 disables.
+    web_handroll_nudge: int = 6
+
     # Transient model-API failures (connect errors, 5xx) retry with exponential
     # backoff — but only if no tokens have streamed to the client yet, so a
     # retry can never duplicate visible output.
@@ -135,11 +156,6 @@ class Settings(BaseSettings):
     # current without relying on the model remembering.
     auto_journal: bool = True
 
-    # Auto-approve the FINAL research document (research/<topic>.md) so it goes
-    # straight to canonical instead of waiting in the approval queue. Node
-    # scratch files under runs/ stay staged regardless.
-    research_auto_approve: bool = True
-
     # Archive upload caps (POST /upload_archive extraction)
     upload_max_uncompressed_mb: int = 200
     upload_max_files: int = 5000
@@ -164,6 +180,10 @@ class Settings(BaseSettings):
     # host tools brokered over vsock. Off by default until the guest path is the
     # proven default (cutover in M4); flip per-turn tests via the flag.
     use_guest_loop: bool = False
+    # True only inside the guest (the guest config shim overrides it). run_code
+    # keys on this: on the host it is always False, so the tool refuses to run
+    # code anywhere the sandbox isn't.
+    in_guest: bool = False
     # Idle scrub (M4c): reboot the single guest once it has been idle (no in-flight
     # turn) for this many seconds, so the next operation batch lands in a FRESH
     # guest instead of inheriting the previous one's state. The reboot happens
@@ -177,6 +197,12 @@ class Settings(BaseSettings):
     # host-side tools query SearXNG and fetch pages, strip them to plain text,
     # and refuse internal/private targets (SSRF guard).
     searxng_url: str = "http://10.0.0.58:8080"
+    # SearXNG is a metasearch proxy; its default engine mix on the main server
+    # is mostly rate-limited/blocked (google/ddg/brave/startpage/qwant all
+    # return 0 results — measured 2026-07-21). Pin the engines that still work
+    # so web_search returns real links instead of just Wikipedia infoboxes.
+    # Empty string = let SearXNG use its own default set.
+    searxng_engines: str = "bing,mojeek,wikipedia"
     web_search_results: int = 8
     web_fetch_timeout: int = 15
     web_max_bytes: int = 2_000_000      # stop reading a page past this
@@ -188,6 +214,50 @@ class Settings(BaseSettings):
     # re-read within a task skips the download AND the summarize model call.
     web_cache_ttl_seconds: int = 900
     web_cache_max_entries: int = 50
+
+    # --- Monitored egress (Layer 3) ---------------------------------------
+    # OFF by default: the guest stays netless (`-nic none`) until this is flipped
+    # on and soaked, exactly like the use_guest_loop cutover. When true the guest
+    # gets a tap NIC bridged to the host; ALL egress crosses the host proxy on
+    # vm_egress_proxy_port, the LAN is dropped by nftables, and DNS is forced
+    # through the host resolver (backend/vm/egress_proxy.py + vm/net_up.sh). The
+    # guest still holds no key — secrets are injected at the proxy, on the wire.
+    vm_egress: bool = False
+    vm_egress_tap: str = "jvtap0"
+    vm_egress_host_ip: str = "10.201.0.1"     # host side of the point-to-point
+    vm_egress_proxy_port: int = 8443          # host TLS-terminating forward proxy
+    vm_egress_pcap: bool = True               # tcpdump ring buffer on the tap
+    # NOTE: the guest IP (10.201.0.2), DNS port, and the RFC1918 LAN-denied
+    # ranges are FIXED constants baked into vm/net/jarvis-egress.nft,
+    # vm/net/dnsmasq-egress.conf and guest/backend/server.py — they are not
+    # configurable here (a settings knob nothing reads would silently drift
+    # from what nftables actually enforces).
+    # A brand-new project inherits this shared "general" allowlist (deny-by-
+    # default vs the open internet), which trains up as new hosts are approved.
+    # Seeded with the developer toolchain so pip/npm/git work on day one;
+    # everything else is denied + queued. Sensitive projects get a scoped policy
+    # (their own egress_policy row) instead of inheriting this.
+    egress_seed_hosts: list[str] = [
+        "pypi.org", "files.pythonhosted.org", "registry.npmjs.org",
+        "github.com", "codeload.github.com", "objects.githubusercontent.com",
+        "raw.githubusercontent.com", "api.github.com", "deb.debian.org",
+        "security.debian.org", "crates.io", "static.crates.io", "proxy.golang.org",
+    ]
+
+    # --- Egress anomaly detection (Layer 3) -------------------------------
+    # A trip auto-cuts the offending host (nftables drop) and raises a
+    # security_event. A new/unapproved host does NOT trip these — it is simply
+    # denied and queued for approval; only exfil-shaped behaviour alerts.
+    egress_entropy_threshold: float = 3.8     # Shannon bits/char of the hostname; DGA / DNS-tunnel tell
+    egress_volume_multiple: float = 8.0       # bytes-to-host over this * baseline = a spike
+    egress_volume_min_bytes: int = 1_000_000  # ignore spikes below this (tiny-baseline noise)
+    egress_beacon_min_hits: int = 6           # regular hits to one host before cadence is judged
+    egress_beacon_cv_max: float = 0.15        # inter-arrival coefficient-of-variation below this = beacon
+
+    # --- Golden image lifecycle (Layer 1) ---------------------------------
+    # The VM widget goes amber when the running image is older than this; a
+    # monthly systemd timer rebuilds a fresh versioned base (never in place).
+    vm_image_max_age_days: int = 35
 
 
 settings = Settings()

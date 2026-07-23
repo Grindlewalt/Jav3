@@ -1,12 +1,15 @@
-from backend.config import settings
-from backend.agent.tools.todostore import _parse_todos, _write_todos
+from backend import writes
+from backend.agent.tools.todostore import parse_todo_text, render_todos
 from backend.agent.tools.toolctx import require_project
 
 
 async def run(action: str, text: str | None = None, index: int | None = None) -> str:
     slug = await require_project()
-    base = settings.projects_dir / slug
-    todos = _parse_todos(base)
+    # read through writes.resolve so an in-guest turn sees its own pending
+    # edits; write through apply_write so todo.md crosses the one chokepoint
+    # (secret refusal + advisory scan on the host, .staging buffer in the guest)
+    src = writes.resolve(slug, "todo.md")
+    todos = parse_todo_text(src.read_text()) if src else []
     if action == "list":
         pass
     elif action == "add":
@@ -23,7 +26,10 @@ async def run(action: str, text: str | None = None, index: int | None = None) ->
     else:
         return f"error: unknown action '{action}'"
     if action != "list":
-        _write_todos(base, todos)
+        try:
+            await writes.apply_write(slug, "todo.md", render_todos(todos).encode())
+        except writes.SecretLeakError as e:
+            return f"error: todo update refused — {e}"
     if not todos:
         return "todo list is empty"
     return "\n".join(

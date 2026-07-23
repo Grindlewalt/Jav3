@@ -18,7 +18,12 @@ parameters:
     focus:
       type: string
       description: What you're looking for — each page is summarized against this.
+    triage:
+      type: boolean
+      description: Skim each page's opening first and skip low-value pages (error/boilerplate/off-topic) instead of summarizing them. Use when surveying unvetted search hits.
 ---
 Returns one "Source: <url>" block per page with 3-6 bullets. Because only the
 summaries come back, you can read a dozen pages across a task without the
-context (and token cost) snowballing.
+context (and token cost) snowballing. With `triage: true`, pages judged
+low-value from their opening come back as one "(skipped by triage: …)" line
+instead of a summary — cheaper still when many of your URLs are long shots.

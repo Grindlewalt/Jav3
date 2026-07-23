@@ -40,7 +40,7 @@ async def list_projects():
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT id, slug, name, github_remote, created_at FROM projects "
+            "SELECT id, slug, name, github_remote, autonomy, created_at FROM projects "
             "WHERE deleted_at IS NULL AND is_hidden = 0 ORDER BY created_at DESC"
         ) as cur:
             rows = await cur.fetchall()
@@ -79,6 +79,15 @@ async def create_project(body: CreateProject):
         await refresh_all_projects(db)
     finally:
         await db.close()
+    # with direct writes (no staging quarantine) git is the review/undo surface,
+    # so every project is a repo from birth with a baseline commit to diff against
+    try:
+        from . import gitgate
+        await gitgate.ensure_repo(slug)
+        await gitgate.run_git(slug, "add", "-A")
+        await gitgate.run_git(slug, "commit", "-q", "-m", "project created")
+    except Exception:  # noqa: BLE001 — a git hiccup must not block project creation
+        pass
     return {"slug": slug, "name": body.name}
 
 
@@ -121,11 +130,16 @@ async def set_autonomy(slug: str, body: SetAutonomy):
 
 @router.put("/projects/{slug}/md")
 async def update_project_md(slug: str, body: UpdateProjectMd):
-    if not project_md_path(slug).parent.exists():
-        raise HTTPException(status_code=404, detail="no such project")
-    project_md_path(slug).write_text(body.content)
     db = await get_db()
     try:
+        # validate against the DB like every sibling endpoint — a raw
+        # path-existence check let slug='..' write outside projects_dir
+        async with db.execute(
+            "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL", (slug,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="no such project")
+        project_md_path(slug).write_text(body.content)
         await refresh_all_projects(db)
     finally:
         await db.close()
@@ -203,7 +217,6 @@ async def purge_project(slug: str):
                                 detail="soft-delete first — purge only empties the bin")
         pid = row["id"]
         await db.execute("UPDATE conversations SET project_id = NULL WHERE project_id = ?", (pid,))
-        await db.execute("DELETE FROM runs WHERE project_id = ?", (pid,))
         await db.execute("DELETE FROM projects WHERE id = ?", (pid,))
         await db.commit()
         await refresh_all_projects(db)
@@ -211,7 +224,11 @@ async def purge_project(slug: str):
         await db.close()
     project_path = settings.projects_dir / slug
     if project_path.exists():
-        shutil.rmtree(project_path)
+        # a big project tree on the Pi's SD card takes a while — don't stall
+        # every SSE stream and the broker on the shared event loop
+        import asyncio
+        await asyncio.get_running_loop().run_in_executor(
+            None, shutil.rmtree, project_path)
     return {"ok": True}
 
 

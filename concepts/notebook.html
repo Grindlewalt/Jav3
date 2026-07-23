@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concept — Notebook</title>
+<style>
+  :root {
+    --bg:#0e1013; --bg-soft:#13161b; --panel:#171b21; --panel-2:#1e242c;
+    --border:#262d37; --text:#d7dde5; --dim:#7a8494; --accent:#5b9cf5;
+    --accent-2:#8b6cf0; --green:#4cc38a; --red:#e5534b; --amber:#d9a13d;
+    color-scheme: dark;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:15px/1.6 Georgia, 'Times New Roman', serif; }
+  .ui { font:13px/1.4 system-ui, sans-serif; }
+  header { position:sticky; top:0; background:var(--bg-soft);
+    border-bottom:1px solid var(--border); padding:10px 0; z-index:5; }
+  .shell { max-width:880px; margin:0 auto; padding:0 24px; }
+  header .shell { display:flex; align-items:center; gap:14px; }
+  header b { font-family:system-ui; }
+  .dim { color:var(--dim); }
+  .doc { padding:34px 0 120px; }
+  h1 { font-size:30px; margin:0 0 4px; }
+  h2 { font-size:15px; font-family:system-ui; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--dim); border-bottom:1px solid var(--border);
+    padding-bottom:6px; margin:38px 0 14px; }
+  .entry { display:flex; gap:16px; margin:14px 0; }
+  .entry .date { flex:0 0 84px; font-family:system-ui; font-size:12px;
+    color:var(--dim); padding-top:4px; text-align:right;
+    font-variant-numeric:tabular-nums; }
+  .entry .what { flex:1; }
+  .entry.auto .what { color:var(--dim); font-style:italic; }
+  .aside { border-left:3px solid var(--accent-2); background:var(--panel);
+    border-radius:0 8px 8px 0; padding:10px 14px; margin:10px 0;
+    font-family:system-ui; font-size:13.5px; }
+  .aside .who { font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--accent-2); margin-bottom:4px; }
+  .aside.op { border-color:var(--accent); }
+  .aside.op .who { color:var(--accent); }
+  .diff { font:12.5px/1.5 ui-monospace, monospace; background:var(--bg-soft);
+    border:1px solid var(--border); border-radius:8px; margin:10px 0;
+    overflow:hidden; }
+  .diff .path { padding:6px 12px; border-bottom:1px solid var(--border);
+    color:var(--dim); display:flex; gap:10px; align-items:center; }
+  .diff .path .act { margin-left:auto; display:flex; gap:6px; }
+  .diff pre { margin:0; padding:8px 12px; overflow-x:auto; }
+  .del { background:rgba(229,83,75,.14); display:block; }
+  .add { background:rgba(76,195,138,.13); display:block; }
+  .btn { font-family:system-ui; font-size:12px; border-radius:6px;
+    padding:2px 10px; cursor:pointer; background:none; }
+  .btn.ok { border:1px solid var(--green); color:var(--green); }
+  .btn.no { border:1px solid var(--red); color:var(--red); }
+  .runline { display:flex; gap:10px; align-items:center; font-family:system-ui;
+    font-size:13px; background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; padding:8px 12px; margin:10px 0; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--accent);
+    box-shadow:0 0 6px var(--accent); animation:pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity:.35 } }
+  .margin-chat { position:fixed; right:22px; bottom:22px; width:330px;
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    box-shadow:0 12px 40px rgba(0,0,0,.45); font-family:system-ui; font-size:13px; }
+  .margin-chat .head { padding:9px 13px; border-bottom:1px solid var(--border);
+    display:flex; gap:8px; align-items:center; font-weight:600; }
+  .margin-chat .log { padding:10px 13px; max-height:180px; overflow-y:auto; }
+  .margin-chat .log p { margin:0 0 8px; }
+  .margin-chat .log .j { color:var(--dim); }
+  .margin-chat form { display:flex; gap:6px; padding:9px; border-top:1px solid var(--border); }
+  .margin-chat input { flex:1; background:var(--bg); border:1px solid var(--border);
+    color:var(--text); border-radius:7px; padding:6px 9px; font-size:13px; }
+  .margin-chat button { background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    border:0; color:#fff; border-radius:7px; padding:6px 12px; cursor:pointer; }
+  .toc { position:fixed; left:22px; top:90px; width:150px; font-family:system-ui;
+    font-size:12px; color:var(--dim); }
+  .toc div { padding:3px 0; border-left:2px solid var(--border); padding-left:10px; }
+  .toc .here { border-color:var(--accent); color:var(--text); }
+  @media (max-width:1280px){ .toc{display:none} }
+</style>
+</head>
+<body>
+  <header class="ui"><div class="shell">
+    <b>pi-cluster</b> <span class="dim">/ project journal</span>
+    <span class="dim" style="margin-left:auto">autonomy: stage</span>
+    <span class="dim">≈41k tokens in context</span>
+    <span>🔔 2</span>
+  </div></header>
+
+  <nav class="toc ui">
+    <div>Summary</div><div class="here">Journal</div><div>Open questions</div>
+    <div>Staged changes</div><div>Runs</div>
+  </nav>
+
+  <div class="shell doc">
+    <h1>Pi cluster</h1>
+    <p class="dim">Sensor mesh on three Pis; this doc is the project's memory —
+      Jarvis and the operator both write to it.</p>
+
+    <h2>Journal</h2>
+
+    <div class="entry"><div class="date">Jul 15 14:02</div><div class="what">
+      Decided: poller failures back off exponentially, capped at 5 minutes.
+      Flat retry was hammering the flaky BME280 node.
+      <div class="diff ui">
+        <div class="path">code/poller.py <span class="dim">staged · +41 −17</span>
+          <span class="act"><button class="btn ok">approve</button><button class="btn no">reject</button></span></div>
+        <pre><span class="del">-        time.sleep(POLL_INTERVAL)</span><span class="add">+        delay = min(base * 2 ** fails, CAP)</span><span class="add">+        time.sleep(jitter(delay))</span></pre>
+      </div>
+      <div class="aside op"><div class="who">operator</div>
+        Cap feels high for the door sensor — make the cap per-sensor?</div>
+      <div class="aside"><div class="who">jarvis</div>
+        Good catch. Staged a per-sensor override; door sensor caps at 30s.
+        The diff above is updated — one approval covers both.</div>
+    </div></div>
+
+    <div class="entry"><div class="date">Jul 15 13:40</div><div class="what">
+      <div class="runline"><span class="dot"></span> test-writer agent — scaffolding
+        pytest for backoff <span class="dim" style="margin-left:auto">2/4 files · 3m</span></div>
+    </div></div>
+
+    <div class="entry auto"><div class="date">Jul 15 13:38</div><div class="what">
+      (auto) Plan written: 5 steps — refactor, per-sensor caps, tests, docs, commit.
+    </div></div>
+
+    <div class="entry"><div class="date">Jul 14 21:15</div><div class="what">
+      Research: <a style="color:var(--accent)" href="#">MQTT vs plain HTTP for the mesh</a>
+      — MQTT wins on battery nodes; doc staged and approved.
+    </div></div>
+
+    <h2>Open questions</h2>
+    <div class="entry"><div class="date"></div><div class="what">
+      Should scheduled polls pause during the nightly backup window? <span class="dim">(operator to decide)</span>
+    </div></div>
+  </div>
+
+  <div class="margin-chat ui">
+    <div class="head">💬 talk to the doc <span class="dim" style="margin-left:auto">chat #61</span></div>
+    <div class="log">
+      <p>why did the door sensor flap last night?</p>
+      <p class="j">Journal Jul 12: its battery dipped below 3.1V during the cold
+        window — same signature. I can add a low-battery alert schedule; want it?</p>
+    </div>
+    <form><input placeholder="ask, or dictate a journal entry…"><button>↑</button></form>
+  </div>
+</body>
+</html>

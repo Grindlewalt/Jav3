@@ -25,6 +25,7 @@ handler is surfaced to the model but fails loudly if called — that mismatch is
 a bug we want to see.
 """
 import importlib.util
+import inspect
 import json
 import re
 import traceback
@@ -91,7 +92,10 @@ def compile_registry() -> list[dict]:
     """Scan tool defs + skills, write data/registry.json, return the entries."""
     entries: list[dict] = []
     for path in _sources():
-        meta = _parse_md(path)
+        try:
+            meta = _parse_md(path)
+        except Exception:  # noqa: BLE001 — one broken TOOL.md must not take down
+            continue       # the whole registry (and with it every chat turn)
         if meta:
             entries.append(meta)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -107,9 +111,15 @@ def load_registry() -> list[dict]:
     if not path.exists():
         return compile_registry()
     cached = path.stat().st_mtime
-    if any(p.stat().st_mtime > cached for p in _sources()):
+    srcs = _sources()
+    if any(p.stat().st_mtime > cached for p in srcs):
         return compile_registry()
-    return json.loads(path.read_text())
+    entries = json.loads(path.read_text())
+    # a deleted tool folder never bumps a surviving file's mtime, so the check
+    # above misses it — compare the source sets or its ghost entry lives forever
+    if {e.get("source") for e in entries} != {str(p) for p in srcs}:
+        return compile_registry()
+    return entries
 
 
 def read_only_names(entries: list[dict] | None = None) -> frozenset[str]:
@@ -126,6 +136,11 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
     specs = []
     for e in entries:
         if e.get("enabled") is False:
+            continue
+        # requires_guest tools (run_code) exist ONLY inside the sandbox VM:
+        # with the guest loop off there is nowhere safe to execute them, so
+        # they are not offered at all — no silent host fallback, by design
+        if e.get("requires_guest") and not settings.use_guest_loop:
             continue
         desc = e["description"]
         if e.get("when_to_use"):
@@ -152,7 +167,12 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
 
 
 async def dispatch(name: str, args: dict) -> str:
-    handler = _load_dynamic(name)
+    try:
+        handler = _load_dynamic(name)
+    except Exception as e:  # noqa: BLE001 — a handler that fails to import
+        # (syntax error, broken top-level import) must not kill the turn
+        return (f"error: tool '{name}' handler failed to load: "
+                f"{type(e).__name__}: {e}. Use a different tool.")
     if handler is None:
         entry = next((e for e in load_registry() if e["name"] == name), None)
         if entry and entry.get("kind") == "skill":
@@ -163,10 +183,15 @@ async def dispatch(name: str, args: dict) -> str:
                     f"using the arguments you passed: {json.dumps(args)}]\n{body}")
         return f"error: tool '{name}' is registered but has no handler"
     try:
-        return await handler(**args)
+        # bind first so ONLY argument mismatches read as "bad arguments" —
+        # a TypeError raised inside the handler is a real fault, not the
+        # model's, and must keep its traceback
+        inspect.signature(handler).bind(**args)
     except TypeError as e:
         return (f"error: bad arguments for '{name}': {e}. Check the tool's "
                 "parameter schema and retry with corrected arguments.")
+    try:
+        return await handler(**args)
     except Exception as e:
         # The loop must observe failures, not die on them — and the message
         # should read as the first half of the fix, not just the fault.

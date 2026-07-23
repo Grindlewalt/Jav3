@@ -57,7 +57,8 @@ async def test_ensure_repo_and_status(client):
     assert marker.exists()
     (_pdir() / "code" / "x.py").write_text("print(1)\n")
     status = await gitgate.status_text("demo")
-    assert "no commits yet" in status and "code/x.py" in status
+    # projects are born with a baseline commit ("project created")
+    assert "project created" in status and "code/x.py" in status
 
 
 async def test_commit_request_is_pending_and_commits_nothing(client):
@@ -68,8 +69,8 @@ async def test_commit_request_is_pending_and_commits_nothing(client):
     reqs = r.json()["requests"]
     assert len(reqs) == 1
     assert reqs[0]["status"] == "pending" and reqs[0]["commit_sha"] is None
-    rc, _, _ = await gitgate.run_git("demo", "rev-parse", "--verify", "-q", "HEAD")
-    assert rc != 0  # no commit happened
+    _, n, _ = await gitgate.run_git("demo", "rev-list", "--count", "HEAD")
+    assert n.strip() == "1"  # only the creation baseline — no new commit happened
 
 
 async def test_approve_commits_and_skips_runtime_files(client):
@@ -102,8 +103,8 @@ async def test_reject_leaves_tree_untouched(client):
     r = await client.post(f"/api/projects/demo/git/requests/{rid}/reject")
     assert r.status_code == 200 and r.json()["status"] == "rejected"
     assert (_pdir() / "a.txt").read_text() == "a"
-    rc, _, _ = await gitgate.run_git("demo", "rev-parse", "--verify", "-q", "HEAD")
-    assert rc != 0
+    _, n, _ = await gitgate.run_git("demo", "rev-list", "--count", "HEAD")
+    assert n.strip() == "1"  # still only the creation baseline
     # a decided request can't be approved
     r = await client.post(f"/api/projects/demo/git/requests/{rid}/approve")
     assert r.status_code == 409
@@ -125,11 +126,9 @@ async def test_agent_cannot_write_into_git_dir(client):
 
 
 async def test_empty_message_and_clean_tree_refused(client):
-    await gitgate.ensure_repo("demo")
     out = await registry.dispatch("git_commit_request", {"message": "   "})
     assert "error" in out and "empty" in out
-    row = await gitgate.create_request("demo", "Initial")
-    await gitgate.approve_request(row["id"])
+    # the creation baseline already committed the scaffold — tree is clean
     out = await registry.dispatch("git_commit_request", {"message": "Nothing"})
     assert "error" in out and "clean" in out
 
@@ -144,7 +143,7 @@ async def test_commit_only_selected_paths(client):
     assert r.status_code == 200
     _, files, _ = await gitgate.run_git("demo", "ls-files")
     tracked = files.split()
-    assert tracked == ["a.txt"]
+    assert "a.txt" in tracked and "b.txt" not in tracked
     _, porcelain, _ = await gitgate.run_git("demo", "status", "--porcelain")
     assert "?? b.txt" in porcelain  # untouched, still uncommitted
 

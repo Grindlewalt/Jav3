@@ -1,7 +1,8 @@
-"""Phase 3 M3: the workspace round-trip. The host pushes a merged workspace, the
-guest edits a file IN the guest (subprocess, stdlib-only guest env), and the host
-reconciles the guest's staged edit back through stage_write with a secret scan —
-the operator's canonical files are never touched; approval stays host-side."""
+"""Phase 3 M3: the workspace round-trip. The host pushes a workspace, the guest
+edits a file IN the guest (subprocess, stdlib-only guest env) — buffered in the
+guest's own .staging overlay — and the host applies the buffer back through
+writes.apply_write (secret refusal + advisory diff gate), landing it on the
+canonical files. The guest itself still never touches host files directly."""
 import io
 import os
 import subprocess
@@ -24,7 +25,7 @@ def _tar_dir(root: Path) -> bytes:
     return buf.getvalue()
 
 
-def test_workspace_roundtrip_edit_in_guest_reconciled(tmp_env):
+async def test_workspace_roundtrip_edit_in_guest_reconciled(tmp_env):
     # host: a project with one canonical file
     proj = settings.projects_dir / "demo"
     proj.mkdir(parents=True)
@@ -50,17 +51,17 @@ def test_workspace_roundtrip_edit_in_guest_reconciled(tmp_env):
     r = subprocess.run([sys.executable, "-S", "-c", script], cwd=gdir,
                        env={"PYTHONPATH": gdir, "PATH": os.environ.get("PATH", "")},
                        capture_output=True, text=True)
-    assert r.returncode == 0 and "staged write" in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0 and "wrote notes/new.txt" in r.stdout, r.stdout + r.stderr
 
-    # the guest staged into its OWN .staging (canonical untouched)
+    # the guest buffered into its OWN .staging (guest canonical copy untouched)
     gstaged = gproj / ".staging" / "notes" / "new.txt"
     assert gstaged.is_file() and gstaged.read_text() == "edited from the guest"
 
-    # host: reconcile the guest's .staging back through stage_write
-    result = workspace_xfer.reconcile_staged("demo", _tar_dir(gproj / ".staging"))
-    assert "notes/new.txt" in result["staged"]
+    # host: apply the guest's buffer through writes.apply_write -> canonical
+    result = await workspace_xfer.apply_guest_writes("demo", _tar_dir(gproj / ".staging"))
+    assert "notes/new.txt" in result["applied"]
     assert result["secret_files"] == {}
-    host_staged = settings.projects_dir / "demo" / ".staging" / "notes" / "new.txt"
-    assert host_staged.is_file() and host_staged.read_text() == "edited from the guest"
-    # the operator's canonical file was never touched by the guest
+    landed = settings.projects_dir / "demo" / "notes" / "new.txt"
+    assert landed.is_file() and landed.read_text() == "edited from the guest"
+    # untouched files stay untouched
     assert (settings.projects_dir / "demo" / "hello.txt").read_text() == "original"

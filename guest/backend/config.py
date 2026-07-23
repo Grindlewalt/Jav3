@@ -11,11 +11,14 @@ _BASE = Path(__file__).resolve().parent.parent
 
 
 class _Settings:
+    in_guest = True     # the run_code handler keys on this: host settings lack it
     max_react_iterations = 60
     subagent_max_iterations = 12
     dead_end_force_answer = 8
     dead_end_error_streak = 4
     delegate_nudge_round = 12
+    plan_recheck_every = 6
+    web_handroll_nudge = 6
     tool_result_max_chars = 12000
     tool_result_keep_recent = 2
     tool_result_evict_chars = 4000

@@ -3,7 +3,7 @@ pushes, when a remote is configured) after operator approval via the API.
 
 The repo is the project dir itself. Staging metadata and runtime files are
 kept out via a host-written .gitignore, and the agent can never write into
-.git/ (staging + workspace endpoints refuse the path).
+.git/ (writes + workspace endpoints refuse the path).
 """
 import asyncio
 import json
@@ -42,15 +42,22 @@ async def run_git(slug: str, *args: str, check: bool = False) -> tuple[int, str,
     return proc.returncode, out, err
 
 
+# per-slug init lock: git_status/git_diff are read_only-flagged, so the loop
+# may run them concurrently — two first-touches must not race `git init`
+_repo_locks: dict[str, asyncio.Lock] = {}
+
+
 async def ensure_repo(slug: str) -> None:
-    d = _project_dir(slug)
-    if not (d / ".git").exists():
-        await run_git(slug, "init", "-q", check=True)
-        await run_git(slug, "config", "user.name", "Jarvis", check=True)
-        await run_git(slug, "config", "user.email", "jarvis@atomos.local", check=True)
-    gitignore = d / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text(GITIGNORE)
+    lock = _repo_locks.setdefault(slug, asyncio.Lock())
+    async with lock:
+        d = _project_dir(slug)
+        if not (d / ".git").exists():
+            await run_git(slug, "init", "-q", check=True)
+            await run_git(slug, "config", "user.name", "Jarvis", check=True)
+            await run_git(slug, "config", "user.email", "jarvis@atomos.local", check=True)
+        gitignore = d / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text(GITIGNORE)
 
 
 async def status_text(slug: str) -> str:

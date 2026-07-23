@@ -5,7 +5,7 @@ lazily by toolctx when a file tool first runs). This API is the operator's
 view over those stores: list/search them, edit files (the normal project file
 endpoints work — a hidden slug is still a slug), and graduate them — convert
 the store into a real visible project, or merge its files into an existing
-project's staging queue where the usual approval review applies again.
+project's files directly (writes are live; git is the undo surface).
 """
 import shutil
 
@@ -17,7 +17,7 @@ from .config import settings
 from .db import get_db
 from .fsutil import list_tree
 from .memory import refresh_all_projects
-from .staging import stage_write
+from .writes import apply_write
 
 router = APIRouter(prefix="/api/artifacts", tags=["artifacts"],
                    dependencies=[Depends(require_user)])
@@ -88,7 +88,7 @@ async def list_artifacts(q: str = ""):
 @router.post("/{slug}/convert")
 async def convert_artifact(slug: str, body: Convert):
     """Graduate the store into a real, visible project. From here on its
-    writes stage for approval like any other project's."""
+    writes apply live like any other project's."""
     if not body.name.strip():
         raise HTTPException(status_code=400, detail="name is required")
     db = await get_db()
@@ -106,12 +106,22 @@ async def convert_artifact(slug: str, body: Convert):
         await refresh_all_projects(db)
     finally:
         await db.close()
+    # artifact stores are minted repo-less; a real project needs the baseline
+    # commit (git is the review/undo surface for live writes) — same block as
+    # create_project, same best-effort stance
+    try:
+        from . import gitgate
+        await gitgate.ensure_repo(slug)
+        await gitgate.run_git(slug, "add", "-A")
+        await gitgate.run_git(slug, "commit", "-q", "-m", "project created")
+    except Exception:  # noqa: BLE001 — a git hiccup must not block the convert
+        pass
     return {"ok": True, "slug": slug, "name": body.name.strip()}
 
 
 @router.post("/{slug}/merge")
 async def merge_artifact(slug: str, body: Merge):
-    """Copy the store's files into the target project's STAGING queue — the
+    """Copy the store's files into the target project directly — the
     operator reviews them like any agent edit before they go canonical."""
     db = await get_db()
     try:
@@ -128,12 +138,12 @@ async def merge_artifact(slug: str, body: Merge):
                 raise HTTPException(status_code=404, detail="no such target project")
     finally:
         await db.close()
-    staged = []
+    merged = []
     for f in _files(slug):
         data = (settings.projects_dir / slug / f["path"]).read_bytes()
-        stage_write(body.target, f["path"], data)
-        staged.append(f["path"])
-    return {"ok": True, "staged": staged, "target": body.target}
+        await apply_write(body.target, f["path"], data)
+        merged.append(f["path"])
+    return {"ok": True, "merged": merged, "target": body.target}
 
 
 @router.delete("/{slug}")
@@ -150,5 +160,7 @@ async def delete_artifact(slug: str):
         await db.commit()
     finally:
         await db.close()
-    shutil.rmtree(settings.projects_dir / slug, ignore_errors=True)
+    import asyncio
+    await asyncio.get_running_loop().run_in_executor(
+        None, lambda: shutil.rmtree(settings.projects_dir / slug, ignore_errors=True))
     return {"ok": True}

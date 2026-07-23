@@ -2,7 +2,7 @@
 import pytest
 
 from backend.agent.tools import registry
-from backend.db import get_db, init_db
+from backend.db import init_db
 from backend.websec import UnsafeURL, html_to_text, is_safe_url
 from backend import webtools
 
@@ -36,9 +36,9 @@ def test_html_to_text_strips_active_content():
 async def test_fetch_ledger_roundtrip(tmp_env):
     await init_db()
     assert await webtools.fetched_set("proj") == set()
-    await webtools.record("proj", "https://a.com", "A")
-    await webtools.record("proj", "https://a.com", "A")   # idempotent
-    await webtools.record("other", "https://b.com", "B")
+    assert await webtools.claim("proj", "https://a.com") is True
+    assert await webtools.claim("proj", "https://a.com") is False   # idempotent
+    assert await webtools.claim("other", "https://b.com") is True
     assert await webtools.fetched_set("proj") == {"https://a.com"}
     assert await webtools.fetched_set("other") == {"https://b.com"}
 
@@ -107,3 +107,16 @@ async def test_headless_agent_run_gets_own_session(tmp_env, monkeypatch):
     await agents_run.run_agent_headless("probe", "go", active=None)
     assert len(seen) == 2 and seen[0] != seen[1]
     assert all(s and s.startswith("run:") for s in seen)
+
+
+def test_search_params_pins_working_engines(monkeypatch):
+    """web_search must pin the engines that actually return results — the Pi's
+    default SearXNG mix is mostly blocked (0 results). See the 07-21 fix."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "searxng_engines", "bing,mojeek,wikipedia")
+    p = webtools._search_params("kevin durant")
+    assert p["q"] == "kevin durant" and p["format"] == "json"
+    assert p["engines"] == "bing,mojeek,wikipedia"
+    # empty setting -> let SearXNG choose (no engines param)
+    monkeypatch.setattr(settings, "searxng_engines", "")
+    assert "engines" not in webtools._search_params("x")

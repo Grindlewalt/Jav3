@@ -20,15 +20,15 @@ def test_guest_package_assembles_and_imports_stdlib_only():
         t.extractall(d, filter="data")
     assert "backend/agent/loop.py" in names
     assert "backend/server.py" in names
-    assert "backend/staging.py" in names          # copied verbatim
+    assert "backend/writes.py" in names           # the guest write-buffer shim
     assert "tools/read_file/handler.py" in names   # a clean in-guest handler
     # -S: no site-packages, so third-party libs are OFF the path — if loop.py or a
-    # copied module (staging/codeindex) imported anything but stdlib + the guest
+    # copied module (codeindex) or shim imported anything but stdlib + the guest
     # backend, these imports fail.
     r = subprocess.run(
         [sys.executable, "-S", "-c",
          "import backend.server; from backend.agent.loop import run_turn; "
-         "import backend.staging, backend.codeindex, backend.fsutil; print('GUEST-OK')"],
+         "import backend.writes, backend.codeindex, backend.fsutil; print('GUEST-OK')"],
         cwd=d, env={"PYTHONPATH": d, "PATH": os.environ.get("PATH", "")},
         capture_output=True, text=True)
     assert r.returncode == 0 and "GUEST-OK" in r.stdout, r.stderr

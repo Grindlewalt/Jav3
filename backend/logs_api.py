@@ -128,8 +128,10 @@ async def conversations(kind: str | None = None):
             "SELECT c.id, c.kind, c.summary, c.started_at, p.slug AS project, "
             "  (SELECT COUNT(*) FROM tool_calls t WHERE t.conversation_id=c.id) AS tool_calls, "
             "  (SELECT COALESCE(SUM(LENGTH(t.result)),0) FROM tool_calls t WHERE t.conversation_id=c.id) AS result_bytes, "
-            "  (SELECT COALESCE(SUM(u.input_tokens),0) FROM usage_log u WHERE u.conversation_id=c.id) AS input_tokens, "
-            "  (SELECT COALESCE(SUM(u.output_tokens),0) FROM usage_log u WHERE u.conversation_id=c.id) AS output_tokens "
+            # model_calls, not usage_log: the ledger covers every call (agents,
+            # schedules, research, funnel nodes) — usage_log only sees chat turns
+            "  (SELECT COALESCE(SUM(m.input_tokens),0) FROM model_calls m WHERE m.conversation_id=c.id) AS input_tokens, "
+            "  (SELECT COALESCE(SUM(m.output_tokens),0) FROM model_calls m WHERE m.conversation_id=c.id) AS output_tokens "
             "FROM conversations c LEFT JOIN projects p ON p.id=c.project_id ")
         args: tuple = ()
         if kind:
@@ -171,10 +173,11 @@ async def transcript(cid: int):
             h["bytes"] += len(res)
             n_calls += 1
             tot_bytes += len(res)
+        # model_calls covers every execution path; usage_log only chat turns
         cur = await db.execute(
             "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o, "
             "COALESCE(SUM(cache_hit),0) ch, COALESCE(SUM(cache_miss),0) cm, COUNT(*) turns "
-            "FROM usage_log WHERE conversation_id=?", (cid,))
+            "FROM model_calls WHERE conversation_id=?", (cid,))
         u = await cur.fetchone()
         # interleave by wall-clock: message and tool ids come from separate
         # sequences, so only the timestamp orders them across streams. Tool

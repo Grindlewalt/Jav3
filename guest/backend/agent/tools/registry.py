@@ -8,6 +8,7 @@ everything else (web, secrets, memory, git, spawn/deploy) sends a tool_broker_ca
 over vsock so the host runs it behind every gate."""
 import asyncio
 import importlib.util
+import inspect
 import json
 import socket
 import traceback
@@ -20,7 +21,7 @@ HOST_CID = socket.VMADDR_CID_HOST          # 2
 # tools safe to run in the disposable guest against the pushed workspace
 IN_GUEST_TOOLS = frozenset({"read_file", "list_files", "search_codebase",
                             "crawl_codebase", "write_file", "edit_file",
-                            "dashboard", "todo_update"})
+                            "dashboard", "todo_update", "run_code"})
 
 # handler modules are stateless and keyed by name, so this cache is safely shared
 # across turns; the per-turn state (specs, op_id, ...) lives in turnctx.
@@ -71,14 +72,21 @@ def _load_handler(name: str):
 
 
 async def _local_dispatch(name: str, args: dict) -> str:
-    handler = _load_handler(name)
+    try:
+        handler = _load_handler(name)
+    except Exception as e:  # noqa: BLE001 — a broken pushed handler must not kill the turn
+        return (f"error: in-guest tool '{name}' handler failed to load: "
+                f"{type(e).__name__}: {e}. Use a different tool.")
     if handler is None:
         return f"error: in-guest tool '{name}' has no handler in the pushed package"
     try:
-        return await handler(**args)
+        # bind first so only argument mismatches read as "bad arguments"
+        inspect.signature(handler).bind(**args)
     except TypeError as e:
         return (f"error: bad arguments for '{name}': {e}. Check the schema and "
                 "retry with corrected arguments.")
+    try:
+        return await handler(**args)
     except Exception as e:  # noqa: BLE001 — the loop must observe failures, not die
         return (f"error: {name} failed with {type(e).__name__}: {e}. Adjust the "
                 f"arguments or try a different approach.\n{traceback.format_exc(limit=4)}")

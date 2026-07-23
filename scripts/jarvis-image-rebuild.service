@@ -1,0 +1,10 @@
+[Unit]
+Description=Jarvis golden-image monthly rebuild (patched kernel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# ~20 min build; give it generous headroom
+TimeoutStartSec=3600
+ExecStart=%h/jarvis/scripts/rebuild_image.sh

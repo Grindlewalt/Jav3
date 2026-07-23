@@ -53,3 +53,12 @@ async def selftest():
         return await vm.selftest()
     except VMError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/rebuild")
+async def rebuild(body: NukeBody):
+    """Build the next golden-image version (patched kernel) in the background.
+    Double-confirmed like nuke — it's a ~20-minute Pi operation."""
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="rebuild requires confirm=true")
+    return await vm.rebuild_image()

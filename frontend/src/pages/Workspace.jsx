@@ -3,6 +3,8 @@ import { useParams } from 'react-router-dom'
 import { api, chatStream } from '../api.js'
 import ChatBox from '../ChatBox.jsx'
 import Md from '../Md.jsx'
+import { ReviewQueue } from './Review.jsx'
+import { NetworkPanel } from './Network.jsx'
 import { cspMediaSources } from '../mediaHosts.js'
 
 // ---- panel registry: add a capability = one component + one entry here ----
@@ -14,17 +16,24 @@ const PANEL_TYPES = {
   organizer: { label: 'File organizer', w: 580, h: 460 },
   run: { label: 'Run — python sandbox', w: 560, h: 470 },
   todos: { label: 'To-dos', w: 360, h: 380 },
-  staging: { label: 'Staged changes — approve / reject', w: 620, h: 480 },
+  git: { label: 'Git — review, approve, push', w: 560, h: 480 },
+  board: { label: 'Task board — goal / plan / runs', w: 400, h: 540 },
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
   research: { label: 'Research bots — live', w: 620, h: 560 },
+  review: { label: 'Review — approvals & alerts', w: 480, h: 540 },
+  network: { label: 'Network — egress & host approvals', w: 480, h: 560 },
+  secrets: { label: 'Secrets — key grants for this project', w: 460, h: 380 },
 }
 
+// Default board: chat + the session spine (board = goal/plan/runs), with git as
+// the review/undo surface (writes are live now — no staging panel) and network
+// for approving the hosts the agent asks to reach.
 const DEFAULT_PANELS = [
-  { id: 'p1', type: 'chat', x: 16, y: 16, w: 440, h: 520, z: 1, state: {} },
-  { id: 'p2', type: 'journal', x: 472, y: 16, w: 440, h: 300, z: 2, state: {} },
-  { id: 'p3', type: 'todos', x: 928, y: 16, w: 340, h: 300, z: 3, state: {} },
-  { id: 'p4', type: 'staging', x: 472, y: 332, w: 620, h: 204, z: 4, state: {} },
+  { id: 'p1', type: 'chat', x: 16, y: 16, w: 460, h: 560, z: 1, state: {} },
+  { id: 'p2', type: 'board', x: 492, y: 16, w: 400, h: 560, z: 2, state: {} },
+  { id: 'p3', type: 'git', x: 908, y: 16, w: 540, h: 300, z: 3, state: {} },
+  { id: 'p4', type: 'network', x: 908, y: 332, w: 540, h: 244, z: 4, state: {} },
 ]
 
 const TEXT_EXT = /\.(md|txt|py|js|jsx|ts|json|html|css|csv|toml|yaml|yml|sh|tex)$/i
@@ -117,16 +126,33 @@ export default function Workspace() {
   const refreshProject = useCallback(
     () => api(`/api/projects/${slug}`).then(setProject), [slug])
 
+  const loadLayout = useCallback(() =>
+    api(`/api/projects/${slug}/layout`).then((r) => {
+      const saved = r.layout?.panels?.length ? r.layout.panels : DEFAULT_PANELS
+      // drop panel types that no longer exist (e.g. the removed 'staging'
+      // panel on an old saved board) so they don't render "unknown panel"
+      const p = saved.filter((x) => PANEL_TYPES[x.type])
+      const clean = p.length ? p : DEFAULT_PANELS
+      zRef.current = Math.max(10, ...clean.map((x) => x.z || 0))
+      setPanels(clean)
+    }), [slug])
+
   useEffect(() => {
+    // reset before loading: a stale panels array must never be debounce-saved
+    // into the NEW slug's layout (cross-project board bleed)
+    setPanels(null)
     // opening a project's board loads it into Jarvis's context — this tab is
     // where you live, so what you're looking at is what Jarvis is thinking about
     api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
-    api(`/api/projects/${slug}/layout`).then((r) => {
-      const p = r.layout?.panels?.length ? r.layout.panels : DEFAULT_PANELS
-      zRef.current = Math.max(10, ...p.map((x) => x.z || 0))
-      setPanels(p)
-    })
-  }, [slug, refreshProject])
+    loadLayout()
+  }, [slug, refreshProject, loadLayout])
+
+  // Jarvis rearranged the board server-side (workspace_panel tool) — refetch
+  useEffect(() => {
+    const h = (e) => { if (!e.detail?.slug || e.detail.slug === slug) loadLayout() }
+    window.addEventListener('jarvis-layout-changed', h)
+    return () => window.removeEventListener('jarvis-layout-changed', h)
+  }, [slug, loadLayout])
 
   // debounced layout persistence
   useEffect(() => {
@@ -301,6 +327,20 @@ export default function Workspace() {
           : <button className="ghost" onClick={async () => {
               await api(`/api/projects/${slug}/load`, { method: 'POST' }); refreshProject() }}>
               load into context</button>}
+        <label className="dim small" title="which tools Jarvis is offered here — enforced server-side per turn">
+          autonomy
+          <select className="autonomy-dial" value={project.autonomy || 'full'}
+                  onChange={async (e) => {
+                    await api(`/api/projects/${slug}/autonomy`, {
+                      method: 'PUT', body: JSON.stringify({ level: e.target.value }) })
+                    refreshProject()
+                  }}>
+            <option value="read_only">read-only — observe</option>
+            <option value="stage">stage — + file writes</option>
+            <option value="gated">gated — + agents & research</option>
+            <option value="full">full — + commit proposals</option>
+          </select>
+        </label>
         <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close ·
           <kbd> ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add ·
           <kbd> esc</kbd> collapse</span>
@@ -347,10 +387,14 @@ function PanelBody(props) {
     case 'organizer': return <OrganizerPanel {...props} />
     case 'run': return <RunPanel {...props} />
     case 'todos': return <TodoPanel {...props} />
-    case 'staging': return <StagingPanel {...props} />
+    case 'git': return <GitPanel {...props} />
+    case 'board': return <TaskBoardPanel {...props} />
     case 'context': return <ContextPanel {...props} />
     case 'agent': return <AgentPanel {...props} />
     case 'research': return <ResearchPanel {...props} />
+    case 'review': return <ReviewPanel {...props} />
+    case 'network': return <NetworkPanel slug={props.slug} />
+    case 'secrets': return <SecretsPanel slug={props.slug} />
     default: return <div className="dim">unknown panel</div>
   }
 }
@@ -678,8 +722,12 @@ function OrganizerPanel({ slug }) {
     if (!file) return
     const form = new FormData()
     form.append('file', file)
-    await fetch(`/api/projects/${slug}/upload?dest=${encodeURIComponent(uploadDest.current)}`,
-                { method: 'POST', body: form })
+    const res = await fetch(`/api/projects/${slug}/upload?dest=${encodeURIComponent(uploadDest.current)}`,
+                            { method: 'POST', body: form })
+    if (!res.ok) {
+      const detail = await res.json().then((d) => d.detail).catch(() => res.statusText)
+      window.alert(`upload failed: ${detail}`)
+    }
     e.target.value = ''
     refresh()
   }
@@ -818,10 +866,26 @@ function ContextPanel({ slug }) {
 
   const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`)
 
+  async function setAll(on) {
+    setBusy(true)
+    try {
+      await api(`/api/projects/${slug}/context`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          files: on ? files.filter((f) => !f.binary).map((f) => f.path) : [] }) })
+      await refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
+
   return (
     <div className="pane-col">
       <div className="row">
         <span className="grow dim">nothing loads by default — tick to include</span>
+        <button className="ghost" disabled={busy || files.length === 0}
+                onClick={() => setAll(true)}>all</button>
+        <button className="ghost" disabled={busy || files.length === 0}
+                onClick={() => setAll(false)}>none</button>
         <span className="ctx-total">≈{fmt(total)} tokens loaded</span>
       </div>
       <ul className="ctx-list">
@@ -841,8 +905,9 @@ function ContextPanel({ slug }) {
   )
 }
 
-// Run any defined agent right here in the project. It works in this project's
-// context and its file edits land in the same staging/approval queue.
+// Run any defined agent right here in the project. The run is pinned to THIS
+// project (the slug rides the request), so several boards can run agents in
+// different projects at the same time; edits apply live to the project files.
 function AgentPanel({ slug, state, setState }) {
   const [agents, setAgents] = useState([])
   const [task, setTask] = useState('')
@@ -860,7 +925,7 @@ function AgentPanel({ slug, state, setState }) {
     setLog((l) => [...l, { role: 'task', text: task }, { role: 'out', text: '' }])
     try {
       await chatStream(
-        { task, confirm_peak: confirmPeak }, (ev) => {
+        { task, confirm_peak: confirmPeak, project: slug }, (ev) => {
           if (ev.type === 'tool')
             setLog((l) => upLast(l, (last) => ({ ...last, text: last.text + `\n⚙ ${ev.name}\n` })))
           if (ev.type === 'token')
@@ -938,7 +1003,8 @@ function ResearchPanel({ slug, state, setState }) {
     if (!topic.trim() || busy) return
     setBusy(true); setNodes({}); setOrder([]); setOpen({}); setDoc(null)
     try {
-      await chatStream({ topic, angles: Number(angles) || 4, confirm_peak: confirmPeak }, (ev) => {
+      await chatStream({ topic, angles: Number(angles) || 4, confirm_peak: confirmPeak,
+                         project: slug }, (ev) => {
         if (ev.type === 'node_spawned') {
           upNode(ev.node_id, { id: ev.node_id, parent: ev.parent_id, kind: ev.kind,
                                title: ev.title, depth: ev.depth, status: 'planning' })
@@ -989,7 +1055,7 @@ function ResearchPanel({ slug, state, setState }) {
           )
         })}
       </div>
-      {doc && <div className="dim small">document staged at <code>{doc.path}</code> — approve it in Staged changes
+      {doc && <div className="dim small">document written to <code>{doc.path}</code>
         {doc.usage && <> · {doc.usage}</>}</div>}
     </div>
   )
@@ -1001,81 +1067,238 @@ function upLast(list, fn) {
   return copy
 }
 
-// Jarvis's pending edits: everything it writes lands here first, inert, and
-// only touches the real files when approved. Diffs are shown as plain text.
-function StagingPanel({ slug }) {
-  const [staged, setStaged] = useState([])
-  const [sel, setSel] = useState(null)
-  const [diff, setDiff] = useState(null)
+// The unified Review Center, scoped to this one project: the same commit
+// requests, egress host approvals and security alerts (incl. advisory write
+// flags) the global /review page shows, filtered to this slug.
+function ReviewPanel({ slug }) {
+  return (
+    <div className="pane-col">
+      <div className="review-scrollwrap"><ReviewQueue slug={slug} /></div>
+    </div>
+  )
+}
+
+// Git gate: the working tree, the diff, and Jarvis's pending commit requests
+// with approve (commit + push) / reject — all through the existing gitgate
+// endpoints (this panel only *uses* the gate; the semantics live server-side).
+function GitPanel({ slug }) {
+  const [status, setStatus] = useState('')
+  const [requests, setRequests] = useState([])
+  const [diff, setDiff] = useState(null)     // null = hidden
   const [busy, setBusy] = useState(false)
 
-  const refresh = () =>
-    api(`/api/projects/${slug}/staging`).then((r) => {
-      setStaged(r.staged)
-      if (sel && !r.staged.some((e) => e.path === sel)) { setSel(null); setDiff(null) }
-    })
+  const refresh = () => Promise.all([
+    api(`/api/projects/${slug}/git/status`)
+      .then((r) => setStatus(r.status || '(clean)'))
+      .catch((e) => setStatus(`error: ${e.detail || e}`)),
+    api(`/api/projects/${slug}/git/requests`)
+      .then((r) => setRequests(r.requests)).catch(() => {}),
+  ])
   useEffect(() => {
     refresh()
-    const t = setInterval(refresh, 8000)
+    const t = setInterval(refresh, 10000)
     const h = () => refresh()
     window.addEventListener('jarvis-files-changed', h)
     return () => { clearInterval(t); window.removeEventListener('jarvis-files-changed', h) }
   }, [slug]) // eslint-disable-line
 
-  useEffect(() => {
-    if (!sel) return
-    api(`/api/projects/${slug}/staging/diff?path=${encodeURIComponent(sel)}`)
-      .then(setDiff).catch(() => setDiff(null))
-  }, [sel, slug])
+  async function toggleDiff() {
+    if (diff != null) { setDiff(null); return }
+    try {
+      const r = await api(`/api/projects/${slug}/git/diff`)
+      setDiff(r.diff || '(no unstaged changes)')
+    } catch (err) { setDiff(`error: ${err.detail || err}`) }
+  }
 
-  async function act(verb, paths) {
+  async function act(rid, verb) {
+    if (verb === 'reject' && !window.confirm(`reject commit request #${rid}?`)) return
     setBusy(true)
     try {
-      await api(`/api/projects/${slug}/staging/${verb}`, {
-        method: 'POST', body: JSON.stringify({ paths }) })
+      await api(`/api/projects/${slug}/git/requests/${rid}/${verb}`, { method: 'POST' })
       await refresh()
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (err) { window.alert(err.detail || String(err)) }
     setBusy(false)
   }
 
-  if (staged.length === 0)
-    return <div className="dim center-pad">no staged changes — Jarvis's edits appear here for approval</div>
+  const pending = requests.filter((r) => r.status === 'pending')
+  const decided = requests.filter((r) => r.status !== 'pending').slice(0, 6)
+  return (
+    <div className="pane-col">
+      <div className="row">
+        <span className="grow dim">working tree</span>
+        <button className="ghost" onClick={toggleDiff}>{diff != null ? 'hide diff' : 'diff'}</button>
+        <button className="ghost" onClick={refresh}>↻</button>
+      </div>
+      <pre className="git-status">{status || '…'}</pre>
+      {diff != null && <pre className="git-diff">{diff}</pre>}
+      <div className="dim small">commit requests — approving commits (and pushes, when a
+        remote is set) on the host</div>
+      <ul className="staged-list">
+        {pending.length === 0 && <li className="dim">nothing waiting on you</li>}
+        {pending.map((r) => (
+          <li key={r.id}>
+            <span className="tag new">#{r.id}</span>
+            <span className="grow ellipsis" title={r.message}>{r.message}</span>
+            {r.error && <span className="tag error" title={r.error}>retry</span>}
+            <button className="win-btn ok" title="approve: commit + push" disabled={busy}
+                    onClick={() => act(r.id, 'approve')}>✓</button>
+            <button className="win-btn" title="reject" disabled={busy}
+                    onClick={() => act(r.id, 'reject')}>✕</button>
+          </li>
+        ))}
+        {decided.map((r) => (
+          <li key={r.id} className="dim">
+            <span className={`tag ${r.status === 'approved' ? 'done' : 'error'}`}>{r.status}</span>
+            <span className="grow ellipsis" title={r.message}>{r.message}</span>
+            {r.commit_sha && <span className="mono small">{r.commit_sha.slice(0, 7)}</span>}
+            {r.error && <span className="tag error" title={r.error}>push failed</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+// Per-project secret grants: which of the operator's saved keys the egress
+// proxy may inject into THIS project's outbound requests ({{secret:X}} swapped
+// on the wire — the agent never holds the value). Keys themselves are added on
+// the Context page; this panel only flips the grant.
+function SecretsPanel({ slug }) {
+  const [secrets, setSecrets] = useState([])
+  const [grants, setGrants] = useState({})   // name -> status
+  const [busy, setBusy] = useState(false)
+
+  const refresh = () => Promise.all([
+    api('/api/secrets').then((r) => setSecrets(r.secrets)).catch(() => {}),
+    api(`/api/egress/grants/${slug}`)
+      .then((r) => setGrants(Object.fromEntries(r.grants.map((g) => [g.secret_name, g.status]))))
+      .catch(() => {}),
+  ])
+  useEffect(() => { refresh() }, [slug]) // eslint-disable-line
+
+  async function setGrant(name, status) {
+    setBusy(true)
+    try {
+      await api(`/api/egress/grants/${slug}`, {
+        method: 'POST', body: JSON.stringify({ secret: name, status }) })
+      await refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
 
   return (
     <div className="pane-col">
       <div className="row">
-        <span className="grow dim">{staged.length} pending file{staged.length !== 1 && 's'}</span>
-        <button disabled={busy} onClick={() => act('approve', null)}>✓ approve all</button>
-        <button className="ghost danger" disabled={busy}
-                onClick={() => window.confirm('discard ALL staged changes?') && act('reject', null)}>
-          ✕ reject all</button>
+        <span className="grow dim">keys this project may use</span>
+        <button className="ghost" onClick={refresh}>↻</button>
       </div>
+      <div className="dim small">a granted key is injected wherever this project's code
+        sends {'{{secret:NAME}}'} through the egress proxy — the agent never sees the
+        value. Add or edit the keys themselves on the Context page.</div>
       <ul className="staged-list">
-        {staged.map((e) => (
-          <li key={e.path} className={sel === e.path ? 'active' : ''}
-              onClick={() => setSel(e.path)}>
-            <span className={`tag ${e.status}`}>{e.status}</span>
-            <span className="grow ellipsis">{e.path}</span>
-            <button className="win-btn ok" title="approve" disabled={busy}
-                    onClick={(ev) => { ev.stopPropagation(); act('approve', [e.path]) }}>✓</button>
-            <button className="win-btn" title="reject" disabled={busy}
-                    onClick={(ev) => { ev.stopPropagation(); act('reject', [e.path]) }}>✕</button>
+        {secrets.length === 0 && <li className="dim">no keys saved yet — add them on the Context page</li>}
+        {secrets.map((s) => {
+          const granted = grants[s.name] === 'granted'
+          return (
+            <li key={s.name}>
+              <span className={`tag ${granted ? 'done' : ''}`}>{granted ? 'granted' : 'off'}</span>
+              <span className="grow mono ellipsis">{s.name}</span>
+              <span className="dim small">…{s.last4}</span>
+              {s.hosts?.length > 0 &&
+                <span className="dim small ellipsis" title={`web: ${s.hosts.join(', ')}`}>
+                  {s.hosts.join(', ')}</span>}
+              <button className={granted ? 'win-btn' : 'win-btn ok'} disabled={busy}
+                      onClick={() => setGrant(s.name, granted ? 'revoked' : 'granted')}>
+                {granted ? 'revoke' : 'grant'}
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+// The session spine: the goal, the plan (shared todos), and this project's
+// live runs — one glance says what we're doing, where we are, what's moving.
+// The goal persists with the board layout (.workspace.json panel state).
+function TaskBoardPanel({ slug, state, setState }) {
+  const [todos, setTodos] = useState([])
+  const [text, setText] = useState('')
+  const [jobs, setJobs] = useState([])
+
+  const refreshTodos = () =>
+    api(`/api/projects/${slug}/todos`).then((r) => setTodos(r.todos))
+  const refreshJobs = () =>
+    api('/api/jobs').then((r) =>
+      setJobs((r.jobs || []).filter((j) => j.project === slug))).catch(() => {})
+  useEffect(() => {
+    refreshTodos(); refreshJobs()
+    const t = setInterval(refreshJobs, 5000)
+    const h = () => refreshTodos()
+    window.addEventListener('jarvis-files-changed', h)
+    return () => { clearInterval(t); window.removeEventListener('jarvis-files-changed', h) }
+  }, [slug]) // eslint-disable-line
+
+  async function act(body) {
+    const r = await api(`/api/projects/${slug}/todos`, {
+      method: 'POST', body: JSON.stringify(body) })
+    setTodos(r.todos)
+  }
+
+  const running = jobs.filter((j) => !j.done)
+  const recent = jobs.filter((j) => j.done).slice(0, 3)
+  const doneCount = todos.filter((t) => t.done).length
+  return (
+    <div className="pane-col">
+      <div className="dim small">goal</div>
+      <textarea className="board-goal" rows={2} value={state.goal || ''}
+                placeholder="what is this session trying to achieve?"
+                onChange={(e) => setState({ goal: e.target.value })} />
+      <div className="row">
+        <span className="dim small grow">plan · {doneCount}/{todos.length} done</span>
+      </div>
+      <ul className="todo-list grow-scroll">
+        {todos.map((t, i) => (
+          <li key={i} className={t.done ? 'done' : ''}>
+            <label>
+              <input type="checkbox" checked={t.done}
+                     onChange={() => act({ action: 'toggle', index: i })} />
+              <span>{t.text}</span>
+            </label>
+            <button className="win-btn" onClick={() => act({ action: 'delete', index: i })}>×</button>
+          </li>
+        ))}
+        {todos.length === 0 && <li className="dim">no plan yet — Jarvis writes one with todo_update</li>}
+      </ul>
+      <form className="row" onSubmit={(e) => {
+        e.preventDefault()
+        if (text.trim()) { act({ action: 'add', text }); setText('') }
+      }}>
+        <input className="grow" placeholder="add a step…" value={text}
+               onChange={(e) => setText(e.target.value)} />
+        <button type="submit">Add</button>
+      </form>
+      <div className="dim small">runs</div>
+      <ul className="board-runs">
+        {running.length === 0 && recent.length === 0 &&
+          <li className="dim">nothing running</li>}
+        {running.map((j) => (
+          <li key={j.id}>
+            <span className="run-dot running" />
+            <span className="grow ellipsis" title={j.summary}>{j.summary || `#${j.id}`}</span>
+            <span className="tag running">{j.kind}</span>
+          </li>
+        ))}
+        {recent.map((j) => (
+          <li key={j.id} className="dim">
+            <span className="run-dot done" />
+            <span className="grow ellipsis" title={j.summary}>{j.summary || `#${j.id}`}</span>
+            <span className="tag done">{j.kind}</span>
           </li>
         ))}
       </ul>
-      {sel && diff && (
-        <div className="diff-view">
-          <div className="diff-col">
-            <div className="dim small">current</div>
-            <pre>{diff.old ?? '(new file)'}</pre>
-          </div>
-          <div className="diff-col">
-            <div className="dim small">staged</div>
-            <pre>{diff.new}</pre>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

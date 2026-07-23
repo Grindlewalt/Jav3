@@ -1,4 +1,4 @@
-from backend import agents_run
+from backend import agents_run, runtime
 from backend.agent.budget import current as current_budget
 from backend.db import get_db
 
@@ -7,6 +7,9 @@ async def run(agent: str, task: str) -> str:
     from fastapi import HTTPException
     b = current_budget()
     before = (b.input_tokens + b.output_tokens) if b else None
+    # one hop deeper for the child's whole run: its toolset keeps spawn_agent
+    # below autonomy.MAX_SPAWN_DEPTH and drops it at the cap (fork-bomb fence)
+    depth_token = runtime.spawn_depth.set(runtime.spawn_depth.get() + 1)
     try:
         result = await agents_run.run_agent_headless(agent, task)
     except HTTPException as e:
@@ -14,6 +17,8 @@ async def run(agent: str, task: str) -> str:
             return (f"error: no agent named '{agent}'. Check the agent list — "
                     "agents are created in the Agents tab.")
         return f"error: {e.detail}"
+    finally:
+        runtime.spawn_depth.reset(depth_token)
     db = await get_db()
     try:
         async with db.execute(

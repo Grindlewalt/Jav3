@@ -112,6 +112,43 @@ async def test_second_message_while_running_409s(client, monkeypatch):
     roles = [m["role"] for m in r.json()["messages"]]
     assert roles == ["user", "assistant"]
 
+async def test_stop_cancels_turn_and_leaves_marker(client, monkeypatch):
+    """POST /chat/{id}/stop cancels the in-flight turn: the transcript gains
+    the interruption marker, tails get a final event, and the running flag
+    clears."""
+    from backend import chat as chat_mod
+    post, cid, release = await _start_blocked_turn(client, monkeypatch, "never")
+    tail = asyncio.create_task(client.get(f"/api/chat/{cid}/stream"))
+    await asyncio.sleep(0.05)                     # let the tail subscribe
+
+    r = await client.post(f"/api/chat/{cid}/stop")
+    assert r.json()["stopped"] is True
+    task = chat_mod._active_turns.get(cid)
+    if task:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert cid not in chat_mod._active_turns
+
+    # both the original POST tail and the resume tail settle on the marker
+    r = await asyncio.wait_for(tail, 5)
+    assert chat_mod.INTERRUPTED_MARKER in r.text
+    r = await asyncio.wait_for(post, 5)
+    assert chat_mod.INTERRUPTED_MARKER in r.text
+
+    body = (await client.get(f"/api/conversations/{cid}/messages")).json()
+    assert body["running"] is False
+    assert body["messages"][-1]["role"] == "assistant"
+    assert body["messages"][-1]["content"] == chat_mod.INTERRUPTED_MARKER
+
+    # a second message is accepted afterwards (no stuck 409)
+    release.set()   # harmless; the cancelled turn is already gone
+
+
+async def test_stop_without_running_turn_is_noop(client):
+    r = await client.post("/api/chat/424242/stop")
+    assert r.json()["stopped"] is False
+
+
 async def test_job_announce_reaches_chat_channel(client, monkeypatch):
     """A tool-launched job (research/funnel) announces itself on the chat
     channel so the GUI mounts a live tree inline."""

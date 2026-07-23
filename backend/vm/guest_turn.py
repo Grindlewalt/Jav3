@@ -22,10 +22,35 @@ from . import broker, workspace_xfer
 
 GUEST_RUNTURN_PORT = 5556                   # must match jarvis_guest.server.PORT
 
+# One guest, one workspace dir per slug. Unpacking rmtree's that dir, so only
+# the FIRST concurrent operation on a slug may ship a fresh copy — later ones
+# join the existing one (like nested turns always have), and the LAST one out
+# sweeps the shared write buffer home. Single event loop: plain dict, but the
+# check+increment must happen with no await in between.
+_ws_holds: dict[str, int] = {}
+
+
+def acquire_workspace(slug: str) -> bool:
+    """Register a workspace user; True when this caller should push the copy."""
+    n = _ws_holds.get(slug, 0)
+    _ws_holds[slug] = n + 1
+    return n == 0
+
+
+def release_workspace(slug: str) -> bool:
+    """Drop a hold; True when this caller was the last one out."""
+    n = _ws_holds.get(slug, 1) - 1
+    if n <= 0:
+        _ws_holds.pop(slug, None)
+        return True
+    _ws_holds[slug] = n
+    return False
+
 _CONFIG_KNOBS = (
     "max_react_iterations", "subagent_max_iterations", "dead_end_force_answer",
     "dead_end_error_streak", "delegate_nudge_round", "tool_result_max_chars",
     "tool_result_keep_recent", "tool_result_evict_chars",
+    "plan_recheck_every", "web_handroll_nudge",
 )
 
 
@@ -44,12 +69,13 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
     turn's tool_broker_calls; the guest never carries it.
 
     `active_slug` is the project the guest's in-guest file tools operate on.
-    `push_workspace` ships that project's effective workspace (a fresh copy) and
-    pulls the staged edits back at turn end — set for a TOP-LEVEL turn. A NESTED
+    `push_workspace` asks for that project's workspace in the guest, with its
+    write buffer coming home at turn end — set for a TOP-LEVEL turn. A NESTED
     turn (spawn_agent/deploy_agents child) leaves it False: it reuses the copy its
-    parent already pushed into the same guest, so it must not re-push (which would
-    wipe the parent's in-flight staged edits), and its edits ride home on the
-    parent's turn-end pack.
+    parent already pushed into the same guest and its edits ride home on the
+    parent's turn-end pack. Among CONCURRENT top-level turns on one slug, only
+    the first actually ships a copy (see _ws_holds above); the last one out
+    sweeps the shared buffer.
 
     A nested turn passes an op_id already carrying the operation's Budget; a
     top-level turn's op_id is fresh, and it inherits the operation's Budget if one
@@ -64,6 +90,9 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             settings.max_op_input_tokens, settings.max_op_output_tokens))
     if envelope is not None:
         broker.register_turn(envelope)
+    holds_ws = bool(push_workspace and active_slug)
+    # first-in pushes a fresh copy; joiners reuse it (no await between check+set)
+    owns_ws = acquire_workspace(active_slug) if holds_ws else False
     spec = {
         "conversation_id": conversation_id,
         "system_prompt": system_prompt,
@@ -80,9 +109,9 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         "config": config_snapshot(),
         "active_slug": active_slug,
     }
-    if push_workspace and active_slug:
-        # push the effective workspace (canonical + Jarvis's staged edits) so the
-        # in-guest file tools work on a copy; staged edits come back after the turn.
+    if owns_ws:
+        # ship the workspace so the in-guest file tools work on a copy; the
+        # guest's write buffer comes back after the turn.
         spec["workspace_tar_b64"] = base64.b64encode(
             workspace_xfer.build_merged_tar(active_slug)).decode()
     from .lifecycle import vm as guest_vm
@@ -109,18 +138,26 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                 continue
             ev = json.loads(line)
             if ev.get("type") == "staged":
-                # the guest's staged edits, sent AFTER `final` — reconcile them
-                # host-side (host stage_write + secret scan) and don't surface it
-                # to the caller. Only a top-level turn receives this (it owns the
-                # workspace); nested edits ride home on it. The stream ends when
-                # the guest closes.
-                if push_workspace and active_slug:
-                    workspace_xfer.reconcile_staged(
+                # the guest's write buffer, sent AFTER `final` — apply it
+                # host-side (writes.apply_write: secret refusal + advisory diff
+                # gate) and don't surface it to the caller. Only the workspace
+                # owner receives this; joiner/nested edits ride the shared
+                # buffer. The stream ends when the guest closes.
+                if owns_ws:
+                    await workspace_xfer.apply_guest_writes(
                         active_slug, base64.b64decode(ev.get("tar_b64") or ""))
                 continue
             yield ev
     finally:
         s.close()
+        if holds_ws and release_workspace(active_slug) and not owns_ws:
+            # last one out of a shared workspace, and the owner's turn-end pack
+            # already happened (or never will): sweep the buffer home. Repeat
+            # applies of the same bytes are idempotent.
+            try:
+                await pull_writes(active_slug)
+            except Exception:  # noqa: BLE001 — best-effort sweep
+                pass
         guest_vm.release()
         if envelope is not None:
             broker.release_turn(op_id)
@@ -151,15 +188,17 @@ async def _guest_rpc(spec: dict) -> dict | None:
 async def prime_workspace(slug: str) -> None:
     """Push ONE fresh workspace copy for an operation whose turns will reuse it
     (orchestrator leaves fan out concurrently on one project — priming once up
-    front avoids each leaf racing a fresh unpack of the shared guest dir)."""
+    front avoids each leaf racing a fresh unpack of the shared guest dir).
+    Callers hold the slug via acquire_workspace and prime only when first in."""
     tar_b64 = base64.b64encode(workspace_xfer.build_merged_tar(slug)).decode()
     await _guest_rpc({"mode": "prime", "active_slug": slug,
                       "workspace_tar_b64": tar_b64})
 
 
-async def pull_staging(slug: str) -> None:
-    """Pull the operation's accumulated guest .staging and reconcile it host-side
-    (stage_write + secret scan) — the counterpart to prime_workspace."""
+async def pull_writes(slug: str) -> None:
+    """Pull the operation's accumulated guest write buffer and apply it host-side
+    (secret refusal + advisory diff gate) — the counterpart to prime_workspace."""
     ev = await _guest_rpc({"mode": "pull", "active_slug": slug})
     if ev and ev.get("type") == "staged":
-        workspace_xfer.reconcile_staged(slug, base64.b64decode(ev.get("tar_b64") or ""))
+        await workspace_xfer.apply_guest_writes(
+            slug, base64.b64decode(ev.get("tar_b64") or ""))

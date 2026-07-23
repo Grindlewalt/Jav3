@@ -120,7 +120,68 @@ async def _handle(loop, conn) -> None:
             pass
 
 
+def _bring_up_egress_nic() -> None:
+    """Give the tap NIC its pinned egress address. The golden image is built
+    netless (cloud-init masks networkd-wait-online; the runtime boot runs no DHCP
+    client), so enp0s1 comes up with no address and the guest can't reach the host
+    proxy/DNS at 10.201.0.1. Assign the static 10.201.0.2/24 the host already pins
+    (dnsmasq dhcp-host in vm/net/dnsmasq-egress.conf) so the proxy path works. A
+    netless guest has only lo -> no-op. Idempotent, best-effort, runs as root."""
+    import os
+    import subprocess
+    guest_ip, host_ip = "10.201.0.2", "10.201.0.1"
+    nics = [n for n in sorted(os.listdir("/sys/class/net")) if n != "lo"]
+    if not nics:
+        return
+    nic = nics[0]
+    try:
+        have = subprocess.run(["ip", "-o", "-4", "addr", "show", "dev", nic],
+                              capture_output=True, text=True).stdout
+        if guest_ip not in have:
+            subprocess.run(["ip", "addr", "flush", "dev", nic], check=False)
+            subprocess.run(["ip", "addr", "add", f"{guest_ip}/24", "dev", nic],
+                           check=False)
+        subprocess.run(["ip", "link", "set", nic, "up"], check=False)
+        subprocess.run(["ip", "route", "replace", "default", "via", host_ip,
+                        "dev", nic], check=False)
+        try:
+            with open("/etc/resolv.conf", "w") as f:
+                f.write(f"nameserver {host_ip}\n")
+        except OSError:
+            pass
+        print(f"GUEST-EGRESS-NIC: {nic} {guest_ip}/24 via {host_ip}", flush=True)
+    except Exception as e:  # noqa: BLE001 — never let NIC setup crash the boot
+        print(f"GUEST-EGRESS-NIC-ERROR: {type(e).__name__}: {e}", flush=True)
+
+
+def _detect_egress_proxy() -> None:
+    """Monitored-egress mode: the guest has a tap NIC (10.201.0.2, gateway
+    10.201.0.1 — mirrors host vm_egress_host_ip/proxy_port). Point every
+    subprocess (pip/npm/curl/git via run_code) at the host proxy. A netless guest
+    has only lo, so this stays unset and direct sockets fail closed as before."""
+    import os
+    _bring_up_egress_nic()
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("10.201.0.1", 9))     # no packet sent; resolves src addr
+            local = probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        local = ""
+    if local.startswith("10.201."):
+        proxy = "http://10.201.0.1:8443"
+        os.environ["JARVIS_EGRESS_PROXY"] = proxy
+        os.environ.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy,
+                          http_proxy=proxy, https_proxy=proxy)
+        print(f"GUEST-EGRESS-PROXY: {proxy}", flush=True)
+    else:
+        print("GUEST-EGRESS-PROXY: none (netless)", flush=True)
+
+
 async def serve() -> None:
+    _detect_egress_proxy()
     loop = asyncio.get_running_loop()
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     s.bind((socket.VMADDR_CID_ANY, PORT))

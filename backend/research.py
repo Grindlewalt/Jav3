@@ -8,7 +8,7 @@ ReAct agent (that was what burned 5M tokens re-sending a snowballing context).
                SUMMARIZES each immediately (compaction), so it carries tight
                summaries, never raw pages. Nothing snowballs; no page is read
                twice (the list was pre-deduped and assignments are disjoint).
-  3. Synthesize — the summaries become one cited document, staged for approval.
+  3. Synthesize — the summaries become one cited document written to the project.
 
 Every phase publishes bus events so the whole thing streams live on the Runs
 tab (head -> scout -> readers). Token cost is bounded and predictable.
@@ -20,14 +20,14 @@ import uuid
 from datetime import date
 from urllib.parse import urlparse
 
-from . import bus, staging, webtools
+from . import bus, webtools
 from .agent import budget as budget_mod
 from .agent.loop import _enforce_rules
-from .agent.model import complete_text, confirm_peak
+from .agent.model import complete_text
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import standing_rules_tail
-from .staging import stage_write
+from .writes import apply_write
 
 MAX_QUERIES = 8
 RESULTS_PER_QUERY = 6
@@ -46,16 +46,11 @@ def _dom(u: str) -> str:
         return u
 
 
-def _write_doc(project: str, doc_path: str, doc: str) -> str:
-    """Write the FINAL research document: stage it, and when the operator has
-    auto-approve on (the default) promote it straight to canonical. Node
-    scratch files under runs/ stay staged either way — only the synthesized
-    doc is trusted enough to skip the queue. Returns 'canonical'|'staged'."""
-    stage_write(project, doc_path, doc.encode())
-    if settings.research_auto_approve:
-        staging.approve(project, [doc_path])
-        return "canonical"
-    return "staged"
+async def _write_doc(project: str, doc_path: str, doc: str) -> str:
+    """Write the FINAL research document straight to the project (the staging
+    queue is gone; writes are live and advisory-scanned in apply_write)."""
+    await apply_write(project, doc_path, doc.encode())
+    return "canonical"
 
 
 async def _node(project, parent, job_id, kind, title) -> int:
@@ -176,7 +171,7 @@ async def _reader(project, parent, job_id, group, topic, session) -> str:
                 ("\n\n".join(summaries) if summaries else "(no usable sources)"))
     bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "summarizing"})
     await _save_rollup(cid, findings[:3000])
-    stage_write(project, f"runs/{job_id}/{cid}-reader.md", findings.encode())
+    await apply_write(project, f"runs/{job_id}/{cid}-reader.md", findings.encode())
     bus.publish(job_id, {"type": "node_done", "node_id": cid, "rollup": findings[:3000]})
     return findings
 
@@ -205,6 +200,7 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
     doc_path = f"research/{_slugify(topic)}.md"
 
     optok = None
+    head = None
     b = budget_mod.current()
     if b is None:
         b = budget_mod.Budget(settings.max_op_input_tokens, settings.max_op_output_tokens)
@@ -212,7 +208,6 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         optok = budget_mod.active_op_id.set(job_id)
     try:
         head = await _node(project, None, job_id, "head", f"Research: {topic}")
-        confirm_peak(head)
         bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": head})
         bus.announce_job(job_id, head, f"Research: {topic}")
         bus.publish(job_id, {"type": "node_spawned", "node_id": head, "parent_id": None,
@@ -220,7 +215,6 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
 
         # phase 1: scout
         scout = await _node(project, head, job_id, "scout", "search & filter")
-        confirm_peak(scout)
         bus.publish(job_id, {"type": "node_spawned", "node_id": scout, "parent_id": head,
                              "kind": "scout", "title": "search & filter", "depth": 1})
         bus.publish(job_id, {"type": "node_status", "node_id": scout, "status": "running"})
@@ -234,7 +228,7 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         scout_rollup = (f"Ran {len(queries)} searches, found {len(results)} unique "
                         f"sources, kept {kept} across {len(groups)} reading groups.")
         await _save_rollup(scout, scout_rollup)
-        stage_write(project, f"runs/{job_id}/{scout}-scout.md", scout_rollup.encode())
+        await apply_write(project, f"runs/{job_id}/{scout}-scout.md", scout_rollup.encode())
         bus.publish(job_id, {"type": "node_done", "node_id": scout, "rollup": scout_rollup})
 
         if not groups:
@@ -242,33 +236,51 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
             doc = (f"# Research: {topic}\n\nThe search backend returned no usable "
                    "sources for this topic (it may have been momentarily "
                    "unavailable). Please try again.")
-            doc_status = _write_doc(project, doc_path, doc)
+            doc_status = await _write_doc(project, doc_path, doc)
             note = "no sources retrieved — search returned nothing"
             await _save_rollup(head, note)
             bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
                                  "doc_path": doc_path, "rollup": note, "usage": b.summary()})
-            bus.close_job(job_id)
             return {"topic": topic, "job_id": job_id, "root_id": head,
                     "doc_path": doc_path, "doc_status": doc_status}
 
-        # phase 2: readers in parallel (session = job_id so reads are fresh per run)
-        findings = await asyncio.gather(
-            *[_reader(project, head, job_id, g, topic, job_id) for g in groups])
+        # phase 2: readers in parallel (session = job_id so reads are fresh per
+        # run). One crashed reader must not sink the job — drop it and synthesize
+        # from the survivors.
+        results = await asyncio.gather(
+            *[_reader(project, head, job_id, g, topic, job_id) for g in groups],
+            return_exceptions=True)
+        findings = [f for f in results if isinstance(f, str)]
+        if not findings:
+            raise RuntimeError("every reader subagent failed")
 
         # phase 3: synthesize
-        doc = await _synthesize(topic, [f for f in findings if f])
-        doc_status = _write_doc(project, doc_path, doc)
+        doc = await _synthesize(topic, findings)
+        doc_status = await _write_doc(project, doc_path, doc)
         head_rollup = f"Researched '{topic}' via {len(groups)} reader groups. {b.summary()}"
         await _save_rollup(head, head_rollup)
-        stage_write(project, f"runs/{job_id}/{head}-head.md", head_rollup.encode())
+        await apply_write(project, f"runs/{job_id}/{head}-head.md", head_rollup.encode())
 
         bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
                              "doc_path": doc_path, "rollup": head_rollup,
                              "usage": b.summary()})
-        bus.close_job(job_id)
         return {"topic": topic, "job_id": job_id, "root_id": head,
                 "doc_path": doc_path, "doc_status": doc_status}
+    except Exception as e:
+        # without a terminal event every SSE tail on this job hangs forever and
+        # the Runs list shows it "running" until restart — fail LOUDLY
+        note = f"error: {type(e).__name__}: {e}"
+        try:
+            if head is not None:
+                await _save_rollup(head, note)
+        except Exception:  # noqa: BLE001 — the rollup is best-effort here
+            pass
+        bus.publish(job_id, {"type": "error", "node_id": head, "message": str(e)})
+        bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
+                             "doc_path": None, "rollup": note, "usage": b.summary()})
+        raise
     finally:
+        bus.close_job(job_id)
         if optok is not None:
             budget_mod.active_op_id.reset(optok)
             budget_mod.release(job_id)

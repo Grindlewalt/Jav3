@@ -18,9 +18,32 @@ from .config import settings
 router = APIRouter(prefix="/api/agents", tags=["agents"],
                    dependencies=[Depends(require_user)])
 
-DEFAULT_PROMPT = """You are {name}, a focused agent working for the operator.
-Stay on brief, report back concisely, and say so when something is outside
-your scope.
+# CO-STAR-shaped default: an agent prompt has no per-turn size cap (unlike
+# tool specs), so explicit structure is cheap and measurably steadies flash.
+# The GUI generator (GENERATE_SYSTEM) fills the same skeleton.
+DEFAULT_PROMPT = """# Context
+You are {name}, an agent working for the operator inside Jarvis. You run
+headless when spawned: there are no follow-up questions, so decide and act
+on the brief you were given.
+
+# Objective
+(What this agent is for, its exact scope, and what "done" looks like.
+Edit me.)
+
+# Style
+Work in the smallest number of tool calls that does the job. When something
+is outside your scope or cannot be determined, say so instead of guessing.
+
+# Tone
+Direct and factual. No filler, no hedging.
+
+# Audience
+The operator, or a head agent that will synthesize your report with others —
+assume your reply is read once, fast.
+
+# Response
+Report back concisely: lead with the outcome, then only the details that
+change what the reader does next.
 """
 
 FIELD_DEFAULTS = {
@@ -53,9 +76,22 @@ mutually distinct, 2-4 per question."""
 
 GENERATE_SYSTEM = """You write system prompts for task agents. Given the \
 agent's description and the operator's answers to clarifying questions, write \
-a complete system prompt (150-300 words): who the agent is, its exact scope, \
-how it should work, output format, and what it must NOT do. Direct second \
-person ("You are..."). Output only the prompt text, no preamble or fences."""
+a complete system prompt (150-300 words) in direct second person ("You \
+are..."), structured with EXACTLY these markdown headings, in this order:
+
+# Context — who the agent is and where it runs (headless, no follow-up \
+questions, acts on the brief it is given)
+# Objective — its exact scope, what "done" looks like, and what it must \
+NOT do
+# Style — how it works: method, sources/tools to prefer, how to handle \
+failure or out-of-scope requests
+# Tone — the voice of its output
+# Audience — who reads the result and what they need from it
+# Response — the exact output format: sections, length cap, what to \
+include when something could not be determined
+
+Fill every section with content specific to THIS agent — no placeholder \
+text. Output only the prompt text, no preamble or fences."""
 
 
 class QuizRequest(BaseModel):
