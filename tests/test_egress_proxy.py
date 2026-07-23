@@ -28,6 +28,16 @@ def test_parse_garbage():
     assert ep.parse_target(b"not an http request\r\n\r\n") is None
 
 
+def test_request_path_preserves_query():
+    head = b"GET /w?q=x&appid={{secret:K}} HTTP/1.1\r\nHost: h\r\n\r\n"
+    assert ep._request_path(head) == "/w?q=x&appid={{secret:K}}"
+
+
+def test_request_path_absolute_form_keeps_query():
+    head = b"GET http://h/data?q=1 HTTP/1.1\r\n\r\n"
+    assert ep._request_path(head) == "/data?q=1"
+
+
 @pytest.fixture
 async def db(tmp_env):
     await db_mod.init_db()
@@ -75,6 +85,17 @@ async def test_fail_closed_without_project(db):
         out, refused = await ep.inject_secrets(db, slug, "api.github.com", text)
         assert "realsecretvalue1" not in out       # value never leaks
         assert refused == ["GRANTED_KEY"]
+
+
+async def test_query_string_secret_injects_into_forwarded_path(db):
+    """The weather-API shape: the key rides the URL query string. The forwarded
+    URL is rebuilt from the request line, so injection must hit the path too —
+    this was silently forwarding the literal placeholder to the origin."""
+    await egress.grant_secret(db, "proj", "GRANTED_KEY")
+    head = b"GET /data?q=Seattle&appid={{secret:GRANTED_KEY}} HTTP/1.1\r\nHost: x\r\n\r\n"
+    path = ep._request_path(head)
+    sent, refused = await ep.inject_secrets(db, "proj", "api.github.com", path)
+    assert sent == "/data?q=Seattle&appid=realsecretvalue1" and refused == []
 
 
 async def test_host_binding_enforced(db):

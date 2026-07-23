@@ -98,6 +98,17 @@ async def inject_secrets(db, slug: str | None, host: str, text: str) -> tuple[st
     return "".join(out), sorted(set(refused))
 
 
+def _request_path(head: bytes) -> str:
+    """Origin-form path (query preserved) from a request line. Absolute-form
+    targets (explicit proxy clients) are reduced to path?query too."""
+    line = _REQ_LINE.match(head)
+    path = line.group(2).decode()
+    if "://" in path:
+        u = urlsplit(path)
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+    return path
+
+
 async def _record(host, method, path, bo, bi, verdict, reason):
     ctx = egress.current_context()
     db = await get_db()
@@ -221,14 +232,16 @@ async def _handle_http(method, host, port, head, cr, cw):
     try:
         raw = (head + body).decode("latin-1")
         injected, _refused = await inject_secrets(db, ctx["project"], host, raw)
+        # the forwarded URL is rebuilt from the request line, NOT from
+        # `injected` — inject into the path separately or a query-string key
+        # (the common ?api_key=... shape) forwards as the literal placeholder.
+        # `path` (placeholder intact) is what gets logged; only `send_path`
+        # carries the real value, and only onto the wire.
+        path = _request_path(head)
+        send_path, _ = await inject_secrets(db, ctx["project"], host, path)
     finally:
         await db.close()
-    # split head/body back apart, rebuild target URL
-    line = _REQ_LINE.match(head)
-    path = line.group(2).decode()
-    if "://" in path:
-        path = urlsplit(path).path or "/"
-    url = f"http://{host}:{port}{path}"
+    url = f"http://{host}:{port}{send_path}"
     hdr_block = injected.split("\r\n\r\n", 1)[0]
     # hop-by-hop + length/host headers are recomputed by httpx from the (possibly
     # injection-resized) body and target URL; forwarding the stale originals would
