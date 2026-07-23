@@ -23,9 +23,11 @@ async def client(tmp_env):
                 "INSERT INTO tool_calls (conversation_id, tool, args, result) VALUES (1, 'web_read', ?, ?)",
                 ("{}", "x" * 6000))
         await db.execute("INSERT INTO messages (conversation_id, role, content) VALUES (1, 'assistant', 'done')")
+        # the stats read the model_calls ledger (covers every execution path,
+        # not just chat turns — usage_log only ever saw those)
         await db.execute(
-            "INSERT INTO usage_log (conversation_id, input_tokens, output_tokens, cache_hit, cache_miss) "
-            "VALUES (1, 1200000, 45000, 900000, 300000)")
+            "INSERT INTO model_calls (conversation_id, model, input_tokens, output_tokens, cache_hit, cache_miss) "
+            "VALUES (1, 'deepseek-v4-flash', 1200000, 45000, 900000, 300000)")
         await db.commit()
     finally:
         await db.close()

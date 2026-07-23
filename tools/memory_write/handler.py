@@ -1,5 +1,6 @@
 import re
 
+from backend import secrets as secrets_mod
 from backend.memory import notes_dir, parse_note
 from backend.runtime import write_taint
 
@@ -34,6 +35,14 @@ async def run(name: str, content: str, mode: str = "append",
     notes = notes_dir()
     notes.mkdir(parents=True, exist_ok=True)
     path = notes / f"{_safe_name(name)}.md"
+    # same hard line as writes.apply_write: a real secret VALUE never lands in
+    # an agent-reachable file — memory notes are read back verbatim by
+    # memory_read and would otherwise be an unscanned side door
+    leaks = secrets_mod.find_in_bytes(content.encode())
+    if leaks:
+        return ("error: refused — the content contains the literal value of "
+                f"an operator secret ({', '.join(leaks)}). Use the "
+                "{{secret:NAME}} placeholder form instead.")
     if mode == "delete":
         if not path.exists():
             return (f"error: no note named '{name}' to delete — "

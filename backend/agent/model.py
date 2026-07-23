@@ -240,6 +240,8 @@ class ModelClient:
         tool_calls: dict[int, dict] = {}
         usage: dict | None = None
         dsml = False   # once the native tool-call markup starts, stop streaming it
+        tail = ""      # rolling window for mark detection across chunk splits —
+                       # re-joining content_parts per delta was O(n²) per response
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
             async with client.stream(
@@ -267,8 +269,11 @@ class ModelClient:
                     delta = choices[0].get("delta", {})
                     if delta.get("content"):
                         content_parts.append(delta["content"])
-                        if not dsml and _DSML_MARK in "".join(content_parts):
-                            dsml = True   # it's a tool call in disguise, not prose
+                        if not dsml:
+                            probe = tail + delta["content"]
+                            if _DSML_MARK in probe:
+                                dsml = True   # a tool call in disguise, not prose
+                            tail = probe[-(len(_DSML_MARK) - 1):]
                         if not dsml:
                             yield {"type": "token", "text": delta["content"]}
                     for tc in delta.get("tool_calls") or []:

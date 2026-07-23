@@ -10,7 +10,7 @@ so the nav can show a badge. Each source is wrapped so one failing store does no
 blank the whole panel."""
 from fastapi import APIRouter, Depends
 
-from . import egress, gitgate, security
+from . import security
 from .auth import require_user
 from .db import get_db
 from .projects import list_projects
@@ -20,17 +20,23 @@ router = APIRouter(prefix="/api/notifications", tags=["notifications"],
 
 
 async def _git_pending(slugs: list[str]) -> list[dict]:
-    out = []
-    for s in slugs:
+    """One query on one connection — the old per-project gitgate.list_requests
+    loop opened N sqlite connections per 15s bell poll, per open tab."""
+    try:
+        db = await get_db()
         try:
-            for r in await gitgate.list_requests(s):
-                if r.get("status") == "pending":
-                    out.append({"project": s, "id": r["id"],
-                                "message": r.get("message", ""),
-                                "created_at": r.get("created_at")})
-        except Exception:                       # noqa: BLE001 (one project's failure is not fatal)
-            continue
-    return out
+            async with db.execute(
+                "SELECT id, project_slug, message, created_at FROM git_requests "
+                "WHERE status = 'pending' ORDER BY id DESC") as cur:
+                rows = await cur.fetchall()
+        finally:
+            await db.close()
+        keep = set(slugs)
+        return [{"project": r["project_slug"], "id": r["id"],
+                 "message": r["message"], "created_at": r["created_at"]}
+                for r in rows if r["project_slug"] in keep]
+    except Exception:                           # noqa: BLE001
+        return []
 
 
 async def _schedules_pending() -> list[dict]:
@@ -57,7 +63,10 @@ async def _security_pending() -> dict:
         db = await get_db()
         try:
             out["alerts"] = await security.count_unacknowledged(db)
-            out["egress_pending"] = len(await egress.list_pending(db))
+            async with db.execute(
+                "SELECT COUNT(*) AS n FROM egress_pending "
+                "WHERE status = 'pending'") as cur:
+                out["egress_pending"] = (await cur.fetchone())["n"]
         finally:
             await db.close()
     except Exception:                           # noqa: BLE001

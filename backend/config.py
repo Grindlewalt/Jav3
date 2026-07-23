@@ -156,10 +156,6 @@ class Settings(BaseSettings):
     # current without relying on the model remembering.
     auto_journal: bool = True
 
-    # Auto-approve the FINAL research document (research/<topic>.md) so it goes
-    # straight to canonical instead of waiting in the approval queue. Node
-    # scratch files under runs/ stay staged regardless.
-
     # Archive upload caps (POST /upload_archive extraction)
     upload_max_uncompressed_mb: int = 200
     upload_max_files: int = 5000
@@ -227,18 +223,15 @@ class Settings(BaseSettings):
     # through the host resolver (backend/vm/egress_proxy.py + vm/net_up.sh). The
     # guest still holds no key — secrets are injected at the proxy, on the wire.
     vm_egress: bool = False
-    vm_egress_bridge: str = "jvbr0"
     vm_egress_tap: str = "jvtap0"
     vm_egress_host_ip: str = "10.201.0.1"     # host side of the point-to-point
-    vm_egress_guest_ip: str = "10.201.0.2"    # the guest's only address
     vm_egress_proxy_port: int = 8443          # host TLS-terminating forward proxy
-    vm_egress_dns_port: int = 5353            # host dnsmasq the guest is forced onto
     vm_egress_pcap: bool = True               # tcpdump ring buffer on the tap
-    # LAN the guest may NEVER reach (RFC1918 + link-local). The operator's own
-    # servers sit inside these ranges; listing the ranges keeps a compromised
-    # guest from pivoting onto main/git/test regardless of their exact IPs.
-    vm_egress_lan_denied: list[str] = ["10.0.0.0/8", "172.16.0.0/12",
-                                       "192.168.0.0/16", "169.254.0.0/16"]
+    # NOTE: the guest IP (10.201.0.2), DNS port, and the RFC1918 LAN-denied
+    # ranges are FIXED constants baked into vm/net/jarvis-egress.nft,
+    # vm/net/dnsmasq-egress.conf and guest/backend/server.py — they are not
+    # configurable here (a settings knob nothing reads would silently drift
+    # from what nftables actually enforces).
     # A brand-new project inherits this shared "general" allowlist (deny-by-
     # default vs the open internet), which trains up as new hosts are approved.
     # Seeded with the developer toolchain so pip/npm/git work on day one;

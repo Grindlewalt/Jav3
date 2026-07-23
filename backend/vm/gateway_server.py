@@ -124,7 +124,15 @@ class VsockGateway:
     async def _serve(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
-            conn, _ = await loop.sock_accept(self._sock)
+            try:
+                conn, _ = await loop.sock_accept(self._sock)
+            except asyncio.CancelledError:
+                raise
+            except OSError:
+                # a transient accept failure must not end the listener for the
+                # app's whole life — that would silently disable the guest
+                await asyncio.sleep(0.5)
+                continue
             conn.setblocking(False)
             self.connections += 1
             asyncio.create_task(handle_conn(loop, conn))

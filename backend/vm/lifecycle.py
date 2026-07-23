@@ -294,10 +294,6 @@ class GuestVM:
                 s.close()
         raise VMError("guest run-turn server did not become ready in time")
 
-    async def ensure_ready(self) -> None:
-        async with self._lock:
-            await self._ensure_ready_locked()
-
     def _isolation(self) -> dict:
         text = _console_log().read_text(errors="replace") if _console_log().exists() else ""
         ifaces = _IFACES_RE.search(text)

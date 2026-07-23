@@ -61,8 +61,10 @@ async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
 
     leaks = secrets_mod.find_in_bytes(content)
     if leaks:
+        # 'critical' is the schema's top severity (db.py: info|warn|critical);
+        # the old 'alert' wasn't in the Review Center's map and styled as info
         await _raise_flag(slug, rel, "secret_leak", {"secrets": leaks},
-                          severity="alert", refused=True)
+                          severity="critical", refused=True)
         raise SecretLeakError(leaks)
 
     old_text = ""

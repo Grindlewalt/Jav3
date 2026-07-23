@@ -319,7 +319,7 @@ export default function Logs() {
                 <Tile label="tool calls" value={stats.tool_calls || 0}
                       bad={(stats.tool_calls || 0) > HEAVY_CALLS} />
                 <Tile label="result bytes" value={human(stats.result_bytes)} />
-                <Tile label="turns" value={stats.turns || 0} />
+                <Tile label="model calls" value={stats.turns || 0} />
                 <Tile label="cache hit" value={cachePct == null ? '—' : `${cachePct}%`}
                       sub={cacheTotal ? `${stats.cache_hit}/${cacheTotal}` : null} />
                 {calls.length > 0 && <Tile label="cost" value={usd(totalCost)}

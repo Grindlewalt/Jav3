@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     project_id INTEGER REFERENCES projects(id),
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     summary TEXT,
-    fidelity_tier INTEGER NOT NULL DEFAULT 0,
     -- run-tree (M7): a conversation is a node in an agent job. NULL parent +
     -- kind 'chat' is an ordinary chat; head/leader/subagent are job nodes.
     parent_conversation_id INTEGER REFERENCES conversations(id),
@@ -47,21 +46,14 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     result TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE TABLE IF NOT EXISTS runs (
-    id INTEGER PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES projects(id),
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
 CREATE TABLE IF NOT EXISTS session_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
 CREATE TABLE IF NOT EXISTS fetched_urls (
     id INTEGER PRIMARY KEY,
-    session TEXT NOT NULL,           -- research scope (project slug, or 'global')
+    session TEXT NOT NULL,           -- operation scope (web_session), 'global' fallback
     url TEXT NOT NULL,
-    title TEXT,
     fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(session, url)
 );
@@ -162,19 +154,6 @@ CREATE TABLE IF NOT EXISTS project_secret_grants (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(project_slug, secret_name)
 );
--- Deterministic diff-gate trips on staged writes. A flagged (path,trigger)
--- blocks approval of that staged file until the operator acknowledges it.
-CREATE TABLE IF NOT EXISTS gate_flags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_slug TEXT NOT NULL,
-    path TEXT NOT NULL,
-    trigger TEXT NOT NULL,               -- new_import | network_call | high_entropy | secret_leak | logging_removed | assertion_removed
-    detail TEXT,
-    acknowledged INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    acknowledged_at TEXT,
-    UNIQUE(project_slug, path, trigger)
-);
 -- Transient security alerts (anomaly, host cut, gate flag, secret leak, stale
 -- image). Persisted + ack-able, unlike the poll-derived notifications aggregate.
 CREATE TABLE IF NOT EXISTS security_events (
@@ -256,8 +235,6 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_egress_events_host ON egress_events(host, created_at)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_egress_pending_status ON egress_pending(status)")
-        await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_gate_flags_ack ON gate_flags(project_slug, acknowledged)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_security_events_ack ON security_events(acknowledged, created_at)")
         await db.commit()

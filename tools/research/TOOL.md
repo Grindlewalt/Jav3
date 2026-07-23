@@ -12,7 +12,7 @@ parameters:
       description: The topic or question to research.
     angles:
       type: integer
-      description: How many angles to split it into (2-6, default 4).
+      description: How many angles to split it into (2-4, default 4).
   required: [topic]
 ---
 This runs several subagents and many web fetches, so it takes a while and is

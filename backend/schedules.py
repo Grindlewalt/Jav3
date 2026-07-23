@@ -17,7 +17,6 @@ from .vm.turn import run_agent_turn
 from .agent.model import confirm_peak
 from .agents_run import run_agent_headless
 from .auth import require_user
-from .config import settings
 from .db import get_db, open_conversation
 from .memory import assemble_system_prompt
 

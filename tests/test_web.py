@@ -2,7 +2,7 @@
 import pytest
 
 from backend.agent.tools import registry
-from backend.db import get_db, init_db
+from backend.db import init_db
 from backend.websec import UnsafeURL, html_to_text, is_safe_url
 from backend import webtools
 
@@ -36,9 +36,9 @@ def test_html_to_text_strips_active_content():
 async def test_fetch_ledger_roundtrip(tmp_env):
     await init_db()
     assert await webtools.fetched_set("proj") == set()
-    await webtools.record("proj", "https://a.com", "A")
-    await webtools.record("proj", "https://a.com", "A")   # idempotent
-    await webtools.record("other", "https://b.com", "B")
+    assert await webtools.claim("proj", "https://a.com") is True
+    assert await webtools.claim("proj", "https://a.com") is False   # idempotent
+    assert await webtools.claim("other", "https://b.com") is True
     assert await webtools.fetched_set("proj") == {"https://a.com"}
     assert await webtools.fetched_set("other") == {"https://b.com"}
 

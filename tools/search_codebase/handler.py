@@ -24,10 +24,6 @@ async def run(query: str, subdir: str | None = None, regex: bool = False) -> str
         by_file.setdefault(h["path"], []).append(h)
 
     out: list[str] = []
-    stale = index_stale(slug)
-    if stale:
-        out.append(f"note: the codebase index is stale ({stale} files changed "
-                   "since it was built) — re-run crawl_codebase if the overview matters")
     for path, hs in sorted(by_file.items(), key=lambda kv: -len(kv[1])):
         out.append(f"{path} ({len(hs)} match{'es' if len(hs) > 1 else ''})")
         # merge hits + context into one line map; a line that is both context
@@ -45,4 +41,11 @@ async def run(query: str, subdir: str | None = None, regex: bool = False) -> str
             out.append(f"  {no}{':' if is_match else '-'} {ln}")
     if truncated:
         out.append(f"(showing first {CAP} matches — narrow the query)")
+    # appended LAST: a result STARTING with "note:" reads as a failure to the
+    # loop's dead-end heuristic and a permanently-stale index would rack up a
+    # bogus error streak on every successful search
+    stale = index_stale(slug)
+    if stale:
+        out.append(f"(the codebase index is stale — {stale} files changed since "
+                   "it was built; re-run crawl_codebase if the overview matters)")
     return "\n".join(out)

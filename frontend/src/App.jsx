@@ -18,20 +18,17 @@ import Review from './pages/Review.jsx'
 
 function NotificationBell() {
   const [data, setData] = useState(null)
-  const [secCount, setSecCount] = useState(0)
   const [open, setOpen] = useState(false)
   useEffect(() => {
-    const load = () => {
-      api('/api/notifications').then(setData).catch(() => {})
-      // unacknowledged security alerts fold into the same badge
-      api('/api/security/events?unacknowledged=true')
-        .then((r) => setSecCount((r.events || []).length)).catch(() => {})
-    }
+    const load = () => api('/api/notifications').then(setData).catch(() => {})
     load()
     const t = setInterval(load, 15000)
     return () => clearInterval(t)
   }, [])
-  const count = (data?.count || 0) + secCount
+  // the backend count already folds in security alerts + egress approvals
+  const count = data?.count || 0
+  const secCount = data?.alerts || 0
+  const egressCount = data?.egress_pending || 0
   const close = () => setOpen(false)
   return (
     <div className="notif-wrap">
@@ -45,6 +42,11 @@ function NotificationBell() {
           {secCount > 0 && (
             <NavLink to="/review" className="notif-item" onClick={close}>
               <span className="grow ellipsis">⚠ {secCount} security alert{secCount === 1 ? '' : 's'} — review</span>
+            </NavLink>
+          )}
+          {egressCount > 0 && (
+            <NavLink to="/network" className="notif-item" onClick={close}>
+              <span className="grow ellipsis">🌐 {egressCount} host approval{egressCount === 1 ? '' : 's'} waiting — network</span>
             </NavLink>
           )}
           {(data?.git || []).map((g) => (

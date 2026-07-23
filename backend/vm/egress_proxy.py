@@ -79,6 +79,11 @@ async def inject_secrets(db, slug: str | None, host: str, text: str) -> tuple[st
             return False
         if not await egress.may_use_secret(db, slug, name):
             return False
+        # UNBOUND granted keys inject to the project's allowed hosts by design:
+        # the grant is the operator's explicit authorization (bind hosts to
+        # restrict further) — pinned by test_adversarial_egress_proxy. Note this
+        # deliberately diverges from the WEB path, where substitute_url refuses
+        # unbound secrets outright.
         bound = secrets_mod.hosts_for(name)  # respect an explicit host binding, if any
         if bound and not secrets_mod._host_allowed(host, bound):
             return False
@@ -165,7 +170,10 @@ async def _authorize(host: str) -> tuple[str, str]:
     # any host that resolves to a non-public address, matching webtools' guard.
     if verdict == "allow":
         try:
-            websec.is_safe_url(f"http://{host}")
+            # worker thread: the guard's getaddrinfo is blocking DNS and this
+            # runs per proxied request on the shared event loop
+            await asyncio.get_running_loop().run_in_executor(
+                None, websec.is_safe_url, f"http://{host}")
         except websec.UnsafeURL as e:
             return "deny", f"blocked non-public target: {e}"
     return verdict, reason
@@ -264,9 +272,14 @@ async def _handle_http(method, host, port, head, cr, cw):
             bi = len(r.content)
             out = (f"HTTP/1.1 {r.status_code} {r.reason_phrase}\r\n").encode()
             for k, v in r.headers.items():
-                if k.lower() in ("transfer-encoding", "connection"):
+                # content-length is recomputed below: a chunked origin response
+                # has none, and forwarding a de-chunked body with no framing
+                # leaves the guest client hanging until its timeout
+                if k.lower() in ("transfer-encoding", "connection", "content-length"):
                     continue
                 out += f"{k}: {v}\r\n".encode()
+            out += (f"Content-Length: {len(r.content)}\r\n"
+                    "Connection: close\r\n").encode()
             out += b"\r\n" + r.content
             cw.write(out); await cw.drain()
     except (httpx.HTTPError, OSError) as e:

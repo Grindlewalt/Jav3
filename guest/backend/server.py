@@ -125,7 +125,7 @@ def _bring_up_egress_nic() -> None:
     netless (cloud-init masks networkd-wait-online; the runtime boot runs no DHCP
     client), so enp0s1 comes up with no address and the guest can't reach the host
     proxy/DNS at 10.201.0.1. Assign the static 10.201.0.2/24 the host already pins
-    (dnsmasq dhcp-host + config.vm_egress_guest_ip) so the proxy path works. A
+    (dnsmasq dhcp-host in vm/net/dnsmasq-egress.conf) so the proxy path works. A
     netless guest has only lo -> no-op. Idempotent, best-effort, runs as root."""
     import os
     import subprocess

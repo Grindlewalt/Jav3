@@ -281,7 +281,6 @@ def secrets_index() -> str:
         return ""
     lines = []
     for n in names:
-        from . import secrets as secrets_mod
         hosts = secrets_mod.hosts_for(n)
         lines.append(f"- {n}" + (f" (web: {', '.join(hosts)})" if hosts else
                                  " (no web hosts bound — unusable)"))

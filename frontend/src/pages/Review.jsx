@@ -191,7 +191,8 @@ function AlertRow({ a, onAck }) {
           <span className="dim small">{ts(a.created_at)}</span>
         </div>
         <div className="rev-alert-summary">{a.summary}</div>
-        {open && a.detail && <pre className="log-pre rev-alert-detail">{a.detail}</pre>}
+        {open && a.detail && <pre className="log-pre rev-alert-detail">{
+          typeof a.detail === 'string' ? a.detail : JSON.stringify(a.detail, null, 2)}</pre>}
       </div>
       <div className="sbx-right">
         {a.detail && <button className="ghost" onClick={() => setOpen((o) => !o)}>

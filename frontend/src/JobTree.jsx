@@ -37,7 +37,9 @@ export default function JobTree({ cid, onFinal }) {
       if (ev.type === 'error') up(ev.node_id, { status: 'error', tool: ev.message })
       if (ev.type === 'job_final') { setLive(false); es.close(); onFinal?.() }
     }
-    es.onerror = () => { setLive(false); es.close() }
+    // transient blips auto-reconnect (the browser retries while CONNECTING);
+    // only a dead socket ends the live view
+    es.onerror = () => { if (es.readyState === EventSource.CLOSED) setLive(false) }
     return () => es.close()
   }, [cid]) // eslint-disable-line
 

@@ -154,7 +154,9 @@ export function NetworkPanel({ slug }) {
     let live = true
     api('/api/egress/events?limit=200').then((r) => {
       const evs = (Array.isArray(r) ? r : r.events) || []
-      if (live) setFeed(evs.filter((e) => e.project === slug)
+      // REST rows carry project_slug; the live stream carries project
+      if (live) setFeed(evs.map((e) => ({ ...e, project: e.project ?? e.project_slug }))
+        .filter((e) => e.project === slug)
         .map((e) => ({ ...e, _k: ++keyRef.current })))
     }).catch(() => {})
     const stop = subscribeSse('/api/egress/stream', (ev) => {
@@ -229,7 +231,9 @@ export default function Network() {
     let live = true
     api('/api/egress/events?limit=200').then((r) => {
       const evs = (Array.isArray(r) ? r : r.events) || []
-      if (live) setFeed(evs.map((e) => ({ ...e, _k: ++keyRef.current })))
+      // REST rows carry project_slug; the live stream carries project
+      if (live) setFeed(evs.map((e) => (
+        { ...e, project: e.project ?? e.project_slug, _k: ++keyRef.current })))
     }).catch(() => {})
     const stop = subscribeSse('/api/egress/stream', (ev) => {
       if (ev.type !== 'egress') return

@@ -993,7 +993,8 @@ function ResearchPanel({ slug, state, setState }) {
     if (!topic.trim() || busy) return
     setBusy(true); setNodes({}); setOrder([]); setOpen({}); setDoc(null)
     try {
-      await chatStream({ topic, angles: Number(angles) || 4, confirm_peak: confirmPeak }, (ev) => {
+      await chatStream({ topic, angles: Number(angles) || 4, confirm_peak: confirmPeak,
+                         project: slug }, (ev) => {
         if (ev.type === 'node_spawned') {
           upNode(ev.node_id, { id: ev.node_id, parent: ev.parent_id, kind: ev.kind,
                                title: ev.title, depth: ev.depth, status: 'planning' })

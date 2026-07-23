@@ -106,6 +106,16 @@ async def convert_artifact(slug: str, body: Convert):
         await refresh_all_projects(db)
     finally:
         await db.close()
+    # artifact stores are minted repo-less; a real project needs the baseline
+    # commit (git is the review/undo surface for live writes) — same block as
+    # create_project, same best-effort stance
+    try:
+        from . import gitgate
+        await gitgate.ensure_repo(slug)
+        await gitgate.run_git(slug, "add", "-A")
+        await gitgate.run_git(slug, "commit", "-q", "-m", "project created")
+    except Exception:  # noqa: BLE001 — a git hiccup must not block the convert
+        pass
     return {"ok": True, "slug": slug, "name": body.name.strip()}
 
 
@@ -150,5 +160,7 @@ async def delete_artifact(slug: str):
         await db.commit()
     finally:
         await db.close()
-    shutil.rmtree(settings.projects_dir / slug, ignore_errors=True)
+    import asyncio
+    await asyncio.get_running_loop().run_in_executor(
+        None, lambda: shutil.rmtree(settings.projects_dir / slug, ignore_errors=True))
     return {"ok": True}

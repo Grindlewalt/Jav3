@@ -263,8 +263,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     cidtoken = runtime.conversation_id.set(conversation_id)
     atoken = None
     ptoken = None
-    db = await get_db()
+    db = None
     try:
+        # inside the try: if the connect fails, the finally must still evict
+        # _active_turns and close the bus channel or the conversation bricks
+        # (every later POST 409s turn_in_progress) and its SSE tails hang
+        db = await get_db()
         bus.publish(chan, {"type": "start", "conversation_id": conversation_id})
         # the conversation's OWN project binding wins; unassigned chats follow
         # the GUI's global active project. Pinning here (not the global) is what
@@ -383,14 +387,14 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     except Exception as exc:  # surfaced to any tail rather than lost
         bus.publish(chan, {"type": "error", "message": str(exc)})
     finally:
-        if ephemeral:
+        if db is not None and ephemeral:
             # incognito: leave zero trace — drop the convo and any temp notes
             for tbl in ("tool_calls", "messages", "conversations"):
                 col = "id" if tbl == "conversations" else "conversation_id"
                 await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
             await db.commit()
             shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
-        else:
+        elif db is not None:
             try:
                 await db.execute(
                     "INSERT INTO usage_log (conversation_id, input_tokens, "
@@ -411,7 +415,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         runtime.ephemeral.reset(token)
         budget.active_op_id.reset(optoken)
         budget.release(op_id)
-        await db.close()
+        if db is not None:
+            await db.close()
         # order matters for the reconnect race: drop the running flag, THEN
         # signal end — a subscriber that still sees the flag is guaranteed
         # the job_end is ahead of it in the queue (both happen in this tick)

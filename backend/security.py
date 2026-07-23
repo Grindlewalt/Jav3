@@ -24,9 +24,11 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
         "VALUES (?,?,?,?,?)",
         (kind, severity, project, summary, json.dumps(detail) if detail is not None else None))
     await db.commit()
+    # mirror the REST row shape (detail as an object) so live-SSE rows in the
+    # Review Center render the same as poll-loaded ones
     bus.publish(SECURITY_CHAN, {"type": "security_event", "id": cur.lastrowid,
                                 "kind": kind, "severity": severity, "project": project,
-                                "summary": summary})
+                                "summary": summary, "detail": detail})
     return cur.lastrowid
 
 

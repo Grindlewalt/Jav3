@@ -234,6 +234,10 @@ async def run_agent(slug: str, body: RunAgent):
         from . import runtime
         ptoken = runtime.active_project.set(active)
         cidtoken = runtime.conversation_id.set(conversation_id)
+        # own fetch-ledger scope, like headless runs: without it web claims fall
+        # back to the project slug and never expire — a URL read today would be
+        # "already claimed" for every future interactive run in this project
+        wtoken = runtime.web_session.set(f"run:{conversation_id}")
         db = await get_db()
         try:
             yield sse({"type": "start", "conversation_id": conversation_id,
@@ -260,6 +264,7 @@ async def run_agent(slug: str, body: RunAgent):
             yield sse({"type": "error", "message": str(e)})
         finally:
             await db.close()
+            runtime.web_session.reset(wtoken)
             runtime.conversation_id.reset(cidtoken)
             runtime.active_project.reset(ptoken)
 
