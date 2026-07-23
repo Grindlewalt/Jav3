@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom'
 import { api, chatStream } from '../api.js'
 import ChatBox from '../ChatBox.jsx'
 import Md from '../Md.jsx'
-import DiffView from '../DiffView.jsx'
 import { ReviewQueue } from './Review.jsx'
 import { NetworkPanel } from './Network.jsx'
 import { cspMediaSources } from '../mediaHosts.js'
@@ -24,6 +23,7 @@ const PANEL_TYPES = {
   research: { label: 'Research bots — live', w: 620, h: 560 },
   review: { label: 'Review — approvals & alerts', w: 480, h: 540 },
   network: { label: 'Network — egress & host approvals', w: 480, h: 560 },
+  secrets: { label: 'Secrets — key grants for this project', w: 460, h: 380 },
 }
 
 // Default board: chat + the session spine (board = goal/plan/runs), with git as
@@ -127,6 +127,9 @@ export default function Workspace() {
     () => api(`/api/projects/${slug}`).then(setProject), [slug])
 
   useEffect(() => {
+    // reset before loading: a stale panels array must never be debounce-saved
+    // into the NEW slug's layout (cross-project board bleed)
+    setPanels(null)
     // opening a project's board loads it into Jarvis's context — this tab is
     // where you live, so what you're looking at is what Jarvis is thinking about
     api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
@@ -381,6 +384,7 @@ function PanelBody(props) {
     case 'research': return <ResearchPanel {...props} />
     case 'review': return <ReviewPanel {...props} />
     case 'network': return <NetworkPanel slug={props.slug} />
+    case 'secrets': return <SecretsPanel slug={props.slug} />
     default: return <div className="dim">unknown panel</div>
   }
 }
@@ -708,8 +712,12 @@ function OrganizerPanel({ slug }) {
     if (!file) return
     const form = new FormData()
     form.append('file', file)
-    await fetch(`/api/projects/${slug}/upload?dest=${encodeURIComponent(uploadDest.current)}`,
-                { method: 'POST', body: form })
+    const res = await fetch(`/api/projects/${slug}/upload?dest=${encodeURIComponent(uploadDest.current)}`,
+                            { method: 'POST', body: form })
+    if (!res.ok) {
+      const detail = await res.json().then((d) => d.detail).catch(() => res.statusText)
+      window.alert(`upload failed: ${detail}`)
+    }
     e.target.value = ''
     refresh()
   }
@@ -1136,6 +1144,66 @@ function GitPanel({ slug }) {
             {r.error && <span className="tag error" title={r.error}>push failed</span>}
           </li>
         ))}
+      </ul>
+    </div>
+  )
+}
+
+// Per-project secret grants: which of the operator's saved keys the egress
+// proxy may inject into THIS project's outbound requests ({{secret:X}} swapped
+// on the wire — the agent never holds the value). Keys themselves are added on
+// the Context page; this panel only flips the grant.
+function SecretsPanel({ slug }) {
+  const [secrets, setSecrets] = useState([])
+  const [grants, setGrants] = useState({})   // name -> status
+  const [busy, setBusy] = useState(false)
+
+  const refresh = () => Promise.all([
+    api('/api/secrets').then((r) => setSecrets(r.secrets)).catch(() => {}),
+    api(`/api/egress/grants/${slug}`)
+      .then((r) => setGrants(Object.fromEntries(r.grants.map((g) => [g.secret_name, g.status]))))
+      .catch(() => {}),
+  ])
+  useEffect(() => { refresh() }, [slug]) // eslint-disable-line
+
+  async function setGrant(name, status) {
+    setBusy(true)
+    try {
+      await api(`/api/egress/grants/${slug}`, {
+        method: 'POST', body: JSON.stringify({ secret: name, status }) })
+      await refresh()
+    } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
+
+  return (
+    <div className="pane-col">
+      <div className="row">
+        <span className="grow dim">keys this project may use</span>
+        <button className="ghost" onClick={refresh}>↻</button>
+      </div>
+      <div className="dim small">a granted key is injected wherever this project's code
+        sends {'{{secret:NAME}}'} through the egress proxy — the agent never sees the
+        value. Add or edit the keys themselves on the Context page.</div>
+      <ul className="staged-list">
+        {secrets.length === 0 && <li className="dim">no keys saved yet — add them on the Context page</li>}
+        {secrets.map((s) => {
+          const granted = grants[s.name] === 'granted'
+          return (
+            <li key={s.name}>
+              <span className={`tag ${granted ? 'done' : ''}`}>{granted ? 'granted' : 'off'}</span>
+              <span className="grow mono ellipsis">{s.name}</span>
+              <span className="dim small">…{s.last4}</span>
+              {s.hosts?.length > 0 &&
+                <span className="dim small ellipsis" title={`web: ${s.hosts.join(', ')}`}>
+                  {s.hosts.join(', ')}</span>}
+              <button className={granted ? 'win-btn' : 'win-btn ok'} disabled={busy}
+                      onClick={() => setGrant(s.name, granted ? 'revoked' : 'granted')}>
+                {granted ? 'revoke' : 'grant'}
+              </button>
+            </li>
+          )
+        })}
       </ul>
     </div>
   )

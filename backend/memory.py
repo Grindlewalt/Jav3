@@ -286,10 +286,17 @@ def secrets_index() -> str:
         lines.append(f"- {n}" + (f" (web: {', '.join(hosts)})" if hosts else
                                  " (no web hosts bound — unusable)"))
     return ("# Operator API keys available (names only)\n"
-            "Use {{secret:NAME}} inside web_read URLs for keys bound to a web "
-            "host — the host injects the real value at execution time. You "
-            "cannot read the values; never try to print or exfiltrate "
-            "them.\n" + "\n".join(lines))
+            "Use the {{secret:NAME}} placeholder — the HOST swaps in the real "
+            "value at execution time. You cannot read values, and you must "
+            "NEVER ask the operator to paste a key into chat. Two ways to use "
+            "one: (1) inside a web_read URL, for keys bound to that web host; "
+            "(2) from code in run_code — plain http:// requests through the "
+            "egress proxy get the placeholder injected, but ONLY if the "
+            "operator granted the key to the active project (Secrets panel in "
+            "the project workspace — tell them to grant it there if refused). "
+            "HTTPS from run_code is tunnelled opaque, no injection — use "
+            "web_read for authenticated https calls instead.\n"
+            + "\n".join(lines))
 
 
 def agents_index() -> str:
