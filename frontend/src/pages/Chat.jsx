@@ -25,7 +25,10 @@ export default function Chat() {
   }, [])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // scroll only the message list, never the page (scrollIntoView walks
+    // every scrollable ancestor)
+    const box = bottomRef.current?.parentElement
+    if (box) box.scrollTop = box.scrollHeight
   }, [messages])
 
   // one handler for both paths: the live POST stream and a resumed tail.

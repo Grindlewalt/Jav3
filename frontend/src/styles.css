@@ -308,7 +308,11 @@ kbd {
   background: linear-gradient(135deg, transparent 50%, var(--border) 50%);
   border-bottom-right-radius: 12px;
 }
-.pane-col { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; }
+/* overflow-y: panels whose content is a plain stack (todos, git lists, journal)
+   scroll inside the window; panels with their own flex scroll areas
+   (.messages.compact, .grow-scroll) fit exactly, so this never double-scrolls */
+.pane-col { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px;
+  overflow-y: auto; }
 .pane-col .row { margin: 0; }
 .render-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
