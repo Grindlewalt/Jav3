@@ -172,7 +172,13 @@ class Settings(BaseSettings):
     vm_dir: Path = BASE_DIR / "data" / "vm"
     vm_image_version: str = "v1"
     vm_vsock_port: int = 5555            # host gateway; guest dials CID 2 : this
+    vm_shell_port: int = 5557            # guest co-working PTY; host dials CID : this
     vm_guest_cid: int = 3                # guest CID (>=3); host is always CID 2
+    # Operator co-working shell INTO the guest (browser terminal panel + the
+    # `guest-shell` CLI). Both go through the host broker, which pins the guest
+    # (no idle-scrub mid-session) and is the only path in — the guest stays
+    # unreachable except through the supervisor. On by default; a kill switch.
+    guest_shell_enabled: bool = True
     vm_memory_mb: int = 768
     vm_cpus: int = 2
     vm_boot_timeout_seconds: int = 120

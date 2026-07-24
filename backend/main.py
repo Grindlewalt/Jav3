@@ -7,8 +7,9 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 
 from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api,
-               git_api, gui, logs_api, memory_api, notifications_api, projects,
-               runs_api, schedules, skills_api, vm_api, workspace, secrets)
+               git_api, gui, guest_shell, logs_api, memory_api,
+               notifications_api, projects, runs_api, schedules, skills_api,
+               vm_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .config import settings, ensure_dirs
 from .db import init_db
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
     if settings.vm_egress:
         await vm.net_up()          # tap/nft/dnsmasq/pcap up BEFORE the proxy binds
     await egress_proxy.start()     # monitored-egress proxy (no-op unless vm_egress)
+    await guest_shell.start_unix_server()   # co-working shell CLI front door
     try:
         yield
     finally:
@@ -38,6 +40,7 @@ async def lifespan(app: FastAPI):
         reaper.cancel()
         await gateway.stop()
         await egress_proxy.stop()
+        await guest_shell.stop_unix_server()
         await vm.teardown()        # never leave a guest running past shutdown
         if settings.vm_egress:
             await vm.net_down()
@@ -64,6 +67,7 @@ app.include_router(vm_api.router)
 app.include_router(egress_api.router)
 app.include_router(egress_api.security_router)
 app.include_router(gui.router)
+app.include_router(guest_shell.router)
 
 
 @app.get("/api/health")

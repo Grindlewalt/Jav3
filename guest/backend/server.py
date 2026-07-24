@@ -188,6 +188,13 @@ async def serve() -> None:
     s.listen(4)
     s.setblocking(False)
     print(f"GUEST-RUNTURN-SERVER: listening on vsock :{PORT}", flush=True)
+    # the operator co-working PTY listener runs alongside (best-effort: an old
+    # golden image without shell.py just skips it, run-turn still serves)
+    try:
+        from . import shell
+        asyncio.ensure_future(shell.serve())
+    except Exception as e:  # noqa: BLE001
+        print(f"GUEST-SHELL-SERVER: not started ({e})", flush=True)
     while True:
         conn, _ = await loop.sock_accept(s)
         conn.setblocking(False)

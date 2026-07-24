@@ -106,6 +106,20 @@ many tabs saw it — zero means nobody's looking; adapt (say it in text
 instead). Use these when showing beats describing: open the dashboard you just
 generated, put the journal next to the chat, queue the operator's playlist.
 
+## co-working shell
+
+The operator can open a live shell INSIDE the guest VM — the same disposable
+sandbox your run_code executes in (no secrets, no DB, nukeable). Two front
+doors, both through the host broker (backend/guest_shell.py): a **Terminal
+panel** on the project board (WebSocket /api/guest/shell) and a **CLI**
+(`python -m backend.cli guest-shell [slug]`) for an operator already SSH'd to
+the Pi. The broker pins the guest for the session (idle-scrub can't reap a live
+shell) and primes the active project's files so they land beside your file
+tools. It is a debug/exploration seat: edits there do NOT auto-reconcile to the
+host project — durable changes still go through the file tools / editor. This
+does not weaken containment: the guest is still NIC-less and secret-free,
+reachable only through the supervisor. Kill switch: settings.guest_shell_enabled.
+
 ## multi-agent
 
 `spawn_agent` runs a defined agent as a child with narrowed context; the

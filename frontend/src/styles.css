@@ -865,3 +865,10 @@ kbd {
 .media-dock audio { width: 100%; }
 .media-dock .row { align-items: center; }
 .gui-toasts.raised { bottom: 200px; }
+
+/* guest co-working terminal */
+.term-host { flex: 1; min-height: 0; overflow: hidden; border-radius: 6px;
+  background: #0e1013; padding: 6px 8px; }
+.term-host .xterm { height: 100%; }
+.term-status.connected { color: var(--green); }
+.term-status.disconnected, .term-status.closed { color: var(--red); }

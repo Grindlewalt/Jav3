@@ -73,6 +73,7 @@ PANEL_SIZES = {
     "todos": (360, 380), "git": (560, 480), "board": (400, 540),
     "context": (440, 460), "agent": (460, 520), "research": (620, 560),
     "review": (480, 540), "network": (480, 560), "secrets": (460, 380),
+    "terminal": (560, 360),
 }
 
 DEFAULT_PANELS = [
