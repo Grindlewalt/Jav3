@@ -72,7 +72,10 @@ export default function ChatBox({ projectSlug }) {
   }
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // scroll ONLY the message list — scrollIntoView walks every scrollable
+    // ancestor and yanked the whole workspace board to the bottom on stream
+    const box = bottomRef.current?.parentElement
+    if (box) box.scrollTop = box.scrollHeight
   }, [messages])
 
   async function open(id) {

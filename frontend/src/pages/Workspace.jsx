@@ -917,7 +917,11 @@ function AgentPanel({ slug, state, setState }) {
   const which = state.agent || ''
 
   useEffect(() => { api('/api/agents').then((r) => setAgents(r.agents)) }, [])
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [log])
+  useEffect(() => {
+    // contain the autoscroll to the log list (scrollIntoView scrolls the page)
+    const box = bottomRef.current?.parentElement
+    if (box) box.scrollTop = box.scrollHeight
+  }, [log])
 
   async function run(confirmPeak = false) {
     if (!which || !task.trim() || busy) return
