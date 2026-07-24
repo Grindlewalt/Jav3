@@ -28,9 +28,38 @@ from .config import settings
 router = APIRouter(tags=["guest-shell"])
 
 
-async def _connect_guest(port: int):
-    """(reader, writer) over a vsock stream to the guest, retried briefly (the
-    PTY listener comes up a beat after the run-turn one on a fresh boot)."""
+class _LineSock:
+    """Newline-framed async I/O over a raw vsock socket. asyncio streams can't
+    wrap AF_VSOCK (uvloop's transport pokes TCP-only sockopts -> ENOPROTOOPT),
+    so the whole codebase uses loop.sock_* directly; this buffers lines on top."""
+    def __init__(self, sock: socket.socket):
+        self._s = sock
+        self._buf = b""
+
+    async def readline(self) -> bytes:
+        while b"\n" not in self._buf:
+            chunk = await asyncio.get_running_loop().sock_recv(self._s, 65536)
+            if not chunk:
+                line, self._buf = self._buf, b""
+                return line                          # EOF: flush any tail, then b""
+            self._buf += chunk
+        line, self._buf = self._buf.split(b"\n", 1)
+        return line + b"\n"
+
+    async def write_line(self, data: bytes) -> None:
+        await asyncio.get_running_loop().sock_sendall(self._s, data)
+
+    def close(self) -> None:
+        try:
+            self._s.close()
+        except OSError:
+            pass
+
+
+async def _connect_guest(port: int) -> _LineSock:
+    """A line-framed vsock connection to the guest, retried briefly (the PTY
+    listener comes up a beat after the run-turn one on a fresh boot). Blocking
+    connect in an executor — uvloop's sock_connect chokes on an AF_VSOCK tuple."""
     loop = asyncio.get_running_loop()
     last = None
     for _ in range(20):
@@ -38,7 +67,7 @@ async def _connect_guest(port: int):
         try:
             await loop.run_in_executor(
                 None, s.connect, (settings.vm_guest_cid, port))
-            return await asyncio.open_connection(sock=s)
+            return _LineSock(s)
         except OSError as e:
             last = e
             s.close()
@@ -55,18 +84,18 @@ async def _prime_project(slug: str) -> None:
     import base64
     try:
         tar_b64 = base64.b64encode(workspace_xfer.build_merged_tar(slug)).decode()
-        reader, writer = await _connect_guest(GUEST_RUNTURN_PORT)
+        conn = await _connect_guest(GUEST_RUNTURN_PORT)
     except (ConnectionError, OSError):
         return
     try:
-        writer.write((json.dumps({"mode": "prime", "active_slug": slug,
-                                  "workspace_tar_b64": tar_b64}) + "\n").encode())
-        await writer.drain()
-        await asyncio.wait_for(reader.readline(), timeout=30)   # {"type":"primed"}
+        await conn.write_line((json.dumps(
+            {"mode": "prime", "active_slug": slug,
+             "workspace_tar_b64": tar_b64}) + "\n").encode())
+        await asyncio.wait_for(conn.readline(), timeout=30)     # {"type":"primed"}
     except (OSError, asyncio.TimeoutError):
         pass
     finally:
-        writer.close()
+        conn.close()
 
 
 async def _session(client_recv, client_send, slug: str | None):
@@ -86,7 +115,7 @@ async def _session(client_recv, client_send, slug: str | None):
     try:
         if slug:
             await _prime_project(slug)
-        reader, writer = await _connect_guest(settings.vm_shell_port)
+        conn = await _connect_guest(settings.vm_shell_port)
     except (ConnectionError, OSError) as e:
         await client_send(json.dumps({"type": "o", "data": _b64(f"{e}\r\n")}))
         vm.release()
@@ -97,12 +126,11 @@ async def _session(client_recv, client_send, slug: str | None):
             line = await client_recv()
             if line is None:
                 return
-            writer.write((line.rstrip("\n") + "\n").encode())
-            await writer.drain()
+            await conn.write_line((line.rstrip("\n") + "\n").encode())
 
     async def from_guest():
         while True:
-            line = await reader.readline()
+            line = await conn.readline()
             if not line:
                 return
             await client_send(line.decode(errors="replace").rstrip("\n"))
@@ -114,10 +142,7 @@ async def _session(client_recv, client_send, slug: str | None):
     finally:
         for t in (a, b):
             t.cancel()
-        try:
-            writer.close()
-        except OSError:
-            pass
+        conn.close()
         vm.release()
 
 

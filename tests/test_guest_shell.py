@@ -26,27 +26,22 @@ def test_guest_package_includes_shell():
     assert "backend/server.py" in names
 
 
-class _FakeWriter:
-    def __init__(self):
+class _FakeConn:
+    """Stand-in for guest_shell._LineSock: canned guest->client lines, and a
+    capture buffer for client->guest writes."""
+    def __init__(self, lines):
+        self._lines = list(lines)
         self.sent = []
         self.closed = False
 
-    def write(self, data):
-        self.sent.append(data)
+    async def readline(self):
+        return self._lines.pop(0) if self._lines else b""
 
-    async def drain(self):
-        pass
+    async def write_line(self, data):
+        self.sent.append(data)
 
     def close(self):
         self.closed = True
-
-
-class _FakeReader:
-    def __init__(self, lines):
-        self._lines = list(lines)
-
-    async def readline(self):
-        return self._lines.pop(0) if self._lines else b""
 
 
 class _FakeVM:
@@ -64,15 +59,14 @@ class _FakeVM:
 @pytest.fixture
 def wired(monkeypatch):
     fake_vm = _FakeVM()
-    writer = _FakeWriter()
     # guest -> client: one output frame then EOF
-    reader = _FakeReader([b'{"type":"o","data":"aGk="}\n'])
+    conn = _FakeConn([b'{"type":"o","data":"aGk="}\n'])
     import backend.vm.lifecycle as lifecycle
     monkeypatch.setattr(lifecycle, "vm", fake_vm)
     monkeypatch.setattr(lifecycle, "VMError", RuntimeError, raising=False)
 
     async def fake_connect(port):
-        return reader, writer
+        return conn
 
     async def fake_prime(slug):
         fake_prime.calls.append(slug)
@@ -80,12 +74,12 @@ def wired(monkeypatch):
 
     monkeypatch.setattr(guest_shell, "_connect_guest", fake_connect)
     monkeypatch.setattr(guest_shell, "_prime_project", fake_prime)
-    return fake_vm, reader, writer, fake_prime
+    return fake_vm, conn, fake_prime
 
 
 async def test_session_relays_and_releases(wired, monkeypatch):
     monkeypatch.setattr(settings, "guest_shell_enabled", True)
-    fake_vm, reader, writer, fake_prime = wired
+    fake_vm, conn, fake_prime = wired
     sent_to_client = []
     inbox = ['{"type":"i","data":"bHM="}', None]   # one input frame, then hang up
 
@@ -101,7 +95,7 @@ async def test_session_relays_and_releases(wired, monkeypatch):
 
     assert fake_vm.acquired == 1 and fake_vm.released == 1   # pinned then freed
     assert fake_prime.calls == ["demo"]                     # project primed
-    assert any(b'"type":"i"' in f for f in writer.sent)     # input reached guest
+    assert any(b'"type":"i"' in f for f in conn.sent)       # input reached guest
     assert any('"type":"o"' in f for f in sent_to_client)   # output reached client
 
 
