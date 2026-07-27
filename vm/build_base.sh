@@ -45,9 +45,19 @@ EOF
 cat > user-data <<EOF
 #cloud-config
 hostname: jarvis-guest
-# no network at runtime -> don't let boot wait on a NIC
-package_update: false
+# no network at runtime -> don't let boot wait on a NIC. The provision boot
+# DOES have SLIRP net, so dev tooling is baked here — runtime installs into
+# the overlay are wiped by the idle scrub, so anything needed every run
+# belongs in this list.
+package_update: true
 package_upgrade: false
+packages:
+  - python3-pip
+  - python3-venv
+  - git
+  - curl
+  - nodejs
+  - npm
 write_files:
   - path: /opt/jarvis/bootstrap.py
     encoding: b64
