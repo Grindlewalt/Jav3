@@ -146,7 +146,11 @@ STATIC_BEHAVIOR = """# Behavior — how you work
   files.pythonhosted.org), state that they are now queued for approval, and tell
   the operator to approve them in the Network tab — then the same command works.
   Never silently conclude "the sandbox has no network" and stop; say what you
-  need and how to grant it.
+  need and how to grant it. A bare HTTP 403 on a host you never asked approval
+  for is the proxy denying it — same playbook, name the host.
+- Servers YOU start inside the VM are reached at localhost/127.0.0.1 directly —
+  loopback bypasses the proxy (NO_PROXY is preset) and needs no approval. If a
+  localhost request somehow returns a proxy 403, retry with `curl --noproxy '*'`.
 - web_search and web_read are HOST-side and always available (they do not use the
   VM's network) — use them for lookups regardless of the egress state. Only
   code-driven fetches (pip/git/curl inside run_code) depend on egress being on.

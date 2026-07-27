@@ -173,8 +173,10 @@ def _detect_egress_proxy() -> None:
     if local.startswith("10.201."):
         proxy = "http://10.201.0.1:8443"
         os.environ["JARVIS_EGRESS_PROXY"] = proxy
+        local = "localhost,127.0.0.1,::1"    # loopback stays in-guest, never proxied
         os.environ.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy,
-                          http_proxy=proxy, https_proxy=proxy)
+                          http_proxy=proxy, https_proxy=proxy,
+                          NO_PROXY=local, no_proxy=local)
         print(f"GUEST-EGRESS-PROXY: {proxy}", flush=True)
     else:
         print("GUEST-EGRESS-PROXY: none (netless)", flush=True)

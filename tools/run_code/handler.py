@@ -115,8 +115,13 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
     # where direct sockets fail closed anyway.
     _proxy = os.environ.get("JARVIS_EGRESS_PROXY")
     if _proxy:
+        # Loopback must NEVER route to the proxy: proxy-side "localhost" is the
+        # HOST (SSRF guard rightly refuses it), and the agent testing its own
+        # in-VM server would see nothing but 403s and conclude "no internet".
+        _local = "localhost,127.0.0.1,::1"
         env.update(HTTP_PROXY=_proxy, HTTPS_PROXY=_proxy,
-                   http_proxy=_proxy, https_proxy=_proxy)
+                   http_proxy=_proxy, https_proxy=_proxy,
+                   NO_PROXY=_local, no_proxy=_local)
     t0 = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
