@@ -116,6 +116,31 @@ def check_peak_gate(conversation_id: int) -> None:
 
 
 CAPTURE_STATE_KEY = "capture_context"
+MODEL_STATE_KEY = "model_override"
+
+# Runtime model switch (nav dropdown): one host-side slot consulted by the
+# gateway, so chat, agents, and guest turns all follow it. An explicit
+# per-call model_name (agent pin) always wins. Persisted in session_state and
+# reloaded at app startup.
+_model_override: str | None = None
+
+
+def get_model_override() -> str | None:
+    return _model_override
+
+
+def set_model_override(name: str | None) -> None:
+    global _model_override
+    _model_override = name or None
+
+
+async def load_model_override() -> None:
+    from ..db import get_db, get_state
+    db = await get_db()
+    try:
+        set_model_override(await get_state(db, MODEL_STATE_KEY))
+    finally:
+        await db.close()
 
 
 async def record_model_call(conversation_id: int | None, model_name: str,
@@ -351,12 +376,12 @@ class ModelGateway:
             raise ModelError("DEEPSEEK_API_KEY is not set (~/.config/jarvis/env, JARVIS_DEEPSEEK_API_KEY=...)")
         else:
             key = self.api_key
-        name = model_name or self.transport.name
+        name = model_name or _model_override or self.transport.name
 
         final: dict | None = None
         async for ev in self.transport.complete(
                 messages, tools=tools, temperature=temperature,
-                model_name=model_name, base_url=base_url, key=key):
+                model_name=name, base_url=base_url, key=key):
             if ev["type"] == "token":
                 yield ev
             else:

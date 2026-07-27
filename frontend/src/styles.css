@@ -238,6 +238,8 @@ input:focus, textarea:focus { border-color: var(--accent); }
 /* ---- projects list ---- */
 .page { padding: 26px; max-width: 960px; width: 100%; margin: 0 auto; overflow-y: auto; }
 .autonomy-sel { padding: 3px 7px; font-size: 12px; }
+.model-switch { padding: 3px 7px; font-size: 12px; margin-left: auto; }
+.nav .model-switch { margin-left: 8px; }
 .create-project { display: flex; gap: 8px; margin-bottom: 18px; align-items: center; }
 .create-project input:nth-child(2) { flex: 1; }
 .project-list { list-style: none; padding: 0; }

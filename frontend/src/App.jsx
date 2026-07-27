@@ -69,6 +69,28 @@ function NotificationBell() {
 // discard the overlay and reboot fresh from the golden image. Nuke is
 // double-confirmed and refuses while a turn is in flight; boot/teardown stay
 // elsewhere. The status read itself never mutates.
+// Runtime model switch: flash for cheap, pro for smart. Applies to the next
+// model call everywhere (chat/agents/guest); agents with an explicit model
+// pin keep it. Server-side allowlist; persisted across restarts.
+function ModelSwitch() {
+  const [m, setM] = useState(null)
+  useEffect(() => { api('/api/model').then(setM).catch(() => {}) }, [])
+  if (!m) return null
+  const short = (id) => id.replace(/^deepseek-v4-/, '')
+  return (
+    <select className="model-switch" value={m.active}
+            title="model for new turns — pro is ~3x the price of flash"
+            onChange={async (e) => {
+              try {
+                setM(await api('/api/model', {
+                  method: 'PUT', body: JSON.stringify({ model: e.target.value }) }))
+              } catch (err) { window.alert(err.detail || String(err)) }
+            }}>
+      {m.choices.map((c) => <option key={c} value={c}>{short(c)}</option>)}
+    </select>
+  )
+}
+
 function VmStatus() {
   const [s, setS] = useState(null)
   const [open, setOpen] = useState(false)
@@ -280,6 +302,7 @@ export default function App() {
               Logout
             </button>
           </div>
+          <ModelSwitch />
           <NotificationBell />
           <VmStatus />
         </nav>

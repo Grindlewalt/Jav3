@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 import asyncio
 
@@ -10,9 +11,12 @@ from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api,
                git_api, gui, guest_shell, logs_api, memory_api,
                notifications_api, projects, runs_api, schedules, skills_api,
                vm_api, workspace, secrets)
+from .agent.model import (MODEL_STATE_KEY, get_model_override,
+                          load_model_override, set_model_override)
 from .agent.tools.registry import compile_registry
+from .auth import require_user
 from .config import settings, ensure_dirs
-from .db import init_db
+from .db import get_db, init_db, set_state
 from .memory import ensure_memory_seeds
 from .vm.egress_proxy import proxy as egress_proxy
 from .vm.gateway_server import gateway
@@ -24,6 +28,7 @@ async def lifespan(app: FastAPI):
     ensure_dirs()
     await init_db()
     ensure_memory_seeds()
+    await load_model_override()    # nav model switch survives restarts
     await schedules.ensure_default_schedules()
     compile_registry()
     task = asyncio.create_task(schedules.scheduler_loop())
@@ -73,6 +78,37 @@ app.include_router(guest_shell.router)
 @app.get("/api/health")
 async def health():
     return {"ok": True}
+
+
+class ModelSelect(BaseModel):
+    model: str
+
+
+def _model_state() -> dict:
+    return {"active": get_model_override() or settings.model_name,
+            "default": settings.model_name, "choices": settings.model_choices}
+
+
+@app.get("/api/model", dependencies=[Depends(require_user)])
+async def get_model():
+    return _model_state()
+
+
+@app.put("/api/model", dependencies=[Depends(require_user)])
+async def put_model(body: ModelSelect):
+    """Switch the runtime model (nav dropdown). Takes effect on the next model
+    call — no restart. Agents with an explicit model pin are unaffected."""
+    if body.model not in settings.model_choices:
+        raise HTTPException(status_code=400,
+                            detail=f"model must be one of {settings.model_choices}")
+    override = None if body.model == settings.model_name else body.model
+    set_model_override(override)
+    db = await get_db()
+    try:
+        await set_state(db, MODEL_STATE_KEY, override or "")
+    finally:
+        await db.close()
+    return _model_state()
 
 
 @app.get("/api/config")

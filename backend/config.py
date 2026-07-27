@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     model_base_url_allowlist: list[str] = ["http://127.0.0.1:11434",
                                            "http://localhost:11434"]
     model_name: str = "deepseek-v4-flash"
+    # Models the nav switcher may select at runtime (persisted in session_state,
+    # no restart). Agents with an explicit model pin are unaffected by the switch.
+    model_choices: list[str] = ["deepseek-v4-flash", "deepseek-v4-pro"]
     # v4-flash caps output at 384K (verified accepted by the API). The old
     # 4096 was a v3-era default: large tool-call payloads (whole-file writes)
     # hit it mid-arguments and dispatched as empty {} args.
@@ -55,10 +58,17 @@ class Settings(BaseSettings):
 
     # DeepSeek pricing per 1M tokens (USD), for the Logs cost tab. Input is
     # split by the API into cache hit/miss; output is flat. Override via
-    # JARVIS_PRICE_* when the provider reprices.
+    # JARVIS_PRICE_* when the provider reprices. The flat price_* fields are
+    # the fallback for models not in model_prices (and stay = flash).
     price_cache_hit_per_m: float = 0.0028
     price_cache_miss_per_m: float = 0.14
     price_output_per_m: float = 0.28
+    model_prices: dict[str, dict[str, float]] = {
+        "deepseek-v4-flash": {"cache_hit": 0.0028, "cache_miss": 0.14,
+                              "output": 0.28},
+        "deepseek-v4-pro": {"cache_hit": 0.003625, "cache_miss": 0.435,
+                            "output": 0.87},
+    }
     # Raw-context capture (the exact message array sent per model call) is
     # opt-in and heavy; captured blobs older than this are nulled out.
     context_capture_keep_days: int = 7

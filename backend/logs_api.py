@@ -19,10 +19,18 @@ router = APIRouter(prefix="/api/logs", tags=["logs"],
                    dependencies=[Depends(require_user)])
 
 
-def _cost_usd(cache_hit: int, cache_miss: int, output: int) -> float:
-    return (cache_hit * settings.price_cache_hit_per_m
-            + cache_miss * settings.price_cache_miss_per_m
-            + output * settings.price_output_per_m) / 1_000_000
+def _prices(model: str | None) -> dict:
+    return settings.model_prices.get(model or "", {
+        "cache_hit": settings.price_cache_hit_per_m,
+        "cache_miss": settings.price_cache_miss_per_m,
+        "output": settings.price_output_per_m})
+
+
+def _cost_usd(cache_hit: int, cache_miss: int, output: int,
+              model: str | None = None) -> float:
+    p = _prices(model)
+    return (cache_hit * p["cache_hit"] + cache_miss * p["cache_miss"]
+            + output * p["output"]) / 1_000_000
 
 
 # --- cost accounting: every API call ledgered at the Model.complete choke
@@ -39,18 +47,31 @@ async def costs():
     try:
         out = {}
         for label, offset in _WINDOWS:
-            q = ("SELECT COUNT(*) n, COALESCE(SUM(cache_hit),0) ch, "
+            # priced per model so a pro turn bills at pro rates
+            q = ("SELECT model, COUNT(*) n, COALESCE(SUM(cache_hit),0) ch, "
                  "COALESCE(SUM(cache_miss),0) cm, "
                  "COALESCE(SUM(output_tokens),0) o FROM model_calls")
             args: tuple = ()
             if offset:
                 q += " WHERE created_at >= datetime('now', ?)"
                 args = (offset,)
+            q += " GROUP BY model"
             async with db.execute(q, args) as cur:
-                r = await cur.fetchone()
-            out[label] = {"calls": r["n"], "cache_hit": r["ch"],
-                          "cache_miss": r["cm"], "output": r["o"],
-                          "cost_usd": round(_cost_usd(r["ch"], r["cm"], r["o"]), 4)}
+                rows = await cur.fetchall()
+            agg = {"calls": 0, "cache_hit": 0, "cache_miss": 0, "output": 0,
+                   "cost_usd": 0.0}
+            by_model = {}
+            for r in rows:
+                cost = _cost_usd(r["ch"], r["cm"], r["o"], r["model"])
+                agg["calls"] += r["n"]
+                agg["cache_hit"] += r["ch"]
+                agg["cache_miss"] += r["cm"]
+                agg["output"] += r["o"]
+                agg["cost_usd"] += cost
+                by_model[r["model"] or "?"] = {
+                    "calls": r["n"], "cost_usd": round(cost, 4)}
+            agg["cost_usd"] = round(agg["cost_usd"], 4)
+            out[label] = {**agg, "by_model": by_model}
         capture = await get_state(db, CAPTURE_STATE_KEY) == "1"
     finally:
         await db.close()
