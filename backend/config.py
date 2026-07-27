@@ -44,7 +44,10 @@ class Settings(BaseSettings):
     model_base_url_allowlist: list[str] = ["http://127.0.0.1:11434",
                                            "http://localhost:11434"]
     model_name: str = "deepseek-v4-flash"
-    model_max_tokens: int = 4096
+    # v4-flash caps output at 384K (verified accepted by the API). The old
+    # 4096 was a v3-era default: large tool-call payloads (whole-file writes)
+    # hit it mid-arguments and dispatched as empty {} args.
+    model_max_tokens: int = 384_000
     # Main generation temperature. 0.7 keeps personality and fluency; the
     # no-tools self-check pass (which runs at 0.0) is what enforces rules, so
     # the main turn doesn't need to run cold. Tunable via JARVIS_MODEL_TEMPERATURE.
@@ -93,7 +96,8 @@ class Settings(BaseSettings):
     # (tool specs, rule injection, chars/4 estimate error). After
     # compact_failures_max consecutive summarize failures a conversation
     # falls back to the plain recent_message_limit window.
-    model_context_window: int = 64_000
+    # v4-flash is a 1M-token window (input + output share it); 64k was v3's.
+    model_context_window: int = 1_000_000
     compact_buffer_tokens: int = 8_000
     compact_recent_fraction: float = 0.3
     compact_failures_max: int = 3

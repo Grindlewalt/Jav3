@@ -181,6 +181,7 @@ async def test_compaction_persists_checkpoint_and_reuses_it(tmp_env, monkeypatch
     await init_db()
     # effective window ≈ 13000-4096-8000 = 904 tokens ≈ 3.6k chars
     monkeypatch.setattr(settings, "model_context_window", 13_000)
+    monkeypatch.setattr(settings, "model_max_tokens", 4096)
     fake = _FakeSummarizer()
     monkeypatch.setattr(compaction, "model", fake)
     msgs = [("user", "old question " + "a" * 2000),
@@ -209,6 +210,7 @@ async def test_compaction_chains_prior_summary(tmp_env, monkeypatch):
     from backend import compaction
     await init_db()
     monkeypatch.setattr(settings, "model_context_window", 13_000)
+    monkeypatch.setattr(settings, "model_max_tokens", 4096)
     fake = _FakeSummarizer()
     monkeypatch.setattr(compaction, "model", fake)
     cid = await _conversation_with([("user", "x" * 6000), ("assistant", "y" * 500),
@@ -237,6 +239,7 @@ async def test_compaction_circuit_breaker(tmp_env, monkeypatch):
     from backend import compaction
     await init_db()
     monkeypatch.setattr(settings, "model_context_window", 13_000)
+    monkeypatch.setattr(settings, "model_max_tokens", 4096)
     monkeypatch.setattr(settings, "compact_failures_max", 3)
     fake = _FakeSummarizer(fail=True)
     monkeypatch.setattr(compaction, "model", fake)
