@@ -6,14 +6,18 @@ kept out via a host-written .gitignore, and the agent can never write into
 .git/ (writes + workspace endpoints refuse the path).
 """
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .config import settings
 from .db import get_db
 
 GIT_TIMEOUT = 30
+NET_TIMEOUT = 120       # push / fetch / ls-remote cross the internet on a Pi
+CLONE_TIMEOUT = 300
 
 GITIGNORE = ".staging/\n.workspace.json\n.context.json\ndata/\n"
 
@@ -22,23 +26,27 @@ def _project_dir(slug: str) -> Path:
     return settings.projects_dir / slug
 
 
-async def run_git(slug: str, *args: str, check: bool = False) -> tuple[int, str, str]:
+async def run_git(slug: str, *args: str, check: bool = False,
+                  extra_env: dict[str, str] | None = None,
+                  timeout: int = GIT_TIMEOUT) -> tuple[int, str, str]:
     """git -C <project dir> <args>. Never a shell; env stripped of GIT_* surprises."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_TERMINAL_PROMPT"] = "0"
+    if extra_env:
+        env.update(extra_env)
     proc = await asyncio.create_subprocess_exec(
         "git", "-C", str(_project_dir(slug)), *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=GIT_TIMEOUT)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
-        raise RuntimeError(f"git {' '.join(args)} timed out after {GIT_TIMEOUT}s")
+        raise RuntimeError(f"git {' '.join(args)} timed out after {timeout}s")
     out = stdout.decode(errors="replace")
     err = stderr.decode(errors="replace")
     if check and proc.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed: {(err or out).strip()}")
+        raise RuntimeError(f"git {' '.join(args)} failed: {_scrub((err or out).strip())}")
     return proc.returncode, out, err
 
 
@@ -58,6 +66,174 @@ async def ensure_repo(slug: str) -> None:
         gitignore = d / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text(GITIGNORE)
+
+
+# --- GitHub remote plumbing --------------------------------------------------
+# The remote URL is stored CLEAN in projects.github_remote and .git/config
+# ("origin"). Auth rides only in per-invocation env (GIT_CONFIG_* ->
+# http.extraheader), so the token never appears in argv, .git/config, the DB,
+# or persisted error text; _scrub is belt-and-braces on every surfaced string.
+# All of this is operator-only surface — no agent tool can set a remote,
+# push, or pull.
+
+def github_token() -> str | None:
+    from . import secrets as secrets_store
+    return (secrets_store.load().get("GITHUB_TOKEN")
+            or os.environ.get("JARVIS_GITHUB_TOKEN") or None)
+
+
+def valid_remote(url: str) -> bool:
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return False
+    return (u.scheme == "https" and u.hostname == "github.com"
+            and not u.username and not u.password
+            and len([p for p in u.path.split("/") if p]) >= 2)
+
+
+def _scrub(text: str) -> str:
+    tok = github_token()
+    return text.replace(tok, "***") if tok and tok in text else text
+
+
+def _auth_env(url: str | None) -> dict[str, str]:
+    tok = github_token()
+    if not tok or not url or urlsplit(url).hostname != "github.com":
+        return {}
+    b64 = base64.b64encode(f"x-access-token:{tok}".encode()).decode()
+    return {"GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {b64}"}
+
+
+async def get_remote(slug: str) -> str | None:
+    db = await get_db()
+    try:
+        async with db.execute("SELECT github_remote FROM projects WHERE slug = ?",
+                              (slug,)) as cur:
+            row = await cur.fetchone()
+        return row["github_remote"] if row else None
+    finally:
+        await db.close()
+
+
+async def _ensure_origin(slug: str, url: str) -> None:
+    """Self-heal: origin mirrors the stored URL (covers rows set before the
+    remote API existed, or hand-edited in the DB)."""
+    rc, out, _ = await run_git(slug, "remote", "get-url", "origin")
+    if rc != 0:
+        await run_git(slug, "remote", "add", "origin", url, check=True)
+    elif out.strip() != url:
+        await run_git(slug, "remote", "set-url", "origin", url, check=True)
+
+
+async def set_remote(slug: str, url: str | None) -> None:
+    """Persist the remote (DB) and mirror it onto the repo's origin so plain
+    fetch/merge refs (origin/<branch>) exist. None disconnects."""
+    await ensure_repo(slug)
+    if url:
+        await _ensure_origin(slug, url)
+    else:
+        rc, _, _ = await run_git(slug, "remote", "get-url", "origin")
+        if rc == 0:
+            await run_git(slug, "remote", "remove", "origin")
+    db = await get_db()
+    try:
+        await db.execute("UPDATE projects SET github_remote = ? WHERE slug = ?",
+                         (url, slug))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def verify_remote(slug: str, url: str) -> None:
+    """ls-remote reachability/auth check; raises RuntimeError (scrubbed) if not."""
+    await ensure_repo(slug)
+    rc, out, err = await run_git(slug, "ls-remote", "--heads", "--", url,
+                                 extra_env=_auth_env(url), timeout=NET_TIMEOUT)
+    if rc != 0:
+        raise RuntimeError(_scrub((err or out).strip()))
+
+
+async def current_branch(slug: str) -> str:
+    rc, out, _ = await run_git(slug, "symbolic-ref", "--short", "-q", "HEAD")
+    return out.strip() if rc == 0 and out.strip() else "main"
+
+
+async def push_to_remote(slug: str) -> str:
+    url = await get_remote(slug)
+    if not url:
+        raise ValueError("no remote connected for this project")
+    await _ensure_origin(slug, url)
+    branch = await current_branch(slug)
+    rc, out, err = await run_git(slug, "push", "origin", f"HEAD:refs/heads/{branch}",
+                                 extra_env=_auth_env(url), timeout=NET_TIMEOUT)
+    if rc != 0:
+        raise RuntimeError(_scrub((err or out).strip()))
+    return _scrub((err or out).strip() or "pushed")   # git narrates on stderr
+
+
+async def pull_from_remote(slug: str) -> str:
+    """fetch + ff-only merge. Refuses on a dirty tree — never merge over the
+    agent's uncommitted work."""
+    url = await get_remote(slug)
+    if not url:
+        raise ValueError("no remote connected for this project")
+    _, porcelain, _ = await run_git(slug, "status", "--porcelain")
+    if porcelain.strip():
+        raise ValueError("working tree has uncommitted changes — commit "
+                         "(approve a request) or discard them before pulling")
+    await _ensure_origin(slug, url)
+    branch = await current_branch(slug)
+    await run_git(slug, "fetch", "origin", extra_env=_auth_env(url),
+                  timeout=NET_TIMEOUT, check=True)
+    rc, out, err = await run_git(slug, "merge", "--ff-only",
+                                 f"origin/{branch}")
+    if rc != 0:
+        raise RuntimeError(_scrub((err or out).strip()))
+    return _scrub((out or err).strip() or "up to date")
+
+
+async def ahead_behind(slug: str, fetch: bool = False) -> dict | None:
+    """{'ahead': n, 'behind': m} vs origin/<branch>, or None if no remote ref
+    is known yet. fetch=True refreshes origin first (network)."""
+    url = await get_remote(slug)
+    if not url:
+        return None
+    if fetch:
+        await _ensure_origin(slug, url)
+        await run_git(slug, "fetch", "origin", extra_env=_auth_env(url),
+                      timeout=NET_TIMEOUT, check=True)
+    branch = await current_branch(slug)
+    rc, out, _ = await run_git(slug, "rev-list", "--left-right", "--count",
+                               f"HEAD...origin/{branch}")
+    if rc != 0:
+        return None
+    ahead, behind = (int(x) for x in out.split())
+    return {"ahead": ahead, "behind": behind}
+
+
+async def clone_repo(url: str, dest: Path) -> None:
+    """git clone into a fresh dir; auth via env, so the token never lands in
+    the clone's .git/config."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.update(_auth_env(url))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    proc = await asyncio.create_subprocess_exec(
+        "git", "clone", "--", url, str(dest),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(),
+                                                timeout=CLONE_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise RuntimeError(f"git clone timed out after {CLONE_TIMEOUT}s")
+    if proc.returncode != 0:
+        raise RuntimeError(_scrub(
+            (stderr.decode(errors="replace") or stdout.decode(errors="replace")).strip()))
 
 
 async def status_text(slug: str) -> str:
@@ -147,11 +323,11 @@ async def approve_request(rid: int) -> dict:
         async with db.execute("SELECT github_remote FROM projects WHERE slug = ?",
                               (slug,)) as cur:
             prow = await cur.fetchone()
-        remote = prow["github_remote"] if prow else None
-        if remote:
-            rc, out, err = await run_git(slug, "push", remote, "HEAD")
-            if rc != 0:
-                error = f"push failed: {(err or out).strip()}"  # commit stands
+        if prow and prow["github_remote"]:
+            try:
+                await push_to_remote(slug)
+            except (RuntimeError, ValueError) as e:
+                error = f"push failed: {e}"  # commit stands
         await db.execute(
             "UPDATE git_requests SET status = 'approved', commit_sha = ?, error = ?, "
             "decided_at = datetime('now') WHERE id = ?", (sha.strip(), error, rid))

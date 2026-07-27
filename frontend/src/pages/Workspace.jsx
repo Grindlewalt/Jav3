@@ -1095,6 +1095,8 @@ function GitPanel({ slug }) {
   const [requests, setRequests] = useState([])
   const [diff, setDiff] = useState(null)     // null = hidden
   const [busy, setBusy] = useState(false)
+  const [remote, setRemote] = useState(null) // {url, has_token, ahead, behind}
+  const [remoteUrl, setRemoteUrl] = useState('')
 
   const refresh = () => Promise.all([
     api(`/api/projects/${slug}/git/status`)
@@ -1102,6 +1104,8 @@ function GitPanel({ slug }) {
       .catch((e) => setStatus(`error: ${e.detail || e}`)),
     api(`/api/projects/${slug}/git/requests`)
       .then((r) => setRequests(r.requests)).catch(() => {}),
+    api(`/api/projects/${slug}/git/remote`)
+      .then(setRemote).catch(() => {}),
   ])
   useEffect(() => {
     refresh()
@@ -1130,10 +1134,68 @@ function GitPanel({ slug }) {
     setBusy(false)
   }
 
+  async function remoteOp(fn) {
+    setBusy(true)
+    try { await fn() } catch (err) { window.alert(err.detail || String(err)) }
+    setBusy(false)
+  }
+  const connect = () => remoteOp(async () => {
+    const r = await api(`/api/projects/${slug}/git/remote`, {
+      method: 'PUT', body: JSON.stringify({ url: remoteUrl }) })
+    setRemote({ ...remote, ...r }); setRemoteUrl(''); await refresh()
+  })
+  const disconnect = () => {
+    if (!window.confirm('disconnect the remote? (nothing is deleted on GitHub)')) return
+    remoteOp(async () => {
+      await api(`/api/projects/${slug}/git/remote`, {
+        method: 'PUT', body: JSON.stringify({ url: null }) })
+      await refresh()
+    })
+  }
+  const syncRemote = () => remoteOp(async () =>
+    setRemote(await api(`/api/projects/${slug}/git/remote?fetch=1`)))
+  const doPush = () => remoteOp(async () => {
+    await api(`/api/projects/${slug}/git/push`, { method: 'POST' })
+    await syncRemote()
+  })
+  const doPull = () => remoteOp(async () => {
+    await api(`/api/projects/${slug}/git/pull`, { method: 'POST' })
+    await refresh(); await syncRemote()
+    window.dispatchEvent(new Event('jarvis-files-changed'))
+  })
+
+  const shortRemote = remote?.url
+    ? remote.url.replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '') : null
   const pending = requests.filter((r) => r.status === 'pending')
   const decided = requests.filter((r) => r.status !== 'pending').slice(0, 6)
   return (
     <div className="pane-col">
+      {shortRemote ? (
+        <div className="row">
+          <span className="grow ellipsis" title={remote.url}>⇄ {shortRemote}</span>
+          {remote.ahead != null &&
+            <span className="dim small" title="ahead / behind origin">
+              ↑{remote.ahead} ↓{remote.behind}</span>}
+          <button className="ghost" disabled={busy} title="fetch + recount ahead/behind"
+                  onClick={syncRemote}>sync</button>
+          <button className="ghost" disabled={busy} onClick={doPush}>push</button>
+          <button className="ghost" disabled={busy} title="fast-forward only; refuses on a dirty tree"
+                  onClick={doPull}>pull</button>
+          <button className="ghost danger" disabled={busy} title="disconnect remote"
+                  onClick={disconnect}>✕</button>
+        </div>
+      ) : (
+        <div className="row">
+          <input className="grow" placeholder="https://github.com/owner/repo"
+                 value={remoteUrl} onChange={(e) => setRemoteUrl(e.target.value)} />
+          <button className="ghost" disabled={busy || !remoteUrl.trim()}
+                  onClick={connect}>connect</button>
+        </div>
+      )}
+      {remote && !remote.has_token && (
+        <div className="dim small">no GITHUB_TOKEN secret set — private repos and
+          pushes will fail (add it in Secrets)</div>
+      )}
       <div className="row">
         <span className="grow dim">working tree</span>
         <button className="ghost" onClick={toggleDiff}>{diff != null ? 'hide diff' : 'diff'}</button>

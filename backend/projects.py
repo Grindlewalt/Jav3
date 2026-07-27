@@ -91,6 +91,56 @@ async def create_project(body: CreateProject):
     return {"slug": slug, "name": body.name}
 
 
+class ImportProject(BaseModel):
+    url: str
+    name: str | None = None
+
+
+@router.post("/projects/import")
+async def import_project(body: ImportProject):
+    """Clone an existing GitHub repo in as a new project, remote pre-connected.
+    Operator-only (like all of this router); the agent has no import path."""
+    from . import gitgate
+    url = body.url.strip()
+    if not gitgate.valid_remote(url):
+        raise HTTPException(
+            status_code=400,
+            detail="url must look like https://github.com/<owner>/<repo>")
+    repo = url.rstrip("/").rsplit("/", 1)[-1]
+    repo = repo[:-4] if repo.endswith(".git") else repo
+    name = (body.name or repo).strip()
+    slug = slugify(name)
+    project_dir = settings.projects_dir / slug
+    db = await get_db()
+    try:
+        async with db.execute("SELECT 1 FROM projects WHERE slug = ?", (slug,)) as cur:
+            if await cur.fetchone():
+                raise HTTPException(status_code=409,
+                                    detail=f"project '{slug}' already exists")
+        if project_dir.exists():
+            raise HTTPException(status_code=409,
+                                detail=f"directory '{slug}' already exists on disk")
+        try:
+            await gitgate.clone_repo(url, project_dir)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=f"clone failed: {e}")
+        await gitgate.run_git(slug, "config", "user.name", "Jarvis")
+        await gitgate.run_git(slug, "config", "user.email", "jarvis@atomos.local")
+        md = project_md_path(slug)
+        if not md.exists():
+            md.write_text(PROJECT_TEMPLATE.format(
+                name=name, summary=f"Imported from {url}",
+                created=date.today().isoformat()))
+        await db.execute(
+            "INSERT INTO projects (slug, name, path, github_remote) VALUES (?, ?, ?, ?)",
+            (slug, name, str(project_dir), url))
+        await db.commit()
+        await refresh_all_projects(db)
+    finally:
+        await db.close()
+    return {"slug": slug, "name": name, "github_remote": url}
+
+
 @router.get("/projects/{slug}")
 async def get_project(slug: str):
     db = await get_db()

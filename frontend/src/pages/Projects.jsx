@@ -9,6 +9,8 @@ export default function Projects() {
   const [name, setName] = useState('')
   const [summary, setSummary] = useState('')
   const [error, setError] = useState(null)
+  const [importUrl, setImportUrl] = useState('')
+  const [importing, setImporting] = useState(false)
 
   async function refresh() {
     const r = await api('/api/projects')
@@ -29,6 +31,21 @@ export default function Projects() {
       setName(''); setSummary('')
       refresh()
     } catch (err) { setError(err.detail) }
+  }
+
+  async function importRepo(e) {
+    e.preventDefault()
+    setError(null)
+    setImporting(true)
+    try {
+      await api('/api/projects/import', {
+        method: 'POST',
+        body: JSON.stringify({ url: importUrl }),
+      })
+      setImportUrl('')
+      refresh()
+    } catch (err) { setError(err.detail) }
+    setImporting(false)
   }
 
   async function load(slug) {
@@ -69,6 +86,12 @@ export default function Projects() {
                onChange={(e) => setSummary(e.target.value)} />
         <button type="submit">Create</button>
         {error && <span className="error">{error}</span>}
+      </form>
+      <form className="create-project" onSubmit={importRepo}>
+        <input placeholder="https://github.com/owner/repo — import an existing repo"
+               value={importUrl} onChange={(e) => setImportUrl(e.target.value)} required />
+        <button type="submit" disabled={importing}>
+          {importing ? 'cloning…' : 'Import from GitHub'}</button>
       </form>
       <ul className="project-list">
         {projects.map((p) => (
