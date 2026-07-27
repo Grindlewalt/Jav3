@@ -295,12 +295,64 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
         await db.close()
 
 
+async def create_remote_request(slug: str, url: str) -> dict:
+    """The agent's path to a remote: file a request; the operator's approval
+    verifies, connects, and pushes. The agent itself never touches the remote."""
+    url = (url or "").strip()
+    if not valid_remote(url):
+        raise ValueError("remote must look like https://github.com/<owner>/<repo>")
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT id FROM git_requests WHERE project_slug = ? AND "
+                "kind = 'remote' AND status = 'pending'", (slug,)) as cur:
+            dup = await cur.fetchone()
+        if dup:
+            raise ValueError(f"remote request #{dup['id']} is already pending "
+                             "for this project — wait for the operator")
+        cur = await db.execute(
+            "INSERT INTO git_requests (project_slug, kind, message) "
+            "VALUES (?, 'remote', ?)", (slug, url))
+        await db.commit()
+        return await _fetch_request(db, cur.lastrowid)
+    finally:
+        await db.close()
+
+
+async def _approve_remote(db, rid: int, row: dict) -> dict:
+    """Operator approved a remote-connect request: verify auth/reach, connect,
+    and push any existing commits. A push failure records but the connect stands."""
+    slug, url = row["project_slug"], row["message"]
+    try:
+        await verify_remote(slug, url)
+    except RuntimeError as e:
+        await db.execute("UPDATE git_requests SET error = ? WHERE id = ?",
+                         (f"verify failed: {e}", rid))
+        await db.commit()
+        raise                       # stays pending — retryable after fixing token/URL
+    await set_remote(slug, url)
+    error = None
+    rc, _, _ = await run_git(slug, "rev-parse", "--verify", "-q", "HEAD")
+    if rc == 0:                     # commits exist -> put them up now
+        try:
+            await push_to_remote(slug)
+        except (RuntimeError, ValueError) as e:
+            error = f"connected, but push failed: {e}"
+    await db.execute(
+        "UPDATE git_requests SET status = 'approved', error = ?, "
+        "decided_at = datetime('now') WHERE id = ?", (error, rid))
+    await db.commit()
+    return await _fetch_request(db, rid)
+
+
 async def approve_request(rid: int) -> dict:
     db = await get_db()
     try:
         row = await _fetch_request(db, rid)
         if row["status"] != "pending":
             raise ValueError(f"request #{rid} is {row['status']}, not pending")
+        if row.get("kind") == "remote":
+            return await _approve_remote(db, rid, row)
         slug, message = row["project_slug"], row["message"]
         paths = json.loads(row["paths"]) if row["paths"] else None
         await ensure_repo(slug)

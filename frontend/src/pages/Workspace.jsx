@@ -1210,9 +1210,13 @@ function GitPanel({ slug }) {
         {pending.map((r) => (
           <li key={r.id}>
             <span className="tag new">#{r.id}</span>
+            {r.kind === 'remote' && <span className="tag">remote</span>}
             <span className="grow ellipsis" title={r.message}>{r.message}</span>
             {r.error && <span className="tag error" title={r.error}>retry</span>}
-            <button className="win-btn ok" title="approve: commit + push" disabled={busy}
+            <button className="win-btn ok" disabled={busy}
+                    title={r.kind === 'remote'
+                      ? 'approve: verify + connect + push existing commits'
+                      : 'approve: commit + push'}
                     onClick={() => act(r.id, 'approve')}>✓</button>
             <button className="win-btn" title="reject" disabled={busy}
                     onClick={() => act(r.id, 'reject')}>✕</button>

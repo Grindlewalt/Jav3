@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS fetched_urls (
 CREATE TABLE IF NOT EXISTS git_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_slug TEXT NOT NULL,
-    message TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'commit',      -- commit | remote (connect+push)
+    message TEXT NOT NULL,           -- commit message, or the remote URL
     paths TEXT,                      -- JSON array or NULL = all changes
     status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
     commit_sha TEXT,
@@ -210,6 +211,12 @@ async def init_db() -> None:
         if "pending_approval" not in scols:
             await db.execute("ALTER TABLE schedules ADD COLUMN "
                              "pending_approval INTEGER NOT NULL DEFAULT 0")
+        async with db.execute("PRAGMA table_info(git_requests)") as cur:
+            gcols = [r["name"] for r in await cur.fetchall()]
+        if "kind" not in gcols:
+            # remote-connect requests ride the same approval queue as commits
+            await db.execute("ALTER TABLE git_requests ADD COLUMN "
+                             "kind TEXT NOT NULL DEFAULT 'commit'")
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
                           ("rollup", "TEXT"), ("job_id", "TEXT"),

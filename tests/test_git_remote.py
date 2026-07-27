@@ -188,3 +188,46 @@ async def test_import_rejects_bad_url(client):
     r = await client.post("/api/projects/import",
                           json={"url": "https://gitlab.com/o/r"})
     assert r.status_code == 400
+
+
+async def test_remote_request_flow(client, tmp_path, monkeypatch):
+    slug = await _mkproject(client, "Remote Req")
+    # invalid URL refused at filing time (agent gets immediate feedback)
+    with pytest.raises(ValueError, match="github.com"):
+        await gitgate.create_remote_request(slug, "http://github.com/o/r")
+
+    bare = tmp_path / "req-bare.git"
+    await _sh("git", "init", "-q", "--bare", str(bare))
+    url = f"file://{bare}"
+    monkeypatch.setattr(gitgate, "valid_remote", lambda u: True)
+    row = await gitgate.create_remote_request(slug, url)
+    assert row["kind"] == "remote" and row["status"] == "pending"
+    # only one pending remote request per project
+    with pytest.raises(ValueError, match="already pending"):
+        await gitgate.create_remote_request(slug, url)
+
+    # a commit exists -> approval should connect AND push it
+    d = settings.projects_dir / slug
+    (d / "f.txt").write_text("x\n")
+    await gitgate.run_git(slug, "add", "-A", check=True)
+    await gitgate.run_git(slug, "commit", "-q", "-m", "x", check=True)
+
+    async def fake_verify(slug, url):
+        return None
+    monkeypatch.setattr(gitgate, "verify_remote", fake_verify)
+    r = await client.post(f"/api/projects/{slug}/git/requests/{row['id']}/approve")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "approved" and body["error"] is None
+    assert await gitgate.get_remote(slug) == url
+    branch = await gitgate.current_branch(slug)
+    remote_sha = (await _sh("git", "-C", str(bare), "rev-parse", branch)).strip()
+    local_sha = (await gitgate.run_git(slug, "rev-parse", "HEAD"))[1].strip()
+    assert remote_sha == local_sha
+
+    # reject path works for remote kind too
+    row2 = await gitgate.create_remote_request(slug, url)
+    r = await client.post(f"/api/projects/{slug}/git/requests/{row2['id']}/reject")
+    assert r.status_code == 200
+    assert r.json()["status"] == "rejected"
+    assert await gitgate.get_remote(slug) == url   # unchanged by the reject
