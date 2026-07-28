@@ -35,7 +35,8 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
 async def list_events(db: aiosqlite.Connection, *, unacknowledged_only: bool = False,
                       limit: int = 100) -> list[dict]:
     q = ("SELECT id, kind, severity, project_slug, summary, detail, acknowledged, "
-         "created_at, acknowledged_at FROM security_events")
+         "created_at, acknowledged_at, triage_verdict, triage_reason "
+         "FROM security_events")
     if unacknowledged_only:
         q += " WHERE acknowledged = 0"
     q += " ORDER BY id DESC LIMIT ?"

@@ -91,6 +91,22 @@ nav a.active { color: var(--text); background: var(--panel-2); }
   margin-top: 4px; display: flex; }
 .vm-nuke-row button { flex: 1; font-size: 12px; }
 
+/* ---- triage reviewer dropdown ---- */
+.triage-drop { width: 380px; max-height: 70vh; }
+.triage-drop .notif-item { cursor: default; }
+.triage-head { border-bottom: 1px solid var(--border); border-radius: 7px 7px 0 0; }
+.triage-toggle { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.triage-sub { padding-top: 2px; padding-bottom: 2px; }
+.triage-sec { padding: 6px 10px 0; text-transform: uppercase; letter-spacing: 0.05em;
+  font-size: 10px; }
+.triage-row { align-items: flex-start; }
+.triage-row .win-btn, .triage-row .ghost { flex-shrink: 0; }
+
+/* reviewer-flag tag on Review/Network queue rows */
+.tag.triage-flag { background: color-mix(in srgb, var(--red) 18%, transparent);
+  color: var(--red); max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+
 /* ---- controls ---- */
 button {
   background: linear-gradient(135deg, var(--accent), #4a7fd4);

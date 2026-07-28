@@ -168,6 +168,35 @@ CREATE TABLE IF NOT EXISTS security_events (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     acknowledged_at TEXT
 );
+-- Triage reviewer (backend/reviewer.py): one row per sweep, one per action.
+-- The log is the audit + undo surface for the reviewer's autonomous
+-- approves/acks; triage_* columns on the queue tables (added in init_db)
+-- carry each item's verdict + reason into the Review/Network views.
+CREATE TABLE IF NOT EXISTS triage_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL DEFAULT 'manual',      -- manual | auto
+    examined INTEGER NOT NULL DEFAULT 0,
+    allowed INTEGER NOT NULL DEFAULT 0,
+    acked INTEGER NOT NULL DEFAULT 0,
+    flagged INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+);
+CREATE TABLE IF NOT EXISTS triage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER REFERENCES triage_runs(id),
+    item_kind TEXT NOT NULL,             -- egress | alert
+    item_id INTEGER NOT NULL,
+    project_slug TEXT,
+    subject TEXT,                        -- the host, or the alert summary head
+    verdict TEXT NOT NULL,               -- allow | ack | flag
+    reason TEXT,
+    action TEXT NOT NULL,                -- approved | acked | flagged
+    detail TEXT,                         -- JSON (e.g. which allowlist an approval extended)
+    undone INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -217,6 +246,13 @@ async def init_db() -> None:
             # remote-connect requests ride the same approval queue as commits
             await db.execute("ALTER TABLE git_requests ADD COLUMN "
                              "kind TEXT NOT NULL DEFAULT 'commit'")
+        # triage reviewer verdict columns on the two queue tables
+        for table in ("egress_pending", "security_events"):
+            async with db.execute(f"PRAGMA table_info({table})") as cur:
+                tcols = [r["name"] for r in await cur.fetchall()]
+            for col in ("triage_verdict", "triage_reason", "triage_at"):
+                if col not in tcols:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
                           ("rollup", "TEXT"), ("job_id", "TEXT"),

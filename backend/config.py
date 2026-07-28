@@ -274,6 +274,17 @@ class Settings(BaseSettings):
     egress_beacon_min_hits: int = 6           # regular hits to one host before cadence is judged
     egress_beacon_cv_max: float = 0.15        # inter-arrival coefficient-of-variation below this = beacon
 
+    # --- Triage reviewer (backend/reviewer.py) ----------------------------
+    # The isolated no-tools second reader that clears routine noise from the
+    # review/network queues. The sweep interval is the auto cadence (<= 0
+    # removes the background task entirely; the GUI toggle pauses it at
+    # runtime); the budget bounds one run's model spend.
+    reviewer_interval_seconds: int = 300
+    reviewer_batch_size: int = 40             # items per model call
+    reviewer_max_items: int = 400             # items per run (a run per sweep drains a backlog)
+    reviewer_budget_input: int = 1_500_000    # per-run token caps
+    reviewer_budget_output: int = 60_000
+
     # --- Golden image lifecycle (Layer 1) ---------------------------------
     # The VM widget goes amber when the running image is older than this; a
     # monthly systemd timer rebuilds a fresh versioned base (never in place).

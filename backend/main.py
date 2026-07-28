@@ -9,8 +9,8 @@ import asyncio
 
 from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api,
                git_api, gui, guest_shell, logs_api, memory_api,
-               notifications_api, projects, runs_api, schedules, skills_api,
-               vm_api, workspace, secrets)
+               notifications_api, projects, reviewer, reviewer_api, runs_api,
+               schedules, skills_api, vm_api, workspace, secrets)
 from .agent.model import (MODEL_STATE_KEY, get_model_override,
                           load_model_override, set_model_override)
 from .agent.tools.registry import compile_registry
@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     compile_registry()
     task = asyncio.create_task(schedules.scheduler_loop())
     reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
+    triage = asyncio.create_task(reviewer.sweeper_loop())  # auto queue triage
     await gateway.start()          # host vsock model gateway (no-op if no vsock)
     if settings.vm_egress:
         await vm.net_up()          # tap/nft/dnsmasq/pcap up BEFORE the proxy binds
@@ -43,6 +44,7 @@ async def lifespan(app: FastAPI):
     finally:
         task.cancel()
         reaper.cancel()
+        triage.cancel()
         await gateway.stop()
         await egress_proxy.stop()
         await guest_shell.stop_unix_server()
@@ -71,6 +73,7 @@ app.include_router(artifacts_api.router)
 app.include_router(vm_api.router)
 app.include_router(egress_api.router)
 app.include_router(egress_api.security_router)
+app.include_router(reviewer_api.router)
 app.include_router(gui.router)
 app.include_router(guest_shell.router)
 

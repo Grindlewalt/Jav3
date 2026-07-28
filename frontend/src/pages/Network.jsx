@@ -192,6 +192,8 @@ export function NetworkPanel({ slug }) {
             <li key={p.id}>
               <span className="tag pending">{p.hit_count}×</span>
               <span className="grow ellipsis mono" title={p.host}>{p.host}</span>
+              {p.triage_verdict === 'flag' && (
+                <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
               <button className="win-btn ok" title="approve" onClick={() => decide(p.id, 'approve')}>✓</button>
               <button className="win-btn" title="reject" onClick={() => decide(p.id, 'reject')}>✕</button>
             </li>
@@ -302,6 +304,8 @@ export default function Network() {
                 <li key={p.id}>
                   <span className="tag pending">{p.hit_count}×</span>
                   <span className="grow ellipsis mono" title={p.host}>{p.host}</span>
+                  {p.triage_verdict === 'flag' && (
+                    <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
                   {!filter && p.project_slug && <span className="tag">{p.project_slug}</span>}
                   <button className="win-btn ok" title="approve" onClick={() => decide(p.id, 'approve')}>✓</button>
                   <button className="win-btn" title="reject" onClick={() => decide(p.id, 'reject')}>✕</button>

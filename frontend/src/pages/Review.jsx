@@ -165,6 +165,8 @@ export function ReviewQueue({ slug }) {
               <li key={p.id}>
                 <span className="tag pending">{p.hit_count}×</span>
                 <span className="grow ellipsis" title={p.host}>{p.host}</span>
+                {p.triage_verdict === 'flag' && (
+                  <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
                 {!slug && p.project_slug && <span className="tag">{p.project_slug}</span>}
                 <button className="win-btn ok" title="approve host"
                         onClick={() => egressAct(p.id, 'approve')}>✓</button>
@@ -188,6 +190,8 @@ function AlertRow({ a, onAck }) {
           <span className={`tag sev-${sevClass(a.severity)}-tag`}>{a.severity}</span>
           <span className="mono small">{a.kind}</span>
           {a.project_slug && <span className="tag">{a.project_slug}</span>}
+          {a.triage_verdict === 'flag' && (
+            <span className="tag triage-flag" title={a.triage_reason}>⚑ {a.triage_reason}</span>)}
           <span className="dim small">{ts(a.created_at)}</span>
         </div>
         <div className="rev-alert-summary">{a.summary}</div>

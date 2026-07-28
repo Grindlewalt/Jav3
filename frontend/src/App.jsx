@@ -15,6 +15,7 @@ import Schedules from './pages/Schedules.jsx'
 import Logs from './pages/Logs.jsx'
 import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
+import TriagePanel from './TriagePanel.jsx'
 
 function NotificationBell() {
   const [data, setData] = useState(null)
@@ -304,6 +305,7 @@ export default function App() {
           </div>
           <ModelSwitch />
           <NotificationBell />
+          <TriagePanel />
           <VmStatus />
         </nav>
       )}

@@ -128,6 +128,21 @@ a watched, policy-gated, cuttable pipe to the internet.
     a deliberately heavy `run_code` degrades concurrent turns. An availability
     risk, not a confidentiality one.
 
+11. **LLM triage of the approval queues (added 2026-07-28).** The triage
+    reviewer (`backend/reviewer.py`) auto-approves egress hosts and auto-acks
+    routine alerts — an operator-directed relaxation of "a human clicks every
+    approval." Its inputs (hostnames, alert summaries) are attacker-influenced,
+    so a crafted benign-looking host could be steered past it; its verdict is a
+    model output. Containment: the reviewer is isolated (no tools, no fetch
+    capability, no main-agent context; its only egress is the model API call
+    every feature makes), deterministic guardrails outrank it (critical /
+    anomaly / secret-leak alerts and cut, anomaly-named or high-entropy hosts
+    are never auto-handled), it fails closed (unparseable output acts on
+    nothing), and every auto-action is audit-logged and one-click undoable.
+    The residual: a plausible-looking exfil host auto-allowed is exactly risk
+    #1 with the human click removed — the anomaly detectors and the undo log
+    are the backstop.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -142,6 +157,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Hypervisor / kernel escape | Critical | Low | No passthrough, minimal devices, monthly patched image; unpatched-CVE window only. |
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
 | Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
+| Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
 
 **Closing frame:** the netless design made the room have no phone; this design
 gives the room a **monitored, policy-gated, cuttable phone with no address book of

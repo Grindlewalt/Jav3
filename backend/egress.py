@@ -184,13 +184,14 @@ async def reject_host(db: aiosqlite.Connection, pending_id: int) -> dict:
 
 
 async def list_pending(db: aiosqlite.Connection, slug: str | None = None) -> list[dict]:
-    q = ("SELECT id, project_slug, host, hit_count, first_seen, last_seen, status "
-         "FROM egress_pending WHERE status='pending'")
+    q = ("SELECT id, project_slug, host, hit_count, first_seen, last_seen, status, "
+         "triage_verdict, triage_reason FROM egress_pending WHERE status='pending'")
     args: tuple = ()
     if slug:
         q += " AND project_slug = ?"
         args = (slug,)
-    q += " ORDER BY last_seen DESC"
+    # reviewer-flagged hosts first — those are the ones actually waiting on a human
+    q += " ORDER BY (triage_verdict = 'flag') DESC, last_seen DESC"
     async with db.execute(q, args) as cur:
         return [dict(r) for r in await cur.fetchall()]
 
