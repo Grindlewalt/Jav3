@@ -50,13 +50,14 @@ def _agent_tools(agent: dict, autonomy_level: str | None = None) -> list[dict]:
     own_exclude = set(agent.get("tools_exclude") or [])
     excluded = set(own_exclude)
     # a subagent never launches teams or mints persistent infrastructure —
-    # but spawn_agent itself nests up to MAX_SPAWN_DEPTH (fork-bomb cap;
-    # the shared per-op Budget fences cost). The agent definition's own
+    # but the spawn tools themselves nest up to MAX_SPAWN_DEPTH (fork-bomb
+    # cap; the shared per-op Budget fences cost). The agent definition's own
     # exclusion still wins.
     excluded |= autonomy.NON_DELEGABLE
-    if ("spawn_agent" not in own_exclude
-            and runtime.spawn_depth.get() < autonomy.MAX_SPAWN_DEPTH):
-        excluded.discard("spawn_agent")
+    if runtime.spawn_depth.get() < autonomy.MAX_SPAWN_DEPTH:
+        for t in ("spawn_agent", "spawn_temp_agent"):
+            if t not in own_exclude:
+                excluded.discard(t)
     entries = [e for e in load_registry() if e["name"] not in excluded]
     # a headless run is the unattended case — honour the project's autonomy dial
     entries = autonomy.filter_entries(entries, autonomy_level)
@@ -105,12 +106,11 @@ async def _agent_system_prompt(db, agent: dict, active=_USE_DB) -> str:
     return f"{agent['prompt']}\n\n---\n\n{base}"
 
 
-async def _open_agent_run(db, slug: str, task: str,
-                          active=_USE_DB) -> tuple[dict, int, str | None]:
+async def _open_run(db, agent: dict, task: str,
+                    active=_USE_DB) -> tuple[int, str | None]:
     """Create the conversation for an agent run and record the task. Returns
-    (agent def, conversation_id, resolved project slug) — the caller needs the
-    resolved slug (not the _USE_DB sentinel) for the autonomy lookup."""
-    agent = _read(slug)  # 404s if missing
+    (conversation_id, resolved project slug) — the caller needs the resolved
+    slug (not the _USE_DB sentinel) for the autonomy lookup."""
     if active is _USE_DB:
         active = await _inherited_or_global(db)
     title = f"[{agent['name']}] " + " ".join(task.split())[:40]
@@ -120,14 +120,62 @@ async def _open_agent_run(db, slug: str, task: str,
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
     await db.commit()
-    return agent, conversation_id, active
+    return conversation_id, active
 
 
 async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
-    """Run an agent to completion, no streaming — for scheduled runs and the
-    spawn_agent tool. Peak is auto-confirmed: the caller (a schedule or Jarvis
-    itself) already intended this, there's no human to prompt. `active` pins
-    the project context without disturbing the operator's live session.
+    """Run a defined agent to completion, no streaming — for scheduled runs and
+    the spawn_agent tool."""
+    agent = _read(slug)  # 404s if missing
+    return await _run_headless(agent, task, active)
+
+
+# blocks a lean temp agent drops: Jarvis's identity, standing memory, the user
+# profile and the rosters — the bulk that re-rides every iteration without
+# helping a narrow worker. env.md, the active project and the operator-rules
+# tail stay (the tail is non-excludable anyway).
+TEMP_LEAN_EXCLUDE = ("soul.md", "standing-memory", "user.md",
+                     "all-projects.md", "agents-index", "secrets-index")
+
+TEMP_REPORT_BACK = """# Temporary agent
+You exist only for this task; when you finish you are gone, and only two
+things survive you: the memory note you write and the final report you
+return. If you built or changed anything durable (files, code, config),
+record it FIRST with memory_write — one note named after the task: WHAT you
+built (exact paths), HOW to use or implement it, and any follow-ups. Pure
+lookups skip the note. Your final reply goes to the agent that spawned you:
+outcome first, no process narration."""
+
+
+def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
+    """An in-memory AGENT.md equivalent — same keys the _agent_* helpers read,
+    never touches the roster on disk. `duplicate` mirrors the operator's ask:
+    a full copy of Jarvis's context only when the task truly needs it."""
+    return {
+        "name": (label or "").strip()[:40] or "temp agent",
+        "prompt": prompt.strip() + "\n\n" + TEMP_REPORT_BACK,
+        "description": "", "model": "", "base_url": "", "own_memory": False,
+        "context_exclude": [] if duplicate else list(TEMP_LEAN_EXCLUDE),
+        "tools_exclude": [], "skills_exclude": [], "max_iterations": 0,
+    }
+
+
+async def run_temp_agent_headless(prompt: str, task: str, *,
+                                  duplicate: bool = False, label: str = "",
+                                  active=_USE_DB) -> dict:
+    """A disposable agent: no AGENT.md, no roster entry — a role prompt layered
+    on Jarvis's own context (full when duplicate, lean otherwise), run once and
+    gone. What survives is the run's conversation row (Jobs view) and any
+    memory note the agent writes."""
+    return await _run_headless(_temp_agent_def(prompt, duplicate, label),
+                               task, active)
+
+
+async def _run_headless(agent: dict, task: str, active=_USE_DB) -> dict:
+    """Shared engine for named and temp headless runs. Peak is auto-confirmed:
+    the caller (a schedule or Jarvis itself) already intended this, there's no
+    human to prompt. `active` pins the project context without disturbing the
+    operator's live session.
 
     Headless runs are subagents of something (a parent turn or a schedule), so
     they get the tight subagent iteration cap unless the agent's definition
@@ -138,8 +186,7 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
     try:
         # take the RESOLVED slug back: _project_autonomy below binds `active`
         # as an SQL parameter, and the raw _USE_DB object() crashes aiosqlite
-        agent, conversation_id, active = await _open_agent_run(
-            db, slug, task, active=active)
+        conversation_id, active = await _open_run(db, agent, task, active=active)
         # own fetch-ledger scope: the agent hasn't seen its parent's reads, so
         # it must be able to re-fetch them — and a scheduled run must never be
         # starved by yesterday's claims (the 06:45 news-agent post-mortem)

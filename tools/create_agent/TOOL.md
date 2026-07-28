@@ -1,7 +1,7 @@
 ---
 name: create_agent
-description: Define a new named agent (system prompt + roster entry) that you can then run with spawn_agent or propose a schedule for — or, with update=true, rewrite an existing agent's prompt. For a one-off subtask an existing agent covers, just spawn_agent it instead.
-when_to_use: The operator asks for a new kind of agent ("make a news agent"), wants an existing agent's behavior changed ("make the news agent shorter" -> update=true), or a recurring task needs a role no agent in your roster covers. Check the roster first — never duplicate an existing agent.
+description: Define a new named agent (system prompt + roster entry) that you can then run with spawn_agent or propose a schedule for — or, with update=true, rewrite an existing agent's prompt. For a one-off subtask an existing agent covers, just spawn_agent it; for a one-off role nothing covers, spawn_temp_agent a disposable worker instead of saving a definition.
+when_to_use: The operator asks for a new kind of agent ("make a news agent"), wants an existing agent's behavior changed ("make the news agent shorter" -> update=true), or a RECURRING task needs a role no agent in your roster covers. Check the roster first — never duplicate an existing agent, and don't mint roster entries for one-off jobs (that is spawn_temp_agent's job).
 enabled: true
 parameters:
   type: object

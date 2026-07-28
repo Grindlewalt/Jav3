@@ -67,13 +67,14 @@ async def test_agent_run_rejects_unknown_project(client):
 async def test_headless_run_inherits_parent_pin(client):
     """spawn_agent children resolve the parent turn's pinned project via the
     contextvar, not the global active project."""
-    from backend.agents_run import _USE_DB, _open_agent_run
+    from backend.agents_api import _read
+    from backend.agents_run import _USE_DB, _open_run
     await client.post("/api/agents", json={"name": "Helper"})
     tok = runtime.active_project.set("beta")
     db = await get_db()
     try:
-        _agent, cid, active = await _open_agent_run(db, "helper", "do a thing",
-                                                    active=_USE_DB)
+        cid, active = await _open_run(db, _read("helper"), "do a thing",
+                                      active=_USE_DB)
         assert active == "beta"                    # inherited pin, not alpha
         async with db.execute(
             "SELECT p.slug AS slug FROM conversations c JOIN projects p ON "

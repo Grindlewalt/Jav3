@@ -18,7 +18,7 @@ def _names(specs):
 def test_agent_gets_spawn_below_the_cap():
     names = _names(agents_run._agent_tools({}))
     assert "spawn_agent" in names                       # depth 0
-    for t in NON_DELEGABLE - {"spawn_agent"}:
+    for t in NON_DELEGABLE - {"spawn_agent", "spawn_temp_agent"}:
         assert t not in names                           # infra tools never
 
 

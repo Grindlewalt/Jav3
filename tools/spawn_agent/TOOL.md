@@ -1,7 +1,7 @@
 ---
 name: spawn_agent
 description: Summon one of the defined agents to carry out a task and return its report. The agent runs its own reasoning loop with its own tools in the current project.
-when_to_use: When the operator asks you to run/summon a named agent (e.g. "have the recon agent do its job"), or when a sub-task fits an agent you can see in the agent list.
+when_to_use: When the operator asks you to run/summon a named agent (e.g. "have the recon agent do its job"), or when a sub-task fits an agent you can see in the agent list. For a one-off role no saved agent covers, use spawn_temp_agent instead.
 enabled: true
 parameters:
   type: object

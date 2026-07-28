@@ -206,14 +206,16 @@ def test_summarize_reexports_the_one_complete_text():
 
 def test_non_delegable_is_the_single_source(tmp_env):
     assert autonomy.NON_DELEGABLE == frozenset(
-        {"spawn_agent", "deploy_agents", "create_agent", "schedule_update"})
+        {"spawn_agent", "spawn_temp_agent", "deploy_agents", "create_agent",
+         "schedule_update"})
     # the subagent tool build references it: infra tools never reach a
-    # delegate; spawn_agent alone is handed back below MAX_SPAWN_DEPTH
-    # (depth-capped nesting, 2026-07-23) and drops out at the cap
+    # delegate; the spawn tools alone are handed back below MAX_SPAWN_DEPTH
+    # (depth-capped nesting, 2026-07-23) and drop out at the cap
     from backend import runtime
     from backend.agents_run import _agent_tools
     names = {s["function"]["name"] for s in _agent_tools({})}
-    assert names.isdisjoint(autonomy.NON_DELEGABLE - {"spawn_agent"})
+    assert names.isdisjoint(
+        autonomy.NON_DELEGABLE - {"spawn_agent", "spawn_temp_agent"})
     assert "spawn_agent" in names
     tok = runtime.spawn_depth.set(autonomy.MAX_SPAWN_DEPTH)
     try:

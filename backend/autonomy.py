@@ -31,7 +31,7 @@ _STAGE = {
     "todo_update", "memory_write", "create_agent", "schedule_update",
 }
 _GATED = {
-    "research", "spawn_agent", "deploy_agents",
+    "research", "spawn_agent", "spawn_temp_agent", "deploy_agents",
     # code execution: contained in the no-key/no-net guest, but running code
     # is still more than file edits — gated tier
     "run_code",
@@ -45,15 +45,17 @@ _COMMIT = {"git_commit_request", "git_remote_request"}
 # (agents_run._agent_tools, deploy_agents); deploy_agents' own _in_funnel
 # contextvar is a second, whole-subtree fence.
 NON_DELEGABLE = frozenset({
-    "spawn_agent", "deploy_agents", "create_agent", "schedule_update",
+    "spawn_agent", "spawn_temp_agent", "deploy_agents", "create_agent",
+    "schedule_update",
 })
 
-# spawn_agent alone nests, capped (2026-07-23 operator ask): an agent at spawn
-# depth d < MAX_SPAWN_DEPTH gets spawn_agent back (head chat = depth 0, so
-# Jarvis -> agent -> agent, then leaf). The cap is the fork-bomb fence; the
-# shared per-op Budget fences total cost. Funnel workers (deploy_agents,
-# runs_api) keep the full NON_DELEGABLE set — the orchestrator builds its own
-# capped tree and workers must not sprout side-trees around it.
+# the spawn tools alone nest, capped (2026-07-23 operator ask): an agent at
+# spawn depth d < MAX_SPAWN_DEPTH gets spawn_agent/spawn_temp_agent back
+# (head chat = depth 0, so Jarvis -> agent -> agent, then leaf). The cap is
+# the fork-bomb fence; the shared per-op Budget fences total cost. Funnel
+# workers (deploy_agents, runs_api) keep the full NON_DELEGABLE set — the
+# orchestrator builds its own capped tree and workers must not sprout
+# side-trees around it.
 MAX_SPAWN_DEPTH = 2
 
 
