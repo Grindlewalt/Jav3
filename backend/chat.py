@@ -388,7 +388,28 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         bus.publish(chan, {"type": "error", "message": str(exc)})
     finally:
         if db is not None and ephemeral:
-            # incognito: leave zero trace — drop the convo and any temp notes
+            # incognito: no trace in the DB or GUI — but the operator asked
+            # for an SSH-only recovery hatch, so the turn's transcript is
+            # appended to a date-stamped file under data/ (gitignored, never
+            # served) before the wipe. Best-effort: a dump failure must not
+            # keep the rows alive.
+            try:
+                async with db.execute(
+                    "SELECT role, content, created_at FROM messages "
+                    "WHERE conversation_id = ? ORDER BY id",
+                    (conversation_id,)) as cur:
+                    msgs = await cur.fetchall()
+                if msgs:
+                    dump_dir = settings.data_dir / "incognito"
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+                    path = dump_dir / f"{msgs[0]['created_at'][:10]}.md"
+                    with path.open("a", encoding="utf-8") as fh:
+                        fh.write(f"\n---\n\n## chat {conversation_id} · "
+                                 f"{msgs[-1]['created_at']} UTC\n\n")
+                        for m in msgs:
+                            fh.write(f"**{m['role']}**:\n\n{m['content']}\n\n")
+            except Exception:  # noqa: BLE001 — recovery dump is best-effort
+                pass
             for tbl in ("tool_calls", "messages", "conversations"):
                 col = "id" if tbl == "conversations" else "conversation_id"
                 await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))

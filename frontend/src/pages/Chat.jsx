@@ -11,6 +11,8 @@ export default function Chat() {
   const [active, setActive] = useState(null)
   const [projects, setProjects] = useState([])
   const [incognito, setIncognito] = useState(false)
+  const [sideOpen, setSideOpen] = useState(
+    () => localStorage.getItem('jarvis.chat.side') !== 'closed')
   const scrollRef = useRef(null)   // the .messages scroll container
   const inputRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
@@ -24,6 +26,24 @@ export default function Chat() {
     api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
     return () => tailAbort.current?.abort()
   }, [])
+
+  useEffect(() => {
+    localStorage.setItem('jarvis.chat.side', sideOpen ? 'open' : 'closed')
+  }, [sideOpen])
+
+  // incognito greys out the whole GUI: .incog on <html> swaps the palette
+  // variables, and a transient .theme-fade class makes every surface
+  // cross-fade instead of snapping
+  useEffect(() => {
+    const el = document.documentElement
+    el.classList.add('theme-fade')
+    el.classList.toggle('incog', incognito)
+    const t = setTimeout(() => el.classList.remove('theme-fade'), 700)
+    return () => clearTimeout(t)
+  }, [incognito])
+  // leaving the Chat page ends the unsaved chat — restore the normal palette
+  useEffect(() => () =>
+    document.documentElement.classList.remove('incog', 'theme-fade'), [])
 
   useEffect(() => {
     // scroll only the message list, never the page (scrollIntoView walks
@@ -69,6 +89,7 @@ export default function Chat() {
 
   async function openConversation(id) {
     tailAbort.current?.abort()
+    setIncognito(false)   // saved chats always use the normal palette
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
@@ -97,6 +118,7 @@ export default function Chat() {
   function newConversation() {
     tailAbort.current?.abort()
     setBusy(false)
+    setIncognito(false)   // a fresh chat always starts saved + light
     setConversationId(null)
     setMessages([])
   }
@@ -163,14 +185,15 @@ export default function Chat() {
 
   return (
     <div className="chat-layout">
-      <aside>
-        <button onClick={newConversation}>+ New chat</button>
-        <label className="incognito-toggle" title="persist nothing; memory writes go to a temp dir">
-          <input type="checkbox" checked={incognito}
-                 onChange={(e) => { setIncognito(e.target.checked); newConversation() }} />
-          <span>🕶 incognito</span>
-        </label>
-        <div className="side-title">Chats</div>
+      <aside className={sideOpen ? '' : 'collapsed'}>
+        <div className="side-head">
+          <button type="button" className="icon-btn"
+                  title={sideOpen ? 'collapse sidebar' : 'expand sidebar'}
+                  onClick={() => setSideOpen((o) => !o)}>{sideOpen ? '«' : '»'}</button>
+          <span className="side-title">Chats</span>
+          <button type="button" className="icon-btn" title="new chat"
+                  onClick={newConversation}>＋</button>
+        </div>
         <ul className="convo-list">
           {conversations.map((c) => (
             <li key={c.id} className={c.id === conversationId ? 'active' : ''}
@@ -186,6 +209,12 @@ export default function Chat() {
         {active && <div className="active-project">project loaded: {active}</div>}
       </aside>
       <main>
+        {!conversationId && incognito && messages.length > 0 && (
+          <div className="chat-toolbar">
+            <span className="tag incog-tag">🕶 incognito</span>
+            <span className="dim small">nothing here is saved — closing this chat discards it</span>
+          </div>
+        )}
         {conversationId && (
           <div className="chat-toolbar">
             <span className="chat-title ellipsis">
@@ -220,6 +249,14 @@ export default function Chat() {
                   </button>
                 ))}
               </div>
+              <label className="incog-switch"
+                     title="off: incognito — nothing is saved and the GUI greys out; recovery is SSH-only">
+                <input type="checkbox" checked={!incognito}
+                       onChange={(e) => setIncognito(!e.target.checked)} />
+                <span className="track"><span className="knob">{incognito ? '🕶' : ''}</span></span>
+                <span className="incog-label">
+                  {incognito ? 'Incognito — nothing will be saved' : 'Chat is saved'}</span>
+              </label>
             </div>
           ) : (
             <div className="thread">
@@ -243,7 +280,7 @@ export default function Chat() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
-              placeholder="Message Jarvis…"
+              placeholder={incognito ? 'Message Jarvis (incognito)…' : 'Message Jarvis…'}
               rows={1}
             />
             {busy
