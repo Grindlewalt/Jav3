@@ -284,6 +284,12 @@ class Settings(BaseSettings):
     reviewer_max_items: int = 400             # items per run (a run per sweep drains a backlog)
     reviewer_budget_input: int = 1_500_000    # per-run token caps
     reviewer_budget_output: int = 60_000
+    # The never-auto-approve entropy floor. Deliberately looser than
+    # egress_entropy_threshold (3.8): that one alerts on live traffic, but as
+    # a triage guard it flags ordinary long hostnames
+    # (raw.githubusercontent.com = 3.80). DGA-shaped names run > 4.2; below
+    # the floor the model still judges the host and can flag it on its own.
+    reviewer_entropy_guard: float = 4.2
 
     # --- Golden image lifecycle (Layer 1) ---------------------------------
     # The VM widget goes amber when the running image is older than this; a
