@@ -11,7 +11,8 @@ export default function Chat() {
   const [active, setActive] = useState(null)
   const [projects, setProjects] = useState([])
   const [incognito, setIncognito] = useState(false)
-  const bottomRef = useRef(null)
+  const scrollRef = useRef(null)   // the .messages scroll container
+  const inputRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight (set even incognito)
 
@@ -27,9 +28,18 @@ export default function Chat() {
   useEffect(() => {
     // scroll only the message list, never the page (scrollIntoView walks
     // every scrollable ancestor)
-    const box = bottomRef.current?.parentElement
+    const box = scrollRef.current
     if (box) box.scrollTop = box.scrollHeight
   }, [messages])
+
+  // the composer grows with the draft, up to the CSS max-height
+  function autoGrow() {
+    const ta = inputRef.current
+    if (!ta) return
+    ta.style.height = 'auto'
+    ta.style.height = `${ta.scrollHeight}px`
+  }
+  useEffect(autoGrow, [input])
 
   // one handler for both paths: the live POST stream and a resumed tail.
   // token/tool/tool_result fold into the streaming message's parts; final
@@ -160,6 +170,7 @@ export default function Chat() {
                  onChange={(e) => { setIncognito(e.target.checked); newConversation() }} />
           <span>🕶 incognito</span>
         </label>
+        <div className="side-title">Chats</div>
         <ul className="convo-list">
           {conversations.map((c) => (
             <li key={c.id} className={c.id === conversationId ? 'active' : ''}
@@ -177,8 +188,13 @@ export default function Chat() {
       <main>
         {conversationId && (
           <div className="chat-toolbar">
-            <span className="dim">chat #{conversationId}</span>
-            <label className="dim">project:</label>
+            <span className="chat-title ellipsis">
+              {conversations.find((c) => c.id === conversationId)?.summary
+                || `Chat #${conversationId}`}
+            </span>
+            <span className="tag">#{conversationId}</span>
+            <span className="grow" />
+            <label className="dim">project</label>
             <select
               value={conversations.find((c) => c.id === conversationId)?.project_slug || ''}
               onChange={(e) => assignProject(e.target.value)}>
@@ -187,30 +203,55 @@ export default function Chat() {
             </select>
           </div>
         )}
-        <div className="messages">
-          {messages.map((m, i) => (
-            <div key={i} className={`msg ${m.role}`}>
-              {m.role === 'assistant'
-                ? <MessageBody m={m} />
-                : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
+        <div className="messages" ref={scrollRef}>
+          {messages.length === 0 ? (
+            <div className="chat-empty">
+              <div className="orb" />
+              <h2>How can I help?</h2>
+              <p>{incognito ? 'Incognito — this chat won’t be saved.'
+                : 'Enter to send · Shift+Enter for a newline'}</p>
+              <div className="chat-suggest">
+                {['What did my schedules do overnight?',
+                  'Summarize the latest security events',
+                  'What changed across my projects this week?'].map((s) => (
+                  <button key={s} type="button"
+                          onClick={() => { setInput(s); inputRef.current?.focus() }}>
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
-          ))}
-          <div ref={bottomRef} />
+          ) : (
+            <div className="thread">
+              {messages.map((m, i) => (
+                <div key={i} className={`msg ${m.role}`}>
+                  {m.role === 'assistant' ? <>
+                    <div className={`msg-avatar ${m.streaming ? 'thinking' : ''}`}>J</div>
+                    <MessageBody m={m} />
+                  </> : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <form className="composer" onSubmit={(e) => { e.preventDefault(); send() }}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-            }}
-            placeholder="Message Jarvis… (Enter to send, Shift+Enter for newline)"
-            rows={3}
-          />
-          {busy
-            ? <button type="button" className="ghost danger" title="stop this turn"
-                      onClick={stop}>⏹ Stop</button>
-            : <button type="submit">Send</button>}
+          <div className="composer-inner">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+              }}
+              placeholder="Message Jarvis…"
+              rows={1}
+            />
+            {busy
+              ? <button type="button" className="send-btn stop" title="stop this turn"
+                        onClick={stop}>◼</button>
+              : <button type="submit" className="send-btn" title="send"
+                        disabled={!input.trim()}>↑</button>}
+          </div>
         </form>
       </main>
     </div>

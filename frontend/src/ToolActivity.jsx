@@ -58,12 +58,14 @@ export function ToolRow({ part }) {
   return (
     <div className={`tool-row ${status}`}>
       <div className="tool-row-head" onClick={() => part.done && setOpen((o) => !o)}>
+        {!part.done && <span className="tool-spinner" />}
+        {part.done && (part.ok
+          ? <span className="tool-ok">✓</span>
+          : <span className="tool-fail">✕</span>)}
         <span className="grow ellipsis">
           {humanizeTool(part.name, part.args)}{exit ? ` — exit ${exit[1]}` : ''}
         </span>
-        {part.done
-          ? <span className="dim">{open ? '▾' : '▸'}</span>
-          : <span className="tool-row-spin">···</span>}
+        {part.done && <span className={`chev dim ${open ? 'open' : ''}`}>▶</span>}
       </div>
       {open && (
         <div className="tool-row-detail">
@@ -85,8 +87,9 @@ export function ActivityGroup({ parts }) {
   if (!parts?.length) return null
   return (
     <div className="activity-group">
-      <div className="tool-row-head dim" onClick={() => setOpen((o) => !o)}>
-        <span>{open ? '▾' : '▸'} {parts.length} step{parts.length !== 1 ? 's' : ''}</span>
+      <div className="steps-pill" onClick={() => setOpen((o) => !o)}>
+        <span className={`chev ${open ? 'open' : ''}`}>▶</span>
+        <span>{parts.length} step{parts.length !== 1 ? 's' : ''}</span>
       </div>
       {open && parts.map((p, i) => p.kind === 'job'
         ? <div key={`job${p.root_id}`} className="tool-row ok"><JobTree cid={p.root_id} /></div>
@@ -125,11 +128,15 @@ export function finishTurn(m, content) {
   }
 }
 
+function Typing() {
+  return <span className="typing"><span /><span /><span /></span>
+}
+
 export function MessageBody({ m }) {
   if (m.parts) {
     return (
       <div className="bubble">
-        {m.parts.length === 0 && '…'}
+        {m.parts.length === 0 && <Typing />}
         {m.parts.map((p, i) => {
           if (p.kind === 'text') return <Md key={i} text={p.text} />
           if (p.kind === 'job') return (
@@ -143,10 +150,11 @@ export function MessageBody({ m }) {
       </div>
     )
   }
+  if (!m.content && m.streaming) return <div className="bubble"><Typing /></div>
   return (
     <div className="bubble">
       {m.activity?.length > 0 && <ActivityGroup parts={m.activity} />}
-      <Md text={m.content || (m.streaming ? '…' : '')} />
+      <Md text={m.content} />
     </div>
   )
 }
