@@ -117,8 +117,11 @@ export default function Projects() {
       </ul>
 
       {deleted.length > 0 && (
-        <>
-          <h3 className="section-h">Recently deleted</h3>
+        <details className="deleted-fold">
+          <summary>
+            Recently deleted ({deleted.length})
+            <span className="chev" aria-hidden="true">›</span>
+          </summary>
           <ul className="project-list">
             {deleted.map((p) => (
               <li key={p.slug} className="deleted">
@@ -129,7 +132,7 @@ export default function Projects() {
               </li>
             ))}
           </ul>
-        </>
+        </details>
       )}
     </div>
   )

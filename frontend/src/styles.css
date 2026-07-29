@@ -958,6 +958,20 @@ kbd {
 .small { font-size: 12px; }
 .section-h { margin: 26px 0 12px; color: var(--dim); font-size: 13px;
   text-transform: uppercase; letter-spacing: 1px; }
+/* deleted projects fold shut — a graveyard shouldn't take up the page.
+   Same voice as .section-h, plus the shared chevron: right closed, down open. */
+.deleted-fold { margin-top: 26px; }
+.deleted-fold summary {
+  display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  list-style: none; user-select: none; padding: 4px 0;
+  color: var(--dim); font-size: 13px; text-transform: uppercase;
+  letter-spacing: 1px; border-radius: 6px;
+  transition: color 0.15s;
+}
+.deleted-fold summary:hover { color: var(--text); }
+.deleted-fold summary::-webkit-details-marker { display: none; }
+.deleted-fold[open] summary .chev { transform: rotate(90deg); }
+.deleted-fold .project-list { margin-top: 12px; }
 .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 12px; }
 .tool-card {
