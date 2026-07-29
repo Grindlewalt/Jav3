@@ -1,0 +1,4 @@
+websockets>=12
+jeepney>=0.8        # MPRIS transport control over D-Bus (Linux). Optional:
+                    # without it everything else still works and transport
+                    # returns a clear "not installed" error.

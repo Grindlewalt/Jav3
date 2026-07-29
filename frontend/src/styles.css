@@ -1763,3 +1763,25 @@ kbd {
 .model-menu .m-name { flex: 1; display: flex; flex-direction: column; gap: 1px; }
 .model-menu .m-sub { font-size: 11px; color: var(--dim); }
 .model-menu .m-check { color: var(--accent); font-size: 11px; }
+
+/* ---- computer use ----
+   Grants and the pairing token live here and only here; the layout keeps the
+   three sections visually separate so it reads as a control panel, not a form. */
+.cu-page .panel { margin-bottom: 18px; }
+.cu-page h2 { font-size: 15px; margin: 0 0 6px; }
+.cu-clients, .cu-grants { list-style: none; margin: 8px 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px; }
+.cu-clients li, .cu-grants li {
+  display: flex; align-items: center; gap: 9px; padding: 9px 12px;
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: 10px; font-size: 13.5px;
+}
+.cu-grants li code { font-size: 12.5px; overflow-wrap: anywhere; }
+.cu-probe { margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+  background: var(--bg-soft); border: 1px solid var(--border);
+  font-size: 12.5px; display: flex; flex-direction: column; gap: 4px; }
+.cu-cmd {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; overflow-x: auto; margin: 10px 0 6px;
+  font: 12.5px/1.6 ui-monospace, Menlo, monospace; color: var(--dim);
+}

@@ -19,6 +19,7 @@ import Schedules from './pages/Schedules.jsx'
 import Logs from './pages/Logs.jsx'
 import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
+import ComputerUse from './pages/ComputerUse.jsx'
 import Notices, { useNotices } from './Notices.jsx'
 
 // Primary destinations stay on the bar; everything else lives behind "More".
@@ -32,6 +33,7 @@ const PRIMARY_LINKS = [
 ]
 const MORE_LINKS = [
   { to: '/artifacts', label: 'Artifacts' },
+  { to: '/computer', label: 'Computer use' },
   { to: '/network', label: 'Network' },
   { to: '/context', label: 'Context' },
   { to: '/logs', label: 'Logs' },
@@ -506,6 +508,7 @@ export default function App() {
         <Route path="/artifacts" element={<Artifacts />} />
         <Route path="/review" element={<Review />} />
         <Route path="/network" element={<Network />} />
+        <Route path="/computer" element={<ComputerUse />} />
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />
         <Route path="/logs" element={<Logs />} />

@@ -7,7 +7,8 @@ from pydantic import BaseModel
 
 import asyncio
 
-from . import (agents_api, agents_run, artifacts_api, auth, chat, egress_api,
+from . import (agents_api, agents_run, artifacts_api, auth, chat,
+               computeruse_api, egress_api,
                git_api, gui, guest_shell, logs_api, memory_api,
                notifications_api, projects, reviewer, reviewer_api, runs_api,
                schedules, skills_api, vm_api, workspace, secrets)
@@ -76,6 +77,8 @@ app.include_router(egress_api.security_router)
 app.include_router(reviewer_api.router)
 app.include_router(gui.router)
 app.include_router(guest_shell.router)
+app.include_router(computeruse_api.router)
+app.include_router(computeruse_api.ws_router)
 
 
 @app.get("/api/health")

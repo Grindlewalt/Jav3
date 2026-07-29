@@ -197,6 +197,15 @@ CREATE TABLE IF NOT EXISTS triage_log (
     undone INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- Computer use: the folders a desktop client may play from. Written only from
+-- the Computer use tab -- no tool creates one, so the agent cannot widen its
+-- own reach. The client intersects these with its own --allow-root ceiling.
+CREATE TABLE IF NOT EXISTS cu_grants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    root TEXT NOT NULL UNIQUE,           -- absolute, already resolved
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
