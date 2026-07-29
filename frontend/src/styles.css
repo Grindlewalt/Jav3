@@ -1400,7 +1400,12 @@ kbd {
     transition: transform 0.24s ease, visibility 0s linear 0s;
   }
   .chat-layout aside.collapsed {
-    width: min(300px, 84vw); padding: 10px;
+    /* position must be restated here: the desktop rail rule sets
+       `aside.collapsed { position: relative }` at higher specificity than
+       the plain `.chat-layout aside` overlay above, which put the collapsed
+       list back in flow and shoved the whole thread below the fold */
+    position: absolute;
+    width: min(300px, 84vw); padding: 10px 10px calc(10px + var(--sab));
     transform: translateX(-100%); box-shadow: none;
     visibility: hidden; transition: transform 0.24s ease,
       visibility 0s linear 0.24s;
