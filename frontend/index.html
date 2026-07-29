@@ -8,9 +8,13 @@
       // stamp the theme before first paint so a light-theme reload never
       // flashes dark (App keeps it in sync from then on)
       try {
-        document.documentElement.dataset.theme =
-          localStorage.getItem('jarvis.theme')
+        var t = localStorage.getItem('jarvis.theme')
           || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.dataset.theme = t;
+        // the browser/status-bar chrome too, or a light reload frames the
+        // app in dark chrome until React mounts
+        document.querySelector('meta[name="theme-color"]')
+          .setAttribute('content', t === 'light' ? '#ece7da' : '#0a0a0b');
       } catch (e) { /* storage blocked — default dark */ }
     </script>
     <meta name="apple-mobile-web-app-capable" content="yes" />

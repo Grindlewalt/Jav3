@@ -31,6 +31,13 @@
   --nav-h: 56px;
   --tap: 44px;
   --overlay: rgba(4, 4, 5, 0.62);
+  /* iOS standalone (Add to Home Screen) safe areas — 0 everywhere else,
+     so nothing below moves on desktop or in-browser mobile */
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  /* painted behind the iPhone status bar: black-translucent mode renders the
+     clock white no matter what, so this strip must stay dark in BOTH themes */
+  --statusbar-bg: var(--bg-soft);
 }
 /* toned warm paper, not white — the first cut (#f5f3ec / #fcfbf7 cards) was
    bright enough to squint at */
@@ -57,14 +64,22 @@
   --shadow-pop: 0 10px 30px rgba(72, 64, 46, 0.16);
   --shadow-win: 0 14px 40px rgba(72, 64, 46, 0.2);
   --overlay: rgba(58, 53, 42, 0.4);
+  --statusbar-bg: #221f1a;   /* warm near-black; white clock stays legible */
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
+/* iOS: no grey flash on tap, no surprise text inflation in landscape */
+html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.55 -apple-system, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
   transition: background 0.25s ease, color 0.25s ease;
+  /* the shell never scrolls; without this iOS rubber-bands the whole app */
+  overscroll-behavior: none;
 }
+/* manipulation still pans and pinches — it only drops the double-tap zoom,
+   which on controls read as a dead first tap */
+button, a, input, select, textarea, label { touch-action: manipulation; }
 /* keyboard focus was invisible everywhere; :focus-visible keeps it off mouse
    clicks so it never shows up as a stray ring on a tapped button. The
    :not(:focus-visible) reset drops the UA's `outline: auto` ring, which a
@@ -93,8 +108,16 @@ body {
    --nav-collapse the whole set moves into the drawer. */
 nav {
   display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;
-  padding: 0 18px; height: var(--nav-h); flex-shrink: 0;
-  background: var(--bg-soft); border-bottom: 1px solid var(--border);
+  /* standalone iOS draws the app under the status bar (viewport-fit=cover):
+     the bar grows by the inset, its content sits below the clock, and the
+     inset strip itself is painted --statusbar-bg. Sides clear a landscape
+     notch. All of it is 0 outside standalone. */
+  padding: var(--sat) max(18px, env(safe-area-inset-right)) 0
+           max(18px, env(safe-area-inset-left));
+  height: calc(var(--nav-h) + var(--sat)); flex-shrink: 0;
+  background: linear-gradient(var(--statusbar-bg), var(--statusbar-bg))
+    top / 100% var(--sat) no-repeat var(--bg-soft);
+  border-bottom: 1px solid var(--border);
   /* an ease-in-out, deliberately: cubic-bezier(.22,.9,.28,1) leaves the
      origin at 4x speed and covered three quarters of the fold in the first
      frame, which is exactly the snap this was meant to remove */
@@ -551,7 +574,8 @@ input:focus, textarea:focus { border-color: var(--accent);
   overscroll-behavior: contain; }
 /* the trailing padding is the composer's clearance: the last message scrolls to
    rest above the floating bar instead of under it */
-.thread { max-width: 880px; margin: 0 auto; padding: 26px 0 124px; }
+.thread { max-width: 880px; margin: 0 auto;
+  padding: 26px 0 calc(124px + var(--sab)); }
 .msg { display: flex; margin-bottom: 22px;
   animation: msg-in 0.3s cubic-bezier(0.21, 1.02, 0.55, 1) both; }
 @keyframes msg-in { from { opacity: 0; transform: translateY(10px) scale(0.985); } }
@@ -631,7 +655,7 @@ input:focus, textarea:focus { border-color: var(--accent);
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
   /* the deep bottom padding is the glow's room to spill — any tighter and the
      halo is sheared off flat against the window edge */
-  padding: 20px 24px 30px; pointer-events: none;
+  padding: 20px 24px calc(30px + var(--sab)); pointer-events: none;
   background: linear-gradient(to top, var(--bg) 46%,
     color-mix(in srgb, var(--bg) 55%, transparent) 76%, transparent);
 }
@@ -658,7 +682,8 @@ input:focus, textarea:focus { border-color: var(--accent);
    Sat 6px lower and a touch wider than the pill, so the blur reads as light
    pooling out from under it rather than a rectangle behind it. */
 .composer-glow {
-  position: absolute; left: 0; right: 0; bottom: 24px; margin: 0 auto;
+  position: absolute; left: 0; right: 0; bottom: calc(24px + var(--sab));
+  margin: 0 auto;
   width: min(900px, calc(100% - 40px)); height: 48px; border-radius: 999px;
   pointer-events: none; filter: blur(14px);
 }
@@ -1294,14 +1319,16 @@ kbd {
   nav .brand { margin-right: 8px; }
 
   .nav-scrim {
-    display: block; position: fixed; inset: var(--nav-h) 0 0; z-index: 900;
+    display: block; position: fixed; z-index: 900;
+    inset: calc(var(--nav-h) + var(--sat)) 0 0;
     background: var(--overlay); animation: scrim-in 0.18s ease both;
   }
   @keyframes scrim-in { from { opacity: 0; } }
   .nav-drawer {
     display: flex; flex-direction: column; gap: 2px;
-    position: fixed; top: var(--nav-h); right: 0; z-index: 901;
-    width: min(320px, 86vw); max-height: calc(100% - var(--nav-h));
+    position: fixed; top: calc(var(--nav-h) + var(--sat)); right: 0; z-index: 901;
+    width: min(320px, 86vw);
+    max-height: calc(100% - var(--nav-h) - var(--sat));
     overflow-y: auto; overscroll-behavior: contain;
     padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
     background: var(--bg-soft); border-left: 1px solid var(--border);
@@ -1340,10 +1367,17 @@ kbd {
   /* iOS: use the dynamic viewport height so the composer isn't hidden
      under the browser chrome */
   .app { height: 100vh; height: 100dvh; }
-  nav { padding: 0 10px 0 14px; }
+  nav { padding: var(--sat) max(10px, env(safe-area-inset-right)) 0
+                 max(14px, env(safe-area-inset-left)); }
 
-  /* ---- pages: tighter gutters ---- */
-  .page { padding: 16px 14px; }
+  /* iOS zooms the whole page when a focused control is under 16px — the
+     single biggest "it doesn't feel like an app" offender. Phone only. */
+  input, textarea, select, .composer textarea { font-size: 16px; }
+
+  /* ---- pages: tighter gutters; bottom + sides clear the home indicator
+     and a landscape notch ---- */
+  .page { padding: 16px max(14px, env(safe-area-inset-right))
+                   calc(16px + var(--sab)) max(14px, env(safe-area-inset-left)); }
   .review-page, .review-page.page { max-width: 100%; }
 
   /* ---- chat: the conversation list is an overlay, not a permanent block.
@@ -1352,7 +1386,8 @@ kbd {
   .chat-layout { flex-direction: column; position: relative; }
   .chat-layout aside {
     position: absolute; z-index: 20; top: 0; bottom: 0; left: 0;
-    width: min(300px, 84vw); max-height: none; padding: 10px;
+    width: min(300px, 84vw); max-height: none;
+    padding: 10px 10px calc(10px + var(--sab));
     border-right: 1px solid var(--border); border-bottom: 0;
     background: var(--bg-soft); box-shadow: var(--shadow-win);
     transition: transform 0.24s ease;
@@ -1388,16 +1423,18 @@ kbd {
   /* the toolbar already names the open chat — don't say it twice */
   .chat-mobile-bar + .chat-toolbar .chat-title { display: none; }
   .messages { padding: 0 12px; }
-  .thread { padding: 16px 0 96px; }
+  .thread { padding: 16px 0 calc(96px + var(--sab)); }
   .msg { margin-bottom: 16px; }
   .msg.user pre { max-width: 88%; }
   .msg.assistant { gap: 9px; }
   .msg-avatar { width: 26px; height: 26px; font-size: 11.5px; }
-  .chat-empty { padding-bottom: 76px; }
-  .composer { padding: 16px 10px 12px; }
+  .chat-empty { padding-bottom: calc(76px + var(--sab)); }
+  .composer { padding: 16px max(10px, env(safe-area-inset-right))
+                       calc(12px + var(--sab)) max(10px, env(safe-area-inset-left)); }
   .composer-inner { padding: 7px 7px 7px 16px; }
   .composer-inner.multi { padding-left: 14px; }
-  .composer-glow { bottom: 6px; width: calc(100% - 20px); height: 42px; }
+  .composer-glow { bottom: calc(6px + var(--sab));
+    width: calc(100% - 20px); height: 42px; }
 
   /* ---- generic split layouts (context / files): aside on top ----
      flex-shrink:0 is load-bearing. As a shrinkable column child the aside
@@ -1412,7 +1449,7 @@ kbd {
   .split-layout > main { flex: 1 1 auto; min-height: 0; }
 
   /* ---- network: single column ---- */
-  .net-page { padding: 12px; }
+  .net-page { padding: 12px 12px calc(12px + var(--sab)); }
   .net-body { flex-direction: column; }
   .net-side { min-width: 0; max-width: 100%; }
   .net-head { flex-wrap: wrap; }
@@ -1506,13 +1543,14 @@ kbd {
 /* very small phones */
 @media (max-width: 400px) {
   nav .brand { font-size: 16px; }
-  .page { padding: 14px 10px; }
+  .page { padding: 14px max(10px, env(safe-area-inset-right))
+                   calc(14px + var(--sab)) max(10px, env(safe-area-inset-left)); }
   .msg.user pre { max-width: 94%; }
 }
 
 /* GUI bridge: Jarvis-driven toasts + floating media player */
 .gui-toasts {
-  position: fixed; right: 16px; bottom: 16px; z-index: 3000;
+  position: fixed; right: 16px; bottom: calc(16px + var(--sab)); z-index: 3000;
   display: flex; flex-direction: column; gap: 8px; max-width: min(420px, 90vw);
 }
 .gui-toast {
@@ -1522,7 +1560,7 @@ kbd {
 }
 .gui-toast a { color: var(--accent); }
 .media-dock {
-  position: fixed; right: 16px; bottom: 16px; z-index: 2900;
+  position: fixed; right: 16px; bottom: calc(16px + var(--sab)); z-index: 2900;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 12px; padding: 10px; box-shadow: var(--shadow-pop);
   width: min(480px, 92vw); display: flex; flex-direction: column; gap: 8px;
@@ -1554,12 +1592,13 @@ kbd {
    pauses on hover, and a click lands in the Review Center. At most three
    cards show; the backlog folds into a "+N" chip. */
 .notices {
-  position: fixed; top: calc(var(--nav-h) + 12px); right: 16px; z-index: 3000;
+  position: fixed; top: calc(var(--nav-h) + var(--sat) + 12px);
+  right: 16px; z-index: 3000;
   /* railed, there is no bar to clear */
   display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
   width: min(360px, 92vw);
 }
-.app.railed .notices { top: 12px; }
+.app.railed .notices { top: calc(var(--sat) + 12px); }
 .notice {
   position: relative; overflow: hidden; display: block; width: 100%;
   text-align: left; background: var(--glass); color: var(--text);
