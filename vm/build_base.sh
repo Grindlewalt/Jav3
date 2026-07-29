@@ -51,13 +51,28 @@ hostname: jarvis-guest
 # belongs in this list.
 package_update: true
 package_upgrade: false
+# Curated dev toolchain: build-essential/python3-dev/pkg-config so pip and npm
+# native modules compile; jq/ripgrep/sqlite3/zip tools because agents reach for
+# them constantly. Deliberately absent: openssh-client, socat, netcat, nmap,
+# tcpdump — the only sanctioned path off-box is vsock + the monitored egress
+# proxy, and those exist to find other paths.
 packages:
   - python3-pip
   - python3-venv
+  - python3-dev
   - git
   - curl
+  - ca-certificates
   - nodejs
   - npm
+  - build-essential
+  - pkg-config
+  - jq
+  - ripgrep
+  - sqlite3
+  - unzip
+  - zip
+  - xz-utils
 write_files:
   - path: /opt/jarvis/bootstrap.py
     encoding: b64
@@ -97,7 +112,7 @@ echo "== [3/5] provision boot (KVM, SLIRP net for cloud-init only) =="
 cp pristine.qcow2 base-work.qcow2
 qemu-img resize base-work.qcow2 "$DISK_SIZE"
 cp "$AAVMF_VARS" efi_vars_build.fd
-timeout 1200 qemu-system-aarch64 \
+timeout 1800 qemu-system-aarch64 \
   -machine virt,gic-version=host -accel kvm -cpu host \
   -smp 2 -m 1024 \
   -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
