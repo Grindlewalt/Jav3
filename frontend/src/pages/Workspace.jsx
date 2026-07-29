@@ -107,6 +107,67 @@ function shrinkAway(p, me0, me) {
   return out
 }
 
+// ---- auto-arrange: shelf-pack the open panels into a tight block ------------
+// Panels are taken in reading order and packed into rows. To let rows meet
+// flush, each panel may grow up to 2 grid units and shrink up to 1 per axis;
+// anything the budget can't close stays as a small hole rather than a
+// distorted panel. Several row widths are tried and scored on hole area +
+// how far the block's shape drifts from the viewport's.
+const GROW = 2 * GRID
+const SHRINK = GRID
+const ARR_PAD = 16   // block origin — matches the default board inset
+
+const toward = (want, cur, floor) =>
+  Math.max(Math.max(floor, cur - SHRINK), Math.min(cur + GROW, want))
+
+function arrangeRows(items, targetW) {
+  const rows = []
+  let row = [], x = 0
+  for (const it of items) {
+    const minW = Math.max(MIN_W, it.w0 - SHRINK)
+    if (row.length && x + minW > targetW) { rows.push(row); row = []; x = 0 }
+    // squeeze (within budget) so the row closes flush on the right edge
+    const w = Math.min(it.w0, Math.max(minW, targetW - x))
+    row.push({ ...it, w })
+    x += w + GAP
+  }
+  if (row.length) rows.push(row)
+
+  let y = 0, usedW = 0, filled = 0
+  const placed = []
+  for (const r of rows) {
+    // row height: the tallest panel's, or one unit shorter when that leaves
+    // strictly less hole under the short neighbours
+    const maxH = Math.max(...r.map((o) => o.h0))
+    const hole = (rh) => r.reduce((s, o) => s + (rh - toward(rh, o.h0, MIN_H)) * o.w, 0)
+    const low = maxH - SHRINK
+    const rowH = low >= MIN_H && hole(low) < hole(maxH) ? low : maxH
+    // hand leftover row width out a grid step at a time, round-robin
+    let leftover = targetW - r.reduce((s, o) => s + o.w, 0) - GAP * (r.length - 1)
+    let moved = true
+    while (leftover >= GRID && moved) {
+      moved = false
+      for (const o of r) {
+        if (leftover >= GRID && o.w + GRID <= o.w0 + GROW) {
+          o.w += GRID; leftover -= GRID; moved = true
+        }
+      }
+    }
+    let rx = 0
+    for (const o of r) {
+      o.x = rx
+      o.y = y
+      o.h = toward(rowH, o.h0, MIN_H)
+      rx += o.w + GAP
+      filled += o.w * o.h
+      placed.push(o)
+    }
+    usedW = Math.max(usedW, rx - GAP)
+    y += rowH + GAP
+  }
+  return { placed, w: usedW, h: y - GAP, filled }
+}
+
 const rawUrl = (slug, p) =>
   `/api/projects/${slug}/raw/${p.split('/').map(encodeURIComponent).join('/')}`
 
@@ -318,6 +379,34 @@ export default function Workspace() {
     openMenuAt(e.clientX, e.clientY)
   }
 
+  function autoArrange() {
+    const b = boardRef.current
+    if (!panels?.length || !b) return
+    const items = [...panels]
+      .sort((a, c) => (a.y - c.y) || (a.x - c.x))
+      .map((p) => ({ id: p.id,
+                     w0: Math.max(MIN_W, snap(p.w)), h0: Math.max(MIN_H, snap(p.h)) }))
+    const floorW = Math.max(...items.map((i) => Math.max(MIN_W, i.w0 - SHRINK)))
+    const sumW = items.reduce((s, i) => s + i.w0 + GAP, 0) - GAP
+    const maxW = Math.max(floorW, Math.min(b.clientWidth - 2 * ARR_PAD, sumW))
+    const aspect = b.clientWidth / Math.max(1, b.clientHeight)
+    let best = null
+    for (let k = 0; k <= 8; k++) {
+      const tw = Math.round(floorW + ((maxW - floorW) * k) / 8)
+      const r = arrangeRows(items, tw)
+      const box = Math.max(1, r.w * r.h)
+      const score = (box - r.filled) / box +
+        0.35 * Math.abs(Math.log((r.w / Math.max(1, r.h)) / aspect))
+      if (!best || score < best.score) best = { ...r, score }
+    }
+    setExpanded(null)
+    setPanels((ps) => ps.map((p) => {
+      const o = best.placed.find((q) => q.id === p.id)
+      return o ? { ...p, x: ARR_PAD + o.x, y: ARR_PAD + o.y, w: o.w, h: o.h } : p
+    }))
+    b.scrollTo({ top: 0, left: 0, behavior: 'smooth' })
+  }
+
   if (!project || !panels) return <div className="center">…</div>
 
   return (
@@ -348,6 +437,9 @@ export default function Workspace() {
         <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close ·
           <kbd> ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add ·
           <kbd> esc</kbd> collapse</span>
+        <button className="ghost" onClick={autoArrange}
+                title="auto-arrange the open panels into a tight block (grows ≤2 grid units, shrinks ≤1)">
+          ⌗ tidy</button>
         <button className="ghost" onClick={(e) => openMenuAt(e.clientX - 120, e.clientY + 14)}>
           + panel</button>
       </header>
