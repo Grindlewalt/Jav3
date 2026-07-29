@@ -1464,6 +1464,15 @@ kbd {
   }
   .chat-toolbar { padding: 8px 12px; flex-wrap: nowrap; gap: 8px; }
   .chat-toolbar .chat-title { min-width: 0; }
+  /* the empty-state project menu: its chip sits mid-screen, so a downward
+     dropdown ran off the bottom and under the composer. Anchored to the
+     screen instead — a sheet rising from just above the composer. */
+  .empty-controls .proj-menu {
+    position: fixed; left: 14px; right: 14px; width: auto;
+    top: auto; bottom: calc(96px + var(--sab)); max-height: 46vh;
+    transform-origin: bottom center;
+    animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
+  }
   .messages { padding: 0 12px; }
   .thread { padding: 16px 0 calc(96px + var(--sab)); }
   .msg { margin-bottom: 16px; }
