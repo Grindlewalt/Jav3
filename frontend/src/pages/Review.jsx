@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
+import TriagePanel from '../TriagePanel.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
 // requests, egress host approvals, and security alerts (which now include the
@@ -214,6 +215,7 @@ export default function Review() {
       <p className="dim small">Everything waiting on you, across every project — commit
         requests, egress approvals and security alerts (including advisory write
         flags), with inline actions.</p>
+      <TriagePanel />
       <ReviewQueue />
     </div>
   )

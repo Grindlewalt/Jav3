@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from './api.js'
-import { useDismiss } from './useDismiss.js'
 
-// Control surface for the isolated triage reviewer (backend/reviewer.py): a
-// nav dropdown with the auto-sweep toggle, a run-now button, what the reviewer
-// flagged for human eyes (with inline approve/reject/ack), and its recent
-// autonomous approves/acks with one-click undo.
+// Control surface for the isolated triage reviewer (backend/reviewer.py),
+// rendered as a card at the top of the Review Center (it used to be a nav
+// dropdown behind a shield icon): the auto-sweep toggle, a run-now button,
+// what the reviewer flagged for human eyes (with inline approve/reject/ack),
+// and its recent autonomous approves/acks with one-click undo.
 //
 // EVERY item string here — hostnames, alert summaries, the reviewer's own
 // reasons (a model output derived from untrusted input) — is UNTRUSTED and is
@@ -15,7 +15,6 @@ function ts(s) { return s ? String(s).replace('T', ' ').slice(5, 16) : '' }
 
 export default function TriagePanel() {
   const [s, setS] = useState(null)
-  const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const load = () => api('/api/reviewer').then(setS).catch(() => {})
@@ -30,9 +29,6 @@ export default function TriagePanel() {
     const t = setInterval(load, 3000)
     return () => clearInterval(t)
   }, [s?.running])
-
-  const close = useCallback(() => setOpen(false), [])
-  const wrapRef = useDismiss(open, close)
 
   if (!s) return null
   const flagged = (s.flagged_hosts?.length || 0) + (s.flagged_alerts?.length || 0)
@@ -53,19 +49,10 @@ export default function TriagePanel() {
   }
 
   return (
-    <div className="notif-wrap vm-wrap" ref={wrapRef}>
-      <button className="notif-bell" onClick={() => setOpen((o) => !o)}
-              aria-expanded={open}
-              aria-label={`triage reviewer${flagged ? ` (${flagged} flagged)` : ''}`}
-              title="triage reviewer — flagged items need your eyes">
-        <span aria-hidden="true">🛡</span>
-        {flagged > 0 && (
-          <span className="notif-badge">{flagged > 99 ? '99+' : flagged}</span>)}
-      </button>
-      {open && (
-        <div className="notif-drop triage-drop">
+    <div className="sbx-card triage-card">
           <div className="notif-item triage-head">
-            <span className="grow"><b>Triage reviewer</b></span>
+            <span className="grow"><b>Triage reviewer</b>
+              {flagged > 0 && <span className="tag triage-flag"> {flagged} flagged</span>}</span>
             <label className="small dim triage-toggle" title="sweep the queues automatically">
               <input type="checkbox" checked={!!s.enabled}
                      onChange={(e) => toggle(e.target.checked)} /> auto
@@ -147,8 +134,6 @@ export default function TriagePanel() {
               ))}
             </>
           )}
-        </div>
-      )}
     </div>
   )
 }

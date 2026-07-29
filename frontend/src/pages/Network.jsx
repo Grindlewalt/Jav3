@@ -76,7 +76,7 @@ function PolicyEditor({ slug }) {
             <option value="denyall">deny all — no egress</option>
           </select>
         </label>
-        <label className="incognito-toggle">
+        <label className="check-row">
           <input type="checkbox" checked={!!pol.inherit_general}
                  onChange={(e) => setPol({ ...pol, inherit_general: e.target.checked })} />
           inherit the general allowlist

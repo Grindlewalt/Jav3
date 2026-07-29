@@ -16,7 +16,7 @@ import Schedules from './pages/Schedules.jsx'
 import Logs from './pages/Logs.jsx'
 import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
-import TriagePanel from './TriagePanel.jsx'
+import Notices, { useNotices } from './Notices.jsx'
 
 // Primary destinations stay on the bar; everything else lives behind "More".
 // Eleven top-level links used to wrap the bar into two or three ragged rows
@@ -41,55 +41,44 @@ const MORE_LINKS = [
 // the badge and smeared across the icon.
 const badge = (n) => (n > 99 ? '99+' : String(n))
 
-function NotificationBell() {
-  const [data, setData] = useState(null)
-  const [open, setOpen] = useState(false)
+// Light/dark switch. index.html stamps data-theme before first paint; this
+// keeps it, localStorage and the browser-chrome colour in sync afterwards.
+function useTheme() {
+  const [theme, setTheme] = useState(
+    () => document.documentElement.dataset.theme === 'light' ? 'light' : 'dark')
   useEffect(() => {
-    const load = () => api('/api/notifications').then(setData).catch(() => {})
-    load()
-    const t = setInterval(load, 15000)
-    return () => clearInterval(t)
-  }, [])
-  // the backend count already folds in security alerts + egress approvals
-  const count = data?.count || 0
-  const secCount = data?.alerts || 0
-  const egressCount = data?.egress_pending || 0
-  const close = useCallback(() => setOpen(false), [])
-  const ref = useDismiss(open, close)
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem('jarvis.theme', theme) } catch { /* private mode */ }
+    document.querySelector('meta[name="theme-color"]')
+      ?.setAttribute('content', theme === 'light' ? '#f5f3ec' : '#0a0a0b')
+  }, [theme])
+  const toggle = useCallback(
+    () => setTheme((t) => (t === 'light' ? 'dark' : 'light')), [])
+  return [theme, toggle]
+}
+
+const SunIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="4.4" />
+    <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7
+             16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" />
+  </svg>
+)
+const MoonIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M20.6 14.2A8.8 8.8 0 0 1 9.8 3.4a8.8 8.8 0 1 0 10.8 10.8Z" />
+  </svg>
+)
+
+function ThemeToggle({ theme, onToggle }) {
+  const light = theme === 'light'
   return (
-    <div className="notif-wrap" ref={ref}>
-      <button className="notif-bell" onClick={() => setOpen((o) => !o)}
-              aria-label={`Pending approvals${count ? ` (${count})` : ''}`}
-              aria-expanded={open} title="Pending approvals">
-        <span aria-hidden="true">🔔</span>
-        {count > 0 && <span className="notif-badge">{badge(count)}</span>}
-      </button>
-      {open && (
-        <div className="notif-drop">
-          {count === 0 && <div className="dim small notif-empty">Nothing waiting on you</div>}
-          {secCount > 0 && (
-            <NavLink to="/review" className="notif-item" onClick={close}>
-              <span className="grow ellipsis">⚠ {secCount} security alert{secCount === 1 ? '' : 's'} — review</span>
-            </NavLink>
-          )}
-          {egressCount > 0 && (
-            <NavLink to="/network" className="notif-item" onClick={close}>
-              <span className="grow ellipsis">🌐 {egressCount} host approval{egressCount === 1 ? '' : 's'} waiting — network</span>
-            </NavLink>
-          )}
-          {(data?.git || []).map((g) => (
-            <NavLink key={`g${g.id}`} to={`/projects/${g.project}`} className="notif-item" onClick={close}>
-              <span className="grow ellipsis">git push · {g.project} · {g.message}</span>
-            </NavLink>
-          ))}
-          {(data?.schedules || []).map((s) => (
-            <NavLink key={`sc${s.id}`} to="/schedules" className="notif-item" onClick={close}>
-              <span className="grow ellipsis">proposed schedule · {s.name} · {s.kind === 'agent' ? s.agent_slug : 'jarvis'}</span>
-            </NavLink>
-          ))}
-        </div>
-      )}
-    </div>
+    <button className="nav-chip" onClick={onToggle}
+            aria-label={light ? 'switch to dark theme' : 'switch to light theme'}
+            title={light ? 'dark mode' : 'light mode'}>
+      {light ? <MoonIcon /> : <SunIcon />}
+    </button>
   )
 }
 
@@ -101,13 +90,22 @@ function NotificationBell() {
 // model call everywhere (chat/agents/guest); agents with an explicit model
 // pin keep it. Server-side allowlist; persisted across restarts.
 // State lives in App so the bar copy and the mobile-drawer copy stay in sync.
+// The composer's model chip changes the same server-side setting — the two
+// controls sync through the jarvis-model-changed window event.
 function useModel() {
   const [m, setM] = useState(null)
-  useEffect(() => { api('/api/model').then(setM).catch(() => {}) }, [])
+  useEffect(() => {
+    api('/api/model').then(setM).catch(() => {})
+    const h = (e) => setM(e.detail)
+    window.addEventListener('jarvis-model-changed', h)
+    return () => window.removeEventListener('jarvis-model-changed', h)
+  }, [])
   const change = useCallback(async (model) => {
     try {
-      setM(await api('/api/model', {
-        method: 'PUT', body: JSON.stringify({ model }) }))
+      const next = await api('/api/model', {
+        method: 'PUT', body: JSON.stringify({ model }) })
+      setM(next)
+      window.dispatchEvent(new CustomEvent('jarvis-model-changed', { detail: next }))
     } catch (err) { window.alert(err.detail || String(err)) }
   }, [])
   return [m, change]
@@ -183,7 +181,7 @@ function VmStatus() {
     ? `${s.image_age_days}d old` : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
   return (
     <div className="notif-wrap vm-wrap" ref={wrapRef}>
-      <button className="notif-bell" onClick={() => setOpen((o) => !o)}
+      <button className="nav-chip" onClick={() => setOpen((o) => !o)}
               aria-expanded={open}
               aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
               title="guest VM status">
@@ -295,7 +293,11 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false) // mobile nav drawer
   const [moreOpen, setMoreOpen] = useState(false) // desktop overflow menu
   const [model, setModel] = useModel()
+  const [theme, toggleTheme] = useTheme()
   const location = useLocation()
+
+  // toasts + the pending count that lives on the Review nav link
+  const notices = useNotices(!!user)
 
   // close both menus whenever the route changes
   useEffect(() => { setMenuOpen(false); setMoreOpen(false) }, [location.pathname])
@@ -339,10 +341,15 @@ export default function App() {
           <nav className="nav">
             <span className="brand">Jarvis</span>
 
-            {/* desktop: primary destinations + an overflow menu */}
+            {/* desktop: primary destinations + an overflow menu. Review wears
+                the pending count — the bell's old job. */}
             <div className="nav-links">
               {PRIMARY_LINKS.map((l) => (
-                <NavLink key={l.to} to={l.to} end={l.end}>{l.label}</NavLink>
+                <NavLink key={l.to} to={l.to} end={l.end}>
+                  {l.label}
+                  {l.to === '/review' && notices.count > 0 && (
+                    <span className="nav-count">{badge(notices.count)}</span>)}
+                </NavLink>
               ))}
               <div className="notif-wrap more-wrap" ref={moreRef}>
                 <button className="nav-more" aria-expanded={moreOpen}
@@ -367,8 +374,7 @@ export default function App() {
 
             <div className="nav-status">
               <ModelSwitch m={model} onChange={setModel} className="bar-only" />
-              <NotificationBell />
-              <TriagePanel />
+              <ThemeToggle theme={theme} onToggle={toggleTheme} />
               <VmStatus />
             </div>
 
@@ -388,7 +394,11 @@ export default function App() {
                aria-hidden={!menuOpen}>
             {[...PRIMARY_LINKS, ...MORE_LINKS].map((l) => (
               <NavLink key={l.to} to={l.to} end={l.end}
-                       tabIndex={menuOpen ? 0 : -1}>{l.label}</NavLink>
+                       tabIndex={menuOpen ? 0 : -1}>
+                {l.label}
+                {l.to === '/review' && notices.count > 0 && (
+                  <span className="nav-count">{badge(notices.count)}</span>)}
+              </NavLink>
             ))}
             <div className="drawer-foot">
               <label className="drawer-model">
@@ -396,12 +406,17 @@ export default function App() {
                 <ModelSwitch m={model} onChange={setModel} className="drawer-only" />
               </label>
               <button className="ghost" tabIndex={menuOpen ? 0 : -1}
+                      onClick={toggleTheme}>
+                {theme === 'light' ? 'Dark mode' : 'Light mode'}</button>
+              <button className="ghost" tabIndex={menuOpen ? 0 : -1}
                       onClick={logout}>Log out</button>
             </div>
           </div>
         </>
       )}
       {user && <GuiBridge />}
+      {user && <Notices toasts={notices.toasts} dismiss={notices.dismiss}
+                        clear={notices.clear} />}
       <Routes>
         <Route path="/login" element={<Login onLogin={setUser} />} />
         <Route path="/" element={<Chat />} />

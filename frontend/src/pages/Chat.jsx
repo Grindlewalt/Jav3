@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from '../api.js'
+import { useDismiss } from '../useDismiss.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
@@ -93,6 +94,62 @@ function pickGreeting() {
   return list[Math.floor(Math.random() * list.length)]
 }
 
+// The glassy flash/pro picker at the send end of the composer. It changes the
+// same server-side setting as the nav switch (they sync over the
+// jarvis-model-changed window event) and only shows while the draft is empty —
+// the menu opens upward, since the bar lives at the bottom of the screen.
+const MODEL_SUB = {
+  flash: 'fast · everyday',
+  pro: 'deeper reasoning · ~3× price',
+}
+
+function ComposerModel({ visible }) {
+  const [m, setM] = useState(null)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    api('/api/model').then(setM).catch(() => {})
+    const h = (e) => setM(e.detail)
+    window.addEventListener('jarvis-model-changed', h)
+    return () => window.removeEventListener('jarvis-model-changed', h)
+  }, [])
+  const close = useCallback(() => setOpen(false), [])
+  const ref = useDismiss(open, close)
+  if (!m) return null
+  const short = (id) => id.replace(/^deepseek-v4-/, '')
+  async function pick(model) {
+    setOpen(false)
+    if (model === m.active) return
+    try {
+      const next = await api('/api/model', {
+        method: 'PUT', body: JSON.stringify({ model }) })
+      setM(next)
+      window.dispatchEvent(new CustomEvent('jarvis-model-changed', { detail: next }))
+    } catch (err) { window.alert(err.detail || String(err)) }
+  }
+  return (
+    <div className={`composer-model${visible ? '' : ' gone'}`} ref={ref}>
+      <button type="button" className="model-chip" aria-haspopup="menu"
+              aria-expanded={open} title="model for new turns"
+              onClick={() => setOpen((o) => !o)}>
+        {short(m.active)}
+        <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
+      </button>
+      {open && (
+        <div className="model-menu" role="menu">
+          {m.choices.map((c) => (
+            <button key={c} type="button" role="menuitemradio"
+                    aria-checked={c === m.active} onClick={() => pick(c)}>
+              <span className="m-name">{short(c)}
+                <span className="m-sub">{MODEL_SUB[short(c)] || c}</span></span>
+              {c === m.active && <span className="m-check" aria-hidden="true">●</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Chat() {
   const [conversations, setConversations] = useState([])
   const [conversationId, setConversationId] = useState(null)
@@ -101,7 +158,6 @@ export default function Chat() {
   const [busy, setBusy] = useState(false)
   const [active, setActive] = useState(null)
   const [projects, setProjects] = useState([])
-  const [incognito, setIncognito] = useState(false)
   const [greeting, setGreeting] = useState(pickGreeting)
   const [multiline, setMultiline] = useState(false)   // composer past one line
   // on a phone the list is an overlay, so it starts closed unless the operator
@@ -115,7 +171,7 @@ export default function Chat() {
   const inputRef = useRef(null)
   const glowRef = useRef(null)     // composer underglow — direct style writes, not state
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
-  const liveId = useRef(null)      // id of the turn in flight (set even incognito)
+  const liveId = useRef(null)      // id of the turn in flight
 
   const refreshConvos = () =>
     api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -129,19 +185,6 @@ export default function Chat() {
   useEffect(() => {
     localStorage.setItem('jarvis.chat.side', sideOpen ? 'open' : 'closed')
   }, [sideOpen])
-
-  // switching modes used to repaint the whole GUI grey, which just read as the
-  // screen dimming. Now the change is a single sweep of light under the
-  // composer; the switch and the placeholder carry the state.
-  useEffect(() => {
-    const el = glowRef.current
-    if (!el) return
-    el.classList.remove('flash')
-    void el.offsetWidth      // reflow, so the animation restarts on a re-toggle
-    el.classList.add('flash')
-    const t = setTimeout(() => el.classList.remove('flash'), 900)
-    return () => clearTimeout(t)
-  }, [incognito])
 
   useEffect(() => {
     // scroll only the message list, never the page (scrollIntoView walks
@@ -183,8 +226,10 @@ export default function Chat() {
   // token/tool/tool_result fold into the streaming message's parts; final
   // swaps in the reply with the activity collapsed above it.
   function handleTurnEvent(ev) {
-    if (ev.type === 'start') liveId.current = ev.conversation_id
-    if (ev.type === 'start' && !incognito) setConversationId(ev.conversation_id)
+    if (ev.type === 'start') {
+      liveId.current = ev.conversation_id
+      setConversationId(ev.conversation_id)
+    }
     if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
       setMessages((m) => {
         const copy = [...m]
@@ -212,7 +257,6 @@ export default function Chat() {
 
   async function openConversation(id) {
     tailAbort.current?.abort()
-    setIncognito(false)   // saved chats always use the normal palette
     closeSideOnPhone()
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
@@ -242,7 +286,6 @@ export default function Chat() {
   function newConversation() {
     tailAbort.current?.abort()
     setBusy(false)
-    setIncognito(false)   // a fresh chat always starts saved + light
     closeSideOnPhone()
     setConversationId(null)
     setMessages([])
@@ -280,8 +323,7 @@ export default function Chat() {
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
       await chatStream(
-        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
-          ephemeral: incognito },
+        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak },
         handleTurnEvent,
       )
       api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -356,12 +398,6 @@ export default function Chat() {
           <button type="button" className="icon-btn" aria-label="new chat"
                   onClick={newConversation}>＋</button>
         </div>
-        {!conversationId && incognito && messages.length > 0 && (
-          <div className="chat-toolbar">
-            <span className="tag incog-tag">🕶 incognito</span>
-            <span className="dim small">nothing here is saved — closing this chat discards it</span>
-          </div>
-        )}
         {conversationId && (
           <div className="chat-toolbar">
             <span className="chat-title ellipsis">
@@ -384,21 +420,6 @@ export default function Chat() {
             <div className="chat-empty">
               <div className="orb" />
               <h2>{greeting}</h2>
-              {/* the keys are load-bearing: remounting the face and the label
-                  on a flip replays their entry animations */}
-              <label className="incog-switch"
-                     title="off: incognito — nothing is saved; recovery is SSH-only">
-                <input type="checkbox" checked={!incognito}
-                       onChange={(e) => setIncognito(!e.target.checked)} />
-                <span className="track">
-                  <span className="knob">
-                    <span className="knob-face" key={incognito ? 'on' : 'off'}>
-                      {incognito ? '🕶' : ''}</span>
-                  </span>
-                </span>
-                <span className="incog-label" key={incognito ? 'on' : 'off'}>
-                  {incognito ? 'Incognito — nothing will be saved' : 'Chat is saved'}</span>
-              </label>
             </div>
           ) : (
             <div className="thread">
@@ -423,9 +444,10 @@ export default function Chat() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
-              placeholder={incognito ? 'Message Jarvis (incognito)…' : 'Message Jarvis…'}
+              placeholder="Message Jarvis…"
               rows={1}
             />
+            <ComposerModel visible={!input.trim()} />
             {busy
               ? <button type="button" className="send-btn stop" title="stop this turn"
                         onClick={stop}>◼</button>
