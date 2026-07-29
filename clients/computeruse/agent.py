@@ -497,9 +497,15 @@ class MacOS(Linux):
 # --- the client -------------------------------------------------------------
 
 class Agent:
-    def __init__(self, server, token, roots, name=None, dry_run=False):
+    def __init__(self, server, token, roots, name=None, dry_run=False,
+                 cf_id=None, cf_secret=None):
         self.server = server.rstrip("/")
         self.token = token
+        # Cloudflare Access service token, when Jarvis sits behind Access.
+        # A browser gets an interactive SSO redirect; a daemon cannot, so it
+        # presents these two headers on the upgrade request instead.
+        self.cf_id = cf_id
+        self.cf_secret = cf_secret
         self.name = name or platform.node() or "desktop"
         self.dry_run = dry_run
         self.runner = Runner(dry_run=dry_run)
@@ -570,12 +576,27 @@ class Agent:
             print("this client needs the 'websockets' package "
                   "(pip install websockets)", file=sys.stderr)
             return 2
+        if not self.server.startswith(("http://", "https://")):
+            print("--server needs a scheme, e.g. https://jarvis.example",
+                  file=sys.stderr)
+            return 2
         ws_url = (self.server.replace("https://", "wss://")
                              .replace("http://", "ws://")) + "/api/computeruse/agent"
+        headers = {}
+        if self.cf_id and self.cf_secret:
+            headers["CF-Access-Client-Id"] = self.cf_id
+            headers["CF-Access-Client-Secret"] = self.cf_secret
         backoff = 1
         while True:
             try:
-                async with websockets.connect(ws_url, max_size=64 * 1024) as ws:
+                # ping_interval is load-bearing behind a reverse proxy:
+                # Cloudflare resets an idle WebSocket after ~100s, and
+                # cloudflared drops idle HTTP/2 streams to the origin sooner
+                # than that. 20s keeps it warm with room to spare.
+                async with websockets.connect(
+                        ws_url, max_size=64 * 1024,
+                        additional_headers=headers or None,
+                        ping_interval=20, ping_timeout=20) as ws:
                     await ws.send(json.dumps({
                         "token": self.token, "name": self.name,
                         "platform": self.os.name,
@@ -665,6 +686,13 @@ def main(argv=None):
                     help="a folder Jarvis may play from. Repeatable. This is the "
                          "ceiling: grants made in the GUI can only narrow it.")
     ap.add_argument("--name", help="how this machine appears in Jarvis")
+    ap.add_argument("--cf-access-id", default=os.environ.get("CF_ACCESS_CLIENT_ID"),
+                    help="Cloudflare Access service token client id, if Jarvis "
+                         "is behind Access. Prefer the CF_ACCESS_CLIENT_ID env "
+                         "var — a command line is visible in `ps`.")
+    ap.add_argument("--cf-access-secret",
+                    default=os.environ.get("CF_ACCESS_CLIENT_SECRET"),
+                    help="the matching secret (CF_ACCESS_CLIENT_SECRET)")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and log every action without running it")
     ap.add_argument("--selftest", action="store_true",
@@ -677,7 +705,10 @@ def main(argv=None):
         return _selftest()
     if not a.server or not a.token:
         ap.error("--server and --token are required (or use --selftest)")
-    agent = Agent(a.server, a.token, a.allow_root, a.name, a.dry_run)
+    if bool(a.cf_access_id) != bool(a.cf_access_secret):
+        ap.error("--cf-access-id and --cf-access-secret go together")
+    agent = Agent(a.server, a.token, a.allow_root, a.name, a.dry_run,
+                  a.cf_access_id, a.cf_access_secret)
     try:
         return asyncio.run(agent.serve())
     except KeyboardInterrupt:

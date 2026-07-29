@@ -49,6 +49,36 @@ reachable instead of failing silently later.
   `do shell script "..."`, so allowing it would reopen the exact path this
   client exists to close.
 
+## Through a reverse proxy / Cloudflare Tunnel
+
+The client makes one outbound WebSocket to `<server>/api/computeruse/agent`, so
+`--server https://jarvis.example` dials `wss://jarvis.example/api/computeruse/agent`.
+Nothing listens on the machine being driven; it works fine behind NAT.
+
+Cloudflare proxies WebSockets by default, but **resets an idle one after about
+100 seconds**, and cloudflared drops idle HTTP/2 streams to the origin sooner
+than that. The client pings every 20s to stay under both, and reconnects with
+backoff if it is dropped anyway.
+
+**Cloudflare Access needs a service token.** If the hostname is protected by
+Access, an unauthenticated request is redirected to an SSO login page — fine for
+a browser, impossible for a daemon. Create a service token in Zero Trust
+(Access → Service Auth), add a policy on the app with action *Service Auth*
+allowing that token, and give the client:
+
+```
+export CF_ACCESS_CLIENT_ID='<id>.access'
+export CF_ACCESS_CLIENT_SECRET='<secret>'
+python3 agent.py --server https://jarvis.example --token ... --allow-root ~/Music
+```
+
+It sends them as `CF-Access-Client-Id` / `CF-Access-Client-Secret` on the
+upgrade request. Use the environment rather than the `--cf-access-*` flags where
+you can — a command line is visible in `ps`.
+
+Scope the Access policy to the path `/api/computeruse/agent` if you can, so the
+service token cannot be used to reach the rest of Jarvis.
+
 ## Why there is no shell
 
 - Commands arrive as a **verb name plus typed parameters**, checked against a
