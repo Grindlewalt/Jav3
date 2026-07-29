@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import {
+  createContext, useCallback, useEffect, useLayoutEffect, useRef, useState,
+} from 'react'
+import { createPortal } from 'react-dom'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api.js'
 import { useDismiss } from './useDismiss.js'
@@ -40,6 +43,31 @@ const MORE_LINKS = [
 // Counts come from live queues and reached 294 in practice, which overflowed
 // the badge and smeared across the icon.
 const badge = (n) => (n > 99 ? '99+' : String(n))
+
+// One glyph per primary destination. The nav lives in two places — the top bar
+// and the chat sidebar's collapsed rail — and these are the constant that flies
+// between them, so every placement must draw the same mark.
+const ICONS = {
+  '/': <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4L3 21l1.2-3.6A8.4 8.4 0 1 1 21 11.5Z" />,
+  '/projects': <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5a1.5
+                        1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5Z" />,
+  '/agents': <><circle cx="12" cy="8.6" r="3.4" /><path d="M5.5 19.4a6.5 6.5 0 0 1 13 0" /></>,
+  '/review': <path d="M12 3.2 19.2 6v5.6c0 4-3 7.2-7.2 9.2-4.2-2-7.2-5.2-7.2-9.2V6Zm-2.6
+                      8.6 2 2.1 4-4.2" />,
+}
+const NavIcon = ({ to, innerRef }) => (
+  <span className="nav-ico" ref={innerRef} aria-hidden="true">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      {ICONS[to]}
+    </svg>
+  </span>
+)
+
+// The nav's two homes exchange it through this: the Chat page hands up the DOM
+// node inside its collapsed sidebar, and App portals the links into it. A slot
+// means "render as a rail" — no second source of truth to keep in sync.
+export const NavSlotContext = createContext(() => {})
 
 // Light/dark switch. index.html stamps data-theme before first paint; this
 // keeps it, localStorage and the browser-chrome colour in sync afterwards.
@@ -144,7 +172,7 @@ function VmStatus() {
   const imageAge = s.image_age_days != null
     ? `${s.image_age_days}d old` : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
   return (
-    <div className="notif-wrap vm-wrap" ref={wrapRef}>
+    <div className="notif-wrap vm-wrap vm-corner" ref={wrapRef}>
       <button className="nav-chip" onClick={() => setOpen((o) => !o)}
               aria-expanded={open}
               aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
@@ -258,6 +286,44 @@ export default function App() {
   const [moreOpen, setMoreOpen] = useState(false) // desktop overflow menu
   const [theme, toggleTheme] = useTheme()
   const location = useLocation()
+  // the Chat page publishes a mount point when its sidebar is collapsed; while
+  // one exists the nav renders into it as a rail instead of onto the top bar
+  const [navSlot, setNavSlot] = useState(null)
+  const railed = !!navSlot
+  const icoRefs = useRef(new Map())     // route -> icon element, for the FLIP
+  const lastRects = useRef(null)
+
+  // FLIP: the icons visibly travel between the rail and the bar rather than
+  // vanishing from one and appearing in the other.
+  //
+  // The capture runs after EVERY render, not just when the placement changes.
+  // Keyed on [railed] it also fired during App's pre-auth render, where there
+  // is no nav at all — that cached an empty map, and the first bar -> rail move
+  // had nothing to fly from (only rail -> bar animated). Re-measuring each pass
+  // also keeps the rects honest when the Review count resizes the bar.
+  const prevRailed = useRef(railed)
+  useLayoutEffect(() => {
+    const now = new Map()
+    icoRefs.current.forEach((el, key) => { if (el) now.set(key, el.getBoundingClientRect()) })
+    const before = lastRects.current
+    const moved = prevRailed.current !== railed
+    prevRailed.current = railed
+    lastRects.current = now
+    if (!moved || !before || !before.size) return
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    now.forEach((to, key) => {
+      const from = before.get(key)
+      const el = icoRefs.current.get(key)
+      if (!from || !el) return
+      const dx = from.left - to.left
+      const dy = from.top - to.top
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return
+      el.animate(
+        [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+        { duration: 420, easing: 'cubic-bezier(0.22, 0.9, 0.28, 1)' },
+      )
+    })
+  })
 
   // toasts + the pending count that lives on the Review nav link
   const notices = useNotices(!!user)
@@ -297,55 +363,77 @@ export default function App() {
   if (user === null && location.pathname !== '/login')
     return <Navigate to="/login" replace />
 
+  // the same links either way — only the container and the label's visibility
+  // differ, which is what lets the icons fly between the two
+  const navLinks = (
+    <>
+      {PRIMARY_LINKS.map((l) => (
+        <NavLink key={l.to} to={l.to} end={l.end} title={l.label}>
+          <NavIcon to={l.to} innerRef={(el) => {
+            if (el) icoRefs.current.set(l.to, el)
+            else icoRefs.current.delete(l.to)
+          }} />
+          <span className="nav-label">{l.label}</span>
+          {l.to === '/review' && notices.count > 0 && (
+            <span className="nav-count">{badge(notices.count)}</span>)}
+        </NavLink>
+      ))}
+      <div className="notif-wrap more-wrap" ref={moreRef}>
+        <button className="nav-more" aria-expanded={moreOpen} aria-haspopup="menu"
+                title="More" onClick={() => setMoreOpen((o) => !o)}>
+          <span className="nav-ico" aria-hidden="true">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="5.5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" />
+              <circle cx="18.5" cy="12" r="1.6" />
+            </svg>
+          </span>
+          <span className="nav-label">More</span>
+          <span className={moreOpen ? 'chev open' : 'chev'} aria-hidden="true">›</span>
+        </button>
+        {moreOpen && (
+          <div className="notif-drop more-drop" role="menu">
+            {MORE_LINKS.map((l) => (
+              <NavLink key={l.to} to={l.to} role="menuitem"
+                       className="notif-item more-item"
+                       onClick={closeMore}>{l.label}</NavLink>
+            ))}
+            <button className="notif-item more-item more-logout"
+                    role="menuitem" onClick={logout}>Log out</button>
+          </div>
+        )}
+      </div>
+    </>
+  )
+
   return (
-    <div className="app">
+    <div className={railed ? 'app railed' : 'app'}>
       {user && (
         <>
-          <nav className="nav">
-            <span className="brand">Jarvis</span>
-
-            {/* desktop: primary destinations + an overflow menu. Review wears
-                the pending count — the bell's old job. */}
-            <div className="nav-links">
-              {PRIMARY_LINKS.map((l) => (
-                <NavLink key={l.to} to={l.to} end={l.end}>
-                  {l.label}
-                  {l.to === '/review' && notices.count > 0 && (
-                    <span className="nav-count">{badge(notices.count)}</span>)}
-                </NavLink>
-              ))}
-              <div className="notif-wrap more-wrap" ref={moreRef}>
-                <button className="nav-more" aria-expanded={moreOpen}
-                        aria-haspopup="menu"
-                        onClick={() => setMoreOpen((o) => !o)}>
-                  More <span className={moreOpen ? 'chev open' : 'chev'}
-                             aria-hidden="true">›</span>
+          {/* Railed: the bar is gone and the links live in the chat sidebar,
+              portaled into the slot it published. Otherwise the usual top bar.
+              Review wears the pending count — the bell's old job. */}
+          {railed
+            ? createPortal(
+                <>
+                  <div className="rail-links">{navLinks}</div>
+                  <span className="grow" />
+                  <ThemeToggle theme={theme} onToggle={toggleTheme} />
+                </>, navSlot)
+            : (
+              <nav className="nav">
+                <span className="brand">Jarvis</span>
+                <div className="nav-links">{navLinks}</div>
+                <div className="nav-status">
+                  <ThemeToggle theme={theme} onToggle={toggleTheme} />
+                </div>
+                <button className="nav-toggle"
+                        aria-label={menuOpen ? 'close menu' : 'menu'}
+                        aria-expanded={menuOpen}
+                        onClick={() => setMenuOpen((o) => !o)}>
+                  {menuOpen ? '✕' : '☰'}
                 </button>
-                {moreOpen && (
-                  <div className="notif-drop more-drop" role="menu">
-                    {MORE_LINKS.map((l) => (
-                      <NavLink key={l.to} to={l.to} role="menuitem"
-                               className="notif-item more-item"
-                               onClick={closeMore}>{l.label}</NavLink>
-                    ))}
-                    <button className="notif-item more-item more-logout"
-                            role="menuitem" onClick={logout}>Log out</button>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="nav-status">
-              <ThemeToggle theme={theme} onToggle={toggleTheme} />
-              <VmStatus />
-            </div>
-
-            <button className="nav-toggle" aria-label={menuOpen ? 'close menu' : 'menu'}
-                    aria-expanded={menuOpen}
-                    onClick={() => setMenuOpen((o) => !o)}>
-              {menuOpen ? '✕' : '☰'}
-            </button>
-          </nav>
+              </nav>
+            )}
 
           {/* phone: a fixed drawer over a scrim, never an in-flow block that
               shoves the page down */}
@@ -375,6 +463,10 @@ export default function App() {
       {user && <GuiBridge />}
       {user && <Notices toasts={notices.toasts} dismiss={notices.dismiss}
                         clear={notices.clear} />}
+      {/* the guest VM sits on its own in the bottom-left corner, off away from
+          the destinations and the page's own controls */}
+      {user && <VmStatus />}
+      <NavSlotContext.Provider value={setNavSlot}>
       <Routes>
         <Route path="/login" element={<Login onLogin={setUser} />} />
         <Route path="/" element={<Chat />} />
@@ -390,6 +482,7 @@ export default function App() {
         <Route path="/skills" element={<Skills />} />
         <Route path="/tools" element={<Tools />} />
       </Routes>
+      </NavSlotContext.Provider>
     </div>
   )
 }

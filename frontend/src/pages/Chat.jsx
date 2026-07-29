@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback, useContext, useEffect, useLayoutEffect, useRef, useState,
+} from 'react'
 import { api, chatStream, tailStream } from '../api.js'
+import { NavSlotContext } from '../App.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 
@@ -217,9 +220,28 @@ export default function Chat() {
     if (saved) return saved !== 'closed'
     return !window.matchMedia('(max-width: 768px)').matches
   })
+  // Collapsed on a desktop, the sidebar stops being a chat list and becomes the
+  // app's nav rail: it publishes a mount point and App portals the destinations
+  // into it. On a phone the sidebar is off-canvas, so it can't hold the nav —
+  // no slot there, and the top bar stays.
+  const [phone, setPhone] = useState(
+    () => window.matchMedia('(max-width: 768px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)')
+    const h = (e) => setPhone(e.matches)
+    mq.addEventListener('change', h)
+    return () => mq.removeEventListener('change', h)
+  }, [])
+  const setNavSlot = useContext(NavSlotContext)
+  const slotRef = useCallback((el) => setNavSlot(el), [setNavSlot])
+  // hand the slot back when leaving Chat, or the bar never comes home
+  useEffect(() => () => setNavSlot(null), [setNavSlot])
+
   const scrollRef = useRef(null)   // the .messages scroll container
   const inputRef = useRef(null)
   const glowRef = useRef(null)     // composer underglow — direct style writes, not state
+  const orbRef = useRef(null)      // empty-state orb, measured when a chat starts
+  const orbFrom = useRef(null)     // its rect at that moment; consumed by the fly-in
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight
 
@@ -235,6 +257,28 @@ export default function Chat() {
   useEffect(() => {
     localStorage.setItem('jarvis.chat.side', sideOpen ? 'open' : 'closed')
   }, [sideOpen])
+
+  // Starting a chat doesn't replace the orb, it moves it: the big one is the
+  // same object as the little one beside Jarvis's first reply. send() measures
+  // it on the way out and this flies the avatar in from there, shrinking as it
+  // goes. Runs on every message change but costs one null check unless a rect
+  // is waiting.
+  useLayoutEffect(() => {
+    const from = orbFrom.current
+    if (!from) return
+    orbFrom.current = null
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    const el = scrollRef.current?.querySelector('.msg.assistant .msg-avatar')
+    if (!el) return
+    const to = el.getBoundingClientRect()
+    if (!to.width) return
+    el.animate([
+      { transform: `translate(${(from.left + from.width / 2) - (to.left + to.width / 2)}px, `
+                 + `${(from.top + from.height / 2) - (to.top + to.height / 2)}px) `
+                 + `scale(${from.width / to.width})` },
+      { transform: 'none' },
+    ], { duration: 620, easing: 'cubic-bezier(0.22, 0.9, 0.28, 1)' })
+  }, [messages])
 
   useEffect(() => {
     // scroll only the message list, never the page (scrollIntoView walks
@@ -367,6 +411,10 @@ export default function Chat() {
   async function send(confirmPeak = false, resend = null) {
     const text = (resend ?? input).trim()
     if (!text || busy) return
+    // the orb is on screen only while the chat is empty — grab where it is
+    // before this turn unmounts it, so the avatar can fly in from there
+    if (messages.length === 0 && orbRef.current)
+      orbFrom.current = orbRef.current.getBoundingClientRect()
     setBusy(true)
     // clear the bar NOW — the message visibly left; it comes back on failure
     if (!resend) setInput('')
@@ -415,6 +463,7 @@ export default function Chat() {
           <button type="button" className="icon-btn" title="new chat"
                   onClick={newConversation}>＋</button>
         </div>
+        {!sideOpen && !phone && <div className="side-nav" ref={slotRef} />}
         <ul className="convo-list">
           {conversations.map((c) => (
             <li key={c.id} className={c.id === conversationId ? 'active' : ''}
@@ -472,7 +521,7 @@ export default function Chat() {
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 ? (
             <div className="chat-empty">
-              <div className="orb" />
+              <div className="orb" ref={orbRef} />
               <h2>{greeting}</h2>
             </div>
           ) : (
