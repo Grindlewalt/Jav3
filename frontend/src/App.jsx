@@ -24,13 +24,13 @@ import TriagePanel from './TriagePanel.jsx'
 const PRIMARY_LINKS = [
   { to: '/', label: 'Chat', end: true },
   { to: '/projects', label: 'Projects' },
+  { to: '/agents', label: 'Agents' },
   { to: '/review', label: 'Review' },
-  { to: '/network', label: 'Network' },
 ]
 const MORE_LINKS = [
   { to: '/artifacts', label: 'Artifacts' },
+  { to: '/network', label: 'Network' },
   { to: '/context', label: 'Context' },
-  { to: '/agents', label: 'Agents' },
   { to: '/logs', label: 'Logs' },
   { to: '/schedules', label: 'Schedules' },
   { to: '/skills', label: 'Skills' },
