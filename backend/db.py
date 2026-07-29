@@ -259,7 +259,13 @@ async def init_db() -> None:
                           # tier-2 compaction checkpoint: the structured
                           # summary + id of the last message it covers
                           ("compact_summary", "TEXT"),
-                          ("compact_upto", "INTEGER")):
+                          ("compact_upto", "INTEGER"),
+                          # 0: follow whatever project is loaded (the historic
+                          # behaviour, and the default for a new chat).
+                          # 1: project_id is the answer verbatim — including
+                          # NULL, which means deliberately no project, so the
+                          # turn falls back to the chat's artifact store.
+                          ("project_locked", "INTEGER NOT NULL DEFAULT 0")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
@@ -306,7 +312,7 @@ async def set_state(db: aiosqlite.Connection, key: str, value: str | None) -> No
 async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
                             title: str, kind: str = "chat",
                             parent: int | None = None, job_id: str | None = None,
-                            commit: bool = True) -> int:
+                            locked: bool = False, commit: bool = True) -> int:
     """Create a conversation node and return its id — the one place that resolves
     a project slug to its id and inserts the row.
 
@@ -314,7 +320,10 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
     agent/scheduled). `title` is stored verbatim as the summary (callers format
     their own prefixes). Pass commit=False when the caller adds a first message in
     the same transaction and commits itself. Follow-ups (peak confirmation, the
-    opening user message) are the caller's, using the returned id."""
+    opening user message) are the caller's, using the returned id.
+
+    `locked` pins the binding: the turn uses this project (or no project at all,
+    if `project` is None) instead of following whatever is loaded globally."""
     project_id = None
     if project:
         async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
@@ -322,7 +331,8 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
         project_id = row["id"] if row else None
     cur = await db.execute(
         "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, "
-        "job_id) VALUES (?, ?, ?, ?, ?)", (project_id, title, kind, parent, job_id))
+        "job_id, project_locked) VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, title, kind, parent, job_id, 1 if locked else 0))
     if commit:
         await db.commit()
     return cur.lastrowid

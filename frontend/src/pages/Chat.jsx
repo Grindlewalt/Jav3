@@ -155,44 +155,61 @@ function ComposerModel({ visible }) {
 
 // The project control for the open chat, in the same glassy idiom as the model
 // chip. It also absorbed the old "project loaded: x" line that used to sit in
-// bright green in the sidebar's bottom corner: when the conversation has no
-// project of its own it shows the globally-active one as an inherited value,
-// dimmed, so there is one place project state is read instead of two.
-function ProjectPicker({ projects, value, global, onPick, disabled }) {
+// bright green in the sidebar's bottom corner, so there is one place project
+// state is read instead of two.
+//
+// Three states, not two. "follow" is the historic default — the chat uses
+// whatever project is loaded globally. "none" is a real answer: pinned to no
+// project, so file work lands in the chat's own artifact store instead of
+// silently inheriting the last project that happened to be open.
+function ProjectPicker({ projects, mode, value, global: loaded, onPick }) {
   const [open, setOpen] = useState(false)
   const close = useCallback(() => setOpen(false), [])
   const ref = useDismiss(open, close)
   const name = (slug) => projects.find((p) => p.slug === slug)?.name || slug
-  const inherited = !value && global
+  const label = mode === 'pin' ? name(value)
+    : mode === 'none' ? 'No project'
+    : (loaded ? name(loaded) : 'No project')
+  const pick = (m, slug) => { setOpen(false); onPick(m, slug || '') }
   return (
     <div className="proj-pick" ref={ref}>
       <button type="button" className="proj-chip" aria-haspopup="menu"
-              aria-expanded={open} disabled={disabled}
-              title={inherited
-                ? `no project pinned to this chat — inheriting the loaded project (${global})`
-                : 'project this chat is pinned to'}
+              aria-expanded={open}
+              title={mode === 'follow'
+                ? `following the loaded project${loaded ? ` (${loaded})` : ' — nothing loaded'}`
+                : mode === 'none'
+                  ? 'pinned to no project — files go to this chat’s artifacts'
+                  : 'pinned to this project'}
               onClick={() => setOpen((o) => !o)}>
-        <span className={`proj-dot${value ? ' pinned' : ''}`} aria-hidden="true" />
-        <span className="ellipsis">{value ? name(value) : (global ? name(global) : 'No project')}</span>
-        {inherited && <span className="proj-inherit">loaded</span>}
+        <span className={`proj-dot${mode === 'pin' ? ' pinned' : ''}`
+                         + (mode === 'none' ? ' none' : '')} aria-hidden="true" />
+        <span className="ellipsis">{label}</span>
+        {mode === 'follow' && loaded && <span className="proj-inherit">loaded</span>}
         <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
       </button>
       {open && (
         <div className="proj-menu" role="menu">
-          <button type="button" role="menuitemradio" aria-checked={!value}
-                  onClick={() => { setOpen(false); onPick('') }}>
-            <span className="m-name">No project
-              <span className="m-sub">{global ? `inherits ${name(global)}` : 'nothing loaded'}</span>
-            </span>
-            {!value && <span className="m-check" aria-hidden="true">●</span>}
+          <button type="button" role="menuitemradio" aria-checked={mode === 'follow'}
+                  onClick={() => pick('follow')}>
+            <span className="m-name">Follow loaded project
+              <span className="m-sub">{loaded ? name(loaded) : 'nothing loaded'}</span></span>
+            {mode === 'follow' && <span className="m-check" aria-hidden="true">●</span>}
           </button>
+          <button type="button" role="menuitemradio" aria-checked={mode === 'none'}
+                  onClick={() => pick('none')}>
+            <span className="m-name">No project
+              <span className="m-sub">files go to this chat’s artifacts</span></span>
+            {mode === 'none' && <span className="m-check" aria-hidden="true">●</span>}
+          </button>
+          <div className="proj-sep" />
           {projects.map((p) => (
             <button key={p.slug} type="button" role="menuitemradio"
-                    aria-checked={p.slug === value}
-                    onClick={() => { setOpen(false); onPick(p.slug) }}>
+                    aria-checked={mode === 'pin' && p.slug === value}
+                    onClick={() => pick('pin', p.slug)}>
               <span className="m-name">{p.name}
                 <span className="m-sub">{p.slug}</span></span>
-              {p.slug === value && <span className="m-check" aria-hidden="true">●</span>}
+              {mode === 'pin' && p.slug === value
+                && <span className="m-check" aria-hidden="true">●</span>}
             </button>
           ))}
         </div>
@@ -213,6 +230,10 @@ export default function Chat() {
   const [multiline, setMultiline] = useState(false)   // composer past one line
   // project chosen for a chat that doesn't exist yet; sent with the first turn
   const [pendingProject, setPendingProject] = useState('')
+  const [pendingMode, setPendingMode] = useState('follow')
+  // incognito: the turn persists nothing. No longer repaints the GUI — the
+  // toolbar toggle and the composer placeholder carry it.
+  const [incognito, setIncognito] = useState(false)
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -322,7 +343,8 @@ export default function Chat() {
   function handleTurnEvent(ev) {
     if (ev.type === 'start') {
       liveId.current = ev.conversation_id
-      setConversationId(ev.conversation_id)
+      // incognito: never adopt the id, or the chat becomes a saved one
+      if (!incognito) setConversationId(ev.conversation_id)
     }
     if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
       setMessages((m) => {
@@ -351,6 +373,7 @@ export default function Chat() {
 
   async function openConversation(id) {
     tailAbort.current?.abort()
+    setIncognito(false)   // saved chats always persist
     closeSideOnPhone()
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
@@ -384,6 +407,8 @@ export default function Chat() {
     setConversationId(null)
     setMessages([])
     setPendingProject('')
+    setPendingMode('follow')
+    setIncognito(false)
     setGreeting(pickGreeting())
   }
 
@@ -394,9 +419,17 @@ export default function Chat() {
     refreshConvos()
   }
 
-  async function assignProject(slug) {
+  // the row the toolbar is describing, and the picker state it implies:
+  // a slug means pinned, a locked row with no slug means deliberately none,
+  // anything else is still following whatever project is loaded
+  const openConvo = conversations.find((c) => c.id === conversationId)
+  const convoMode = (c) =>
+    c?.project_slug ? 'pin' : (c?.project_locked ? 'none' : 'follow')
+
+  async function assignProject(mode, slug) {
     await api(`/api/conversations/${conversationId}`, {
-      method: 'PATCH', body: JSON.stringify({ project: slug || null }) })
+      method: 'PATCH',
+      body: JSON.stringify({ project: slug || null, mode }) })
     refreshConvos()
   }
 
@@ -423,8 +456,10 @@ export default function Chat() {
     try {
       await chatStream(
         { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
+          ephemeral: incognito,
           // only meaningful when the conversation is being created by this turn
-          ...(conversationId || !pendingProject ? {} : { project: pendingProject }) },
+          ...(conversationId ? {} : { project: pendingProject || null,
+                                      project_mode: pendingMode }) },
         handleTurnEvent,
       )
       api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -512,11 +547,28 @@ export default function Chat() {
           <span className="grow" />
           <ProjectPicker
             projects={projects} global={active}
-            value={conversationId
-              ? (conversations.find((c) => c.id === conversationId)?.project_slug || '')
-              : pendingProject}
-            onPick={(slug) => (conversationId ? assignProject(slug)
-                                              : setPendingProject(slug))} />
+            mode={conversationId ? convoMode(openConvo) : pendingMode}
+            value={conversationId ? (openConvo?.project_slug || '') : pendingProject}
+            onPick={(mode, slug) => {
+              if (conversationId) return assignProject(mode, slug)
+              setPendingMode(mode)
+              setPendingProject(slug)
+            }} />
+          {/* incognito lives beside the project control: both answer "where
+              does this turn's work go" */}
+          <button type="button"
+                  className={`incog-btn${incognito ? ' on' : ''}`}
+                  aria-pressed={incognito}
+                  disabled={!!conversationId}
+                  title={conversationId
+                    ? 'this chat is already saved — start a new one to go incognito'
+                    : incognito
+                      ? 'incognito: nothing from this chat is saved'
+                      : 'go incognito — nothing from this chat will be saved'}
+                  onClick={() => setIncognito((v) => !v)}>
+            <span aria-hidden="true">🕶</span>
+            <span className="incog-word">{incognito ? 'Incognito' : 'Saved'}</span>
+          </button>
         </div>
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 ? (
@@ -547,7 +599,7 @@ export default function Chat() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
-              placeholder="Message Jarvis…"
+              placeholder={incognito ? 'Message Jarvis (incognito)…' : 'Message Jarvis…'}
               rows={1}
             />
             <ComposerModel visible={!input.trim()} />

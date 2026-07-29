@@ -177,7 +177,8 @@ function VmStatus() {
               aria-expanded={open}
               aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
               title="guest VM status">
-        <span className={`run-dot ${s.running ? 'running' : ''}`} /> VM
+        <span className={`run-dot ${s.running ? 'running' : ''}`} />
+        <span className="vm-word">VM</span>
         {s.image_stale && <span className="notif-badge vm-stale-badge" title="image is stale">!</span>}
       </button>
       {open && (
@@ -412,28 +413,31 @@ export default function App() {
           {/* Railed: the bar is gone and the links live in the chat sidebar,
               portaled into the slot it published. Otherwise the usual top bar.
               Review wears the pending count — the bell's old job. */}
-          {railed
-            ? createPortal(
-                <>
-                  <div className="rail-links">{navLinks}</div>
-                  <span className="grow" />
-                  <ThemeToggle theme={theme} onToggle={toggleTheme} />
-                </>, navSlot)
-            : (
-              <nav className="nav">
-                <span className="brand">Jarvis</span>
-                <div className="nav-links">{navLinks}</div>
-                <div className="nav-status">
-                  <ThemeToggle theme={theme} onToggle={toggleTheme} />
-                </div>
-                <button className="nav-toggle"
-                        aria-label={menuOpen ? 'close menu' : 'menu'}
-                        aria-expanded={menuOpen}
-                        onClick={() => setMenuOpen((o) => !o)}>
-                  {menuOpen ? '✕' : '☰'}
-                </button>
-              </nav>
-            )}
+          {/* the bar always exists and folds to zero height instead of being
+              torn out — otherwise the page below jumped 56px the instant the
+              rail handed the nav back, which read as a jolt under the icons'
+              flight. Empty while folded; the links are in the rail. */}
+          <nav className={railed ? 'nav folded' : 'nav'} aria-hidden={railed}>
+            {!railed && <>
+              <span className="brand">Jarvis</span>
+              <div className="nav-links">{navLinks}</div>
+              <div className="nav-status">
+                <ThemeToggle theme={theme} onToggle={toggleTheme} />
+              </div>
+              <button className="nav-toggle"
+                      aria-label={menuOpen ? 'close menu' : 'menu'}
+                      aria-expanded={menuOpen}
+                      onClick={() => setMenuOpen((o) => !o)}>
+                {menuOpen ? '✕' : '☰'}
+              </button>
+            </>}
+          </nav>
+          {railed && createPortal(
+            <>
+              <div className="rail-links">{navLinks}</div>
+              <span className="grow" />
+              <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            </>, navSlot)}
 
           {/* phone: a fixed drawer over a scrim, never an in-flow block that
               shoves the page down */}

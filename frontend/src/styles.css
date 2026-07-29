@@ -95,7 +95,12 @@ nav {
   display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;
   padding: 0 18px; height: var(--nav-h); flex-shrink: 0;
   background: var(--bg-soft); border-bottom: 1px solid var(--border);
+  transition: height 0.34s cubic-bezier(0.22, 0.9, 0.28, 1),
+              border-bottom-color 0.34s ease;
 }
+/* railed: the bar folds shut rather than unmounting, so handing the nav back
+   slides the page down instead of snapping it */
+nav.folded { height: 0; border-bottom-color: transparent; overflow: hidden; }
 /* the wordmark: slanted, tracked-out uppercase — a launch-provider badge, not
    a gradient. The text node stays "Jarvis"; the transform does the shouting. */
 nav .brand {
@@ -108,13 +113,13 @@ nav .brand {
   display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;
   flex: 1; min-width: 0;
 }
-nav a, .rail-links a {
+nav a, .rail-links > a {
   color: var(--dim); text-decoration: none; padding: 8px 12px;
   border-radius: 8px; transition: color 0.15s, background 0.15s;
   white-space: nowrap; display: inline-flex; align-items: center; gap: 9px;
 }
-nav a:hover, .rail-links a:hover { color: var(--text); background: var(--panel); }
-nav a.active, .rail-links a.active { color: var(--text); background: var(--panel-2); }
+nav a:hover, .rail-links > a:hover { color: var(--text); background: var(--panel); }
+nav a.active, .rail-links > a.active { color: var(--text); background: var(--panel-2); }
 /* the icon is the piece that flies between the bar and the rail, so it is its
    own box in both placements and never inherits a layout that would resize it */
 .nav-ico { display: flex; align-items: center; justify-content: center;
@@ -125,19 +130,23 @@ nav a.active, .rail-links a.active { color: var(--text); background: var(--panel
    the app's nav: the top bar hides and the destinations portal down into here
    (App.jsx renders into the slot, Chat.jsx publishes it). Expanding the sidebar
    sends them back up, icons flying between the two positions. */
-.app.railed nav, .app.railed .nav-drawer { display: none; }
+.app.railed .nav-drawer { display: none; }
 .side-nav { display: flex; flex-direction: column; align-items: center;
   gap: 4px; flex: 1; min-height: 0; padding-top: 4px; }
 .rail-links { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-.rail-links a, .rail-links .nav-more {
+/* child combinator, not descendant: the More flyout lives inside .rail-links,
+   so the loose version squeezed each of its menu items into a 38px square and
+   clipped the labels down to a few letters */
+.rail-links > a, .rail-links > .notif-wrap > .nav-more {
   width: 38px; height: 38px; padding: 0; justify-content: center; gap: 0;
   position: relative;
 }
 /* labels and the More chevron are a bar-only affordance; the rail is glyphs */
-.rail-links .nav-label, .rail-links .nav-more .chev { display: none; }
+.rail-links > a > .nav-label, .rail-links .nav-more > .nav-label,
+.rail-links .nav-more > .chev { display: none; }
 /* the button is 38px but its glyph is 19px, so anchoring the badge to the
    button's corner left it floating a clear 9px above the icon it belongs to */
-.rail-links .nav-count {
+.rail-links > a .nav-count {
   position: absolute; top: 5px; right: 3px; margin: 0; min-width: 15px;
   padding: 0 3px; font-size: 9px; line-height: 15px;
 }
@@ -189,7 +198,15 @@ nav a.active, .rail-links a.active { color: var(--text); background: var(--panel
   background: var(--glass);
   backdrop-filter: blur(14px) saturate(1.15);
   -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  transition: width 0.28s ease, padding 0.28s ease;
 }
+/* railed, the corner is a 56px column — the labelled pill hung out past its
+   edge. Drop to the dot alone, sized like the rail's other buttons. */
+.app.railed .vm-corner { left: 9px; }
+.app.railed .vm-corner .nav-chip {
+  width: 38px; padding: 0; justify-content: center;
+}
+.app.railed .vm-corner .nav-chip .vm-word { display: none; }
 .vm-corner .vm-drop {
   top: auto; bottom: calc(100% + 8px); left: 0; right: auto;
   transform-origin: bottom left;
@@ -360,7 +377,14 @@ input:focus, textarea:focus { border-color: var(--accent);
   display: flex; flex-direction: column; gap: 10px; background: var(--bg-soft);
   transition: width 0.28s ease, padding 0.28s ease; overflow: hidden;
 }
-.chat-layout aside.collapsed { width: 56px; padding: 12px 9px 54px; }
+/* overflow must open up once collapsed: the rail's More flyout is a child of
+   the sidebar, and `hidden` clipped it into nothing — it measured as visible
+   and on-screen but no click ever reached it. z-index lifts it over <main>,
+   which otherwise paints on top by DOM order. */
+.chat-layout aside.collapsed {
+  width: 56px; padding: 12px 9px 54px;
+  overflow: visible; position: relative; z-index: 30;
+}
 .chat-layout aside.collapsed .side-title,
 .chat-layout aside.collapsed .convo-list { display: none; }
 .side-head { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
@@ -470,6 +494,27 @@ input:focus, textarea:focus { border-color: var(--accent);
   gap: 1px; }
 .proj-menu .m-sub { font-size: 11px; color: var(--dim); }
 .proj-menu .m-check { color: var(--accent); font-size: 11px; }
+/* the two binding modes sit above the projects themselves */
+.proj-sep { height: 1px; margin: 5px 8px; background: var(--border); }
+/* hollow = following the loaded project, struck = deliberately none,
+   filled = pinned here */
+.proj-dot.none { border-style: dashed; opacity: 0.7; }
+
+/* incognito, beside the project chip: both answer "where does this go" */
+.incog-btn {
+  display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0;
+  background: transparent; color: var(--dim); border: 1px solid transparent;
+  border-radius: 999px; padding: 6px 12px; font-size: 12.5px; font-weight: 500;
+  white-space: nowrap; opacity: 0.55; transition: opacity 0.18s, color 0.18s,
+    background 0.18s, border-color 0.18s;
+}
+.incog-btn:hover:not(:disabled) { opacity: 1; color: var(--text);
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--panel-2) 60%, transparent);
+  filter: none; transform: none; }
+.incog-btn.on { opacity: 1; color: var(--text); border-color: var(--border);
+  background: var(--panel-2); }
+.incog-btn:disabled { opacity: 0.3; cursor: default; }
 /* position: relative — the composer floats over the thread inside this box.
    min-height: 0 is load-bearing: as a column flex item main defaults to
    min-height:auto, so a long thread grew main past the viewport and the whole

@@ -2,6 +2,7 @@ import asyncio
 import json
 import shutil
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -28,6 +29,9 @@ class ChatRequest(BaseModel):
     # pin a NEW conversation to this project (workspace chat panels pass their
     # slug); ignored for existing conversations — reassign via PATCH instead.
     project: str | None = None
+    # same tri-state as AssignProject.mode. Omitted it keeps the old shape: a
+    # slug pins, no slug follows the globally-loaded project.
+    project_mode: Literal["follow", "none", "pin"] | None = None
 
 
 def sse(event: dict) -> str:
@@ -62,7 +66,12 @@ async def _name_conversation(conversation_id: int, user_msg: str, reply: str) ->
 
 
 class AssignProject(BaseModel):
-    project: str | None  # slug, or null to detach
+    project: str | None = None   # slug to pin this chat to
+    # "follow": inherit whatever project is loaded globally (the historic
+    # meaning of a null project). "none": pinned to no project — file work
+    # goes to the chat's artifact store instead. "pin": use `project`.
+    # Omitted, it reads the old shape: a slug pins, a null follows.
+    mode: Literal["follow", "none", "pin"] | None = None
 
 
 @router.get("/conversations")
@@ -115,8 +124,9 @@ async def assign_conversation(conversation_id: int, body: AssignProject):
         ) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="no such conversation")
+        mode = body.mode or ("pin" if body.project else "follow")
         project_id = None
-        if body.project:
+        if mode == "pin" and body.project:
             async with db.execute(
                 "SELECT id FROM projects WHERE slug = ? AND deleted_at IS NULL",
                 (body.project,),
@@ -126,13 +136,13 @@ async def assign_conversation(conversation_id: int, body: AssignProject):
                 raise HTTPException(status_code=404, detail="no such project")
             project_id = row["id"]
         await db.execute(
-            "UPDATE conversations SET project_id = ? WHERE id = ?",
-            (project_id, conversation_id),
+            "UPDATE conversations SET project_id = ?, project_locked = ? WHERE id = ?",
+            (project_id, 0 if mode == "follow" else 1, conversation_id),
         )
         await db.commit()
     finally:
         await db.close()
-    return {"ok": True, "project": body.project}
+    return {"ok": True, "project": project_id and body.project, "mode": mode}
 
 
 @router.get("/conversations/{conversation_id}/messages")
@@ -270,15 +280,25 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # (every later POST 409s turn_in_progress) and its SSE tails hang
         db = await get_db()
         bus.publish(chan, {"type": "start", "conversation_id": conversation_id})
-        # the conversation's OWN project binding wins; unassigned chats follow
-        # the GUI's global active project. Pinning here (not the global) is what
-        # lets chats in different projects run at the same time.
+        # the conversation's OWN project binding wins; pinning here (not the
+        # global) is what lets chats in different projects run at the same time.
+        # An unpinned chat follows the GUI's global active project — but a chat
+        # pinned to nothing (project_locked with a NULL project) stays at no
+        # project, and its file work lands in the artifact store below. Without
+        # the lock there was no way to express that: a null binding was
+        # indistinguishable from "not chosen yet" and inherited the last
+        # project loaded.
         async with db.execute(
-            "SELECT p.slug AS slug FROM conversations c "
-            "JOIN projects p ON p.id = c.project_id "
-            "WHERE c.id = ? AND p.deleted_at IS NULL", (conversation_id,)) as cur:
+            "SELECT c.project_locked AS locked, p.slug AS slug FROM conversations c "
+            "LEFT JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL "
+            "WHERE c.id = ?", (conversation_id,)) as cur:
             row = await cur.fetchone()
-        active = row["slug"] if row else await get_active_project(db)
+        if row and row["slug"]:
+            active = row["slug"]
+        elif row and row["locked"]:
+            active = None
+        else:
+            active = await get_active_project(db)
         # tools deep in the loop (and spawn_agent children) resolve this pin
         # instead of the DB global — see toolctx.active_slug
         ptoken = runtime.active_project.set(active)
@@ -508,7 +528,8 @@ async def chat(body: ChatRequest):
             if in_peak_window() and not body.confirm_peak:
                 raise HTTPException(status_code=409,
                                     detail="peak_confirmation_required")
-            if body.project:
+            mode = body.project_mode or ("pin" if body.project else "follow")
+            if mode == "pin" and body.project:
                 async with db.execute(
                     "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL",
                     (body.project,)) as cur:
@@ -516,12 +537,15 @@ async def chat(body: ChatRequest):
                         raise HTTPException(status_code=404,
                                             detail=f"no such project: {body.project}")
                 active = body.project
+            elif mode == "none":
+                active = None      # deliberately unbound: artifacts, not a project
             else:
                 active = await get_active_project(db)
             # provisional title: first bit of the opening message; an LLM
             # naming pass upgrades it after the first exchange (best effort)
             title = " ".join(body.message.split())[:48] or "(empty)"
-            conversation_id = await open_conversation(db, project=active, title=title)
+            conversation_id = await open_conversation(
+                db, project=active, title=title, locked=mode != "follow")
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:
