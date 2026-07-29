@@ -2,6 +2,97 @@ import { useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from '../api.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 
+// Empty-state greeting, swapped in per new chat. Mostly not about the time of
+// day — a handful per period nod to it (capped at 5) so it doesn't read as a
+// gimmick that's always talking about the clock.
+const GREETINGS = {
+  morning: [
+    'Morning, sir.',
+    'Good morning — try not to open forty tabs before breakfast.',
+    'Early start, sir?',
+    "The coffee's fresh; so is the morning queue.",
+    'Up with the sun, or fighting it?',
+    "Right then — where do we begin?",
+    'Standing by, as ever.',
+    'Systems nominal. You, less certain — go on then.',
+    "Another queue, another day. Let's clear it.",
+    "I've been awake the whole time. You get the excuse.",
+    'At your service, sir.',
+    "Whenever you're ready.",
+    "Let's make today's list somebody else's problem.",
+    "You bring the questions, I'll bring the follow-through.",
+    'First request — no pressure.',
+    'Onwards.',
+    "I've kept the seat warm.",
+    "Let's not overthink the first ten minutes.",
+    'Say the word.',
+    "No fires so far. Let's keep it that way.",
+    'Fresh terminal, clean slate.',
+    'Shall we?',
+    "I've been idling productively.",
+    'Consider me caffeinated in spirit, if nothing else.',
+  ],
+  midday: [
+    'Halfway through the day and still unbothered.',
+    'Afternoon lull? Not on my watch.',
+    "Midday check-in — what's on the docket?",
+    "The day's second half starts now.",
+    'Post-lunch fog is a you problem, not a me problem.',
+    'Say the word.',
+    'Standing by.',
+    "What's next on the list?",
+    "I've been idling productively.",
+    'Right, what\'s the crisis today?',
+    "You've survived the hard part. Onwards.",
+    "Let's turn 'later' into 'done'.",
+    'Go on, then.',
+    "I'm listening.",
+    "Whatever's next, I'm across it.",
+    'Ready and, dare I say, a little bored.',
+    'Consider me at your disposal.',
+    'One task or twelve — makes no difference to me.',
+    "Shall we get on with it?",
+    'Feed me a problem.',
+    'Still here. Still capable.',
+    "Momentum's a fragile thing. Let's not lose it.",
+    "Whatever you're stuck on, I probably have opinions.",
+    'Your move, sir.',
+  ],
+  night: [
+    'Burning those midnight tokens?',
+    'Still up, I see.',
+    'Night owl mode: engaged.',
+    "The world's asleep. We're not.",
+    'Late one, sir?',
+    'No judgment. Just data.',
+    "Let's make this quick and painless.",
+    "I don't sleep, so I don't mind.",
+    "Let's get this sorted so you can actually rest.",
+    'At your service, whatever the hour.',
+    'Quiet hours, focused work.',
+    "You're here. I'm here. Let's not waste it.",
+    'Say the word.',
+    'Fewer distractions right now, at least.',
+    'Onwards, into the quiet.',
+    "I'll keep the lights on, figuratively.",
+    'Whenever inspiration strikes, apparently.',
+    'No rush. Also, definitely some rush.',
+    "Let's be efficient about this.",
+    'The house is quiet. Good time to think.',
+    "I've got nowhere else to be.",
+    'Consider me undistracted.',
+    "Let's wrap this up before it wraps around you.",
+    "Whatever's keeping you up, let's make it worth it.",
+  ],
+}
+
+function pickGreeting() {
+  const h = new Date().getHours()
+  const period = h < 5 ? 'night' : h < 12 ? 'morning' : h < 18 ? 'midday' : 'night'
+  const list = GREETINGS[period]
+  return list[Math.floor(Math.random() * list.length)]
+}
+
 export default function Chat() {
   const [conversations, setConversations] = useState([])
   const [conversationId, setConversationId] = useState(null)
@@ -11,6 +102,7 @@ export default function Chat() {
   const [active, setActive] = useState(null)
   const [projects, setProjects] = useState([])
   const [incognito, setIncognito] = useState(false)
+  const [greeting, setGreeting] = useState(pickGreeting)
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -20,6 +112,7 @@ export default function Chat() {
   })
   const scrollRef = useRef(null)   // the .messages scroll container
   const inputRef = useRef(null)
+  const orbRef = useRef(null)      // empty-state orb — moved via direct style writes, not state
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight (set even incognito)
 
@@ -65,6 +158,23 @@ export default function Chat() {
     ta.style.height = `${ta.scrollHeight}px`
   }
   useEffect(autoGrow, [input])
+
+  // the empty-state orb drifts toward the cursor. Direct style writes (not
+  // React state) so a mousemove doesn't trigger a render on every pixel.
+  const reduceMotion = () =>
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  function trackOrb(e) {
+    const el = orbRef.current
+    if (!el || reduceMotion()) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const max = 26   // px of drift, clamped so it wanders rather than snaps
+    const dx = Math.max(-max, Math.min(max, (e.clientX - (r.left + r.width / 2)) * 0.12))
+    const dy = Math.max(-max, Math.min(max, (e.clientY - (r.top + r.height / 2)) * 0.12))
+    el.style.transform = `translate(${dx}px, ${dy}px)`
+  }
+  function resetOrb() {
+    if (orbRef.current) orbRef.current.style.transform = 'translate(0, 0)'
+  }
 
   // one handler for both paths: the live POST stream and a resumed tail.
   // token/tool/tool_result fold into the streaming message's parts; final
@@ -133,6 +243,7 @@ export default function Chat() {
     closeSideOnPhone()
     setConversationId(null)
     setMessages([])
+    setGreeting(pickGreeting())
   }
 
   async function deleteConversation(id) {
@@ -267,21 +378,9 @@ export default function Chat() {
         )}
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 ? (
-            <div className="chat-empty">
-              <div className="orb" />
-              <h2>How can I help?</h2>
-              <p>{incognito ? 'Incognito — this chat won’t be saved.'
-                : 'Enter to send · Shift+Enter for a newline'}</p>
-              <div className="chat-suggest">
-                {['What did my schedules do overnight?',
-                  'Summarize the latest security events',
-                  'What changed across my projects this week?'].map((s) => (
-                  <button key={s} type="button"
-                          onClick={() => { setInput(s); inputRef.current?.focus() }}>
-                    {s}
-                  </button>
-                ))}
-              </div>
+            <div className="chat-empty" onMouseMove={trackOrb} onMouseLeave={resetOrb}>
+              <div className="orb" ref={orbRef} />
+              <h2>{greeting}</h2>
               <label className="incog-switch"
                      title="off: incognito — nothing is saved and the GUI greys out; recovery is SSH-only">
                 <input type="checkbox" checked={!incognito}
