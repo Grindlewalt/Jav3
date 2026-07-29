@@ -11,14 +11,17 @@ GUI and forwards it verbatim, and none that adds a grant on the agent's behalf.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from . import computeruse as cu
+from . import computeruse as cu, security
 from .auth import require_user
+from .db import get_db
 
 router = APIRouter(prefix="/api/computeruse", tags=["computeruse"],
                    dependencies=[Depends(require_user)])
@@ -106,6 +109,39 @@ async def probe(client_id: str | None = None):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# Rejected pairing attempts, per peer. Deduped into one security event per
+# burst so a scanner hammering the endpoint raises one alert rather than
+# thousands, which would bury everything else in the Review Center.
+_bad_attempts: dict[str, list] = {}
+_BURST_WINDOW = 300.0
+
+
+async def _note_bad_token(peer: str) -> None:
+    now = time.time()
+    count, first, alerted = _bad_attempts.get(peer, [0, now, False])
+    if now - first > _BURST_WINDOW:
+        count, first, alerted = 0, now, False
+    count += 1
+    should_alert = not alerted and count >= 3
+    _bad_attempts[peer] = [count, first, alerted or should_alert]
+    if not should_alert:
+        return
+    db = await get_db()
+    try:
+        await security.raise_event(
+            db, kind="computeruse_auth",
+            severity="warn",
+            summary=f"{count} rejected computer-use pairing attempts from {peer}",
+            detail={"peer": peer, "attempts": count,
+                    "note": "the agent WebSocket takes a pairing token instead "
+                            "of a session cookie; repeated failures mean "
+                            "something is probing it"})
+    except Exception:
+        pass
+    finally:
+        await db.close()
+
+
 @ws_router.websocket("/agent")
 async def agent_socket(ws: WebSocket):
     """A desktop client's connection.
@@ -113,12 +149,23 @@ async def agent_socket(ws: WebSocket):
     The client dials in, presents the pairing token, and then does nothing but
     answer verbs. It never sends commands to us and we never send it anything
     that is not a validated verb from cu.VERBS.
+
+    This is the one route in the app with no session cookie behind it — a daemon
+    has no browser to log in with. So it is also the one route where a failed
+    auth is worth recording: if Jarvis is published, this endpoint is reachable
+    by anyone who gets past whatever fronts it, and a run of rejected tokens is
+    something the operator should be able to see.
     """
     await ws.accept()
     client = None
     try:
         hello = json.loads(await ws.receive_text())
         if not await cu.check_token(hello.get("token", "")):
+            peer = getattr(ws.client, "host", "?")
+            await _note_bad_token(peer)
+            # a small delay costs a legitimate client nothing and makes the
+            # endpoint useless for guessing at volume
+            await asyncio.sleep(1.0)
             await ws.send_text(json.dumps({"ok": False, "error": "bad pairing token"}))
             await ws.close(code=4401)
             return

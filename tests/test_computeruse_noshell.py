@@ -397,3 +397,61 @@ def test_macos_module_never_mentions_osascript_as_something_to_run():
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             # prose explaining why it is avoided is fine; a bare command is not
             assert not node.value.strip().startswith("osascript"), node.value
+
+
+# --- 6. the one unauthenticated route ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_rejected_pairing_attempts_raise_one_alert_per_burst(monkeypatch):
+    """The agent socket takes a pairing token instead of a session cookie, so
+    it is the one route a published Jarvis exposes to anyone who gets past
+    whatever fronts it. Failures have to be visible — but a scanner must raise
+    one alert, not thousands, or it buries the Review Center."""
+    import backend.computeruse_api as api
+    from backend import security
+
+    api._bad_attempts.clear()
+    events = []
+
+    async def fake_raise(db, **kw):
+        events.append(kw)
+    monkeypatch.setattr(security, "raise_event", fake_raise)
+
+    for _ in range(25):
+        await api._note_bad_token("203.0.113.9")
+    assert len(events) == 1, "a burst must dedupe to one alert"
+    assert "203.0.113.9" in events[0]["summary"]
+    assert events[0]["severity"] == "warn"
+
+    # a second source is its own burst
+    for _ in range(3):
+        await api._note_bad_token("198.51.100.4")
+    assert len(events) == 2
+    assert "198.51.100.4" in events[1]["summary"]
+
+
+@pytest.mark.asyncio
+async def test_a_single_typo_does_not_cry_wolf(monkeypatch):
+    """One or two failures is somebody fat-fingering a token."""
+    import backend.computeruse_api as api
+    from backend import security
+    api._bad_attempts.clear()
+    events = []
+
+    async def fake_raise(db, **kw):
+        events.append(kw)
+    monkeypatch.setattr(security, "raise_event", fake_raise)
+
+    await api._note_bad_token("10.0.0.5")
+    await api._note_bad_token("10.0.0.5")
+    assert events == []
+
+
+def test_the_pairing_token_is_long_enough_to_be_unguessable():
+    """256 bits from secrets.token_urlsafe, compared with compare_digest. The
+    delay and the alert above are for noise, not for brute force — this is what
+    makes brute force pointless."""
+    import inspect
+    src = inspect.getsource(cu.pairing_token)
+    assert "token_urlsafe(32)" in src
+    assert "compare_digest" in inspect.getsource(cu.check_token)
