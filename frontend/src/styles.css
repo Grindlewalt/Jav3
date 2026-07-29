@@ -300,8 +300,7 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .chat-layout aside.collapsed { width: 56px; padding: 12px 9px; }
 .chat-layout aside.collapsed .side-title,
-.chat-layout aside.collapsed .convo-list,
-.chat-layout aside.collapsed .active-project { display: none; }
+.chat-layout aside.collapsed .convo-list { display: none; }
 .side-head { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .chat-layout aside.collapsed .side-head { flex-direction: column; gap: 10px; }
 .side-head .side-title { flex: 1; }
@@ -314,24 +313,40 @@ input:focus, textarea:focus { border-color: var(--accent);
 .icon-btn:hover { color: var(--text); background: var(--panel-2);
   transform: none; filter: none; }
 .convo-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1;
-  display: flex; flex-direction: column; gap: 2px; }
+  display: flex; flex-direction: column; gap: 5px; }
 .convo-list li {
   position: relative; display: flex; align-items: center; gap: 6px;
-  padding: 8px 12px; border-radius: 9px; cursor: pointer;
-  font-size: 13.5px; color: var(--dim);
+  padding: 9px 12px; border-radius: 10px; cursor: pointer;
+  font-size: 14px; color: var(--text);
   transition: background 0.15s, color 0.15s;
 }
 .convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
-  gap: 1px; }
-.convo-title { display: block; }
-.convo-proj { font-size: 11px; color: var(--dim); opacity: 0.75;
-  font-family: ui-monospace, Menlo, monospace; }
+  gap: 2px; }
+/* the list is body copy, not chrome: title in the text colour at a normal
+   weight, the slug as a quiet lowercase caption rather than monospace, which
+   read as a code fragment sitting in a nav */
+.convo-title { display: block; letter-spacing: -0.005em;
+  color: color-mix(in srgb, var(--text) 76%, var(--dim)); }
+.convo-list li:hover .convo-title,
+.convo-list li.active .convo-title { color: var(--text); }
+.convo-list li.active .convo-title { font-weight: 550; }
+.convo-proj { font-size: 11px; letter-spacing: 0.03em; color: var(--dim);
+  opacity: 0.85; }
 .convo-list li::before {
   content: ''; position: absolute; left: 0; top: 26%; bottom: 26%; width: 3px;
   border-radius: 3px; background: var(--accent);
   opacity: 0; transform: scaleY(0.4); transition: opacity 0.18s, transform 0.18s;
 }
 .convo-list li.active::before { opacity: 1; transform: none; }
+/* hairline between rows so the list reads as separated entries rather than one
+   run-on block. It sits in the gap and yields to the hover/active pill, which
+   would otherwise get a line drawn through its shoulder. */
+.convo-list li + li::after {
+  content: ''; position: absolute; left: 12px; right: 12px; top: -3px; height: 1px;
+  background: var(--border); opacity: 0.6; transition: opacity 0.15s;
+}
+.convo-list li:hover::after, .convo-list li.active::after,
+.convo-list li:hover + li::after, .convo-list li.active + li::after { opacity: 0; }
 .convo-list li .win-btn { visibility: hidden; }
 .convo-list li:hover .win-btn { visibility: visible; }
 /* transparent + borderless: the toolbar, the thread and the composer are one
@@ -342,11 +357,57 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 /* the phone-only strip that reopens the off-canvas conversation list */
 .chat-mobile-bar { display: none; }
-.chat-toolbar select { padding: 4px 8px; font-size: 13px; }
 .chat-title { font-weight: 600; color: var(--text); }
 .project-list li.deleted { opacity: 0.65; border-style: dashed; }
 .convo-list li:hover, .convo-list li.active { background: var(--panel-2); color: var(--text); }
-.active-project { font-size: 12px; color: var(--green); }
+
+/* ---- project picker (chat toolbar) ----
+   Same glass idiom as the composer's model chip, opening downward since this
+   one lives at the top of the page. The dot is the state: filled accent when
+   the chat is pinned to a project, hollow when it is only inheriting the
+   globally-loaded one. */
+.proj-pick { position: relative; flex-shrink: 0; }
+.proj-chip {
+  display: inline-flex; align-items: center; gap: 7px; max-width: 240px;
+  background: transparent; color: var(--dim); border: 1px solid transparent;
+  border-radius: 999px; padding: 6px 12px; font-size: 12.5px; font-weight: 500;
+  white-space: nowrap;
+}
+.proj-chip:hover:not(:disabled) { color: var(--text); border-color: var(--border);
+  background: color-mix(in srgb, var(--panel-2) 60%, transparent);
+  filter: none; transform: none; }
+.proj-chip .chev { transform: rotate(90deg); }
+.proj-chip .chev.open { transform: rotate(-90deg); }
+.proj-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  border: 1px solid var(--dim);
+}
+.proj-dot.pinned { background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 55%, transparent); }
+.proj-inherit { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--dim); opacity: 0.8; }
+.proj-menu {
+  position: absolute; right: 0; top: calc(100% + 8px); width: 260px;
+  max-height: 60vh; overflow-y: auto;
+  background: var(--glass); border: 1px solid var(--border);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border-radius: 14px; padding: 6px; box-shadow: var(--shadow-pop); z-index: 5;
+  transform-origin: top right;
+  animation: drop-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
+}
+@keyframes drop-in { from { opacity: 0; transform: translateY(-6px) scale(0.97); } }
+.proj-menu button {
+  display: flex; width: 100%; align-items: center; gap: 8px;
+  background: none; color: var(--text); padding: 8px 10px; border-radius: 9px;
+  font-weight: 400; font-size: 13px; text-align: left;
+}
+.proj-menu button:hover:not(:disabled) { background: var(--panel-2);
+  filter: none; transform: none; }
+.proj-menu .m-name { flex: 1; min-width: 0; display: flex; flex-direction: column;
+  gap: 1px; }
+.proj-menu .m-sub { font-size: 11px; color: var(--dim); }
+.proj-menu .m-check { color: var(--accent); font-size: 11px; }
 /* position: relative — the composer floats over the thread inside this box.
    min-height: 0 is load-bearing: as a column flex item main defaults to
    min-height:auto, so a long thread grew main past the viewport and the whole
@@ -375,17 +436,20 @@ input:focus, textarea:focus { border-color: var(--accent);
   border-color: var(--bubble-border); border-radius: 16px 16px 6px 16px;
 }
 .msg.assistant { gap: 13px; }
+/* Jarvis signs his turns with the orb itself, shrunk — same sphere, same
+   light. It was a lettered accent disc; one identity is better than two, and
+   it is what the empty-state orb flies into when a chat starts. */
 .msg-avatar {
   width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0; margin-top: 3px;
-  background: var(--accent);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 13px; font-weight: 800; color: var(--accent-ink); user-select: none;
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 30%, transparent);
+  background: radial-gradient(circle at 32% 30%,
+    var(--orb-1), var(--orb-2) 65%, var(--orb-3) 100%);
+  box-shadow: 0 3px 14px var(--orb-glow); user-select: none;
 }
-.msg-avatar.thinking { animation: avatar-pulse 1.8s ease-in-out infinite; }
-@keyframes avatar-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); }
-  50% { box-shadow: 0 0 0 8px transparent; }
+/* thinking = breathing faster, the same tell as the big orb */
+.msg-avatar.thinking { animation: avatar-breathe 2s ease-in-out infinite; }
+@keyframes avatar-breathe {
+  0%, 100% { transform: scale(0.94); box-shadow: 0 2px 10px var(--orb-glow); }
+  50% { transform: scale(1.06); box-shadow: 0 4px 22px var(--orb-glow); }
 }
 .msg.assistant .bubble { border-top-left-radius: 6px; }
 .msg.error { justify-content: center; }
@@ -418,11 +482,12 @@ input:focus, textarea:focus { border-color: var(--accent);
   background: radial-gradient(circle at 32% 30%,
     var(--orb-1), var(--orb-2) 65%, var(--orb-3) 100%);
   box-shadow: 0 10px 44px var(--orb-glow);
-  animation: orb-breathe 5.5s ease-in-out infinite;
+  animation: orb-breathe 4s ease-in-out infinite;
 }
+/* a real breath, not a twitch — the first pass at 2.8% was too small to read */
 @keyframes orb-breathe {
-  0%, 100% { transform: scale(1); box-shadow: 0 10px 44px var(--orb-glow); }
-  50% { transform: scale(1.028); box-shadow: 0 10px 54px var(--orb-glow); }
+  0%, 100% { transform: scale(0.968); box-shadow: 0 8px 36px var(--orb-glow); }
+  50% { transform: scale(1.055); box-shadow: 0 14px 66px var(--orb-glow); }
 }
 .chat-empty h2 { margin: 0; font-size: 22px; max-width: 480px; text-align: center; }
 /* ---- the floating composer ----
@@ -452,17 +517,18 @@ input:focus, textarea:focus { border-color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
 }
-/* the underglow: a faint white halo pooled under the pill, blurred so only the
-   spill shows past the opaque bar. --gx / --gi are written by Chat.jsx on
-   mousemove — x is where the light pools, i how bright it burns. */
-/* sat 6px lower and a touch wider than the pill, so the blur reads as light
-   pooling out from under it rather than a rectangle behind it */
+/* the underglow: light pooled under the pill, blurred so only the spill shows
+   past the opaque bar. --gx / --gi are written by Chat.jsx on mousemove — x is
+   where the light pools, i how bright it burns.
+   There is deliberately NO resting halo: an always-on glow read as the page
+   doing an unprompted "light at the bottom" thing on every load. The light
+   exists because the cursor is there, and is absent otherwise.
+   Sat 6px lower and a touch wider than the pill, so the blur reads as light
+   pooling out from under it rather than a rectangle behind it. */
 .composer-glow {
   position: absolute; left: 0; right: 0; bottom: 24px; margin: 0 auto;
   width: min(900px, calc(100% - 40px)); height: 48px; border-radius: 999px;
   pointer-events: none; filter: blur(14px);
-  background: radial-gradient(112% 128% at 50% 60%,
-    rgb(var(--glow) / 0.14), transparent 70%);
 }
 .composer-glow::before {
   content: ''; position: absolute; inset: -6px; border-radius: inherit;
@@ -1166,8 +1232,7 @@ kbd {
       visibility 0s linear 0.24s;
   }
   .chat-layout aside.collapsed .side-title,
-  .chat-layout aside.collapsed .convo-list,
-  .chat-layout aside.collapsed .active-project { display: flex; }
+  .chat-layout aside.collapsed .convo-list { display: flex; }
   .chat-layout aside.collapsed .side-title { display: block; }
   .chat-layout aside.collapsed .side-head { flex-direction: row; }
   .chat-scrim {

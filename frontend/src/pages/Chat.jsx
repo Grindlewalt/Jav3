@@ -150,6 +150,54 @@ function ComposerModel({ visible }) {
   )
 }
 
+// The project control for the open chat, in the same glassy idiom as the model
+// chip. It also absorbed the old "project loaded: x" line that used to sit in
+// bright green in the sidebar's bottom corner: when the conversation has no
+// project of its own it shows the globally-active one as an inherited value,
+// dimmed, so there is one place project state is read instead of two.
+function ProjectPicker({ projects, value, global, onPick, disabled }) {
+  const [open, setOpen] = useState(false)
+  const close = useCallback(() => setOpen(false), [])
+  const ref = useDismiss(open, close)
+  const name = (slug) => projects.find((p) => p.slug === slug)?.name || slug
+  const inherited = !value && global
+  return (
+    <div className="proj-pick" ref={ref}>
+      <button type="button" className="proj-chip" aria-haspopup="menu"
+              aria-expanded={open} disabled={disabled}
+              title={inherited
+                ? `no project pinned to this chat — inheriting the loaded project (${global})`
+                : 'project this chat is pinned to'}
+              onClick={() => setOpen((o) => !o)}>
+        <span className={`proj-dot${value ? ' pinned' : ''}`} aria-hidden="true" />
+        <span className="ellipsis">{value ? name(value) : (global ? name(global) : 'No project')}</span>
+        {inherited && <span className="proj-inherit">loaded</span>}
+        <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
+      </button>
+      {open && (
+        <div className="proj-menu" role="menu">
+          <button type="button" role="menuitemradio" aria-checked={!value}
+                  onClick={() => { setOpen(false); onPick('') }}>
+            <span className="m-name">No project
+              <span className="m-sub">{global ? `inherits ${name(global)}` : 'nothing loaded'}</span>
+            </span>
+            {!value && <span className="m-check" aria-hidden="true">●</span>}
+          </button>
+          {projects.map((p) => (
+            <button key={p.slug} type="button" role="menuitemradio"
+                    aria-checked={p.slug === value}
+                    onClick={() => { setOpen(false); onPick(p.slug) }}>
+              <span className="m-name">{p.name}
+                <span className="m-sub">{p.slug}</span></span>
+              {p.slug === value && <span className="m-check" aria-hidden="true">●</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Chat() {
   const [conversations, setConversations] = useState([])
   const [conversationId, setConversationId] = useState(null)
@@ -160,6 +208,8 @@ export default function Chat() {
   const [projects, setProjects] = useState([])
   const [greeting, setGreeting] = useState(pickGreeting)
   const [multiline, setMultiline] = useState(false)   // composer past one line
+  // project chosen for a chat that doesn't exist yet; sent with the first turn
+  const [pendingProject, setPendingProject] = useState('')
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -289,6 +339,7 @@ export default function Chat() {
     closeSideOnPhone()
     setConversationId(null)
     setMessages([])
+    setPendingProject('')
     setGreeting(pickGreeting())
   }
 
@@ -323,7 +374,9 @@ export default function Chat() {
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
       await chatStream(
-        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak },
+        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
+          // only meaningful when the conversation is being created by this turn
+          ...(conversationId || !pendingProject ? {} : { project: pendingProject }) },
         handleTurnEvent,
       )
       api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -378,7 +431,6 @@ export default function Chat() {
             </li>
           ))}
         </ul>
-        {active && <div className="active-project">project loaded: {active}</div>}
       </aside>
       {sideOpen && (
         <div className="chat-scrim" onClick={() => setSideOpen(false)} />
@@ -398,23 +450,25 @@ export default function Chat() {
           <button type="button" className="icon-btn" aria-label="new chat"
                   onClick={newConversation}>＋</button>
         </div>
-        {conversationId && (
-          <div className="chat-toolbar">
+        {/* always present, even on a fresh chat — it is the one home for the
+            project state, so it can't come and go with the conversation */}
+        <div className="chat-toolbar">
+          {conversationId && <>
             <span className="chat-title ellipsis">
               {conversations.find((c) => c.id === conversationId)?.summary
                 || `Chat #${conversationId}`}
             </span>
             <span className="tag">#{conversationId}</span>
-            <span className="grow" />
-            <label className="dim">project</label>
-            <select
-              value={conversations.find((c) => c.id === conversationId)?.project_slug || ''}
-              onChange={(e) => assignProject(e.target.value)}>
-              <option value="">— none —</option>
-              {projects.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
-            </select>
-          </div>
-        )}
+          </>}
+          <span className="grow" />
+          <ProjectPicker
+            projects={projects} global={active}
+            value={conversationId
+              ? (conversations.find((c) => c.id === conversationId)?.project_slug || '')
+              : pendingProject}
+            onPick={(slug) => (conversationId ? assignProject(slug)
+                                              : setPendingProject(slug))} />
+        </div>
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 ? (
             <div className="chat-empty">
@@ -426,7 +480,7 @@ export default function Chat() {
               {messages.map((m, i) => (
                 <div key={i} className={`msg ${m.role}`}>
                   {m.role === 'assistant' ? <>
-                    <div className={`msg-avatar ${m.streaming ? 'thinking' : ''}`}>J</div>
+                    <div className={`msg-avatar ${m.streaming ? 'thinking' : ''}`} />
                     <MessageBody m={m} />
                   </> : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
                 </div>
