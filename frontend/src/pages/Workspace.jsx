@@ -185,7 +185,7 @@ export default function Workspace() {
   const zRef = useRef(10)
   const saveTimer = useRef(null)
   const mouseRef = useRef({ x: 200, y: 160 })
-  const undoRef = useRef([])                       // closed panels, for ctrl+z
+  const undoRef = useRef([])                       // ctrl+z stack: closes + pre-tidy layouts
   const gestureRef = useRef(null)                  // layout snapshot during a resize
 
   const refreshProject = useCallback(
@@ -282,15 +282,26 @@ export default function Workspace() {
       setClosingIds((c) => c.filter((x) => x !== id))
       setPanels((ps) => {
         const p = ps.find((x) => x.id === id)
-        if (p) undoRef.current.push(p)
+        if (p) undoRef.current.push({ kind: 'close', panel: p })
         return ps.filter((x) => x.id !== id)
       })
     }, 170)
   }
 
-  const undoClose = () => {
-    const p = undoRef.current.pop()
-    if (p) setPanels((ps) => [...ps, { ...p, z: ++zRef.current }])
+  const undo = () => {
+    const e = undoRef.current.pop()
+    if (!e) return
+    if (e.kind === 'close') {
+      setPanels((ps) => [...ps, { ...e.panel, z: ++zRef.current }])
+    } else {
+      // pre-tidy snapshot: restore geometry for panels that still exist;
+      // panels opened/closed since keep their own fate (closes are their
+      // own undo entries)
+      setPanels((ps) => ps.map((p) => {
+        const o = e.panels.find((q) => q.id === p.id)
+        return o ? { ...p, x: o.x, y: o.y, w: o.w, h: o.h } : p
+      }))
+    }
   }
 
   // hover-targeted hotkeys: f expand, q close (ctrl+z restores), n add menu
@@ -306,7 +317,7 @@ export default function Workspace() {
           t.tagName === 'SELECT' || t.isContentEditable) return
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault()
-        undoClose()
+        undo()
         return
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return
@@ -399,6 +410,7 @@ export default function Workspace() {
         0.35 * Math.abs(Math.log((r.w / Math.max(1, r.h)) / aspect))
       if (!best || score < best.score) best = { ...r, score }
     }
+    undoRef.current.push({ kind: 'layout', panels: panels.map((p) => ({ ...p })) })
     setExpanded(null)
     setPanels((ps) => ps.map((p) => {
       const o = best.placed.find((q) => q.id === p.id)
