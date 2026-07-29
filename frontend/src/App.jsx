@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api.js'
+import { useDismiss } from './useDismiss.js'
 import { setMediaHosts } from './mediaHosts.js'
 import Login from './pages/Login.jsx'
 import Chat from './pages/Chat.jsx'
@@ -17,6 +18,29 @@ import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
 import TriagePanel from './TriagePanel.jsx'
 
+// Primary destinations stay on the bar; everything else lives behind "More".
+// Eleven top-level links used to wrap the bar into two or three ragged rows
+// between 769px and ~1250px, stranding Logout in the middle of the header.
+const PRIMARY_LINKS = [
+  { to: '/', label: 'Chat', end: true },
+  { to: '/projects', label: 'Projects' },
+  { to: '/review', label: 'Review' },
+  { to: '/network', label: 'Network' },
+]
+const MORE_LINKS = [
+  { to: '/artifacts', label: 'Artifacts' },
+  { to: '/context', label: 'Context' },
+  { to: '/agents', label: 'Agents' },
+  { to: '/logs', label: 'Logs' },
+  { to: '/schedules', label: 'Schedules' },
+  { to: '/skills', label: 'Skills' },
+  { to: '/tools', label: 'Tools' },
+]
+
+// Counts come from live queues and reached 294 in practice, which overflowed
+// the badge and smeared across the icon.
+const badge = (n) => (n > 99 ? '99+' : String(n))
+
 function NotificationBell() {
   const [data, setData] = useState(null)
   const [open, setOpen] = useState(false)
@@ -30,12 +54,15 @@ function NotificationBell() {
   const count = data?.count || 0
   const secCount = data?.alerts || 0
   const egressCount = data?.egress_pending || 0
-  const close = () => setOpen(false)
+  const close = useCallback(() => setOpen(false), [])
+  const ref = useDismiss(open, close)
   return (
-    <div className="notif-wrap">
+    <div className="notif-wrap" ref={ref}>
       <button className="notif-bell" onClick={() => setOpen((o) => !o)}
-              title="Pending approvals">
-        🔔{count > 0 && <span className="notif-badge">{count}</span>}
+              aria-label={`Pending approvals${count ? ` (${count})` : ''}`}
+              aria-expanded={open} title="Pending approvals">
+        <span aria-hidden="true">🔔</span>
+        {count > 0 && <span className="notif-badge">{badge(count)}</span>}
       </button>
       {open && (
         <div className="notif-drop">
@@ -73,20 +100,27 @@ function NotificationBell() {
 // Runtime model switch: flash for cheap, pro for smart. Applies to the next
 // model call everywhere (chat/agents/guest); agents with an explicit model
 // pin keep it. Server-side allowlist; persisted across restarts.
-function ModelSwitch() {
+// State lives in App so the bar copy and the mobile-drawer copy stay in sync.
+function useModel() {
   const [m, setM] = useState(null)
   useEffect(() => { api('/api/model').then(setM).catch(() => {}) }, [])
+  const change = useCallback(async (model) => {
+    try {
+      setM(await api('/api/model', {
+        method: 'PUT', body: JSON.stringify({ model }) }))
+    } catch (err) { window.alert(err.detail || String(err)) }
+  }, [])
+  return [m, change]
+}
+
+function ModelSwitch({ m, onChange, className = '' }) {
   if (!m) return null
   const short = (id) => id.replace(/^deepseek-v4-/, '')
   return (
-    <select className="model-switch" value={m.active}
+    <select className={`model-switch ${className}`} value={m.active}
+            aria-label="model for new turns"
             title="model for new turns — pro is ~3x the price of flash"
-            onChange={async (e) => {
-              try {
-                setM(await api('/api/model', {
-                  method: 'PUT', body: JSON.stringify({ model: e.target.value }) }))
-              } catch (err) { window.alert(err.detail || String(err)) }
-            }}>
+            onChange={(e) => onChange(e.target.value)}>
       {m.choices.map((c) => <option key={c} value={c}>{short(c)}</option>)}
     </select>
   )
@@ -104,6 +138,8 @@ function VmStatus() {
     const t = setInterval(load, 10000)
     return () => clearInterval(t)
   }, [])
+  const closeDrop = useCallback(() => setOpen(false), [])
+  const wrapRef = useDismiss(open, closeDrop)
 
   async function nuke() {
     if (s?.inflight > 0) {
@@ -146,8 +182,10 @@ function VmStatus() {
   const imageAge = s.image_age_days != null
     ? `${s.image_age_days}d old` : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
   return (
-    <div className="notif-wrap vm-wrap">
+    <div className="notif-wrap vm-wrap" ref={wrapRef}>
       <button className="notif-bell" onClick={() => setOpen((o) => !o)}
+              aria-expanded={open}
+              aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
               title="guest VM status">
         <span className={`run-dot ${s.running ? 'running' : ''}`} /> VM
         {s.image_stale && <span className="notif-badge vm-stale-badge" title="image is stale">!</span>}
@@ -255,10 +293,28 @@ export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
   const [, setCfgReady] = useState(false) // bump once the media allowlist lands
   const [menuOpen, setMenuOpen] = useState(false) // mobile nav drawer
+  const [moreOpen, setMoreOpen] = useState(false) // desktop overflow menu
+  const [model, setModel] = useModel()
   const location = useLocation()
 
-  // close the mobile menu whenever the route changes
-  useEffect(() => { setMenuOpen(false) }, [location.pathname])
+  // close both menus whenever the route changes
+  useEffect(() => { setMenuOpen(false); setMoreOpen(false) }, [location.pathname])
+
+  const closeMore = useCallback(() => setMoreOpen(false), [])
+  const moreRef = useDismiss(moreOpen, closeMore)
+
+  // the drawer is a fixed overlay; stop the page behind it from scrolling,
+  // and let Escape dismiss it like every other popover in the bar
+  useEffect(() => {
+    document.body.classList.toggle('nav-locked', menuOpen)
+    if (!menuOpen) return () => document.body.classList.remove('nav-locked')
+    const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false) }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.classList.remove('nav-locked')
+    }
+  }, [menuOpen])
 
   useEffect(() => {
     api('/api/auth/me').then(setUser).catch(() => setUser(null))
@@ -267,6 +323,11 @@ export default function App() {
       .catch(() => {})
   }, [])
 
+  const logout = async () => {
+    await api('/api/auth/logout', { method: 'POST' })
+    setUser(null)
+  }
+
   if (user === undefined) return <div className="center">…</div>
   if (user === null && location.pathname !== '/login')
     return <Navigate to="/login" replace />
@@ -274,40 +335,71 @@ export default function App() {
   return (
     <div className="app">
       {user && (
-        <nav className={menuOpen ? 'nav open' : 'nav'}>
-          <span className="brand">Jarvis</span>
-          <button className="nav-toggle" aria-label="menu"
-                  aria-expanded={menuOpen}
-                  onClick={() => setMenuOpen((o) => !o)}>
-            {menuOpen ? '✕' : '☰'}
-          </button>
-          <div className="nav-links">
-            <NavLink to="/" end>Chat</NavLink>
-            <NavLink to="/projects">Projects</NavLink>
-            <NavLink to="/artifacts">Artifacts</NavLink>
-            <NavLink to="/review">Review</NavLink>
-            <NavLink to="/network">Network</NavLink>
-            <NavLink to="/context">Context</NavLink>
-            <NavLink to="/agents">Agents</NavLink>
-            <NavLink to="/logs">Logs</NavLink>
-            <NavLink to="/schedules">Schedules</NavLink>
-            <NavLink to="/skills">Skills</NavLink>
-            <NavLink to="/tools">Tools</NavLink>
-            <button
-              className="link nav-logout"
-              onClick={async () => {
-                await api('/api/auth/logout', { method: 'POST' })
-                setUser(null)
-              }}
-            >
-              Logout
+        <>
+          <nav className="nav">
+            <span className="brand">Jarvis</span>
+
+            {/* desktop: primary destinations + an overflow menu */}
+            <div className="nav-links">
+              {PRIMARY_LINKS.map((l) => (
+                <NavLink key={l.to} to={l.to} end={l.end}>{l.label}</NavLink>
+              ))}
+              <div className="notif-wrap more-wrap" ref={moreRef}>
+                <button className="nav-more" aria-expanded={moreOpen}
+                        aria-haspopup="menu"
+                        onClick={() => setMoreOpen((o) => !o)}>
+                  More <span className={moreOpen ? 'chev open' : 'chev'}
+                             aria-hidden="true">›</span>
+                </button>
+                {moreOpen && (
+                  <div className="notif-drop more-drop" role="menu">
+                    {MORE_LINKS.map((l) => (
+                      <NavLink key={l.to} to={l.to} role="menuitem"
+                               className="notif-item more-item"
+                               onClick={closeMore}>{l.label}</NavLink>
+                    ))}
+                    <button className="notif-item more-item more-logout"
+                            role="menuitem" onClick={logout}>Log out</button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="nav-status">
+              <ModelSwitch m={model} onChange={setModel} className="bar-only" />
+              <NotificationBell />
+              <TriagePanel />
+              <VmStatus />
+            </div>
+
+            <button className="nav-toggle" aria-label={menuOpen ? 'close menu' : 'menu'}
+                    aria-expanded={menuOpen}
+                    onClick={() => setMenuOpen((o) => !o)}>
+              {menuOpen ? '✕' : '☰'}
             </button>
+          </nav>
+
+          {/* phone: a fixed drawer over a scrim, never an in-flow block that
+              shoves the page down */}
+          {menuOpen && (
+            <div className="nav-scrim" onClick={() => setMenuOpen(false)} />
+          )}
+          <div className={menuOpen ? 'nav-drawer open' : 'nav-drawer'}
+               aria-hidden={!menuOpen}>
+            {[...PRIMARY_LINKS, ...MORE_LINKS].map((l) => (
+              <NavLink key={l.to} to={l.to} end={l.end}
+                       tabIndex={menuOpen ? 0 : -1}>{l.label}</NavLink>
+            ))}
+            <div className="drawer-foot">
+              <label className="drawer-model">
+                <span className="dim small">Model for new turns</span>
+                <ModelSwitch m={model} onChange={setModel} className="drawer-only" />
+              </label>
+              <button className="ghost" tabIndex={menuOpen ? 0 : -1}
+                      onClick={logout}>Log out</button>
+            </div>
           </div>
-          <ModelSwitch />
-          <NotificationBell />
-          <TriagePanel />
-          <VmStatus />
-        </nav>
+        </>
       )}
       {user && <GuiBridge />}
       <Routes>

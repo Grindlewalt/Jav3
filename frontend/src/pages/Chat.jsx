@@ -11,8 +11,13 @@ export default function Chat() {
   const [active, setActive] = useState(null)
   const [projects, setProjects] = useState([])
   const [incognito, setIncognito] = useState(false)
-  const [sideOpen, setSideOpen] = useState(
-    () => localStorage.getItem('jarvis.chat.side') !== 'closed')
+  // on a phone the list is an overlay, so it starts closed unless the operator
+  // has explicitly opened it before; on desktop it stays open by default
+  const [sideOpen, setSideOpen] = useState(() => {
+    const saved = localStorage.getItem('jarvis.chat.side')
+    if (saved) return saved !== 'closed'
+    return !window.matchMedia('(max-width: 768px)').matches
+  })
   const scrollRef = useRef(null)   // the .messages scroll container
   const inputRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
@@ -87,9 +92,15 @@ export default function Chat() {
       })
   }
 
+  // the phone list overlays the thread, so picking a chat should reveal it
+  const closeSideOnPhone = () => {
+    if (window.matchMedia('(max-width: 768px)').matches) setSideOpen(false)
+  }
+
   async function openConversation(id) {
     tailAbort.current?.abort()
     setIncognito(false)   // saved chats always use the normal palette
+    closeSideOnPhone()
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
@@ -119,6 +130,7 @@ export default function Chat() {
     tailAbort.current?.abort()
     setBusy(false)
     setIncognito(false)   // a fresh chat always starts saved + light
+    closeSideOnPhone()
     setConversationId(null)
     setMessages([])
   }
@@ -208,7 +220,24 @@ export default function Chat() {
         </ul>
         {active && <div className="active-project">project loaded: {active}</div>}
       </aside>
+      {sideOpen && (
+        <div className="chat-scrim" onClick={() => setSideOpen(false)} />
+      )}
       <main>
+        {/* on a phone the list is off-canvas, and its collapse button goes
+            with it — this is the way back to it */}
+        <div className="chat-mobile-bar">
+          <button type="button" className="icon-btn" aria-label="open chat list"
+                  onClick={() => setSideOpen(true)}>☰</button>
+          <span className="grow ellipsis">
+            {conversationId
+              ? (conversations.find((c) => c.id === conversationId)?.summary
+                 || `Chat #${conversationId}`)
+              : 'New chat'}
+          </span>
+          <button type="button" className="icon-btn" aria-label="new chat"
+                  onClick={newConversation}>＋</button>
+        </div>
         {!conversationId && incognito && messages.length > 0 && (
           <div className="chat-toolbar">
             <span className="tag incog-tag">🕶 incognito</span>

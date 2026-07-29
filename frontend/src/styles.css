@@ -17,6 +17,10 @@
   --bubble-1: #2c4d78;
   --bubble-2: #24405f;
   --bubble-border: #2e5079;
+  /* layout tokens: bar height, minimum touch target, drawer scrim */
+  --nav-h: 56px;
+  --tap: 44px;
+  --overlay: rgba(6, 8, 11, 0.62);
 }
 
 /* incognito: the whole GUI drops to a desaturated dark grey while an
@@ -38,49 +42,116 @@ body {
   margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.55 -apple-system, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
 }
+/* keyboard focus was invisible everywhere; :focus-visible keeps it off mouse
+   clicks so it never shows up as a stray ring on a tapped button. The
+   :not(:focus-visible) reset drops the UA's `outline: auto` ring, which a
+   tap still leaves behind on the hamburger. */
+:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px;
+}
+:focus:not(:focus-visible) { outline: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+  }
+}
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 .app { display: flex; flex-direction: column; height: 100vh; }
 
-/* ---- nav ---- */
+/* ---- nav ----
+   One fixed-height bar that must never wrap. Eleven links used to reflow into
+   two or three ragged rows anywhere between 769px and ~1250px, which pushed
+   the bar to 135px tall and stranded Logout mid-header. Now only four primary
+   destinations sit on the bar; the rest live behind "More", and below
+   --nav-collapse the whole set moves into the drawer. */
 nav {
-  display: flex; gap: 4px; align-items: center; padding: 10px 18px;
+  display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;
+  padding: 0 18px; height: var(--nav-h); flex-shrink: 0;
   background: var(--bg-soft); border-bottom: 1px solid var(--border);
 }
 nav .brand {
   font-weight: 800; font-size: 17px; margin-right: 18px; letter-spacing: 0.3px;
+  flex-shrink: 0; white-space: nowrap;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
-/* flex:1 lets the Logout button's own margin-left:auto push it to the right of
-   the link row (grouped near the bell/VM) instead of crowding "Tools" */
-.nav-links { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; flex: 1; }
+.nav-links {
+  display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;
+  flex: 1; min-width: 0;
+}
 nav a {
-  color: var(--dim); text-decoration: none; padding: 6px 12px;
-  border-radius: 8px; transition: all 0.15s; white-space: nowrap;
+  color: var(--dim); text-decoration: none; padding: 8px 12px;
+  border-radius: 8px; transition: color 0.15s, background 0.15s;
+  white-space: nowrap;
 }
 nav a:hover { color: var(--text); background: var(--panel); }
 nav a.active { color: var(--text); background: var(--panel-2); }
-.nav-logout { margin-left: 4px; }
-/* hamburger: hidden on desktop, shown on mobile via the media query below */
-.nav-toggle {
-  display: none; background: none; border: 0; color: var(--text);
-  font-size: 20px; line-height: 1; padding: 4px 8px; cursor: pointer;
-  margin-left: auto;
+
+/* overflow menu ("More") */
+.more-wrap { margin-left: 2px; }
+.nav-more {
+  background: none; color: var(--dim); font-weight: 400; font-size: 15px;
+  padding: 8px 10px; border-radius: 8px; display: flex; align-items: center;
+  gap: 5px; white-space: nowrap;
+}
+.nav-more:hover:not(:disabled) {
+  color: var(--text); background: var(--panel); filter: none; transform: none;
+}
+.nav-more .chev { transform: rotate(90deg); font-size: 12px; }
+.nav-more .chev.open { transform: rotate(-90deg); }
+.more-drop { width: 210px; }
+.more-item { text-decoration: none; }
+.more-item.active { color: var(--accent); }
+.more-drop .more-logout {
+  background: none; color: var(--dim); width: 100%; text-align: left;
+  font-weight: 400; font-size: 13px; margin-top: 4px; padding-top: 10px;
+  border-top: 1px solid var(--border); border-radius: 0 0 7px 7px;
+}
+.more-drop .more-logout:hover:not(:disabled) {
+  color: var(--text); filter: none; transform: none; background: var(--panel-2);
 }
 
-/* ---- notification bell ---- */
-.notif-wrap { position: relative; margin-left: auto; }
-.notif-bell {
-  background: none; border: 0; padding: 4px 8px; font-size: 16px;
-  cursor: pointer; position: relative; line-height: 1;
+/* right-hand status cluster: model, bell, triage, VM */
+.nav-status { display: flex; align-items: center; gap: 2px; flex-shrink: 0;
+  margin-left: auto; }
+
+/* hamburger: hidden until the bar collapses (media query below) */
+.nav-toggle {
+  display: none; background: none; border: 0; color: var(--text);
+  font-size: 20px; line-height: 1; cursor: pointer; flex-shrink: 0;
+  width: var(--tap); height: var(--tap); align-items: center;
+  justify-content: center; border-radius: 10px;
 }
+.nav-toggle:hover:not(:disabled) { background: var(--panel-2);
+  filter: none; transform: none; }
+
+/* ---- mobile drawer (hidden above the collapse width) ---- */
+.nav-scrim, .nav-drawer { display: none; }
+
+/* ---- notification bell ---- */
+/* .nav-status owns the right-hand alignment now, so these no longer each
+   claim margin-left:auto */
+.notif-wrap { position: relative; }
+.notif-bell {
+  background: none; border: 0; padding: 0 6px; font-size: 16px;
+  cursor: pointer; position: relative; line-height: 1; color: var(--text);
+  min-width: var(--tap); height: var(--tap); border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+}
+.notif-bell:hover:not(:disabled) { background: var(--panel-2);
+  filter: none; transform: none; }
+/* sits in the icon's top-right corner without covering it; counts run to the
+   hundreds in practice, so the badge grows leftward and caps at 99+ */
 .notif-badge {
-  position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px;
-  padding: 0 4px; border-radius: 8px; background: var(--red); color: #fff;
-  font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+  position: absolute; top: 4px; right: 0; min-width: 17px; height: 17px;
+  padding: 0 5px; border-radius: 9px; background: var(--red); color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 17px; text-align: center;
+  font-variant-numeric: tabular-nums; pointer-events: none;
+  border: 1.5px solid var(--bg-soft);
 }
 .notif-drop {
   position: absolute; top: 100%; right: 0; margin-top: 6px; z-index: 50;
@@ -102,7 +173,6 @@ nav a.active { color: var(--text); background: var(--panel-2); }
   background: var(--dim);
 }
 .notif-bell .run-dot.running { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-.vm-wrap { margin-left: 0; }
 .vm-drop { width: 230px; }
 .vm-drop .notif-item { cursor: default; }
 .vm-nuke-row { padding: 6px 4px 2px; border-top: 1px solid var(--border);
@@ -220,6 +290,8 @@ input:focus, textarea:focus { border-color: var(--accent); }
   border-bottom: 1px solid var(--border); background: var(--bg-soft);
   font-size: 13px;
 }
+/* the phone-only strip that reopens the off-canvas conversation list */
+.chat-mobile-bar { display: none; }
 .chat-toolbar select { padding: 4px 8px; font-size: 13px; }
 .chat-title { font-weight: 600; color: var(--text); }
 .project-list li.deleted { opacity: 0.65; border-style: dashed; }
@@ -376,6 +448,16 @@ input:focus, textarea:focus { border-color: var(--accent); }
   color: var(--dim); font-family: ui-monospace, Menlo, monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Rows carrying action buttons must lay them out. As a plain block with
+   overflow:hidden, a long name pushed the trailing buttons past the clip edge
+   — the agent trash bin's restore/delete-forever were unclickable at every
+   width, not just on a phone. */
+.file-list li:has(.win-btn) {
+  display: flex; align-items: center; gap: 6px;
+}
+.file-list li:has(.win-btn) > .grow {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
 .file-list li:hover, .file-list li.active { background: var(--panel-2); color: var(--text); }
 .editor-pane { display: flex; flex-direction: column; height: 100%; padding: 14px 18px; }
 .pane-head { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
@@ -396,8 +478,10 @@ input:focus, textarea:focus { border-color: var(--accent); }
 /* ---- projects list ---- */
 .page { padding: 26px; max-width: 960px; width: 100%; margin: 0 auto; overflow-y: auto; }
 .autonomy-sel { padding: 3px 7px; font-size: 12px; }
-.model-switch { padding: 3px 7px; font-size: 12px; margin-left: auto; }
-.nav .model-switch { margin-left: 8px; }
+.model-switch { padding: 5px 8px; font-size: 12px; }
+.nav .model-switch { margin-right: 6px; }
+/* one <select>, two homes: the bar above the collapse width, the drawer below */
+.model-switch.drawer-only { display: none; }
 .create-project { display: flex; gap: 8px; margin-bottom: 18px; align-items: center; }
 .create-project input:nth-child(2) { flex: 1; }
 .project-list { list-style: none; padding: 0; }
@@ -925,51 +1009,119 @@ kbd {
 .tag.sev-crit-tag { color: var(--red); border-color: var(--red); }
 
 /* ============================================================
-   Mobile / phone layout (≤768px). Desktop is untouched above;
-   these rules only take over on narrow screens.
+   Collapsed nav (≤1024px). The bar can hold brand + 4 links + More +
+   the status cluster down to about 1050px; below that everything
+   navigational moves into the drawer.
+   ============================================================ */
+@media (max-width: 1024px) {
+  .nav-links { display: none; }
+  .nav-toggle { display: inline-flex; }
+  nav .brand { margin-right: 8px; }
+  /* the model picker is a setting, not an alert — it moves to the drawer so
+     the bar keeps only the two things that demand attention */
+  .model-switch.bar-only { display: none; }
+  .model-switch.drawer-only { display: block; }
+
+  .nav-scrim {
+    display: block; position: fixed; inset: var(--nav-h) 0 0; z-index: 900;
+    background: var(--overlay); animation: scrim-in 0.18s ease both;
+  }
+  @keyframes scrim-in { from { opacity: 0; } }
+  .nav-drawer {
+    display: flex; flex-direction: column; gap: 2px;
+    position: fixed; top: var(--nav-h); right: 0; z-index: 901;
+    width: min(320px, 86vw); max-height: calc(100% - var(--nav-h));
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+    background: var(--bg-soft); border-left: 1px solid var(--border);
+    box-shadow: -12px 0 40px #0009;
+    transform: translateX(100%); transition: transform 0.24s ease;
+    visibility: hidden;
+  }
+  .nav-drawer.open { transform: none; visibility: visible; }
+  /* the drawer is a sibling of <nav>, so the `nav a` rules above never reach
+     it — without these the links render as default underlined browser links */
+  .nav-drawer a {
+    color: var(--dim); text-decoration: none;
+    padding: 13px 14px; font-size: 15px; border-radius: 10px;
+    min-height: var(--tap); display: flex; align-items: center;
+    transition: color 0.15s, background 0.15s;
+  }
+  .nav-drawer a:hover { color: var(--text); background: var(--panel); }
+  .nav-drawer a.active { color: var(--text); background: var(--panel-2); }
+  .drawer-foot {
+    margin-top: 10px; padding-top: 12px; display: flex; flex-direction: column;
+    gap: 12px; border-top: 1px solid var(--border);
+  }
+  .drawer-model { display: flex; flex-direction: column; gap: 5px;
+    padding: 0 4px; }
+  .drawer-model .model-switch { width: 100%; padding: 9px 10px;
+    font-size: 14px; }
+  .drawer-foot .ghost { min-height: var(--tap); }
+  /* the drawer scrolls itself; the page behind it must not */
+  body.nav-locked { overflow: hidden; }
+
+  /* dropdowns must never exceed the viewport */
+  .notif-drop { width: min(340px, 92vw); }
+  .vm-drop { width: min(260px, 90vw); }
+  .triage-drop { width: min(380px, 94vw); }
+}
+
+/* ============================================================
+   Phone layout (≤768px).
    ============================================================ */
 @media (max-width: 768px) {
   /* iOS: use the dynamic viewport height so the composer isn't hidden
      under the browser chrome */
   .app { height: 100vh; height: 100dvh; }
-
-  /* ---- nav becomes a hamburger drawer ---- */
-  nav { flex-wrap: wrap; padding: 8px 14px; gap: 8px; }
-  .nav-toggle { display: block; order: 3; margin-left: 0; }
-  nav .brand { margin-right: 0; }
-  .notif-wrap { order: 1; margin-left: auto; }
-  .vm-wrap { order: 2; }
-  .nav-links {
-    order: 4; flex-basis: 100%; flex-direction: column; align-items: stretch;
-    gap: 2px; display: none; padding-top: 6px;
-    border-top: 1px solid var(--border); margin-top: 4px;
-  }
-  nav.open .nav-links { display: flex; }
-  .nav-links a { padding: 11px 12px; font-size: 15px; }
-  /* button.link sets margin-left:auto (right-aligns it on the desktop bar) and
-     out-specifies a bare .nav-logout — match its specificity to left-align here */
-  button.link.nav-logout {
-    text-align: left; margin: 4px 0 0; padding: 11px 12px; font-size: 15px;
-  }
-
-  /* dropdowns must never exceed the viewport */
-  .notif-drop { width: min(340px, 92vw); }
-  .vm-drop { width: min(260px, 90vw); }
+  nav { padding: 0 10px 0 14px; }
 
   /* ---- pages: tighter gutters ---- */
   .page { padding: 16px 14px; }
   .review-page, .review-page.page { max-width: 100%; }
 
-  /* ---- chat: stack the conversation list above the thread ---- */
-  .chat-layout { flex-direction: column; }
+  /* ---- chat: the conversation list is an overlay, not a permanent block.
+     It used to sit stacked above the thread at 34vh, so a third of the
+     screen was a chat list cut off mid-row before you could read a reply. */
+  .chat-layout { flex-direction: column; position: relative; }
   .chat-layout aside {
-    width: 100%; max-height: 34vh; border-right: 0;
-    border-bottom: 1px solid var(--border); padding: 10px;
+    position: absolute; z-index: 20; top: 0; bottom: 0; left: 0;
+    width: min(300px, 84vw); max-height: none; padding: 10px;
+    border-right: 1px solid var(--border); border-bottom: 0;
+    background: var(--bg-soft); box-shadow: 12px 0 32px #0009;
+    transition: transform 0.24s ease;
   }
-  /* collapsed on mobile = a slim horizontal strip, not a rail */
-  .chat-layout aside.collapsed { width: 100%; padding: 6px 10px; }
+  /* collapsed on mobile = fully off-canvas, with the strip's controls
+     mirrored into the chat toolbar */
+  /* visibility (delayed so the slide-out still animates) takes the off-canvas
+     list out of the tab order — otherwise Tab walks into invisible controls */
+  .chat-layout aside {
+    transition: transform 0.24s ease, visibility 0s linear 0s;
+  }
+  .chat-layout aside.collapsed {
+    width: min(300px, 84vw); padding: 10px;
+    transform: translateX(-100%); box-shadow: none;
+    visibility: hidden; transition: transform 0.24s ease,
+      visibility 0s linear 0.24s;
+  }
+  .chat-layout aside.collapsed .side-title,
+  .chat-layout aside.collapsed .convo-list,
+  .chat-layout aside.collapsed .active-project { display: flex; }
+  .chat-layout aside.collapsed .side-title { display: block; }
   .chat-layout aside.collapsed .side-head { flex-direction: row; }
-  .chat-toolbar { padding: 8px 14px; flex-wrap: wrap; }
+  .chat-scrim {
+    position: absolute; inset: 0; z-index: 19; background: var(--overlay);
+    animation: scrim-in 0.18s ease both;
+  }
+  .chat-toolbar { padding: 8px 12px; flex-wrap: nowrap; gap: 8px; }
+  .chat-toolbar .chat-title { min-width: 0; }
+  .chat-mobile-bar {
+    display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    border-bottom: 1px solid var(--border); background: var(--bg-soft);
+    font-size: 14px; color: var(--dim); flex-shrink: 0;
+  }
+  /* the toolbar already names the open chat — don't say it twice */
+  .chat-mobile-bar + .chat-toolbar .chat-title { display: none; }
   .messages { padding: 0 12px; }
   .thread { padding: 16px 0 10px; }
   .msg { margin-bottom: 16px; }
@@ -979,12 +1131,17 @@ kbd {
   .composer { padding: 8px 10px 12px; }
   .composer-inner { padding: 7px 7px 7px 13px; }
 
-  /* ---- generic split layouts (context / files): aside on top ---- */
+  /* ---- generic split layouts (context / files): aside on top ----
+     flex-shrink:0 is load-bearing. As a shrinkable column child the aside
+     collapsed to its title bar, so the Schedules "new schedule" form and the
+     Context secrets panel were squashed to nothing — unreachable on a phone
+     even though their controls still reported live positions. */
   .split-layout { flex-direction: column; }
   .split-layout > aside, .panel.split > aside {
-    width: 100%; max-height: 32vh; border-right: 0;
-    border-bottom: 1px solid var(--border);
+    width: 100%; flex: 0 0 auto; max-height: 46vh; overflow-y: auto;
+    border-right: 0; border-bottom: 1px solid var(--border);
   }
+  .split-layout > main { flex: 1 1 auto; min-height: 0; }
 
   /* ---- network: single column ---- */
   .net-page { padding: 12px; }
@@ -1016,8 +1173,66 @@ kbd {
   /* wide content (diffs, tables, code) scrolls inside its box, never the page */
   .diff-view, .md-body table { display: block; overflow-x: auto; max-width: 100%; }
 
-  /* touch targets: give small icon buttons a little more room */
-  .win-btn { padding: 4px 9px; font-size: 16px; }
+  /* ---- list rows become cards ----
+     Every row below was a nowrap flex sized for a 1400px bar. On a 390px
+     screen the last controls slid past the right edge (Schedules' delete sat
+     at x=339..400) and flex squeezed the identifying text to zero width, so
+     egress rows offered approve/reject for a host you could not read. */
+  .project-list li, .sched-head, .staged-list li, .rev-staged-row,
+  .egr-row, .sbx-row, .create-project {
+    flex-wrap: wrap; row-gap: 8px;
+  }
+  /* the thing the row is about gets its own full-width line and stays legible */
+  .project-list li > a, .sched-head > .grow, .staged-list li > .grow,
+  .egr-host, .sbx-row > .grow {
+    flex: 1 1 100%; min-width: 0; font-size: 15px;
+  }
+  .project-list li { padding: 12px 14px; gap: 8px; }
+  .project-list code { flex: 1 1 auto; }
+  .project-list li button, .sched-head button, .sbx-actions button {
+    min-height: 38px;
+  }
+  .project-list li .autonomy-sel, .sched-form select { min-height: 38px; }
+  /* actions group on their own line, right-aligned, never off-screen */
+  .sched-head { align-items: center; }
+  .sched-head button { flex: 1 1 auto; }
+  .egr-row { align-items: flex-start; }
+  .egr-path { flex: 1 1 100%; }
+  .sbx-right { flex-wrap: wrap; }
+  .tag.triage-flag { max-width: 100%; white-space: normal; }
+
+  /* Context page: the secrets/hosts action buttons overlapped each other */
+  .sbx-rule-line { flex-wrap: wrap; row-gap: 6px; }
+  .sbx-sec-head { flex-wrap: wrap; row-gap: 2px; }
+  .sbx-sec-head h3 { flex: 1 1 100%; }
+
+  /* long unbroken strings (hosts, paths, results) stay inside their box */
+  .sched-result, .log-pre, .console, .git-status, .git-diff {
+    overflow-x: auto; max-width: 100%;
+  }
+  .egr-host, .egr-path { overflow-wrap: anywhere; white-space: normal; }
+
+  /* touch targets: the bar controls measured 32x24 to 65x24 before this */
+  .win-btn { min-width: 38px; min-height: 38px; font-size: 16px; }
+  .icon-btn { width: var(--tap); height: var(--tap); }
+  button, button.ghost, .ghost-link { min-height: 38px; padding: 9px 14px; }
+  .win-btn, .icon-btn, .notif-bell, .nav-toggle { padding: 0 6px; }
+  .file-list li:has(.win-btn), .staged-list li:has(.win-btn) {
+    min-height: var(--tap);
+  }
+  /* One scroll container, not three. The aside stacks several panes that each
+     claimed `flex:1; overflow-y:auto`, so inside a 46vh box the later ones
+     (secrets, the new-schedule form) collapsed and their controls scrolled
+     under the pane below — hit-testing found them genuinely uncoverable. */
+  .split-layout > aside, .panel.split > aside { overflow-y: auto; }
+  .split-layout > aside .file-list,
+  .split-layout > aside .sched-form,
+  .split-layout > aside .agent-form,
+  .split-layout > aside .skill-form {
+    flex: 0 0 auto; overflow: visible; max-height: none;
+  }
+  /* window chrome has to be tall enough for the bigger close/expand buttons */
+  .window-head { min-height: var(--tap); padding: 4px 8px; }
 }
 
 /* very small phones */

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
+import { useDismiss } from './useDismiss.js'
 
 // Control surface for the isolated triage reviewer (backend/reviewer.py): a
 // nav dropdown with the auto-sweep toggle, a run-now button, what the reviewer
@@ -30,6 +31,9 @@ export default function TriagePanel() {
     return () => clearInterval(t)
   }, [s?.running])
 
+  const close = useCallback(() => setOpen(false), [])
+  const wrapRef = useDismiss(open, close)
+
   if (!s) return null
   const flagged = (s.flagged_hosts?.length || 0) + (s.flagged_alerts?.length || 0)
   const untriaged = (s.untriaged?.hosts || 0) + (s.untriaged?.alerts || 0)
@@ -49,10 +53,14 @@ export default function TriagePanel() {
   }
 
   return (
-    <div className="notif-wrap vm-wrap">
+    <div className="notif-wrap vm-wrap" ref={wrapRef}>
       <button className="notif-bell" onClick={() => setOpen((o) => !o)}
+              aria-expanded={open}
+              aria-label={`triage reviewer${flagged ? ` (${flagged} flagged)` : ''}`}
               title="triage reviewer — flagged items need your eyes">
-        🛡{flagged > 0 && <span className="notif-badge">{flagged}</span>}
+        <span aria-hidden="true">🛡</span>
+        {flagged > 0 && (
+          <span className="notif-badge">{flagged > 99 ? '99+' : flagged}</span>)}
       </button>
       {open && (
         <div className="notif-drop triage-drop">
