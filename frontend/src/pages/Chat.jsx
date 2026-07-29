@@ -269,15 +269,39 @@ export default function Chat() {
   const orbFrom = useRef(null)     // its rect at that moment; consumed by the fly-in
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight
+  // Read during render, before any effect: the persistence effect below fires
+  // on mount with a null id and would clear the key before a restore effect
+  // could read it.
+  const resumeId = useRef(Number(localStorage.getItem('jarvis.chat.last')) || null)
 
   const refreshConvos = () =>
     api('/api/conversations').then((r) => setConversations(r.conversations))
 
   useEffect(() => {
-    refreshConvos()
+    api('/api/conversations').then((r) => {
+      setConversations(r.conversations)
+      // Resume only a chat that is still in the list. The messages endpoint
+      // answers for any id — a deleted one comes back as an empty transcript,
+      // which looks exactly like a new chat but is bound to a conversation the
+      // backend 404s on the first send.
+      const id = resumeId.current
+      if (id && r.conversations.some((c) => c.id === id)) openConversation(id)
+      else localStorage.removeItem('jarvis.chat.last')
+    }).catch(() => {})
     api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
     return () => tailAbort.current?.abort()
   }, [])
+
+  // "Chat" in the nav is a destination, not a reset. It used to mount a blank
+  // conversation every time, so coming back from Projects silently dropped the
+  // chat you were in — and it did the same job as ＋, which is the control that
+  // actually means "new". Resuming makes the two distinct: ＋ is now the only
+  // way to start one.
+  useEffect(() => {
+    if (conversationId) localStorage.setItem('jarvis.chat.last', String(conversationId))
+    else localStorage.removeItem('jarvis.chat.last')
+  }, [conversationId])
+
 
   useEffect(() => {
     localStorage.setItem('jarvis.chat.side', sideOpen ? 'open' : 'closed')
