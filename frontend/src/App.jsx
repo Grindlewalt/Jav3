@@ -302,15 +302,28 @@ export default function App() {
   // is no nav at all — that cached an empty map, and the first bar -> rail move
   // had nothing to fly from (only rail -> bar animated). Re-measuring each pass
   // also keeps the rects honest when the Review count resizes the bar.
+  //
+  // Detached rects are ignored, and an empty pass never overwrites a good one.
+  // Navigating off Chat leaves one commit where the portal still targets the
+  // slot node the unmounting page just took with it: the icons measure (0,0)
+  // there, and caching that made the return flight start from the top-left
+  // corner instead of the rail — the icons snapped to the corner and flew in
+  // from there, which is what read as jumpy. Only that direction was affected,
+  // which is why toggling the sidebar always looked fine.
   const prevRailed = useRef(railed)
   useLayoutEffect(() => {
     const now = new Map()
-    icoRefs.current.forEach((el, key) => { if (el) now.set(key, el.getBoundingClientRect()) })
+    icoRefs.current.forEach((el, key) => {
+      if (!el || !el.isConnected) return
+      const r = el.getBoundingClientRect()
+      if (!r.width && !r.height) return
+      now.set(key, r)
+    })
     const before = lastRects.current
     const moved = prevRailed.current !== railed
     prevRailed.current = railed
-    lastRects.current = now
-    if (!moved || !before || !before.size) return
+    if (now.size) lastRects.current = now
+    if (!moved || !before || !before.size || !now.size) return
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
     now.forEach((to, key) => {
       const from = before.get(key)

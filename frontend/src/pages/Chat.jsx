@@ -256,8 +256,11 @@ export default function Chat() {
   }, [])
   const setNavSlot = useContext(NavSlotContext)
   const slotRef = useCallback((el) => setNavSlot(el), [setNavSlot])
-  // hand the slot back when leaving Chat, or the bar never comes home
-  useEffect(() => () => setNavSlot(null), [setNavSlot])
+  // Hand the slot back when leaving Chat, or the bar never comes home. This is
+  // a layout effect on purpose: as a passive one the release landed after the
+  // next route had already painted, so there was a frame with the nav portaled
+  // into a node that was no longer in the document.
+  useLayoutEffect(() => () => setNavSlot(null), [setNavSlot])
 
   const scrollRef = useRef(null)   // the .messages scroll container
   const inputRef = useRef(null)
