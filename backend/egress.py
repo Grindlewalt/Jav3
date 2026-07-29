@@ -117,7 +117,8 @@ async def note_denied(db: aiosqlite.Connection, slug: str, host: str) -> None:
         "INSERT INTO egress_pending(project_slug, host) VALUES (?, ?) "
         "ON CONFLICT(project_slug, host) DO UPDATE SET "
         "hit_count = hit_count + 1, last_seen = datetime('now'), "
-        "status = CASE WHEN status = 'rejected' THEN 'pending' ELSE status END",
+        "status = CASE WHEN status IN ('rejected', 'dismissed') "
+        "THEN 'pending' ELSE status END",
         (slug, host))
     await db.commit()
 
@@ -181,6 +182,28 @@ async def reject_host(db: aiosqlite.Connection, pending_id: int) -> dict:
                      "WHERE id = ?", (pending_id,))
     await db.commit()
     return {"ok": True}
+
+
+async def bulk_pending(db: aiosqlite.Connection, action: str,
+                       slug: str | None = None) -> dict:
+    """Decide every pending host at once — the queue reached hundreds and
+    one-at-a-time was untenable. approve trains the allowlist exactly like the
+    single path; reject and dismiss only change status. dismiss records that
+    the queue was cleared without a verdict — like reject, a host that is hit
+    again re-queues."""
+    if action not in ("approve", "reject", "dismiss"):
+        return {"ok": False, "error": "action must be approve|reject|dismiss"}
+    rows = await list_pending(db, slug)
+    if action == "approve":
+        for r in rows:
+            await _append_host(db, r["project_slug"], r["host"])
+    status = {"approve": "approved", "reject": "rejected",
+              "dismiss": "dismissed"}[action]
+    await db.executemany(
+        "UPDATE egress_pending SET status=?, decided_at=datetime('now') WHERE id=?",
+        [(status, r["id"]) for r in rows])
+    await db.commit()
+    return {"ok": True, "done": len(rows)}
 
 
 async def list_pending(db: aiosqlite.Connection, slug: str | None = None) -> list[dict]:

@@ -56,6 +56,50 @@ async def test_note_denied_bumps_hit_count(db):
     assert (await egress.list_pending(db, "proj"))[0]["hit_count"] == 2
 
 
+async def test_bulk_approve_trains_every_host(db):
+    for h in ("a.com", "b.com"):
+        await egress.note_denied(db, "proj", h)
+    res = await egress.bulk_pending(db, "approve")
+    assert res["ok"] and res["done"] == 2
+    assert (await egress.decide(db, "proj", "a.com"))[0] == "allow"
+    assert (await egress.decide(db, "proj", "b.com"))[0] == "allow"
+    assert await egress.list_pending(db) == []
+
+
+async def test_bulk_dismiss_clears_without_verdict_and_revives(db):
+    await egress.note_denied(db, "proj", "later.com")
+    res = await egress.bulk_pending(db, "dismiss")
+    assert res["ok"] and res["done"] == 1
+    assert await egress.list_pending(db) == []
+    # nothing was trained — the host is still denied…
+    assert (await egress.decide(db, "proj", "later.com"))[0] == "deny"
+    # …and a fresh hit re-queues it, same as a rejected host
+    await egress.note_denied(db, "proj", "later.com")
+    assert (await egress.list_pending(db))[0]["host"] == "later.com"
+
+
+async def test_bulk_scoped_to_one_project(db):
+    await egress.note_denied(db, "projA", "a.com")
+    await egress.note_denied(db, "projB", "b.com")
+    res = await egress.bulk_pending(db, "reject", "projA")
+    assert res["done"] == 1
+    left = await egress.list_pending(db)
+    assert len(left) == 1 and left[0]["project_slug"] == "projB"
+
+
+async def test_bulk_rejects_unknown_action(db):
+    assert not (await egress.bulk_pending(db, "nuke"))["ok"]
+
+
+async def test_acknowledge_all(db):
+    for i in range(3):
+        await security.raise_event(db, kind="test", severity="warn",
+                                   summary=f"e{i}")
+    res = await security.acknowledge_all(db)
+    assert res["ok"] and res["done"] == 3
+    assert await security.count_unacknowledged(db) == 0
+
+
 # --- scoped (sensitive) project policies -------------------------------------
 
 async def test_denyall_project_is_netless(db):

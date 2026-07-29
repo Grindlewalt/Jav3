@@ -98,6 +98,38 @@ export function ReviewQueue({ slug }) {
     catch (e) { window.alert(e.detail || String(e)) }
   }
 
+  // bulk verdicts — the queues reached hundreds; one server call each.
+  // approve trains the allowlist for every host, so it confirms hardest.
+  const BULK_ASK = {
+    approve: (n) => `Approve all ${n} hosts? Every one is added to the allowlist `
+      + '— including the ⚑ flagged ones.',
+    reject: (n) => `Reject all ${n} hosts? They stay blocked and re-queue if hit again.`,
+    dismiss: (n) => `Dismiss all ${n} hosts? No verdict — the queue just clears; `
+      + 'a host that is hit again comes back.',
+  }
+  async function egressBulk(action) {
+    if (!window.confirm(BULK_ASK[action](pending.length))) return
+    setBusy(true)
+    try {
+      await api('/api/egress/pending/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ action, project: slug || null }) })
+      loadEgress()
+      window.dispatchEvent(new Event('jarvis-files-changed'))
+    } catch (e) { window.alert(e.detail || String(e)) }
+    setBusy(false)
+  }
+  async function ackAllAlerts() {
+    if (!window.confirm(`Acknowledge all ${alerts.length} alerts?`)) return
+    setBusy(true)
+    try {
+      await api('/api/security/events/ack_all', { method: 'POST' })
+      loadAlerts()
+      window.dispatchEvent(new Event('jarvis-files-changed'))
+    } catch (e) { window.alert(e.detail || String(e)) }
+    setBusy(false)
+  }
+
   const multi = !slug && (slugs?.length || 0) > 1
   const projLabel = (s) => names[s] || s
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
@@ -111,23 +143,13 @@ export function ReviewQueue({ slug }) {
         <div className="dim center-pad">nothing waiting on you — all clear ✓</div>
       )}
 
-      {/* ---- security alerts (most urgent first) ---- */}
-      {alerts.length > 0 && (
-        <section className="sbx-sec">
-          <div className="sbx-sec-head">
-            <h3>Security alerts</h3>
-            <span className="dim small">{alerts.length} unacknowledged</span>
-          </div>
-          {alerts.map((a) => <AlertRow key={a.id} a={a} onAck={ackAlert} />)}
-        </section>
-      )}
-
-      {/* ---- git commit requests ---- */}
+      {/* ---- git commit requests (deliberately no bulk verdict: each one is
+             a push to a repo, they deserve individual eyes) ---- */}
       {gitTotal > 0 && (
         <section className="sbx-sec">
           <div className="sbx-sec-head">
             <h3>Commit requests</h3>
-            <span className="dim small">approving commits (and pushes, when a remote is set)</span>
+            <span className="sec-count">{gitTotal}</span>
           </div>
           {(slugs || []).map((s) => {
             const reqs = gitReqs[s] || []
@@ -158,8 +180,19 @@ export function ReviewQueue({ slug }) {
       {pending.length > 0 && (
         <section className="sbx-sec">
           <div className="sbx-sec-head">
-            <h3>Egress host approvals</h3>
-            <span className="dim small">hosts the guest tried to reach — approve to train the allowlist</span>
+            <h3>Egress hosts</h3>
+            <span className="sec-count">{pending.length}</span>
+            <div className="sec-actions">
+              <button className="ghost" disabled={busy}
+                      title="add every host to the allowlist"
+                      onClick={() => egressBulk('approve')}>✓ Approve all</button>
+              <button className="ghost danger" disabled={busy}
+                      title="keep every host blocked"
+                      onClick={() => egressBulk('reject')}>✕ Reject all</button>
+              <button className="ghost" disabled={busy}
+                      title="clear the queue without a verdict"
+                      onClick={() => egressBulk('dismiss')}>Dismiss all</button>
+            </div>
           </div>
           <ul className="staged-list rev-list">
             {pending.map((p) => (
@@ -176,6 +209,26 @@ export function ReviewQueue({ slug }) {
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {/* ---- security alerts ---- */}
+      {alerts.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Security alerts</h3>
+            <span className="sec-count">{alerts.length}</span>
+            {/* ack_all is global — inside a single project's Workspace panel it
+                would silently clear other projects' alerts, so it stays off */}
+            {!slug && (
+              <div className="sec-actions">
+                <button className="ghost" disabled={busy}
+                        title="mark every alert as seen"
+                        onClick={ackAllAlerts}>Acknowledge all</button>
+              </div>
+            )}
+          </div>
+          {alerts.map((a) => <AlertRow key={a.id} a={a} onAck={ackAlert} />)}
         </section>
       )}
     </div>
@@ -212,9 +265,6 @@ export default function Review() {
   return (
     <div className="page review-page">
       <h2>Review Center</h2>
-      <p className="dim small">Everything waiting on you, across every project — commit
-        requests, egress approvals and security alerts (including advisory write
-        flags), with inline actions.</p>
       <TriagePanel />
       <ReviewQueue />
     </div>

@@ -56,6 +56,14 @@ async def acknowledge(db: aiosqlite.Connection, event_id: int) -> dict:
     return {"ok": True}
 
 
+async def acknowledge_all(db: aiosqlite.Connection) -> dict:
+    """Operator bulk-clear — the queue reached hundreds in practice."""
+    cur = await db.execute("UPDATE security_events SET acknowledged=1, "
+                           "acknowledged_at=datetime('now') WHERE acknowledged=0")
+    await db.commit()
+    return {"ok": True, "done": cur.rowcount}
+
+
 async def count_unacknowledged(db: aiosqlite.Connection) -> int:
     async with db.execute(
             "SELECT COUNT(*) AS n FROM security_events WHERE acknowledged = 0") as cur:

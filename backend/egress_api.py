@@ -100,6 +100,20 @@ async def reject(pid: int):
         await db.close()
 
 
+class BulkBody(BaseModel):
+    action: str                    # approve | reject | dismiss
+    project: str | None = None     # limit to one project's queue
+
+
+@router.post("/pending/bulk")
+async def bulk_pending(body: BulkBody):
+    db = await get_db()
+    try:
+        return await egress.bulk_pending(db, body.action, body.project)
+    finally:
+        await db.close()
+
+
 # --- egress: per-project policy ---------------------------------------------
 
 class PolicyBody(BaseModel):
@@ -169,6 +183,15 @@ async def ack(eid: int):
     db = await get_db()
     try:
         return await security.acknowledge(db, eid)
+    finally:
+        await db.close()
+
+
+@security_router.post("/events/ack_all")
+async def ack_all():
+    db = await get_db()
+    try:
+        return await security.acknowledge_all(db)
     finally:
         await db.close()
 
