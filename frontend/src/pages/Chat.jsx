@@ -103,6 +103,7 @@ export default function Chat() {
   const [projects, setProjects] = useState([])
   const [incognito, setIncognito] = useState(false)
   const [greeting, setGreeting] = useState(pickGreeting)
+  const [multiline, setMultiline] = useState(false)   // composer past one line
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -113,6 +114,7 @@ export default function Chat() {
   const scrollRef = useRef(null)   // the .messages scroll container
   const inputRef = useRef(null)
   const orbRef = useRef(null)      // empty-state orb — moved via direct style writes, not state
+  const glowRef = useRef(null)     // composer underglow — same, driven by mousemove
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight (set even incognito)
 
@@ -129,19 +131,18 @@ export default function Chat() {
     localStorage.setItem('jarvis.chat.side', sideOpen ? 'open' : 'closed')
   }, [sideOpen])
 
-  // incognito greys out the whole GUI: .incog on <html> swaps the palette
-  // variables, and a transient .theme-fade class makes every surface
-  // cross-fade instead of snapping
+  // switching modes used to repaint the whole GUI grey, which just read as the
+  // screen dimming. Now the change is a single sweep of light under the
+  // composer; the switch and the placeholder carry the state.
   useEffect(() => {
-    const el = document.documentElement
-    el.classList.add('theme-fade')
-    el.classList.toggle('incog', incognito)
-    const t = setTimeout(() => el.classList.remove('theme-fade'), 700)
+    const el = glowRef.current
+    if (!el) return
+    el.classList.remove('flash')
+    void el.offsetWidth      // reflow, so the animation restarts on a re-toggle
+    el.classList.add('flash')
+    const t = setTimeout(() => el.classList.remove('flash'), 900)
     return () => clearTimeout(t)
   }, [incognito])
-  // leaving the Chat page ends the unsaved chat — restore the normal palette
-  useEffect(() => () =>
-    document.documentElement.classList.remove('incog', 'theme-fade'), [])
 
   useEffect(() => {
     // scroll only the message list, never the page (scrollIntoView walks
@@ -150,12 +151,14 @@ export default function Chat() {
     if (box) box.scrollTop = box.scrollHeight
   }, [messages])
 
-  // the composer grows with the draft, up to the CSS max-height
+  // the composer grows with the draft, up to the CSS max-height. Past one line
+  // the pill relaxes into a rounded box — .multi is that threshold.
   function autoGrow() {
     const ta = inputRef.current
     if (!ta) return
     ta.style.height = 'auto'
     ta.style.height = `${ta.scrollHeight}px`
+    setMultiline(ta.scrollHeight > 48)
   }
   useEffect(autoGrow, [input])
 
@@ -174,6 +177,24 @@ export default function Chat() {
   }
   function resetOrb() {
     if (orbRef.current) orbRef.current.style.transform = 'translate(0, 0)'
+  }
+
+  // the composer's underglow pools wherever the cursor is: --gx is the point
+  // along the bar the light gathers at, --gi how bright it burns (falling off
+  // with the distance up the thread). Direct style writes for the same reason
+  // as the orb — a mousemove must not render the message list.
+  function trackGlow(e) {
+    const el = glowRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    if (!r.width) return
+    const x = ((e.clientX - r.left) / r.width) * 100
+    const above = Math.max(0, r.top - e.clientY)      // 0 once level with the bar
+    el.style.setProperty('--gx', `${Math.max(-12, Math.min(112, x))}%`)
+    el.style.setProperty('--gi', Math.max(0, 1 - above / 300).toFixed(3))
+  }
+  function fadeGlow() {
+    glowRef.current?.style.setProperty('--gi', '0')
   }
 
   // one handler for both paths: the live POST stream and a resumed tail.
@@ -338,7 +359,7 @@ export default function Chat() {
       {sideOpen && (
         <div className="chat-scrim" onClick={() => setSideOpen(false)} />
       )}
-      <main>
+      <main onMouseMove={trackGlow} onMouseLeave={fadeGlow}>
         {/* on a phone the list is off-canvas, and its collapse button goes
             with it — this is the way back to it */}
         <div className="chat-mobile-bar">
@@ -381,12 +402,19 @@ export default function Chat() {
             <div className="chat-empty" onMouseMove={trackOrb} onMouseLeave={resetOrb}>
               <div className="orb" ref={orbRef} />
               <h2>{greeting}</h2>
+              {/* the keys are load-bearing: remounting the face and the label
+                  on a flip replays their entry animations */}
               <label className="incog-switch"
-                     title="off: incognito — nothing is saved and the GUI greys out; recovery is SSH-only">
+                     title="off: incognito — nothing is saved; recovery is SSH-only">
                 <input type="checkbox" checked={!incognito}
                        onChange={(e) => setIncognito(!e.target.checked)} />
-                <span className="track"><span className="knob">{incognito ? '🕶' : ''}</span></span>
-                <span className="incog-label">
+                <span className="track">
+                  <span className="knob">
+                    <span className="knob-face" key={incognito ? 'on' : 'off'}>
+                      {incognito ? '🕶' : ''}</span>
+                  </span>
+                </span>
+                <span className="incog-label" key={incognito ? 'on' : 'off'}>
                   {incognito ? 'Incognito — nothing will be saved' : 'Chat is saved'}</span>
               </label>
             </div>
@@ -404,7 +432,8 @@ export default function Chat() {
           )}
         </div>
         <form className="composer" onSubmit={(e) => { e.preventDefault(); send() }}>
-          <div className="composer-inner">
+          <div className="composer-glow" ref={glowRef} />
+          <div className={`composer-inner${multiline ? ' multi' : ''}`}>
             <textarea
               ref={inputRef}
               value={input}

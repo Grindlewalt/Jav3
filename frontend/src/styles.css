@@ -23,19 +23,10 @@
   --overlay: rgba(6, 8, 11, 0.62);
 }
 
-/* incognito: the whole GUI drops to a desaturated dark grey while an
-   unsaved chat is active (Chat.jsx toggles .incog on <html>) */
-:root.incog {
-  --bg: #08090b; --bg-soft: #0c0d10; --panel: #121316; --panel-2: #16171b;
-  --border: #23252a; --text: #c7cbd2; --dim: #767c85;
-  --accent: #8a93a2; --accent-2: #6c7382; --btn-grad-2: #59616e;
-  --bubble-1: #2d3138; --bubble-2: #26292f; --bubble-border: #363a42;
-}
-/* applied briefly around the toggle so every surface cross-fades together */
-html.theme-fade, html.theme-fade * {
-  transition: background-color 0.55s ease, border-color 0.55s ease,
-    color 0.55s ease, box-shadow 0.55s ease !important;
-}
+/* incognito used to repaint the whole GUI in a desaturated grey, which read as
+   the screen dimming rather than as a mode. The palette is now fixed; the mode
+   announces itself through the switch, the composer placeholder and the
+   toolbar chip instead. */
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
 body {
@@ -290,10 +281,11 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .convo-list li.active::before { opacity: 1; transform: none; }
 .convo-list li .win-btn { visibility: hidden; }
 .convo-list li:hover .win-btn { visibility: visible; }
+/* transparent + borderless: the toolbar, the thread and the composer are one
+   surface, so the chat reads as sidebar + centre rather than three strips */
 .chat-toolbar {
   display: flex; align-items: center; gap: 10px; padding: 9px 28px;
-  border-bottom: 1px solid var(--border); background: var(--bg-soft);
-  font-size: 13px;
+  background: transparent; font-size: 13px; flex-shrink: 0;
 }
 /* the phone-only strip that reopens the off-canvas conversation list */
 .chat-mobile-bar { display: none; }
@@ -302,9 +294,18 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .project-list li.deleted { opacity: 0.65; border-style: dashed; }
 .convo-list li:hover, .convo-list li.active { background: var(--panel-2); color: var(--text); }
 .active-project { font-size: 12px; color: var(--green); }
-.chat-layout main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.messages { flex: 1; overflow-y: auto; padding: 0 24px; overscroll-behavior: contain; }
-.thread { max-width: 880px; margin: 0 auto; padding: 26px 0 14px; }
+/* position: relative — the composer floats over the thread inside this box.
+   min-height: 0 is load-bearing: as a column flex item main defaults to
+   min-height:auto, so a long thread grew main past the viewport and the whole
+   page scrolled instead of the message list — taking the composer off-screen
+   with it. Same reason on .messages. */
+.chat-layout main { flex: 1; display: flex; flex-direction: column; min-width: 0;
+  min-height: 0; position: relative; }
+.messages { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px;
+  overscroll-behavior: contain; }
+/* the trailing padding is the composer's clearance: the last message scrolls to
+   rest above the floating bar instead of under it */
+.thread { max-width: 880px; margin: 0 auto; padding: 26px 0 124px; }
 .msg { display: flex; margin-bottom: 22px;
   animation: msg-in 0.3s cubic-bezier(0.21, 1.02, 0.55, 1) both; }
 @keyframes msg-in { from { opacity: 0; transform: translateY(10px) scale(0.985); } }
@@ -346,9 +347,12 @@ input:focus, textarea:focus { border-color: var(--accent); }
   0%, 60%, 100% { transform: none; opacity: 0.4; }
   30% { transform: translateY(-5px); opacity: 1; }
 }
+/* padding-bottom lifts the centre of the empty state clear of the floating
+   composer, which overlays the bottom of this same box */
 .chat-empty {
   height: 100%; display: flex; flex-direction: column; align-items: center;
-  justify-content: center; gap: 6px; animation: msg-in 0.4s ease both;
+  justify-content: center; gap: 6px; padding-bottom: 96px;
+  animation: msg-in 0.4s ease both;
 }
 /* a plain white orb that drifts toward the cursor (Chat.jsx writes the
    transform directly on mousemove) instead of the old idle float loop —
@@ -382,32 +386,96 @@ input:focus, textarea:focus { border-color: var(--accent); }
   position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
   border-radius: 50%; background: #cfd4db; box-shadow: 0 1px 4px #0007;
   display: flex; align-items: center; justify-content: center; font-size: 11px;
-  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.35s;
+  transition: transform 0.42s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.35s;
 }
-.incog-switch input:checked + .track .knob { transform: translateX(20px);
-  background: #fff; }
-.incog-label { font-size: 13px; color: var(--dim); }
+/* the knob rolls as it slides, and the 🕶 face pops in on arrival — the two
+   states of the switch are now a movement, not a repaint */
+.incog-switch input:checked + .track .knob {
+  transform: translateX(20px) rotate(200deg); background: #fff;
+}
+.incog-switch .knob-face {
+  display: block; line-height: 1;
+  animation: knob-face-in 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes knob-face-in {
+  from { opacity: 0; transform: scale(0.2); }
+  to { opacity: 1; transform: scale(1); }
+}
+/* keyed on the mode in Chat.jsx, so React remounts it and the animation replays */
+.incog-label { font-size: 13px; color: var(--dim);
+  animation: incog-label-in 0.34s ease both; }
+@keyframes incog-label-in {
+  from { opacity: 0; transform: translateY(5px); }
+}
 .tag.incog-tag { color: var(--text); border: 1px solid var(--border);
-  margin-left: 0; padding: 3px 10px; }
+  margin-left: 0; padding: 3px 10px;
+  animation: msg-in 0.32s cubic-bezier(0.21, 1.02, 0.55, 1) both; }
+/* ---- the floating composer ----
+   No border, no bar of its own: it hovers over the bottom of the thread, and
+   the gradient fades scrolled messages out underneath it. pointer-events are
+   off on the wrapper so that faded strip still scrolls; only the pill catches
+   the mouse. */
 .composer {
-  padding: 12px 24px 16px; border-top: 1px solid var(--border);
-  background: var(--bg-soft);
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
+  /* the deep bottom padding is the glow's room to spill — any tighter and the
+     halo is sheared off flat against the window edge */
+  padding: 20px 24px 30px; pointer-events: none;
+  background: linear-gradient(to top, var(--bg) 46%,
+    color-mix(in srgb, var(--bg) 55%, transparent) 76%, transparent);
 }
 .composer-inner {
+  position: relative; pointer-events: auto;
   max-width: 880px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
-  padding: 9px 9px 9px 16px; transition: border-color 0.15s, box-shadow 0.2s;
+  background: var(--panel); border: 1px solid var(--border);
+  /* a stadium: straight top and bottom, fully round ends. Past one line it
+     eases into a rounded box so a tall draft isn't a giant lozenge. */
+  border-radius: 999px; padding: 9px 9px 9px 20px;
+  transition: border-color 0.15s, box-shadow 0.2s, border-radius 0.25s ease;
 }
+.composer-inner.multi { border-radius: 22px; padding-left: 18px; }
 .composer-inner:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: color-mix(in srgb, var(--border) 40%, #fff);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+}
+/* the underglow: a faint white halo pooled under the pill, blurred so only the
+   spill shows past the opaque bar. --gx / --gi are written by Chat.jsx on
+   mousemove — x is where the light pools, i how bright it burns. */
+/* sat 6px lower and a touch wider than the pill, so the blur reads as light
+   pooling out from under it rather than a rectangle behind it */
+.composer-glow {
+  position: absolute; left: 0; right: 0; bottom: 24px; margin: 0 auto;
+  width: min(900px, calc(100% - 40px)); height: 48px; border-radius: 999px;
+  pointer-events: none; filter: blur(14px);
+  background: radial-gradient(112% 128% at 50% 60%,
+    rgba(255, 255, 255, 0.14), transparent 70%);
+}
+.composer-glow::before {
+  content: ''; position: absolute; inset: -6px; border-radius: inherit;
+  background: radial-gradient(190px 62px at var(--gx, 50%) 58%,
+    rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.24) 42%, transparent 74%);
+  opacity: var(--gi, 0); transition: opacity 0.4s ease;
+}
+/* one sweep of light across the bar when incognito is toggled */
+.composer-glow.flash::after {
+  content: ''; position: absolute; inset: -8px; border-radius: inherit;
+  background: linear-gradient(90deg, transparent 20%,
+    rgba(255, 255, 255, 0.5) 50%, transparent 80%);
+  animation: glow-sweep 0.85s cubic-bezier(0.37, 0, 0.24, 1) both;
+}
+@keyframes glow-sweep {
+  from { transform: translateX(-65%); opacity: 0; }
+  30% { opacity: 1; }
+  to { transform: translateX(65%); opacity: 0; }
 }
 .composer textarea {
   flex: 1; resize: none; border: 0; background: none; padding: 7px 0;
   max-height: 200px; font-size: 15px; line-height: 1.5; border-radius: 0;
 }
+/* the pill's own :focus-within ring is the focus indicator — the textarea's
+   would otherwise draw a hard blue rectangle inside it */
+.composer textarea:focus-visible { outline: none; }
 .send-btn {
-  width: 38px; height: 38px; padding: 0; border-radius: 12px; flex-shrink: 0;
+  width: 38px; height: 38px; padding: 0; border-radius: 50%; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center; font-size: 17px;
 }
 .send-btn.stop { background: var(--panel-2); border: 1px solid var(--border);
@@ -1122,13 +1190,16 @@ kbd {
   /* the toolbar already names the open chat — don't say it twice */
   .chat-mobile-bar + .chat-toolbar .chat-title { display: none; }
   .messages { padding: 0 12px; }
-  .thread { padding: 16px 0 10px; }
+  .thread { padding: 16px 0 96px; }
   .msg { margin-bottom: 16px; }
   .msg.user pre { max-width: 88%; }
   .msg.assistant { gap: 9px; }
   .msg-avatar { width: 26px; height: 26px; font-size: 11.5px; }
-  .composer { padding: 8px 10px 12px; }
-  .composer-inner { padding: 7px 7px 7px 13px; }
+  .chat-empty { padding-bottom: 76px; }
+  .composer { padding: 16px 10px 12px; }
+  .composer-inner { padding: 7px 7px 7px 16px; }
+  .composer-inner.multi { padding-left: 14px; }
+  .composer-glow { bottom: 6px; width: calc(100% - 20px); height: 42px; }
 
   /* ---- generic split layouts (context / files): aside on top ----
      flex-shrink:0 is load-bearing. As a shrinkable column child the aside
