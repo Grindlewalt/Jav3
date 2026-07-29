@@ -1473,6 +1473,15 @@ kbd {
     transform-origin: bottom center;
     animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
   }
+  /* one line per project: the slug sub-line under nearly every row repeated
+     the name and read as clutter. The chip already names what's loaded, so
+     the mode rows lose nothing either. */
+  .proj-menu .m-sub { display: none; }
+  .proj-menu .m-name {
+    display: block; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .proj-menu button { font-size: 14px; }
   .messages { padding: 0 12px; }
   .thread { padding: 16px 0 calc(96px + var(--sab)); }
   .msg { margin-bottom: 16px; }
