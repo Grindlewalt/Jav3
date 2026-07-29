@@ -1554,6 +1554,9 @@ kbd {
   .egr-host, .sbx-row > .grow {
     flex: 1 1 100%; min-width: 0; font-size: 15px;
   }
+  /* the create fields stack: full-width each, not one narrow name field
+     above two stretched ones */
+  .create-project input { flex: 1 1 100%; }
   .project-list li { padding: 12px 14px; gap: 8px; }
   .project-list code { flex: 1 1 auto; }
   .project-list li button, .sched-head button, .sbx-actions button {
