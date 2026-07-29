@@ -210,9 +210,13 @@ export default function Chat() {
           {conversations.map((c) => (
             <li key={c.id} className={c.id === conversationId ? 'active' : ''}
                 onClick={() => openConversation(c.id)}>
-              <span className="grow ellipsis" title={c.summary || `#${c.id}`}>
-                {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
-              {c.project_slug && <span className="tag">{c.project_slug}</span>}
+              {/* title owns the row; the project slug sits under it so a long
+                  slug can never crush the title into two letters */}
+              <div className="convo-main">
+                <span className="convo-title ellipsis" title={c.summary || `#${c.id}`}>
+                  {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
+                {c.project_slug && <span className="convo-proj ellipsis">{c.project_slug}</span>}
+              </div>
               <button className="win-btn" title="delete chat"
                       onClick={(e) => { e.stopPropagation(); deleteConversation(c.id) }}>×</button>
             </li>
