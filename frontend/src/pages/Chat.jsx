@@ -491,8 +491,57 @@ export default function Chat() {
     setBusy(false)
   }
 
+  // Swipe in from the left edge to open the chat list on a phone — the old
+  // mobile bar (☰ / title / ＋) is gone; this gesture is its replacement. The
+  // start must be at the screen's edge so horizontal scrolls inside code
+  // blocks and tables never trigger it.
+  const edgeTouch = useRef(null)
+  const onEdgeTouchStart = (e) => {
+    if (!phone || sideOpen) { edgeTouch.current = null; return }
+    const t = e.touches[0]
+    edgeTouch.current = t.clientX <= 28 ? { x: t.clientX, y: t.clientY } : null
+  }
+  const onEdgeTouchMove = (e) => {
+    const s = edgeTouch.current
+    if (!s) return
+    const t = e.touches[0]
+    if (t.clientX - s.x > 42 && Math.abs(t.clientY - s.y) < 40) {
+      setSideOpen(true)
+      edgeTouch.current = null
+    } else if (Math.abs(t.clientY - s.y) >= 40) edgeTouch.current = null
+  }
+
+  // a brand-new chat: no saved conversation, nothing sent yet. On a phone the
+  // toolbar disappears and its two controls move under the orb instead.
+  const fresh = !conversationId && messages.length === 0
+  const projectPicker = (
+    <ProjectPicker
+      projects={projects} global={active}
+      mode={conversationId ? convoMode(openConvo) : pendingMode}
+      value={conversationId ? (openConvo?.project_slug || '') : pendingProject}
+      onPick={(mode, slug) => {
+        if (conversationId) return assignProject(mode, slug)
+        setPendingMode(mode)
+        setPendingProject(slug)
+      }} />
+  )
+  const tempSwitch = (
+    <label className={`temp-switch${temporary ? ' on' : ''}`
+                      + (conversationId ? ' fixed' : '')}
+           title={conversationId
+             ? 'this chat is already saved — start a new one to make it temporary'
+             : 'temporary chat: nothing is written to disk, and it is gone '
+               + 'once you leave'}>
+      <input type="checkbox" checked={temporary} disabled={!!conversationId}
+             onChange={(e) => setTemporary(e.target.checked)} />
+      <span className="temp-track"><span className="temp-knob" /></span>
+      <span className="temp-word">Temporary chat</span>
+    </label>
+  )
+
   return (
-    <div className="chat-layout">
+    <div className="chat-layout"
+         onTouchStart={onEdgeTouchStart} onTouchMove={onEdgeTouchMove}>
       <aside className={sideOpen ? '' : 'collapsed'}>
         <div className="side-head">
           <button type="button" className="icon-btn"
@@ -524,60 +573,37 @@ export default function Chat() {
         <div className="chat-scrim" onClick={() => setSideOpen(false)} />
       )}
       <main onMouseMove={trackGlow} onMouseLeave={fadeGlow}>
-        {/* on a phone the list is off-canvas, and its collapse button goes
-            with it — this is the way back to it */}
-        <div className="chat-mobile-bar">
-          <button type="button" className="icon-btn" aria-label="open chat list"
-                  onClick={() => setSideOpen(true)}>☰</button>
-          <span className="grow ellipsis">
-            {conversationId
-              ? (conversations.find((c) => c.id === conversationId)?.summary
-                 || `Chat #${conversationId}`)
-              : 'New chat'}
-          </span>
-          <button type="button" className="icon-btn" aria-label="new chat"
-                  onClick={newConversation}>＋</button>
-        </div>
-        {/* always present, even on a fresh chat — it is the one home for the
-            project state, so it can't come and go with the conversation */}
-        <div className="chat-toolbar">
-          {conversationId && <>
-            <span className="chat-title ellipsis">
-              {conversations.find((c) => c.id === conversationId)?.summary
-                || `Chat #${conversationId}`}
-            </span>
-            <span className="tag">#{conversationId}</span>
-          </>}
-          <span className="grow" />
-          <ProjectPicker
-            projects={projects} global={active}
-            mode={conversationId ? convoMode(openConvo) : pendingMode}
-            value={conversationId ? (openConvo?.project_slug || '') : pendingProject}
-            onPick={(mode, slug) => {
-              if (conversationId) return assignProject(mode, slug)
-              setPendingMode(mode)
-              setPendingProject(slug)
-            }} />
-          {/* sits beside the project control: both answer "where does this
-              turn's work go". A switch, not a chip — it is a mode you leave
-              set, and the track shows which way at a glance. */}
-          <label className={`temp-switch${temporary ? ' on' : ''}`
-                            + (conversationId ? ' fixed' : '')}
-                 title={conversationId
-                   ? 'this chat is already saved — start a new one to make it temporary'
-                   : 'temporary chat: nothing is written to disk, and it is gone '
-                     + 'once you leave'}>
-            <input type="checkbox" checked={temporary} disabled={!!conversationId}
-                   onChange={(e) => setTemporary(e.target.checked)} />
-            <span className="temp-track"><span className="temp-knob" /></span>
-            <span className="temp-word">Temporary chat</span>
-          </label>
-        </div>
+        {/* the one home for the project state — except a fresh chat on a
+            phone, where both controls sit under the orb and the bar itself
+            would just be an empty strip */}
+        {(!phone || !fresh) && (
+          <div className="chat-toolbar">
+            {conversationId && <>
+              <span className="chat-title ellipsis">
+                {conversations.find((c) => c.id === conversationId)?.summary
+                  || `Chat #${conversationId}`}
+              </span>
+              <span className="tag">#{conversationId}</span>
+            </>}
+            <span className="grow" />
+            {projectPicker}
+            {/* sits beside the project control: both answer "where does this
+                turn's work go". A switch, not a chip — it is a mode you leave
+                set, and the track shows which way at a glance. */}
+            {tempSwitch}
+          </div>
+        )}
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 ? (
             <div className="chat-empty">
               <div className="orb" ref={orbRef} />
               <h2>{greeting}</h2>
+              {phone && fresh && (
+                <div className="empty-controls">
+                  {projectPicker}
+                  {tempSwitch}
+                </div>
+              )}
             </div>
           ) : (
             <div className="thread">

@@ -116,7 +116,7 @@ function ThemeToggle({ theme, onToggle }) {
 // elsewhere. The status read itself never mutates.
 // (The runtime model switch lives in the chat composer now — ComposerModel in
 // Chat.jsx; the bar copy was redundant and the operator asked for its removal.)
-function VmStatus() {
+function VmStatus({ inBar = false }) {
   const [s, setS] = useState(null)
   const [open, setOpen] = useState(false)
   const [nuking, setNuking] = useState(false)
@@ -172,7 +172,7 @@ function VmStatus() {
   const imageAge = s.image_age_days != null
     ? `${s.image_age_days}d old` : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
   return (
-    <div className="notif-wrap vm-wrap vm-corner" ref={wrapRef}>
+    <div className={`notif-wrap vm-wrap${inBar ? '' : ' vm-corner'}`} ref={wrapRef}>
       <button className="nav-chip" onClick={() => setOpen((o) => !o)}
               aria-expanded={open}
               aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
@@ -291,6 +291,16 @@ export default function App() {
   // one exists the nav renders into it as a rail instead of onto the top bar
   const [navSlot, setNavSlot] = useState(null)
   const railed = !!navSlot
+  // phone: the VM chip rides the top bar (operator's call) instead of holding
+  // the bottom-left corner. One instance either way — it polls.
+  const [phone, setPhone] = useState(
+    () => window.matchMedia('(max-width: 768px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)')
+    const h = (e) => setPhone(e.matches)
+    mq.addEventListener('change', h)
+    return () => mq.removeEventListener('change', h)
+  }, [])
   const icoRefs = useRef(new Map())     // route -> icon element, for the FLIP
   const lastRects = useRef(null)
 
@@ -437,6 +447,7 @@ export default function App() {
               <span className="brand">Jarvis</span>
               <div className="nav-links">{navLinks}</div>
               <div className="nav-status">
+                {phone && <VmStatus inBar />}
                 <ThemeToggle theme={theme} onToggle={toggleTheme} />
               </div>
               <button className="nav-toggle"
@@ -483,8 +494,9 @@ export default function App() {
       {user && <Notices toasts={notices.toasts} dismiss={notices.dismiss}
                         clear={notices.clear} />}
       {/* the guest VM sits on its own in the bottom-left corner, off away from
-          the destinations and the page's own controls */}
-      {user && <VmStatus />}
+          the destinations and the page's own controls — on a phone it moved
+          into the top bar above */}
+      {user && !phone && <VmStatus />}
       <NavSlotContext.Provider value={setNavSlot}>
       <Routes>
         <Route path="/login" element={<Login onLogin={setUser} />} />

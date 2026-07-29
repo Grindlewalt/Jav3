@@ -80,6 +80,13 @@ body {
 /* manipulation still pans and pinches — it only drops the double-tap zoom,
    which on controls read as a dead first tap */
 button, a, input, select, textarea, label { touch-action: manipulation; }
+/* installed to the home screen, the document itself must never pan: iOS lets
+   the whole app rubber-band (worst after the keyboard has been up once) even
+   though nothing overflows. Pinning the body kills that; inner scrollers
+   (.messages, the chat list, pages) still scroll when their content asks. */
+@media (display-mode: standalone) and (max-width: 768px) {
+  body { position: fixed; inset: 0; overflow: hidden; }
+}
 /* keyboard focus was invisible everywhere; :focus-visible keeps it off mouse
    clicks so it never shows up as a stray ring on a tapped button. The
    :not(:focus-visible) reset drops the UA's `outline: auto` ring, which a
@@ -493,7 +500,6 @@ input:focus, textarea:focus { border-color: var(--accent);
   background: transparent; font-size: 13px; flex-shrink: 0;
 }
 /* the phone-only strip that reopens the off-canvas conversation list */
-.chat-mobile-bar { display: none; }
 .chat-title { font-weight: 600; color: var(--text); }
 .project-list li.deleted { opacity: 0.65; border-style: dashed; }
 .convo-list li:hover, .convo-list li.active { background: var(--panel-2); color: var(--text); }
@@ -671,6 +677,12 @@ input:focus, textarea:focus { border-color: var(--accent);
   50% { transform: scale(1.055); box-shadow: 0 14px 66px var(--orb-glow); }
 }
 .chat-empty h2 { margin: 0; font-size: 22px; max-width: 480px; text-align: center; }
+/* phone, fresh chat: the toolbar is gone and its two controls — project and
+   temporary — sit centred under the orb and the greeting instead */
+.chat-empty .empty-controls {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  margin-top: 18px;
+}
 /* ---- the floating composer ----
    No border, no bar of its own: it hovers over the bottom of the thread, and
    the gradient fades scrolled messages out underneath it. pointer-events are
@@ -1452,13 +1464,6 @@ kbd {
   }
   .chat-toolbar { padding: 8px 12px; flex-wrap: nowrap; gap: 8px; }
   .chat-toolbar .chat-title { min-width: 0; }
-  .chat-mobile-bar {
-    display: flex; align-items: center; gap: 6px; padding: 5px 8px;
-    border-bottom: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 14px; color: var(--dim); flex-shrink: 0;
-  }
-  /* the toolbar already names the open chat — don't say it twice */
-  .chat-mobile-bar + .chat-toolbar .chat-title { display: none; }
   .messages { padding: 0 12px; }
   .thread { padding: 16px 0 calc(96px + var(--sab)); }
   .msg { margin-bottom: 16px; }
