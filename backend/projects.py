@@ -94,6 +94,7 @@ async def create_project(body: CreateProject):
 class ImportProject(BaseModel):
     url: str
     name: str | None = None
+    summary: str | None = None
 
 
 @router.post("/projects/import")
@@ -129,7 +130,7 @@ async def import_project(body: ImportProject):
         md = project_md_path(slug)
         if not md.exists():
             md.write_text(PROJECT_TEMPLATE.format(
-                name=name, summary=f"Imported from {url}",
+                name=name, summary=body.summary or f"Imported from {url}",
                 created=date.today().isoformat()))
         await db.execute(
             "INSERT INTO projects (slug, name, path, github_remote) VALUES (?, ?, ?, ?)",

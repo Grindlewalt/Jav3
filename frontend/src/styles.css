@@ -810,8 +810,10 @@ input:focus, textarea:focus { border-color: var(--accent);
 /* ---- projects list ---- */
 .page { padding: 26px; max-width: 960px; width: 100%; margin: 0 auto; overflow-y: auto; }
 .autonomy-sel { padding: 3px 7px; font-size: 12px; }
-.create-project { display: flex; gap: 8px; margin-bottom: 18px; align-items: center; }
-.create-project input:nth-child(2) { flex: 1; }
+.create-project { display: flex; gap: 8px; margin-bottom: 18px;
+  align-items: center; flex-wrap: wrap; }
+.create-project input:nth-child(2) { flex: 1 1 200px; }
+.create-project .gh-url { flex: 1 1 240px; }
 .project-list { list-style: none; padding: 0; }
 .project-list li {
   display: flex; gap: 14px; align-items: center; padding: 14px 16px;

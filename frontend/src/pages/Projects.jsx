@@ -9,8 +9,8 @@ export default function Projects() {
   const [name, setName] = useState('')
   const [summary, setSummary] = useState('')
   const [error, setError] = useState(null)
-  const [importUrl, setImportUrl] = useState('')
-  const [importing, setImporting] = useState(false)
+  const [repoUrl, setRepoUrl] = useState('')
+  const [creating, setCreating] = useState(false)
 
   async function refresh() {
     const r = await api('/api/projects')
@@ -20,32 +20,31 @@ export default function Projects() {
   }
   useEffect(() => { refresh() }, [])
 
+  // One form, both paths: a GitHub URL turns the create into a clone-import,
+  // and name/description ride along either way (the import derives a name
+  // from the repo when the field is left empty).
   async function create(e) {
     e.preventDefault()
     setError(null)
+    setCreating(true)
+    const url = repoUrl.trim()
     try {
-      await api('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify({ name, summary: summary || undefined }),
-      })
-      setName(''); setSummary('')
+      if (url) {
+        await api('/api/projects/import', {
+          method: 'POST',
+          body: JSON.stringify({ url, name: name.trim() || undefined,
+                                 summary: summary.trim() || undefined }),
+        })
+      } else {
+        await api('/api/projects', {
+          method: 'POST',
+          body: JSON.stringify({ name, summary: summary || undefined }),
+        })
+      }
+      setName(''); setSummary(''); setRepoUrl('')
       refresh()
     } catch (err) { setError(err.detail) }
-  }
-
-  async function importRepo(e) {
-    e.preventDefault()
-    setError(null)
-    setImporting(true)
-    try {
-      await api('/api/projects/import', {
-        method: 'POST',
-        body: JSON.stringify({ url: importUrl }),
-      })
-      setImportUrl('')
-      refresh()
-    } catch (err) { setError(err.detail) }
-    setImporting(false)
+    setCreating(false)
   }
 
   async function load(slug) {
@@ -80,18 +79,19 @@ export default function Projects() {
     <div className="page">
       <h2>Projects</h2>
       <form className="create-project" onSubmit={create}>
-        <input placeholder="project name" value={name}
-               onChange={(e) => setName(e.target.value)} required />
+        <input placeholder={repoUrl.trim()
+                 ? 'project name (repo name if empty)' : 'project name'}
+               value={name} onChange={(e) => setName(e.target.value)}
+               required={!repoUrl.trim()} />
         <input placeholder="what are you building? (one line)" value={summary}
                onChange={(e) => setSummary(e.target.value)} />
-        <button type="submit">Create</button>
+        <input className="gh-url" type="url"
+               placeholder="https://github.com/owner/repo (optional — clone it in)"
+               value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
+        <button type="submit" disabled={creating}>
+          {creating && repoUrl.trim() ? 'cloning…'
+            : repoUrl.trim() ? 'Clone & create' : 'Create'}</button>
         {error && <span className="error">{error}</span>}
-      </form>
-      <form className="create-project" onSubmit={importRepo}>
-        <input placeholder="https://github.com/owner/repo — import an existing repo"
-               value={importUrl} onChange={(e) => setImportUrl(e.target.value)} required />
-        <button type="submit" disabled={importing}>
-          {importing ? 'cloning…' : 'Import from GitHub'}</button>
       </form>
       <ul className="project-list">
         {projects.map((p) => (
