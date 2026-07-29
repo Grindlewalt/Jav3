@@ -401,7 +401,12 @@ input:focus, textarea:focus { border-color: var(--accent);
 .chat-layout aside {
   width: 260px; padding: 12px 12px 54px; border-right: 1px solid var(--border);
   display: flex; flex-direction: column; gap: 10px; background: var(--bg-soft);
-  transition: width 0.28s ease, padding 0.28s ease; overflow: hidden;
+  /* same curve and duration as the nav's fold — the two run together when the
+     rail takes over, and at 0.28s ease the sidebar finished visibly ahead of
+     the bar */
+  transition: width 0.38s cubic-bezier(0.4, 0, 0.2, 1),
+              padding 0.38s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
 }
 /* overflow must open up once collapsed: the rail's More flyout is a child of
    the sidebar, and `hidden` clipped it into nothing — it measured as visible
@@ -411,8 +416,28 @@ input:focus, textarea:focus { border-color: var(--accent);
   width: 56px; padding: 12px 9px 54px;
   overflow: visible; position: relative; z-index: 30;
 }
-.chat-layout aside.collapsed .side-title,
-.chat-layout aside.collapsed .convo-list { display: none; }
+/* The list cross-fades instead of being display:none'd out from under the
+   width transition — it was the bulk of the sidebar vanishing in one frame
+   while the panel was still moving. It clips its own content (a scroll
+   container on both axes), so nothing spills as it narrows.
+   It leaves the flow while it fades, though: left in it, an invisible list
+   still claimed half the column and the rail's theme toggle sat stranded in
+   the middle of the sidebar instead of at its foot.
+   The title keeps display:none — it is `flex: 1`, so merely hiding it would
+   still have it claim height and shove the head's buttons apart. */
+.chat-layout aside.collapsed .side-title { display: none; }
+.convo-list { transition: opacity 0.24s ease 0.06s; }
+.chat-layout aside.collapsed .convo-list {
+  opacity: 0; pointer-events: none; transition: opacity 0.15s ease;
+  position: absolute; left: 9px; right: 9px; top: 62px; bottom: 54px;
+}
+/* Pin the collapsed column to its final 38px instead of letting it centre in
+   whatever width the panel is passing through: centred, the icons slid left
+   across the whole collapse, fighting the flight that was already carrying
+   them down from the bar. Fixed width, and they are in their final place from
+   the first frame. */
+.chat-layout aside.collapsed .side-head,
+.chat-layout aside.collapsed .side-nav { width: 38px; align-self: flex-start; }
 .side-head { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .chat-layout aside.collapsed .side-head { flex-direction: column; gap: 10px; }
 .side-head .side-title { flex: 1; }
@@ -1414,6 +1439,13 @@ kbd {
   .chat-layout aside.collapsed .convo-list { display: flex; }
   .chat-layout aside.collapsed .side-title { display: block; }
   .chat-layout aside.collapsed .side-head { flex-direction: row; }
+  /* the desktop rail's geometry must not follow the list into the phone
+     drawer: collapsed there means off-canvas at full width, not a 38px rail */
+  .chat-layout aside.collapsed .convo-list {
+    position: static; opacity: 1; pointer-events: auto;
+  }
+  .chat-layout aside.collapsed .side-head,
+  .chat-layout aside.collapsed .side-nav { width: auto; align-self: auto; }
   .chat-scrim {
     position: absolute; inset: 0; z-index: 19; background: var(--overlay);
     animation: scrim-in 0.18s ease both;
