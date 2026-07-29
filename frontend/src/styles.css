@@ -354,15 +354,20 @@ input:focus, textarea:focus { border-color: var(--accent); }
   justify-content: center; gap: 6px; padding-bottom: 96px;
   animation: msg-in 0.4s ease both;
 }
-/* a plain white orb that drifts toward the cursor (Chat.jsx writes the
-   transform directly on mousemove) instead of the old idle float loop —
-   one deliberate behavior instead of two competing ones */
+/* a plain white orb, breathing very slightly on its own. It used to drift
+   toward the cursor, but the composer's underglow already tracks the mouse and
+   two things chasing the pointer at once was too much — this one just idles. */
 .chat-empty .orb {
   width: 62px; height: 62px; border-radius: 50%; margin-bottom: 12px;
   background: radial-gradient(circle at 32% 30%, #ffffff, #cfd6e0 65%, #9aa3b0 100%);
   box-shadow: 0 10px 44px rgba(255, 255, 255, 0.3);
-  transition: transform 0.25s cubic-bezier(0.21, 1.02, 0.55, 1);
-  will-change: transform;
+  animation: orb-breathe 5.5s ease-in-out infinite;
+}
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1);
+    box-shadow: 0 10px 44px rgba(255, 255, 255, 0.28); }
+  50% { transform: scale(1.028);
+    box-shadow: 0 10px 52px rgba(255, 255, 255, 0.36); }
 }
 .chat-empty h2 { margin: 0; font-size: 22px; max-width: 480px; text-align: center; }
 .incog-switch {

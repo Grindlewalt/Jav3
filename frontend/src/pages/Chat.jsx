@@ -113,8 +113,7 @@ export default function Chat() {
   })
   const scrollRef = useRef(null)   // the .messages scroll container
   const inputRef = useRef(null)
-  const orbRef = useRef(null)      // empty-state orb — moved via direct style writes, not state
-  const glowRef = useRef(null)     // composer underglow — same, driven by mousemove
+  const glowRef = useRef(null)     // composer underglow — direct style writes, not state
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight (set even incognito)
 
@@ -161,23 +160,6 @@ export default function Chat() {
     setMultiline(ta.scrollHeight > 48)
   }
   useEffect(autoGrow, [input])
-
-  // the empty-state orb drifts toward the cursor. Direct style writes (not
-  // React state) so a mousemove doesn't trigger a render on every pixel.
-  const reduceMotion = () =>
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  function trackOrb(e) {
-    const el = orbRef.current
-    if (!el || reduceMotion()) return
-    const r = e.currentTarget.getBoundingClientRect()
-    const max = 26   // px of drift, clamped so it wanders rather than snaps
-    const dx = Math.max(-max, Math.min(max, (e.clientX - (r.left + r.width / 2)) * 0.12))
-    const dy = Math.max(-max, Math.min(max, (e.clientY - (r.top + r.height / 2)) * 0.12))
-    el.style.transform = `translate(${dx}px, ${dy}px)`
-  }
-  function resetOrb() {
-    if (orbRef.current) orbRef.current.style.transform = 'translate(0, 0)'
-  }
 
   // the composer's underglow pools wherever the cursor is: --gx is the point
   // along the bar the light gathers at, --gi how bright it burns (falling off
@@ -399,8 +381,8 @@ export default function Chat() {
         )}
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 ? (
-            <div className="chat-empty" onMouseMove={trackOrb} onMouseLeave={resetOrb}>
-              <div className="orb" ref={orbRef} />
+            <div className="chat-empty">
+              <div className="orb" />
               <h2>{greeting}</h2>
               {/* the keys are load-bearing: remounting the face and the label
                   on a flip replays their entry animations */}
