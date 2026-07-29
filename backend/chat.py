@@ -25,7 +25,8 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: int | None = None
     confirm_peak: bool = False
-    ephemeral: bool = False   # incognito: persist nothing, memory writes go to a temp dir
+    # "temporary chat" in the GUI: persist nothing, memory writes go to a temp dir
+    ephemeral: bool = False
     # pin a NEW conversation to this project (workspace chat panels pass their
     # slug); ignored for existing conversations — reassign via PATCH instead.
     project: str | None = None

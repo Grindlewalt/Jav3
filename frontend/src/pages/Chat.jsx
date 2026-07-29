@@ -231,9 +231,10 @@ export default function Chat() {
   // project chosen for a chat that doesn't exist yet; sent with the first turn
   const [pendingProject, setPendingProject] = useState('')
   const [pendingMode, setPendingMode] = useState('follow')
-  // incognito: the turn persists nothing. No longer repaints the GUI — the
-  // toolbar toggle and the composer placeholder carry it.
-  const [incognito, setIncognito] = useState(false)
+  // a temporary chat persists nothing: no conversation row, no transcript.
+  // Doesn't repaint the GUI — the toolbar switch and the composer placeholder
+  // carry it.
+  const [temporary, setTemporary] = useState(false)
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -343,8 +344,8 @@ export default function Chat() {
   function handleTurnEvent(ev) {
     if (ev.type === 'start') {
       liveId.current = ev.conversation_id
-      // incognito: never adopt the id, or the chat becomes a saved one
-      if (!incognito) setConversationId(ev.conversation_id)
+      // temporary: never adopt the id, or the chat becomes a saved one
+      if (!temporary) setConversationId(ev.conversation_id)
     }
     if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
       setMessages((m) => {
@@ -373,7 +374,7 @@ export default function Chat() {
 
   async function openConversation(id) {
     tailAbort.current?.abort()
-    setIncognito(false)   // saved chats always persist
+    setTemporary(false)   // saved chats always persist
     closeSideOnPhone()
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
@@ -408,7 +409,7 @@ export default function Chat() {
     setMessages([])
     setPendingProject('')
     setPendingMode('follow')
-    setIncognito(false)
+    setTemporary(false)
     setGreeting(pickGreeting())
   }
 
@@ -456,7 +457,7 @@ export default function Chat() {
     try {
       await chatStream(
         { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
-          ephemeral: incognito,
+          ephemeral: temporary,
           // only meaningful when the conversation is being created by this turn
           ...(conversationId ? {} : { project: pendingProject || null,
                                       project_mode: pendingMode }) },
@@ -554,21 +555,20 @@ export default function Chat() {
               setPendingMode(mode)
               setPendingProject(slug)
             }} />
-          {/* incognito lives beside the project control: both answer "where
-              does this turn's work go" */}
-          <button type="button"
-                  className={`incog-btn${incognito ? ' on' : ''}`}
-                  aria-pressed={incognito}
-                  disabled={!!conversationId}
-                  title={conversationId
-                    ? 'this chat is already saved — start a new one to go incognito'
-                    : incognito
-                      ? 'incognito: nothing from this chat is saved'
-                      : 'go incognito — nothing from this chat will be saved'}
-                  onClick={() => setIncognito((v) => !v)}>
-            <span aria-hidden="true">🕶</span>
-            <span className="incog-word">{incognito ? 'Incognito' : 'Saved'}</span>
-          </button>
+          {/* sits beside the project control: both answer "where does this
+              turn's work go". A switch, not a chip — it is a mode you leave
+              set, and the track shows which way at a glance. */}
+          <label className={`temp-switch${temporary ? ' on' : ''}`
+                            + (conversationId ? ' fixed' : '')}
+                 title={conversationId
+                   ? 'this chat is already saved — start a new one to make it temporary'
+                   : 'temporary chat: nothing is written to disk, and it is gone '
+                     + 'once you leave'}>
+            <input type="checkbox" checked={temporary} disabled={!!conversationId}
+                   onChange={(e) => setTemporary(e.target.checked)} />
+            <span className="temp-track"><span className="temp-knob" /></span>
+            <span className="temp-word">Temporary chat</span>
+          </label>
         </div>
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 ? (
@@ -599,7 +599,8 @@ export default function Chat() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
-              placeholder={incognito ? 'Message Jarvis (incognito)…' : 'Message Jarvis…'}
+              placeholder={temporary ? 'Message Jarvis (temporary chat)…'
+                                     : 'Message Jarvis…'}
               rows={1}
             />
             <ComposerModel visible={!input.trim()} />
