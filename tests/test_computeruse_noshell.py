@@ -15,9 +15,14 @@ import pytest
 
 from backend import computeruse as cu
 
-CLIENT = Path(__file__).resolve().parents[1] / "clients" / "computeruse" / "agent.py"
-SOURCE = CLIENT.read_text()
-TREE = ast.parse(SOURCE)
+CLIENT_DIR = Path(__file__).resolve().parents[1] / "clients" / "computeruse"
+CLIENT = CLIENT_DIR / "agent.py"
+# every module in the client is scanned, not just the entry point -- the macOS
+# backend is where a convenient osascript shim would otherwise appear
+CLIENT_FILES = sorted(CLIENT_DIR.glob("*.py"))
+SOURCE = "\n".join(f.read_text() for f in CLIENT_FILES)
+TREES = {f.name: ast.parse(f.read_text()) for f in CLIENT_FILES}
+TREE = TREES["agent.py"]
 
 
 # --- 1. the client's source may not contain a way to execute a string --------
@@ -34,8 +39,9 @@ BANNED_PREFIX = ("os.exec", "os.spawn", "os.posix_spawn")
 
 
 def _calls():
-    """(dotted-name, node) for every call in the client."""
-    for node in ast.walk(TREE):
+    """(dotted-name, node) for every call anywhere in the client."""
+    for tree in TREES.values():
+      for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         parts, f = [], node.func
@@ -103,10 +109,12 @@ def test_binary_allowlist_is_closed_and_small():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert set(mod.BINARIES) <= {
-        "mpv", "pactl", "wpctl", "xdg-open", "xrandr", "osascript", "open"}
-    # a shell must never be in it
-    for shell in ("sh", "bash", "zsh", "fish", "python", "python3", "perl", "env"):
-        assert shell not in mod.BINARIES
+        "mpv", "pactl", "wpctl", "xdg-open", "xrandr", "open"}
+    # neither a shell nor anything that evaluates a language. osascript counts:
+    # AppleScript has `do shell script`, so it is a shell by another door.
+    for interp in ("sh", "bash", "zsh", "fish", "python", "python3", "perl",
+                   "env", "osascript", "ruby", "node", "awk"):
+        assert interp not in mod.BINARIES, f"{interp} must not be runnable"
 
 
 def test_runner_rejects_a_binary_outside_the_allowlist():
@@ -158,11 +166,24 @@ def test_http_urls_pass():
 
 
 @pytest.mark.parametrize("device", [
-    "sink; rm -rf /", "$(id)", "a" * 200, "sink name with spaces", "sink`id`",
+    "sink; rm -rf /", "$(id)", "a" * 250, "sink name with spaces", "sink`id`",
+    "sink&touch /tmp/x", "sink'quoted'", 'sink"quoted"', "sink\nrm -rf /",
 ])
 def test_device_ids_are_held_to_an_identifier_shape(device):
     with pytest.raises(cu.VerbError):
         cu.validate("volume", {"action": "up", "device": device})
+
+
+@pytest.mark.parametrize("device", [
+    "pulse/alsa_output.pci-0000_00_1f.3.analog-stereo",
+    "coreaudio/AppleHDAEngineOutput:1F,3,0,1:0",
+    "alsa/default:CARD=PCH",
+])
+def test_real_mpv_device_names_are_accepted(device):
+    """mpv names outputs "<ao>/<device>", so the slash has to survive
+    validation — the first cut rejected every legitimate device id."""
+    assert cu.validate("play", {"kind": "audio", "path": "/a/b.mp3",
+                                "device": device})["device"] == device
 
 
 @pytest.mark.parametrize("value", [-1, 101, 1000, True, "5", 3.5])
@@ -318,3 +339,61 @@ def test_mpv_is_launched_without_config_or_scripts(tmp_path):
     assert "--no-config" in args and "--load-scripts=no" in args
     # the file must come after -- so a filename can never be read as an option
     assert "--" in args and args.index("--") == len(args) - 2
+
+
+# --- 5. the macOS backend ----------------------------------------------------
+
+def _macos():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "cu_macos_t", CLIENT_DIR / "macos.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_macos_fourcc_constants_match_the_sdk_headers():
+    """Verified against CoreAudio.framework AudioHardware.h /
+    AudioHardwareBase.h. Getting one of these wrong is a silent no-op or a
+    write to the wrong property, so they are pinned."""
+    m = _macos()
+    assert m.fourcc("dOut") == 0x644F7574        # kAudioHardwarePropertyDefaultOutputDevice
+    assert m.fourcc("volm") == 0x766F6C6D        # kAudioDevicePropertyVolumeScalar
+    assert m.fourcc("vmvc") == 0x766D7663        # ..._VirtualMainVolume
+    assert m.fourcc("mute") == 0x6D757465        # kAudioDevicePropertyMute
+    assert m.fourcc("glob") == 0x676C6F62        # kAudioObjectPropertyScopeGlobal
+    assert m.fourcc("outp") == 0x6F757470        # kAudioObjectPropertyScopeOutput
+    assert m.kAudioObjectSystemObject == 1
+    assert m.kElementMaster == 0
+
+
+def test_macos_backend_spawns_no_processes_for_volume_or_transport():
+    """The whole point of the CoreAudio/Quartz route: no subprocess, so no
+    interpreter, so nothing to quote."""
+    tree = TREES["macos.py"]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            parts, f = [], node.func
+            while isinstance(f, ast.Attribute):
+                parts.append(f.attr)
+                f = f.value
+            if isinstance(f, ast.Name):
+                parts.append(f.id)
+            dotted = ".".join(reversed(parts))
+            assert not dotted.startswith("subprocess."), dotted
+            assert "osascript" not in dotted
+
+
+def test_macos_media_key_codes_are_the_documented_ones():
+    m = _macos()
+    assert (m.NX_KEYTYPE_PLAY, m.NX_KEYTYPE_NEXT, m.NX_KEYTYPE_PREVIOUS) == (16, 17, 18)
+    assert m.NSSystemDefined == 14
+    assert m.MEDIA_KEYS["next"] == 17 and m.MEDIA_KEYS["previous"] == 18
+
+
+def test_macos_module_never_mentions_osascript_as_something_to_run():
+    src = (CLIENT_DIR / "macos.py").read_text()
+    for node in ast.walk(TREES["macos.py"]):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # prose explaining why it is avoided is fine; a bare command is not
+            assert not node.value.strip().startswith("osascript"), node.value

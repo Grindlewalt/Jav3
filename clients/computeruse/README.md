@@ -20,16 +20,34 @@ the first run.
 
 | Verb | Linux | macOS |
 |---|---|---|
-| volume up/down/set/mute | ✅ wpctl or pactl | ❌ not implemented |
-| pause / next / previous / stop | ✅ MPRIS over D-Bus | ❌ not implemented |
+| volume up/down/set/mute | ✅ wpctl or pactl | ✅ CoreAudio via ctypes |
+| pause / next / previous / stop | ✅ MPRIS over D-Bus | ✅ synthesized media keys |
 | open an http(s) link | ✅ xdg-open | ✅ open |
 | play audio/video, chosen screen + audio device | ✅ mpv | ✅ mpv |
-| list screens / audio devices | ✅ xrandr, pactl | ❌ returns empty |
+| list screens | ✅ xrandr | ✅ NSScreen |
+| list audio outputs | ✅ pactl + mpv | ⚠️ default device only |
 
-macOS volume and transport are deliberately absent rather than shimmed through
-`osascript`: that would mean handing a scripting interpreter a string, which is
-the one thing this client exists to avoid. They need CoreAudio and MediaRemote
-bindings.
+**Run `--selftest` first on any new machine.** It reports what is actually
+reachable instead of failing silently later.
+
+### macOS notes
+
+- Volume is a direct CoreAudio call through `ctypes` — no subprocess, and no
+  extra dependency. It tries `kAudioHardwareServiceDeviceProperty_VirtualMainVolume`
+  first and falls back to `kAudioDevicePropertyVolumeScalar`, because many
+  devices have no master channel.
+- Transport synthesizes the keyboard's own media keys, so it drives whatever
+  has the system's attention rather than one named app. This needs
+  **Accessibility permission** (System Settings → Privacy & Security →
+  Accessibility). On macOS 15 that grant lapses after a reboot; the client
+  checks with `CGPreflightPostEventAccess` and tells you rather than doing
+  nothing.
+- Picking a specific *mixer* output on macOS is not wired up — volume applies to
+  the default device. Choosing where a *played file* goes does work
+  (`--audio-device`, from mpv's own list).
+- `osascript` is deliberately not in the binary allowlist. AppleScript can
+  `do shell script "..."`, so allowing it would reopen the exact path this
+  client exists to close.
 
 ## Why there is no shell
 

@@ -24,8 +24,11 @@ async def run(client: str = "") -> str:
         f"{s['index']}={s.get('id')} {s.get('geometry', '')}".strip()
         for s in screens) or "none detected"))
     devs = d.get("audio_devices") or []
-    lines.append("audio devices: " + (", ".join(
-        f"{a['id']} ({a['label']})" for a in devs) or "none detected"))
+    lines.append("mixer outputs (for computer_volume device): " + (", ".join(
+        f"{a['id']}" for a in devs) or "none detected"))
+    plays = d.get("play_devices") or []
+    lines.append("playback outputs (for computer_play device): " + (", ".join(
+        f"{a['id']}" for a in plays[:12]) or "none detected"))
     lines.append("running players: " + (", ".join(d.get("players") or []) or "none"))
     lines.append("granted folders: " + (", ".join(d.get("roots") or []) or "none"))
     return "\n".join(lines)

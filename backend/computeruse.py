@@ -127,11 +127,27 @@ def _check_url(value: str) -> str:
 
 def _check_device(value: str) -> str:
     """Audio device ids come back from `status` and go straight into an argv
-    slot, so they are held to an identifier shape rather than trusted."""
-    if len(value) > 128:
+    slot, so they are held to an identifier shape rather than trusted.
+
+    '/' is allowed because mpv names its outputs "<ao>/<device>" —
+    "pulse/alsa_output.pci-0000_00_1f.3.analog-stereo". It is not a shell
+    metacharacter and nothing here reaches a shell, so the slash is safe; what
+    matters is that spaces, quotes, semicolons and $ are not.
+    """
+    if len(value) > 200:
         raise VerbError("device id too long")
-    if not all(c.isalnum() or c in "._:-+" for c in value):
-        raise VerbError("device id may only contain letters, digits and ._:-+")
+    # ',' and '=' are in real device names too:
+    #   coreaudio/AppleHDAEngineOutput:1F,3,0,1:0
+    #   alsa/default:CARD=PCH
+    # None of / , = : + . _ - is a shell metacharacter, and nothing here reaches
+    # a shell. What stays out is space, quotes, $ ` ; & | < > ( ) * ? ~ and
+    # newlines.
+    if not all(c.isalnum() or c in "._:-+/,=" for c in value):
+        raise VerbError("device id may only contain letters, digits and ._:-+/,=")
+    if value.startswith("-"):
+        # it lands in an argv slot of its own, but a leading dash is how a value
+        # gets read as a flag by whatever is being run
+        raise VerbError("device id may not start with '-'")
     return value
 
 

@@ -1,4 +1,11 @@
 websockets>=12
-jeepney>=0.8        # MPRIS transport control over D-Bus (Linux). Optional:
-                    # without it everything else still works and transport
-                    # returns a clear "not installed" error.
+
+# Linux: MPRIS transport control over D-Bus. Optional — without it everything
+# else still works and transport returns a clear "not installed" error.
+jeepney>=0.8 ; sys_platform == "linux"
+
+# macOS: transport (synthesized media keys) and screen enumeration.
+# Volume needs NEITHER of these — it goes straight into CoreAudio through
+# ctypes, which is stdlib.
+pyobjc-framework-Quartz>=10 ; sys_platform == "darwin"
+pyobjc-framework-Cocoa>=10 ; sys_platform == "darwin"

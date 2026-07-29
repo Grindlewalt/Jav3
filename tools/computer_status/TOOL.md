@@ -11,8 +11,10 @@ parameters:
       type: string
       description: Which computer, if more than one is connected. Omit when there is only one.
 ---
-Screens are indexed from 0 and audio devices have ids you pass verbatim to
-`device`. If nothing is connected, say so plainly — the operator has to start
+Screens are indexed from 0. There are TWO audio lists and they are not
+interchangeable: "mixer outputs" are what computer_volume's `device` accepts,
+"playback outputs" are what computer_play's `device` accepts. Pass either
+verbatim; do not translate between them. If nothing is connected, say so plainly — the operator has to start
 the client on the machine they want driven; you cannot start it for them.
 
 The folders listed are the only places on disk you can reach. The operator
