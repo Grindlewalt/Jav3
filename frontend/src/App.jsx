@@ -50,7 +50,7 @@ function useTheme() {
     document.documentElement.dataset.theme = theme
     try { localStorage.setItem('jarvis.theme', theme) } catch { /* private mode */ }
     document.querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', theme === 'light' ? '#f5f3ec' : '#0a0a0b')
+      ?.setAttribute('content', theme === 'light' ? '#ece7da' : '#0a0a0b')
   }, [theme])
   const toggle = useCallback(
     () => setTheme((t) => (t === 'light' ? 'dark' : 'light')), [])
@@ -86,44 +86,8 @@ function ThemeToggle({ theme, onToggle }) {
 // discard the overlay and reboot fresh from the golden image. Nuke is
 // double-confirmed and refuses while a turn is in flight; boot/teardown stay
 // elsewhere. The status read itself never mutates.
-// Runtime model switch: flash for cheap, pro for smart. Applies to the next
-// model call everywhere (chat/agents/guest); agents with an explicit model
-// pin keep it. Server-side allowlist; persisted across restarts.
-// State lives in App so the bar copy and the mobile-drawer copy stay in sync.
-// The composer's model chip changes the same server-side setting — the two
-// controls sync through the jarvis-model-changed window event.
-function useModel() {
-  const [m, setM] = useState(null)
-  useEffect(() => {
-    api('/api/model').then(setM).catch(() => {})
-    const h = (e) => setM(e.detail)
-    window.addEventListener('jarvis-model-changed', h)
-    return () => window.removeEventListener('jarvis-model-changed', h)
-  }, [])
-  const change = useCallback(async (model) => {
-    try {
-      const next = await api('/api/model', {
-        method: 'PUT', body: JSON.stringify({ model }) })
-      setM(next)
-      window.dispatchEvent(new CustomEvent('jarvis-model-changed', { detail: next }))
-    } catch (err) { window.alert(err.detail || String(err)) }
-  }, [])
-  return [m, change]
-}
-
-function ModelSwitch({ m, onChange, className = '' }) {
-  if (!m) return null
-  const short = (id) => id.replace(/^deepseek-v4-/, '')
-  return (
-    <select className={`model-switch ${className}`} value={m.active}
-            aria-label="model for new turns"
-            title="model for new turns — pro is ~3x the price of flash"
-            onChange={(e) => onChange(e.target.value)}>
-      {m.choices.map((c) => <option key={c} value={c}>{short(c)}</option>)}
-    </select>
-  )
-}
-
+// (The runtime model switch lives in the chat composer now — ComposerModel in
+// Chat.jsx; the bar copy was redundant and the operator asked for its removal.)
 function VmStatus() {
   const [s, setS] = useState(null)
   const [open, setOpen] = useState(false)
@@ -292,7 +256,6 @@ export default function App() {
   const [, setCfgReady] = useState(false) // bump once the media allowlist lands
   const [menuOpen, setMenuOpen] = useState(false) // mobile nav drawer
   const [moreOpen, setMoreOpen] = useState(false) // desktop overflow menu
-  const [model, setModel] = useModel()
   const [theme, toggleTheme] = useTheme()
   const location = useLocation()
 
@@ -373,7 +336,6 @@ export default function App() {
             </div>
 
             <div className="nav-status">
-              <ModelSwitch m={model} onChange={setModel} className="bar-only" />
               <ThemeToggle theme={theme} onToggle={toggleTheme} />
               <VmStatus />
             </div>
@@ -401,10 +363,6 @@ export default function App() {
               </NavLink>
             ))}
             <div className="drawer-foot">
-              <label className="drawer-model">
-                <span className="dim small">Model for new turns</span>
-                <ModelSwitch m={model} onChange={setModel} className="drawer-only" />
-              </label>
               <button className="ghost" tabIndex={menuOpen ? 0 : -1}
                       onClick={toggleTheme}>
                 {theme === 'light' ? 'Dark mode' : 'Light mode'}</button>

@@ -12,14 +12,15 @@
   --border: #27272b;
   --text: #e9e7e2;
   --dim: #918f86;
-  --accent: #a3b18a;
-  --accent-ink: #15170f;   /* text sitting on an accent surface */
+  /* cool moss, not sage — the yellower #a3b18a read as khaki on carbon */
+  --accent: #8caa93;
+  --accent-ink: #0f130f;   /* text sitting on an accent surface */
   --green: #57a06b;
   --red: #e0655c;
   --amber: #d3a95a;
   --radius: 12px;
-  --bubble: #202318;       /* user message: olive-tinted graphite */
-  --bubble-border: #33382a;
+  --bubble: #1d221d;       /* user message: moss-tinted graphite */
+  --bubble-border: #2f382f;
   --orb-1: #ffffff; --orb-2: #cfd6e0; --orb-3: #9aa3b0;
   --orb-glow: rgba(255, 255, 255, 0.3);
   --glow: 255 255 255;     /* composer underglow, rgb triple */
@@ -31,23 +32,25 @@
   --tap: 44px;
   --overlay: rgba(4, 4, 5, 0.62);
 }
+/* toned warm paper, not white — the first cut (#f5f3ec / #fcfbf7 cards) was
+   bright enough to squint at */
 :root[data-theme='light'] {
   color-scheme: light;
-  --bg: #f5f3ec;
-  --bg-soft: #eeebe1;
-  --panel: #fcfbf7;
-  --panel-2: #e7e3d6;
-  --border: #dcd6c6;
+  --bg: #ece7da;
+  --bg-soft: #e3ddcc;
+  --panel: #f6f2e6;
+  --panel-2: #dbd4c1;
+  --border: #cec6af;
   --text: #2b2925;
-  --dim: #7f7a6c;
-  --accent: #5f7150;
-  --accent-ink: #f9f8f3;
+  --dim: #746d5a;
+  --accent: #5a6d52;
+  --accent-ink: #f7f5ec;
   --green: #3e7d4e;
   --red: #b5433a;
   --amber: #96701f;
-  --bubble: #e7ebdc;
-  --bubble-border: #d3dac2;
-  --orb-1: #ffffff; --orb-2: #e8e2d2; --orb-3: #c5bba2;
+  --bubble: #dee4d0;
+  --bubble-border: #c8d2b6;
+  --orb-1: #fbf8ef; --orb-2: #dcd4bf; --orb-3: #b2a683;
   --orb-glow: rgba(120, 108, 82, 0.28);
   --glow: 95 113 80;
   --glass: color-mix(in srgb, var(--panel) 78%, transparent);
@@ -545,12 +548,6 @@ input:focus, textarea:focus { border-color: var(--accent);
 /* ---- projects list ---- */
 .page { padding: 26px; max-width: 960px; width: 100%; margin: 0 auto; overflow-y: auto; }
 .autonomy-sel { padding: 3px 7px; font-size: 12px; }
-.model-switch { padding: 5px 12px; font-size: 12px; border-radius: 999px;
-  background: transparent; color: var(--dim); cursor: pointer; }
-.model-switch:hover { color: var(--text); border-color: var(--dim); }
-.nav .model-switch { margin-right: 6px; }
-/* one <select>, two homes: the bar above the collapse width, the drawer below */
-.model-switch.drawer-only { display: none; }
 .create-project { display: flex; gap: 8px; margin-bottom: 18px; align-items: center; }
 .create-project input:nth-child(2) { flex: 1; }
 .project-list { list-style: none; padding: 0; }
@@ -1090,10 +1087,6 @@ kbd {
   .nav-links { display: none; }
   .nav-toggle { display: inline-flex; }
   nav .brand { margin-right: 8px; }
-  /* the model picker is a setting, not an alert — it moves to the drawer so
-     the bar keeps only the two things that demand attention */
-  .model-switch.bar-only { display: none; }
-  .model-switch.drawer-only { display: block; }
 
   .nav-scrim {
     display: block; position: fixed; inset: var(--nav-h) 0 0; z-index: 900;
@@ -1126,10 +1119,6 @@ kbd {
     margin-top: 10px; padding-top: 12px; display: flex; flex-direction: column;
     gap: 12px; border-top: 1px solid var(--border);
   }
-  .drawer-model { display: flex; flex-direction: column; gap: 5px;
-    padding: 0 4px; }
-  .drawer-model .model-switch { width: 100%; padding: 9px 10px;
-    font-size: 14px; }
   .drawer-foot .ghost { min-height: var(--tap); }
   /* the drawer scrolls itself; the page behind it must not */
   body.nav-locked { overflow: hidden; }
