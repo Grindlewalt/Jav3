@@ -100,6 +100,10 @@ write_files:
 runcmd:
   - systemctl disable systemd-networkd-wait-online.service || true
   - systemctl mask systemd-networkd-wait-online.service || true
+  # The genericcloud base ships network tooling we don't want in an
+  # assumed-compromised guest (ssh/scp/nc/socat/tcpdump) — strip it.
+  - apt-get -y -q purge openssh-client socat tcpdump netcat-openbsd netcat-traditional || true
+  - apt-get -y -q autoremove --purge || true
   - systemctl enable jarvis-guest.service
   - touch /etc/jarvis-provisioned
 power_state:
