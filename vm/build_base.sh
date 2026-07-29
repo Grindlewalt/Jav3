@@ -101,9 +101,13 @@ runcmd:
   - systemctl disable systemd-networkd-wait-online.service || true
   - systemctl mask systemd-networkd-wait-online.service || true
   # The genericcloud base ships network tooling we don't want in an
-  # assumed-compromised guest (ssh/scp/nc/socat/tcpdump) — strip it.
-  - apt-get -y -q purge openssh-client socat tcpdump netcat-openbsd netcat-traditional || true
-  - apt-get -y -q autoremove --purge || true
+  # assumed-compromised guest — including a full sshd that trixie's
+  # systemd-ssh-generator will happily bind to AF_VSOCK, our control channel.
+  # dpkg --force-depends, NOT apt: cloud-init hard-depends on ssh-import-id ->
+  # openssh-client, so an apt purge removes cloud-init out from under this
+  # very provisioning run (it died pre-poweroff and the build hung). dpkg
+  # leaves cloud-init installed with an unmet dep record nothing ever reads.
+  - dpkg --purge --force-depends openssh-server openssh-sftp-server openssh-client ssh-import-id socat tcpdump netcat-openbsd || true
   - systemctl enable jarvis-guest.service
   - touch /etc/jarvis-provisioned
 power_state:
