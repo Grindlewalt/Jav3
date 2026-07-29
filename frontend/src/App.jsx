@@ -321,7 +321,9 @@ export default function App() {
       if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return
       el.animate(
         [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
-        { duration: 420, easing: 'cubic-bezier(0.22, 0.9, 0.28, 1)' },
+        // matches the bar's fold: an ease-in-out, not the front-loaded curve
+        // that made both read as a snap followed by a crawl
+        { duration: 420, easing: 'cubic-bezier(0.4, 0, 0.2, 1)' },
       )
     })
   })

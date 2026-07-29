@@ -95,8 +95,11 @@ nav {
   display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;
   padding: 0 18px; height: var(--nav-h); flex-shrink: 0;
   background: var(--bg-soft); border-bottom: 1px solid var(--border);
-  transition: height 0.34s cubic-bezier(0.22, 0.9, 0.28, 1),
-              border-bottom-color 0.34s ease;
+  /* an ease-in-out, deliberately: cubic-bezier(.22,.9,.28,1) leaves the
+     origin at 4x speed and covered three quarters of the fold in the first
+     frame, which is exactly the snap this was meant to remove */
+  transition: height 0.38s cubic-bezier(0.4, 0, 0.2, 1),
+              border-bottom-color 0.38s ease;
 }
 /* railed: the bar folds shut rather than unmounting, so handing the nav back
    slides the page down instead of snapping it */
