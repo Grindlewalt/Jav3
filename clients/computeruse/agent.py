@@ -589,7 +589,10 @@ class Agent:
         # presents these two headers on the upgrade request instead.
         self.cf_id = cf_id
         self.cf_secret = cf_secret
-        self.name = name or platform.node() or "desktop"
+        # platform.node() gives "MacBook-Pro-5.local"; the trailing .local and
+        # the shouting are noise in something the model has to say back
+        self.name = (name or (platform.node() or "desktop")
+                     .removesuffix(".local").lower() or "desktop")
         self.dry_run = dry_run
         self.runner = Runner(dry_run=dry_run)
         self.os = MacOS(self.runner) if sys.platform == "darwin" else Linux(self.runner)
@@ -602,18 +605,44 @@ class Agent:
             else:
                 print(f"! --allow-root {r} is not a directory; ignoring", flush=True)
         self.grants = list(self.roots)
+        self.grant_note = ""
 
     def set_grants(self, roots):
-        """Narrow to the intersection of the server's grants and our ceiling."""
+        """Narrow to the intersection of the server's grants and our ceiling.
+
+        Intersection ONLY — no falling back to the ceiling when nothing matches.
+        The first version did (`kept or self.roots`), which was wrong twice
+        over: it was more permissive than the operator asked for, since grants
+        exist to narrow --allow-root; and it disagreed with the server, which
+        refuses everything when no folder is granted. It also hid mistakes. A
+        grant of "~/Movies" against --allow-root /Users/you/Movies intersects to
+        nothing, and the fallback made the client report the ceiling as if all
+        were well.
+        """
+        self.grant_note = ""
+        sent = [r for r in (roots or [])]
         kept = []
-        for r in roots or []:
+        for r in sent:
             try:
-                p = Path(r).resolve()
+                p = Path(r).expanduser().resolve()
             except OSError:
                 continue
             if any(p == c or c in p.parents for c in self.roots):
                 kept.append(p)
-        self.grants = kept or list(self.roots)
+        self.grants = kept
+        if not self.roots:
+            self.grant_note = ("this client was started with no --allow-root, so "
+                               "nothing on disk is reachable")
+        elif not sent:
+            self.grant_note = ("no folders are granted in Jarvis, so nothing on "
+                               "disk is reachable — add one on the Computer use tab")
+        elif not kept:
+            self.grant_note = (
+                "none of the granted folders (" + ", ".join(sent) + ") is inside "
+                "this client's --allow-root (" + ", ".join(str(r) for r in self.roots)
+                + "), so nothing on disk is reachable. The two have to agree.")
+        if self.grant_note:
+            print(f"! {self.grant_note}", flush=True)
 
     def check_playable(self, path, kind):
         """The client's own containment check. The backend did this too; doing
@@ -749,7 +778,15 @@ class Agent:
     def handle(self, verb, params):
         p = clean_params(verb, params)
         if verb == "status":
+            roots = []
+            for g in self.grants:
+                roots.append({
+                    "path": str(g),
+                    "audio": self._count_media(g, AUDIO_EXT),
+                    "video": self._count_media(g, VIDEO_EXT)})
             return {"ok": True, "platform": self.os.name,
+                    "roots_detail": roots,
+                    "grant_note": getattr(self, "grant_note", ""),
                     "screens": self.os.screens(),
                     "audio_devices": self.os.audio_devices(),
                     "play_devices": self.os.play_devices(),
