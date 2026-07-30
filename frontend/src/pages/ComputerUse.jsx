@@ -5,6 +5,17 @@ import { api } from '../api.js'
 // exist nowhere else: the folder grants (no tool can create one — if the agent
 // could widen its own reach the grant would be decoration) and the pairing
 // token a desktop client needs to connect.
+// Cloudflare's dashboard shows the token as full header lines, so that is what
+// gets pasted. Strip the header name, any wrapping quotes, and stray whitespace
+// rather than letting "CF-Access-Client-Id: abc.access" through as the id.
+function cleanToken(v) {
+  return String(v || '')
+    .replace(/^\s*CF[-_]?Access[-_]?Client[-_]?(Id|Secret)\s*[:=]\s*/i, '')
+    .replace(/^["'`]|["'`]$/g, '')
+    .replace(/\s+/g, '')
+    .trim()
+}
+
 export default function ComputerUse() {
   const [state, setState] = useState(null)
   const [token, setToken] = useState('')
@@ -25,6 +36,7 @@ export default function ComputerUse() {
   const [tm, setTm] = useState({ url: '', cf_id: '', secret_set: false })
   const [tmSecret, setTmSecret] = useState('')
   const [tmTest, setTmTest] = useState(null)
+  const [tmSameToken, setTmSameToken] = useState(false)
   const [cfId, setCfId] = useState('')
   const [cfSecret, setCfSecret] = useState('')
   const [machine, setMachine] = useState('')
@@ -87,7 +99,11 @@ export default function ComputerUse() {
     try {
       setTm(await api('/api/computeruse/tarmac', {
         method: 'PUT',
-        body: JSON.stringify({ url: tm.url, cf_id: tm.cf_id, cf_secret: tmSecret }) }))
+        body: JSON.stringify({
+          url: tm.url,
+          cf_id: tmSameToken ? cfId : tm.cf_id,
+          cf_secret: tmSameToken ? cfSecret : tmSecret,
+        }) }))
       setTmSecret('')
       note('music server saved')
     } catch (err) { setError(err.detail || String(err)) }
@@ -122,10 +138,16 @@ export default function ComputerUse() {
   const curlAuth = behindAccess
     ? ` \\\n  -H 'CF-Access-Client-Id: ${cfId}' \\\n  -H 'CF-Access-Client-Secret: ${cfSecret}'`
     : ''
+  // -o creates the file before the response arrives, so a failed download left
+  // a zero-byte c.zip and "end of central directory signature not found". The
+  // cleanup branch removes it and says what actually went wrong.
   const fetchCmd =
     `mkdir -p ~/jarvis-client && cd ~/jarvis-client\n`
-    + `curl -fsSL '${origin}/api/computeruse/client.zip'${curlAuth} -o c.zip \\\n`
-    + `  && unzip -o c.zip && rm c.zip\n`
+    + `curl -fsSL '${origin}/api/computeruse/client.zip' \\\n`
+    + `  -H 'X-Jarvis-Token: ${tok}'${curlAuth} -o c.zip \\\n`
+    + `  && unzip -oq c.zip && rm -f c.zip \\\n`
+    + `  || { rm -f c.zip; echo 'download failed — reveal the token above, and `
+    + `check the Access policy'; }\n`
     + `python3 -m pip install -r computeruse/requirements.txt`
   const doctorCmd = 'python3 ~/jarvis-client/computeruse/agent.py --selftest'
   // the grants become --allow-root, since the client treats those flags as its
@@ -263,15 +285,35 @@ export default function ComputerUse() {
           <input className="grow" placeholder="https://music.atomos.network"
                  value={tm.url}
                  onChange={(e) => setTm({ ...tm, url: e.target.value })} />
-          <input placeholder="CF-Access-Client-Id" value={tm.cf_id}
-                 onChange={(e) => setTm({ ...tm, cf_id: e.target.value })} />
+          <input placeholder="CF-Access-Client-Id"
+                 value={tmSameToken ? cfId : tm.cf_id} disabled={tmSameToken}
+                 onChange={(e) => setTm({ ...tm, cf_id: cleanToken(e.target.value) })} />
           <input type="password"
                  placeholder={tm.secret_set ? 'secret (stored)' : 'CF-Access-Client-Secret'}
-                 value={tmSecret} onChange={(e) => setTmSecret(e.target.value)} />
+                 value={tmSameToken ? cfSecret : tmSecret} disabled={tmSameToken}
+                 onChange={(e) => setTmSecret(cleanToken(e.target.value))} />
           <button type="submit">Save</button>
           <button type="button" className="ghost" onClick={testTarmac}
                   disabled={!tm.url}>Test</button>
         </form>
+        <label className="cu-check">
+          <input type="checkbox" checked={tmSameToken}
+                 onChange={(e) => setTmSameToken(e.target.checked)} />
+          <span>Use the same service token as Jarvis (typed above)</span>
+        </label>
+        {tmSameToken && !(cfId && cfSecret) && (
+          <p className="warn small">
+            Fill the Cloudflare token into &ldquo;Connect a computer&rdquo; below
+            first — that is where this reads it from.
+          </p>
+        )}
+        {tmSameToken && (
+          <p className="dim small">
+            Same credential, but this is still a different Access application, so
+            it needs its own <strong>Service Auth</strong> policy naming that
+            token. Test will tell you if it does not have one.
+          </p>
+        )}
         {tmTest && (
           <p className={tmTest.ok ? 'badge' : 'error'}>
             {tmTest.testing ? 'asking…'
@@ -328,10 +370,10 @@ export default function ComputerUse() {
               Jarvis is behind Access)</span></span>
             <div className="row">
               <input className="grow" placeholder="<id>.access" value={cfId}
-                     onChange={(e) => setCfId(e.target.value.trim())} />
+                     onChange={(e) => setCfId(cleanToken(e.target.value))} />
               <input className="grow" type="password" placeholder="client secret"
                      value={cfSecret}
-                     onChange={(e) => setCfSecret(e.target.value.trim())} />
+                     onChange={(e) => setCfSecret(cleanToken(e.target.value))} />
             </div>
             <span className="dim small">
               Held in this page only — not sent to Jarvis, not saved, gone when

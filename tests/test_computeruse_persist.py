@@ -304,3 +304,26 @@ def test_the_client_zip_carries_source_and_no_secrets():
     # is expected and says nothing about a credential being shipped.
     assert not any(n.endswith(".json") for n in names), names
     assert all(n.rsplit(".", 1)[-1] in ("py", "txt", "md") for n in names), names
+
+
+def test_the_client_download_accepts_the_pairing_token():
+    """It is fetched by curl on the machine being set up, which has no browser
+    session. Behind require_user it 401'd every time — and because curl had
+    already created the output file, the operator was left with a zero-byte
+    c.zip and "end of central directory signature not found"."""
+    import backend.computeruse_api as api
+    routes = {r.path: r for r in api.ws_router.routes}
+    assert "/api/computeruse/client.zip" in routes, (
+        "the download must be on the router WITHOUT the session dependency")
+    # and it must not be on the session-gated router
+    assert "/api/computeruse/client.zip" not in {
+        r.path for r in api.router.routes}
+
+
+def test_the_session_gated_router_still_guards_the_grants():
+    """Moving one route off the dependency must not have moved the others."""
+    import backend.computeruse_api as api
+    gated = {r.path for r in api.router.routes}
+    for p in ("/api/computeruse/grants", "/api/computeruse/token",
+              "/api/computeruse/tarmac", "/api/computeruse/status"):
+        assert p in gated, p

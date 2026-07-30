@@ -18,12 +18,13 @@ import time
 import uuid
 import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (APIRouter, Depends, HTTPException, Request, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import computeruse as cu, security, tarmac
-from .auth import require_user
+from .auth import COOKIE_NAME, require_user, user_from_token
 from .config import settings
 from .db import get_db
 
@@ -135,14 +136,27 @@ async def tarmac_test():
         return {"ok": False, "error": str(e)}
 
 
-@router.get("/client.zip")
-async def client_zip():
+@ws_router.get("/client.zip")
+async def client_zip(request: Request, token: str | None = None):
     """The client, zipped, so a machine that has never seen this repo can get it.
 
-    Source only — the .py files, requirements and README. No config and no
-    token: the operator supplies those on the command line, and a download
-    anyone with a session could fetch must not carry a credential.
+    NOT behind the session dependency: it is fetched by curl from a terminal on
+    the machine being set up, which has no browser session. It sat behind
+    require_user at first, so every download 401'd — and because curl had
+    already created the output file, what the operator was left with was a
+    zero-byte c.zip and "end of central directory signature not found".
+
+    The pairing token authenticates it instead, by header or query. That token is
+    in the set-up command anyway, and this only ever returns source: the .py
+    files, requirements and README. No config, so no credential.
     """
+    presented = (request.headers.get("x-jarvis-token") or token or "")
+    if user_from_token(request.cookies.get(COOKIE_NAME)) is None:
+        if not await cu.check_token(presented):
+            raise HTTPException(
+                status_code=401,
+                detail="pass the pairing token as X-Jarvis-Token (the Computer "
+                       "use tab builds the command for you)")
     src = settings.base_dir / "clients" / "computeruse"
     if not src.is_dir():
         raise HTTPException(status_code=500, detail="client source is missing")

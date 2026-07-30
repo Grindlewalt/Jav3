@@ -1825,3 +1825,6 @@ kbd {
   font-size: 13px; }
 .cu-setup-fields label > span:first-child { color: var(--text); font-weight: 500; }
 .cu-setup-fields .row { margin: 0; }
+.cu-check { display: inline-flex; align-items: center; gap: 8px; margin: 8px 0 2px;
+  font-size: 13px; cursor: pointer; }
+.cu-check input { accent-color: var(--accent); }
