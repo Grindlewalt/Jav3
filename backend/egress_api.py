@@ -9,11 +9,11 @@ Both expose an SSE `/stream` fed from the in-process bus, mirroring the Runs tab
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import bus, egress, security
+from . import bus, egress, secctx, security
 from .auth import require_user
 from .db import get_db
 
@@ -174,6 +174,21 @@ async def security_events(unacknowledged: bool = False, limit: int = 100):
     try:
         return {"events": await security.list_events(
             db, unacknowledged_only=unacknowledged, limit=limit)}
+    finally:
+        await db.close()
+
+
+@security_router.get("/events/{eid}/context")
+async def event_context(eid: int):
+    """The evidence board for one alert — the flagged code in place, the diff,
+    the directory, the traffic. Reachable for acknowledged events too, so a
+    toast still opens something days later."""
+    db = await get_db()
+    try:
+        ev = await security.get_event(db, eid)
+        if ev is None:
+            raise HTTPException(status_code=404, detail="no such event")
+        return await secctx.build_board(db, ev)
     finally:
         await db.close()
 

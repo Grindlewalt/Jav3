@@ -15,6 +15,24 @@ from . import bus
 
 SECURITY_CHAN = "security"       # bus channel the bell + Review Center subscribe to
 
+_COLUMNS = ("id, kind, severity, project_slug, summary, detail, acknowledged, "
+            "created_at, acknowledged_at, triage_verdict, triage_reason")
+
+
+def _row(r) -> dict:
+    """A row with its detail decoded. Undecodable JSON is handed back as text
+    rather than raised: one malformed blob must not take down the whole queue."""
+    d = dict(r)
+    raw = d.get("detail")
+    if raw:
+        try:
+            d["detail"] = json.loads(raw)
+        except ValueError:
+            d["detail"] = {"unparsed": str(raw)[:2000]}
+    else:
+        d["detail"] = None
+    return d
+
 
 async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
                       severity: str = "warn", project: str | None = None,
@@ -34,19 +52,21 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
 
 async def list_events(db: aiosqlite.Connection, *, unacknowledged_only: bool = False,
                       limit: int = 100) -> list[dict]:
-    q = ("SELECT id, kind, severity, project_slug, summary, detail, acknowledged, "
-         "created_at, acknowledged_at, triage_verdict, triage_reason "
-         "FROM security_events")
+    q = f"SELECT {_COLUMNS} FROM security_events"
     if unacknowledged_only:
         q += " WHERE acknowledged = 0"
     q += " ORDER BY id DESC LIMIT ?"
     async with db.execute(q, (limit,)) as cur:
-        out = []
-        for r in await cur.fetchall():
-            d = dict(r)
-            d["detail"] = json.loads(d["detail"]) if d["detail"] else None
-            out.append(d)
-        return out
+        return [_row(r) for r in await cur.fetchall()]
+
+
+async def get_event(db: aiosqlite.Connection, event_id: int) -> dict | None:
+    """One event by id, acknowledged or not — the context board is reachable
+    from a toast long after the row left the unacknowledged queue."""
+    async with db.execute(f"SELECT {_COLUMNS} FROM security_events WHERE id = ?",
+                          (event_id,)) as cur:
+        r = await cur.fetchone()
+    return _row(r) if r is not None else None
 
 
 async def acknowledge(db: aiosqlite.Connection, event_id: int) -> dict:

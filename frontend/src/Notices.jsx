@@ -77,8 +77,12 @@ export function useNotices(enabled) {
       seen.current.add(ev.id)
       setCount((c) => c + 1)  // the next poll re-syncs the real total
       const crit = ['critical', 'crit'].includes(String(ev.severity || '').toLowerCase())
-      push({ sev: crit ? 'crit' : 'warn',
-             title: `security · ${ev.kind || 'alert'}`, body: ev.summary || '' })
+      // eventId deep-links the card to that alert's evidence board, so the one
+      // click a draining toast gets lands on the detail rather than the queue
+      push({ sev: crit ? 'crit' : 'warn', eventId: ev.id,
+             title: `security · ${ev.kind || 'alert'}`
+                    + (ev.project_slug || ev.project ? ` · ${ev.project_slug || ev.project}` : ''),
+             body: ev.summary || '' })
     })
   }, [enabled, push])
 
@@ -90,12 +94,17 @@ export default function Notices({ toasts, dismiss, clear }) {
   if (toasts.length === 0) return null
   const shown = toasts.slice(-3)
   const extra = toasts.length - shown.length
-  const open = (id) => { dismiss(id); navigate('/review') }
+  const open = (t) => {
+    dismiss(t.id)
+    navigate('/review', t.eventId ? { state: { openEvent: t.eventId } } : undefined)
+  }
   return (
     <div className="notices" role="status" aria-live="polite">
       {shown.map((t) => (
         <button key={t.id} type="button" className={`notice ${t.sev}`}
-                title="open the Review Center" onClick={() => open(t.id)}>
+                title={t.eventId ? 'open the evidence for this alert'
+                                 : 'open the Review Center'}
+                onClick={() => open(t)}>
           <span className="notice-head">
             <span className="notice-dot" aria-hidden="true" />
             <span className="notice-title ellipsis">{t.title}</span>

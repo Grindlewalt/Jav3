@@ -13,6 +13,11 @@ Triggers the operator chose (large-unrelated-diff deliberately dropped as noise)
   logging_removed   — fewer logging calls than before (evasion)
   assertion_removed — fewer assertions than before (test tampering)
 
+Each flag carries `lines`: the 1-based line numbers in the NEW text that
+tripped it, so the Review Center can show the operator the actual code instead
+of a bag of matched substrings (see `secctx.py`). Removal triggers have no
+location — nothing was added to point at — so they omit the key.
+
 `scan()` is pure and fully unit-testable.
 """
 import math
@@ -50,24 +55,39 @@ def _shannon(s: str) -> float:
     return -sum((k / n) * math.log2(k / n) for k in freq.values())
 
 
-def _added_lines(old: str, new: str) -> list[str]:
+def _added_lines(old: str, new: str) -> list[tuple[int, str]]:
+    """(1-based line number in `new`, text) for every line not already in old."""
     old_set = {ln.strip() for ln in old.splitlines()}
-    return [ln for ln in new.splitlines() if ln.strip() and ln.strip() not in old_set]
+    return [(i, ln) for i, ln in enumerate(new.splitlines(), 1)
+            if ln.strip() and ln.strip() not in old_set]
 
 
-def _imports(lines: list[str]) -> set[str]:
-    mods: set[str] = set()
-    for ln in lines:
+def _imports(lines: list[tuple[int, str]]) -> dict[str, list[int]]:
+    """module -> the added line numbers that import it."""
+    mods: dict[str, list[int]] = {}
+    for n, ln in lines:
         m = _PY_IMPORT.match(ln)
         if m:
-            mods.add((m.group(1) or m.group(2)).split(".")[0])
+            mods.setdefault((m.group(1) or m.group(2)).split(".")[0], []).append(n)
         for jm in _JS_IMPORT.finditer(ln):
-            mods.add(jm.group(1) or jm.group(2))
-    return {m for m in mods if m}
+            mods.setdefault(jm.group(1) or jm.group(2), []).append(n)
+    return {m: ns for m, ns in mods.items() if m}
 
 
 def _count(rx: re.Pattern, text: str) -> int:
     return len(rx.findall(text))
+
+
+# a flag points at a bounded number of lines; the board shows a snippet per
+# line and a hundred of them is a wall, not evidence
+_MAX_LINES = 40
+
+
+def _lines(groups) -> list[int]:
+    out: set[int] = set()
+    for g in groups:
+        out.update(g)
+    return sorted(out)[:_MAX_LINES]
 
 
 def scan(old_text: str, new_text: str, path: str) -> list[dict]:
@@ -77,22 +97,31 @@ def scan(old_text: str, new_text: str, path: str) -> list[dict]:
     if ext not in _CODE_EXT and not path.endswith("Dockerfile"):
         return []
     added = _added_lines(old_text, new_text)
-    added_text = "\n".join(added)
     flags: list[dict] = []
 
     new_mods = _imports(added)
     if new_mods:
-        flags.append({"trigger": "new_import", "detail": {"modules": sorted(new_mods)}})
+        flags.append({"trigger": "new_import",
+                      "detail": {"modules": sorted(new_mods),
+                                 "lines": _lines(new_mods.values())}})
 
-    net = sorted({m.group(0) for m in _NET.finditer(added_text)})
+    net: dict[str, list[int]] = {}
+    for n, ln in added:
+        for m in _NET.finditer(ln):
+            net.setdefault(m.group(0), []).append(n)
     if net:
-        flags.append({"trigger": "network_call", "detail": {"matches": net[:8]}})
+        flags.append({"trigger": "network_call",
+                      "detail": {"matches": sorted(net)[:8],
+                                 "lines": _lines(net.values())}})
 
-    blobs = [b for b in _B64.findall(added_text) if _shannon(b) >= 4.0]
-    blobs += _HEX.findall(added_text)
+    blobs: list[tuple[int, str]] = []
+    for n, ln in added:
+        blobs += [(n, b) for b in _B64.findall(ln) if _shannon(b) >= 4.0]
+        blobs += [(n, h) for h in _HEX.findall(ln)]
     if blobs:
         flags.append({"trigger": "high_entropy",
-                      "detail": {"count": len(blobs), "sample": blobs[0][:24] + "…"}})
+                      "detail": {"count": len(blobs), "sample": blobs[0][1][:24] + "…",
+                                 "lines": _lines([[n for n, _ in blobs]])}})
 
     if _count(_LOG, old_text) > _count(_LOG, new_text):
         flags.append({"trigger": "logging_removed",
@@ -102,3 +131,33 @@ def scan(old_text: str, new_text: str, path: str) -> list[dict]:
         flags.append({"trigger": "assertion_removed",
                       "detail": {"before": _count(_ASSERT, old_text), "after": _count(_ASSERT, new_text)}})
     return flags
+
+
+def locate(text: str, trigger: str, detail: dict) -> list[int]:
+    """The 1-based lines of `text` that would trip `trigger` now.
+
+    `scan` records line numbers at write time, but the file may have been
+    rewritten since (or the event may pre-date the recording), and stale numbers
+    point at bytes that are no longer there. The review board re-finds the lines
+    with this; the patterns live here so there is one definition of what each
+    trigger means.
+    """
+    lines = text.splitlines()
+    hits: set[int] = set()
+    if trigger == "new_import":
+        want = {str(m) for m in (detail.get("modules") or [])}
+        for i, ln in enumerate(lines, 1):
+            m = _PY_IMPORT.match(ln)
+            if m and (m.group(1) or m.group(2)).split(".")[0] in want:
+                hits.add(i)
+                continue
+            if any((jm.group(1) or jm.group(2)) in want
+                   for jm in _JS_IMPORT.finditer(ln)):
+                hits.add(i)
+    elif trigger == "network_call":
+        hits = {i for i, ln in enumerate(lines, 1) if _NET.search(ln)}
+    elif trigger == "high_entropy":
+        for i, ln in enumerate(lines, 1):
+            if _HEX.search(ln) or any(_shannon(b) >= 4.0 for b in _B64.findall(ln)):
+                hits.add(i)
+    return sorted(hits)[:_MAX_LINES]

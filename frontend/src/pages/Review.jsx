@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
+import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
@@ -12,6 +14,11 @@ import TriagePanel from '../TriagePanel.jsx'
 // alert summaries/details — is UNTRUSTED (it comes from the agent, from the
 // guest, or from scanned/egress data). All of it is rendered as plain text
 // nodes; nothing here goes through <Md>.
+//
+// An alert row is a headline, not the evidence: "Inspect" opens the
+// SecurityBoard, which is where the flagged code, the diff, the directory and
+// the traffic live. A security toast deep-links straight into it via router
+// state (`openEvent`), so a card that drains away is still recoverable.
 
 const SEV = { info: 'info', warn: 'warn', warning: 'warn', critical: 'crit', crit: 'crit' }
 const sevClass = (s) => SEV[String(s || 'info').toLowerCase()] || 'info'
@@ -25,6 +32,16 @@ export function ReviewQueue({ slug }) {
   const [pending, setPending] = useState([])                 // egress host approvals
   const [alerts, setAlerts] = useState([])                   // unacknowledged security events
   const [busy, setBusy] = useState(false)
+  const [board, setBoard] = useState(null)   // {id, seed} — the open evidence board
+  const loc = useLocation()
+
+  // arriving from a security toast: open that event's board straight away.
+  // Keyed on loc.key as well as the id so clicking a second toast for the SAME
+  // alert re-opens it instead of looking dead.
+  useEffect(() => {
+    const id = loc.state?.openEvent
+    if (id) setBoard({ id, seed: null })
+  }, [loc.key]) // eslint-disable-line
 
   // which projects to cover: the one slug, or all of them
   useEffect(() => {
@@ -228,33 +245,54 @@ export function ReviewQueue({ slug }) {
               </div>
             )}
           </div>
-          {alerts.map((a) => <AlertRow key={a.id} a={a} onAck={ackAlert} />)}
+          {alerts.map((a) => (
+            <AlertRow key={a.id} a={a} onAck={ackAlert}
+                      onOpen={() => setBoard({ id: a.id, seed: a })} />
+          ))}
         </section>
+      )}
+
+      {board && (
+        <SecurityBoard eventId={board.id} seed={board.seed}
+                       onClose={() => setBoard(null)} onAck={ackAlert} />
       )}
     </div>
   )
 }
 
-function AlertRow({ a, onAck }) {
-  const [open, setOpen] = useState(false)
+// The one thing worth seeing without opening the board: WHAT the alert is
+// about. A queue of "write flag: new_import" rows is unscannable; a queue of
+// paths and hostnames is.
+function subjectOf(d) {
+  if (!d || typeof d !== 'object') return null
+  return d.path || d.host || d.username || d.peer || null
+}
+
+function AlertRow({ a, onAck, onOpen }) {
+  const sev = sevClass(a.severity)
+  const subject = subjectOf(a.detail)
   return (
-    <div className={`sbx-row sev-${sevClass(a.severity)}`}>
+    <div className={`sbx-row sev-${sev}`}>
       <div className="grow" style={{ minWidth: 0 }}>
         <div className="sbx-verdict-top" style={{ marginBottom: 2 }}>
-          <span className={`tag sev-${sevClass(a.severity)}-tag`}>{a.severity}</span>
+          <span className={`tag sev-${sev}-tag`}>{a.severity}</span>
           <span className="mono small">{a.kind}</span>
           {a.project_slug && <span className="tag">{a.project_slug}</span>}
           {a.triage_verdict === 'flag' && (
             <span className="tag triage-flag" title={a.triage_reason}>⚑ {a.triage_reason}</span>)}
           <span className="dim small">{ts(a.created_at)}</span>
         </div>
-        <div className="rev-alert-summary">{a.summary}</div>
-        {open && a.detail && <pre className="log-pre rev-alert-detail">{
-          typeof a.detail === 'string' ? a.detail : JSON.stringify(a.detail, null, 2)}</pre>}
+        {/* the whole summary is the affordance — clicking it opens the board */}
+        <button type="button" className="rev-alert-open" onClick={onOpen}
+                title="open the evidence board">
+          <span className="rev-alert-summary">{a.summary}</span>
+          {subject && <span className="mono small rev-alert-subject">{subject}</span>}
+        </button>
       </div>
       <div className="sbx-right">
-        {a.detail && <button className="ghost" onClick={() => setOpen((o) => !o)}>
-          {open ? 'less' : 'detail'}</button>}
+        <button className="ghost" onClick={onOpen}
+                title="the flagged code, the diff, the directory, the traffic">
+          Inspect</button>
         <button className="ghost" onClick={() => onAck(a.id)}>Acknowledge</button>
       </div>
     </div>

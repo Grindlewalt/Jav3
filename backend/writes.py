@@ -19,7 +19,7 @@ through apply_write here, so guest-authored files get the same scan + refusal.
 """
 from pathlib import Path
 
-from . import diffgate
+from . import diffgate, runtime
 from . import secrets as secrets_mod
 from .config import settings
 from .fsutil import safe_join
@@ -63,7 +63,8 @@ async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
     if leaks:
         # 'critical' is the schema's top severity (db.py: info|warn|critical);
         # the old 'alert' wasn't in the Review Center's map and styled as info
-        await _raise_flag(slug, rel, "secret_leak", {"secrets": leaks},
+        await _raise_flag(slug, rel, "secret_leak",
+                          {"secrets": leaks, "bytes": len(content)},
                           severity="critical", refused=True)
         raise SecretLeakError(leaks)
 
@@ -81,7 +82,10 @@ async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
     dest.chmod(0o644)  # agent-written bytes never carry exec bits
 
     for f in flags:
-        await _raise_flag(slug, rel, f["trigger"], f["detail"])
+        await _raise_flag(slug, rel, f["trigger"],
+                          {**f["detail"], "bytes": len(content),
+                           "line_count": new_text.count("\n") + 1,
+                           "new_file": not old_text})
     return [f["trigger"] for f in flags]
 
 
@@ -89,7 +93,11 @@ async def _raise_flag(slug: str, rel: str, trigger: str, detail: dict, *,
                       severity: str = "warn", refused: bool = False) -> None:
     """One deduped security event per (project, path, trigger): an agent
     iterating on a flagged file must not drown the bell. Best-effort — an
-    alerting failure never fails the write it annotates."""
+    alerting failure never fails the write it annotates.
+
+    The detail carries the conversation that made the write, so the Review
+    Center's board can name the run that did this instead of leaving the
+    operator to guess which of several concurrent agents it was."""
     try:
         from . import security
         from .db import get_db
@@ -105,7 +113,9 @@ async def _raise_flag(slug: str, rel: str, trigger: str, detail: dict, *,
                     return
             await security.raise_event(
                 db, kind="write_flag", severity=severity, project=slug,
-                summary=summary, detail={"path": rel, "trigger": trigger, **detail})
+                summary=summary,
+                detail={"path": rel, "trigger": trigger, "refused": refused,
+                        "conversation_id": runtime.conversation_id.get(), **detail})
         finally:
             await db.close()
     except Exception:  # noqa: BLE001 — advisory only, never breaks the write
