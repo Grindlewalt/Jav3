@@ -22,6 +22,9 @@ export default function ComputerUse() {
   // component and nowhere else: not sent to the backend, not in localStorage, and
   // gone when the page reloads. It exists only to paste into the command below —
   // that is why the field is here rather than a stored setting.
+  const [tm, setTm] = useState({ url: '', cf_id: '', secret_set: false })
+  const [tmSecret, setTmSecret] = useState('')
+  const [tmTest, setTmTest] = useState(null)
   const [cfId, setCfId] = useState('')
   const [cfSecret, setCfSecret] = useState('')
   const [machine, setMachine] = useState('')
@@ -33,6 +36,7 @@ export default function ComputerUse() {
     refresh()
     api('/api/computeruse/token').then((r) => setToken(r.token)).catch(() => {})
     api('/api/computeruse/jellyfin').then(setJf).catch(() => {})
+    api('/api/computeruse/tarmac').then(setTm).catch(() => {})
     const t = setInterval(refresh, 8000)
     return () => clearInterval(t)
   }, [])
@@ -75,6 +79,25 @@ export default function ComputerUse() {
       setJfKey('')
       note('Jellyfin settings saved')
     } catch (err) { setError(err.detail || String(err)) }
+  }
+
+  async function saveTarmac(e) {
+    e.preventDefault()
+    setError(null); setTmTest(null)
+    try {
+      setTm(await api('/api/computeruse/tarmac', {
+        method: 'PUT',
+        body: JSON.stringify({ url: tm.url, cf_id: tm.cf_id, cf_secret: tmSecret }) }))
+      setTmSecret('')
+      note('music server saved')
+    } catch (err) { setError(err.detail || String(err)) }
+  }
+
+  async function testTarmac() {
+    setTmTest({ testing: true })
+    try {
+      setTmTest(await api('/api/computeruse/tarmac/test', { method: 'POST' }))
+    } catch (err) { setTmTest({ ok: false, error: err.detail || String(err) }) }
   }
 
   async function rotate() {
@@ -222,6 +245,42 @@ export default function ComputerUse() {
                  onChange={(e) => setLabel(e.target.value)} />
           <button type="submit" disabled={!root.trim()}>Grant</button>
         </form>
+      </section>
+
+      <section className="panel">
+        <h2>Music server (TARMAC)</h2>
+        <p className="dim small">
+          The operator's own library, at <code>music.atomos.network</code>.
+          Jarvis talks to it over HTTP and plays on <em>its</em> players — the
+          music app open on a phone or desktop — so nothing streams through a
+          computer-use client and no credential reaches a media player.
+          <br />
+          Its Cloudflare Access application is <strong>separate from this
+          one</strong>, so it needs its own Service Auth policy naming the
+          service token, even if the same token works for Jarvis.
+        </p>
+        <form className="row" onSubmit={saveTarmac}>
+          <input className="grow" placeholder="https://music.atomos.network"
+                 value={tm.url}
+                 onChange={(e) => setTm({ ...tm, url: e.target.value })} />
+          <input placeholder="CF-Access-Client-Id" value={tm.cf_id}
+                 onChange={(e) => setTm({ ...tm, cf_id: e.target.value })} />
+          <input type="password"
+                 placeholder={tm.secret_set ? 'secret (stored)' : 'CF-Access-Client-Secret'}
+                 value={tmSecret} onChange={(e) => setTmSecret(e.target.value)} />
+          <button type="submit">Save</button>
+          <button type="button" className="ghost" onClick={testTarmac}
+                  disabled={!tm.url}>Test</button>
+        </form>
+        {tmTest && (
+          <p className={tmTest.ok ? 'badge' : 'error'}>
+            {tmTest.testing ? 'asking…'
+              : tmTest.ok
+                ? `reachable — ${tmTest.status?.tracks ?? '?'} tracks, `
+                  + `${tmTest.status?.players_connected ?? 0} player(s) open`
+                : tmTest.error}
+          </p>
+        )}
       </section>
 
       <section className="panel">

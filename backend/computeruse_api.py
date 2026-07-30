@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import computeruse as cu, security
+from . import computeruse as cu, security, tarmac
 from .auth import require_user
 from .config import settings
 from .db import get_db
@@ -46,6 +46,12 @@ class TokenBody(BaseModel):
 class JellyfinBody(BaseModel):
     url: str = ""
     key: str = ""      # blank leaves the stored key alone
+
+
+class TarmacBody(BaseModel):
+    url: str = ""
+    cf_id: str = ""
+    cf_secret: str = ""    # blank leaves the stored pair alone
 
 
 @router.get("/status")
@@ -100,6 +106,33 @@ async def jellyfin_put(body: JellyfinBody):
         raise HTTPException(status_code=400, detail=str(e))
     url, key = await cu.jellyfin_config()
     return {"url": url, "key_set": bool(key)}
+
+
+@router.get("/tarmac")
+async def tarmac_get():
+    url, cf_id, cf_secret = await tarmac.get_config()
+    # the secret never leaves the host; the tab learns only that one is set
+    return {"url": url, "cf_id": cf_id, "secret_set": bool(cf_secret)}
+
+
+@router.put("/tarmac")
+async def tarmac_put(body: TarmacBody):
+    try:
+        await tarmac.set_config(body.url, body.cf_id, body.cf_secret)
+    except tarmac.TarmacError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    url, cf_id, cf_secret = await tarmac.get_config()
+    return {"url": url, "cf_id": cf_id, "secret_set": bool(cf_secret)}
+
+
+@router.post("/tarmac/test")
+async def tarmac_test():
+    """Ask the music server for its status, so the operator finds out here
+    rather than by watching a chat turn fail."""
+    try:
+        return {"ok": True, "status": await tarmac.status()}
+    except tarmac.TarmacError as e:
+        return {"ok": False, "error": str(e)}
 
 
 @router.get("/client.zip")
