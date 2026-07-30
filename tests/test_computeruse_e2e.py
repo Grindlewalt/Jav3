@@ -195,7 +195,7 @@ async def test_tools_say_so_when_nothing_is_connected():
 
 @pytest.mark.asyncio
 async def test_library_lists_folders_with_counts_and_files(wired, monkeypatch):
-    """The agent could only search, so 'what films are there' had no answer."""
+    """Walked on the client, because the Jarvis host cannot see that disk."""
     music = wired["music"]
     (music / "Action").mkdir()
     (music / "Action" / "Heat.mkv").write_bytes(b"\0")
@@ -215,9 +215,13 @@ async def test_library_lists_folders_with_counts_and_files(wired, monkeypatch):
 @pytest.mark.asyncio
 async def test_library_refuses_a_folder_outside_the_grants(wired):
     from tools.computer_library.handler import run
-    for bad in ("/etc", "..", "../..", str(wired["outside"].parent)):
+    for bad in ("/etc", str(wired["outside"].parent)):
         out = await run(folder=bad)
-        assert "not a granted folder" in out, bad
+        assert "error" in out.lower(), bad
+    # '..' is refused by the contract before it reaches the filesystem
+    for bad in ("..", "../.."):
+        out = await run(folder=bad)
+        assert "error" in out.lower(), bad
 
 
 @pytest.mark.asyncio
@@ -310,3 +314,68 @@ async def test_but_a_known_list_still_refuses_an_unknown_device(wired):
     from tools.computer_play.handler import run
     out = await run(query="film2", kind="video", device="pulse/invented")
     assert out.startswith("error") and "pulse/real" in out
+
+
+# --- the host/client filesystem split ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_playing_a_path_that_exists_only_on_the_client(tmp_path, monkeypatch):
+    """The bug this whole split fixes.
+
+    The Jarvis host used to resolve media paths against ITS disk, so a grant for
+    /Users/you/Movies could not even be created (is_dir() on the Pi) and nothing
+    on a laptop was ever playable. The host's check is lexical now; the client
+    checks the real file.
+    """
+    # a "remote" root the host cannot see, standing in for /Users/you/Movies
+    remote = tmp_path / "Users" / "you" / "Movies"
+    remote.mkdir(parents=True)
+    (remote / "Heat.mkv").write_bytes(b"\0")
+
+    async def grants(db=None):
+        return [cu.Grant(1, str(remote), "mac films")]
+    monkeypatch.setattr(cu, "list_grants", grants)
+
+    mod = _load_client()
+    agent = mod.Agent("http://x", "t", [str(remote)], "mac", dry_run=True)
+    agent.runner.bin["mpv"] = "/usr/bin/mpv"
+    calls = []
+    agent.runner.run = lambda name, *a, **k: calls.append([name, *a]) or ""
+
+    sent = []
+
+    async def send(raw):
+        msg = json.loads(raw)
+        sent.append(msg)
+        try:
+            reply = {"id": msg["id"], "ok": True,
+                     "result": agent.handle(msg["verb"], msg["params"])}
+        except Exception as e:
+            reply = {"id": msg["id"], "ok": False, "error": str(e)}
+        cu.resolve_result("mac", msg["id"], reply)
+
+    cu.register(cu.Client(id="mac", name="mac", platform="darwin", send=send))
+    try:
+        from tools.computer_library.handler import run as lib
+        out = await lib(kind="video")
+        assert "Heat.mkv" in out, out
+
+        from tools.computer_play.handler import run as play
+        out = await play(query="heat", kind="video")
+        assert "playing" in out, out
+        assert str(remote / "Heat.mkv") in calls[-1]
+    finally:
+        cu.unregister("mac")
+
+
+@pytest.mark.asyncio
+async def test_a_mac_style_grant_can_be_created(monkeypatch, tmp_path):
+    """add_grant used to require the directory to exist on the Jarvis host, so
+    every /Users/... grant was rejected outright."""
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "t.db", raising=False)
+    await db_mod.init_db()
+    g = await cu.add_grant("/Users/grant/Movies", "mac films")
+    assert g.root == "/Users/grant/Movies"
+    assert not Path(g.root).exists(), "the point is it is not on this host"
+    await cu.remove_grant(g.id)

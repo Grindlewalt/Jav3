@@ -25,15 +25,23 @@ async def run(query: str = "", path: str = "", kind: str = "audio",
 
     if path:
         try:
-            params["path"] = await cu.resolve_local(path, kind)
+            # lexical containment only; the client checks the real file against
+            # its own roots, because only the client can see that disk
+            params["path"] = await cu.path_within_grants(path)
             title = Path(params["path"]).stem
         except cu.VerbError as e:
             return f"error: {e}"
     else:
-        # granted folders first — local files are free and always available
+        # search the operator's machine, not this host
         hits = []
         if source in ("auto", "local"):
-            hits = await cu.search_local(query, kind, limit=MAX_SHOWN + 1)
+            try:
+                r = await cu.dispatch(
+                    "find", {"query": query, "kind": kind,
+                             "limit": MAX_SHOWN + 1}, client or None, timeout=30)
+                hits = (r.get("result") or {}).get("hits", []) if r.get("ok") else []
+            except cu.VerbError as e:
+                return f"error: {e}"
         if len(hits) > 1:
             listing = "\n".join(f"  {h}" for h in hits[:MAX_SHOWN])
             more = "" if len(hits) <= MAX_SHOWN else f"\n  ... and more"

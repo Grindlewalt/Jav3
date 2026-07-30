@@ -111,6 +111,14 @@ def _v_path(value):
     return value
 
 
+def _v_folder(value):
+    if not isinstance(value, str) or "\x00" in value or len(value) > 4096:
+        raise Refused("bad folder")
+    if any(part == ".." for part in value.replace("\\", "/").split("/")):
+        raise Refused("'..' is not allowed in a folder name")
+    return value
+
+
 def _v_int(lo, hi):
     def check(value):
         if isinstance(value, bool) or not isinstance(value, int):
@@ -141,6 +149,13 @@ VERBS = {
                       "title": (_v_text, False), "screen": (_v_int(0, 15), False),
                       "device": (_v_device, False), "volume": (_v_int(0, 100), False)},
     "stop_playback": {},
+    # answered from THIS machine's disk: the server cannot see it
+    "list":          {"folder": (_v_folder, False),
+                      "kind": (_v_enum(("both", "audio", "video")), False),
+                      "limit": (_v_int(1, 300), False)},
+    "find":          {"query": (_v_text, True),
+                      "kind": (_v_enum(("both", "audio", "video")), False),
+                      "limit": (_v_int(1, 100), False)},
 }
 
 
@@ -613,6 +628,124 @@ class Agent:
             raise Refused(f"{real.suffix or 'no extension'} is not a {kind} type")
         return str(real)
 
+    # -- library, over this machine's own disk -------------------------------
+    #
+    # This lived on the Jarvis host until it turned out the host cannot see the
+    # operator's Movies folder. Every path here is checked against self.grants,
+    # which is already the intersection of the server's grants and --allow-root.
+
+    def _exts(self, kind):
+        return {"audio": AUDIO_EXT, "video": VIDEO_EXT}.get(
+            kind, AUDIO_EXT | VIDEO_EXT)
+
+    def _inside_grants(self, path):
+        real = Path(path).expanduser().resolve()
+        if not any(real == g or g in real.parents for g in self.grants):
+            raise Refused(
+                f"{real} is outside every allowed folder. Allowed: "
+                + (", ".join(str(g) for g in self.grants) or "none"))
+        return real
+
+    def _count_media(self, base, exts, cap=5000):
+        n, stack = 0, [base]
+        while stack and n < cap:
+            try:
+                for e in os.scandir(stack.pop()):
+                    if e.name.startswith("."):
+                        continue
+                    try:
+                        if e.is_dir():
+                            stack.append(e.path)
+                        elif Path(e.name).suffix.lower() in exts:
+                            n += 1
+                            if n >= cap:
+                                break
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+        return n
+
+    def do_list(self, folder=None, kind="both", limit=60):
+        if not self.grants:
+            return {"ok": True, "text":
+                    "no folders are allowed on this machine — the client was "
+                    "started without --allow-root, or the granted folders are "
+                    "outside it"}
+        exts = self._exts(kind)
+        if folder:
+            cand = Path(folder).expanduser()
+            tries = [cand] if cand.is_absolute() else [g / folder for g in self.grants]
+            base = None
+            for t in tries:
+                try:
+                    real = t.resolve()
+                except OSError:
+                    continue
+                if real.is_dir() and any(real == g or g in real.parents
+                                         for g in self.grants):
+                    base = real
+                    break
+            if base is None:
+                raise Refused(
+                    f"'{folder}' is not a folder inside an allowed one. Allowed: "
+                    + ", ".join(str(g) for g in self.grants))
+            bases = [base]
+        else:
+            bases = list(self.grants)
+
+        out = []
+        for base in bases:
+            subdirs, files = [], []
+            try:
+                entries = sorted(os.scandir(base), key=lambda e: e.name.lower())
+            except OSError as e:
+                out.append(f"{base}: cannot read ({e.strerror})")
+                continue
+            for e in entries:
+                if e.name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir():
+                        subdirs.append((e.name, self._count_media(e.path, exts)))
+                    elif Path(e.name).suffix.lower() in exts:
+                        files.append(e.name)
+                except OSError:
+                    continue
+            out.append(str(base))
+            for name, n in subdirs:
+                out.append(f"  {name}/  ({n} file{'s' if n != 1 else ''})"
+                           if n else f"  {name}/  (nothing playable)")
+            out.extend(f"  {f}" for f in files[:limit])
+            if len(files) > limit:
+                out.append(f"  ... and {len(files) - limit} more here")
+            if not subdirs and not files:
+                out.append("  (empty)")
+        return {"ok": True, "text": "\n".join(out)}
+
+    def do_find(self, query, kind="both", limit=40):
+        words = [w for w in (query or "").lower().split() if w]
+        if not words:
+            raise Refused("empty query")
+        exts = self._exts(kind)
+        hits = []
+        for g in self.grants:
+            try:
+                for dirpath, dirnames, filenames in os.walk(g):
+                    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                    for fn in filenames:
+                        if Path(fn).suffix.lower() not in exts:
+                            continue
+                        full = Path(dirpath) / fn
+                        hay = str(full.relative_to(g)).lower()
+                        if all(w in hay for w in words):
+                            hits.append(str(full))
+                            if len(hits) >= limit:
+                                return {"ok": True, "hits": hits}
+            except OSError:
+                continue
+        return {"ok": True, "hits": hits}
+
     def handle(self, verb, params):
         p = clean_params(verb, params)
         if verb == "status":
@@ -635,6 +768,12 @@ class Agent:
             return self.os.play(**p)
         if verb == "stop_playback":
             return self.os.stop_playback()
+        if verb == "list":
+            return self.do_list(p.get("folder"), p.get("kind", "both"),
+                                p.get("limit", 60))
+        if verb == "find":
+            return self.do_find(p["query"], p.get("kind", "both"),
+                                p.get("limit", 40))
         raise Refused(f"unhandled verb {verb!r}")     # pragma: no cover
 
     async def serve(self):

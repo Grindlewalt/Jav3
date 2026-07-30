@@ -240,68 +240,64 @@ def test_relative_and_null_paths_are_refused():
             cu.validate("play", {"kind": "audio", "path": p})
 
 
-# --- 3. grant containment ---------------------------------------------------
+# --- 3. grant containment, lexical on the host -------------------------------
+#
+# The host cannot see the operator's disk, so its check is a string check: a
+# useful early error, not the control. The real check is the client's, below.
 
 @pytest.mark.asyncio
-async def test_paths_outside_a_granted_root_are_refused(tmp_path, monkeypatch):
-    root = tmp_path / "Music"
-    root.mkdir()
-    (root / "song.mp3").write_bytes(b"\0")
-    outside = tmp_path / "secret.mp3"
-    outside.write_bytes(b"\0")
+async def test_a_path_outside_every_grant_is_refused(monkeypatch):
+    async def grants(db=None):
+        return [cu.Grant(1, "/Users/you/Movies", "films")]
+    monkeypatch.setattr(cu, "list_grants", grants)
 
-    async def fake_grants(db=None):
-        return [cu.Grant(1, str(root), "test")]
-    monkeypatch.setattr(cu, "list_grants", fake_grants)
-
-    assert await cu.resolve_local(str(root / "song.mp3"), "audio")
-    with pytest.raises(cu.VerbError):
-        await cu.resolve_local(str(outside), "audio")
-    with pytest.raises(cu.VerbError):
-        await cu.resolve_local("/etc/passwd", "audio")
-
-
-@pytest.mark.asyncio
-async def test_a_symlink_out_of_the_granted_tree_is_refused(tmp_path, monkeypatch):
-    """Containment is checked on the resolved path: the real file is what gets
-    played, so the real file is what has to be inside."""
-    root = tmp_path / "Music"
-    root.mkdir()
-    secret = tmp_path / "elsewhere.mp3"
-    secret.write_bytes(b"\0")
-    (root / "innocent.mp3").symlink_to(secret)
-
-    async def fake_grants(db=None):
-        return [cu.Grant(1, str(root), "test")]
-    monkeypatch.setattr(cu, "list_grants", fake_grants)
-
-    with pytest.raises(cu.VerbError):
-        await cu.resolve_local(str(root / "innocent.mp3"), "audio")
-
-
-@pytest.mark.asyncio
-async def test_non_media_files_are_refused(tmp_path, monkeypatch):
-    root = tmp_path / "Music"
-    root.mkdir()
-    (root / "id_rsa").write_text("KEY")
-    (root / "notes.txt").write_text("x")
-
-    async def fake_grants(db=None):
-        return [cu.Grant(1, str(root), "test")]
-    monkeypatch.setattr(cu, "list_grants", fake_grants)
-
-    for name in ("id_rsa", "notes.txt"):
+    assert await cu.path_within_grants("/Users/you/Movies/Dune.mkv")
+    assert await cu.path_within_grants("Dune.mkv")            # relative to the root
+    for bad in ("/etc/passwd", "/Users/you/Documents/tax.pdf", "/Users/you"):
         with pytest.raises(cu.VerbError):
-            await cu.resolve_local(str(root / name), "audio")
+            await cu.path_within_grants(bad)
 
 
 @pytest.mark.asyncio
-async def test_with_no_grants_nothing_on_disk_is_reachable(monkeypatch):
+async def test_dot_dot_cannot_climb_out_of_a_grant(monkeypatch):
+    async def grants(db=None):
+        return [cu.Grant(1, "/Users/you/Movies", "films")]
+    monkeypatch.setattr(cu, "list_grants", grants)
+    for bad in ("/Users/you/Movies/../../../etc/passwd",
+                "../../etc/passwd", "/Users/you/Movies/../Documents/x.mkv"):
+        with pytest.raises(cu.VerbError):
+            await cu.path_within_grants(bad)
+
+
+@pytest.mark.asyncio
+async def test_a_remote_path_is_accepted_without_existing_here(monkeypatch):
+    """The whole bug this replaced: the host required the folder to exist
+    locally, so no macOS path could ever be granted or played."""
+    async def grants(db=None):
+        return [cu.Grant(1, "/Users/grant/Movies", "mac films")]
+    monkeypatch.setattr(cu, "list_grants", grants)
+    got = await cu.path_within_grants("/Users/grant/Movies/Heat.mkv")
+    assert got == "/Users/grant/Movies/Heat.mkv"
+    assert not Path(got).exists(), "the point is that it does not exist here"
+
+
+@pytest.mark.asyncio
+async def test_with_no_grants_nothing_is_reachable(monkeypatch):
     async def none(db=None):
         return []
     monkeypatch.setattr(cu, "list_grants", none)
     with pytest.raises(cu.VerbError):
-        await cu.resolve_local("/home/someone/Music/x.mp3", "audio")
+        await cu.path_within_grants("/Users/you/Music/x.mp3")
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_relative_path_asks_instead_of_picking(monkeypatch):
+    async def grants(db=None):
+        return [cu.Grant(1, "/a/Media", "a"), cu.Grant(2, "/b/Media", "b")]
+    monkeypatch.setattr(cu, "list_grants", grants)
+    with pytest.raises(cu.VerbError) as e:
+        await cu.path_within_grants("Dune.mkv")
+    assert "ambiguous" in str(e.value)
 
 
 # --- 4. the client's own containment, independent of the backend ------------

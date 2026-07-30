@@ -43,7 +43,7 @@ import secrets as _secrets
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from .db import get_db, get_state, set_state
@@ -106,6 +106,25 @@ VERBS: dict[str, dict] = {
     "stop_playback": {
         "doc": "Stop the player this client started.",
         "params": {},
+    },
+    # These two are answered by the client from ITS filesystem. They used to be
+    # done here, which only worked when the client happened to run on this same
+    # host — never the case for the operator's laptop.
+    "list": {
+        "doc": "List one level of a granted folder on the client's disk.",
+        "params": {
+            "folder": {"str": "path_or_name"},
+            "kind": {"enum": ("both", "audio", "video")},
+            "limit": {"int": (1, 300)},
+        },
+    },
+    "find": {
+        "doc": "Search the granted folders on the client's disk.",
+        "params": {
+            "query": {"str": "text", "required": True},
+            "kind": {"enum": ("both", "audio", "video")},
+            "limit": {"int": (1, 100)},
+        },
     },
 }
 
@@ -185,8 +204,20 @@ def _check_path(value: str) -> str:
     return value
 
 
+def _check_path_or_name(value: str) -> str:
+    """A folder to open: either an absolute path or a plain subfolder name.
+    Containment is the client's call, but '..' never has a legitimate use here
+    and is refused on sight."""
+    if "\x00" in value or len(value) > 4096:
+        raise VerbError("bad folder")
+    if any(part == ".." for part in value.replace("\\", "/").split("/")):
+        raise VerbError("'..' is not allowed in a folder name")
+    return value
+
+
 _STR_CHECKS = {"url": _check_url, "device": _check_device,
-               "text": _check_text, "path": _check_path}
+               "text": _check_text, "path": _check_path,
+               "path_or_name": _check_path_or_name}
 
 
 def validate(verb: str, params: dict | None) -> dict:
@@ -270,12 +301,20 @@ async def add_grant(root: str, label: str = "") -> Grant:
     There is deliberately no tool that creates one. If the agent could widen its
     own reach the grant would be decoration.
     """
-    p = Path(root).expanduser()
-    if not p.is_absolute():
-        raise VerbError("grant root must be an absolute path")
-    p = p.resolve()
-    if not p.is_dir():
-        raise VerbError(f"{p} is not a directory")
+    # No filesystem check here, deliberately. The folder lives on the
+    # OPERATOR'S machine, not on this host: /Users/you/Movies does not exist on
+    # the Pi, so is_dir() rejected every legitimate Mac and Windows grant and
+    # made remote playback impossible. A grant is a declaration about a remote
+    # path; the client is the only thing that can and does verify it, against
+    # its own --allow-root ceiling and its own disk.
+    raw = (root or "").strip()
+    if not raw.startswith("/") and not raw.startswith("~"):
+        raise VerbError("grant root must be an absolute path (or start with ~)")
+    if "\x00" in raw:
+        raise VerbError("path contains a null byte")
+    # normpath only — lexical. resolve() would follow symlinks on THIS host,
+    # which says nothing about the machine the path is actually on.
+    p = Path(os.path.normpath(raw))
     db = await get_db()
     try:
         cur = await db.execute(
@@ -302,180 +341,44 @@ async def remove_grant(grant_id: int) -> None:
         await db.close()
 
 
-async def resolve_local(source: str, kind: str) -> str:
-    """A granted-folder path -> an absolute file, or VerbError.
+async def path_within_grants(source: str) -> str:
+    """A path the agent asked for -> an absolute path inside a granted folder.
 
-    Containment is checked after resolve(), so a symlink pointing out of the
-    granted tree fails: the real file is what gets played, so the real file is
-    what has to be inside.
+    Lexical only. This host cannot see the operator's disk, so existence, file
+    type and symlink resolution are all the client's job — it checks the real
+    file against its own roots before playing anything. This is the early
+    filter that gives a useful error without a round trip, not the control.
     """
     grants = await list_grants()
     if not grants:
         raise VerbError(
             "no folders have been granted yet — the operator adds them on the "
-            "Computer use tab; nothing on disk is reachable until they do")
+            "Computer use tab; nothing on the machine is reachable until they do")
     raw = (source or "").strip()
     if not raw:
         raise VerbError("empty source")
-    cand = Path(raw).expanduser()
+    if "\x00" in raw:
+        raise VerbError("path contains a null byte")
 
-    roots = [Path(g.root) for g in grants]
-    tries: list[Path] = []
-    if cand.is_absolute():
-        tries.append(cand)
-    else:
-        tries.extend(r / cand for r in roots)     # relative: try each root
-
-    for t in tries:
-        try:
-            real = t.resolve()
-        except OSError:
-            continue
-        if not any(real == r or r in real.parents for r in roots):
-            continue
-        if not real.is_file():
-            continue
-        ext = real.suffix.lower()
-        want = AUDIO_EXT if kind == "audio" else VIDEO_EXT
-        if ext not in want:
-            raise VerbError(
-                f"{real.name} is not a {kind} file ({ext or 'no extension'}); "
-                f"allowed: {', '.join(sorted(want))}")
-        return str(real)
-
+    roots = [PurePosixPath(g.root) for g in grants]
+    if raw.startswith("/"):
+        cand = PurePosixPath(os.path.normpath(raw))
+        for r in roots:
+            if cand == r or r in cand.parents:
+                return str(cand)
+        raise VerbError(
+            f"'{raw}' is not inside a granted folder. Granted: "
+            + ", ".join(str(r) for r in roots))
+    # relative: only unambiguous against a single root
+    joined = [PurePosixPath(os.path.normpath(str(r / raw))) for r in roots]
+    inside = [j for j, r in zip(joined, roots) if j == r or r in j.parents]
+    if len(inside) == 1:
+        return str(inside[0])
+    if not inside:
+        raise VerbError(f"'{raw}' escapes every granted folder")
     raise VerbError(
-        f"'{raw}' is not inside a granted folder. Granted: "
-        + ", ".join(g.root for g in grants))
-
-
-def _kind_exts(kind: str) -> frozenset:
-    return {"audio": AUDIO_EXT, "video": VIDEO_EXT}.get(kind, MEDIA_EXT)
-
-
-async def tree_local(folder: str | None = None, kind: str = "both",
-                     limit: int = 60) -> str:
-    """Browse the granted folders — one level at a time.
-
-    The agent could only ever *search*, which meant it had to already know what
-    it was looking for; asking "what films are there" had no answer. This walks
-    one level and summarises what is below, so a library gets explored in a few
-    small steps instead of one dump nobody can afford to read.
-
-    Still just a filesystem read inside the granted roots: no shell, no
-    listing of anything the operator has not granted.
-    """
-    grants = await list_grants()
-    if not grants:
-        return ("no folders have been granted — the operator adds them on the "
-                "Computer use tab, and nothing on disk is visible until they do")
-    roots = [Path(g.root) for g in grants]
-    exts = _kind_exts(kind)
-
-    if folder:
-        base = None
-        cand = Path(folder).expanduser()
-        tries = [cand] if cand.is_absolute() else [r / cand for r in roots]
-        for t in tries:
-            try:
-                real = t.resolve()
-            except OSError:
-                continue
-            if any(real == r or r in real.parents for r in roots) and real.is_dir():
-                base = real
-                break
-        if base is None:
-            return (f"'{folder}' is not a granted folder (or is not a folder). "
-                    f"Granted: {', '.join(str(r) for r in roots)}")
-        bases = [base]
-    else:
-        bases = roots
-
-    out: list[str] = []
-    for base in bases:
-        subdirs: list[tuple[str, int]] = []
-        files: list[str] = []
-        try:
-            entries = sorted(os.scandir(base), key=lambda e: e.name.lower())
-        except OSError as e:
-            out.append(f"{base}: cannot read ({e.strerror})")
-            continue
-        for e in entries:
-            if e.name.startswith("."):
-                continue
-            try:
-                if e.is_dir():
-                    subdirs.append((e.name, _count_media(Path(e.path), exts)))
-                elif Path(e.name).suffix.lower() in exts:
-                    files.append(e.name)
-            except OSError:
-                continue
-
-        out.append(f"{base}")
-        for name, n in subdirs:
-            if n:
-                out.append(f"  {name}/  ({n} file{'s' if n != 1 else ''})")
-            else:
-                out.append(f"  {name}/  (nothing playable)")
-        shown = files[:limit]
-        out.extend(f"  {f}" for f in shown)
-        if len(files) > limit:
-            out.append(f"  ... and {len(files) - limit} more here")
-        if not subdirs and not files:
-            out.append("  (empty)")
-
-    out.append("")
-    out.append('expand a subfolder with folder="<name>"; play something by '
-               'passing its path to computer_play')
-    return "\n".join(out)
-
-
-def _count_media(path: Path, exts: frozenset, cap: int = 5000) -> int:
-    """How many playable files are under here. Capped — a media library can be
-    enormous and an exact count nobody reads is not worth the stat calls."""
-    n = 0
-    stack = [path]
-    while stack and n < cap:
-        try:
-            for e in os.scandir(stack.pop()):
-                if e.name.startswith("."):
-                    continue
-                try:
-                    if e.is_dir():
-                        stack.append(Path(e.path))
-                    elif Path(e.name).suffix.lower() in exts:
-                        n += 1
-                        if n >= cap:
-                            break
-                except OSError:
-                    continue
-        except OSError:
-            continue
-    return n
-
-
-async def search_local(query: str, kind: str = "audio", limit: int = 40) -> list[str]:
-    """Filenames under the granted roots matching every word of `query`.
-
-    The agent gets names, not a directory listing of the operator's disk: it can
-    only find what it can already describe.
-    """
-    words = [w for w in (query or "").lower().split() if w]
-    want = AUDIO_EXT if kind == "audio" else VIDEO_EXT
-    hits: list[str] = []
-    for g in await list_grants():
-        root = Path(g.root)
-        try:
-            for p in root.rglob("*"):
-                if len(hits) >= limit:
-                    return hits
-                if not p.is_file() or p.suffix.lower() not in want:
-                    continue
-                hay = str(p.relative_to(root)).lower()
-                if all(w in hay for w in words):
-                    hits.append(str(p))
-        except OSError:
-            continue
-    return hits
+        f"'{raw}' is ambiguous across {len(inside)} granted folders — "
+        "give the full path (computer_library shows them)")
 
 
 # ---------------------------------------------------------------------------
