@@ -42,6 +42,7 @@ import platform
 import re
 import shutil
 import subprocess
+import time
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -85,12 +86,14 @@ def _v_url(value):
 # coreaudio/AppleHDAEngineOutput:1F,3,0,1:0, alsa/default:CARD=PCH.
 # So / , = are in. Space, quotes, $ ` ; & | < > ( ) * ? ~ and newlines are not,
 # and a leading dash is refused so a value cannot be read as a flag.
-_DEVICE_RE = re.compile(r"\A(?!-)[A-Za-z0-9._:+/,=-]{1,200}\Z")
+_DEVICE_RE = re.compile(r"\A(?!-)(?!\s)[A-Za-z0-9._:+/,=() \[\]-]{1,200}\Z")
 
 
 def _v_device(value):
     if not isinstance(value, str) or not _DEVICE_RE.match(value):
-        raise Refused("device id has an unacceptable shape")
+        raise Refused("device has an unacceptable shape")
+    if value.strip() != value:
+        raise Refused("device may not start or end with whitespace")
     return value
 
 
@@ -234,6 +237,56 @@ class Linux:
 
     def __init__(self, runner):
         self.r = runner
+        self._cache: dict = {}
+
+    # -- enumeration, cached ------------------------------------------------
+    def _cached(self, key, fn, ttl=30.0):
+        """Device and screen lists cost a subprocess each. Jarvis asks for them
+        far more often than they change, so a short TTL turns a repeated status
+        call into nothing."""
+        hit = self._cache.get(key)
+        if hit and (time.monotonic() - hit[0]) < ttl:
+            return hit[1]
+        val = fn()
+        self._cache[key] = (time.monotonic(), val)
+        return val
+
+    def _resolve_device(self, wanted, options, what):
+        """Turn whatever Jarvis asked for into an id THIS machine reported.
+
+        The model can pass a full id or a fragment of a name — "desk speakers"
+        — and gets back the real id, or an error listing the options. That is
+        what removes the need to call status before every action.
+
+        It also tightens things: the value that ends up in argv is always one we
+        enumerated ourselves, so the model's string never reaches a command line
+        at all — it is only ever a search key.
+        """
+        if not wanted:
+            return None
+        ids = [o["id"] for o in options]
+        if wanted in ids:
+            return wanted
+        if not ids:
+            # We could not enumerate at all — mpv absent, pactl absent, the
+            # query failed. That is not the same as knowing the device is wrong,
+            # and refusing here would make a correct id unusable whenever
+            # enumeration breaks. The value already passed the shape check, so
+            # it is argv-safe; hand it to the player and let IT complain.
+            return wanted
+        w = wanted.lower().strip()
+        hits = [o["id"] for o in options if o["id"].lower() == w]
+        if not hits:
+            hits = [o["id"] for o in options
+                    if w in o["id"].lower() or w in (o.get("label") or "").lower()]
+        if len(hits) == 1:
+            return hits[0]
+        if not hits:
+            raise Refused(
+                f"no {what} here matches {wanted!r}. Available: "
+                + (", ".join(ids[:12]) or "none detected"))
+        raise Refused(f"{wanted!r} matches several: " + ", ".join(hits[:8])
+                      + " — name one exactly")
 
     # -- audio ---------------------------------------------------------------
     def _mixer(self):
@@ -245,6 +298,8 @@ class Linux:
 
     def volume(self, action, percent=None, device=None):
         m = self._mixer()
+        if device:
+            device = self._resolve_device(device, self.audio_devices(), "mixer output")
         sink = device or ("@DEFAULT_AUDIO_SINK@" if m == "wpctl" else "@DEFAULT_SINK@")
         step = percent if percent is not None else 5
         if m == "wpctl":
@@ -273,6 +328,9 @@ class Linux:
 
     def audio_devices(self):
         """Mixer sinks — what `volume` can target."""
+        return self._cached("sinks", self._audio_devices)
+
+    def _audio_devices(self):
         if "pactl" not in self.r.bin:
             return []
         try:
@@ -288,6 +346,9 @@ class Linux:
         sinks above: mpv wants "<ao>/<device>" (pulse/alsa_output...,
         coreaudio/<uid>), so the names are taken from mpv itself rather than
         translated from pactl and hoped over."""
+        return self._cached("outputs", self._play_devices)
+
+    def _play_devices(self):
         if "mpv" not in self.r.bin:
             return []
         try:
@@ -348,6 +409,9 @@ class Linux:
 
     # -- screens -------------------------------------------------------------
     def screens(self):
+        return self._cached("screens", self._screens)
+
+    def _screens(self):
         if "xrandr" not in self.r.bin:
             return []
         try:
@@ -393,6 +457,7 @@ class Linux:
             if screen is not None:
                 args.append(f"--screen={screen}")
         if device is not None:
+            device = self._resolve_device(device, self.play_devices(), "playback output")
             args.append(f"--audio-device={device}")
         if volume is not None:
             args.append(f"--volume={volume}")

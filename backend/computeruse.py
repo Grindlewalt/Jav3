@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets as _secrets
 import time
 import uuid
@@ -142,8 +143,19 @@ def _check_device(value: str) -> str:
     # None of / , = : + . _ - is a shell metacharacter, and nothing here reaches
     # a shell. What stays out is space, quotes, $ ` ; & | < > ( ) * ? ~ and
     # newlines.
-    if not all(c.isalnum() or c in "._:-+/,=" for c in value):
-        raise VerbError("device id may only contain letters, digits and ._:-+/,=")
+    # Spaces and parentheses are allowed because this may also be a NAME to
+    # match rather than an id -- "Built-in Audio Analog Stereo". The client
+    # resolves whatever arrives against the devices it enumerated itself, so
+    # the string that reaches argv is always one of ITS ids, never this value.
+    # Safe regardless: argv is a list and shell=False, so a space is just a
+    # space. What stays out is quotes, $ ` ; & | < > * ? ~ and control chars.
+    if not all(c.isalnum() or c in "._:-+/,= ()[]" for c in value):
+        raise VerbError(
+            "device may only contain letters, digits, spaces and ._:-+/,=()[]")
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise VerbError("device may not contain control characters")
+    if value.strip() != value:
+        raise VerbError("device may not start or end with whitespace")
     if value.startswith("-"):
         # it lands in an argv slot of its own, but a leading dash is how a value
         # gets read as a flag by whatever is being run
@@ -334,6 +346,111 @@ async def resolve_local(source: str, kind: str) -> str:
     raise VerbError(
         f"'{raw}' is not inside a granted folder. Granted: "
         + ", ".join(g.root for g in grants))
+
+
+def _kind_exts(kind: str) -> frozenset:
+    return {"audio": AUDIO_EXT, "video": VIDEO_EXT}.get(kind, MEDIA_EXT)
+
+
+async def tree_local(folder: str | None = None, kind: str = "both",
+                     limit: int = 60) -> str:
+    """Browse the granted folders — one level at a time.
+
+    The agent could only ever *search*, which meant it had to already know what
+    it was looking for; asking "what films are there" had no answer. This walks
+    one level and summarises what is below, so a library gets explored in a few
+    small steps instead of one dump nobody can afford to read.
+
+    Still just a filesystem read inside the granted roots: no shell, no
+    listing of anything the operator has not granted.
+    """
+    grants = await list_grants()
+    if not grants:
+        return ("no folders have been granted — the operator adds them on the "
+                "Computer use tab, and nothing on disk is visible until they do")
+    roots = [Path(g.root) for g in grants]
+    exts = _kind_exts(kind)
+
+    if folder:
+        base = None
+        cand = Path(folder).expanduser()
+        tries = [cand] if cand.is_absolute() else [r / cand for r in roots]
+        for t in tries:
+            try:
+                real = t.resolve()
+            except OSError:
+                continue
+            if any(real == r or r in real.parents for r in roots) and real.is_dir():
+                base = real
+                break
+        if base is None:
+            return (f"'{folder}' is not a granted folder (or is not a folder). "
+                    f"Granted: {', '.join(str(r) for r in roots)}")
+        bases = [base]
+    else:
+        bases = roots
+
+    out: list[str] = []
+    for base in bases:
+        subdirs: list[tuple[str, int]] = []
+        files: list[str] = []
+        try:
+            entries = sorted(os.scandir(base), key=lambda e: e.name.lower())
+        except OSError as e:
+            out.append(f"{base}: cannot read ({e.strerror})")
+            continue
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            try:
+                if e.is_dir():
+                    subdirs.append((e.name, _count_media(Path(e.path), exts)))
+                elif Path(e.name).suffix.lower() in exts:
+                    files.append(e.name)
+            except OSError:
+                continue
+
+        out.append(f"{base}")
+        for name, n in subdirs:
+            if n:
+                out.append(f"  {name}/  ({n} file{'s' if n != 1 else ''})")
+            else:
+                out.append(f"  {name}/  (nothing playable)")
+        shown = files[:limit]
+        out.extend(f"  {f}" for f in shown)
+        if len(files) > limit:
+            out.append(f"  ... and {len(files) - limit} more here")
+        if not subdirs and not files:
+            out.append("  (empty)")
+
+    out.append("")
+    out.append('expand a subfolder with folder="<name>"; play something by '
+               'passing its path to computer_play')
+    return "\n".join(out)
+
+
+def _count_media(path: Path, exts: frozenset, cap: int = 5000) -> int:
+    """How many playable files are under here. Capped — a media library can be
+    enormous and an exact count nobody reads is not worth the stat calls."""
+    n = 0
+    stack = [path]
+    while stack and n < cap:
+        try:
+            for e in os.scandir(stack.pop()):
+                if e.name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir():
+                        stack.append(Path(e.path))
+                    elif Path(e.name).suffix.lower() in exts:
+                        n += 1
+                        if n >= cap:
+                            break
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return n
 
 
 async def search_local(query: str, kind: str = "audio", limit: int = 40) -> list[str]:

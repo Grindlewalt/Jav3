@@ -166,12 +166,48 @@ def test_http_urls_pass():
 
 
 @pytest.mark.parametrize("device", [
-    "sink; rm -rf /", "$(id)", "a" * 250, "sink name with spaces", "sink`id`",
+    "sink; rm -rf /", "$(id)", "a" * 250, "sink`id`",
     "sink&touch /tmp/x", "sink'quoted'", 'sink"quoted"', "sink\nrm -rf /",
+    "sink|cat", "x>y", "x<y", "sink*", "~root", "  leading", "trailing  ",
+    "sink\x00null", "sink\x1b[2J",
 ])
-def test_device_ids_are_held_to_an_identifier_shape(device):
+def test_device_fields_reject_shell_metacharacters_and_control_chars(device):
     with pytest.raises(cu.VerbError):
         cu.validate("volume", {"action": "up", "device": device})
+
+
+@pytest.mark.parametrize("device", [
+    "Built-in Audio Analog Stereo",          # a pactl description
+    "desk speakers",                         # a fragment the operator would say
+    "HDMI / DisplayPort 1 (plugged in)",     # real label punctuation
+])
+def test_device_fields_accept_a_human_name_to_match_on(device):
+    """Spaces and parentheses are allowed on purpose: the field doubles as a
+    NAME to match, so the model can pass "desk speakers" instead of preflighting
+    with computer_status.
+
+    That is safe for two independent reasons. Nothing reaches a shell — argv is
+    a list with shell=False, so a space is just a space. And the client resolves
+    whatever arrives against the devices it enumerated itself, so the string that
+    actually lands in argv is one of its own ids. The next test is that second
+    guarantee.
+    """
+    assert cu.validate("volume", {"action": "up", "device": device})["device"]
+
+
+def test_a_resolved_device_comes_from_the_machines_own_list(tmp_path):
+    """The compensating control for accepting free-ish text: the model's phrase
+    is only ever a search key. What reaches the command line is enumerated
+    locally, so widening the field did not widen what can be executed."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cu_res", CLIENT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    agent = mod.Agent("http://x", "t", [], "t", dry_run=True)
+    options = [{"id": "alsa_output.usb-Focusrite", "label": "Scarlett Desk Speakers"}]
+    got = agent.os._resolve_device("desk speakers", options, "output")
+    assert got == "alsa_output.usb-Focusrite"
+    assert got in [o["id"] for o in options]
 
 
 @pytest.mark.parametrize("device", [

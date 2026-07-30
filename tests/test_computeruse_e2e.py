@@ -189,3 +189,124 @@ async def test_tools_say_so_when_nothing_is_connected():
     from tools.computer_volume.handler import run
     out = await run(action="up")
     assert "no computer-use client is connected" in out
+
+
+# --- browsing a library ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_library_lists_folders_with_counts_and_files(wired, monkeypatch):
+    """The agent could only search, so 'what films are there' had no answer."""
+    music = wired["music"]
+    (music / "Action").mkdir()
+    (music / "Action" / "Heat.mkv").write_bytes(b"\0")
+    (music / "Action" / "Ronin.mp4").write_bytes(b"\0")
+    (music / "Dune.mp4").write_bytes(b"\0")
+
+    from tools.computer_library.handler import run
+    out = await run(kind="video")
+    assert "Action/" in out and "(2 files)" in out
+    assert "Dune.mp4" in out
+    assert "notes.txt" not in out, "non-media must not be listed"
+
+    deeper = await run(folder="Action", kind="video")
+    assert "Heat.mkv" in deeper and "Ronin.mp4" in deeper
+
+
+@pytest.mark.asyncio
+async def test_library_refuses_a_folder_outside_the_grants(wired):
+    from tools.computer_library.handler import run
+    for bad in ("/etc", "..", "../..", str(wired["outside"].parent)):
+        out = await run(folder=bad)
+        assert "not a granted folder" in out, bad
+
+
+@pytest.mark.asyncio
+async def test_library_caps_a_huge_listing(wired):
+    """A film library is thousands of files; dumping it wastes the context the
+    actual task needs."""
+    for i in range(120):
+        (wired["music"] / f"track{i:03d}.mp3").write_bytes(b"\0")
+    from tools.computer_library.handler import run
+    out = await run(kind="audio", limit=20)
+    assert "and " in out and "more here" in out
+    assert out.count("track") <= 25
+
+
+# --- device resolution removes the preflight ---------------------------------
+
+@pytest.mark.asyncio
+async def test_a_device_name_is_resolved_to_a_real_id(wired):
+    """The point of this: no computer_status round trip before acting."""
+    agent = wired["agent"]
+    agent.os._cache["sinks"] = (9e18, [
+        {"id": "alsa_output.pci-0000_00_1f.3.analog-stereo",
+         "label": "Built-in Audio Analog Stereo"},
+        {"id": "alsa_output.usb-Focusrite", "label": "Scarlett Desk Speakers"}])
+    from tools.computer_volume.handler import run
+    out = await run(action="up", percent=5, device="desk speakers")
+    assert not out.startswith("error"), out
+    argv = wired["calls"][-1]
+    # what reached argv is the machine's own id, never the model's phrase
+    assert "alsa_output.usb-Focusrite" in argv
+    assert not any("desk speakers" in str(a) for a in argv)
+
+
+@pytest.mark.asyncio
+async def test_an_unmatched_device_error_lists_the_options(wired):
+    """So the model can correct itself from the error instead of preflighting."""
+    agent = wired["agent"]
+    agent.os._cache["sinks"] = (9e18, [{"id": "sink.one", "label": "One"},
+                                       {"id": "sink.two", "label": "Two"}])
+    from tools.computer_volume.handler import run
+    out = await run(action="up", device="headphones")
+    assert out.startswith("error")
+    assert "sink.one" in out and "sink.two" in out
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_device_asks_rather_than_guessing(wired):
+    agent = wired["agent"]
+    agent.os._cache["sinks"] = (9e18, [{"id": "hdmi.a", "label": "HDMI 1"},
+                                       {"id": "hdmi.b", "label": "HDMI 2"}])
+    from tools.computer_volume.handler import run
+    out = await run(action="up", device="hdmi")
+    assert "matches several" in out
+
+
+def test_enumeration_is_cached_so_repeat_calls_cost_nothing(wired):
+    """Each list costs a subprocess, and Jarvis asks far more often than they
+    change."""
+    agent = wired["agent"]
+    calls = []
+    agent.os._cache.clear()
+    agent.os._audio_devices = lambda: calls.append(1) or [{"id": "x", "label": "X"}]
+    for _ in range(5):
+        agent.os.audio_devices()
+    assert len(calls) == 1, f"enumerated {len(calls)} times, should be cached"
+
+
+@pytest.mark.asyncio
+async def test_an_unenumerable_machine_still_accepts_a_device_id(wired):
+    """"We could not enumerate" is not "that device does not exist". Refusing
+    when the list is empty would make a perfectly good id unusable any time mpv
+    or pactl is missing, or the query fails."""
+    agent = wired["agent"]
+    agent.os._cache["outputs"] = (9e18, [])          # enumeration came back empty
+    (wired["music"] / "Film.mkv").write_bytes(b"\0")
+    from tools.computer_play.handler import run
+    out = await run(query="film", kind="video",
+                    device="pulse/alsa_output.pci-0000_00_1f.3.analog-stereo")
+    assert not out.startswith("error"), out
+    argv = wired["calls"][-1]
+    assert "--audio-device=pulse/alsa_output.pci-0000_00_1f.3.analog-stereo" in argv
+
+
+@pytest.mark.asyncio
+async def test_but_a_known_list_still_refuses_an_unknown_device(wired):
+    """The permissive path above must only apply when we know nothing."""
+    agent = wired["agent"]
+    agent.os._cache["outputs"] = (9e18, [{"id": "pulse/real", "label": "Real"}])
+    (wired["music"] / "Film2.mkv").write_bytes(b"\0")
+    from tools.computer_play.handler import run
+    out = await run(query="film2", kind="video", device="pulse/invented")
+    assert out.startswith("error") and "pulse/real" in out

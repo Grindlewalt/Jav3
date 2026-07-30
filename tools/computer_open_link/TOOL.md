@@ -1,7 +1,7 @@
 ---
 name: computer_open_link
 description: Open an http(s) URL in the browser on the operator's actual computer (not in the Jarvis tab).
-when_to_use: When the operator wants a page up on their machine — including streaming sites like YouTube, Netflix or Spotify, which cannot be played as files. Use open_website instead if you only want it to appear in the Jarvis GUI tab.
+when_to_use: When the operator wants a page up on their machine — including streaming sites like YouTube, Netflix or Spotify, which cannot be played as files. Use open_website instead if you only want it to appear in the Jarvis GUI tab. No need to check computer_status first.
 enabled: true
 parameters:
   type: object

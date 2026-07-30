@@ -1,7 +1,7 @@
 ---
 name: computer_status
 description: List the operator's connected computers and what each can drive — monitors (for choosing a screen), audio outputs (for choosing where sound goes), any media player currently running, and which folders you may play from.
-when_to_use: Before any computer_play or computer_open_link where the operator named a screen or a speaker ("play it on the TV", "put it through the desk speakers"), so you use the real device id instead of guessing. Also when they ask what you can control.
+when_to_use: Only when the operator asks what you can control, or after an action came back saying a device name did not match. Do NOT call this before acting: the action tools resolve a device name themselves and their error lists the options, so a preflight check just costs a round trip and tokens.
 enabled: true
 read_only: true
 parameters:
