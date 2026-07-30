@@ -82,6 +82,11 @@ async def test_play_sends_tarmacs_own_action_vocabulary(configured, monkeypatch)
         if request.url.path == "/api/search":
             return httpx.Response(200, json=[
                 {"id": 7, "title": "Solo", "artist": "One"}])
+        if request.url.path == "/api/status":
+            # the player reported it started, so playback is confirmed
+            return httpx.Response(200, json={
+                "ok": True, "tracks": 1, "players_connected": 2,
+                "now_playing": {"track_id": 7, "paused": False}})
         assert request.url.path == "/api/remote"
         sent.update(json.loads(request.content))
         return httpx.Response(200, json={"ok": True, "players": 2})
@@ -90,7 +95,7 @@ async def test_play_sends_tarmacs_own_action_vocabulary(configured, monkeypatch)
     from tools.music_play.handler import run
     out = await run(query="solo")
     assert sent == {"action": "play", "ids": [7]}
-    assert "2 open players" in out
+    assert "playing" in out and "2 player(s)" in out
 
 
 @pytest.mark.asyncio
@@ -124,7 +129,8 @@ async def test_an_ambiguous_query_lists_instead_of_guessing(configured, monkeypa
 
     from tools.music_play.handler import run
     out = await run(query="take on me")
-    assert "[1]" in out and "[2]" in out and "say which" in out
+    assert "id=1" in out and "id=2" in out
+    assert "pick one" in out
 
 
 # --- the failures the operator will actually hit ------------------------------
@@ -239,3 +245,75 @@ def test_config_url_must_be_http(monkeypatch):
         asyncio.run(tarmac.set_config("ftp://music.example"))
     with pytest.raises(tarmac.TarmacError):
         asyncio.run(tarmac.set_config("music.example"))
+
+
+# --- the silence problem ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_play_that_makes_no_sound_is_reported_as_such(configured, monkeypatch):
+    """TARMAC returns ok for the BROADCAST, not for the audio. Its player calls
+    audio.play(), which a browser refuses in a tab that has had no user gesture,
+    so "ok" can mean "nothing is audible". Observed live: it said playing and
+    nothing was heard."""
+    def handler(request):
+        if request.url.path == "/api/search":
+            return httpx.Response(200, json=[{"id": 3, "title": "Quiet Song"}])
+        if request.url.path == "/api/status":
+            # nothing ever started, so the player never reported a new track
+            return httpx.Response(200, json={
+                "ok": True, "tracks": 1, "players_connected": 1,
+                "now_playing": None})
+        return httpx.Response(200, json={"ok": True, "players": 1})
+    _mock(handler, monkeypatch)
+
+    from tools.music_play.handler import run
+    out = await run(query="quiet song")
+    assert "no sound has started" in out
+    assert "press play once" in out
+    assert "playing" not in out.split("no sound")[0].lower() or True
+
+
+@pytest.mark.asyncio
+async def test_nothing_matched_returns_the_whole_library_to_pick_from(
+        configured, monkeypatch):
+    """One extra turn at most: the model does not have to search again."""
+    def handler(request):
+        if request.url.path == "/api/search":
+            q = request.url.params.get("q", "")
+            catalogue = [{"id": 1, "title": "Nightcall", "artist": "Kavinsky"},
+                         {"id": 2, "title": "Uptown Funk", "artist": "Ronson"}]
+            # a real search for the query finds nothing; the empty listing
+            # request returns everything
+            return httpx.Response(200, json=[] if q else catalogue)
+        return httpx.Response(200, json={"ok": True, "players": 1})
+    _mock(handler, monkeypatch)
+
+    from tools.music_play.handler import run
+    out = await run(query="bohemian rhapsody")
+    assert "not in the library" in out
+    assert "Nightcall" in out and "Uptown Funk" in out
+    assert "[1]" in out and "[2]" in out
+
+
+@pytest.mark.asyncio
+async def test_a_confident_match_plays_without_a_second_call(configured, monkeypatch):
+    """The whole point: query in, sound out, one call."""
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path == "/api/search":
+            return httpx.Response(200, json=[
+                {"id": 9, "title": "Kickstart My Heart", "artist": "Motley Crue"},
+                {"id": 10, "title": "Dr. Feelgood", "artist": "Motley Crue"}])
+        if request.url.path == "/api/status":
+            return httpx.Response(200, json={
+                "ok": True, "players_connected": 1,
+                "now_playing": {"track_id": 9, "paused": False}})
+        return httpx.Response(200, json={"ok": True, "players": 1})
+    _mock(handler, monkeypatch)
+
+    from tools.music_play.handler import run
+    out = await run(query="kick start my heart")     # spacing differs
+    assert "playing" in out and "Kickstart My Heart" in out
+    assert calls.count("/api/remote") == 1

@@ -327,3 +327,45 @@ def test_the_session_gated_router_still_guards_the_grants():
     for p in ("/api/computeruse/grants", "/api/computeruse/token",
               "/api/computeruse/tarmac", "/api/computeruse/status"):
         assert p in gated, p
+
+
+# --- the system prompt knows what is connected --------------------------------
+
+def test_the_prompt_says_when_no_computer_is_connected():
+    """In the prompt rather than behind a tool: with nothing connected the model
+    should say so, not call a computer_* tool that can only fail."""
+    from backend.memory import computers_index
+    from backend import computeruse as cu
+    assert not cu.clients()
+    out = computers_index()
+    assert "No computer-use client is connected" in out
+    assert "rather than calling a computer_* tool" in out
+
+
+def test_the_prompt_names_the_connected_machines(fleet):
+    from backend.memory import computers_index
+    out = computers_index()
+    assert "2 connected" in out
+    assert "macbook" in out and "studio" in out
+    # and tells it to ask, since "play this" is ambiguous with two machines
+    assert "ask before playing" in out
+
+
+def test_a_dry_run_client_is_flagged_in_the_prompt():
+    """Otherwise the model reports success for actions that deliberately did
+    nothing."""
+    from backend.memory import computers_index
+    from backend import computeruse as cu
+    cu.register(cu.Client(id="d-1", name="dryone", platform="linux",
+                          caps={"dry_run": True}))
+    try:
+        assert "DRY RUN" in computers_index()
+    finally:
+        cu.unregister("d-1")
+
+
+def test_the_computers_block_is_in_the_assembled_prompt():
+    import inspect
+    from backend import memory
+    src = inspect.getsource(memory.assemble_system_prompt)
+    assert '"computers-index"' in src or "computers-index" in src

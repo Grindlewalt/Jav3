@@ -521,6 +521,41 @@ def standing_rules_tail() -> str:
 _USE_DB = object()  # sentinel: "read the active project from the db"
 
 
+def computers_index() -> str:
+    """Which of the operator's computers are reachable right now.
+
+    In the prompt rather than behind a tool because the answer changes what the
+    model should say, not just what it should do: with two machines connected,
+    "play this" needs a question first, and with none it should say so instead of
+    calling a tool that can only fail. Costs a line or two; saves a round trip.
+    """
+    from . import computeruse as cu
+    conn = cu.clients()
+    if not conn:
+        return ("# Computers\nNo computer-use client is connected, so nothing "
+                "can be played, opened or have its volume changed on the "
+                "operator's machines right now. Say that rather than calling a "
+                "computer_* tool.")
+    lines = ["# Computers", f"{len(conn)} connected — pass the name as `client` "
+             f"to any computer_* tool:"]
+    for c in conn:
+        caps = c.caps or {}
+        bits = [f"- {c.name} ({c.platform})"]
+        if caps.get("dry_run"):
+            bits.append("[DRY RUN — reports, does not act]")
+        screens = caps.get("screens") or []
+        if screens:
+            bits.append(f"{len(screens)} screen(s)")
+        outs = caps.get("play_devices") or caps.get("audio_devices") or []
+        if outs:
+            bits.append(f"{len(outs)} audio output(s)")
+        lines.append(" ".join(bits))
+    if len(conn) > 1:
+        lines.append("More than one is connected, so if the operator does not "
+                     "say which, ask before playing or opening anything.")
+    return "\n".join(lines)
+
+
 async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB,
                                  exclude: set[str] | None = None) -> str:
     """Central context: soul + user + env + thin all-projects (always) +
@@ -552,6 +587,7 @@ async def assemble_system_prompt(db: aiosqlite.Connection, active=_USE_DB,
         ("all-projects.md", read_memory_file("all-projects.md")),
         ("agents-index", agents_index()),
         ("secrets-index", secrets_index()),
+        ("computers-index", computers_index()),
     ]
     if active is _USE_DB:
         active = await get_active_project(db)

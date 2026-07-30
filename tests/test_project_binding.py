@@ -53,8 +53,14 @@ async def test_pinned_contextvar_beats_global_active(client):
 
 
 async def test_chat_rejects_unknown_project(client):
-    r = await client.post("/api/chat", json={"message": "hi", "project": "nope"})
-    assert r.status_code == 404
+    # confirm_peak, or this asserts the wrong thing for seven hours a day: the
+    # peak-pricing gate runs before the project lookup, so inside a peak window
+    # an unknown project comes back 409 rather than 404. The ordering is
+    # deliberate (it stops an orphan conversation being created), so the test
+    # steps past the gate instead.
+    r = await client.post("/api/chat", json={
+        "message": "hi", "project": "nope", "confirm_peak": True})
+    assert r.status_code == 404, r.text
 
 
 async def test_agent_run_rejects_unknown_project(client):

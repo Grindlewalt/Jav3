@@ -1,27 +1,43 @@
 ---
 name: music_play
-description: Play tracks from the operator's self-hosted library (TARMAC) on whichever music player they have open — phone or desktop.
-when_to_use: When they ask for music from their own library. Pass ids from music_search, or a query and this will search first. For a file on a specific computer use computer_play instead; for Spotify or YouTube use computer_open_link.
+description: Play music — searches the operator's library and any granted folders on their computers, finds the best match, and plays it. One call.
+when_to_use: Whenever they ask for music by name. Just pass what they said in `query`; do not search first. For a film use computer_play, and for Spotify or YouTube use computer_open_link.
 enabled: true
 parameters:
   type: object
   properties:
+    query:
+      type: string
+      description: What they asked for, in their words — "kick start my heart". Matched by an algorithm, so spelling and spacing do not have to be exact.
     ids:
       type: array
       items:
         type: integer
-      description: Track ids from music_search. Several become a queue, in order.
-    query:
-      type: string
-      description: Instead of ids — searched, and played if exactly one thing matches.
+      description: Exact library ids, if a previous call handed you a shortlist. Several become a queue.
     tag:
       type: string
       enum: [drive, fast]
-      description: Narrow a query to one of their two genres.
+      description: Their two genres, for "put on something fast".
+    device:
+      type: string
+      description: An audio output, if they named one. Only applies to a file from a granted folder — the library plays through the music app, which has no output control.
+    volume:
+      type: integer
+      description: Start level 0-100, same restriction as device.
+    client:
+      type: string
+      description: Which computer to search for local files, by name.
   required: []
 ---
-This plays on TARMAC's own player, so one has to be open on a device. If none
-is, you get told — say so rather than claiming it started.
+Do not call music_search first. This searches everywhere itself and plays the
+winner, so the normal case is a single call.
 
-If a query matches several tracks this lists them instead of guessing. Playing
-several ids queues them in the order given.
+If it cannot tell which track was meant it returns a shortlist — play one by
+passing its id. If nothing matched at all it returns the whole library, so the
+next call can be the right one. Two calls is the worst case, not a conversation.
+
+It also checks the sound actually started. The music app runs in a browser, and a
+browser refuses to begin audio in a tab nobody has touched — so a play can be
+accepted and still be silent. When that happens you are told, and the fix is for
+the operator to press play once in the app. Do not claim music is playing when
+the result says it did not start.
