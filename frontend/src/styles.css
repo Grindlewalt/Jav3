@@ -1709,6 +1709,9 @@ kbd {
   border-color: color-mix(in srgb, var(--n-c) 45%, var(--border)); }
 .notice.warn { --n-c: var(--amber); }
 .notice.crit { --n-c: var(--red); }
+/* an agent finishing is good news, not a warning — amber for that read as a
+   problem at a glance */
+.notice.ok { --n-c: var(--accent); }
 .notice-head { display: flex; align-items: center; gap: 8px; }
 .notice-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
   background: var(--n-c);
@@ -1935,15 +1938,15 @@ kbd {
   padding: 11px 16px; border-top: 1px solid var(--border); }
 .sbd-err { color: var(--red); padding: 12px 0; }
 
-/* the brief: what happened, why it matters, what to check */
-.sbd-brief { padding: 14px 0 4px; }
-.sbd-brief p { margin: 0 0 8px; }
-.sbd-what { font-size: 14.5px; }
-.sbd-why { color: var(--dim); }
-.sbd-checkhead { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--dim); margin: 12px 0 6px; }
-.sbd-checks { margin: 0; padding-left: 18px; }
-.sbd-checks li { margin-bottom: 4px; }
+/* the brief: one line on why this is worth a look, then the questions that
+   decide it. Kept to ~3 lines total — prose above the evidence gets scrolled
+   past, and then the evidence is what got buried. */
+.sbd-brief { padding: 12px 0 2px; }
+.sbd-brief p { margin: 0; }
+.sbd-why { font-size: 14px; }
+.sbd-checks { margin: 7px 0 0; padding-left: 17px; color: var(--dim);
+  font-size: 12.5px; }
+.sbd-checks li { margin-bottom: 2px; }
 
 .sbd-sec { padding: 14px 0; border-top: 1px solid var(--border); }
 .sbd-sec h4 { margin: 0 0 10px; font-size: 12px; letter-spacing: 0.07em;

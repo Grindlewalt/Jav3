@@ -122,128 +122,87 @@ def _ago(epoch: float | None, now: float | None = None) -> str:
 
 
 # --- plain-English framing ---------------------------------------------------
-# (title, what happened, why it is worth a look, what to check)
+# One line on why the alert is worth a look, and the two questions that
+# actually decide it. Deliberately terse: the evidence below is the point,
+# and prose the operator scrolls past is worse than no prose.
 
 _BRIEF = {
     "new_import": {
         "title": "A new dependency appeared in a file",
-        "what": "This write added an import that was not in the file before.",
-        "why": "A new import is the cheapest supply-chain move there is: a "
-               "typo-squatted package name, or a legitimate module pulled in "
-               "to reach the network, the filesystem or a subprocess.",
-        "checks": ["Is the module real, spelled the way you'd expect, and already "
-                   "used elsewhere in this project?",
-                   "Is it declared in requirements.txt / package.json, or a surprise?",
-                   "Does the code around it actually need it, or does it look bolted on?"],
+        "why": "Typo-squats and injected packages both arrive as one new import.",
+        "checks": ["Is the name spelled the way you'd expect?",
+                   "Does the code around it need it?"],
     },
     "network_call": {
         "title": "Code that talks to the network was added",
-        "what": "This write added an outbound-call primitive (an HTTP client, a "
-                "socket, a curl/wget shell-out).",
-        "why": "Exfiltration, a beacon and a dependency download all look like "
-               "this line. Inside the guest the egress proxy still gates where "
-               "it can reach — this flag is about whether the code should be "
-               "reaching out at all.",
+        "why": "Exfil, a beacon and a package download all look like this line.",
         "checks": ["Is the destination a constant you recognise, or built at runtime?",
-                   "Does anything secret sit in the request body or headers?",
-                   "Is this code on a path that runs unattended (a schedule, a tool)?"],
+                   "Does anything secret ride in the request?"],
     },
     "high_entropy": {
         "title": "An opaque blob was embedded in the code",
-        "what": "This write added a long base64/hex run — random-looking enough "
-                "that it is not prose and not source.",
-        "why": "That is the shape of an embedded payload, a packed script, or a "
-               "hard-coded credential that the secret scanner does not know about.",
-        "checks": ["Is it obviously data the code needs (an image, a test fixture, a hash)?",
-                   "Is anything decoding it and then executing or eval-ing it?",
-                   "If it looks like a key, rotate it and move it into the secret store."],
+        "why": "The shape of a packed payload — or a key the secret scanner "
+               "doesn't know.",
+        "checks": ["Is it data the code plainly needs (a fixture, a hash)?",
+                   "Does anything decode it and then run it?"],
     },
     "logging_removed": {
         "title": "Logging calls were removed",
-        "what": "The file came out of this write with fewer logging calls than "
-                "it went in with.",
-        "why": "Turning the lights off is a step in a compromise, and it is also "
-               "what a tidy-up refactor looks like. The diff tells you which.",
-        "checks": ["Was the whole function that logged deleted, or only the log line?",
-                   "Did anything else change in the same write?",
+        "why": "Evasion and a tidy-up refactor look identical here. The diff "
+               "tells you which.",
+        "checks": ["Was the whole function deleted, or only the log line?",
                    "Is the removed line on an error path?"],
     },
     "assertion_removed": {
         "title": "Assertions were removed",
-        "what": "The file came out of this write with fewer assertions than it "
-                "went in with.",
-        "why": "Deleting a failing check is the fastest way to make a suite go "
-               "green without fixing anything.",
-        "checks": ["Was the assertion replaced by a better one, or just dropped?",
-                   "Does the test still fail if you put it back?",
-                   "Was the behaviour it guarded changed in the same write?"],
+        "why": "The fastest way to make a suite go green without fixing anything.",
+        "checks": ["Replaced by a better check, or just dropped?",
+                   "Does the test still fail if you put it back?"],
     },
     "secret_leak": {
-        "title": "A real secret value was about to be written to a file",
-        "what": "The content contained the literal value of one of your stored "
-                "secrets. THE WRITE WAS REFUSED — nothing landed on disk.",
-        "why": "This is the one hard block left in the write path. The "
-               "{{secret:NAME}} indirection exists so a key never sits in a "
-               "file the agent can read back or commit.",
-        "checks": ["Did the value reach the agent's context, or was it constructed? "
-                   "If it was in context, treat the key as exposed and rotate it.",
-                   "Should this project hold a grant for that secret at all?",
-                   "Check the egress feed for requests carrying it around the same time."],
+        "title": "A secret value was about to be written to a file",
+        "why": "REFUSED — nothing landed. {{secret:NAME}} exists so a key never "
+               "sits in a file the agent can read back.",
+        "checks": ["If the value reached the agent's context, rotate it.",
+                   "Should this project hold that secret at all?"],
     },
     "_write_unknown": {
         "title": "A write tripped a diff gate",
-        "what": "The deterministic write-time scan flagged this file.",
-        "why": "The write landed — the gate is advisory since the staging "
-               "quarantine was removed. Git is the undo surface.",
-        "checks": ["Read the diff below and decide whether it is what you asked for."],
+        "why": "The write landed — the gate is advisory. Git is the undo surface.",
+        "checks": ["Read the diff below and decide if it is what you asked for."],
     },
     "egress_high_entropy": {
         "title": "The guest reached a random-looking hostname",
-        "what": "A hostname with high character entropy was contacted, then cut.",
-        "why": "Domain-generation algorithms and DNS tunnels produce names like "
-               "this; hand-registered domains almost never do.",
-        "checks": ["Is it a real CDN/cloud name (those can look random)?",
-                   "Which project and which run reached it?",
-                   "Did anything leave — check bytes out below."],
+        "why": "DGA and DNS-tunnel names look like this; registered domains "
+               "rarely do.",
+        "checks": ["Is it a real CDN name (those can look random)?",
+                   "Did anything leave — check bytes out."],
     },
     "egress_volume_spike": {
-        "title": "One host received far more data than the project's norm",
-        "what": "Bytes out to this host went well past the baseline built from "
-                "the project's other hosts, so the host was cut.",
-        "why": "Bulk outbound to a single destination is what exfiltration looks "
-               "like. It is also what a legitimate upload looks like.",
-        "checks": ["Was a big upload expected in this project?",
-                   "Compare against the per-host table below — is the baseline meaningful?",
-                   "Look at the request paths: one big POST, or thousands of small ones?"],
+        "title": "One host received far more data than the norm",
+        "why": "Bulk outbound to a single host is exfil-shaped. It is also what "
+               "a legitimate upload looks like.",
+        "checks": ["Was a big upload expected here?",
+                   "One large POST, or thousands of small ones?"],
     },
     "egress_beacon_cadence": {
         "title": "Traffic to one host is suspiciously regular",
-        "what": "Requests to this host arrived on a near-perfect interval, so it "
-                "was cut.",
-        "why": "Human and app traffic is bursty; command-and-control check-ins "
-               "are metronomic.",
-        "checks": ["Is a poller or a heartbeat in this project supposed to run?",
-                   "Is the interval one a human would pick (30s, 60s, 300s)?",
-                   "Do the request paths and sizes repeat exactly?"],
+        "why": "App traffic is bursty; C2 check-ins are metronomic.",
+        "checks": ["Is a poller in this project supposed to run?",
+                   "Is the interval one a human would pick?"],
     },
     "login_failed": {
         "title": "Repeated failed logins",
-        "what": "A burst of failed password attempts hit the login endpoint.",
-        "why": "If the username is real, someone is guessing at a known account. "
-               "If it is not, it is background internet noise finding your host.",
-        "checks": ["Was this you, on a device with a stale saved password?",
-                   "Is the tried username one that exists (see below)?",
-                   "If the host is exposed, consider whether it needs to be."],
+        "why": "A real username means someone is guessing at a known account; "
+               "an unknown one is background noise.",
+        "checks": ["Was this you, with a stale saved password?",
+                   "Does the peer look like your LAN?"],
     },
     "computeruse_auth": {
         "title": "Rejected computer-use pairing attempts",
-        "what": "Something presented a bad pairing token to the desktop-client "
-                "WebSocket, repeatedly.",
-        "why": "That socket is the seam between Jarvis and your actual machines, "
-               "and it authenticates with a token rather than a session cookie.",
-        "checks": ["Is one of your own clients running with an old token?",
-                   "Does the peer below look like your LAN or like the internet?",
-                   "If it is not yours, rotate the pairing token."],
+        "why": "That socket is the seam between Jarvis and your actual machines.",
+        "checks": ["Is one of your own clients running an old token?",
+                   "If it isn't yours, rotate the pairing token."],
     },
 }
 
@@ -252,7 +211,7 @@ def _brief(key: str, fallback: str) -> dict:
     b = _BRIEF.get(key)
     if b:
         return b
-    return {"title": fallback, "what": "", "why": "", "checks": []}
+    return {"title": fallback, "why": "", "checks": []}
 
 
 # --- shared lookups ----------------------------------------------------------
@@ -401,7 +360,7 @@ async def _diff_section(slug: str, rel: str) -> dict | None:
     hunks, truncated = _parse_hunks(out)
     return {"type": "diff", "title": "Uncommitted change vs git HEAD", "path": rel,
             "hunks": hunks, "truncated": truncated,
-            "note": "`git diff HEAD` in the project repo — this is the undo surface"}
+            "note": "git diff HEAD — the undo surface"}
 
 
 def _files_section(project: Path, path: Path, rel: str, event_ts: float | None,
@@ -472,7 +431,7 @@ def _modules_section(project: Path, mods: list[str]) -> dict | None:
         if m.startswith((".", "/", "~")):
             verdict, where = "local file", "relative import, not a package"
         elif m in sys.stdlib_module_names:
-            verdict, where = "python stdlib", "ships with python — nothing was installed"
+            verdict, where = "python stdlib", "nothing was installed"
         else:
             base = m.split("/")[0].lstrip("@")
             found = [n for n, text in manifests.items() if base.lower() in text]
@@ -480,11 +439,9 @@ def _modules_section(project: Path, mods: list[str]) -> dict | None:
                 verdict, where = "declared", ", ".join(found)
             else:
                 verdict, where = ("NOT DECLARED",
-                                  f"absent from {', '.join(manifests) or 'any manifest'}"
-                                  " — check the spelling and whether it is installed")
+                                  f"absent from {', '.join(manifests) or 'any manifest'}")
         rows.append([m, verdict, where])
-    return _table("The modules", ["Module", "Status", "Where"], rows,
-                  note="undeclared third-party names are how typo-squats arrive")
+    return _table("The modules", ["Module", "Status", "Where"], rows)
 
 
 _STATUS_CODES = {"??": "untracked", " M": "modified", "M ": "modified (staged)",
@@ -506,7 +463,7 @@ async def _status_section(slug: str) -> dict | None:
     if not rows:
         return None
     return _table("Uncommitted files in this project", ["State", "Path"], rows[:60],
-                  note="everything the agent has changed since the last commit"
+                  note="changed since the last commit"
                        + (f" · showing 60 of {len(rows)}" if len(rows) > 60 else ""))
 
 
@@ -543,13 +500,13 @@ async def _write_board(db, ev, detail, add) -> dict:
         rows = [
             ["File", rel],
             ["Project", f"{name} ({slug})" if name else slug],
-            ["Gate", trigger, "deterministic write-time scan (backend/diffgate.py)"],
+            ["Gate", trigger, "deterministic write-time scan"],
             ["Outcome",
              "REFUSED — nothing was written" if refused
-             else "landed on disk — the gate is advisory, this is an alert not a block"],
+             else "landed — the gate is advisory, not a block"],
             ["Flagged", f"{_iso(event_ts) or ev.get('created_at')} ({_ago(event_ts)})"],
             ["Written by", await _conv_label(db, detail.get("conversation_id"))
-             or "not recorded (pre-dates write attribution)"],
+             or "not recorded"],
         ]
         if detail.get("bytes") is not None:
             rows.append(["Write size", f"{_bytes(detail['bytes'])}"
@@ -562,9 +519,8 @@ async def _write_board(db, ev, detail, add) -> dict:
         elif not refused:
             rows.append(["File now", "GONE — the file no longer exists on disk"])
         if changed_after:
-            rows.append(["⚠ Drift", "the file was modified after this flag fired — "
-                                    "what you see below is the current content, "
-                                    "not the bytes that were scanned"])
+            rows.append(["⚠ Drift", "modified after the flag fired — this is the "
+                                    "current file, not the bytes that were scanned"])
         return _facts("The write", rows)
 
     async def tripped():
@@ -572,8 +528,7 @@ async def _write_board(db, ev, detail, add) -> dict:
         if trigger == "new_import":
             rows.append(["Modules added", ", ".join(map(str, detail.get("modules") or []))])
         elif trigger == "network_call":
-            rows.append(["Matched", ", ".join(map(str, detail.get("matches") or [])),
-                         "the outbound-call primitives found in the added lines"])
+            rows.append(["Matched", ", ".join(map(str, detail.get("matches") or []))])
         elif trigger == "high_entropy":
             rows.append(["Blobs", detail.get("count")])
             rows.append(["First blob", detail.get("sample")])
@@ -583,12 +538,10 @@ async def _write_board(db, ev, detail, add) -> dict:
             rows.append([f"{what.capitalize()} after", detail.get("after")])
         elif trigger == "secret_leak":
             rows.append(["Secrets found", ", ".join(map(str, detail.get("secrets") or [])),
-                         "matched by VALUE against your secret store — the names "
-                         "are shown, never the values"])
+                         "names only — never the values"])
         if detail.get("lines"):
             rows.append(["At line" + ("s" if len(detail["lines"]) != 1 else ""),
-                         ", ".join(str(n) for n in detail["lines"]),
-                         "line numbers in the file as it was written"])
+                         ", ".join(str(n) for n in detail["lines"])])
         return _facts("What tripped it", rows) if rows else None
 
     async def code():
@@ -600,12 +553,10 @@ async def _write_board(db, ev, detail, add) -> dict:
         marks, note = stored, None
         if not stored or changed_after:
             marks = diffgate.locate(text, trigger, detail)
-            note = ("re-found in the current file" if stored else
-                    "located by rescanning the current file (this event pre-dates "
-                    "line recording)")
+            note = ("re-found in the current file" if stored
+                    else "located by rescanning — this event pre-dates line recording")
         if not marks:
-            note = ("the flagged pattern is no longer in this file — showing the "
-                    "head of it instead")
+            note = "pattern is gone from this file — showing its head instead"
         return _code_section(f"{rel} — the lines in question", text, marks,
                              path=rel, note=note)
 
@@ -644,9 +595,7 @@ async def _write_board(db, ev, detail, add) -> dict:
         return _facts("What this code could reach", [
             ["Egress mode", f"{mode} (from the {pol.get('source')} list)"],
             ["Reachable", reach],
-            ["Scope", "this is the GUEST's policy: code running in the VM is held "
-                      "to it and every attempt is logged on the Network tab. Code "
-                      "that runs outside the guest is not gated by it."],
+            ["Scope", "the guest's policy — code outside the VM is not gated by it"],
         ])
 
     await add(facts)
@@ -694,8 +643,7 @@ async def _egress_board(db, ev, detail, add) -> dict:
                 ["Detected", f"{_iso(event_ts) or ev.get('created_at')} ({_ago(event_ts)})"]]
         if kind == "high_entropy":
             rows.append(["Entropy", f"{detail.get('entropy')} bits/char",
-                         f"threshold {detail.get('threshold')} — above this a name "
-                         "is treated as machine-generated"])
+                         f"threshold {detail.get('threshold')}"])
         elif kind == "volume_spike":
             rows.append(["Bytes out", f"{_bytes(detail.get('bytes_out'))} "
                                       f"({detail.get('bytes_out')} bytes)"])
@@ -705,15 +653,13 @@ async def _egress_board(db, ev, detail, add) -> dict:
         elif kind == "beacon_cadence":
             rows.append(["Interval", f"about {detail.get('period_seconds')}s between hits"])
             rows.append(["Regularity", f"cv {detail.get('cv')}",
-                         "coefficient of variation — 0 is a metronome, real "
-                         "traffic is well above it"])
+                         "0 is a metronome; real traffic is well above it"])
             rows.append(["Hits counted", detail.get("hits")])
         rows.append(["Cut now",
                      "yes — the proxy refuses it and nftables drops its IPs"
                      if egress.is_cut(slug, host) else
-                     "no — the cut is held in memory, so a backend restart since "
-                     "the alert has cleared it. The host is reachable again unless "
-                     "policy says otherwise."])
+                     "no — the cut is held in memory, so a backend restart has "
+                     "cleared it. Reachable again unless policy says otherwise."])
         try:
             pol = await egress.get_policy(db, slug or egress.GENERAL)
             rows.append(["Policy", f"{pol.get('mode')} (from the "
@@ -742,10 +688,8 @@ async def _egress_board(db, ev, detail, add) -> dict:
                  h["reason"] or ""] for h in hits]
         return _table("Requests to this host",
                       ["When", "Verdict", "Method", "Path", "Out", "In", "Reason"], rows,
-                      note="what actually went over the wire, newest first "
-                           "(paths are untrusted guest input)",
-                      empty="no recorded requests — the anomaly fired on history "
-                            "that has since been trimmed")
+                      note="newest first · paths are untrusted guest input",
+                      empty="no recorded requests — the history has since been trimmed")
 
     async def neighbours():
         q = ("SELECT host, COUNT(*) n, SUM(bytes_out) o, SUM(bytes_in) i, "
@@ -760,7 +704,7 @@ async def _egress_board(db, ev, detail, add) -> dict:
                      _iso(_ts(r["last"]))] for r in await cur.fetchall()]
         return _table("Where this project's bytes go",
                       ["Host", "Requests", "Out", "In", "Last seen"], rows,
-                      note="the baseline a volume spike is measured against")
+                      note="the baseline a spike is measured against")
 
     async def cadence():
         if kind != "beacon_cadence" or len(hits) < 3:
@@ -806,17 +750,15 @@ async def _login_board(db, ev, detail, add) -> dict:
         return _facts("The attempts", [
             ["Username tried", who or "(blank)"],
             ["Is that a real account",
-             "YES — someone is guessing at an account that exists" if real
-             else "no — no such user, which reads as untargeted scanning"],
+             "YES — an account that exists" if real
+             else "no such user — reads as untargeted scanning"],
             ["Attempts in this burst", detail.get("attempts")],
-            ["From", peer, "taken from CF-Connecting-IP / X-Forwarded-For where "
-                           "present — a hint only, never used for throttling"],
+            ["From", peer, "a header hint, never used for throttling"],
             ["Detected", f"{_iso(event_ts) or ev.get('created_at')} ({_ago(event_ts)})"],
             ["Bursts for this name", f"{r['n']} alert(s) since {_iso(_ts(r['first']))}"
              if r and r["n"] else None],
             ["Accounts on this instance", len(users)],
-            ["Throttle", "each further attempt is delayed up to 8s; the account is "
-                         "never locked out"],
+            ["Throttle", "each further attempt delayed up to 8s; never locked out"],
         ])
 
     async def history():
@@ -827,8 +769,7 @@ async def _login_board(db, ev, detail, add) -> dict:
                      "seen" if r["acknowledged"] else "waiting"]
                     for r in await cur.fetchall()]
         return _table("Failed-login bursts", ["When", "Summary", "State"], rows,
-                      note="every burst recorded, newest first — a cadence here "
-                           "tells you scanning from noise")
+                      note="newest first — a cadence here separates scanning from noise")
 
     await add(facts)
     await add(history)
@@ -847,15 +788,11 @@ async def _cu_board(db, ev, detail, add) -> dict:
                                    "172.18.", "127.", "::1"))
         return _facts("The attempts", [
             ["From", peer],
-            ["Looks like", "your LAN / loopback — most likely one of your own "
-                           "clients with a stale token" if private
-                           else "outside your LAN — treat as a probe"],
-            ["Rejected attempts", detail.get("attempts"),
-             "counted in a 5 minute window; one alert per burst"],
+            ["Looks like", "your LAN — likely your own client with a stale token"
+                           if private else "outside your LAN — treat as a probe"],
+            ["Rejected attempts", detail.get("attempts"), "per 5 minute window"],
             ["Detected", f"{_iso(event_ts) or ev.get('created_at')} ({_ago(event_ts)})"],
-            ["How that socket authenticates",
-             "a pairing token, not a session cookie — so a bad token here is the "
-             "whole failed handshake"],
+            ["Authenticates with", "a pairing token, not a session cookie"],
         ])
 
     async def clients():
@@ -865,10 +802,8 @@ async def _cu_board(db, ev, detail, add) -> dict:
                 for c in cu.clients()]
         return _table("Computers connected right now",
                       ["Name", "Platform", "Client id", "Since", "Age"], rows,
-                      note="if one of these went missing around the alert, the "
-                           "rejected attempts are probably that client reconnecting",
-                      empty="nothing is connected — so none of these attempts "
-                            "succeeded")
+                      note="one missing around the alert = probably it reconnecting",
+                      empty="nothing connected — none of these attempts succeeded")
 
     async def history():
         async with db.execute(
@@ -911,7 +846,7 @@ async def _generic_board(db, ev, detail, add) -> dict:
     await add(lambda: _related_table(f"Other {kind} alerts", rel_events["same"],
                                      subject="this kind"))
     return {"title": kind.replace("_", " ").capitalize(),
-            "what": ev.get("summary") or "", "why": "", "checks": []}
+            "why": ev.get("summary") or "", "checks": []}
 
 
 _BOARDS = {"write_flag": _write_board, "egress_anomaly": _egress_board,
@@ -948,7 +883,7 @@ async def build_board(db: aiosqlite.Connection, ev: dict) -> dict:
     try:
         brief = await builder(db, ev, detail, add)
     except Exception as e:                          # noqa: BLE001
-        brief = {"title": str(ev.get("kind") or "alert"), "what": "", "why": "",
+        brief = {"title": str(ev.get("kind") or "alert"), "why": "",
                  "checks": []}
         sections.append(_note("This board could not be assembled",
                               f"{type(e).__name__}: {e}"))

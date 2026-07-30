@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { api, chatStream } from '../api.js'
+import { watchRun } from '../agentWatch.js'
 import ChatBox from '../ChatBox.jsx'
 import Md from '../Md.jsx'
 import { ReviewQueue } from './Review.jsx'
@@ -1023,9 +1024,13 @@ function AgentPanel({ slug, state, setState }) {
   const [log, setLog] = useState([])
   const [busy, setBusy] = useState(false)
   const bottomRef = useRef(null)
+  const unwatch = useRef(null)
   const which = state.agent || ''
 
   useEffect(() => { api('/api/agents').then((r) => setAgents(r.agents)) }, [])
+  // the run outlives this panel now, so releasing the watch on unmount is what
+  // turns "operator walked away" into a notice
+  useEffect(() => () => { unwatch.current?.() }, [])
   useEffect(() => {
     // contain the autoscroll to the log list (scrollIntoView scrolls the page)
     const box = bottomRef.current?.parentElement
@@ -1039,6 +1044,10 @@ function AgentPanel({ slug, state, setState }) {
     try {
       await chatStream(
         { task, confirm_peak: confirmPeak, project: slug }, (ev) => {
+          if (ev.type === 'start') {
+            unwatch.current?.()
+            unwatch.current = watchRun(ev.conversation_id)
+          }
           if (ev.type === 'tool')
             setLog((l) => upLast(l, (last) => ({ ...last, text: last.text + `\n⚙ ${ev.name}\n` })))
           if (ev.type === 'token')

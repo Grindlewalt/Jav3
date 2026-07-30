@@ -7,12 +7,15 @@ The agent runs in the ACTIVE PROJECT: it gets the project's assembled context
 (minus any context items the agent excludes) and the same staged-write tools,
 so its file changes land in the approval queue exactly like Jarvis's own.
 """
+import asyncio
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from . import bus
 from .agent.loop import db_tool_sink
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .vm.turn import run_agent_turn
@@ -38,6 +41,30 @@ class RunAgent(BaseModel):
 
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
+
+
+# In-flight interactive runs, keyed by conversation. As in chat.py this dict is
+# both the "still running" flag and the strong reference that keeps the task
+# alive once the HTTP connection that started it has gone away.
+_active_runs: dict[int, asyncio.Task] = {}
+
+# Completion notices for named-agent runs the OPERATOR started. Deliberately
+# only this path: `spawn_agent`/`spawn_temp_agent` children and orchestrator
+# funnel nodes finish constantly inside a turn the operator is already
+# watching, and toasting those would bury the one they actually walked away
+# from.
+NOTICE_CHAN = "agent_notices"
+
+
+def _chan(conversation_id: int) -> str:
+    return f"agentrun:{conversation_id}"
+
+
+def _human_secs(s: float) -> str:
+    if s < 60:
+        return f"{s:.0f}s"
+    m, sec = divmod(int(s), 60)
+    return f"{m}m {sec:02d}s"
 
 
 def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
@@ -283,42 +310,133 @@ async def run_agent(slug: str, body: RunAgent):
     finally:
         await db.close()
 
-    async def event_stream():
-        from . import runtime
-        ptoken = runtime.active_project.set(active)
-        cidtoken = runtime.conversation_id.set(conversation_id)
-        # own fetch-ledger scope, like headless runs: without it web claims fall
-        # back to the project slug and never expire — a URL read today would be
-        # "already claimed" for every future interactive run in this project
-        wtoken = runtime.web_session.set(f"run:{conversation_id}")
+    # subscribe BEFORE spawning so this tail cannot miss the first events, then
+    # detach the run: closing the panel or leaving the page used to cancel the
+    # response generator and take the agent's work down with it
+    q = bus.subscribe(_chan(conversation_id))
+    _active_runs[conversation_id] = asyncio.create_task(
+        _run_interactive(conversation_id, agent, body.task, active))
+    return _tail(conversation_id, q)
+
+
+async def _run_interactive(conversation_id: int, agent: dict, task: str,
+                           active: str | None) -> None:
+    """One interactive agent run, detached from the HTTP connection that asked
+    for it. Every event goes to the conversation's bus channel; the original
+    POST and any later re-attach just watch. Persistence happens here either
+    way, and the run ends with a notice on NOTICE_CHAN so the GUI can tell the
+    operator it finished if they moved on."""
+    from . import runtime
+    ptoken = runtime.active_project.set(active)
+    cidtoken = runtime.conversation_id.set(conversation_id)
+    # own fetch-ledger scope, like headless runs: without it web claims fall
+    # back to the project slug and never expire — a URL read today would be
+    # "already claimed" for every future interactive run in this project
+    wtoken = runtime.web_session.set(f"run:{conversation_id}")
+    chan = _chan(conversation_id)
+    started = time.monotonic()
+    db = None
+    final_content, error = "", None
+    try:
         db = await get_db()
+        bus.publish(chan, {"type": "start", "conversation_id": conversation_id,
+                           "agent": agent["name"]})
+        system_prompt = await _agent_system_prompt(db, agent, active=active)
+        tools = _agent_tools(agent, await _project_autonomy(db, active))
+        mdl, burl = _agent_overrides(agent)
+        history = [{"role": "user", "content": task}]
+        async for event in run_agent_turn(conversation_id, system_prompt, history,
+                                          tools=tools, model_name=mdl, base_url=burl,
+                                          active_project=active,
+                                          on_tool_call=db_tool_sink(db, conversation_id)):
+            if event["type"] == "final":
+                final_content = event["content"]
+            else:
+                bus.publish(chan, event)
+        await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) "
+            "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
+        await db.commit()
+        bus.publish(chan, {"type": "final", "content": final_content})
+    except asyncio.CancelledError:
+        error = "run cancelled"
+        bus.publish(chan, {"type": "error", "message": error})
+        raise
+    except Exception as e:  # noqa: BLE001 — surface to the GUI, don't 500 mid-stream
+        error = str(e)
+        bus.publish(chan, {"type": "error", "message": error})
+    finally:
+        # the notice fires however the run ended — an agent that died after the
+        # operator walked away is exactly the case worth telling them about
         try:
-            yield sse({"type": "start", "conversation_id": conversation_id,
-                       "agent": agent["name"]})
-            system_prompt = await _agent_system_prompt(db, agent, active=active)
-            tools = _agent_tools(agent, await _project_autonomy(db, active))
-            mdl, burl = _agent_overrides(agent)
-            history = [{"role": "user", "content": body.task}]
-            final_content = ""
-            async for event in run_agent_turn(conversation_id, system_prompt, history,
-                                              tools=tools, model_name=mdl, base_url=burl,
-                                              active_project=active,
-                                              on_tool_call=db_tool_sink(db, conversation_id)):
-                if event["type"] == "final":
-                    final_content = event["content"]
-                else:
-                    yield sse(event)
-            await db.execute(
-                "INSERT INTO messages (conversation_id, role, content) "
-                "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
-            await db.commit()
-            yield sse({"type": "final", "content": final_content})
-        except Exception as e:  # noqa: BLE001 — surface to the GUI, don't 500 mid-stream
-            yield sse({"type": "error", "message": str(e)})
-        finally:
+            bus.publish(NOTICE_CHAN, {
+                "type": "agent_run_done", "conversation_id": conversation_id,
+                "agent": agent.get("name") or agent.get("slug"),
+                "slug": agent.get("slug"), "project": active,
+                "ok": error is None, "error": error,
+                "took": _human_secs(time.monotonic() - started),
+                "summary": " ".join((final_content or "").split())[:180]})
+        except Exception:                        # noqa: BLE001 — never break the run
+            pass
+        bus.publish(chan, bus.JOB_END)
+        _active_runs.pop(conversation_id, None)
+        if db is not None:
             await db.close()
-            runtime.web_session.reset(wtoken)
-            runtime.conversation_id.reset(cidtoken)
-            runtime.active_project.reset(ptoken)
+        runtime.web_session.reset(wtoken)
+        runtime.conversation_id.reset(cidtoken)
+        runtime.active_project.reset(ptoken)
+
+
+def _tail(conversation_id: int, q) -> StreamingResponse:
+    """SSE-forward one run's bus channel. A client disconnect cancels only this
+    tail — never the run."""
+    async def event_stream():
+        try:
+            while True:
+                ev = await q.get()
+                if ev.get("type") == "job_end":
+                    break
+                yield sse(ev)
+                if ev.get("type") in ("final", "error"):
+                    break
+        finally:
+            bus.unsubscribe(_chan(conversation_id), q)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/runs/{conversation_id}/stream")
+async def resume_run_stream(conversation_id: int):
+    """Re-attach to an in-flight run (came back to the board, reloaded the
+    page). Tokens streamed before attaching are gone, but the final event
+    carries the whole reply."""
+    q = bus.subscribe(_chan(conversation_id))
+    if conversation_id not in _active_runs:
+        bus.unsubscribe(_chan(conversation_id), q)
+
+        async def idle():
+            yield sse({"type": "idle", "conversation_id": conversation_id})
+
+        return StreamingResponse(idle(), media_type="text/event-stream")
+    return _tail(conversation_id, q)
+
+
+@router.get("/notices/stream")
+async def notice_stream():
+    """Completion notices for operator-started agent runs (see NOTICE_CHAN)."""
+    q = bus.subscribe(NOTICE_CHAN)
+
+    async def gen():
+        try:
+            yield sse({"type": "stream_open"})
+            while True:
+                try:
+                    yield sse(await asyncio.wait_for(q.get(), timeout=25))
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            bus.unsubscribe(NOTICE_CHAN, q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")

@@ -201,17 +201,13 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
           {err && <div className="sbd-err">could not load this board — {err}</div>}
           {!board && !err && <div className="dim center-pad">assembling…</div>}
 
-          {board && (board.what || board.why) && (
+          {board && (board.why || board.checks?.length > 0) && (
             <section className="sbd-brief">
-              {board.what && <p className="sbd-what">{board.what}</p>}
               {board.why && <p className="sbd-why">{board.why}</p>}
               {board.checks?.length > 0 && (
-                <>
-                  <div className="sbd-checkhead">What to check</div>
-                  <ul className="sbd-checks">
-                    {board.checks.map((c, i) => <li key={i}>{c}</li>)}
-                  </ul>
-                </>
+                <ul className="sbd-checks">
+                  {board.checks.map((c, i) => <li key={i}>{c}</li>)}
+                </ul>
               )}
             </section>
           )}

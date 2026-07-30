@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { isWatched } from './agentWatch.js'
 import { api, subscribeSse } from './api.js'
 
 // Top-right notices — the successor to the nav bell and shield. Anything that
@@ -10,10 +11,17 @@ import { api, subscribeSse } from './api.js'
 // pauses while hovered (dismissal rides the CSS animation's end, so the pause
 // is free). At most three cards show; the backlog folds into a "+N" chip.
 //
-// Sources: the live security SSE stream (instant, id-deduped) and the
-// /api/notifications poll (egress/git/schedule deltas between snapshots).
-// Security alerts are deliberately NOT toasted from the poll — the stream owns
-// them, and a reconnect gap only costs a toast, never the badge count.
+// Sources: the live security SSE stream (instant, id-deduped), the agent-run
+// notice stream, and the /api/notifications poll (egress/git/schedule deltas
+// between snapshots). Security alerts are deliberately NOT toasted from the
+// poll — the stream owns them, and a reconnect gap only costs a toast, never
+// the badge count.
+//
+// Agent notices cover DEDICATED agents the operator started and then left: the
+// run is detached server-side, so it finishes either way, and this is how they
+// hear about it. A run whose panel is on screen in a visible tab is skipped
+// (agentWatch) — they are already watching it — and the agents Jarvis spawns
+// mid-turn never reach this stream at all.
 //
 // Every string shown here (summaries, commit messages, schedule names) is
 // UNTRUSTED model/guest output — rendered as plain text nodes only.
@@ -86,6 +94,22 @@ export function useNotices(enabled) {
     })
   }, [enabled, push])
 
+  useEffect(() => {
+    if (!enabled) return
+    return subscribeSse('/api/agents/notices/stream', (ev) => {
+      if (ev.type !== 'agent_run_done') return
+      if (isWatched(ev.conversation_id)) return   // they're looking right at it
+      push({
+        sev: ev.ok ? 'ok' : 'crit',
+        project: ev.project,
+        title: `${ev.agent || 'agent'} ${ev.ok ? 'finished' : 'failed'}`
+               + (ev.took ? ` · ${ev.took}` : ''),
+        body: ev.ok ? (ev.summary || 'no output') : (ev.error || 'run failed'),
+        life: 14,   // longer than an approval card: this is a result to read
+      })
+    })
+  }, [enabled, push])
+
   return { toasts, count, dismiss, clear }
 }
 
@@ -96,14 +120,18 @@ export default function Notices({ toasts, dismiss, clear }) {
   const extra = toasts.length - shown.length
   const open = (t) => {
     dismiss(t.id)
-    navigate('/review', t.eventId ? { state: { openEvent: t.eventId } } : undefined)
+    // an agent notice belongs to the board it ran on; everything else is a
+    // queue item and belongs in the Review Center
+    if (t.project) navigate(`/projects/${t.project}`)
+    else navigate('/review', t.eventId ? { state: { openEvent: t.eventId } } : undefined)
   }
   return (
     <div className="notices" role="status" aria-live="polite">
       {shown.map((t) => (
         <button key={t.id} type="button" className={`notice ${t.sev}`}
-                title={t.eventId ? 'open the evidence for this alert'
-                                 : 'open the Review Center'}
+                title={t.project ? `open the ${t.project} board`
+                  : t.eventId ? 'open the evidence for this alert'
+                    : 'open the Review Center'}
                 onClick={() => open(t)}>
           <span className="notice-head">
             <span className="notice-dot" aria-hidden="true" />
