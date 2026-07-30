@@ -4,9 +4,10 @@ Runs on the machine you want Jarvis to drive. It dials **out** to Jarvis, so
 nothing listens on your computer and quitting the process ends all access.
 
 ```
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 
-python3 agent.py \
+.venv/bin/python agent.py \
   --server https://jarvis.example \
   --token  <from the Computer use tab> \
   --allow-root ~/Music \
@@ -54,7 +55,7 @@ reachable instead of failing silently later.
 Save the settings once, then let the OS keep it running:
 
 ```
-python3 agent.py --install \
+.venv/bin/python agent.py --install \
   --server https://jarvis.example \
   --token  <from the Computer use tab> \
   --allow-root ~/Music --allow-root ~/Videos \
@@ -67,6 +68,10 @@ That writes two files and prints the commands to enable the service:
 |---|---|---|
 | `~/.config/jarvis/computeruse.json` | **0600** | server, pairing token, CF token, roots |
 | systemd unit / launchd plist | 0644 | a path to the above, and nothing else |
+
+The service runs the *same interpreter you ran `--install` with*, so run it with
+the venv's python — a unit pointing at a system python that never had
+`websockets` installed starts and immediately dies.
 
 **Secrets are in the config, never in the service definition.** A systemd unit
 is world-readable and a launchd plist is world-readable *and* Spotlight-indexed,
@@ -129,7 +134,7 @@ allowing that token, and give the client:
 ```
 export CF_ACCESS_CLIENT_ID='<id>.access'
 export CF_ACCESS_CLIENT_SECRET='<secret>'
-python3 agent.py --server https://jarvis.example --token ... --allow-root ~/Music
+.venv/bin/python agent.py --server https://jarvis.example --token ... --allow-root ~/Music
 ```
 
 It sends them as `CF-Access-Client-Id` / `CF-Access-Client-Secret` on the

@@ -289,13 +289,11 @@ def test_the_client_zip_carries_source_and_no_secrets():
     but a download any session can fetch must not contain a credential."""
     import io
     import zipfile
-    from backend.config import settings
-    src = settings.base_dir / "clients" / "computeruse"
+    import backend.computeruse_api as api
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        for f in sorted(src.iterdir()):
-            if f.is_file() and f.suffix in (".py", ".txt", ".md"):
-                z.write(f, arcname=f"computeruse/{f.name}")
+        for f in api._client_source():
+            z.write(f, arcname=f"computeruse/{f.name}")
     names = zipfile.ZipFile(io.BytesIO(buf.getvalue())).namelist()
     assert "computeruse/agent.py" in names
     assert "computeruse/requirements.txt" in names
@@ -303,6 +301,29 @@ def test_the_client_zip_carries_source_and_no_secrets():
     # is the check — "cf_access_secret" appearing as a variable NAME in agent.py
     # is expected and says nothing about a credential being shipped.
     assert not any(n.endswith(".json") for n in names), names
+    assert all(n.rsplit(".", 1)[-1] in ("py", "txt", "md") for n in names), names
+
+
+def test_the_client_is_also_offered_as_a_tarball():
+    """`unzip` is not part of a base Linux install. The download itself worked
+    and then set-up died on `unzip: command not found`, so the command the tab
+    builds fetches this instead — tar is in every base install and on macOS."""
+    import io
+    import tarfile
+    import backend.computeruse_api as api
+    routes = {r.path for r in api.ws_router.routes}
+    assert "/api/computeruse/client.tar.gz" in routes, (
+        "the tarball must be on the router WITHOUT the session dependency")
+    assert "/api/computeruse/client.tar.gz" not in {
+        r.path for r in api.router.routes}
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        for f in api._client_source():
+            t.add(f, arcname=f"computeruse/{f.name}")
+    names = tarfile.open(fileobj=io.BytesIO(buf.getvalue())).getnames()
+    assert "computeruse/agent.py" in names
+    assert "computeruse/requirements.txt" in names
+    # same rule as the zip: source only, so nothing that could carry a token
     assert all(n.rsplit(".", 1)[-1] in ("py", "txt", "md") for n in names), names
 
 

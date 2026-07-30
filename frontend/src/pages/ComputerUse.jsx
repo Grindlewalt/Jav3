@@ -363,16 +363,27 @@ function Setup({ token, machines, onClose }) {
     ? ` \\\n  -H 'CF-Access-Client-Id: ${cfId}' \\\n  -H 'CF-Access-Client-Secret: ${cfSecret}'`
     : ''
 
+  // Every step after the download runs the client's OWN interpreter, not
+  // whatever `python3` means in that shell:
+  //   - `unzip` is not in a base Linux install; tar is. The zip download used
+  //     to succeed and then die on `unzip: command not found`.
+  //   - `pip install` into the system python is refused outright on Arch and
+  //     Debian (PEP 668, "externally-managed-environment"), and into a venv
+  //     that happens to be active it installs the deps somewhere unrelated.
+  //   - --install bakes sys.executable into the systemd unit / plist, so the
+  //     interpreter used here is the one the service will run forever.
+  const py = '~/jarvis-client/.venv/bin/python'
   const cmds = {
     fetch: `mkdir -p ~/jarvis-client && cd ~/jarvis-client\n`
-      + `curl -fsSL '${origin}/api/computeruse/client.zip' \\\n`
-      + `  -H 'X-Jarvis-Token: ${token}'${cfCurl} -o c.zip \\\n`
-      + `  && unzip -oq c.zip && rm -f c.zip || { rm -f c.zip; echo FAILED; }\n`
-      + `python3 -m pip install -r computeruse/requirements.txt`,
-    check: 'python3 ~/jarvis-client/computeruse/agent.py --selftest',
-    run: 'python3 ~/jarvis-client/computeruse/agent.py',
+      + `curl -fsSL '${origin}/api/computeruse/client.tar.gz' \\\n`
+      + `  -H 'X-Jarvis-Token: ${token}'${cfCurl} -o c.tgz \\\n`
+      + `  && tar xzf c.tgz && rm -f c.tgz || { rm -f c.tgz; echo FAILED; }\n`
+      + `python3 -m venv .venv\n`
+      + `.venv/bin/pip install -q -r computeruse/requirements.txt`,
+    check: `${py} ~/jarvis-client/computeruse/agent.py --selftest`,
+    run: `${py} ~/jarvis-client/computeruse/agent.py`,
     install: [
-      'python3 ~/jarvis-client/computeruse/agent.py --install',
+      `${py} ~/jarvis-client/computeruse/agent.py --install`,
       `  --server ${origin}`,
       `  --token ${token}`,
       ...(name ? [`  --name ${name}`] : []),

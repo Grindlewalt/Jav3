@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import tarfile
 import time
 import uuid
 import zipfile
+from pathlib import Path
 
 from fastapi import (APIRouter, Depends, HTTPException, Request, WebSocket,
                      WebSocketDisconnect)
@@ -161,9 +163,8 @@ async def tarmac_test():
         return {"ok": False, "error": str(e)}
 
 
-@ws_router.get("/client.zip")
-async def client_zip(request: Request, token: str | None = None):
-    """The client, zipped, so a machine that has never seen this repo can get it.
+async def _download_auth(request: Request, token: str | None) -> None:
+    """Let the download through for a logged-in session OR the pairing token.
 
     NOT behind the session dependency: it is fetched by curl from a terminal on
     the machine being set up, which has no browser session. It sat behind
@@ -182,14 +183,47 @@ async def client_zip(request: Request, token: str | None = None):
                 status_code=401,
                 detail="pass the pairing token as X-Jarvis-Token (the Computer "
                        "use tab builds the command for you)")
+
+
+def _client_source() -> list[Path]:
+    """The files the client is made of. Source only — the config file is what
+    would carry a token, and it is not here."""
     src = settings.base_dir / "clients" / "computeruse"
     if not src.is_dir():
         raise HTTPException(status_code=500, detail="client source is missing")
+    return [f for f in sorted(src.iterdir())
+            if f.is_file() and f.suffix in (".py", ".txt", ".md")]
+
+
+@ws_router.get("/client.tar.gz")
+async def client_tar(request: Request, token: str | None = None):
+    """The client as a tarball — what the set-up command actually fetches.
+
+    `unzip` is not part of a base Linux install. The zip below downloaded fine
+    and then died on `unzip: command not found`, leaving the operator with a
+    half-finished set-up and no client. tar is in every base install, and on
+    macOS too, so this is the one that is always openable.
+    """
+    await _download_auth(request, token)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        for f in _client_source():
+            t.add(f, arcname=f"computeruse/{f.name}")
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/gzip",
+        headers={"Content-Disposition":
+                 'attachment; filename="computeruse.tar.gz"'})
+
+
+@ws_router.get("/client.zip")
+async def client_zip(request: Request, token: str | None = None):
+    """The same client, zipped, for a browser download or a machine with unzip."""
+    await _download_auth(request, token)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in sorted(src.iterdir()):
-            if f.is_file() and f.suffix in (".py", ".txt", ".md"):
-                z.write(f, arcname=f"computeruse/{f.name}")
+        for f in _client_source():
+            z.write(f, arcname=f"computeruse/{f.name}")
     buf.seek(0)
     return StreamingResponse(
         buf, media_type="application/zip",
