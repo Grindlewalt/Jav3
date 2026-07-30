@@ -1985,8 +1985,11 @@ kbd {
 .sbd-trunc { padding: 6px 10px; }
 
 /* the directory the flagged file lives in */
+/* capped and scrollable: a 68-file directory must not push the diff and the
+   traffic tables off the screen */
 .sbd-files { list-style: none; margin: 0; padding: 0;
-  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  border: 1px solid var(--border); border-radius: 10px;
+  max-height: 320px; overflow-y: auto; }
 .sbd-files li { display: flex; align-items: center; gap: 8px;
   padding: 6px 10px; font-size: 13px; }
 .sbd-files li:nth-child(odd) { background: var(--bg-soft); }

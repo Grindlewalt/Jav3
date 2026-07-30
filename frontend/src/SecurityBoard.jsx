@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 
 // The evidence board for one security alert. A card in the Review Center says
@@ -84,10 +84,22 @@ function Diff({ s }) {
 // `burst` means it was touched in the same write turn (the real blast radius),
 // `flagged` means it carries an alert of its own.
 function Files({ s }) {
+  const box = useRef(null)
+  const subject = useRef(null)
+  // A real directory can be 60+ files, and the flagged one is wherever the
+  // alphabet put it. The list scrolls inside its own box (so it never pushes
+  // the diff off-screen) and opens parked on the subject — set directly rather
+  // than via scrollIntoView, which would also scroll the modal body.
+  useEffect(() => {
+    if (box.current && subject.current) {
+      box.current.scrollTop = Math.max(0, subject.current.offsetTop - 60)
+    }
+  }, [s])
   return (
-    <ul className="sbd-files">
+    <ul className="sbd-files" ref={box}>
       {s.entries.map((e) => (
-        <li key={e.rel} className={e.subject ? 'subject' : ''}>
+        <li key={e.rel} className={e.subject ? 'subject' : ''}
+            ref={e.subject ? subject : undefined}>
           <span className="sbd-fname mono">
             {e.kind === 'dir' ? '📁 ' : ''}{e.name}{e.kind === 'dir' ? '/' : ''}
           </span>

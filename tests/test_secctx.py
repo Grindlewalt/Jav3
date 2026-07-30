@@ -106,13 +106,23 @@ async def test_write_board_classifies_new_modules(db):
     assert rows["reqeusts"] == "NOT DECLARED"     # the typo-squat shape
 
 
-async def test_network_call_board_shows_what_it_could_reach(db):
+@pytest.mark.parametrize("mode,expect", [
+    ("allowlist", "allowed host"),          # names what IS reachable
+    ("denylist", "ANY host except"),        # names what is NOT — the opposite
+    ("denyall", "egress is switched off"),
+])
+async def test_network_call_board_reads_each_egress_mode_correctly(db, mode, expect):
+    """A denylist counted as 'N hosts reachable' told the operator the exact
+    opposite of the truth on a security board."""
+    from backend import egress
+    await egress.set_policy(db, "proj", mode=mode, hosts=["evil.test"])
     await writes.apply_write("proj", "a.py", b"import x\nx = requests.get('http://y')\n")
     ev = next(e for e in await security.list_events(db)
               if e["detail"]["trigger"] == "network_call")
+
     board = await secctx.build_board(db, ev)
     assert "What this code could reach" in _text(board)
-    assert "allowlist" in _text(board)
+    assert expect in _text(board)
 
 
 async def test_write_board_names_the_run_that_wrote_it(db):

@@ -622,18 +622,31 @@ async def _write_board(db, ev, detail, add) -> dict:
         return _modules_section(_project_dir(slug), detail.get("modules") or [])
 
     async def reach():
-        """For code that can talk out: how far it could actually get."""
+        """For code that can talk out: how far it could actually get. The three
+        modes mean opposite things — an allowlist NAMES what is reachable, a
+        denylist names what is not — so this must never just count the list."""
         if trigger != "network_call":
             return None
         pol = await egress.get_policy(db, slug or egress.GENERAL)
-        hosts = pol.get("effective") or []
+        mode = pol.get("mode")
+        hosts = [str(h) for h in (pol.get("effective") or [])]
+        shown = ", ".join(hosts[:8]) + ("…" if len(hosts) > 8 else "")
+        if mode == "denyall":
+            reach = "nothing — egress is switched off for this project"
+        elif mode == "denylist":
+            reach = (f"ANY host except the {len(hosts)} on the denylist"
+                     + (f" ({shown})" if hosts else "")
+                     + " — this project is allow-by-default")
+        else:
+            reach = (f"{len(hosts)} allowed host{'' if len(hosts) == 1 else 's'}"
+                     + (f": {shown}" if hosts else " — nothing is reachable yet")
+                     + " · everything else is denied and queued for approval")
         return _facts("What this code could reach", [
-            ["Egress mode", f"{pol.get('mode')} (from the {pol.get('source')} list)"],
-            ["Hosts reachable", f"{len(hosts)} allowed"
-             + (f" — {', '.join(map(str, hosts[:8]))}" if hosts else "")],
-            ["Note", "this is the guest's policy: code running in the VM can only "
-                     "reach these, and every attempt is logged on the Network tab. "
-                     "Code run outside the guest is not gated by it."],
+            ["Egress mode", f"{mode} (from the {pol.get('source')} list)"],
+            ["Reachable", reach],
+            ["Scope", "this is the GUEST's policy: code running in the VM is held "
+                      "to it and every attempt is logged on the Network tab. Code "
+                      "that runs outside the guest is not gated by it."],
         ])
 
     await add(facts)
