@@ -11,7 +11,7 @@ parameters:
       enum: [play, pause, playpause, next, previous, stop]
     client:
       type: string
-      description: Which computer, if more than one is connected.
+      description: Which machine, by name (e.g. "macbook"). Only needed when more than one is connected; the error lists them if you guess wrong.
   required: [action]
 ---
 "Back a song" is `previous`. Note that most players treat one `previous` as

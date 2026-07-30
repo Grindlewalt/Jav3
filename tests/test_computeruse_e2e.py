@@ -164,9 +164,9 @@ async def test_open_link_tool_only_accepts_http(wired):
 async def test_status_tool_reports_the_granted_roots(wired):
     from tools.computer_status.handler import run
     out = await run()
-    assert "granted folders" in out
+    assert "folders reachable" in out
     assert str(wired["music"]) in out
-    assert "dry-run" in out
+    assert "DRY RUN" in out
 
 
 @pytest.mark.asyncio

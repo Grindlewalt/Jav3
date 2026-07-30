@@ -9,7 +9,7 @@ parameters:
   properties:
     client:
       type: string
-      description: Which computer, if more than one is connected. Omit when there is only one.
+      description: A machine's name, if you want just one. Omit to describe every connected machine — which is how you learn the names.
 ---
 Screens are indexed from 0. There are TWO audio lists and they are not
 interchangeable: "mixer outputs" are what computer_volume's `device` accepts,

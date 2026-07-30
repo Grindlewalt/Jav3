@@ -223,3 +223,84 @@ def test_macos_backend_refuses_cleanly_rather_than_crashing(monkeypatch):
 def test_the_child_environment_carries_tmpdir_for_macos():
     agent_mod = _mod("agent")
     assert "TMPDIR" in agent_mod._ENV_KEEP
+
+
+# --- addressing several machines ----------------------------------------------
+
+@pytest.fixture
+def fleet():
+    from backend import computeruse as cu
+    for cid, name, plat in (("macbook-a1b2c3", "macbook", "darwin"),
+                            ("studio-d4e5f6", "studio", "linux")):
+        cu.register(cu.Client(id=cid, name=name, platform=plat))
+    yield cu
+    cu.unregister("macbook-a1b2c3")
+    cu.unregister("studio-d4e5f6")
+
+
+def test_a_machine_can_be_named_rather_than_quoted_by_id(fleet):
+    """Ids carry a random suffix so two machines called the same thing stay
+    distinct — but expecting the model to echo "macbook-a1b2c3" back is how it
+    ends up guessing."""
+    assert fleet.get_client("macbook").name == "macbook"
+    assert fleet.get_client("MacBook").name == "macbook"      # case-insensitive
+    assert fleet.get_client("mac").name == "macbook"          # unique prefix
+    assert fleet.get_client("macbook-a1b2c3").name == "macbook"   # full id still works
+
+
+def test_an_unknown_machine_error_lists_the_connected_ones(fleet):
+    with pytest.raises(fleet.VerbError) as e:
+        fleet.get_client("thinkpad")
+    assert "macbook" in str(e.value) and "studio" in str(e.value)
+
+
+def test_no_machine_named_with_several_connected_asks_which(fleet):
+    with pytest.raises(fleet.VerbError) as e:
+        fleet.get_client(None)
+    assert "name one" in str(e.value)
+    assert "macbook" in str(e.value) and "studio" in str(e.value)
+
+
+def test_an_ambiguous_prefix_asks_rather_than_picking():
+    from backend import computeruse as cu
+    for cid, name in (("mac-1", "mac-air"), ("mac-2", "mac-studio")):
+        cu.register(cu.Client(id=cid, name=name, platform="darwin"))
+    try:
+        with pytest.raises(cu.VerbError) as e:
+            cu.get_client("mac")
+        assert "matches several" in str(e.value)
+    finally:
+        cu.unregister("mac-1")
+        cu.unregister("mac-2")
+
+
+def test_nothing_connected_says_how_to_fix_it():
+    from backend import computeruse as cu
+    assert not cu.clients()
+    with pytest.raises(cu.VerbError) as e:
+        cu.get_client(None)
+    assert "Computer use tab" in str(e.value)
+
+
+# --- the client download ------------------------------------------------------
+
+def test_the_client_zip_carries_source_and_no_secrets():
+    """A machine that has never seen this repo needs the client from somewhere,
+    but a download any session can fetch must not contain a credential."""
+    import io
+    import zipfile
+    from backend.config import settings
+    src = settings.base_dir / "clients" / "computeruse"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for f in sorted(src.iterdir()):
+            if f.is_file() and f.suffix in (".py", ".txt", ".md"):
+                z.write(f, arcname=f"computeruse/{f.name}")
+    names = zipfile.ZipFile(io.BytesIO(buf.getvalue())).namelist()
+    assert "computeruse/agent.py" in names
+    assert "computeruse/requirements.txt" in names
+    # source only. The config file is what would carry a token, so its absence
+    # is the check — "cf_access_secret" appearing as a variable NAME in agent.py
+    # is expected and says nothing about a credential being shipped.
+    assert not any(n.endswith(".json") for n in names), names
+    assert all(n.rsplit(".", 1)[-1] in ("py", "txt", "md") for n in names), names

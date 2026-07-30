@@ -17,7 +17,7 @@ parameters:
       description: An output id, or part of its name ("desk speakers"). Resolved against what the machine has; the error lists options on a miss. Omit for the default output.
     client:
       type: string
-      description: Which computer, if more than one is connected.
+      description: Which machine, by name (e.g. "macbook"). Only needed when more than one is connected; the error lists them if you guess wrong.
   required: [action]
 ---
 `device` accepts either an exact id or part of an output's name ("desk

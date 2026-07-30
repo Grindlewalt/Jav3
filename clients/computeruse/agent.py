@@ -861,6 +861,49 @@ def _sibling(name):
         return mod
 
 
+def _fix_commands(runner, mac):
+    """The exact commands for whatever is missing — so the operator copies and
+    pastes rather than working out the package names for their platform."""
+    fixes = []
+    brew = sys.platform == "darwin"
+    if "mpv" not in runner.bin:
+        fixes.append(("play any media",
+                      "brew install mpv" if brew
+                      else "sudo apt install mpv    # or: sudo pacman -S mpv"))
+    if brew:
+        try:
+            import Quartz            # noqa: F401
+        except ImportError:
+            fixes.append(("pause / skip / previous (media keys)",
+                          "pip3 install pyobjc-framework-Quartz "
+                          "pyobjc-framework-Cocoa"))
+    else:
+        if "pactl" not in runner.bin and "wpctl" not in runner.bin:
+            fixes.append(("change the volume",
+                          "sudo apt install pulseaudio-utils    "
+                          "# or wireplumber for wpctl"))
+        try:
+            import jeepney           # noqa: F401
+        except ImportError:
+            fixes.append(("pause / skip / previous (MPRIS)", "pip3 install jeepney"))
+        if "xdg-open" not in runner.bin:
+            fixes.append(("open links", "sudo apt install xdg-utils"))
+        if "xrandr" not in runner.bin:
+            fixes.append(("list screens", "sudo apt install x11-xserver-utils"))
+    try:
+        import websockets            # noqa: F401
+    except ImportError:
+        fixes.insert(0, ("connect to Jarvis at all", "pip3 install websockets"))
+    if brew and mac is not None:
+        ok, _ = mac.preflight()
+        if not ok:
+            fixes.append(("media keys (permission, not a package)",
+                          "open 'x-apple.systempreferences:com.apple.preference."
+                          "security?Privacy_Accessibility'   # then allow this "
+                          "terminal"))
+    return fixes
+
+
 def _selftest():
     """What can this machine actually do? Reports rather than assumes."""
     r = Runner(dry_run=False)
@@ -895,9 +938,6 @@ def _selftest():
         print("\nmacOS:")
         for k, v in mac.selftest().items():
             print(f"  {k:22s} {v}")
-        print("\nIf can_post_media_keys is False, grant Accessibility to the "
-              "app running this\n(System Settings > Privacy & Security > "
-              "Accessibility). On macOS 15 that\nlapses after a reboot.")
     else:
         os_ = Linux(r)
         print(f"\nmixer         : {'wpctl' if 'wpctl' in r.bin else 'pactl' if 'pactl' in r.bin else 'NONE'}")
@@ -908,6 +948,26 @@ def _selftest():
             print(f"MPRIS players : {os_.players() or 'none running'}")
         except Exception as e:
             print(f"MPRIS players : unavailable ({e})")
+
+    mac = None
+    if sys.platform == "darwin":
+        try:
+            mac = _sibling("macos")
+        except Exception:
+            mac = None
+    fixes = _fix_commands(r, mac)
+    print()
+    if not fixes:
+        print("Everything this client needs is present. Nothing to install.")
+    else:
+        print("=" * 68)
+        print("TO FIX — copy and paste these:")
+        print("=" * 68)
+        for what, cmd in fixes:
+            print(f"\n# {what}")
+            print(cmd)
+        print("\n" + "=" * 68)
+        print("then re-run this selftest to confirm.")
     return 0
 
 

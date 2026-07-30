@@ -1819,3 +1819,9 @@ kbd {
 .cu-plat button.on { background: var(--panel-2); color: var(--text); }
 .cu-plat button:hover:not(.on) { color: var(--text); background: none;
   filter: none; transform: none; }
+.cu-setup-fields { display: flex; flex-direction: column; gap: 12px;
+  margin: 12px 0 4px; }
+.cu-setup-fields label { display: flex; flex-direction: column; gap: 5px;
+  font-size: 13px; }
+.cu-setup-fields label > span:first-child { color: var(--text); font-weight: 500; }
+.cu-setup-fields .row { margin: 0; }

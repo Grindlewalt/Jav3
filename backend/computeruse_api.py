@@ -12,15 +12,19 @@ GUI and forwards it verbatim, and none that adds a grant on the agent's behalf.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import time
 import uuid
+import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import computeruse as cu, security
 from .auth import require_user
+from .config import settings
 from .db import get_db
 
 router = APIRouter(prefix="/api/computeruse", tags=["computeruse"],
@@ -96,6 +100,28 @@ async def jellyfin_put(body: JellyfinBody):
         raise HTTPException(status_code=400, detail=str(e))
     url, key = await cu.jellyfin_config()
     return {"url": url, "key_set": bool(key)}
+
+
+@router.get("/client.zip")
+async def client_zip():
+    """The client, zipped, so a machine that has never seen this repo can get it.
+
+    Source only — the .py files, requirements and README. No config and no
+    token: the operator supplies those on the command line, and a download
+    anyone with a session could fetch must not carry a credential.
+    """
+    src = settings.base_dir / "clients" / "computeruse"
+    if not src.is_dir():
+        raise HTTPException(status_code=500, detail="client source is missing")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(src.iterdir()):
+            if f.is_file() and f.suffix in (".py", ".txt", ".md"):
+                z.write(f, arcname=f"computeruse/{f.name}")
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="computeruse.zip"'})
 
 
 @router.post("/probe")

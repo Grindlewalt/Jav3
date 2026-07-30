@@ -488,18 +488,39 @@ def clients() -> list[Client]:
 
 
 def get_client(client_id: str | None) -> Client:
-    if client_id:
-        c = _clients.get(client_id)
-        if c is None:
-            raise VerbError(f"no connected client named {client_id!r}")
-        return c
+    """Find a connected machine by id, name, or an unambiguous prefix.
+
+    Names are what the operator and the model actually use ("macbook"), while
+    ids carry a random suffix so two machines called the same thing stay
+    distinct. Matching accepts either, because expecting the model to quote
+    "macbook-e17e0b" back is how it ends up guessing.
+    """
     if not _clients:
         raise VerbError(
-            "no computer-use client is connected — start clients/computeruse "
-            "on the machine you want driven")
+            "no computer-use client is connected — start the client on the "
+            "machine you want driven (the Computer use tab has the command)")
+    if client_id:
+        want = client_id.strip().lower()
+        if client_id in _clients:
+            return _clients[client_id]
+        by_name = [c for c in _clients.values() if c.name.lower() == want]
+        if len(by_name) == 1:
+            return by_name[0]
+        if not by_name:
+            by_name = [c for c in _clients.values()
+                       if c.name.lower().startswith(want) or c.id.lower().startswith(want)]
+        if len(by_name) == 1:
+            return by_name[0]
+        if not by_name:
+            raise VerbError(
+                f"no connected machine matches {client_id!r}. Connected: "
+                + ", ".join(sorted(c.name for c in _clients.values())))
+        raise VerbError(f"{client_id!r} matches several: "
+                        + ", ".join(sorted(c.name for c in by_name)))
     if len(_clients) > 1:
-        raise VerbError("several clients are connected; name one of: "
-                        + ", ".join(sorted(_clients)))
+        raise VerbError(
+            "several machines are connected, so name one: "
+            + ", ".join(sorted(c.name for c in _clients.values())))
     return next(iter(_clients.values()))
 
 

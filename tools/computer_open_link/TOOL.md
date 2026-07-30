@@ -14,7 +14,7 @@ parameters:
       description: Monitor index from computer_status, if the operator named one.
     client:
       type: string
-      description: Which computer, if more than one is connected.
+      description: Which machine, by name (e.g. "macbook"). Only needed when more than one is connected; the error lists them if you guess wrong.
   required: [url]
 ---
 Only http and https are accepted — file:, javascript: and the rest are refused

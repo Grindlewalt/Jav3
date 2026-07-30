@@ -18,6 +18,13 @@ export default function ComputerUse() {
   const [label, setLabel] = useState('')
   const [jf, setJf] = useState({ url: '', key_set: false })
   const [jfKey, setJfKey] = useState('')
+  // Cloudflare Access service token, if Jarvis sits behind Access. Held in this
+  // component and nowhere else: not sent to the backend, not in localStorage, and
+  // gone when the page reloads. It exists only to paste into the command below —
+  // that is why the field is here rather than a stored setting.
+  const [cfId, setCfId] = useState('')
+  const [cfSecret, setCfSecret] = useState('')
+  const [machine, setMachine] = useState('')
   const [error, setError] = useState(null)
   const [saved, setSaved] = useState('')
 
@@ -85,15 +92,30 @@ export default function ComputerUse() {
   const clients = state.clients || []
   const tok = showToken ? token : '<reveal the token above>'
   const roots = (state.grants || []).map((g) => g.root)
-  // the install command carries the grants as --allow-root, because the client
-  // treats those flags as its ceiling — a grant here can narrow it, never widen
+  const origin = window.location.origin
+  const behindAccess = !!(cfId && cfSecret)
+  // Access headers, if the operator pasted a service token. Only ever used to
+  // build these strings — nothing here is sent to Jarvis.
+  const curlAuth = behindAccess
+    ? ` \\\n  -H 'CF-Access-Client-Id: ${cfId}' \\\n  -H 'CF-Access-Client-Secret: ${cfSecret}'`
+    : ''
+  const fetchCmd =
+    `mkdir -p ~/jarvis-client && cd ~/jarvis-client\n`
+    + `curl -fsSL '${origin}/api/computeruse/client.zip'${curlAuth} -o c.zip \\\n`
+    + `  && unzip -o c.zip && rm c.zip\n`
+    + `python3 -m pip install -r computeruse/requirements.txt`
+  const doctorCmd = 'python3 ~/jarvis-client/computeruse/agent.py --selftest'
+  // the grants become --allow-root, since the client treats those flags as its
+  // ceiling — a grant can narrow it, never widen it
   const installCmd = [
-    'python3 clients/computeruse/agent.py --install',
-    `  --server ${window.location.origin}`,
+    'python3 ~/jarvis-client/computeruse/agent.py --install',
+    `  --server ${origin}`,
     `  --token ${tok}`,
+    ...(machine ? [`  --name ${machine}`] : []),
     ...(roots.length ? roots.map((r) => `  --allow-root ${r}`)
-                     : ['  --allow-root ~/Music   # grant folders below first']),
-    "  --cf-access-id '<id>.access' --cf-access-secret '<secret>'   # only if behind Cloudflare Access",
+                     : ['  --allow-root ~/Music   # grant a folder below first']),
+    ...(behindAccess ? [`  --cf-access-id ${cfId}`,
+                        `  --cf-access-secret ${cfSecret}`] : []),
   ].join(' \\\n')
 
   const enable = platform === 'mac' ? [
@@ -234,29 +256,61 @@ export default function ComputerUse() {
           </div>
         </div>
 
+        <div className="cu-setup-fields">
+          <label>
+            <span>Name this machine</span>
+            <input placeholder="macbook" value={machine}
+                   onChange={(e) => setMachine(e.target.value.replace(/[^\w.-]/g, ''))} />
+            <span className="dim small">What Jarvis will call it. Connect several
+              and it picks by name.</span>
+          </label>
+          <label>
+            <span>Cloudflare Access service token <span className="dim">(only if
+              Jarvis is behind Access)</span></span>
+            <div className="row">
+              <input className="grow" placeholder="<id>.access" value={cfId}
+                     onChange={(e) => setCfId(e.target.value.trim())} />
+              <input className="grow" type="password" placeholder="client secret"
+                     value={cfSecret}
+                     onChange={(e) => setCfSecret(e.target.value.trim())} />
+            </div>
+            <span className="dim small">
+              Held in this page only — not sent to Jarvis, not saved, gone when
+              you reload. It exists to build the commands below.
+            </span>
+          </label>
+        </div>
+
         <ol className="cu-steps">
           <li>
-            <strong>Check what the machine can drive.</strong> Run this first —
-            it reports the mixer, screens, outputs and (on macOS) whether media
-            keys are permitted, instead of failing quietly later.
-            <pre className="cu-cmd">python3 clients/computeruse/agent.py --selftest</pre>
-            {platform === 'mac' && (
-              <span className="dim small">
-                macOS needs <code>pip install -r clients/computeruse/requirements.txt</code>{' '}
-                for transport control, and <code>brew install mpv</code> to play
-                anything. Volume needs neither — it calls CoreAudio directly.
-              </span>
-            )}
+            <strong>Get the client onto that machine.</strong>
+            <pre className="cu-cmd">{fetchCmd}</pre>
+            <span className="dim small">
+              Downloads the client from this Jarvis and installs its
+              dependencies. {behindAccess
+                ? 'The Access headers are included above.'
+                : 'If Jarvis is behind Cloudflare Access, fill the token in above and this command will carry it.'}
+            </span>
+          </li>
+          <li>
+            <strong>Ask it what is missing.</strong>
+            <pre className="cu-cmd">{doctorCmd}</pre>
+            <span className="dim small">
+              Prints what this machine can already drive, then a
+              copy-and-paste list of the exact install commands for whatever it
+              cannot. Re-run it until that list is empty.
+            </span>
           </li>
           <li>
             <strong>Save the settings and write the service.</strong>
             <pre className="cu-cmd">{installCmd}</pre>
             <span className="dim small">
+              {roots.length === 0 && <><strong>Grant a folder above first</strong> —
+                without one, nothing on that machine is playable. </>}
               Settings go to <code>~/.config/jarvis/computeruse.json</code> at{' '}
-              <strong>0600</strong>. The service file gets a path to it and
-              nothing else — a systemd unit and a launchd plist are both
-              world-readable, so a token in one would be public to every account
-              on the machine. After this, the client runs with no arguments.
+              <strong>0600</strong>; the service file gets a path to it and
+              nothing else, because units and plists are world-readable. After
+              this the client runs with no arguments.
             </span>
           </li>
           <li>
@@ -264,12 +318,12 @@ export default function ComputerUse() {
             <pre className="cu-cmd">{enable}</pre>
             <span className="dim small">
               {platform === 'mac'
-                ? <>Media keys need Accessibility permission, and it is granted to
-                    the <em>python binary</em> — change interpreter and you grant
-                    it again. On macOS 15 it also lapses after a reboot.</>
-                : <>The unit is tied to <code>graphical-session.target</code>,
-                    since opening a link or playing video needs a display. If
-                    those fail but volume works, the session did not export one:{' '}
+                ? <>Media keys need Accessibility permission, granted to the{' '}
+                    <em>python binary</em> — change interpreter and you grant it
+                    again. On macOS 15 it also lapses after a reboot.</>
+                : <>Tied to <code>graphical-session.target</code>, since opening a
+                    link or playing video needs a display. If those fail but
+                    volume works:{' '}
                     <code>systemctl --user import-environment DISPLAY
                     WAYLAND_DISPLAY XAUTHORITY</code></>}
             </span>
