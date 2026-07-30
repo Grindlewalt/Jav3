@@ -235,6 +235,11 @@ export default function Chat() {
   // Doesn't repaint the GUI — the toolbar switch and the composer placeholder
   // carry it.
   const [temporary, setTemporary] = useState(false)
+  // draft parked on a peak-pricing 409 until the operator answers in-page.
+  // This must NOT be window.confirm: the iOS home-screen app suppresses
+  // blocking dialogs, so confirm() returns false without ever showing and
+  // every send silently bounced back into the bar.
+  const [peakAsk, setPeakAsk] = useState(null)
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -402,6 +407,7 @@ export default function Chat() {
   async function openConversation(id) {
     tailAbort.current?.abort()
     setTemporary(false)   // saved chats always persist
+    setPeakAsk(null)
     closeSideOnPhone()
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
@@ -431,6 +437,7 @@ export default function Chat() {
   function newConversation() {
     tailAbort.current?.abort()
     setBusy(false)
+    setPeakAsk(null)
     closeSideOnPhone()
     setConversationId(null)
     setMessages([])
@@ -496,13 +503,9 @@ export default function Chat() {
       setMessages((m) => m.slice(0, -2))
       if (err.status === 409 && err.detail === 'peak_confirmation_required') {
         // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the retry just re-sends confirmed
-        if (window.confirm('Peak pricing right now — 2x cost. Use the API?')) {
-          setBusy(false)
-          await send(true, text)
-          return
-        }
-        setInput(text)   // declined: give the draft back
+        // gates before creating it), so the confirmed retry re-sends the
+        // parked draft from scratch
+        setPeakAsk(text)
       } else if (err.status === 409 && err.detail === 'turn_in_progress') {
         setInput(text)
         setMessages((m) => [...m, { role: 'error',
@@ -644,6 +647,18 @@ export default function Chat() {
         </div>
         <form className="composer" onSubmit={(e) => { e.preventDefault(); send() }}>
           <div className="composer-glow" ref={glowRef} />
+          {peakAsk && (
+            <div className="peak-ask" role="alertdialog"
+                 aria-label="peak pricing confirmation">
+              <span className="grow">Peak pricing right now — this reply costs 2×.</span>
+              <button type="button" className="ghost"
+                      onClick={() => { setInput(peakAsk); setPeakAsk(null) }}>
+                Cancel</button>
+              <button type="button"
+                      onClick={() => { const t = peakAsk; setPeakAsk(null); send(true, t) }}>
+                Send anyway</button>
+            </div>
+          )}
           <div className={`composer-inner${multiline ? ' multi' : ''}`}>
             <textarea
               ref={inputRef}

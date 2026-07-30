@@ -11,6 +11,9 @@ export default function ChatBox({ projectSlug }) {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
+  // draft parked on a peak-pricing 409 — in-page, never window.confirm (the
+  // iOS home-screen app suppresses blocking dialogs; see Chat.jsx)
+  const [peakAsk, setPeakAsk] = useState(null)
   const bottomRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
 
@@ -61,6 +64,7 @@ export default function ChatBox({ projectSlug }) {
     setShowHistory(false)
     setCid(null)
     setMessages([])
+    setPeakAsk(null)
   }
 
   async function del(id, e) {
@@ -80,6 +84,7 @@ export default function ChatBox({ projectSlug }) {
 
   async function open(id) {
     tailAbort.current?.abort()
+    setPeakAsk(null)
     setCid(id)
     if (!id) { setMessages([]); return }
     const r = await api(`/api/conversations/${id}/messages`)
@@ -140,13 +145,9 @@ export default function ChatBox({ projectSlug }) {
       setMessages((m) => m.slice(0, -2))
       if (err.status === 409 && err.detail === 'peak_confirmation_required') {
         // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the retry just re-sends confirmed
-        if (window.confirm('Peak pricing right now — 2x cost. Use the API?')) {
-          setBusy(false)
-          await send(true, text)
-          return
-        }
-        setInput(text)   // declined: give the draft back
+        // gates before creating it), so the confirmed retry re-sends the
+        // parked draft from scratch
+        setPeakAsk(text)
       } else if (err.status === 409 && err.detail === 'turn_in_progress') {
         setInput(text)
         setMessages((m) => [...m, { role: 'error',
@@ -197,6 +198,18 @@ export default function ChatBox({ projectSlug }) {
         ))}
         <div ref={bottomRef} />
       </div>
+      {peakAsk && (
+        <div className="peak-ask compact" role="alertdialog"
+             aria-label="peak pricing confirmation">
+          <span className="grow">Peak pricing — this reply costs 2×.</span>
+          <button type="button" className="ghost"
+                  onClick={() => { setInput(peakAsk); setPeakAsk(null) }}>
+            Cancel</button>
+          <button type="button"
+                  onClick={() => { const t = peakAsk; setPeakAsk(null); send(true, t) }}>
+            Send anyway</button>
+        </div>
+      )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); send() }}>
         <textarea className="grow" rows={2} value={input}
                   placeholder="message Jarvis…"
