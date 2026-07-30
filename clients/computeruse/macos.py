@@ -70,7 +70,15 @@ def _lib():
         return _ca
     path = (ctypes.util.find_library("CoreAudio")
             or "/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
-    lib = ctypes.cdll.LoadLibrary(path)
+    try:
+        lib = ctypes.cdll.LoadLibrary(path)
+    except OSError as e:
+        # off-Darwin, or a Mac where the framework cannot be loaded. Raising the
+        # module's own error keeps the failure inside the one exception type the
+        # caller catches — a bare OSError escapes MacOS.volume() and reaches the
+        # model as an unhandled traceback instead of a plain refusal.
+        raise CoreAudioError(
+            f"cannot load CoreAudio ({e}). Volume control needs macOS.") from e
 
     lib.AudioObjectGetPropertyData.restype = ctypes.c_int32
     lib.AudioObjectGetPropertyData.argtypes = [

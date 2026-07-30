@@ -9,6 +9,9 @@ export default function ComputerUse() {
   const [state, setState] = useState(null)
   const [token, setToken] = useState('')
   const [showToken, setShowToken] = useState(false)
+  const [platform, setPlatform] = useState(
+    () => (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+      ? 'mac' : 'linux'))
   const [probe, setProbe] = useState(null)
   const [probing, setProbing] = useState(false)
   const [root, setRoot] = useState('')
@@ -80,10 +83,33 @@ export default function ComputerUse() {
   if (!state) return <div className="page"><p className="dim">loading…</p></div>
 
   const clients = state.clients || []
-  const cmd = `python3 clients/computeruse/agent.py \\\n`
-    + `  --server ${window.location.origin} \\\n`
-    + `  --token ${showToken ? token : '<token>'} \\\n`
-    + (state.grants || []).map((g) => `  --allow-root ${g.root}`).join(' \\\n')
+  const tok = showToken ? token : '<reveal the token above>'
+  const roots = (state.grants || []).map((g) => g.root)
+  // the install command carries the grants as --allow-root, because the client
+  // treats those flags as its ceiling — a grant here can narrow it, never widen
+  const installCmd = [
+    'python3 clients/computeruse/agent.py --install',
+    `  --server ${window.location.origin}`,
+    `  --token ${tok}`,
+    ...(roots.length ? roots.map((r) => `  --allow-root ${r}`)
+                     : ['  --allow-root ~/Music   # grant folders below first']),
+    "  --cf-access-id '<id>.access' --cf-access-secret '<secret>'   # only if behind Cloudflare Access",
+  ].join(' \\\n')
+
+  const enable = platform === 'mac' ? [
+    'launchctl bootstrap gui/$UID \\',
+    '  ~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist',
+    'launchctl kickstart -p gui/$UID/network.atomos.jarvis.computeruse',
+    '',
+    '# stop it:  launchctl bootout gui/$UID/network.atomos.jarvis.computeruse',
+    '# logs:     tail -f ~/Library/Logs/jarvis-computeruse.log',
+  ].join('\n') : [
+    'systemctl --user daemon-reload',
+    'systemctl --user enable --now jarvis-computeruse.service',
+    'loginctl enable-linger $USER      # keep running after logout',
+    '',
+    '# logs:  journalctl --user -u jarvis-computeruse.service -f',
+  ].join('\n')
 
   return (
     <div className="page cu-page">
@@ -126,12 +152,21 @@ export default function ComputerUse() {
               {(probe.screens || []).length
                 ? probe.screens.map((s) => `${s.index}: ${s.id} ${s.geometry || ''}`).join(' · ')
                 : <span className="dim">none detected</span>}</div>
-            <div><span className="dim">audio out</span>{' '}
+            {/* two lists, not one: the mixer sinks and mpv's outputs are
+                separate namespaces and are not interchangeable */}
+            <div><span className="dim">mixer (volume)</span>{' '}
               {(probe.audio_devices || []).length
                 ? probe.audio_devices.map((a) => a.label || a.id).join(' · ')
                 : <span className="dim">none detected</span>}</div>
+            <div><span className="dim">outputs (playback)</span>{' '}
+              {(probe.play_devices || []).length
+                ? probe.play_devices.slice(0, 8).map((a) => a.id).join(' · ')
+                : <span className="dim">none detected — is mpv installed?</span>}</div>
             <div><span className="dim">players</span>{' '}
               {(probe.players || []).join(' · ') || <span className="dim">none running</span>}</div>
+            <div><span className="dim">reachable folders</span>{' '}
+              {(probe.roots || []).join(' · ')
+                || <span className="dim">none — nothing on disk is playable</span>}</div>
           </div>
         )}
       </section>
@@ -190,11 +225,61 @@ export default function ComputerUse() {
           <button className="ghost" onClick={() => setShowToken((s) => !s)}>
             {showToken ? 'hide token' : 'reveal token'}</button>
           <button className="ghost danger" onClick={rotate}>rotate token</button>
+          <span className="grow" />
+          <div className="cu-plat">
+            {[['linux', 'Linux'], ['mac', 'macOS']].map(([k, label]) => (
+              <button key={k} className={platform === k ? 'on' : ''}
+                      onClick={() => setPlatform(k)}>{label}</button>
+            ))}
+          </div>
         </div>
-        <pre className="cu-cmd">{cmd}</pre>
+
+        <ol className="cu-steps">
+          <li>
+            <strong>Check what the machine can drive.</strong> Run this first —
+            it reports the mixer, screens, outputs and (on macOS) whether media
+            keys are permitted, instead of failing quietly later.
+            <pre className="cu-cmd">python3 clients/computeruse/agent.py --selftest</pre>
+            {platform === 'mac' && (
+              <span className="dim small">
+                macOS needs <code>pip install -r clients/computeruse/requirements.txt</code>{' '}
+                for transport control, and <code>brew install mpv</code> to play
+                anything. Volume needs neither — it calls CoreAudio directly.
+              </span>
+            )}
+          </li>
+          <li>
+            <strong>Save the settings and write the service.</strong>
+            <pre className="cu-cmd">{installCmd}</pre>
+            <span className="dim small">
+              Settings go to <code>~/.config/jarvis/computeruse.json</code> at{' '}
+              <strong>0600</strong>. The service file gets a path to it and
+              nothing else — a systemd unit and a launchd plist are both
+              world-readable, so a token in one would be public to every account
+              on the machine. After this, the client runs with no arguments.
+            </span>
+          </li>
+          <li>
+            <strong>Start it, and keep it started.</strong>
+            <pre className="cu-cmd">{enable}</pre>
+            <span className="dim small">
+              {platform === 'mac'
+                ? <>Media keys need Accessibility permission, and it is granted to
+                    the <em>python binary</em> — change interpreter and you grant
+                    it again. On macOS 15 it also lapses after a reboot.</>
+                : <>The unit is tied to <code>graphical-session.target</code>,
+                    since opening a link or playing video needs a display. If
+                    those fail but volume works, the session did not export one:{' '}
+                    <code>systemctl --user import-environment DISPLAY
+                    WAYLAND_DISPLAY XAUTHORITY</code></>}
+            </span>
+          </li>
+        </ol>
+
         <p className="dim small">
-          Add <code>--dry-run</code> to have it report what it would do without
-          touching the machine. Closing the client ends all access immediately.
+          Add <code>--dry-run</code> anywhere to have it report what it would do
+          without touching the machine. Quitting the client — or stopping the
+          service — ends all access immediately.
         </p>
       </section>
     </div>

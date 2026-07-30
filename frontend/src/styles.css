@@ -1785,3 +1785,20 @@ kbd {
   padding: 12px 14px; overflow-x: auto; margin: 10px 0 6px;
   font: 12.5px/1.6 ui-monospace, Menlo, monospace; color: var(--dim);
 }
+
+/* setup steps on the Computer use tab: an ordered list of real commands, so the
+   numbering carries the sequence rather than the prose having to */
+.cu-steps { margin: 12px 0 6px; padding-left: 22px; display: flex;
+  flex-direction: column; gap: 16px; font-size: 13.5px; }
+.cu-steps li { line-height: 1.55; }
+.cu-steps li > strong { display: block; margin-bottom: 4px; color: var(--text); }
+.cu-steps .cu-cmd { margin: 8px 0 6px; }
+.cu-plat { display: inline-flex; border: 1px solid var(--border);
+  border-radius: 999px; overflow: hidden; }
+.cu-plat button {
+  background: none; border: 0; color: var(--dim); padding: 5px 14px;
+  font-size: 12.5px; font-weight: 500; border-radius: 0;
+}
+.cu-plat button.on { background: var(--panel-2); color: var(--text); }
+.cu-plat button:hover:not(.on) { color: var(--text); background: none;
+  filter: none; transform: none; }

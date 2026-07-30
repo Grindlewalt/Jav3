@@ -192,3 +192,34 @@ def test_install_can_be_asked_not_to_write_anything(svc, tmp_path, monkeypatch):
     target, steps = svc.install(Path("/opt/j/agent.py"), dry_run=True)
     assert not target.exists()
     assert steps, "the operator still needs to be told what to run"
+
+
+# --- the macOS backend, checked as far as a Linux box can ---------------------
+
+def test_macos_volume_failure_stays_inside_its_own_error_type():
+    """MacOS.volume() catches CoreAudioError. A bare OSError from the framework
+    load escapes it and surfaces to the model as a traceback rather than a
+    refusal, so the load is wrapped."""
+    m = _mod("macos")
+    with pytest.raises(m.CoreAudioError):
+        m.default_output_device()
+
+
+def test_macos_backend_refuses_cleanly_rather_than_crashing(monkeypatch):
+    """On a machine where CoreAudio will not load, every macOS verb should come
+    back as a Refused the model can read, not an exception."""
+    agent_mod = _mod("agent")
+    r = agent_mod.Runner(dry_run=True)
+    mac = agent_mod.MacOS(r)
+    for call in (lambda: mac.volume("up"), lambda: mac.transport("next")):
+        with pytest.raises(agent_mod.Refused):
+            call()
+    # the read-only surfaces degrade to empty instead of raising
+    assert mac.audio_devices() == [] or isinstance(mac.audio_devices(), list)
+    assert isinstance(mac.screens(), list)
+    assert mac.players() == []
+
+
+def test_the_child_environment_carries_tmpdir_for_macos():
+    agent_mod = _mod("agent")
+    assert "TMPDIR" in agent_mod._ENV_KEEP

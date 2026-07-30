@@ -167,8 +167,11 @@ def clean_params(verb, params):
 
 # A minimal environment. The child gets what it needs to find the display and
 # the audio server and nothing else — no inherited LD_PRELOAD, no PATH games.
+# TMPDIR is here for macOS, where it is per-user and libraries genuinely need
+# it; the X/Wayland/Pulse entries are inert there and vice versa.
 _ENV_KEEP = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE",
-             "XAUTHORITY", "HOME", "USER", "LANG", "PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS")
+             "XAUTHORITY", "HOME", "USER", "LANG", "TMPDIR",
+             "PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS")
 
 
 class Runner:
