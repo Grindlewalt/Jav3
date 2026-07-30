@@ -315,29 +315,31 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
 .vm-nuke-row button { flex: 1; font-size: 12px; }
 
 /* ---- triage reviewer card (lives on the Review Center page now) ---- */
-.triage-card { display: flex; flex-direction: column; gap: 3px;
-  margin-bottom: 20px; }
-.triage-card .notif-item {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-  border-radius: 9px; color: var(--text); font-size: 13px; min-width: 0;
-  cursor: default;
-}
-.triage-head { border-bottom: 1px solid var(--border); padding-bottom: 10px;
-  margin-bottom: 4px; }
-.triage-toggle { display: flex; align-items: center; gap: 4px; cursor: pointer; }
-.triage-sub { padding-top: 2px; padding-bottom: 2px; }
-.triage-sec { padding: 6px 10px 0; text-transform: uppercase; letter-spacing: 0.05em;
-  font-size: 10px; }
-.triage-row { align-items: flex-start; }
-.triage-row .win-btn, .triage-row .ghost { flex-shrink: 0; }
+/* The reviewer is the Review Center's first SECTION, not a card bolted above
+   it: same head, same count chip, same row shape as the queues below, so the
+   page reads as one list. (It used .notif-item from the old nav-bell dropdown,
+   which is why it looked like a visitor from another screen.) */
+.triage-card { margin-bottom: 18px; }
+.sec-count.clear { color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent); }
+/* the auto switch sits with the actions, sized like the buttons beside it */
+.triage-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer;
+  color: var(--dim); font-size: 12.5px; padding: 0 2px; white-space: nowrap; }
+.triage-toggle:hover { color: var(--text); }
+.triage-toggle input { accent-color: var(--accent); }   /* as .check-row does */
+.triage-tally { font-variant-numeric: tabular-nums; padding: 0 2px 2px; }
+.triage-row { align-items: flex-start; border-left-color: var(--border); }
+.triage-row .ghost { flex-shrink: 0; }
 /* the collapsed undo-log disclosure */
 .triage-log-toggle {
   background: none; color: var(--dim); text-align: left; font-size: 12.5px;
-  font-weight: 500; padding: 6px 10px; border-radius: 9px;
+  font-weight: 500; padding: 7px 2px; border-radius: 8px;
   display: flex; align-items: center; gap: 7px;
 }
-.triage-log-toggle:hover:not(:disabled) { background: var(--panel-2);
-  color: var(--text); filter: none; transform: none; }
+.triage-log-toggle:hover:not(:disabled) { background: none;
+  color: var(--accent); filter: none; transform: none; }
+.triage-log-toggle .chev { transition: transform 0.16s cubic-bezier(0.4, 0, 0.2, 1); }
+.triage-log-toggle .chev.open { transform: rotate(90deg); }
 
 /* reviewer-flag tag on Review/Network queue rows */
 .tag.triage-flag { background: color-mix(in srgb, var(--red) 18%, transparent);
