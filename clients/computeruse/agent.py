@@ -1030,10 +1030,18 @@ def main(argv=None):
             print(f"  {k:16s} {v}")
         unit, steps = svc.install(Path(__file__))
         print(f"\nservice written to {unit}")
-        print("it carries no secrets — only the path to the config above\n")
-        print("run these to start it:")
+        print("it carries no secrets — only the path to the config above")
+        print()
+        print("=" * 68)
+        print("NOTHING IS RUNNING YET. This wrote files; it did not start")
+        print("anything, so Jarvis will not show this machine as connected")
+        print("until you run:")
+        print("=" * 68)
         for line in steps:
             print(f"  {line}")
+        print()
+        print("Or, to watch it connect in the foreground first:")
+        print(f"  {sys.executable} {Path(__file__).resolve()}")
         return 0
 
     if not server or not token:

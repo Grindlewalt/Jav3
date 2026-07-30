@@ -308,8 +308,18 @@ async def add_grant(root: str, label: str = "") -> Grant:
     # path; the client is the only thing that can and does verify it, against
     # its own --allow-root ceiling and its own disk.
     raw = (root or "").strip()
-    if not raw.startswith("/") and not raw.startswith("~"):
-        raise VerbError("grant root must be an absolute path (or start with ~)")
+    if raw.startswith("~"):
+        # This host cannot expand a home directory that belongs to another
+        # machine. Stored as "~/Movies" the grant matches nothing: the lexical
+        # check here compares it against an absolute path and fails, and the
+        # client resolves "~" against its working directory rather than $HOME.
+        # It looks accepted and silently never works, so it is refused instead.
+        raise VerbError(
+            "use the full path rather than '~' — this host cannot know where "
+            "home is on the machine being driven. On macOS that is usually "
+            "/Users/<you>/... and on Linux /home/<you>/...")
+    if not raw.startswith("/"):
+        raise VerbError("grant root must be an absolute path")
     if "\x00" in raw:
         raise VerbError("path contains a null byte")
     # normpath only — lexical. resolve() would follow symlinks on THIS host,

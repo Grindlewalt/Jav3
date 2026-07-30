@@ -379,3 +379,23 @@ async def test_a_mac_style_grant_can_be_created(monkeypatch, tmp_path):
     assert g.root == "/Users/grant/Movies"
     assert not Path(g.root).exists(), "the point is it is not on this host"
     await cu.remove_grant(g.id)
+
+
+@pytest.mark.asyncio
+async def test_a_tilde_grant_is_refused_rather_than_silently_useless(
+        monkeypatch, tmp_path):
+    """"~/Movies" looks accepted and then matches nothing: this host cannot
+    expand a home directory on another machine, and the client resolves "~"
+    against its working directory rather than $HOME. Observed live — a grant
+    stored as "~/Movies" that no client could ever use."""
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "t.db", raising=False)
+    await db_mod.init_db()
+    for bad in ("~/Movies", "~", "~grant/Movies", "  ~/Music  "):
+        with pytest.raises(cu.VerbError) as e:
+            await cu.add_grant(bad)
+        assert "full path" in str(e.value), bad
+    # the spelled-out form is fine
+    g = await cu.add_grant("/Users/grant/Movies")
+    assert g.root == "/Users/grant/Movies"
+    await cu.remove_grant(g.id)
