@@ -641,10 +641,36 @@ class Agent:
         await ws.send(json.dumps(payload))
 
 
+def _sibling(name):
+    """Import a sibling module whether we were run as a script or a package."""
+    try:
+        import importlib
+        return importlib.import_module(f".{name}", __package__ or "")
+    except Exception:
+        import importlib.util as u
+        spec = u.spec_from_file_location(f"cu_{name}", Path(__file__).with_name(f"{name}.py"))
+        mod = u.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+
 def _selftest():
     """What can this machine actually do? Reports rather than assumes."""
     r = Runner(dry_run=False)
     print(f"platform      : {sys.platform}")
+    cfgmod = _sibling("config")
+    try:
+        cfg = cfgmod.load()
+        print(f"config        : {cfgmod.CONFIG_PATH}"
+              + ("" if cfg else "  (none yet)"))
+        if cfg:
+            for k, v in sorted(cfgmod.redacted(cfg).items()):
+                print(f"  {k:11s} {v}")
+    except cfgmod.ConfigError as e:
+        print(f"config        : PROBLEM - {e}")
+    if sys.platform != "darwin":
+        disp = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
+        print(f"display       : {disp or 'NONE - opening links and video will fail'}")
     print(f"binaries found: {', '.join(sorted(r.bin)) or 'NONE'}")
     for need, why in (("mpv", "playing media"),
                       ("xdg-open" if sys.platform != "darwin" else "open",
@@ -695,6 +721,10 @@ def main(argv=None):
                     help="the matching secret (CF_ACCESS_CLIENT_SECRET)")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and log every action without running it")
+    ap.add_argument("--install", action="store_true",
+                    help="save the settings to ~/.config/jarvis/computeruse.json "
+                         "(0600) and write a systemd user unit or launchd agent, "
+                         "then print the commands to enable it")
     ap.add_argument("--selftest", action="store_true",
                     help="report what this machine can actually drive, and "
                          "exit. Run this first on a new machine — especially "
@@ -703,12 +733,46 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.selftest:
         return _selftest()
-    if not a.server or not a.token:
-        ap.error("--server and --token are required (or use --selftest)")
-    if bool(a.cf_access_id) != bool(a.cf_access_secret):
-        ap.error("--cf-access-id and --cf-access-secret go together")
-    agent = Agent(a.server, a.token, a.allow_root, a.name, a.dry_run,
-                  a.cf_access_id, a.cf_access_secret)
+
+    cfgmod = _sibling("config")
+    try:
+        cfg = cfgmod.load()
+    except cfgmod.ConfigError as e:
+        print(f"config: {e}", file=sys.stderr)
+        return 2
+
+    # command line > environment > saved config. A one-off override still works
+    # and the old flag-only usage is unchanged.
+    server = a.server or cfg.get("server")
+    token = a.token or cfg.get("token")
+    name = a.name or cfg.get("name")
+    roots = a.allow_root or cfg.get("roots") or []
+    cf_id = a.cf_access_id or cfg.get("cf_access_id")
+    cf_secret = a.cf_access_secret or cfg.get("cf_access_secret")
+
+    if bool(cf_id) != bool(cf_secret):
+        ap.error("the Cloudflare Access id and secret go together")
+
+    if a.install:
+        svc = _sibling("service")
+        path = cfgmod.save({"server": server, "token": token, "name": name,
+                            "roots": roots, "cf_access_id": cf_id,
+                            "cf_access_secret": cf_secret})
+        print(f"settings saved to {path} (0600)")
+        for k, v in sorted(cfgmod.redacted(cfgmod.load()).items()):
+            print(f"  {k:16s} {v}")
+        unit, steps = svc.install(Path(__file__))
+        print(f"\nservice written to {unit}")
+        print("it carries no secrets — only the path to the config above\n")
+        print("run these to start it:")
+        for line in steps:
+            print(f"  {line}")
+        return 0
+
+    if not server or not token:
+        ap.error("--server and --token are needed the first time; --install "
+                 "then saves them for later. Or use --selftest.")
+    agent = Agent(server, token, roots, name, a.dry_run, cf_id, cf_secret)
     try:
         return asyncio.run(agent.serve())
     except KeyboardInterrupt:

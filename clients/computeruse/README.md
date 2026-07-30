@@ -49,6 +49,65 @@ reachable instead of failing silently later.
   `do shell script "..."`, so allowing it would reopen the exact path this
   client exists to close.
 
+## Making it permanent
+
+Save the settings once, then let the OS keep it running:
+
+```
+python3 agent.py --install \
+  --server https://jarvis.example \
+  --token  <from the Computer use tab> \
+  --allow-root ~/Music --allow-root ~/Videos \
+  --cf-access-id '<id>.access' --cf-access-secret '<secret>'
+```
+
+That writes two files and prints the commands to enable the service:
+
+| file | mode | holds |
+|---|---|---|
+| `~/.config/jarvis/computeruse.json` | **0600** | server, pairing token, CF token, roots |
+| systemd unit / launchd plist | 0644 | a path to the above, and nothing else |
+
+**Secrets are in the config, never in the service definition.** A systemd unit
+is world-readable and a launchd plist is world-readable *and* Spotlight-indexed,
+so a token in either is published to every account on the machine. The client
+refuses to start if the config itself is group- or world-readable.
+
+After `--install`, running `agent.py` with no arguments at all picks everything
+up from the config. Flags and environment variables still override it, so a
+one-off `--dry-run` or a different `--server` works unchanged.
+
+**Linux** (systemd user service):
+
+```
+systemctl --user daemon-reload
+systemctl --user enable --now jarvis-computeruse.service
+loginctl enable-linger $USER          # survive logout
+journalctl --user -u jarvis-computeruse.service -f
+```
+
+It is wanted by `graphical-session.target`, since opening a link and playing
+video both need a display. If those verbs fail but volume works, the session
+did not export one:
+
+```
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY
+```
+
+**macOS** (LaunchAgent, `KeepAlive` + `RunAtLoad`):
+
+```
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist
+launchctl kickstart -p gui/$UID/network.atomos.jarvis.computeruse
+launchctl bootout   gui/$UID/network.atomos.jarvis.computeruse   # stop
+tail -f ~/Library/Logs/jarvis-computeruse.log
+```
+
+One macOS wrinkle: Accessibility permission for media keys is granted to the
+**python binary** running the client, not to the script. If you change
+interpreter (a new venv, a Homebrew upgrade) you will have to grant it again —
+`--selftest` reports whether it currently holds.
+
 ## Through a reverse proxy / Cloudflare Tunnel
 
 The client makes one outbound WebSocket to `<server>/api/computeruse/agent`, so
@@ -58,7 +117,8 @@ Nothing listens on the machine being driven; it works fine behind NAT.
 Cloudflare proxies WebSockets by default, but **resets an idle one after about
 100 seconds**, and cloudflared drops idle HTTP/2 streams to the origin sooner
 than that. The client pings every 20s to stay under both, and reconnects with
-backoff if it is dropped anyway.
+backoff if it is dropped anyway. Measured against a real tunnel: 240s of
+complete idleness, one connect and zero disconnects.
 
 **Cloudflare Access needs a service token.** If the hostname is protected by
 Access, an unauthenticated request is redirected to an SSO login page — fine for
