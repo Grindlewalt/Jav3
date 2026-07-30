@@ -898,47 +898,120 @@ def _sibling(name):
         return mod
 
 
-def _fix_commands(runner, mac):
-    """The exact commands for whatever is missing — so the operator copies and
-    pastes rather than working out the package names for their platform."""
-    fixes = []
+# --- what is missing here, and the exact command to fix it -------------------
+#
+# The install line is different on every distribution, and the first version of
+# this printed `sudo apt install ...` on all of them. On Arch that is a
+# "command not found" with the package names guessed as well, which leaves the
+# operator translating the advice before they can take it. So: find the manager
+# this machine actually has, then look the names up for it.
+
+INSTALLERS = (
+    ("pacman", "sudo pacman -S --needed"),
+    ("apt-get", "sudo apt install"),
+    ("dnf", "sudo dnf install"),
+    ("zypper", "sudo zypper install"),
+    ("apk", "sudo apk add"),
+    ("brew", "brew install"),
+)
+
+# need -> package name per manager; "*" is what it is called everywhere else.
+# pactl is in libpulse on Arch and pulseaudio-utils on Debian; xrandr is in
+# xorg-xrandr on Arch and x11-xserver-utils on Debian. Same binary, three names.
+PACKAGES = {
+    "mpv":      {"*": "mpv"},
+    "mixer":    {"*": "pulseaudio-utils", "pacman": "libpulse"},
+    "xdg-open": {"*": "xdg-utils"},
+    "xrandr":   {"*": "xrandr", "pacman": "xorg-xrandr",
+                 "apt-get": "x11-xserver-utils"},
+}
+
+
+def _installer():
+    """(manager, install command) for this machine, or (None, None)."""
+    for name, cmd in INSTALLERS:
+        if shutil.which(name):
+            return name, cmd
+    return None, None
+
+
+def _package(need, manager):
+    names = PACKAGES.get(need, {})
+    return names.get(manager) or names.get("*") or need
+
+
+def _missing(runner, mac=None):
+    """Everything absent, as {why, and one of pkg / pip / note}."""
+    out = []
     brew = sys.platform == "darwin"
+    try:
+        import websockets            # noqa: F401
+    except ImportError:
+        out.append({"why": "connect to Jarvis at all", "pip": ["websockets"]})
     if "mpv" not in runner.bin:
-        fixes.append(("play any media",
-                      "brew install mpv" if brew
-                      else "sudo apt install mpv    # or: sudo pacman -S mpv"))
+        out.append({"why": "play any media", "pkg": "mpv"})
     if brew:
         try:
             import Quartz            # noqa: F401
         except ImportError:
-            fixes.append(("pause / skip / previous (media keys)",
-                          "pip3 install pyobjc-framework-Quartz "
-                          "pyobjc-framework-Cocoa"))
+            out.append({"why": "pause / skip / previous (media keys)",
+                        "pip": ["pyobjc-framework-Quartz",
+                                "pyobjc-framework-Cocoa"]})
+        if mac is not None:
+            ok, _ = mac.preflight()
+            if not ok:
+                out.append({
+                    "why": "media keys — a permission, not a package",
+                    "note": "System Settings > Privacy & Security > "
+                            "Accessibility, and add the terminal (or the python "
+                            "binary) running this"})
     else:
         if "pactl" not in runner.bin and "wpctl" not in runner.bin:
-            fixes.append(("change the volume",
-                          "sudo apt install pulseaudio-utils    "
-                          "# or wireplumber for wpctl"))
+            out.append({"why": "change the volume", "pkg": "mixer"})
         try:
             import jeepney           # noqa: F401
         except ImportError:
-            fixes.append(("pause / skip / previous (MPRIS)", "pip3 install jeepney"))
+            out.append({"why": "pause / skip / previous (MPRIS)",
+                        "pip": ["jeepney"]})
         if "xdg-open" not in runner.bin:
-            fixes.append(("open links", "sudo apt install xdg-utils"))
+            out.append({"why": "open links", "pkg": "xdg-open"})
         if "xrandr" not in runner.bin:
-            fixes.append(("list screens", "sudo apt install x11-xserver-utils"))
-    try:
-        import websockets            # noqa: F401
-    except ImportError:
-        fixes.insert(0, ("connect to Jarvis at all", "pip3 install websockets"))
-    if brew and mac is not None:
-        ok, _ = mac.preflight()
-        if not ok:
-            fixes.append(("media keys (permission, not a package)",
-                          "open 'x-apple.systempreferences:com.apple.preference."
-                          "security?Privacy_Accessibility'   # then allow this "
-                          "terminal"))
-    return fixes
+            out.append({"why": "list screens", "pkg": "xrandr"})
+    return out
+
+
+def _print_fixes(missing):
+    """One command per packaging system rather than one per package — four
+    consecutive `sudo apt install` lines is four password prompts to fix what is
+    one install."""
+    if not missing:
+        print("Everything this client needs is present. Nothing to install.")
+        return
+    manager, install = _installer()
+    print("=" * 68)
+    print("MISSING — the client still runs; this is what it cannot do:")
+    print("=" * 68)
+    for m in missing:
+        label = m.get("pkg") or (m.get("pip") or ["permission"])[0]
+        print(f"  {label:<16} {m['why']}")
+    pkgs = [_package(m["pkg"], manager) for m in missing if m.get("pkg")]
+    pips = [p for m in missing for p in m.get("pip", [])]
+    print()
+    if pkgs and install:
+        print(f"  {install} {' '.join(pkgs)}")
+    elif pkgs:
+        print("  no package manager I recognise here. Install: " + ", ".join(pkgs))
+    if pips:
+        # sys.executable, not pip3. The deps belong in the venv this client will
+        # be run from; a system pip is refused outright on Arch and Debian
+        # (PEP 668) and a pip3 from somewhere else installs them where nothing
+        # will look.
+        print(f"  {sys.executable} -m pip install {' '.join(pips)}")
+    for m in missing:
+        if m.get("note"):
+            print(f"\n  {m['why']}:\n    {m['note']}")
+    print()
+    print("then re-run with --selftest to confirm.")
 
 
 def _selftest():
@@ -992,20 +1065,67 @@ def _selftest():
             mac = _sibling("macos")
         except Exception:
             mac = None
-    fixes = _fix_commands(r, mac)
     print()
-    if not fixes:
-        print("Everything this client needs is present. Nothing to install.")
-    else:
-        print("=" * 68)
-        print("TO FIX — copy and paste these:")
-        print("=" * 68)
-        for what, cmd in fixes:
-            print(f"\n# {what}")
-            print(cmd)
-        print("\n" + "=" * 68)
-        print("then re-run this selftest to confirm.")
+    _print_fixes(_missing(r, mac))
     return 0
+
+
+def _ping(server, token, cf_id=None, cf_secret=None):
+    """One plain HTTP request to Jarvis before anything else. Returns (ok, why).
+
+    Every way this can be wrong — a typo in the URL, no Cloudflare service
+    token, a pairing token that has since been rotated — looks identical from
+    inside the WebSocket retry loop: "disconnected (InvalidStatus: server
+    rejected the connection); retrying in 1s", forever, with the reason on the
+    far side of a handshake that never completes. Asking over ordinary HTTP
+    first is the difference between a sentence and a loop.
+    """
+    import urllib.error
+    import urllib.request
+
+    if not server.startswith(("http://", "https://")):
+        return False, f"--server {server!r} needs a scheme, e.g. https://host"
+    url = server.rstrip("/") + "/api/computeruse/ping"
+    req = urllib.request.Request(url, headers={"X-Jarvis-Token": token})
+    if cf_id and cf_secret:
+        req.add_header("CF-Access-Client-Id", cf_id)
+        req.add_header("CF-Access-Client-Secret", cf_secret)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read(8192)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, ("Jarvis answered, and refused the pairing token. It "
+                           "is rotated from the Computer use tab — copy the "
+                           "current one.")
+        if e.code == 403:
+            return False, ("403 from whatever fronts Jarvis. If that is "
+                           "Cloudflare Access, this needs a service token "
+                           "(--cf-access-id / --cf-access-secret) and a policy "
+                           "allowing it.")
+        if e.code == 404:
+            # an older Jarvis, from before this route existed. The socket is
+            # what matters and that has not moved, so this is not a stop.
+            return True, f"reached {server} (no ping route — an older Jarvis)"
+        return False, f"{server} answered {e.code} {e.reason}"
+    except urllib.error.URLError as e:
+        return False, (f"cannot reach {server}: {e.reason}. Check the address, "
+                       f"and that this machine can see it.")
+    except OSError as e:
+        return False, f"cannot reach {server}: {e}"
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        # An HTML login page, almost always: Access redirecting a request with
+        # no service token to SSO, which a daemon can never complete.
+        return False, (f"{server} returned a web page rather than Jarvis. That "
+                       f"is usually Cloudflare Access asking for a browser "
+                       f"login — add --cf-access-id and --cf-access-secret.")
+    if not isinstance(body, dict) or not body.get("ok"):
+        return False, f"{server} answered, but not as Jarvis: {raw[:120]!r}"
+    others = [c for c in (body.get("connected") or [])]
+    note = f"; already connected: {', '.join(others)}" if others else ""
+    return True, f"reached {server}, token accepted{note}"
 
 
 def main(argv=None):
@@ -1025,6 +1145,12 @@ def main(argv=None):
                     help="the matching secret (CF_ACCESS_CLIENT_SECRET)")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and log every action without running it")
+    ap.add_argument("--setup", action="store_true",
+                    help="first run, all of it: check Jarvis is reachable and "
+                         "the token works, save the settings, report what this "
+                         "machine can drive and how to install the rest, then "
+                         "connect in the foreground. --install afterwards to "
+                         "keep it running.")
     ap.add_argument("--install", action="store_true",
                     help="save the settings to ~/.config/jarvis/computeruse.json "
                          "(0600) and write a systemd user unit or launchd agent, "
@@ -1057,6 +1183,13 @@ def main(argv=None):
     if bool(cf_id) != bool(cf_secret):
         ap.error("the Cloudflare Access id and secret go together")
 
+    if a.install and not (server and token):
+        # --install is now run bare, after --setup has saved everything. Without
+        # that it would write a unit for a config with no server in it, which
+        # starts and dies on every restart forever.
+        ap.error(f"nothing to save: no --server/--token given, and none in "
+                 f"{cfgmod.CONFIG_PATH}. Run --setup first.")
+
     if a.install:
         svc = _sibling("service")
         path = cfgmod.save({"server": server, "token": token, "name": name,
@@ -1082,8 +1215,42 @@ def main(argv=None):
         return 0
 
     if not server or not token:
-        ap.error("--server and --token are needed the first time; --install "
-                 "then saves them for later. Or use --selftest.")
+        ap.error("--server and --token are needed the first time. The Computer "
+                 "use tab builds the whole command — it ends in --setup, which "
+                 "saves them for every run after this one. Or --selftest.")
+
+    if a.setup:
+        # Order matters. Reaching Jarvis is checked FIRST, because everything
+        # below it is wasted if the address or the token is wrong, and because
+        # it is the one failure the operator cannot diagnose from here.
+        print("1/4  reaching Jarvis")
+        ok, why = _ping(server, token, cf_id, cf_secret)
+        print(f"     {why}")
+        if not ok:
+            return 2
+
+        print("\n2/4  saving settings")
+        path = cfgmod.save({"server": server, "token": token, "name": name,
+                            "roots": roots, "cf_access_id": cf_id,
+                            "cf_access_secret": cf_secret})
+        print(f"     {path} (0600) — every later run reads this, so no flags")
+        if not roots:
+            print("     ! no --allow-root, so no file on this machine can be "
+                  "played.\n"
+                  "       Volume, links and transport still work. To allow "
+                  "media, run this\n"
+                  "       again with --allow-root ~/Music (repeatable) — it is "
+                  "the ceiling\n"
+                  "       that folder grants in Jarvis are narrowed against.")
+
+        print("\n3/4  what this machine can drive")
+        _selftest()
+
+        print("\n4/4  connecting — leave this running. It appears on the "
+              "Computer use tab\n"
+              "     the moment it connects; Ctrl-C when you are ready to make "
+              "it permanent.")
+
     agent = Agent(server, token, roots, name, a.dry_run, cf_id, cf_secret)
     try:
         return asyncio.run(agent.serve())

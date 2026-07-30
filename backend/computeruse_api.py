@@ -230,6 +230,26 @@ async def client_zip(request: Request, token: str | None = None):
         headers={"Content-Disposition": 'attachment; filename="computeruse.zip"'})
 
 
+@ws_router.get("/ping")
+async def ping(request: Request, token: str | None = None):
+    """An ordinary HTTP hello, for the client's set-up step.
+
+    Same auth as the download, and for the same reason: it is called by a daemon
+    with no browser session. It exists because a wrong address, a missing
+    Cloudflare service token and a rotated pairing token are indistinguishable
+    from inside the WebSocket retry loop — all three come out as "server
+    rejected the connection", forever. Over plain HTTP each has its own status
+    code and the client can say which one it was.
+
+    The names of connected machines are no more than the pairing token already
+    reaches (it can drive all of them), and they let the client warn about a
+    name it is about to collide with.
+    """
+    await _download_auth(request, token)
+    return {"ok": True, "app": "jarvis",
+            "connected": [c.name for c in cu.clients()]}
+
+
 @router.post("/probe")
 async def probe(client_id: str | None = None):
     """Ask a client to describe itself. The one operator-triggered verb — it

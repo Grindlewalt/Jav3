@@ -6,8 +6,12 @@ either is published to every account on the machine. They must carry a path and
 nothing else.
 """
 import importlib.util
+import json
 import plistlib
 import stat
+import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -109,6 +113,205 @@ def test_secrets_are_redacted_for_printing(cfg):
     assert TOKEN not in str(out)
     assert CF_SECRET not in str(out)
     assert out["server"] == "https://x"       # non-secrets stay legible
+
+
+# --- first run: one command, and it stops where it breaks --------------------
+
+
+@pytest.fixture
+def agent_mod():
+    return _mod("agent")
+
+
+def test_setup_does_not_save_a_token_for_a_server_it_could_not_reach(
+        agent_mod, tmp_path, monkeypatch, capsys):
+    """The ping is first for two reasons: everything after it is wasted if the
+    address or the token is wrong, and writing a credential to disk on the way
+    to a failure leaves the machine holding one for nothing."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(agent_mod, "_ping",
+                        lambda *a, **k: (False, "cannot reach https://x: no route"))
+    rc = agent_mod.main(["--setup", "--server", "https://x", "--token", TOKEN])
+    assert rc == 2
+    assert "cannot reach" in capsys.readouterr().out
+    assert not (tmp_path / "jarvis" / "computeruse.json").exists()
+
+
+def test_setup_saves_everything_the_service_will_need_then_connects(
+        agent_mod, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(agent_mod, "_ping", lambda *a, **k: (True, "reached it"))
+    started = []
+
+    async def fake_serve(self):
+        started.append(self.name)
+        return 0
+    monkeypatch.setattr(agent_mod.Agent, "serve", fake_serve)
+
+    music = tmp_path / "Music"
+    music.mkdir()
+    rc = agent_mod.main(["--setup", "--server", "https://x", "--token", TOKEN,
+                         "--name", "laptop", "--allow-root", str(music)])
+    assert rc == 0
+    assert started == ["laptop"], "set-up has to end connected, not with a hint"
+    saved = json.loads((tmp_path / "jarvis" / "computeruse.json").read_text())
+    assert saved["server"] == "https://x" and saved["name"] == "laptop"
+    assert saved["roots"] == [str(music)]
+    out = capsys.readouterr().out
+    assert "1/4" in out and "4/4" in out
+    # scrollback ends up in screenshots
+    assert TOKEN not in out
+
+
+def test_setup_says_so_when_nothing_on_disk_will_be_reachable(
+        agent_mod, tmp_path, monkeypatch, capsys):
+    """Without --allow-root the client connects, looks healthy, and refuses
+    every play — the ceiling is empty, so no grant can intersect it."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(agent_mod, "_ping", lambda *a, **k: (True, "reached it"))
+
+    async def fake_serve(self):
+        return 0
+    monkeypatch.setattr(agent_mod.Agent, "serve", fake_serve)
+
+    agent_mod.main(["--setup", "--server", "https://x", "--token", TOKEN])
+    assert "no --allow-root" in capsys.readouterr().out
+
+
+def test_install_refuses_rather_than_writing_a_unit_that_cannot_start(
+        agent_mod, tmp_path, monkeypatch):
+    """--install is run bare now, after --setup. With nothing saved it would
+    write a unit with no server in it, which starts and dies forever."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    with pytest.raises(SystemExit):
+        agent_mod.main(["--install"])
+
+
+def test_ping_names_each_failure_instead_of_looping_on_all_of_them(
+        agent_mod, monkeypatch):
+    """A bad address, a rotated token and a missing Cloudflare service token are
+    one message inside the WebSocket retry loop — "server rejected the
+    connection", forever. Over plain HTTP each one is its own sentence."""
+    def raises(exc):
+        def go(*a, **k):
+            raise exc
+        return go
+
+    def check(exc, ok_expected, phrase):
+        monkeypatch.setattr(urllib.request, "urlopen", raises(exc))
+        ok, why = agent_mod._ping("https://x", TOKEN)
+        assert ok is ok_expected, why
+        assert phrase in why, why
+
+    check(urllib.error.HTTPError("u", 401, "Unauthorized", {}, None),
+          False, "pairing token")
+    check(urllib.error.HTTPError("u", 403, "Forbidden", {}, None),
+          False, "Cloudflare Access")
+    check(urllib.error.URLError("Name or service not known"),
+          False, "cannot reach")
+    # 404 is an older Jarvis without this route. The socket has not moved, so
+    # refusing to continue would be wrong.
+    check(urllib.error.HTTPError("u", 404, "Not Found", {}, None),
+          True, "older Jarvis")
+
+    ok, why = agent_mod._ping("atomostest:8000", TOKEN)
+    assert not ok and "scheme" in why
+
+
+def test_ping_recognises_an_access_login_page(agent_mod, monkeypatch):
+    """Access redirects a request with no service token to an SSO page. It is a
+    200 full of HTML, so only the body tells you what happened."""
+    class Resp:
+        def read(self, n=None):
+            return b"<!doctype html><title>Sign in</title>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Resp())
+    ok, why = agent_mod._ping("https://x", TOKEN)
+    assert not ok and "web page" in why and "cf-access" in why.lower()
+
+
+def test_ping_reports_who_is_already_connected(agent_mod, monkeypatch):
+    class Resp:
+        def read(self, n=None):
+            return b'{"ok": true, "connected": ["macbook"]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Resp())
+    ok, why = agent_mod._ping("https://x", TOKEN)
+    assert ok and "macbook" in why
+
+
+def test_the_ping_route_takes_the_pairing_token_not_a_session():
+    """It is called by a daemon on the machine being set up, which has no
+    browser session — the same reason the download is not session-gated."""
+    import backend.computeruse_api as api
+    assert "/api/computeruse/ping" in {r.path for r in api.ws_router.routes}
+    assert "/api/computeruse/ping" not in {r.path for r in api.router.routes}
+
+
+# --- telling the operator what to install, for THEIR machine -----------------
+
+
+def test_the_install_line_uses_the_package_manager_this_machine_has(
+        agent_mod, monkeypatch):
+    for tool, expect in (("pacman", "sudo pacman -S --needed"),
+                         ("apt-get", "sudo apt install"),
+                         ("dnf", "sudo dnf install"),
+                         ("brew", "brew install")):
+        monkeypatch.setattr(agent_mod.shutil, "which",
+                            lambda n, t=tool: f"/usr/bin/{n}" if n == t else None)
+        assert agent_mod._installer() == (tool, expect)
+    monkeypatch.setattr(agent_mod.shutil, "which", lambda n: None)
+    assert agent_mod._installer() == (None, None)
+
+
+def test_package_names_are_the_ones_that_distribution_uses(agent_mod):
+    """Same binary, three names. Printing the Debian one on Arch makes the
+    advice something the operator has to translate before they can take it."""
+    assert agent_mod._package("xrandr", "pacman") == "xorg-xrandr"
+    assert agent_mod._package("xrandr", "apt-get") == "x11-xserver-utils"
+    assert agent_mod._package("mixer", "pacman") == "libpulse"
+    assert agent_mod._package("mixer", "apt-get") == "pulseaudio-utils"
+    assert agent_mod._package("mpv", "dnf") == "mpv"
+
+
+def test_everything_missing_is_one_install_command(agent_mod, monkeypatch, capsys):
+    """Four packages used to print four `sudo apt install` lines: four password
+    prompts for what is one install."""
+    monkeypatch.setattr(agent_mod.shutil, "which",
+                        lambda n: "/usr/bin/pacman" if n == "pacman" else None)
+    agent_mod._print_fixes([{"why": "play media", "pkg": "mpv"},
+                            {"why": "list screens", "pkg": "xrandr"},
+                            {"why": "open links", "pkg": "xdg-open"}])
+    out = capsys.readouterr().out
+    assert "sudo pacman -S --needed mpv xorg-xrandr xdg-utils" in out
+    assert out.count("pacman -S") == 1
+    assert "apt" not in out
+
+
+def test_python_deps_point_at_the_interpreter_that_will_run_the_client(
+        agent_mod, capsys):
+    """`pip3 install jeepney` was the old advice. A system pip is refused
+    outright on Arch and Debian (PEP 668), and where it does work it installs
+    into a python the client is not run with."""
+    agent_mod._print_fixes([{"why": "transport", "pip": ["jeepney"]}])
+    out = capsys.readouterr().out
+    assert f"{sys.executable} -m pip install jeepney" in out
+    assert "pip3" not in out
+
+
+def test_nothing_missing_says_so_plainly(agent_mod, capsys):
+    agent_mod._print_fixes([])
+    assert "Nothing to install" in capsys.readouterr().out
 
 
 # --- the service definitions -------------------------------------------------

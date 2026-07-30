@@ -7,15 +7,32 @@ nothing listens on your computer and quitting the process ends all access.
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-.venv/bin/python agent.py \
+.venv/bin/python agent.py --setup \
   --server https://jarvis.example \
   --token  <from the Computer use tab> \
   --allow-root ~/Music \
   --allow-root ~/Videos
 ```
 
-Add `--dry-run` to have it print what it would do and touch nothing. Good for
-the first run.
+`--setup` is the whole first run, in order, so a failure stops at the step that
+caused it rather than three steps later:
+
+1. **Reaches Jarvis over plain HTTP** and reports what happened. A wrong
+   address, a rotated pairing token and a missing Cloudflare service token are
+   indistinguishable from inside the WebSocket retry loop — all three come back
+   as `server rejected the connection`, forever. Over HTTP each has its own
+   status code, so each gets its own sentence.
+2. **Saves the settings** to `~/.config/jarvis/computeruse.json` (0600). Every
+   later run — including the service — reads them, so nothing needs the flags
+   again.
+3. **Runs the selftest** and prints one install command for whatever is missing,
+   using the package manager this machine actually has (`pacman`, `apt`, `dnf`,
+   `zypper`, `apk`, `brew`) and that manager's names for the packages.
+4. **Connects**, in the foreground, so it appears on the Computer use tab.
+
+The Computer use tab builds that command with the token filled in. Run
+`--selftest` alone at any time for step 3 on its own, and add `--dry-run` to
+have the client print what it would do and touch nothing.
 
 ## What it can do
 
@@ -52,7 +69,14 @@ reachable instead of failing silently later.
 
 ## Making it permanent
 
-Save the settings once, then let the OS keep it running:
+After `--setup` the settings are already saved, so this takes no flags:
+
+```
+.venv/bin/python agent.py --install
+```
+
+Setting it up and making it permanent in one go works too — every flag
+`--setup` takes, `--install` takes as well:
 
 ```
 .venv/bin/python agent.py --install \

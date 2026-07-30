@@ -346,50 +346,72 @@ function Hardware({ d }) {
 // skipped. The previous version was one long column of prose, which is how a
 // placeholder ends up pasted into a terminal instead of a token.
 
-const STEPS = ['Name', 'Access', 'Download', 'Check', 'Keep running']
+const STEPS = ['Name', 'Access', 'Set up', 'Connected', 'Keep running']
+
+// A path may contain a space, and one that does would otherwise arrive at the
+// client as two --allow-root values, neither of which exists.
+const shq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`
 
 function Setup({ token, machines, onClose }) {
   const [step, setStep] = useState(0)
   const [name, setName] = useState('')
+  const [roots, setRoots] = useState('')
   const [cfId, setCfId] = useState('')
   const [cfSecret, setCfSecret] = useState('')
+  const [jumped, setJumped] = useState(false)
   const [platform, setPlatform] = useState(
     () => (/Mac/.test(navigator.platform || navigator.userAgent) ? 'mac' : 'linux'))
 
   const origin = window.location.origin
   const behind = !!(cfId && cfSecret)
   const here = machines.find((m) => m.name === name)
-  const cfCurl = behind
-    ? ` \\\n  -H 'CF-Access-Client-Id: ${cfId}' \\\n  -H 'CF-Access-Client-Secret: ${cfSecret}'`
-    : ''
+  const rootList = roots.split(',').map((s) => s.trim()).filter(Boolean)
 
-  // Every step after the download runs the client's OWN interpreter, not
-  // whatever `python3` means in that shell:
-  //   - `unzip` is not in a base Linux install; tar is. The zip download used
-  //     to succeed and then die on `unzip: command not found`.
+  // It arrives connected or it does not arrive: the set-up step is one paste
+  // that ends with the client running, so the moment it lands the wizard should
+  // be showing what landed rather than waiting to be clicked forward.
+  useEffect(() => {
+    if (here && step === 2 && !jumped) { setJumped(true); setStep(3) }
+  }, [here, step, jumped])
+
+  // One chained command, on purpose. Every line of it used to be a step the
+  // operator ran by hand, and each one had a way to fail that left set-up half
+  // done with no sign of it:
+  //   - `unzip` is not in a base Linux install; tar is. The zip download
+  //     succeeded and then died on `unzip: command not found`, and the next
+  //     line ran anyway against a directory that was never unpacked.
   //   - `pip install` into the system python is refused outright on Arch and
-  //     Debian (PEP 668, "externally-managed-environment"), and into a venv
-  //     that happens to be active it installs the deps somewhere unrelated.
-  //   - --install bakes sys.executable into the systemd unit / plist, so the
-  //     interpreter used here is the one the service will run forever.
+  //     Debian (PEP 668), and into whatever venv happened to be active it puts
+  //     the deps somewhere the service will never look.
+  //   - Starting the client before its settings were saved just printed the
+  //     usage message: --server and --token were only saved by --install, which
+  //     came a step later.
+  // So: && between every step so the first failure stops it, and --setup at the
+  // end, which checks it can reach Jarvis, saves the settings, says what is
+  // missing, and connects.
   const py = '~/jarvis-client/.venv/bin/python'
   const cmds = {
-    fetch: `mkdir -p ~/jarvis-client && cd ~/jarvis-client\n`
-      + `curl -fsSL '${origin}/api/computeruse/client.tar.gz' \\\n`
-      + `  -H 'X-Jarvis-Token: ${token}'${cfCurl} -o c.tgz \\\n`
-      + `  && tar xzf c.tgz && rm -f c.tgz || { rm -f c.tgz; echo FAILED; }\n`
-      + `python3 -m venv .venv\n`
-      + `.venv/bin/pip install -q -r computeruse/requirements.txt`,
-    check: `${py} ~/jarvis-client/computeruse/agent.py --selftest`,
-    run: `${py} ~/jarvis-client/computeruse/agent.py`,
-    install: [
-      `${py} ~/jarvis-client/computeruse/agent.py --install`,
-      `  --server ${origin}`,
-      `  --token ${token}`,
-      ...(name ? [`  --name ${name}`] : []),
-      ...(behind ? [`  --cf-access-id ${cfId}`,
-                    `  --cf-access-secret ${cfSecret}`] : []),
+    setup: [
+      `mkdir -p ~/jarvis-client && cd ~/jarvis-client`,
+      `  && curl -fsSL '${origin}/api/computeruse/client.tar.gz'`,
+      `  -H 'X-Jarvis-Token: ${token}'`,
+      ...(behind ? [`  -H 'CF-Access-Client-Id: ${cfId}'`,
+                    `  -H 'CF-Access-Client-Secret: ${cfSecret}'`] : []),
+      `  -o c.tgz`,
+      `  && tar xzf c.tgz && rm -f c.tgz`,
+      `  && python3 -m venv .venv`,
+      `  && .venv/bin/pip install -q -r computeruse/requirements.txt`,
+      `  && .venv/bin/python computeruse/agent.py --setup`,
+      `       --server ${origin}`,
+      `       --token ${token}`,
+      ...(name ? [`       --name ${name}`] : []),
+      ...rootList.map((r) => `       --allow-root ${shq(r)}`),
+      ...(behind ? [`       --cf-access-id ${cfId}`,
+                    `       --cf-access-secret ${cfSecret}`] : []),
+      `  || { rm -f c.tgz; echo 'set-up stopped — the error is above'; }`,
     ].join(' \\\n'),
+    // no flags: --setup already wrote them to ~/.config/jarvis/computeruse.json
+    install: `${py} ~/jarvis-client/computeruse/agent.py --install`,
     enable: platform === 'mac'
       ? 'launchctl bootstrap gui/$UID '
         + '~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist\n'
@@ -412,6 +434,14 @@ function Setup({ token, machines, onClose }) {
                   onClick={() => setPlatform(k)}>{l}</button>
         ))}
       </div>
+      <label>Folders it may play from
+        <span className="dim small">Optional, comma separated. This is the
+          ceiling — folders granted here later can only narrow it, so a client
+          set up with none can control volume and links but play nothing.</span>
+        <input placeholder={platform === 'mac'
+                 ? '~/Music, ~/Movies' : '~/Music, ~/Videos'}
+               value={roots} onChange={(e) => setRoots(e.target.value)} />
+      </label>
     </>,
     <>
       <label>Cloudflare Access token
@@ -424,23 +454,43 @@ function Setup({ token, machines, onClose }) {
       </label>
     </>,
     <>
-      <p>Run on <strong>{name}</strong>:</p>
-      <Block text={cmds.fetch} />
+      <p>Paste this into a terminal on <strong>{name}</strong>:</p>
+      <Block text={cmds.setup} />
+      <p className="dim small">Downloads the client, gives it its own venv,
+        checks it can reach Jarvis, lists anything missing with the install
+        command for <em>this</em> machine, then connects and stays in the
+        foreground.</p>
     </>,
     <>
-      <p>Check what it can drive:</p>
-      <Block text={cmds.check} />
-      <p className="dim small">Ends with the install commands for anything
-        missing. Run those, then re-run this.</p>
-      <p>Then start it:</p>
-      <Block text={cmds.run} />
-      {here
-        ? <p className="badge">✓ {name} connected</p>
-        : <p className="dim small">This updates the moment it connects.</p>}
+      {here ? (
+        <>
+          <p className="badge">✓ {here.name} connected
+            <span className="dim"> · {here.platform === 'darwin'
+              ? 'macOS' : here.platform}</span></p>
+          <Hardware d={here.caps || {}} />
+          <p className={(here.grants || []).length ? 'dim small' : 'warn'}>
+            {(here.grants || []).length
+              ? `${here.grants.length} folder${here.grants.length === 1 ? '' : 's'} granted`
+              : 'No folders granted yet, so nothing on it can be played — add '
+                + 'one from its card on this page.'}
+          </p>
+        </>
+      ) : (
+        <>
+          <p>Waiting for <strong>{name || 'the client'}</strong>…</p>
+          <p className="dim small">The command ends by connecting, and this
+            fills in the moment it does. If it is still spinning, the terminal
+            has the reason — a wrong address, a rotated token and a missing
+            Cloudflare service token each say so by name.</p>
+        </>
+      )}
     </>,
     <>
-      <p>Save the settings:</p>
+      <p>Ctrl-C the client, then save what it is already using:</p>
       <Block text={cmds.install} />
+      <p className="dim small">No flags — set-up saved them to
+        ~/.config/jarvis/computeruse.json at 0600. The service definition gets
+        the path, never the token.</p>
       <p>Then keep it running:</p>
       <Block text={cmds.enable} />
     </>,
