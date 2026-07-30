@@ -247,7 +247,7 @@ def test_relative_and_null_paths_are_refused():
 
 @pytest.mark.asyncio
 async def test_a_path_outside_every_grant_is_refused(monkeypatch):
-    async def grants(db=None):
+    async def grants(db=None, client=None):
         return [cu.Grant(1, "/Users/you/Movies", "films")]
     monkeypatch.setattr(cu, "list_grants", grants)
 
@@ -260,7 +260,7 @@ async def test_a_path_outside_every_grant_is_refused(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dot_dot_cannot_climb_out_of_a_grant(monkeypatch):
-    async def grants(db=None):
+    async def grants(db=None, client=None):
         return [cu.Grant(1, "/Users/you/Movies", "films")]
     monkeypatch.setattr(cu, "list_grants", grants)
     for bad in ("/Users/you/Movies/../../../etc/passwd",
@@ -273,7 +273,7 @@ async def test_dot_dot_cannot_climb_out_of_a_grant(monkeypatch):
 async def test_a_remote_path_is_accepted_without_existing_here(monkeypatch):
     """The whole bug this replaced: the host required the folder to exist
     locally, so no macOS path could ever be granted or played."""
-    async def grants(db=None):
+    async def grants(db=None, client=None):
         return [cu.Grant(1, "/Users/grant/Movies", "mac films")]
     monkeypatch.setattr(cu, "list_grants", grants)
     got = await cu.path_within_grants("/Users/grant/Movies/Heat.mkv")
@@ -283,7 +283,7 @@ async def test_a_remote_path_is_accepted_without_existing_here(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_with_no_grants_nothing_is_reachable(monkeypatch):
-    async def none(db=None):
+    async def none(db=None, client=None):
         return []
     monkeypatch.setattr(cu, "list_grants", none)
     with pytest.raises(cu.VerbError):
@@ -292,7 +292,7 @@ async def test_with_no_grants_nothing_is_reachable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_an_ambiguous_relative_path_asks_instead_of_picking(monkeypatch):
-    async def grants(db=None):
+    async def grants(db=None, client=None):
         return [cu.Grant(1, "/a/Media", "a"), cu.Grant(2, "/b/Media", "b")]
     monkeypatch.setattr(cu, "list_grants", grants)
     with pytest.raises(cu.VerbError) as e:

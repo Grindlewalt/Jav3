@@ -275,27 +275,108 @@ def validate(verb: str, params: dict | None) -> dict:
 # Folder grants: what of the operator's disk this may see.
 # ---------------------------------------------------------------------------
 
+# What a machine may be asked to do, in the operator's words rather than the
+# protocol's. Verb names are an implementation detail; these are the decisions.
+CAPABILITIES: dict[str, dict] = {
+    "audio":     {"label": "Play music and audio",
+                  "note": "from a granted folder, through this machine's speakers"},
+    "video":     {"label": "Play video on a screen",
+                  "note": "fullscreen on whichever monitor is asked for"},
+    "volume":    {"label": "Change the volume",
+                  "note": "the system volume, so it affects everything playing"},
+    "transport": {"label": "Pause and skip",
+                  "note": "whatever is playing, including apps Jarvis did not start"},
+    "links":     {"label": "Open links in the browser",
+                  "note": "http and https only"},
+    "browse":    {"label": "See what is in the granted folders",
+                  "note": "names only, and only inside the folders below"},
+}
+
+# verb -> capability. status and stop_playback are absent on purpose: reading
+# what a machine is, and stopping something Jarvis itself started, are not
+# privileges worth revoking.
+_VERB_CAP = {
+    "volume": "volume",
+    "transport": "transport",
+    "open_link": "links",
+    "list": "browse",
+    "find": "browse",
+}
+
+
+def capability_for(verb: str, params: dict | None = None) -> str | None:
+    """Which privilege a call needs, if any."""
+    if verb == "play":
+        return "video" if (params or {}).get("kind") == "video" else "audio"
+    return _VERB_CAP.get(verb)
+
+
+async def privileges(client: str) -> dict[str, bool]:
+    """Everything this machine may do. Absent rows mean allowed — revoking is
+    the deliberate act, so it is what gets recorded."""
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT capability, allowed FROM cu_privileges WHERE client = ?",
+                (client,)) as cur:
+            saved = {r["capability"]: bool(r["allowed"]) for r in await cur.fetchall()}
+    except Exception:
+        saved = {}
+    finally:
+        await db.close()
+    return {cap: saved.get(cap, True) for cap in CAPABILITIES}
+
+
+async def set_privilege(client: str, capability: str, allowed: bool) -> None:
+    if capability not in CAPABILITIES:
+        raise VerbError(f"unknown capability {capability!r}")
+    if not (client or "").strip():
+        raise VerbError("which machine?")
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO cu_privileges (client, capability, allowed) "
+            "VALUES (?, ?, ?) ON CONFLICT(client, capability) DO UPDATE SET "
+            "allowed = excluded.allowed, changed_at = datetime('now')",
+            (client.strip(), capability, 1 if allowed else 0))
+        await db.commit()
+    finally:
+        await db.close()
+
+
 @dataclass
 class Grant:
     id: int
     root: str
     label: str
+    client: str = ""      # "" means every machine
 
 
-async def list_grants(db=None) -> list[Grant]:
+async def list_grants(db=None, client: str | None = None) -> list[Grant]:
+    """Every grant, or the ones that apply to one machine.
+
+    A grant with no client applies everywhere — that is what the earlier
+    global-only grants become. Filtering matters as soon as there are two
+    machines: /Users/you/Movies exists on the Mac and nowhere else, and sending
+    it to the Linux box just gives it a root it can never resolve.
+    """
     own = db is None
     db = db or await get_db()
     try:
         async with db.execute(
-                "SELECT id, root, label FROM cu_grants ORDER BY root") as cur:
-            return [Grant(r["id"], r["root"], r["label"] or "")
+                "SELECT id, root, label, client FROM cu_grants ORDER BY root") as cur:
+            rows = [Grant(r["id"], r["root"], r["label"] or "", r["client"] or "")
                     for r in await cur.fetchall()]
     finally:
         if own:
             await db.close()
+    if client is None:
+        return rows
+    want = client.strip().lower()
+    return [g for g in rows if not g.client or g.client.lower() == want]
 
 
-async def add_grant(root: str, label: str = "") -> Grant:
+async def add_grant(root: str, label: str = "", client: str = "") -> Grant:
     """Grants are made here and only here — from the GUI, by the operator.
 
     There is deliberately no tool that creates one. If the agent could widen its
@@ -327,17 +408,19 @@ async def add_grant(root: str, label: str = "") -> Grant:
     p = Path(os.path.normpath(raw))
     db = await get_db()
     try:
+        who = (client or "").strip() or None
         cur = await db.execute(
-            "INSERT OR IGNORE INTO cu_grants (root, label) VALUES (?, ?)",
-            (str(p), label.strip()[:80]))
+            "INSERT OR IGNORE INTO cu_grants (root, label, client) VALUES (?, ?, ?)",
+            (str(p), label.strip()[:80], who))
         await db.commit()
         gid = cur.lastrowid
         if not gid:
-            async with db.execute("SELECT id FROM cu_grants WHERE root = ?",
-                                  (str(p),)) as c2:
+            async with db.execute(
+                    "SELECT id FROM cu_grants WHERE root = ? AND "
+                    "(client IS ? OR client = ?)", (str(p), who, who or "")) as c2:
                 row = await c2.fetchone()
-                gid = row["id"]
-        return Grant(gid, str(p), label)
+                gid = row["id"] if row else 0
+        return Grant(gid, str(p), label, who or "")
     finally:
         await db.close()
 
@@ -351,7 +434,7 @@ async def remove_grant(grant_id: int) -> None:
         await db.close()
 
 
-async def path_within_grants(source: str) -> str:
+async def path_within_grants(source: str, client: str | None = None) -> str:
     """A path the agent asked for -> an absolute path inside a granted folder.
 
     Lexical only. This host cannot see the operator's disk, so existence, file
@@ -359,11 +442,12 @@ async def path_within_grants(source: str) -> str:
     file against its own roots before playing anything. This is the early
     filter that gives a useful error without a round trip, not the control.
     """
-    grants = await list_grants()
+    grants = await list_grants(client=client)
     if not grants:
         raise VerbError(
-            "no folders have been granted yet — the operator adds them on the "
-            "Computer use tab; nothing on the machine is reachable until they do")
+            "no folders have been granted for that machine yet — the operator "
+            "adds them on the Computer use tab; nothing on it is reachable "
+            "until they do")
     raw = (source or "").strip()
     if not raw:
         raise VerbError("empty source")
@@ -553,6 +637,17 @@ async def dispatch(verb: str, params: dict | None = None,
     """
     clean = validate(verb, params)
     c = get_client(client_id)
+    # privilege check here rather than in each tool: this is the one place every
+    # call passes through, so a revoked capability cannot be reached by a tool
+    # that forgot to ask.
+    cap = capability_for(verb, clean)
+    if cap:
+        allowed = await privileges(c.name)
+        if not allowed.get(cap, True):
+            raise VerbError(
+                f"'{CAPABILITIES[cap]['label']}' is switched off for {c.name}. "
+                f"The operator can turn it back on on the Computer use tab — do "
+                f"not try another way round it.")
     req_id = uuid.uuid4().hex[:12]
     fut: asyncio.Future = asyncio.get_running_loop().create_future()
     c._waits[req_id] = fut

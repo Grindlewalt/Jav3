@@ -202,9 +202,21 @@ CREATE TABLE IF NOT EXISTS triage_log (
 -- own reach. The client intersects these with its own --allow-root ceiling.
 CREATE TABLE IF NOT EXISTS cu_grants (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    root TEXT NOT NULL UNIQUE,           -- absolute, already resolved
+    root TEXT NOT NULL,                  -- absolute path ON THAT MACHINE
     label TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    client TEXT,                          -- machine name; NULL = every machine
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(root, client)
+);
+-- What each machine is allowed to be asked to do. Written only from the
+-- Computer use tab. A row is an explicit decision; absent means the default
+-- (allowed), so revoking is what leaves a trace.
+CREATE TABLE IF NOT EXISTS cu_privileges (
+    client TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    allowed INTEGER NOT NULL DEFAULT 1,
+    changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(client, capability)
 );
 """
 
@@ -262,6 +274,12 @@ async def init_db() -> None:
             for col in ("triage_verdict", "triage_reason", "triage_at"):
                 if col not in tcols:
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        # cu_grants gained a `client` column: a grant is a path on a specific
+        # machine, and with two connected there was no way to say which.
+        async with db.execute("PRAGMA table_info(cu_grants)") as cur:
+            gcols = [r["name"] for r in await cur.fetchall()]
+        if gcols and "client" not in gcols:
+            await db.execute("ALTER TABLE cu_grants ADD COLUMN client TEXT")
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
                           ("rollup", "TEXT"), ("job_id", "TEXT"),

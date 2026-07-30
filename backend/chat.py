@@ -67,6 +67,10 @@ async def _name_conversation(conversation_id: int, user_msg: str, reply: str) ->
 
 
 class AssignProject(BaseModel):
+    # `title` renames the chat. The LLM naming pass only runs after the first
+    # exchange and never again, so a chat that drifted keeps a title about its
+    # opening message until somebody can change it by hand.
+    title: str | None = None
     project: str | None = None   # slug to pin this chat to
     # "follow": inherit whatever project is loaded globally (the historic
     # meaning of a null project). "none": pinned to no project — file work
@@ -125,6 +129,15 @@ async def assign_conversation(conversation_id: int, body: AssignProject):
         ) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="no such conversation")
+        if body.title is not None:
+            name = " ".join(body.title.split())[:120]
+            if not name:
+                raise HTTPException(status_code=400, detail="title cannot be blank")
+            await db.execute("UPDATE conversations SET summary = ? WHERE id = ?",
+                             (name, conversation_id))
+            await db.commit()
+            if body.project is None and body.mode is None:
+                return {"ok": True, "title": name}      # rename only
         mode = body.mode or ("pin" if body.project else "follow")
         project_id = None
         if mode == "pin" and body.project:

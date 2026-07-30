@@ -179,6 +179,34 @@ async def set_autonomy(slug: str, body: SetAutonomy):
     return {"ok": True, "autonomy": value or "full"}
 
 
+class RenameProject(BaseModel):
+    name: str
+
+
+@router.put("/projects/{slug}/name")
+async def rename_project(slug: str, body: RenameProject):
+    """Change a project's display name.
+
+    The SLUG is deliberately not touched. It is the directory on disk, the key in
+    every conversation's binding, and what `{{secret:...}}` grants and egress
+    policy are keyed on — renaming it would mean moving a git repo and rewriting
+    rows in five tables to change a label. The name is what anybody reads.
+    """
+    name = " ".join((body.name or "").split())[:80]
+    if not name:
+        raise HTTPException(status_code=400, detail="name cannot be blank")
+    db = await get_db()
+    try:
+        cur = await db.execute("UPDATE projects SET name = ? WHERE slug = ? "
+                               "AND deleted_at IS NULL", (name, slug))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="no such project")
+    finally:
+        await db.close()
+    return {"ok": True, "slug": slug, "name": name}
+
+
 @router.put("/projects/{slug}/md")
 async def update_project_md(slug: str, body: UpdateProjectMd):
     db = await get_db()

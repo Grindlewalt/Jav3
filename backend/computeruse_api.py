@@ -38,6 +38,13 @@ ws_router = APIRouter(prefix="/api/computeruse", tags=["computeruse"])
 class GrantBody(BaseModel):
     root: str
     label: str = ""
+    client: str = ""       # "" means every machine
+
+
+class PrivilegeBody(BaseModel):
+    client: str
+    capability: str
+    allowed: bool
 
 
 class TokenBody(BaseModel):
@@ -59,11 +66,18 @@ class TarmacBody(BaseModel):
 async def status():
     """Everything the tab renders: who is connected, what they can reach, and
     which folders are granted."""
+    machines = []
+    for c in cu.clients():
+        machines.append({**c.describe(),
+                         "privileges": await cu.privileges(c.name),
+                         "grants": [{"id": g.id, "root": g.root, "label": g.label,
+                                     "client": g.client}
+                                    for g in await cu.list_grants(client=c.name)]})
     return {
-        "clients": [c.describe() for c in cu.clients()],
-        "grants": [{"id": g.id, "root": g.root, "label": g.label}
-                   for g in await cu.list_grants()],
-        "verbs": {name: spec["doc"] for name, spec in cu.VERBS.items()},
+        "clients": machines,
+        "capabilities": cu.CAPABILITIES,
+        "grants": [{"id": g.id, "root": g.root, "label": g.label,
+                    "client": g.client} for g in await cu.list_grants()],
     }
 
 
@@ -80,10 +94,21 @@ async def rotate_token(body: TokenBody):
 @router.post("/grants")
 async def create_grant(body: GrantBody):
     try:
-        g = await cu.add_grant(body.root, body.label)
+        g = await cu.add_grant(body.root, body.label, body.client)
     except cu.VerbError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"id": g.id, "root": g.root, "label": g.label}
+    # a live client only learns of a new folder when it reconnects, so say so
+    return {"id": g.id, "root": g.root, "label": g.label, "client": g.client,
+            "restart_needed": bool(cu.clients())}
+
+
+@router.put("/privileges")
+async def set_privilege(body: PrivilegeBody):
+    try:
+        await cu.set_privilege(body.client, body.capability, body.allowed)
+    except cu.VerbError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "privileges": await cu.privileges(body.client)}
 
 
 @router.delete("/grants/{grant_id}")
@@ -253,7 +278,10 @@ async def agent_socket(ws: WebSocket):
         cu.register(client)
         await ws.send_text(json.dumps({
             "ok": True, "client_id": client.id,
-            "grants": [g.root for g in await cu.list_grants()],
+            # only this machine's folders: a path on the Mac is meaningless on
+            # the Linux box, and sending it just gives that client a root it can
+            # never resolve
+            "grants": [g.root for g in await cu.list_grants(client=client.name)],
         }))
         while True:
             msg = json.loads(await ws.receive_text())

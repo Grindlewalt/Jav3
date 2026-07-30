@@ -369,3 +369,94 @@ def test_the_computers_block_is_in_the_assembled_prompt():
     from backend import memory
     src = inspect.getsource(memory.assemble_system_prompt)
     assert '"computers-index"' in src or "computers-index" in src
+
+
+# --- privileges, per computer -------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_revoked_capability_blocks_the_call(tmp_path, monkeypatch):
+    """Checked in dispatch, which every tool goes through — so a revoked
+    capability cannot be reached by a tool that forgot to ask."""
+    from backend import computeruse as cu
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "p.db", raising=False)
+    await db_mod.init_db()
+
+    sent = []
+
+    async def send(raw):
+        sent.append(raw)
+    cu.register(cu.Client(id="mac-1", name="mac", platform="darwin", send=send))
+    try:
+        await cu.set_privilege("mac", "volume", False)
+        with pytest.raises(cu.VerbError) as e:
+            await cu.dispatch("volume", {"action": "up"}, "mac", timeout=1)
+        assert "Change the volume" in str(e.value)
+        assert "switched off for mac" in str(e.value)
+        assert not sent, "nothing should have reached the machine"
+
+        # a different capability is unaffected
+        await cu.set_privilege("mac", "volume", True)
+        privs = await cu.privileges("mac")
+        assert privs["volume"] is True and privs["links"] is True
+    finally:
+        cu.unregister("mac-1")
+
+
+@pytest.mark.asyncio
+async def test_privileges_are_per_machine(tmp_path, monkeypatch):
+    """Revoking on the laptop must not revoke on the desktop."""
+    from backend import computeruse as cu
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "p2.db", raising=False)
+    await db_mod.init_db()
+    await cu.set_privilege("mac", "links", False)
+    assert (await cu.privileges("mac"))["links"] is False
+    assert (await cu.privileges("studio"))["links"] is True
+
+
+@pytest.mark.asyncio
+async def test_absent_rows_mean_allowed(tmp_path, monkeypatch):
+    """Revoking is the deliberate act, so it is what gets recorded. A machine
+    nobody has touched can do everything."""
+    from backend import computeruse as cu
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "p3.db", raising=False)
+    await db_mod.init_db()
+    assert all((await cu.privileges("fresh")).values())
+
+
+@pytest.mark.asyncio
+async def test_status_and_stop_are_not_revocable(tmp_path, monkeypatch):
+    """Reading what a machine is, and stopping something Jarvis itself started,
+    are not privileges worth switching off."""
+    from backend import computeruse as cu
+    assert cu.capability_for("status") is None
+    assert cu.capability_for("stop_playback") is None
+    assert cu.capability_for("play", {"kind": "audio"}) == "audio"
+    assert cu.capability_for("play", {"kind": "video"}) == "video"
+
+
+# --- grants belong to a machine ----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_folder_belongs_to_one_computer(tmp_path, monkeypatch):
+    """/Users/you/Movies exists on the Mac and nowhere else. Sending it to the
+    Linux box just hands it a root it can never resolve."""
+    from backend import computeruse as cu
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "g.db", raising=False)
+    await db_mod.init_db()
+
+    await cu.add_grant("/Users/you/Movies", "films", client="mac")
+    await cu.add_grant("/home/you/Music", "tunes", client="studio")
+    await cu.add_grant("/srv/shared", "shared")          # every machine
+
+    mac = [g.root for g in await cu.list_grants(client="mac")]
+    studio = [g.root for g in await cu.list_grants(client="studio")]
+    assert "/Users/you/Movies" in mac and "/home/you/Music" not in mac
+    assert "/home/you/Music" in studio and "/Users/you/Movies" not in studio
+    # an unassigned grant reaches both
+    assert "/srv/shared" in mac and "/srv/shared" in studio
+    # and everything shows in the unfiltered list
+    assert len(await cu.list_grants()) == 3

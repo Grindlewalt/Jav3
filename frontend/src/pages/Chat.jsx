@@ -447,6 +447,15 @@ export default function Chat() {
     setGreeting(pickGreeting())
   }
 
+  async function renameConversation(id, current) {
+    const next = window.prompt('Rename this chat', current || '')
+    if (next === null) return
+    if (!next.trim()) return
+    await api(`/api/conversations/${id}`, {
+      method: 'PATCH', body: JSON.stringify({ title: next.trim() }) })
+    refreshConvos()
+  }
+
   async function deleteConversation(id) {
     if (!window.confirm(`delete chat #${id}?`)) return
     await api(`/api/conversations/${id}`, { method: 'DELETE' })
@@ -590,6 +599,11 @@ export default function Chat() {
                   {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
                 {c.project_slug && <span className="convo-proj ellipsis">{c.project_slug}</span>}
               </div>
+              <button className="win-btn" title="rename chat"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        renameConversation(c.id, c.summary)
+                      }}>✎</button>
               <button className="win-btn" title="delete chat"
                       onClick={(e) => { e.stopPropagation(); deleteConversation(c.id) }}>×</button>
             </li>

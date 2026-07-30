@@ -97,6 +97,18 @@ export default function Projects() {
         {projects.map((p) => (
           <li key={p.slug}>
             <Link to={`/projects/${p.slug}`}>{p.name}</Link>
+            <button className="win-btn" title="rename project"
+                    onClick={async (e) => {
+                      e.preventDefault()
+                      const next = window.prompt('Rename project', p.name)
+                      if (next === null || !next.trim()) return
+                      try {
+                        await api(`/api/projects/${p.slug}/name`, {
+                          method: 'PUT',
+                          body: JSON.stringify({ name: next.trim() }) })
+                        refresh()
+                      } catch (err) { setError(err.detail || String(err)) }
+                    }}>✎</button>
             <code>{p.slug}</code>
             {active === p.slug
               ? <button onClick={unload}>Unload from context</button>

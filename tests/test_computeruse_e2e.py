@@ -36,7 +36,7 @@ def wired(tmp_path, monkeypatch):
     outside = tmp_path / "outside.mp3"
     outside.write_bytes(b"\0")
 
-    async def grants(db=None):
+    async def grants(db=None, client=None):
         return [cu.Grant(1, str(music), "test")]
     monkeypatch.setattr(cu, "list_grants", grants)
 
@@ -332,7 +332,7 @@ async def test_playing_a_path_that_exists_only_on_the_client(tmp_path, monkeypat
     remote.mkdir(parents=True)
     (remote / "Heat.mkv").write_bytes(b"\0")
 
-    async def grants(db=None):
+    async def grants(db=None, client=None):
         return [cu.Grant(1, str(remote), "mac films")]
     monkeypatch.setattr(cu, "list_grants", grants)
 

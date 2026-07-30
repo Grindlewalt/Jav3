@@ -1,13 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 
-// The operator's control surface for computer use. Two things live here that
-// exist nowhere else: the folder grants (no tool can create one — if the agent
-// could widen its own reach the grant would be decoration) and the pairing
-// token a desktop client needs to connect.
-// Cloudflare's dashboard shows the token as full header lines, so that is what
-// gets pasted. Strip the header name, any wrapping quotes, and stray whitespace
-// rather than letting "CF-Access-Client-Id: abc.access" through as the id.
+// Cloudflare's dashboard shows a service token as whole header lines, so that is
+// what gets pasted. Strip the header name, quotes and whitespace rather than
+// letting "CF-Access-Client-Id: abc.access" through as the id.
 function cleanToken(v) {
   return String(v || '')
     .replace(/^\s*CF[-_]?Access[-_]?Client[-_]?(Id|Secret)\s*[:=]\s*/i, '')
@@ -16,321 +12,203 @@ function cleanToken(v) {
     .trim()
 }
 
+// Copies what it is GIVEN, not what is on screen. The set-up command renders a
+// placeholder until the token is revealed, and copying the rendered text meant
+// pasting the literal "<reveal the token above>" into a terminal.
+function Copy({ text, label = 'copy' }) {
+  const [done, setDone] = useState(false)
+  return (
+    <button type="button" className="copy-btn" onClick={async () => {
+      try {
+        await navigator.clipboard.writeText(text)
+      } catch {
+        const ta = document.createElement('textarea')   // no secure context
+        ta.value = text
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        ta.remove()
+      }
+      setDone(true)
+      setTimeout(() => setDone(false), 1600)
+    }}>{done ? 'copied' : label}</button>
+  )
+}
+
+const Block = ({ text }) => (
+  <div className="cu-block"><Copy text={text} /><pre>{text}</pre></div>
+)
+
 export default function ComputerUse() {
   const [state, setState] = useState(null)
   const [token, setToken] = useState('')
-  const [showToken, setShowToken] = useState(false)
-  const [platform, setPlatform] = useState(
-    () => (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
-      ? 'mac' : 'linux'))
-  const [probe, setProbe] = useState(null)
-  const [probing, setProbing] = useState(false)
-  const [root, setRoot] = useState('')
-  const [label, setLabel] = useState('')
-  const [jf, setJf] = useState({ url: '', key_set: false })
-  const [jfKey, setJfKey] = useState('')
-  // Cloudflare Access service token, if Jarvis sits behind Access. Held in this
-  // component and nowhere else: not sent to the backend, not in localStorage, and
-  // gone when the page reloads. It exists only to paste into the command below —
-  // that is why the field is here rather than a stored setting.
+  const [open, setOpen] = useState(null)      // expanded machine
+  const [probe, setProbe] = useState({})
+  const [setupOpen, setSetupOpen] = useState(false)
+  const [msg, setMsg] = useState(null)
   const [tm, setTm] = useState({ url: '', cf_id: '', secret_set: false })
   const [tmSecret, setTmSecret] = useState('')
   const [tmTest, setTmTest] = useState(null)
-  const [tmSameToken, setTmSameToken] = useState(false)
-  const [cfId, setCfId] = useState('')
-  const [cfSecret, setCfSecret] = useState('')
-  const [machine, setMachine] = useState('')
-  const [error, setError] = useState(null)
-  const [saved, setSaved] = useState('')
+  const [jf, setJf] = useState({ url: '', key_set: false })
+  const [jfKey, setJfKey] = useState('')
 
   const refresh = () => api('/api/computeruse/status').then(setState)
   useEffect(() => {
     refresh()
     api('/api/computeruse/token').then((r) => setToken(r.token)).catch(() => {})
-    api('/api/computeruse/jellyfin').then(setJf).catch(() => {})
     api('/api/computeruse/tarmac').then(setTm).catch(() => {})
-    const t = setInterval(refresh, 8000)
+    api('/api/computeruse/jellyfin').then(setJf).catch(() => {})
+    const t = setInterval(refresh, 6000)
     return () => clearInterval(t)
   }, [])
 
-  const note = (m) => { setSaved(m); setTimeout(() => setSaved(''), 3000) }
+  const say = (m) => { setMsg(m); setTimeout(() => setMsg(null), 6000) }
 
-  async function addGrant(e) {
-    e.preventDefault()
-    setError(null)
+  async function runProbe(name) {
+    setProbe((p) => ({ ...p, [name]: { loading: true } }))
     try {
-      await api('/api/computeruse/grants', {
-        method: 'POST', body: JSON.stringify({ root, label }) })
-      setRoot(''); setLabel('')
-      refresh()
-    } catch (err) { setError(err.detail || String(err)) }
+      const r = await api(
+        `/api/computeruse/probe?client_id=${encodeURIComponent(name)}`,
+        { method: 'POST' })
+      setProbe((p) => ({ ...p, [name]: r.result || r }))
+    } catch (err) {
+      setProbe((p) => ({ ...p, [name]: { error: err.detail || String(err) } }))
+    }
   }
 
-  async function revoke(id, r) {
-    if (!window.confirm(`Stop Jarvis reaching ${r}?`)) return
+  async function togglePriv(client, capability, allowed) {
+    try {
+      await api('/api/computeruse/privileges', {
+        method: 'PUT', body: JSON.stringify({ client, capability, allowed }) })
+      refresh()
+    } catch (err) { say(err.detail || String(err)) }
+  }
+
+  async function addFolder(client, root) {
+    try {
+      const r = await api('/api/computeruse/grants', {
+        method: 'POST', body: JSON.stringify({ root, client }) })
+      refresh()
+      if (r.restart_needed) {
+        say(`Added. ${client} picks up folders when it reconnects — restart the `
+          + `client to use this one.`)
+      }
+    } catch (err) { say(err.detail || String(err)) }
+  }
+
+  const revoke = async (id) => {
     await api(`/api/computeruse/grants/${id}`, { method: 'DELETE' })
     refresh()
   }
 
-  async function runProbe(clientId) {
-    setProbing(true); setError(null); setProbe(null)
-    try {
-      const q = clientId ? `?client_id=${encodeURIComponent(clientId)}` : ''
-      const r = await api(`/api/computeruse/probe${q}`, { method: 'POST' })
-      setProbe(r.result || r)
-    } catch (err) { setError(err.detail || String(err)) }
-    setProbing(false)
-  }
-
-  async function saveJellyfin(e) {
+  async function saveMusic(e) {
     e.preventDefault()
-    setError(null)
-    try {
-      setJf(await api('/api/computeruse/jellyfin', {
-        method: 'PUT', body: JSON.stringify({ url: jf.url, key: jfKey }) }))
-      setJfKey('')
-      note('Jellyfin settings saved')
-    } catch (err) { setError(err.detail || String(err)) }
-  }
-
-  async function saveTarmac(e) {
-    e.preventDefault()
-    setError(null); setTmTest(null)
+    setTmTest(null)
     try {
       setTm(await api('/api/computeruse/tarmac', {
         method: 'PUT',
-        body: JSON.stringify({
-          url: tm.url,
-          cf_id: tmSameToken ? cfId : tm.cf_id,
-          cf_secret: tmSameToken ? cfSecret : tmSecret,
-        }) }))
+        body: JSON.stringify({ url: tm.url, cf_id: tm.cf_id,
+                               cf_secret: tmSecret }) }))
       setTmSecret('')
-      note('music server saved')
-    } catch (err) { setError(err.detail || String(err)) }
+      say('Music server saved')
+    } catch (err) { say(err.detail || String(err)) }
   }
 
-  async function testTarmac() {
+  async function testMusic() {
     setTmTest({ testing: true })
     try {
       setTmTest(await api('/api/computeruse/tarmac/test', { method: 'POST' }))
     } catch (err) { setTmTest({ ok: false, error: err.detail || String(err) }) }
   }
 
-  async function rotate() {
-    if (!window.confirm('Rotate the pairing token? Every connected client is '
-      + 'dropped and has to be restarted with the new one.')) return
-    const r = await api('/api/computeruse/token', {
-      method: 'POST', body: JSON.stringify({ rotate: true }) })
-    setToken(r.token)
-    setShowToken(true)
-    note('token rotated')
+  async function saveJellyfin(e) {
+    e.preventDefault()
+    try {
+      setJf(await api('/api/computeruse/jellyfin', {
+        method: 'PUT', body: JSON.stringify({ url: jf.url, key: jfKey }) }))
+      setJfKey('')
+      say('Jellyfin saved')
+    } catch (err) { say(err.detail || String(err)) }
   }
 
   if (!state) return <div className="page"><p className="dim">loading…</p></div>
-
-  const clients = state.clients || []
-  const tok = showToken ? token : '<reveal the token above>'
-  const roots = (state.grants || []).map((g) => g.root)
-  const origin = window.location.origin
-  const behindAccess = !!(cfId && cfSecret)
-  // Access headers, if the operator pasted a service token. Only ever used to
-  // build these strings — nothing here is sent to Jarvis.
-  const curlAuth = behindAccess
-    ? ` \\\n  -H 'CF-Access-Client-Id: ${cfId}' \\\n  -H 'CF-Access-Client-Secret: ${cfSecret}'`
-    : ''
-  // -o creates the file before the response arrives, so a failed download left
-  // a zero-byte c.zip and "end of central directory signature not found". The
-  // cleanup branch removes it and says what actually went wrong.
-  const fetchCmd =
-    `mkdir -p ~/jarvis-client && cd ~/jarvis-client\n`
-    + `curl -fsSL '${origin}/api/computeruse/client.zip' \\\n`
-    + `  -H 'X-Jarvis-Token: ${tok}'${curlAuth} -o c.zip \\\n`
-    + `  && unzip -oq c.zip && rm -f c.zip \\\n`
-    + `  || { rm -f c.zip; echo 'download failed — reveal the token above, and `
-    + `check the Access policy'; }\n`
-    + `python3 -m pip install -r computeruse/requirements.txt`
-  const doctorCmd = 'python3 ~/jarvis-client/computeruse/agent.py --selftest'
-  // the grants become --allow-root, since the client treats those flags as its
-  // ceiling — a grant can narrow it, never widen it
-  const installCmd = [
-    'python3 ~/jarvis-client/computeruse/agent.py --install',
-    `  --server ${origin}`,
-    `  --token ${tok}`,
-    ...(machine ? [`  --name ${machine}`] : []),
-    ...(roots.length ? roots.map((r) => `  --allow-root ${r}`)
-                     : ['  --allow-root ~/Music   # grant a folder below first']),
-    ...(behindAccess ? [`  --cf-access-id ${cfId}`,
-                        `  --cf-access-secret ${cfSecret}`] : []),
-  ].join(' \\\n')
-
-  const enable = platform === 'mac' ? [
-    'launchctl bootstrap gui/$UID \\',
-    '  ~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist',
-    'launchctl kickstart -p gui/$UID/network.atomos.jarvis.computeruse',
-    '',
-    '# stop it:  launchctl bootout gui/$UID/network.atomos.jarvis.computeruse',
-    '# logs:     tail -f ~/Library/Logs/jarvis-computeruse.log',
-  ].join('\n') : [
-    'systemctl --user daemon-reload',
-    'systemctl --user enable --now jarvis-computeruse.service',
-    'loginctl enable-linger $USER      # keep running after logout',
-    '',
-    '# logs:  journalctl --user -u jarvis-computeruse.service -f',
-  ].join('\n')
+  const machines = state.clients || []
+  const caps = state.capabilities || {}
+  const orphans = (state.grants || []).filter(
+    (g) => g.client && !machines.some((m) => m.name === g.client))
 
   return (
     <div className="page cu-page">
-      <h1>Computer use</h1>
-      <p className="dim">
-        Jarvis drives a computer you are running the client on — the system
-        volume, whatever is playing, and media from the folders you grant below.
-        There is no shell: the client accepts a fixed list of actions and
-        nothing else.
-      </p>
-      {error && <p className="error">{error}</p>}
-      {saved && <p className="badge">{saved}</p>}
+      <div className="cu-head">
+        <h1>Computer use</h1>
+        <button onClick={() => setSetupOpen(true)}>Connect a computer</button>
+      </div>
+      {msg && <p className="warn">{msg}</p>}
 
-      <section className="panel">
-        <h2>Connected computers</h2>
-        {clients.length === 0 ? (
-          <p className="dim">
-            Nothing connected. Run the client on the machine you want driven —
-            it dials out to Jarvis, so no port has to be open on it.
+      {machines.length === 0 ? (
+        <section className="panel cu-empty">
+          <p>No computer connected.</p>
+          <p className="dim small">
+            Jarvis can only reach a machine running the client. It dials out, so
+            nothing needs to be open on your side.
           </p>
-        ) : (
-          <ul className="cu-clients">
-            {clients.map((c) => (
-              <li key={c.id}>
-                <span className="run-dot running" />
-                <span className="grow">
-                  <strong>{c.name}</strong> <span className="dim">{c.platform}</span>
-                  {c.caps?.dry_run && <span className="tag">dry run</span>}
-                </span>
-                <button className="ghost" disabled={probing}
-                        onClick={() => runProbe(c.id)}>
-                  {probing ? 'asking…' : 'what can it drive?'}</button>
+        </section>
+      ) : machines.map((m) => (
+        <Machine key={m.id} m={m} caps={caps}
+                 expanded={open === m.name}
+                 onToggle={() => setOpen(open === m.name ? null : m.name)}
+                 probe={probe[m.name]} onProbe={() => runProbe(m.name)}
+                 onPriv={togglePriv} onAdd={addFolder} onRevoke={revoke} />
+      ))}
+
+      {orphans.length > 0 && (
+        <section className="panel">
+          <h2>Folders for computers that aren’t connected</h2>
+          <ul className="cu-grants">
+            {orphans.map((g) => (
+              <li key={g.id}>
+                <code className="grow">{g.root}</code>
+                <span className="tag">{g.client}</span>
+                <button className="ghost danger" onClick={() => revoke(g.id)}>
+                  remove</button>
               </li>
             ))}
           </ul>
-        )}
-        {probe && (
-          <div className="cu-probe">
-            <div><span className="dim">screens</span>{' '}
-              {(probe.screens || []).length
-                ? probe.screens.map((s) => `${s.index}: ${s.id} ${s.geometry || ''}`).join(' · ')
-                : <span className="dim">none detected</span>}</div>
-            {/* two lists, not one: the mixer sinks and mpv's outputs are
-                separate namespaces and are not interchangeable */}
-            <div><span className="dim">mixer (volume)</span>{' '}
-              {(probe.audio_devices || []).length
-                ? probe.audio_devices.map((a) => a.label || a.id).join(' · ')
-                : <span className="dim">none detected</span>}</div>
-            <div><span className="dim">outputs (playback)</span>{' '}
-              {(probe.play_devices || []).length
-                ? probe.play_devices.slice(0, 8).map((a) => a.id).join(' · ')
-                : <span className="dim">none detected — is mpv installed?</span>}</div>
-            <div><span className="dim">players</span>{' '}
-              {(probe.players || []).join(' · ') || <span className="dim">none running</span>}</div>
-            <div><span className="dim">reachable folders</span>{' '}
-              {(probe.roots || []).join(' · ')
-                || <span className="dim">none — nothing on disk is playable</span>}</div>
-          </div>
-        )}
-      </section>
+        </section>
+      )}
 
       <section className="panel">
-        <h2>Folders Jarvis may play from</h2>
-        <p className="dim small">
-          The only places on your disk it can reach. Nothing else is visible to
-          it, and no tool can add one — this form is the only way in. The client
-          also enforces its own <code>--allow-root</code> ceiling, so a grant
-          for a folder it was not started with is ignored.
-        </p>
-        {(state.grants || []).length === 0
-          ? <p className="dim">No folders granted — media playback is off.</p>
-          : (
-            <ul className="cu-grants">
-              {state.grants.map((g) => (
-                <li key={g.id}>
-                  <code className="grow">{g.root}</code>
-                  {g.label && <span className="tag">{g.label}</span>}
-                  <button className="ghost danger"
-                          onClick={() => revoke(g.id, g.root)}>revoke</button>
-                </li>
-              ))}
-            </ul>
-          )}
-        <form className="row" onSubmit={addGrant}>
-          <input className="grow" placeholder="/home/you/Music" value={root}
-                 onChange={(e) => setRoot(e.target.value)} />
-          <input placeholder="label (optional)" value={label}
-                 onChange={(e) => setLabel(e.target.value)} />
-          <button type="submit" disabled={!root.trim()}>Grant</button>
-        </form>
-      </section>
-
-      <section className="panel">
-        <h2>Music server (TARMAC)</h2>
-        <p className="dim small">
-          The operator's own library, at <code>music.atomos.network</code>.
-          Jarvis talks to it over HTTP and plays on <em>its</em> players — the
-          music app open on a phone or desktop — so nothing streams through a
-          computer-use client and no credential reaches a media player.
-          <br />
-          Its Cloudflare Access application is <strong>separate from this
-          one</strong>, so it needs its own Service Auth policy naming the
-          service token, even if the same token works for Jarvis.
-        </p>
-        <form className="row" onSubmit={saveTarmac}>
+        <h2>Music server</h2>
+        <form className="row" onSubmit={saveMusic}>
           <input className="grow" placeholder="https://music.atomos.network"
                  value={tm.url}
                  onChange={(e) => setTm({ ...tm, url: e.target.value })} />
-          <input placeholder="CF-Access-Client-Id"
-                 value={tmSameToken ? cfId : tm.cf_id} disabled={tmSameToken}
+          <input placeholder="Client Id" value={tm.cf_id}
                  onChange={(e) => setTm({ ...tm, cf_id: cleanToken(e.target.value) })} />
           <input type="password"
-                 placeholder={tm.secret_set ? 'secret (stored)' : 'CF-Access-Client-Secret'}
-                 value={tmSameToken ? cfSecret : tmSecret} disabled={tmSameToken}
+                 placeholder={tm.secret_set ? 'secret (stored)' : 'Client Secret'}
+                 value={tmSecret}
                  onChange={(e) => setTmSecret(cleanToken(e.target.value))} />
           <button type="submit">Save</button>
-          <button type="button" className="ghost" onClick={testTarmac}
+          <button type="button" className="ghost" onClick={testMusic}
                   disabled={!tm.url}>Test</button>
         </form>
-        <label className="cu-check">
-          <input type="checkbox" checked={tmSameToken}
-                 onChange={(e) => setTmSameToken(e.target.checked)} />
-          <span>Use the same service token as Jarvis (typed above)</span>
-        </label>
-        {tmSameToken && !(cfId && cfSecret) && (
-          <p className="warn small">
-            Fill the Cloudflare token into &ldquo;Connect a computer&rdquo; below
-            first — that is where this reads it from.
-          </p>
-        )}
-        {tmSameToken && (
-          <p className="dim small">
-            Same credential, but this is still a different Access application, so
-            it needs its own <strong>Service Auth</strong> policy naming that
-            token. Test will tell you if it does not have one.
-          </p>
-        )}
         {tmTest && (
           <p className={tmTest.ok ? 'badge' : 'error'}>
-            {tmTest.testing ? 'asking…'
-              : tmTest.ok
-                ? `reachable — ${tmTest.status?.tracks ?? '?'} tracks, `
-                  + `${tmTest.status?.players_connected ?? 0} player(s) open`
-                : tmTest.error}
+            {tmTest.testing ? 'asking…' : tmTest.ok
+              ? `${tmTest.status?.tracks ?? '?'} tracks · `
+                + `${tmTest.status?.players_connected ?? 0} player(s) open`
+              : tmTest.error}
           </p>
         )}
+        <p className="dim small">
+          Its Cloudflare Access application is separate from this one, so it needs
+          its own Service Auth policy even with the same token.
+        </p>
       </section>
 
       <section className="panel">
         <h2>Jellyfin</h2>
-        <p className="dim small">
-          A second place to play from. The API key stays on the Jarvis host —
-          the client is handed a stream URL, never the key.
-        </p>
         <form className="row" onSubmit={saveJellyfin}>
           <input className="grow" placeholder="https://jellyfin.example"
                  value={jf.url}
@@ -342,101 +220,245 @@ export default function ComputerUse() {
         </form>
       </section>
 
-      <section className="panel">
-        <h2>Connect a computer</h2>
-        <div className="row">
-          <button className="ghost" onClick={() => setShowToken((s) => !s)}>
-            {showToken ? 'hide token' : 'reveal token'}</button>
-          <button className="ghost danger" onClick={rotate}>rotate token</button>
+      {setupOpen && (
+        <Setup token={token} machines={machines}
+               onClose={() => { setSetupOpen(false); refresh() }} />
+      )}
+    </div>
+  )
+}
+
+// --- one computer ------------------------------------------------------------
+
+function Machine({ m, caps, expanded, onToggle, probe, onProbe,
+                   onPriv, onAdd, onRevoke }) {
+  const [root, setRoot] = useState('')
+  const privs = m.privileges || {}
+  const off = Object.values(privs).filter((v) => v === false).length
+  const folders = m.grants || []
+
+  return (
+    <section className="panel cu-machine">
+      <button className="cu-machine-head" onClick={onToggle}>
+        <span className="run-dot running" />
+        <span className="grow">
+          <strong>{m.name}</strong>
+          <span className="dim"> · {m.platform === 'darwin' ? 'macOS' : m.platform}</span>
+          {m.caps?.dry_run && <span className="tag">dry run</span>}
+        </span>
+        <span className="dim small">
+          {folders.length} folder{folders.length === 1 ? '' : 's'}
+          {off > 0 && ` · ${off} revoked`}
+        </span>
+        <span className={expanded ? 'chev open' : 'chev'} aria-hidden="true">›</span>
+      </button>
+
+      {expanded && (
+        <div className="cu-machine-body">
+          <h3>Allowed to</h3>
+          <ul className="cu-privs">
+            {Object.entries(caps).map(([key, meta]) => {
+              const on = privs[key] !== false
+              return (
+                <li key={key} className={on ? '' : 'revoked'}>
+                  <span className="grow">
+                    <strong>{meta.label}</strong>
+                    <span className="dim small"> {meta.note}</span>
+                  </span>
+                  <button className={on ? 'ghost danger' : ''}
+                          onClick={() => onPriv(m.name, key, !on)}>
+                    {on ? 'Revoke' : 'Grant'}</button>
+                </li>
+              )
+            })}
+          </ul>
+
+          <h3>Folders on this computer</h3>
+          {folders.length === 0
+            ? <p className="dim small">None, so nothing on it can be played.</p>
+            : (
+              <ul className="cu-grants">
+                {folders.map((g) => (
+                  <li key={g.id}>
+                    <code className="grow">{g.root}</code>
+                    {!g.client && <span className="tag">all computers</span>}
+                    <button className="ghost danger"
+                            onClick={() => onRevoke(g.id)}>remove</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          <form className="row" onSubmit={(e) => {
+            e.preventDefault(); onAdd(m.name, root.trim()); setRoot('')
+          }}>
+            <input className="grow" value={root}
+                   placeholder={m.platform === 'darwin'
+                     ? '/Users/you/Movies' : '/home/you/Music'}
+                   onChange={(e) => setRoot(e.target.value)} />
+            <button type="submit" disabled={!root.trim().startsWith('/')}>
+              Add</button>
+          </form>
+
+          <h3>Hardware</h3>
+          {!probe ? <button className="ghost" onClick={onProbe}>Check</button>
+            : probe.loading ? <p className="dim">asking…</p>
+            : probe.error ? <p className="error">{probe.error}</p>
+            : <Hardware d={probe} />}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function Hardware({ d }) {
+  const screens = d.screens || []
+  const mixer = d.audio_devices || []
+  const outs = d.play_devices || []
+  const row = (label, items, empty) => (
+    <>
+      <dt>{label}</dt>
+      <dd>{items.length ? items : <span className="dim">{empty}</span>}</dd>
+    </>
+  )
+  return (
+    <dl className="cu-hw">
+      {row('Screens',
+        screens.map((s) => (
+          <div key={s.index}>Screen {s.index}{s.geometry ? ` — ${s.geometry}` : ''}</div>)),
+        'none detected')}
+      {/* Two different things, so two plain labels. "Mixer" and "ao device" are
+          protocol words that meant nothing to anyone reading this page. */}
+      {row('Speakers it can turn up or down',
+        mixer.map((a) => <div key={a.id}>{a.label || a.id}</div>),
+        'none detected')}
+      {row('Speakers it can play through',
+        outs.slice(0, 6).map((a) => <div key={a.id}>{a.id}</div>),
+        'none — is mpv installed?')}
+      {row('Playing now',
+        (d.players || []).map((p) => <div key={p}>{p}</div>),
+        'nothing')}
+    </dl>
+  )
+}
+
+// --- set-up, one step at a time ----------------------------------------------
+// A fixed-height dialog: each step fits, so nothing scrolls and nothing gets
+// skipped. The previous version was one long column of prose, which is how a
+// placeholder ends up pasted into a terminal instead of a token.
+
+const STEPS = ['Name', 'Access', 'Download', 'Check', 'Keep running']
+
+function Setup({ token, machines, onClose }) {
+  const [step, setStep] = useState(0)
+  const [name, setName] = useState('')
+  const [cfId, setCfId] = useState('')
+  const [cfSecret, setCfSecret] = useState('')
+  const [platform, setPlatform] = useState(
+    () => (/Mac/.test(navigator.platform || navigator.userAgent) ? 'mac' : 'linux'))
+
+  const origin = window.location.origin
+  const behind = !!(cfId && cfSecret)
+  const here = machines.find((m) => m.name === name)
+  const cfCurl = behind
+    ? ` \\\n  -H 'CF-Access-Client-Id: ${cfId}' \\\n  -H 'CF-Access-Client-Secret: ${cfSecret}'`
+    : ''
+
+  const cmds = {
+    fetch: `mkdir -p ~/jarvis-client && cd ~/jarvis-client\n`
+      + `curl -fsSL '${origin}/api/computeruse/client.zip' \\\n`
+      + `  -H 'X-Jarvis-Token: ${token}'${cfCurl} -o c.zip \\\n`
+      + `  && unzip -oq c.zip && rm -f c.zip || { rm -f c.zip; echo FAILED; }\n`
+      + `python3 -m pip install -r computeruse/requirements.txt`,
+    check: 'python3 ~/jarvis-client/computeruse/agent.py --selftest',
+    run: 'python3 ~/jarvis-client/computeruse/agent.py',
+    install: [
+      'python3 ~/jarvis-client/computeruse/agent.py --install',
+      `  --server ${origin}`,
+      `  --token ${token}`,
+      ...(name ? [`  --name ${name}`] : []),
+      ...(behind ? [`  --cf-access-id ${cfId}`,
+                    `  --cf-access-secret ${cfSecret}`] : []),
+    ].join(' \\\n'),
+    enable: platform === 'mac'
+      ? 'launchctl bootstrap gui/$UID '
+        + '~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist\n'
+        + 'launchctl kickstart -p gui/$UID/network.atomos.jarvis.computeruse'
+      : 'systemctl --user daemon-reload\n'
+        + 'systemctl --user enable --now jarvis-computeruse.service\n'
+        + 'loginctl enable-linger $USER',
+  }
+
+  const steps = [
+    <>
+      <label>Name this computer
+        <input autoFocus placeholder="macbook" value={name}
+               onChange={(e) => setName(
+                 e.target.value.replace(/[^\w.-]/g, '').toLowerCase())} />
+      </label>
+      <div className="cu-plat">
+        {[['linux', 'Linux'], ['mac', 'macOS']].map(([k, l]) => (
+          <button key={k} className={platform === k ? 'on' : ''}
+                  onClick={() => setPlatform(k)}>{l}</button>
+        ))}
+      </div>
+    </>,
+    <>
+      <label>Cloudflare Access token
+        <span className="dim small">Only if Jarvis is behind Access. Kept in
+          this page, never sent anywhere.</span>
+        <input placeholder="Client Id" value={cfId}
+               onChange={(e) => setCfId(cleanToken(e.target.value))} />
+        <input type="password" placeholder="Client Secret" value={cfSecret}
+               onChange={(e) => setCfSecret(cleanToken(e.target.value))} />
+      </label>
+    </>,
+    <>
+      <p>Run on <strong>{name}</strong>:</p>
+      <Block text={cmds.fetch} />
+    </>,
+    <>
+      <p>Check what it can drive:</p>
+      <Block text={cmds.check} />
+      <p className="dim small">Ends with the install commands for anything
+        missing. Run those, then re-run this.</p>
+      <p>Then start it:</p>
+      <Block text={cmds.run} />
+      {here
+        ? <p className="badge">✓ {name} connected</p>
+        : <p className="dim small">This updates the moment it connects.</p>}
+    </>,
+    <>
+      <p>Save the settings:</p>
+      <Block text={cmds.install} />
+      <p>Then keep it running:</p>
+      <Block text={cmds.enable} />
+    </>,
+  ]
+
+  return (
+    <div className="cu-scrim" onClick={onClose}>
+      <div className="cu-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="cu-modal-head">
+          <strong>Connect a computer</strong>
           <span className="grow" />
-          <div className="cu-plat">
-            {[['linux', 'Linux'], ['mac', 'macOS']].map(([k, label]) => (
-              <button key={k} className={platform === k ? 'on' : ''}
-                      onClick={() => setPlatform(k)}>{label}</button>
-            ))}
-          </div>
+          <button className="ghost" onClick={onClose}>✕</button>
         </div>
-
-        <div className="cu-setup-fields">
-          <label>
-            <span>Name this machine</span>
-            <input placeholder="macbook" value={machine}
-                   onChange={(e) => setMachine(e.target.value.replace(/[^\w.-]/g, ''))} />
-            <span className="dim small">What Jarvis will call it. Connect several
-              and it picks by name.</span>
-          </label>
-          <label>
-            <span>Cloudflare Access service token <span className="dim">(only if
-              Jarvis is behind Access)</span></span>
-            <div className="row">
-              <input className="grow" placeholder="<id>.access" value={cfId}
-                     onChange={(e) => setCfId(cleanToken(e.target.value))} />
-              <input className="grow" type="password" placeholder="client secret"
-                     value={cfSecret}
-                     onChange={(e) => setCfSecret(cleanToken(e.target.value))} />
-            </div>
-            <span className="dim small">
-              Held in this page only — not sent to Jarvis, not saved, gone when
-              you reload. It exists to build the commands below.
-            </span>
-          </label>
-        </div>
-
-        <ol className="cu-steps">
-          <li>
-            <strong>Get the client onto that machine.</strong>
-            <pre className="cu-cmd">{fetchCmd}</pre>
-            <span className="dim small">
-              Downloads the client from this Jarvis and installs its
-              dependencies. {behindAccess
-                ? 'The Access headers are included above.'
-                : 'If Jarvis is behind Cloudflare Access, fill the token in above and this command will carry it.'}
-            </span>
-          </li>
-          <li>
-            <strong>Ask it what is missing.</strong>
-            <pre className="cu-cmd">{doctorCmd}</pre>
-            <span className="dim small">
-              Prints what this machine can already drive, then a
-              copy-and-paste list of the exact install commands for whatever it
-              cannot. Re-run it until that list is empty.
-            </span>
-          </li>
-          <li>
-            <strong>Save the settings and write the service.</strong>
-            <pre className="cu-cmd">{installCmd}</pre>
-            <span className="dim small">
-              {roots.length === 0 && <><strong>Grant a folder above first</strong> —
-                without one, nothing on that machine is playable. </>}
-              Settings go to <code>~/.config/jarvis/computeruse.json</code> at{' '}
-              <strong>0600</strong>; the service file gets a path to it and
-              nothing else, because units and plists are world-readable. After
-              this the client runs with no arguments.
-            </span>
-          </li>
-          <li>
-            <strong>Start it, and keep it started.</strong>
-            <pre className="cu-cmd">{enable}</pre>
-            <span className="dim small">
-              {platform === 'mac'
-                ? <>Media keys need Accessibility permission, granted to the{' '}
-                    <em>python binary</em> — change interpreter and you grant it
-                    again. On macOS 15 it also lapses after a reboot.</>
-                : <>Tied to <code>graphical-session.target</code>, since opening a
-                    link or playing video needs a display. If those fail but
-                    volume works:{' '}
-                    <code>systemctl --user import-environment DISPLAY
-                    WAYLAND_DISPLAY XAUTHORITY</code></>}
-            </span>
-          </li>
+        <ol className="cu-crumbs">
+          {STEPS.map((s, i) => (
+            <li key={s} className={i === step ? 'on' : i < step ? 'done' : ''}>
+              {s}</li>
+          ))}
         </ol>
-
-        <p className="dim small">
-          Add <code>--dry-run</code> anywhere to have it report what it would do
-          without touching the machine. Quitting the client — or stopping the
-          service — ends all access immediately.
-        </p>
-      </section>
+        <div className="cu-modal-body">{steps[step]}</div>
+        <div className="cu-modal-foot">
+          <button className="ghost" disabled={!step}
+                  onClick={() => setStep(step - 1)}>Back</button>
+          <span className="grow" />
+          {step < STEPS.length - 1
+            ? <button disabled={!name} onClick={() => setStep(step + 1)}>Next</button>
+            : <button onClick={onClose}>Done</button>}
+        </div>
+      </div>
     </div>
   )
 }
