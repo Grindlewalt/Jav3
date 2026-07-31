@@ -11,13 +11,17 @@ const BLANK = {
 
 export default function Schedules() {
   const [schedules, setSchedules] = useState([])
+  const [deleted, setDeleted] = useState([])
   const [agents, setAgents] = useState([])
   const [projects, setProjects] = useState([])
   const [form, setForm] = useState(BLANK)
   const [busy, setBusy] = useState(null)
   const [editing, setEditing] = useState(null)   // schedule id being edited
 
-  const refresh = () => api('/api/schedules').then((r) => setSchedules(r.schedules))
+  const refresh = () => api('/api/schedules').then((r) => {
+    setSchedules(r.schedules)
+    setDeleted(r.deleted || [])
+  })
   useEffect(() => {
     refresh()
     api('/api/agents').then((r) => setAgents(r.agents))
@@ -64,8 +68,17 @@ export default function Schedules() {
     refresh()
   }
   async function del(s) {
-    if (!window.confirm(`delete schedule "${s.name}"?`)) return
+    if (!window.confirm(`move "${s.name}" to recently deleted?`)) return
     await api(`/api/schedules/${s.id}`, { method: 'DELETE' })
+    refresh()
+  }
+  async function restore(s) {
+    await api(`/api/schedules/${s.id}/restore`, { method: 'POST' })
+    refresh()
+  }
+  async function purge(s) {
+    if (!window.confirm(`permanently delete "${s.name}"? This cannot be undone.`)) return
+    await api(`/api/schedules/${s.id}/purge`, { method: 'DELETE' })
     refresh()
   }
   async function runNow(s) {
@@ -149,6 +162,31 @@ export default function Schedules() {
             </li>
           ))}
         </ul>
+
+        {deleted.length > 0 && (
+          <details className="deleted-fold">
+            <summary>
+              Recently deleted ({deleted.length})
+              <span className="chev" aria-hidden="true">›</span>
+            </summary>
+            <ul className="sched-list">
+              {deleted.map((s) => (
+                <li key={s.id} className="deleted">
+                  <div className="sched-head">
+                    <span className="grow"><strong>{s.name}</strong>
+                      <span className="tag">{s.kind === 'agent' ? s.agent_slug : 'jarvis'}</span>
+                      {s.project_slug && <span className="tag">{s.project_slug}</span>}
+                    </span>
+                    <button className="ghost" onClick={() => restore(s)}>restore</button>
+                    <button className="ghost danger" onClick={() => purge(s)}>delete forever</button>
+                  </div>
+                  <div className="dim small">{s.task}</div>
+                  <div className="dim small">{cadence(s)} · deleted {s.deleted_at?.slice(0, 16)}</div>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </main>
     </div>
   )

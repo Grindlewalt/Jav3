@@ -261,6 +261,11 @@ async def init_db() -> None:
         if "pending_approval" not in scols:
             await db.execute("ALTER TABLE schedules ADD COLUMN "
                              "pending_approval INTEGER NOT NULL DEFAULT 0")
+        # deleting a schedule is a soft delete (same bin idiom as projects):
+        # the row stops running immediately but stays restorable until the
+        # scheduler sweeps it past its window
+        if "deleted_at" not in scols:
+            await db.execute("ALTER TABLE schedules ADD COLUMN deleted_at TEXT")
         async with db.execute("PRAGMA table_info(git_requests)") as cur:
             gcols = [r["name"] for r in await cur.fetchall()]
         if "kind" not in gcols:

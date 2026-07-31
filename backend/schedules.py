@@ -26,6 +26,13 @@ router = APIRouter(prefix="/api/schedules", tags=["schedules"],
 POLL_SECONDS = 60
 MIN_INTERVAL = 15  # floor on interval schedules, so a typo can't hammer the Pi
 
+# Deleting a schedule moves it to a bin instead of dropping the row: the
+# heartbeat stops the moment it's deleted, but a fat-fingered delete of a
+# hand-tuned schedule is recoverable. The bin has an edge — past it the
+# scheduler sweeps the row for real, so 'recently deleted' can't grow forever.
+TRASH_DAYS = 30
+TRASH_WINDOW = f"-{TRASH_DAYS} days"   # SQLite datetime() modifier
+
 # The nightly memory-consolidation ("dreaming") pass: merge duplicates, prune
 # stale facts, keep every note described. Seeded DISABLED — the operator
 # flips it on in the GUI when ready to spend nightly tokens on it.
@@ -49,6 +56,8 @@ async def ensure_default_schedules() -> None:
     """Idempotent seed, called from app startup after init_db."""
     db = await get_db()
     try:
+        # deleted rows count as seeded too — a dream the operator threw away
+        # must not come back on the next restart
         async with db.execute("SELECT 1 FROM schedules WHERE name = ?",
                               (DREAM_SCHEDULE_NAME,)) as cur:
             if await cur.fetchone():
@@ -97,14 +106,25 @@ class CreateSchedule(BaseModel):
 
 @router.get("")
 async def list_schedules():
+    """Live schedules, plus the recently-deleted bin (last TRASH_DAYS days) —
+    one call, same shape the projects list uses."""
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT * FROM schedules ORDER BY enabled DESC, next_run") as cur:
+            "SELECT * FROM schedules WHERE deleted_at IS NULL "
+            "ORDER BY enabled DESC, next_run") as cur:
             rows = await cur.fetchall()
+        async with db.execute(
+            "SELECT id, name, kind, agent_slug, project_slug, task, "
+            "cadence_kind, daily_at, interval_minutes, deleted_at "
+            "FROM schedules WHERE deleted_at IS NOT NULL "
+            "AND deleted_at > datetime('now', ?) ORDER BY deleted_at DESC",
+            (TRASH_WINDOW,)) as cur:
+            deleted = await cur.fetchall()
     finally:
         await db.close()
-    return {"schedules": [dict(r) for r in rows]}
+    return {"schedules": [dict(r) for r in rows],
+            "deleted": [dict(r) for r in deleted]}
 
 
 @router.post("")
@@ -153,7 +173,8 @@ async def update_schedule(sid: int, body: CreateSchedule):
         cur = await db.execute(
             "UPDATE schedules SET name = ?, kind = ?, agent_slug = ?, "
             "project_slug = ?, task = ?, cadence_kind = ?, daily_at = ?, "
-            "interval_minutes = ?, next_run = ? WHERE id = ?",
+            "interval_minutes = ?, next_run = ? "
+            "WHERE id = ? AND deleted_at IS NULL",
             (body.name, body.kind, body.agent_slug, body.project_slug, body.task,
              body.cadence_kind, body.daily_at, body.interval_minutes,
              nxt.isoformat(timespec="minutes"), sid))
@@ -172,8 +193,9 @@ async def toggle_schedule(sid: int, enabled: bool):
         if enabled:
             # recompute next_run on enable: a schedule that sat disabled past
             # its next_run would otherwise fire the moment it's switched on
-            async with db.execute("SELECT * FROM schedules WHERE id = ?",
-                                  (sid,)) as cur:
+            async with db.execute(
+                "SELECT * FROM schedules WHERE id = ? AND deleted_at IS NULL",
+                (sid,)) as cur:
                 row = await cur.fetchone()
             if row is not None:
                 nxt = compute_next(row["cadence_kind"], row["daily_at"],
@@ -184,7 +206,8 @@ async def toggle_schedule(sid: int, enabled: bool):
         # (resume = approve, pause = keep it parked) — either way it's no
         # longer awaiting one, so the bell stops showing it
         await db.execute(
-            "UPDATE schedules SET enabled = ?, pending_approval = 0 WHERE id = ?",
+            "UPDATE schedules SET enabled = ?, pending_approval = 0 "
+            "WHERE id = ? AND deleted_at IS NULL",
             (1 if enabled else 0, sid))
         await db.commit()
     finally:
@@ -194,10 +217,58 @@ async def toggle_schedule(sid: int, enabled: bool):
 
 @router.delete("/{sid}")
 async def delete_schedule(sid: int):
+    """Move to the recently-deleted bin. The heartbeat skips it from here on
+    (_tick filters the bin out), but it stays restorable for TRASH_DAYS.
+    pending_approval clears with it: deleting a Jarvis-proposed schedule IS a
+    decision, and the bell must never point at a row that's in the bin."""
     db = await get_db()
     try:
-        await db.execute("DELETE FROM schedules WHERE id = ?", (sid,))
+        cur = await db.execute(
+            "UPDATE schedules SET deleted_at = datetime('now'), "
+            "pending_approval = 0 WHERE id = ? AND deleted_at IS NULL", (sid,))
         await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="no such schedule")
+    finally:
+        await db.close()
+    return {"ok": True}
+
+
+@router.post("/{sid}/restore")
+async def restore_schedule(sid: int):
+    """Back out of the bin. next_run is recomputed for the same reason the
+    enable path recomputes it: a schedule that sat deleted past its next_run
+    would otherwise fire the instant it comes back."""
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT * FROM schedules WHERE id = ? AND deleted_at IS NOT NULL",
+            (sid,)) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="not in the deleted bin")
+        nxt = compute_next(row["cadence_kind"], row["daily_at"],
+                           row["interval_minutes"], _now())
+        await db.execute(
+            "UPDATE schedules SET deleted_at = NULL, next_run = ? WHERE id = ?",
+            (nxt.isoformat(timespec="minutes"), sid))
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": True, "next_run": nxt.isoformat(timespec="minutes")}
+
+
+@router.delete("/{sid}/purge")
+async def purge_schedule(sid: int):
+    """Permanent: only allowed from the bin, like the projects purge."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM schedules WHERE id = ? AND deleted_at IS NOT NULL", (sid,))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=400,
+                                detail="delete first — purge only empties the bin")
     finally:
         await db.close()
     return {"ok": True}
@@ -207,7 +278,9 @@ async def delete_schedule(sid: int):
 async def run_now(sid: int):
     db = await get_db()
     try:
-        async with db.execute("SELECT * FROM schedules WHERE id = ?", (sid,)) as cur:
+        async with db.execute(
+            "SELECT * FROM schedules WHERE id = ? AND deleted_at IS NULL",
+            (sid,)) as cur:
             row = await cur.fetchone()
     finally:
         await db.close()
@@ -272,12 +345,27 @@ async def _run_schedule(row: dict) -> str:
         return f"error: {e}"
 
 
+async def _sweep_trash() -> None:
+    """Empty the bin past its window. 'Recently deleted' needs an edge, and
+    the heartbeat is the only thing already waking up every minute."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "DELETE FROM schedules WHERE deleted_at IS NOT NULL "
+            "AND deleted_at <= datetime('now', ?)", (TRASH_WINDOW,))
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def _tick() -> None:
     now = _now()
+    await _sweep_trash()
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT * FROM schedules WHERE enabled = 1 AND next_run <= ?",
+            "SELECT * FROM schedules WHERE enabled = 1 AND deleted_at IS NULL "
+            "AND next_run <= ?",
             (now.isoformat(timespec="minutes"),)) as cur:
             due = [dict(r) for r in await cur.fetchall()]
     finally:

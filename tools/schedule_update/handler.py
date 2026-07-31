@@ -32,7 +32,10 @@ def _describe(row: dict) -> str:
 async def _list() -> str:
     db = await get_db()
     try:
-        async with db.execute("SELECT * FROM schedules "
+        # a deleted schedule sits in the recently-deleted bin rather than being
+        # dropped, so it has to be filtered out here or the model sees and
+        # reasons about schedules the operator has already thrown away
+        async with db.execute("SELECT * FROM schedules WHERE deleted_at IS NULL "
                               "ORDER BY enabled DESC, next_run") as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     finally:
