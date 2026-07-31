@@ -25,7 +25,7 @@ from fastapi import (APIRouter, Depends, HTTPException, Request, WebSocket,
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import computeruse as cu, gui, security, tarmac
+from . import cfaccess, computeruse as cu, gui, security, tarmac
 from .auth import COOKIE_NAME, require_user, user_from_token
 from .config import settings
 from .db import get_db
@@ -124,6 +124,49 @@ async def delete_grant(grant_id: int):
     # took away must not stay readable until the client happens to restart
     await cu.broadcast_grants()
     return {"ok": True}
+
+
+class CFAccessBody(BaseModel):
+    client_id: str = ""
+    secret: str = ""        # blank keeps the stored one
+    hosts: list[str] = []
+
+
+@router.get("/cfaccess")
+async def cfaccess_get():
+    """The stored Access service token, for a logged-in operator.
+
+    This DOES return the secret, unlike the Jellyfin and TARMAC routes above,
+    and the difference is deliberate rather than an oversight. Those two keys are
+    only ever used by the host, so the tab never needs the value. This one has to
+    end up inside the set-up command that the operator pastes into a terminal on
+    another machine — the whole point is that they stop typing it — so the
+    browser cannot avoid handling it. It is the same exposure as GET /token,
+    which hands over the pairing token for exactly the same reason.
+    """
+    cid, sec = cfaccess.get()
+    return {"client_id": cid, "secret": sec, "configured": bool(cid and sec),
+            "hosts": cfaccess.hosts()}
+
+
+@router.put("/cfaccess")
+async def cfaccess_put(body: CFAccessBody):
+    """Save a rotated token and get it onto every machine that is reachable.
+
+    The reply names the machines that took it, because the ones it does not name
+    are the operator's remaining work — a client that is offline right now
+    cannot be told anything, since Jarvis is behind the very thing being
+    rotated.
+    """
+    try:
+        cfaccess.set_token(body.client_id, body.secret, body.hosts or None)
+    except cfaccess.CFAccessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    updated = await cu.broadcast_access_token()
+    connected = [c.name for c in cu.clients()]
+    return {"ok": True, "configured": cfaccess.configured(),
+            "hosts": cfaccess.hosts(), "updated": updated,
+            "missed": [n for n in connected if n not in updated]}
 
 
 @router.get("/jellyfin")

@@ -51,16 +51,40 @@ export default function ComputerUse() {
   const [tmTest, setTmTest] = useState(null)
   const [jf, setJf] = useState({ url: '', key_set: false })
   const [jfKey, setJfKey] = useState('')
+  const [cf, setCf] = useState({ configured: false, client_id: '', hosts: [] })
+  const [cfId, setCfId] = useState('')
+  const [cfSecret, setCfSecret] = useState('')
+  const [cfResult, setCfResult] = useState(null)
 
   const refresh = () => api('/api/computeruse/status').then(setState)
+  const loadCf = () => api('/api/computeruse/cfaccess')
+    .then((r) => { setCf(r); setCfId(r.client_id || '') }).catch(() => {})
   useEffect(() => {
     refresh()
     api('/api/computeruse/token').then((r) => setToken(r.token)).catch(() => {})
     api('/api/computeruse/tarmac').then(setTm).catch(() => {})
     api('/api/computeruse/jellyfin').then(setJf).catch(() => {})
+    loadCf()
     const t = setInterval(refresh, 6000)
     return () => clearInterval(t)
   }, [])
+
+  // Rotating is the whole reason this panel exists, so it reports which
+  // machines took the new token and which it could not reach — the second list
+  // is the operator's remaining work, and leaving it out would imply the
+  // rotation was complete when it was not.
+  async function saveCf(e) {
+    e.preventDefault()
+    setCfResult(null)
+    try {
+      const r = await api('/api/computeruse/cfaccess', {
+        method: 'PUT',
+        body: JSON.stringify({ client_id: cfId, secret: cfSecret }) })
+      setCfSecret('')
+      setCfResult(r)
+      loadCf()
+    } catch (err) { setCfResult({ error: err.detail || String(err) }) }
+  }
 
   const say = (m) => { setMsg(m); setTimeout(() => setMsg(null), 6000) }
 
@@ -102,15 +126,15 @@ export default function ComputerUse() {
     refresh()
   }
 
+  // Only the URL now. The music server's Access token stopped being its own
+  // thing — it is the one token, held above, and having a second copy here is
+  // precisely how rotating it broke music while everything else looked fine.
   async function saveMusic(e) {
     e.preventDefault()
     setTmTest(null)
     try {
       setTm(await api('/api/computeruse/tarmac', {
-        method: 'PUT',
-        body: JSON.stringify({ url: tm.url, cf_id: tm.cf_id,
-                               cf_secret: tmSecret }) }))
-      setTmSecret('')
+        method: 'PUT', body: JSON.stringify({ url: tm.url }) }))
       say('Music server saved')
     } catch (err) { say(err.detail || String(err)) }
   }
@@ -179,17 +203,43 @@ export default function ComputerUse() {
       )}
 
       <section className="panel">
+        <h2>Cloudflare Access token</h2>
+        <form className="row" onSubmit={saveCf}>
+          <input className="grow" placeholder="Client Id (ends in .access)"
+                 value={cfId}
+                 onChange={(e) => setCfId(cleanToken(e.target.value))} />
+          <input type="password"
+                 placeholder={cf.configured ? 'secret (stored)' : 'Client Secret'}
+                 value={cfSecret}
+                 onChange={(e) => setCfSecret(cleanToken(e.target.value))} />
+          <button type="submit" disabled={!cfId || !cfSecret}>Save & push</button>
+        </form>
+        {cfResult && (cfResult.error
+          ? <p className="error">{cfResult.error}</p>
+          : <p className="badge">
+              Saved.{' '}
+              {cfResult.updated?.length
+                ? `Pushed to ${cfResult.updated.join(', ')} — `
+                  + 'each takes it on its next reconnect.'
+                : 'No machine was connected to push it to.'}
+              {cfResult.missed?.length
+                ? ` Could not reach ${cfResult.missed.join(', ')}.` : ''}
+            </p>)}
+        <p className="dim small">
+          One token, held here and used for everything: Jarvis, the music server,
+          and the set-up command, which fills it in so you never type it. Saving
+          a rotated one pushes it to every machine that is connected right now —
+          a machine that is offline cannot be told, because Jarvis is behind the
+          thing being rotated, so that one needs it pasted in once.
+        </p>
+      </section>
+
+      <section className="panel">
         <h2>Music server</h2>
         <form className="row" onSubmit={saveMusic}>
           <input className="grow" placeholder="https://music.atomos.network"
                  value={tm.url}
                  onChange={(e) => setTm({ ...tm, url: e.target.value })} />
-          <input placeholder="Client Id" value={tm.cf_id}
-                 onChange={(e) => setTm({ ...tm, cf_id: cleanToken(e.target.value) })} />
-          <input type="password"
-                 placeholder={tm.secret_set ? 'secret (stored)' : 'Client Secret'}
-                 value={tmSecret}
-                 onChange={(e) => setTmSecret(cleanToken(e.target.value))} />
           <button type="submit">Save</button>
           <button type="button" className="ghost" onClick={testMusic}
                   disabled={!tm.url}>Test</button>
@@ -203,8 +253,8 @@ export default function ComputerUse() {
           </p>
         )}
         <p className="dim small">
-          Its Cloudflare Access application is separate from this one, so it needs
-          its own Service Auth policy even with the same token.
+          It is a separate Cloudflare Access application, so the token above
+          needs its own Service Auth policy there as well as on this one.
         </p>
       </section>
 
@@ -359,9 +409,22 @@ function Setup({ token, machines, onClose }) {
   const [roots, setRoots] = useState('')
   const [cfId, setCfId] = useState('')
   const [cfSecret, setCfSecret] = useState('')
+  const [cfFromStore, setCfFromStore] = useState(false)
   const [jumped, setJumped] = useState(false)
   const [platform, setPlatform] = useState(
     () => (/Mac/.test(navigator.platform || navigator.userAgent) ? 'mac' : 'linux'))
+
+  // The token is stored once, host-side, so setting up the fifth machine does
+  // not mean finding it in Zero Trust for the fifth time. Typing over it still
+  // works — the field is prefilled, not locked.
+  useEffect(() => {
+    api('/api/computeruse/cfaccess').then((r) => {
+      if (!r.configured) return
+      setCfId(r.client_id)
+      setCfSecret(r.secret)
+      setCfFromStore(true)
+    }).catch(() => { /* not behind Access, or never configured */ })
+  }, [])
 
   const origin = window.location.origin
   const behind = !!(cfId && cfSecret)
@@ -486,12 +549,19 @@ function Setup({ token, machines, onClose }) {
     </>,
     <>
       <label>Cloudflare Access token
-        <span className="dim small">Only if Jarvis is behind Access. Kept in
-          this page, never sent anywhere.</span>
+        <span className="dim small">
+          {cfFromStore
+            ? 'Filled in from the one Jarvis holds — nothing to type. Change it '
+              + 'here to use a different token for just this machine; to rotate '
+              + 'it everywhere, use the Access token panel on the Computer use '
+              + 'tab instead.'
+            : 'Only if Jarvis is behind Access. Save it on the Computer use tab '
+              + 'and it will be filled in here from then on.'}
+        </span>
         <input placeholder="Client Id" value={cfId}
-               onChange={(e) => setCfId(cleanToken(e.target.value))} />
+               onChange={(e) => { setCfId(cleanToken(e.target.value)); setCfFromStore(false) }} />
         <input type="password" placeholder="Client Secret" value={cfSecret}
-               onChange={(e) => setCfSecret(cleanToken(e.target.value))} />
+               onChange={(e) => { setCfSecret(cleanToken(e.target.value)); setCfFromStore(false) }} />
       </label>
     </>,
     <>

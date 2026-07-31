@@ -655,6 +655,45 @@ async def broadcast_grants() -> None:
         await push_grants(c)
 
 
+async def push_access_token(client: Client) -> bool:
+    """Hand a connected machine the current Cloudflare Access service token.
+
+    The rotation problem, solved for machines that are online. Jarvis sits
+    behind Access, so a client whose token has gone stale cannot reach Jarvis to
+    ask for the new one — but a client that is ALREADY connected has a working
+    authenticated socket, and the new token can ride down it before the old one
+    stops working. It saves it and uses it on its next reconnect, so nothing is
+    interrupted.
+
+    A machine that is offline through a rotation is beyond help by construction;
+    it needs the new token pasted in once. That is the honest limit, and the
+    tab says so rather than implying every machine is covered.
+    """
+    from . import cfaccess
+    if client.send is None:
+        return False
+    cid, sec = cfaccess.get()
+    if not (cid and sec):
+        return False
+    try:
+        await client.send(json.dumps(
+            {"config": {"cf_access_id": cid, "cf_access_secret": sec}}))
+        return True
+    except Exception:
+        return False
+
+
+async def broadcast_access_token() -> list[str]:
+    """Push the token to every connected machine; return the ones that took it,
+    so the operator is told which machines are now current and — by omission —
+    which ones they will have to visit."""
+    done = []
+    for c in clients():
+        if await push_access_token(c):
+            done.append(c.name)
+    return done
+
+
 def resolve_result(client_id: str, req_id: str, payload: dict) -> None:
     c = _clients.get(client_id)
     if not c:

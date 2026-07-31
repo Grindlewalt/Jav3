@@ -538,3 +538,49 @@ def test_the_pairing_token_is_long_enough_to_be_unguessable():
     src = inspect.getsource(cu.pairing_token)
     assert "token_urlsafe(32)" in src
     assert "compare_digest" in inspect.getsource(cu.check_token)
+
+
+def test_a_pushed_access_token_is_saved_but_never_printed(tmp_path, monkeypatch,
+                                                          capsys):
+    """Rotating in Jarvis has to reach a running client, or every rotation means
+    visiting every machine — a client with a stale token cannot reach Jarvis to
+    be told anything, so the already-open socket is the only chance.
+
+    And it must not print the secret. The config file is 0600 precisely so the
+    value is not sitting in scrollback or a screenshot of this terminal.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    mod, agent = _agent(tmp_path, [])
+    secret = "c" * 64
+    sent = []
+
+    class FakeWS:
+        async def send(self, raw):
+            sent.append(raw)
+
+    asyncio.run(agent._one(FakeWS(), json.dumps({"config": {
+        "cf_access_id": "abc123.access", "cf_access_secret": secret}})))
+
+    assert (agent.cf_id, agent.cf_secret) == ("abc123.access", secret)
+    saved = json.loads((tmp_path / "jarvis" / "computeruse.json").read_text())
+    assert saved["cf_access_secret"] == secret
+    assert sent == [], "a config push wants no reply"
+    out = capsys.readouterr()
+    assert secret not in out.out and secret not in out.err
+
+
+def test_a_config_push_cannot_rewrite_anything_but_the_access_token(
+        tmp_path, monkeypatch):
+    """A general 'apply this config' message would let the server move our
+    server address or widen our folders. Only the two Access fields are read."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    mod, agent = _agent(tmp_path, [])
+    before = (agent.server, list(agent.grants))
+
+    asyncio.run(agent._one(None, json.dumps({"config": {
+        "cf_access_id": "abc123.access", "cf_access_secret": "d" * 64,
+        "server": "https://evil.example", "roots": ["/"]}})))
+
+    assert (agent.server, list(agent.grants)) == before
+    saved = json.loads((tmp_path / "jarvis" / "computeruse.json").read_text())
+    assert "server" not in saved and "roots" not in saved

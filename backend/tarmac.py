@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from . import cfaccess
 from .db import get_db, get_state, set_state
 
 # TARMAC's own vocabulary. Not the same as computer_playback's: it has no "stop",
@@ -61,13 +62,50 @@ class TarmacError(RuntimeError):
 
 
 async def get_config() -> tuple[str, str, str]:
+    """(url, cf client id, cf secret).
+
+    The URL is TARMAC's own; the service token is NOT — it is the one Cloudflare
+    Access pair, shared with Jarvis's own hostname and owned by `cfaccess`. It
+    used to live in the two rows below, which is how a rotation could break
+    music while leaving every other copy looking fine. Those rows are still read
+    once, to migrate them, and then cleared.
+    """
     db = await get_db()
     try:
-        return (await get_state(db, _URL_KEY) or "",
-                await get_state(db, _ID_KEY) or "",
-                await get_state(db, _SECRET_KEY) or "")
+        url = await get_state(db, _URL_KEY) or ""
+        legacy_id = await get_state(db, _ID_KEY) or ""
+        legacy_secret = await get_state(db, _SECRET_KEY) or ""
     except Exception:
         return "", "", ""
+    finally:
+        await db.close()
+
+    cid, sec = cfaccess.get()
+    if not (cid and sec) and legacy_id and legacy_secret:
+        # one-time move into the 0600 store, bound to the host it was for
+        try:
+            cfaccess.set_token(legacy_id, legacy_secret,
+                               [h for h in (cfaccess.bind_host_from_url(url),) if h])
+            cid, sec = cfaccess.get()
+        except cfaccess.CFAccessError:
+            cid, sec = legacy_id, legacy_secret
+    await _forget_legacy(bool(cid and sec))
+    return url, cid, sec
+
+
+async def _forget_legacy(migrated: bool) -> None:
+    """Drop the plaintext database copies once the store has them. Leaving them
+    behind would recreate the exact bug: two copies, one of them stale."""
+    if not migrated:
+        return
+    db = await get_db()
+    try:
+        if await get_state(db, _ID_KEY) or await get_state(db, _SECRET_KEY):
+            await set_state(db, _ID_KEY, None)
+            await set_state(db, _SECRET_KEY, None)
+            await db.commit()
+    except Exception:
+        pass
     finally:
         await db.close()
 
@@ -81,17 +119,17 @@ async def set_config(url: str, cf_id: str = "", cf_secret: str = "") -> None:
     db = await get_db()
     try:
         await set_state(db, _URL_KEY, url or None)
-        # blank leaves the stored pair alone, so the tab can show the URL
-        # without ever round-tripping the secret
-        if cf_id:
-            await set_state(db, _ID_KEY, cf_id.strip())
-        if cf_secret:
-            await set_state(db, _SECRET_KEY, cf_secret.strip())
-        if not url:
-            await set_state(db, _ID_KEY, None)
-            await set_state(db, _SECRET_KEY, None)
     finally:
         await db.close()
+    # The token goes to the one store, bound to this host as well as whatever
+    # it was already bound to — Jarvis's own hostname is normally in that list.
+    if cf_id or cf_secret:
+        host = cfaccess.bind_host_from_url(url)
+        bound = sorted(set(cfaccess.hosts()) | ({host} if host else set()))
+        try:
+            cfaccess.set_token(cf_id or cfaccess.get()[0], cf_secret, bound)
+        except cfaccess.CFAccessError as e:
+            raise TarmacError(str(e))
 
 
 def _check_redirect(status: int, location: str) -> None:

@@ -663,6 +663,37 @@ class Agent:
         if self.grant_note:
             print(f"! {self.grant_note}", flush=True)
 
+    def save_access_token(self, cfg):
+        """Write a pushed Access token into our own 0600 config.
+
+        Deliberately narrow: only the two Access fields are read out of whatever
+        arrives. A general "apply this config" message would let the server
+        rewrite our server address or our folder roots, and there is no reason
+        to accept that — this exists for one thing.
+
+        Never printed. The whole point of the config file being 0600 is that the
+        secret is not lying around in scrollback, log files, or a screenshot of
+        this terminal.
+        """
+        cid = str(cfg.get("cf_access_id") or "").strip()
+        sec = str(cfg.get("cf_access_secret") or "").strip()
+        if not (cid and sec):
+            return
+        if (cid, sec) == (self.cf_id, self.cf_secret):
+            return                      # already current; say nothing
+        try:
+            cfgmod = _sibling("config")
+            saved = cfgmod.load()
+            saved.update({"cf_access_id": cid, "cf_access_secret": sec})
+            cfgmod.save(saved)
+        except Exception as e:
+            print(f"! could not save the new Access token: "
+                  f"{e.__class__.__name__}", file=sys.stderr, flush=True)
+            return
+        self.cf_id, self.cf_secret = cid, sec
+        print("Cloudflare Access token updated from Jarvis; it takes effect on "
+              "the next reconnect", flush=True)
+
     def check_playable(self, path, kind):
         """The client's own containment check. The backend did this too; doing
         it again here is the point — this side does not trust that one."""
@@ -898,6 +929,15 @@ class Agent:
         if verb is None and "grants" in msg:
             self.set_grants(msg.get("grants") or [])
             print(f"folders updated: {[str(g) for g in self.grants]}", flush=True)
+            return
+        # A rotated Cloudflare Access service token, pushed down the socket we
+        # are already authenticated on. Saved for the NEXT connection — this one
+        # keeps working on the credentials it was accepted with, so a rotation
+        # costs no interruption. Without this, rotating meant visiting every
+        # machine, because a client with a stale token cannot reach Jarvis to
+        # be told anything.
+        if verb is None and isinstance(msg.get("config"), dict):
+            self.save_access_token(msg["config"])
             return
         try:
             # the OS calls are blocking; keep the socket responsive
