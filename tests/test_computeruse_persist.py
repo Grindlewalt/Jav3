@@ -8,6 +8,7 @@ nothing else.
 import importlib.util
 import json
 import plistlib
+import re
 import stat
 import sys
 import urllib.error
@@ -732,3 +733,61 @@ async def test_a_folder_belongs_to_one_computer(tmp_path, monkeypatch):
     assert "/srv/shared" in mac and "/srv/shared" in studio
     # and everything shows in the unfiltered list
     assert len(await cu.list_grants()) == 3
+
+
+def test_every_http_request_names_this_client(agent_mod):
+    """The default urllib user-agent is "Python-urllib/3.x", and Cloudflare's
+    bot rules answer that with a 403.
+
+    This cost a long evening of debugging. The set-up command's curl download
+    succeeded and the very next step — the same host, the same service token,
+    the same pairing token — was refused. The only difference on the wire was
+    this header. The WebSocket was never affected, because the websockets
+    library sends a user-agent of its own, which is what made it look as though
+    the HTTP routes specifically had broken.
+    """
+    src = (CLIENT_DIR / "agent.py").read_text()
+    assert 'USER_AGENT = "jarvis-computeruse' in src
+    # every Request(...) built by the client carries it
+    for call in re.findall(r"urllib\.request\.Request\((.*?)\)\n", src, re.S):
+        assert "USER_AGENT" in call, (
+            f"a urllib Request goes out without a user-agent: {call[:120]}")
+
+
+def test_ping_sends_the_user_agent_over_the_wire(agent_mod, monkeypatch):
+    """Not just present in the source — actually on the request object."""
+    seen = {}
+
+    class FakeResp:
+        status = 200
+        def read(self, n=None): return b'{"ok": true, "app": "jarvis"}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        seen.update(req.headers)
+        return FakeResp()
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    ok, why = agent_mod._ping("https://x.example", TOKEN, "", "")
+    assert ok, why
+    # urllib title-cases header names on the Request object
+    assert seen.get("User-agent") == "jarvis-computeruse/1.0", seen
+
+
+def test_the_403_message_does_not_blame_cloudflare_access(agent_mod, monkeypatch):
+    """Access answers an unauthenticated request with a 302 to a login page,
+    never a 403 — verified against the live host in every credential state.
+    Pointing the operator at the Access policy for a 403 sent them to the one
+    place the problem was not."""
+    import urllib.error, urllib.request
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    ok, why = agent_mod._ping("https://x.example", TOKEN, "id", "secret")
+    assert not ok
+    assert "302" in why and "user-agent" in why.lower()
+    assert "Bot Fight" in why

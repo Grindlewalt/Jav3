@@ -57,6 +57,16 @@ from urllib.parse import urlsplit
 
 # --- the contract, kept in step with backend/computeruse.py -------------------
 
+# Every HTTP request this client makes says who it is. Not politeness — the
+# default is "Python-urllib/3.x", and Cloudflare's bot rules answer that with a
+# 403. It cost a long evening: the set-up command's curl download succeeded, and
+# the very next step, the same URL from urllib, was refused. Same host, same
+# service token, same pairing token — the only difference on the wire was this
+# header. A WebSocket connection was fine throughout, because the websockets
+# library sends a user-agent of its own, which is what made it look like the
+# HTTP routes specifically were broken.
+USER_AGENT = "jarvis-computeruse/1.0"
+
 AUDIO_EXT = frozenset({".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a",
                        ".aac", ".wav", ".wma", ".aiff", ".alac"})
 VIDEO_EXT = frozenset({".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"})
@@ -881,7 +891,11 @@ class Agent:
             return 2
         ws_url = (self.server.replace("https://", "wss://")
                              .replace("http://", "ws://")) + "/api/computeruse/agent"
-        headers = {}
+        # The same name the HTTP calls give. This handshake was never the one
+        # being blocked — the websockets library sends a user-agent of its own,
+        # which is exactly why the socket worked while the plain HTTP routes
+        # 403'd, and why the fault looked like it was in those routes.
+        headers = {"User-Agent": USER_AGENT}
         if self.cf_id and self.cf_secret:
             headers["CF-Access-Client-Id"] = self.cf_id
             headers["CF-Access-Client-Secret"] = self.cf_secret
@@ -1164,7 +1178,8 @@ def _ping(server, token, cf_id=None, cf_secret=None):
     if not server.startswith(("http://", "https://")):
         return False, f"--server {server!r} needs a scheme, e.g. https://host"
     url = server.rstrip("/") + "/api/computeruse/ping"
-    req = urllib.request.Request(url, headers={"X-Jarvis-Token": token})
+    req = urllib.request.Request(url, headers={"X-Jarvis-Token": token,
+                                               "User-Agent": USER_AGENT})
     if cf_id and cf_secret:
         req.add_header("CF-Access-Client-Id", cf_id)
         req.add_header("CF-Access-Client-Secret", cf_secret)
@@ -1177,10 +1192,15 @@ def _ping(server, token, cf_id=None, cf_secret=None):
                            "is rotated from the Computer use tab — copy the "
                            "current one.")
         if e.code == 403:
-            return False, ("403 from whatever fronts Jarvis. If that is "
-                           "Cloudflare Access, this needs a service token "
-                           "(--cf-access-id / --cf-access-secret) and a policy "
-                           "allowing it.")
+            return False, (
+                "403 from whatever fronts Jarvis — and note that Cloudflare "
+                "Access does NOT answer 403; an unauthenticated request to it "
+                "comes back as a 302 to a login page. So this is a firewall or "
+                "bot rule, not a missing service token. The usual cause is the "
+                "user-agent: this client names itself, but a plain 'curl' or a "
+                "browser-less request can trip Bot Fight Mode. Check the WAF / "
+                "Bot Fight Mode rules for the hostname rather than the Access "
+                "policy.")
         if e.code == 404:
             # an older Jarvis, from before this route existed. The socket is
             # what matters and that has not moved, so this is not a stop.

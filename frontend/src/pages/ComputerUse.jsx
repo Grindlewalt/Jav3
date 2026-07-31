@@ -469,7 +469,11 @@ function Setup({ token, machines, onClose }) {
       //   followed now, so a 302 is reported as a 302, and the gzip test below
       //   catches an HTML page that arrives with a 200 anyway (a WAF block page
       //   does exactly that).
-      `  && code=$(curl -sS -o c.tgz -w '%{http_code}'`,
+      // -A names this request. curl's own user-agent happens to be allowed
+      // today, but the very next step of set-up was refused with a 403 purely
+      // for sending "Python-urllib/3.x", so the lesson is that an anonymous
+      // request is a bot-rule away from failing. Both halves say the same name.
+      `  && code=$(curl -sS -o c.tgz -w '%{http_code}' -A 'jarvis-computeruse/1.0'`,
       `  '${origin}/api/computeruse/client.tar.gz'`,
       `  -H 'X-Jarvis-Token: ${token}'`,
       ...(behind ? [`  -H 'CF-Access-Client-Id: ${cfId}'`,
