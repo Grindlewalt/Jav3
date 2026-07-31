@@ -485,3 +485,30 @@ async def test_a_machine_that_drops_mid_push_does_not_break_the_grant(
         await cu.broadcast_grants()      # must not raise
     finally:
         cu.unregister("mac-1")
+
+
+def test_the_client_download_refuses_to_be_cached():
+    """A CDN in front of Jarvis caches by file extension without being asked.
+
+    ".gz" and ".zip" are both on Cloudflare's default list, and it applied a
+    four-hour TTL to a response the origin said nothing about. Every fix shipped
+    to the client was then invisible to anyone downloading through the public
+    hostname — set-up went on installing a stale build, including one that
+    predated the fix for the error being chased. Observed live as
+    cf-cache-status: HIT, age 2758, on a file rebuilt minutes earlier.
+
+    no-store is the directive that keeps it out of an edge cache and a browser
+    cache both; CDN-Cache-Control repeats it to the CDN, which prefers that
+    header when it is present.
+    """
+    from backend import computeruse_api as api
+    cc = api._NO_CACHE["Cache-Control"]
+    assert "no-store" in cc, "no-store is the one that keeps it out of a CDN"
+    assert api._NO_CACHE["CDN-Cache-Control"] == "no-store"
+
+    import inspect
+    for fn in (api.client_tar, api.client_zip):
+        src = inspect.getsource(fn)
+        assert "_NO_CACHE" in src, (
+            f"{fn.__name__} serves the client without cache headers — a CDN "
+            f"will cache it by extension and pin an old build")

@@ -307,6 +307,27 @@ async def _download_auth(request: Request, token: str | None) -> None:
                        "use tab builds the command for you)")
 
 
+# The client download must never be cached, and saying so is not optional.
+#
+# A CDN in front of Jarvis will cache these by FILE EXTENSION without being
+# asked: ".gz" and ".zip" are both on Cloudflare's default list, and it applied
+# a four-hour TTL of its own to a response the origin said nothing about. The
+# effect was that every fix shipped to the client was invisible to anyone
+# downloading through the public hostname — set-up kept installing a stale
+# build, including one that predated the fix for the very error being chased.
+# Observed as cf-cache-status: HIT with an age of 46 minutes on a file that had
+# been rebuilt minutes earlier.
+#
+# no-store is the one directive that keeps it out of both the edge cache and the
+# browser's. CDN-Cache-Control says the same thing again to the CDN
+# specifically, since that is the header a CDN prefers when it is present.
+_NO_CACHE = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "CDN-Cache-Control": "no-store",
+    "Pragma": "no-cache",
+}
+
+
 def _client_source() -> list[Path]:
     """The files the client is made of. Source only — the config file is what
     would carry a token, and it is not here."""
@@ -335,7 +356,7 @@ async def client_tar(request: Request, token: str | None = None):
     return StreamingResponse(
         buf, media_type="application/gzip",
         headers={"Content-Disposition":
-                 'attachment; filename="computeruse.tar.gz"'})
+                 'attachment; filename="computeruse.tar.gz"', **_NO_CACHE})
 
 
 @ws_router.get("/client.zip")
@@ -349,7 +370,8 @@ async def client_zip(request: Request, token: str | None = None):
     buf.seek(0)
     return StreamingResponse(
         buf, media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="computeruse.zip"'})
+        headers={"Content-Disposition": 'attachment; filename="computeruse.zip"',
+                 **_NO_CACHE})
 
 
 @ws_router.get("/ping")
