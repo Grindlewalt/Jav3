@@ -394,11 +394,40 @@ function Setup({ token, machines, onClose }) {
   const cmds = {
     setup: [
       `mkdir -p ~/jarvis-client && cd ~/jarvis-client`,
-      `  && curl -fsSL '${origin}/api/computeruse/client.tar.gz'`,
+      // Two changes from `curl -fsSL`, both of which cost real debugging time:
+      //
+      //   -f prints NOTHING on an HTTP error — no status, no body — so every
+      //   refusal looked the same and named nothing. -w '%{http_code}' keeps it.
+      //
+      //   -L silently FOLLOWED Cloudflare Access's 302 to its login page, which
+      //   answers 200 with HTML. The status check passed, and the operator got
+      //   "gzip: stdin: not in gzip format" from tar — an error about archives
+      //   for what is actually an authentication problem. Redirects are not
+      //   followed now, so a 302 is reported as a 302, and the gzip test below
+      //   catches an HTML page that arrives with a 200 anyway (a WAF block page
+      //   does exactly that).
+      `  && code=$(curl -sS -o c.tgz -w '%{http_code}'`,
+      `  '${origin}/api/computeruse/client.tar.gz'`,
       `  -H 'X-Jarvis-Token: ${token}'`,
       ...(behind ? [`  -H 'CF-Access-Client-Id: ${cfId}'`,
                     `  -H 'CF-Access-Client-Secret: ${cfSecret}'`] : []),
-      `  -o c.tgz`,
+      `  )`,
+      `  && { [ "$code" = 200 ] || { echo "the download answered HTTP $code, not 200:";`,
+      `       head -c 300 c.tgz; echo;`,
+      `       echo '  301/302 -> Cloudflare Access. This app needs its own Service';`,
+      `       echo '             Auth policy naming your service token — policies are';`,
+      `       echo '             per-application, so one that works for another host';`,
+      `       echo '             does not cover this one.';`,
+      `       echo '  401     -> Jarvis itself answered: the pairing token is stale.';`,
+      `       echo '             Copy it again from the Computer use tab.';`,
+      `       echo '  403     -> something in FRONT of Jarvis refused it. Jarvis never';`,
+      `       echo '             answers 403 here, so look at a WAF rule, Bot Fight';`,
+      `       echo '             Mode (it blocks curl by user-agent), or Access.';`,
+      `       rm -f c.tgz; false; }; }`,
+      `  && { gzip -t c.tgz 2>/dev/null || { echo 'that answered 200 but is not a tarball:';`,
+      `       head -c 300 c.tgz; echo;`,
+      `       echo 'HTML here means a login or block page replied instead of Jarvis.';`,
+      `       rm -f c.tgz; false; }; }`,
       `  && tar xzf c.tgz && rm -f c.tgz`,
       `  && python3 -m venv .venv`,
       `  && .venv/bin/pip install -q -r computeruse/requirements.txt`,
