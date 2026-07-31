@@ -427,6 +427,14 @@ function Setup({ token, machines, onClose }) {
   }, [])
 
   const origin = window.location.origin
+  // A unique URL per time this dialog is opened, because the origin saying
+  // "no-store" is not retroactive. Cloudflare caches this path by its .gz
+  // extension and had already pinned a four-hour copy before the header
+  // existed; that entry goes on being served until it expires no matter what
+  // the origin says now. A query parameter is a different cache key, so it
+  // misses the old entry entirely — and it keeps working if this is ever put
+  // behind a CDN that ignores the header again.
+  const [bust] = useState(() => Date.now().toString(36))
   const behind = !!(cfId && cfSecret)
   const here = machines.find((m) => m.name === name)
   const rootList = roots.split(',').map((s) => s.trim()).filter(Boolean)
@@ -474,7 +482,7 @@ function Setup({ token, machines, onClose }) {
       // for sending "Python-urllib/3.x", so the lesson is that an anonymous
       // request is a bot-rule away from failing. Both halves say the same name.
       `  && code=$(curl -sS -o c.tgz -w '%{http_code}' -A 'jarvis-computeruse/1.0'`,
-      `  '${origin}/api/computeruse/client.tar.gz'`,
+      `  '${origin}/api/computeruse/client.tar.gz?v=${bust}'`,
       `  -H 'X-Jarvis-Token: ${token}'`,
       ...(behind ? [`  -H 'CF-Access-Client-Id: ${cfId}'`,
                     `  -H 'CF-Access-Client-Secret: ${cfSecret}'`] : []),
