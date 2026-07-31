@@ -413,6 +413,17 @@ function Setup({ token, machines, onClose }) {
     ].join(' \\\n'),
     // no flags: --setup already wrote them to ~/.config/jarvis/computeruse.json
     install: `${py} ~/jarvis-client/computeruse/agent.py --install`,
+    // Written out by hand rather than calling agent.py --uninstall, because the
+    // copy being removed is by definition the OLD one and may predate that
+    // flag. Every line is safe to run when the thing it names is not there.
+    remove: (platform === 'mac'
+      ? 'launchctl bootout gui/$UID/network.atomos.jarvis.computeruse 2>/dev/null\n'
+        + 'rm -f ~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist\n'
+      : 'systemctl --user disable --now jarvis-computeruse.service 2>/dev/null\n'
+        + 'rm -f ~/.config/systemd/user/jarvis-computeruse.service\n'
+        + 'systemctl --user daemon-reload\n')
+      + 'rm -rf ~/jarvis-client\n'
+      + 'rm -f ~/.config/jarvis/computeruse.json',
     enable: platform === 'mac'
       ? 'launchctl bootstrap gui/$UID '
         + '~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist\n'
@@ -436,9 +447,9 @@ function Setup({ token, machines, onClose }) {
         ))}
       </div>
       <label>Folders it may play from
-        <span className="dim small">Optional, comma separated. This is the
-          ceiling — folders granted here later can only narrow it, so a client
-          set up with none can control volume and links but play nothing.</span>
+        <span className="dim small">Optional — you can add and remove folders
+          from this page afterwards and the client picks them up straight away,
+          no restart. Comma separated.</span>
         <input placeholder={platform === 'mac'
                  ? '~/Music, ~/Movies' : '~/Music, ~/Videos'}
                value={roots} onChange={(e) => setRoots(e.target.value)} />
@@ -461,6 +472,13 @@ function Setup({ token, machines, onClose }) {
         checks it can reach Jarvis, lists anything missing with the install
         command for <em>this</em> machine, then connects and stays in the
         foreground.</p>
+      <details className="cu-remove">
+        <summary>Already set one up on this machine?</summary>
+        <p className="dim small">Run this first. It stops the old client, takes
+          away its service definition, and deletes its folder and saved token —
+          each line is harmless if that part is already gone.</p>
+        <Block text={cmds.remove} />
+      </details>
     </>,
     <>
       {here ? (

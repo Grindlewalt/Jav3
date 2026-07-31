@@ -1994,6 +1994,16 @@ kbd {
 .cu-modal-body input { max-width: 340px; }
 .cu-modal-foot { display: flex; align-items: center; gap: 10px;
   padding: 12px 16px; border-top: 1px solid var(--border); }
+/* starting over is the uncommon path, so it folds away rather than competing
+   with the command the operator is here for */
+.cu-remove { margin-top: 14px; border-top: 1px solid var(--border);
+  padding-top: 10px; }
+.cu-remove > summary { cursor: pointer; color: var(--dim); font-size: 13px;
+  list-style: none; }
+.cu-remove > summary::-webkit-details-marker { display: none; }
+.cu-remove > summary::before { content: '▸ '; }
+.cu-remove[open] > summary::before { content: '▾ '; }
+.cu-remove > summary:hover { color: var(--text); }
 
 /* the open chat's title doubles as its rename control */
 .chat-title.rename-title {
