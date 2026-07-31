@@ -18,12 +18,16 @@ parameters:
       type: string
       enum: [drive, fast]
       description: Their two genres, for "put on something fast".
+    where:
+      type: string
+      enum: [auto, jarvis, app]
+      description: Which player. Leave it alone — auto uses the player inside Jarvis when a tab is open, which is the one that reliably makes sound. Pass app only if they ask for it on their phone or the music app.
     device:
       type: string
-      description: An audio output, if they named one. Only applies to a file from a granted folder — the library plays through the music app, which has no output control.
+      description: An audio output, if they named one — matched against the outputs that player can actually see. Works for the Jarvis player and for a file from a granted folder; the music app has no output control.
     volume:
       type: integer
-      description: Start level 0-100, same restriction as device.
+      description: Start level 0-100. Same destinations as device.
     client:
       type: string
       description: Which computer to search for local files, by name.
@@ -36,8 +40,18 @@ If it cannot tell which track was meant it returns a shortlist — play one by
 passing its id. If nothing matched at all it returns the whole library, so the
 next call can be the right one. Two calls is the worst case, not a conversation.
 
-It also checks the sound actually started. The music app runs in a browser, and a
-browser refuses to begin audio in a tab nobody has touched — so a play can be
-accepted and still be silent. When that happens you are told, and the fix is for
-the operator to press play once in the app. Do not claim music is playing when
-the result says it did not start.
+There are three places sound can come out, and `auto` picks for you:
+
+- **the Jarvis player** — a player inside the Jarvis tab. Preferred whenever a
+  tab is open, because the operator is already touching that tab, and a browser
+  only starts audio in a tab that has been touched. Volume and output work here.
+- **the music app** — TARMAC's own players on a phone or desktop. This is the one
+  that goes silent: it accepts the request and plays nothing until the operator
+  presses play once in that app.
+- **a granted folder** — chosen automatically when the winner is a local file,
+  played through the computer, with a real audio device.
+
+It checks the sound actually started rather than trusting the acceptance, and
+tells you which player it used. Do not claim music is playing when the result
+says it did not start — say what the result says and, if it was the music app,
+offer to move it to the Jarvis player instead.

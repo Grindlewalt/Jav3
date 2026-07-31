@@ -95,13 +95,15 @@ async def test_play_sends_tarmacs_own_action_vocabulary(configured, monkeypatch)
     from tools.music_play.handler import run
     out = await run(query="solo")
     assert sent == {"action": "play", "ids": [7]}
-    assert "playing" in out and "2 player(s)" in out
+    # named, because there are two kinds of player now and "on 2 players" would
+    # not say which one the operator should go look at
+    assert "playing" in out and "2 music-app player(s)" in out
 
 
 @pytest.mark.asyncio
 async def test_control_uses_prev_not_previous(configured, monkeypatch):
-    """TARMAC's set is play/pause/resume/next/prev. Sending 'previous' or
-    'stop' — which computer_playback uses — would 400."""
+    """TARMAC's set is play/pause/resume/next/prev. Sending 'previous' would
+    400, so it is refused here rather than forwarded."""
     sent = {}
 
     def handler(request):
@@ -110,13 +112,20 @@ async def test_control_uses_prev_not_previous(configured, monkeypatch):
     _mock(handler, monkeypatch)
 
     from tools.music_control.handler import run
-    assert "went back" in await run(action="prev")
+    assert "went back" in await run(action="prev", where="app")
     assert sent["action"] == "prev"
 
-    for wrong in ("previous", "stop", "playpause"):
-        out = await run(action=wrong)
+    for wrong in ("previous", "playpause"):
+        out = await run(action=wrong, where="app")
         assert out.startswith("error:"), wrong
         assert "prev" in out
+
+    # 'stop' became a real action when the in-page player arrived, but TARMAC
+    # still has no such verb — against the music app it explains that instead of
+    # forwarding a call that would 400
+    out = await run(action="stop", where="app")
+    assert not out.startswith("error:")
+    assert "no stop control" in out and "where='jarvis'" in out
 
 
 @pytest.mark.asyncio

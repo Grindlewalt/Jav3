@@ -9,6 +9,7 @@ tab AND on the next visit.
 """
 import asyncio
 import json
+import time
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends
@@ -29,6 +30,68 @@ def push(event: dict) -> int:
     if n:
         bus.publish(GUI_CHAN, event)
     return n
+
+
+def tabs() -> int:
+    """How many browser tabs are listening. Lets a tool decide whether the
+    in-page player is even a possible destination before choosing one."""
+    return bus.subscriber_count(GUI_CHAN)
+
+
+# --- the in-page music player -------------------------------------------------
+# The player is an <audio> element in the operator's browser, so the host cannot
+# observe it — the tab reports instead. Deliberately a process global and not a
+# table: it describes a browser tab that exists right now, exactly like TARMAC's
+# own `playerState`, and it is worthless the moment the process restarts.
+#
+# `started` is the load-bearing field. A browser refuses audio.play() in a tab
+# that has had no user gesture, and TARMAC returns ok for the BROADCAST rather
+# than for any sound, so "accepted" and "audible" are different facts. The tab
+# sets started only once play() actually resolves, which is what lets music_play
+# tell the truth instead of claiming music is playing into silence.
+
+_player: dict = {
+    "track": None,      # {id, title, artist, album, duration}
+    "paused": True,
+    "position": 0.0,
+    "duration": None,
+    "queue": 0,         # tracks left after this one
+    "volume": 100,
+    "started": False,
+    "error": "",
+    "reported_at": None,
+}
+
+
+def player_report(state: dict) -> dict:
+    """The tab telling the host what it is actually doing."""
+    _player.update({k: v for k, v in state.items() if k in _player})
+    _player["reported_at"] = time.time()
+    return dict(_player)
+
+
+def player_status() -> dict:
+    """What the host believes the in-page player is doing. `stale` is honest
+    about the tab having gone away without saying goodbye — a closed laptop
+    leaves the last report sitting here forever otherwise."""
+    out = dict(_player)
+    at = out.get("reported_at")
+    out["stale"] = at is None or (time.time() - at) > 30
+    out["tabs"] = tabs()
+    return out
+
+
+def player_push(action: str, **fields) -> int:
+    """Drive the in-page player. Returns the number of tabs that will see it."""
+    if action == "play":
+        _player.update({"started": False, "error": "", "paused": False})
+    return push({"type": "player", "action": action, **fields})
+
+
+def stream_url(track_id) -> str:
+    """Where the browser fetches a library track — Jarvis's own origin, because
+    TARMAC's Cloudflare Access application is a different one."""
+    return f"/api/computeruse/tarmac/stream/{int(track_id)}"
 
 
 # --- media source resolution --------------------------------------------------

@@ -5,13 +5,25 @@ matching is a string problem, so an algorithm does it (backend/musicpick.py) and
 this plays the winner straight away. When it genuinely cannot tell, it hands back
 a shortlist — or the whole library if nothing matched at all — so the worst case
 is one more turn, not a conversation.
+
+Three destinations, and they are not interchangeable:
+
+  jarvis  the player inside the Jarvis tab. The host proxies the audio, so this
+          is the one that reliably makes sound — the operator is already
+          touching that tab, which is the gesture a browser demands before it
+          will start audio. Volume and output selection are real here.
+  app     TARMAC's own PWA players. What the operator listens on when Jarvis is
+          not open, but silent in a tab nobody has touched.
+  local   a file in a granted folder, through the desktop client's mpv. The only
+          destination with true system audio-device selection.
 """
 import asyncio
 
-from backend import computeruse as cu, musicpick, tarmac
+from backend import computeruse as cu, gui, musicpick, tarmac
 
 SHOWN = 12
 FULL_LIST = 60
+MAX_QUEUE = 25          # a queue the model asked for, not the whole library
 
 
 async def _tarmac_candidates(query: str, tag: str) -> list:
@@ -59,8 +71,41 @@ async def _library_listing() -> str:
     return "\n".join(lines) + tail
 
 
+# --- destinations -------------------------------------------------------------
+
+def _resolve_where(where: str) -> str:
+    """Which player. `auto` prefers the in-page one whenever a Jarvis tab is
+    open, because that is the destination that actually produces sound; with no
+    tab open there is nothing to prefer and it falls back to the music app."""
+    w = (where or "auto").strip().lower()
+    if w in ("jarvis", "page", "here", "browser"):
+        return "jarvis"
+    if w in ("app", "tarmac", "pwa", "phone"):
+        return "app"
+    return "jarvis" if gui.tabs() else "app"
+
+
+async def _queue_rows(ids: list[int]) -> list[dict]:
+    """Metadata plus a same-origin stream url per track. The in-page player
+    needs the duration for its scrubber, which a caller working from bare ids
+    would not have."""
+    rows = []
+    for i in ids[:MAX_QUEUE]:
+        try:
+            t = await tarmac.track(i)
+        except tarmac.TarmacError:
+            continue
+        tid = t.get("id")
+        if tid is None:
+            continue
+        rows.append({"id": tid, "title": t.get("title") or f"track {tid}",
+                     "artist": t.get("artist") or "", "album": t.get("album") or "",
+                     "duration": t.get("duration"), "src": gui.stream_url(tid)})
+    return rows
+
+
 async def _confirm_started(track_id: str, tries: int = 5) -> bool | None:
-    """Did sound actually begin?
+    """Did sound actually begin on a TARMAC player?
 
     TARMAC returns success for the broadcast, not for the audio. Its player calls
     audio.play(), which a browser refuses in a tab that has had no user gesture —
@@ -80,21 +125,85 @@ async def _confirm_started(track_id: str, tries: int = 5) -> bool | None:
     return False
 
 
+async def _confirm_in_page(track_id, tries: int = 8) -> tuple[bool, str]:
+    """The same question for the in-page player, answered from the tab's own
+    reports. Returns (started, error) — the error is whatever the browser said
+    when it refused, which is worth passing on verbatim."""
+    for _ in range(tries):
+        await asyncio.sleep(0.5)
+        s = gui.player_status()
+        track = s.get("track") or {}
+        if str(track.get("id") or "") != str(track_id):
+            continue
+        if s.get("error"):
+            return False, str(s["error"])
+        if s.get("started"):
+            return not s.get("paused", False), ""
+    return False, ""
+
+
+async def _play_in_page(ids: list[int], what: str, device: str,
+                        volume: int | None) -> str:
+    rows = await _queue_rows(ids)
+    if not rows:
+        return ("error: the music server would not describe those tracks, so "
+                "there is nothing to stream")
+    fields: dict = {"queue": rows, "index": 0}
+    if volume is not None:
+        fields["volume"] = max(0, min(int(volume), 100))
+    if device:
+        # the tab resolves this against its OWN enumerated outputs, exactly as
+        # the desktop client does — a name from the model never becomes an id
+        fields["output"] = device
+    n = gui.player_push("play", **fields)
+    if not n:
+        return ("no Jarvis tab is open, so there is no in-page player to play "
+                "on. Ask the operator to open Jarvis, or pass where='app' to "
+                "send it to the music app instead.")
+    started, err = await _confirm_in_page(rows[0]["id"])
+    queued = f" ({len(rows)} queued)" if len(rows) > 1 else ""
+    extra = "".join([f", output {device}" if device else "",
+                     f", volume {volume}%" if volume is not None else ""])
+    if started:
+        return f"playing {what} in the Jarvis player{queued}{extra}."
+    if err:
+        return (f"{what} was loaded into the Jarvis player but the browser "
+                f"refused to start it: {err}. The operator can press play in "
+                f"the player.")
+    return (f"{what} was sent to the Jarvis player{queued} but no sound has "
+            f"been confirmed. The player is on screen — the operator may need "
+            f"to press play once.")
+
+
+async def _play_ids(ids: list[int], where: str, what: str, device: str,
+                    volume: int | None) -> str:
+    if where == "jarvis":
+        return await _play_in_page(ids, what, device, volume)
+    try:
+        r = await tarmac.remote("play", ids)
+    except tarmac.TarmacError as e:
+        return f"error: {e}"
+    started = await _confirm_started(ids[0])
+    note = ""
+    if device or volume is not None:
+        note = (" (the music app has no output or volume control — the Jarvis "
+                "player does, so pass where='jarvis' if they want that)")
+    return _playing_line(what, r, started) + note
+
+
 async def run(query: str = "", ids: list | None = None, tag: str = "",
               device: str = "", volume: int | None = None,
-              client: str = "") -> str:
+              client: str = "", where: str = "auto") -> str:
+    dest = _resolve_where(where)
+
     # explicit ids skip matching entirely
     if ids:
         try:
             picked = [int(i) for i in ids]
         except (TypeError, ValueError):
             return "error: ids must be whole numbers"
-        try:
-            r = await tarmac.remote("play", picked)
-        except tarmac.TarmacError as e:
-            return f"error: {e}"
-        started = await _confirm_started(picked[0])
-        return _playing_line(f"{len(picked)} track(s)", r, started)
+        return await _play_ids(picked, dest, f"{len(picked)} track(s)",
+                               device, volume)
 
     if not query and not tag:
         return "error: say what to play, or give ids"
@@ -120,7 +229,7 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
                           for c in shortlist[:SHOWN])
         return (f"{why} for '{query}' — pick one:\n{lines}")
 
-    # a local file goes through the computer, where a device and a level exist
+    # a local file goes through the computer, where a real audio device exists
     if win.source == "local":
         params = {"kind": "audio", "path": win.ref, "title": win.title[:300]}
         if device:
@@ -138,26 +247,22 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
         return f"playing {win.title} from disk{extra}."
 
     try:
-        r = await tarmac.remote("play", [int(win.ref)])
-    except (tarmac.TarmacError, ValueError) as e:
-        return f"error: {e}"
-    started = await _confirm_started(win.ref)
-    note = ""
-    if device or volume is not None:
-        note = (" (the library plays through the music app, which Jarvis cannot "
-                "set an output or a level on — ask for it from a granted folder "
-                "if you need that)")
-    return _playing_line(musicpick.describe(win), r, started) + note
+        track_id = int(win.ref)
+    except ValueError:
+        return f"error: the library gave a track id that is not a number: {win.ref}"
+    return await _play_ids([track_id], dest, musicpick.describe(win),
+                           device, volume)
 
 
 def _playing_line(what: str, r: dict, started: bool | None) -> str:
     n = r.get("players", 0)
     if started:
-        return f"playing {what} on {n} player(s)."
+        return f"playing {what} on {n} music-app player(s)."
     if started is None:
-        return (f"sent {what} to {n} player(s), but could not confirm it "
-                f"started.")
-    return (f"{what} was accepted by {n} player(s) but no sound has started. "
-            f"Browsers block audio in a tab that has not been touched yet — the "
-            f"operator needs to press play once in the music app, after which "
-            f"remote playback works for the rest of that session.")
+        return (f"sent {what} to {n} music-app player(s), but could not confirm "
+                f"it started.")
+    return (f"{what} was accepted by {n} music-app player(s) but no sound has "
+            f"started. Browsers block audio in a tab that has not been touched "
+            f"yet — the operator can press play once in the music app, or pass "
+            f"where='jarvis' to use the player inside Jarvis, which does not "
+            f"have that problem.")

@@ -1668,6 +1668,113 @@ kbd {
 .media-dock .row { align-items: center; }
 .gui-toasts.raised { bottom: 200px; }
 
+/* ---- the in-page music player (Player.jsx) ----
+   Glass, like the nav dropdowns: the page stays legible behind it, so a player
+   sitting over a chat does not feel like a modal. Nothing decorative is a
+   gradient — the two range fills use a hard-stop background-size trick, which
+   reads as a solid bar rather than a fade. */
+.jplayer {
+  position: fixed; right: 16px; bottom: calc(16px + var(--sab)); z-index: 2950;
+  width: min(400px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px; border-radius: var(--radius);
+  background: var(--glass); border: 1px solid var(--border);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  box-shadow: var(--shadow-win);
+}
+.jplayer.collapsed { gap: 0; padding: 10px 12px; }
+
+.jp-head { display: flex; align-items: center; gap: 8px; }
+.jp-meta { flex: 1; min-width: 0; }
+.jp-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.jp-sub { font-size: 12px; color: var(--dim); margin-top: 2px; }
+.jp-queued {
+  margin-left: 6px; padding: 0 5px; border-radius: 999px;
+  font-size: 11px; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.jp-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 30px; height: 30px; padding: 0 6px;
+  border: 0; border-radius: 8px; cursor: pointer;
+  background: transparent; color: var(--dim); font-size: 13px; line-height: 1;
+}
+.jp-icon:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+.jp-icon:disabled { opacity: 0.35; cursor: default; }
+.jp-icon.flat { min-width: 0; padding: 0; background: none; }
+.jp-icon.flat:hover { background: none; }
+
+.jp-play {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border: 0; border-radius: 50%; cursor: pointer;
+  background: var(--accent); color: var(--accent-ink); font-size: 13px;
+}
+.jp-play:hover { filter: brightness(1.08); }
+
+.jp-seek { display: flex; align-items: center; gap: 8px; }
+.jp-seek input { flex: 1; min-width: 0; }
+.jp-time {
+  font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums;
+  min-width: 34px; text-align: center;
+}
+
+.jp-controls { display: flex; align-items: center; gap: 6px; }
+.jp-vol { display: flex; align-items: center; gap: 6px; }
+.jp-vol input { width: 78px; }
+
+.jplayer input[type='range'] {
+  -webkit-appearance: none; appearance: none;
+  height: 4px; border-radius: 2px; cursor: pointer;
+  background-color: var(--panel-2);
+  background-image: linear-gradient(var(--accent), var(--accent));
+  background-size: var(--jp-pct, 0%) 100%;
+  background-repeat: no-repeat;
+}
+.jplayer input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--panel); cursor: pointer;
+}
+.jplayer input[type='range']::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--panel); cursor: pointer;
+}
+
+.jp-outputs {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 190px; overflow-y: auto;
+  padding: 5px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.jp-out {
+  text-align: left; padding: 7px 9px; border: 0; border-radius: 7px;
+  background: none; color: var(--text); font-size: 12.5px; cursor: pointer;
+}
+.jp-out:hover { background: var(--panel-2); }
+.jp-out.active { color: var(--accent); }
+.jp-out.jp-name { color: var(--dim); font-style: italic; }
+.jp-note { padding: 7px 9px; font-size: 12px; color: var(--dim); }
+
+.jp-error {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--amber); line-height: 1.4;
+}
+.jp-retry {
+  flex: none; padding: 3px 10px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  font-size: 12px;
+}
+.jp-retry:hover { background: var(--panel-2); }
+
+@media (max-width: 640px) {
+  .jplayer { left: 12px; right: 12px; width: auto; }
+  /* 16px stops iOS zooming the page when a control takes focus */
+  .jplayer input[type='range'] { font-size: 16px; }
+  .jp-vol input { width: 60px; }
+}
+
 /* guest co-working terminal — deliberately dark in both themes */
 .term-host { flex: 1; min-height: 0; overflow: hidden; border-radius: 8px;
   background: #0e1013; padding: 6px 8px; }
@@ -2038,3 +2145,9 @@ kbd {
   .sbd-fname { flex: 1 1 100%; }
   .sbd-when { text-align: left; min-width: 0; }
 }
+
+/* ---- recently-deleted schedules (appended: the fold itself is styled up at
+   .deleted-fold — these two rules just teach it the sched-list, so the bin
+   reads like the projects one: dashed and dimmed) ---- */
+.deleted-fold .sched-list { margin-top: 12px; }
+.sched-list li.deleted { opacity: 0.65; border-style: dashed; }

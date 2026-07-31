@@ -6,6 +6,7 @@ import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api.js'
 import { useDismiss } from './useDismiss.js'
 import { setMediaHosts } from './mediaHosts.js'
+import Player from './Player.jsx'
 import Login from './pages/Login.jsx'
 import Chat from './pages/Chat.jsx'
 import Projects from './pages/Projects.jsx'
@@ -248,6 +249,10 @@ function GuiBridge() {
         if (!w) toast({ text: 'Jarvis wants to open', url: ev.url })
       } else if (ev.type === 'play_media') {
         setPlayer(ev)
+      } else if (ev.type === 'player') {
+        // the music player owns its own state machine — hand it the event
+        // rather than threading a queue through here
+        window.dispatchEvent(new CustomEvent('jarvis-player', { detail: ev }))
       } else if (ev.type === 'layout_changed') {
         window.dispatchEvent(new CustomEvent('jarvis-layout-changed', { detail: ev }))
       }
@@ -493,6 +498,8 @@ export default function App() {
         </>
       )}
       {user && <GuiBridge />}
+      {/* the music player renders nothing until something is queued into it */}
+      {user && <Player />}
       {user && <Notices toasts={notices.toasts} dismiss={notices.dismiss}
                         clear={notices.clear} />}
       {/* the guest VM sits on its own in the bottom-left corner, off away from
