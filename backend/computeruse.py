@@ -25,9 +25,18 @@ three independent places:
     design assumption for the whole project is that the agent may be compromised;
     a compromised Jarvis must not be able to widen what the client will do.
 
-3.  The client's own launch flags are the ceiling. Folder grants made in the GUI
-    can only ever narrow what `--allow-root` already permits, so the worst a
-    hostile backend can do is address files the operator already pointed at.
+3.  The client re-checks containment on its own side. Every path it is handed is
+    resolved and must sit inside a folder the operator granted, and that folder
+    must really be a directory on that machine.
+
+    This point used to say something stronger: the client's `--allow-root` flags
+    were a ceiling that GUI grants could only narrow, so a hostile backend could
+    only ever address files the operator had already pointed the client at. That
+    was removed on the operator's instruction (2026-07-30). It made the Computer
+    use tab dishonest — a folder granted there but absent from the launch flags
+    looked accepted and reached nothing, and the only way to add one was to stop
+    the client and re-run its set-up command. What is left is that grants are
+    still made only by a logged-in operator in the GUI, never by a tool.
 
 Everything the client executes is an absolute path resolved once at startup from
 a fixed binary allowlist, spawned with an argv list and shell=False. See
@@ -616,6 +625,34 @@ def get_client(client_id: str | None) -> Client:
             "several machines are connected, so name one: "
             + ", ".join(sorted(c.name for c in _clients.values())))
     return next(iter(_clients.values()))
+
+
+async def push_grants(client: Client) -> None:
+    """Tell one connected machine which folders it may reach, now.
+
+    Sent on connect and again on every change. Before this the list was only
+    ever read at connect, so adding a folder in the GUI did nothing until the
+    client was restarted — and restarting it meant re-running the set-up command
+    on the operator's own laptop. Folders are the setting that changes most, so
+    that was the whole tab's usefulness gated behind a terminal.
+
+    Only this machine's folders: a path on the Mac is meaningless on the Linux
+    box, and sending it just gives that client a root it can never resolve.
+    """
+    if client.send is None:
+        return
+    grants = [g.root for g in await list_grants(client=client.name)]
+    try:
+        await client.send(json.dumps({"grants": grants}))
+    except Exception:
+        # a machine that dropped mid-push gets the list on its next connect
+        pass
+
+
+async def broadcast_grants() -> None:
+    """Push to every connected machine, each getting only its own folders."""
+    for c in clients():
+        await push_grants(c)
 
 
 def resolve_result(client_id: str, req_id: str, payload: dict) -> None:

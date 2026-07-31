@@ -115,3 +115,40 @@ def install(agent_path: Path, dry_run: bool = False) -> tuple[Path, list[str]]:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(body)
     return target, steps
+
+
+def service_path() -> Path:
+    """Where install() put the definition on this platform."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    return (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            / "systemd" / "user" / UNIT_NAME)
+
+
+def uninstall(dry_run: bool = False) -> tuple[list[Path], list[str]]:
+    """Stop the service and take its definition away.
+
+    Returns (files removed, what the operator still has to do). Stopping is
+    theirs to run for the same reason enabling was: this removes files, it does
+    not reach into a running session and kill things behind their back.
+
+    Deliberately does NOT touch the config file — that holds the pairing token
+    and the operator may only be replacing the service. --purge does that.
+    """
+    removed: list[Path] = []
+    target = service_path()
+    if sys.platform == "darwin":
+        steps = [
+            f"launchctl bootout gui/{os.getuid()}/{LABEL}   # if it is running",
+        ]
+    else:
+        steps = [
+            f"systemctl --user disable --now {UNIT_NAME}    # if it is running",
+            "systemctl --user daemon-reload",
+        ]
+    if target.exists() and not dry_run:
+        target.unlink()
+        removed.append(target)
+    elif target.exists():
+        removed.append(target)
+    return removed, steps

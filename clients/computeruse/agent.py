@@ -27,10 +27,18 @@ What actually reaches the OS:
 This module must not import os.system, use shell=True, or call eval/exec/compile.
 tests/test_computeruse_noshell.py reads this file and fails if it does.
 
-The --allow-root flags are the ceiling on what can be played. Jarvis sends folder
-grants when we connect, but they are intersected with these — a grant naming a
-folder outside them is dropped. A compromised server can therefore only address
-files the operator already pointed this client at.
+WHICH FOLDERS THIS CAN REACH
+
+The grant list on Jarvis's Computer use tab, and nothing else. It arrives when we
+connect and again whenever the operator changes it, and it is applied live.
+
+--allow-root now only seeds that list for the moments before Jarvis answers; it
+used to be a hard ceiling that GUI grants could only narrow. That was dropped on
+the operator's instruction because it made the tab dishonest — granting a folder
+the client had not been launched with appeared to work and reached nothing, and
+the only cure was re-running the set-up command. The containment checks are
+unchanged and still enforced on this side: every path is resolved and must sit
+inside a granted folder, and a granted folder must really be a directory here.
 """
 from __future__ import annotations
 
@@ -596,7 +604,9 @@ class Agent:
         self.dry_run = dry_run
         self.runner = Runner(dry_run=dry_run)
         self.os = MacOS(self.runner) if sys.platform == "darwin" else Linux(self.runner)
-        # the ceiling: resolved once, never widened
+        # Folders named at startup. These are a STARTING POINT, not a ceiling —
+        # see set_grants. They are what this client can reach until Jarvis says
+        # otherwise, which it does on the very first message after connecting.
         self.roots = []
         for r in roots:
             p = Path(r).expanduser().resolve()
@@ -608,39 +618,48 @@ class Agent:
         self.grant_note = ""
 
     def set_grants(self, roots):
-        """Narrow to the intersection of the server's grants and our ceiling.
+        """Adopt the folder list from Jarvis. It is authoritative.
 
-        Intersection ONLY — no falling back to the ceiling when nothing matches.
-        The first version did (`kept or self.roots`), which was wrong twice
-        over: it was more permissive than the operator asked for, since grants
-        exist to narrow --allow-root; and it disagreed with the server, which
-        refuses everything when no folder is granted. It also hid mistakes. A
-        grant of "~/Movies" against --allow-root /Users/you/Movies intersects to
-        nothing, and the fallback made the client report the ceiling as if all
-        were well.
+        This used to intersect with --allow-root, which was the ceiling: the GUI
+        could only ever narrow what the command line already permitted. That is
+        a real control, and it was removed deliberately (operator's call), for
+        one reason — it made the Computer use tab a liar. Granting a folder the
+        client had not been started with looked like it worked, and then
+        silently reached nothing; the only way to actually add a folder was to
+        stop the client and re-run the set-up command with another --allow-root.
+        Folders are the thing that changes most often, and that made them the
+        one thing the GUI could not change.
+
+        So the grant list in Jarvis is now simply what this client uses, and it
+        is applied live (see _one) rather than only at connect. What remains of
+        the old model: a folder still has to exist and be a directory here, the
+        containment checks below are unchanged and still run on this side, and
+        no verb reaches anything outside the list.
         """
         self.grant_note = ""
-        sent = [r for r in (roots or [])]
-        kept = []
+        sent = list(roots or [])
+        kept, missing = [], []
         for r in sent:
             try:
                 p = Path(r).expanduser().resolve()
             except OSError:
+                missing.append(r)
                 continue
-            if any(p == c or c in p.parents for c in self.roots):
+            # A path that is not a directory HERE is the common mistake now that
+            # the GUI can name anything: a Linux path granted to the Mac, or a
+            # typo. Dropping it silently would look like the old ceiling bug.
+            if p.is_dir():
                 kept.append(p)
+            else:
+                missing.append(r)
         self.grants = kept
-        if not self.roots:
-            self.grant_note = ("this client was started with no --allow-root, so "
-                               "nothing on disk is reachable")
-        elif not sent:
+        if not sent:
             self.grant_note = ("no folders are granted in Jarvis, so nothing on "
                                "disk is reachable — add one on the Computer use tab")
-        elif not kept:
+        elif missing:
             self.grant_note = (
-                "none of the granted folders (" + ", ".join(sent) + ") is inside "
-                "this client's --allow-root (" + ", ".join(str(r) for r in self.roots)
-                + "), so nothing on disk is reachable. The two have to agree.")
+                "granted but not a folder on this machine: " + ", ".join(missing)
+                + " — check the path is right for this computer")
         if self.grant_note:
             print(f"! {self.grant_note}", flush=True)
 
@@ -872,6 +891,14 @@ class Agent:
         except Exception:
             return
         req, verb = msg.get("id"), msg.get("verb")
+        # A folder list, pushed because the operator changed it in the GUI. It
+        # is not a verb and wants no reply — without this branch it fell through
+        # as verb=None and answered an error to a request nobody made. This is
+        # what makes a new grant work now instead of on the next restart.
+        if verb is None and "grants" in msg:
+            self.set_grants(msg.get("grants") or [])
+            print(f"folders updated: {[str(g) for g in self.grants]}", flush=True)
+            return
         try:
             # the OS calls are blocking; keep the socket responsive
             result = await asyncio.get_running_loop().run_in_executor(
@@ -1133,8 +1160,10 @@ def main(argv=None):
     ap.add_argument("--server", help="https://host:port of Jarvis")
     ap.add_argument("--token", help="pairing token from the Computer use tab")
     ap.add_argument("--allow-root", action="append", default=[], metavar="DIR",
-                    help="a folder Jarvis may play from. Repeatable. This is the "
-                         "ceiling: grants made in the GUI can only narrow it.")
+                    help="a folder Jarvis may play from, before it sends its own "
+                         "list. Repeatable, and optional — the grants on the "
+                         "Computer use tab replace this on connect and whenever "
+                         "you change them, so folders are managed there now.")
     ap.add_argument("--name", help="how this machine appears in Jarvis")
     ap.add_argument("--cf-access-id", default=os.environ.get("CF_ACCESS_CLIENT_ID"),
                     help="Cloudflare Access service token client id, if Jarvis "
@@ -1155,6 +1184,14 @@ def main(argv=None):
                     help="save the settings to ~/.config/jarvis/computeruse.json "
                          "(0600) and write a systemd user unit or launchd agent, "
                          "then print the commands to enable it")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="remove the service definition this client installed, "
+                         "and print how to stop it. Add --purge to delete the "
+                         "saved settings and pairing token too.")
+    ap.add_argument("--purge", action="store_true",
+                    help="with --uninstall, also delete "
+                         "~/.config/jarvis/computeruse.json — use this when "
+                         "starting over rather than reinstalling")
     ap.add_argument("--selftest", action="store_true",
                     help="report what this machine can actually drive, and "
                          "exit. Run this first on a new machine — especially "
@@ -1165,6 +1202,28 @@ def main(argv=None):
         return _selftest()
 
     cfgmod = _sibling("config")
+    if a.uninstall:
+        # Before the config is loaded: a config this refuses to read (bad mode,
+        # bad JSON) is exactly when someone wants to remove it, and bailing out
+        # there would leave them with no way to undo an install.
+        svc = _sibling("service")
+        removed, steps = svc.uninstall()
+        if a.purge and cfgmod.CONFIG_PATH.exists():
+            cfgmod.CONFIG_PATH.unlink()
+            removed.append(cfgmod.CONFIG_PATH)
+        for p in removed:
+            print(f"removed {p}")
+        if not removed:
+            print("nothing to remove — no service definition was installed here")
+        if not a.purge:
+            print(f"kept    {cfgmod.CONFIG_PATH} (--purge deletes it, token and all)")
+        print("\nStill running until you run:")
+        for line in steps:
+            print(f"  {line}")
+        print("\nThe client source itself is just this folder — delete it when "
+              "you are done.")
+        return 0
+
     try:
         cfg = cfgmod.load()
     except cfgmod.ConfigError as e:
@@ -1235,13 +1294,13 @@ def main(argv=None):
                             "cf_access_secret": cf_secret})
         print(f"     {path} (0600) — every later run reads this, so no flags")
         if not roots:
-            print("     ! no --allow-root, so no file on this machine can be "
-                  "played.\n"
-                  "       Volume, links and transport still work. To allow "
-                  "media, run this\n"
-                  "       again with --allow-root ~/Music (repeatable) — it is "
-                  "the ceiling\n"
-                  "       that folder grants in Jarvis are narrowed against.")
+            print("     ! no --allow-root given, which is fine — folders are "
+                  "managed in Jarvis.\n"
+                  "       Add one on the Computer use tab and it reaches this "
+                  "client straight\n"
+                  "       away, no restart. Until then volume, links and "
+                  "transport work but\n"
+                  "       no file on this machine can be played.")
 
         print("\n3/4  what this machine can drive")
         _selftest()

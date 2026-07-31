@@ -180,10 +180,18 @@ service token cannot be used to reach the rest of Jarvis.
 - Only the binaries in `BINARIES` can ever run. Each is resolved to an absolute
   path once at startup and frozen, then spawned with an argv **list** and
   `shell=False` in a scrubbed environment. No shell is in that list.
-- `--allow-root` is the ceiling. Folder grants made in the Jarvis GUI are
-  intersected with it, so a grant for a folder you did not name here is ignored.
+- Every path is resolved and checked for containment **on this side** before
+  anything opens it, against the folders granted in the Jarvis GUI.
 - mpv is started with `--no-config --load-scripts=no`, because a Lua script in
   `~/.config/mpv` would otherwise be arbitrary code running off a play command.
+
+`--allow-root` used to be a hard ceiling that GUI grants could only narrow. That
+was removed on 2026-07-30, at the operator's instruction: it made the Computer
+use tab dishonest. A folder granted there but not named on the command line
+looked accepted and reached nothing, and the only way to add one was to stop the
+client and re-run set-up with another flag — so folders, the setting that changes
+most, were the one thing the GUI could not change. The grant list in Jarvis is
+now simply what this client uses, applied live.
 
 `tests/test_computeruse_noshell.py` in the main repo parses this file and fails
 the build if any of that stops being true — including a mutation check that the
@@ -191,7 +199,20 @@ guards actually fire.
 
 ## What it can reach on disk
 
-Only the folders you passed `--allow-root` **and** granted in the GUI, and only
-real audio/video files in them. Paths are resolved before the containment check,
-so a symlink pointing out of a granted tree is refused. There is no verb that
-lists a directory.
+The folders granted on Jarvis's **Computer use** tab, and only real audio/video
+files in them. Paths are resolved before the containment check, so a symlink
+pointing out of a granted tree is refused.
+
+Add or remove a folder there and this client is told at once — no restart, no
+re-running set-up. `--allow-root` only seeds the list for the seconds before
+Jarvis answers, and is optional.
+
+## Removing it
+
+```bash
+python3 agent.py --uninstall           # drop the service, keep the settings
+python3 agent.py --uninstall --purge   # ...and delete the saved pairing token
+```
+
+It prints the one `launchctl`/`systemctl` line that stops a running copy — that
+is left to you rather than done behind your back. Then delete this folder.

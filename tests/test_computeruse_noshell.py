@@ -8,6 +8,8 @@ The operator's requirement was absolute — "ZERO CHANCE FOR SHELL ACCESS OF ANY
 KIND" — so it is checked mechanically rather than left to review.
 """
 import ast
+import asyncio
+import json
 import re
 from pathlib import Path
 
@@ -327,20 +329,69 @@ def test_client_refuses_a_path_the_backend_says_is_fine(tmp_path):
         agent.check_playable("/etc/passwd", "audio")
 
 
-def test_server_grants_cannot_widen_the_client_ceiling(tmp_path):
-    """--allow-root is the ceiling. A grant naming somewhere else is dropped."""
-    allowed = tmp_path / "Music"
-    allowed.mkdir()
-    elsewhere = tmp_path / "Documents"
-    elsewhere.mkdir()
-    mod, agent = _agent(tmp_path, [str(allowed)])
+def test_server_grants_replace_the_startup_roots(tmp_path):
+    """The GUI's folder list is authoritative — it may name a folder the client
+    was never launched with.
 
-    agent.set_grants([str(elsewhere), "/etc", str(allowed)])
-    assert agent.grants == [allowed.resolve()]
+    This is the reverse of what it used to assert. --allow-root was a ceiling
+    that grants could only narrow, which meant a folder added on the Computer
+    use tab silently reached nothing until the client was restarted with a new
+    flag. Removed on the operator's instruction; the containment checks below
+    are what still hold the line.
+    """
+    started_with = tmp_path / "Music"
+    started_with.mkdir()
+    newly_granted = tmp_path / "Documents"
+    newly_granted.mkdir()
+    mod, agent = _agent(tmp_path, [str(started_with)])
 
-    (elsewhere / "x.mp3").write_bytes(b"\0")
+    agent.set_grants([str(newly_granted)])
+    assert agent.grants == [newly_granted.resolve()]
+
+    # the new folder is reachable without a restart...
+    (newly_granted / "x.mp3").write_bytes(b"\0")
+    assert agent.check_playable(str(newly_granted / "x.mp3"), "audio")
+    # ...and the one it was launched with is not, because it was revoked
+    (started_with / "y.mp3").write_bytes(b"\0")
     with pytest.raises(mod.Refused):
-        agent.check_playable(str(elsewhere / "x.mp3"), "audio")
+        agent.check_playable(str(started_with / "y.mp3"), "audio")
+
+
+def test_containment_still_holds_against_anything_not_granted(tmp_path):
+    """Dropping the ceiling did not drop the client's own path checks."""
+    granted = tmp_path / "Music"
+    granted.mkdir()
+    mod, agent = _agent(tmp_path, [])
+    agent.set_grants([str(granted)])
+
+    with pytest.raises(mod.Refused):
+        agent.check_playable("/etc/passwd", "audio")
+    with pytest.raises(mod.Refused):
+        agent.check_playable(str(tmp_path / "elsewhere.mp3"), "audio")
+    # a granted path that is not a directory here is reported, not adopted
+    agent.set_grants([str(granted), "/nope/not/here"])
+    assert agent.grants == [granted.resolve()]
+    assert "not a folder on this machine" in agent.grant_note
+
+
+def test_a_pushed_folder_list_is_not_answered_as_a_verb(tmp_path):
+    """The live push arrives on the same socket as verbs and carries no id.
+
+    Without its own branch it fell through as verb=None: the client answered an
+    error to a request nobody made, and never updated its folders.
+    """
+    granted = tmp_path / "Music"
+    granted.mkdir()
+    _mod, agent = _agent(tmp_path, [])
+    sent = []
+
+    class FakeWS:
+        async def send(self, raw):
+            sent.append(raw)
+
+    asyncio.run(agent._one(FakeWS(), json.dumps({"grants": [str(granted)]})))
+    assert agent.grants == [granted.resolve()]
+    assert sent == [], "a folder push wants no reply"
 
 
 def test_client_rejects_unknown_verbs_and_params(tmp_path):

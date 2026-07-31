@@ -399,3 +399,89 @@ async def test_a_tilde_grant_is_refused_rather_than_silently_useless(
     g = await cu.add_grant("/Users/grant/Movies")
     assert g.root == "/Users/grant/Movies"
     await cu.remove_grant(g.id)
+
+
+@pytest.mark.asyncio
+async def test_a_new_folder_reaches_a_connected_machine_without_a_restart(
+        monkeypatch, tmp_path):
+    """The bug the operator hit: grant a folder, and nothing changes.
+
+    The folder list was read once, in the connect handshake. So a grant added on
+    the Computer use tab did nothing until the client reconnected — and because
+    the client's --allow-root was also a ceiling, reconnecting was not enough
+    either; the set-up command had to be re-run on their own laptop with another
+    flag. Folders were the one setting the tab could not actually change.
+    """
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "t.db", raising=False)
+    await db_mod.init_db()
+
+    pushed = []
+
+    async def send(raw):
+        pushed.append(json.loads(raw))
+
+    cu.register(cu.Client(id="mac-1", name="mac", platform="darwin", send=send))
+    try:
+        g = await cu.add_grant("/Users/grant/Music", "music", "mac")
+        await cu.broadcast_grants()
+        assert pushed and pushed[-1] == {"grants": ["/Users/grant/Music"]}
+
+        # and revoking reaches it just as fast — a folder taken away must not
+        # stay readable until the client happens to restart
+        await cu.remove_grant(g.id)
+        await cu.broadcast_grants()
+        assert pushed[-1] == {"grants": []}
+    finally:
+        cu.unregister("mac-1")
+
+
+@pytest.mark.asyncio
+async def test_a_push_carries_only_the_folders_for_that_machine(
+        monkeypatch, tmp_path):
+    """A path on the Mac is meaningless on the Linux box. Sending it would hand
+    that client a root it can never resolve, which reads as a broken grant."""
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "t.db", raising=False)
+    await db_mod.init_db()
+    await cu.add_grant("/Users/grant/Music", "mac music", "mac")
+    await cu.add_grant("/home/g/Music", "pi music", "pi")
+    await cu.add_grant("/srv/shared", "everywhere")
+
+    got = {}
+
+    def sender(who):
+        async def send(raw):
+            got[who] = json.loads(raw)["grants"]
+        return send
+
+    cu.register(cu.Client(id="mac-1", name="mac", platform="darwin",
+                          send=sender("mac")))
+    cu.register(cu.Client(id="pi-1", name="pi", platform="linux",
+                          send=sender("pi")))
+    try:
+        await cu.broadcast_grants()
+        assert got["mac"] == ["/Users/grant/Music", "/srv/shared"]
+        assert got["pi"] == ["/home/g/Music", "/srv/shared"]
+    finally:
+        cu.unregister("mac-1")
+        cu.unregister("pi-1")
+
+
+@pytest.mark.asyncio
+async def test_a_machine_that_drops_mid_push_does_not_break_the_grant(
+        monkeypatch, tmp_path):
+    """Adding a folder must succeed even if a client vanished a moment ago —
+    it picks the list up on its next connect."""
+    import backend.db as db_mod
+    monkeypatch.setattr(db_mod.settings, "db_path", tmp_path / "t.db", raising=False)
+    await db_mod.init_db()
+
+    async def send(raw):
+        raise ConnectionResetError("gone")
+
+    cu.register(cu.Client(id="mac-1", name="mac", platform="darwin", send=send))
+    try:
+        await cu.broadcast_grants()      # must not raise
+    finally:
+        cu.unregister("mac-1")

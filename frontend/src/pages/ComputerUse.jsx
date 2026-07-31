@@ -86,13 +86,14 @@ export default function ComputerUse() {
 
   async function addFolder(client, root) {
     try {
-      const r = await api('/api/computeruse/grants', {
+      await api('/api/computeruse/grants', {
         method: 'POST', body: JSON.stringify({ root, client }) })
       refresh()
-      if (r.restart_needed) {
-        say(`Added. ${client} picks up folders when it reconnects — restart the `
-          + `client to use this one.`)
-      }
+      // No restart line any more: the host pushes the folder list to the
+      // connected machine as part of this call. It used to say "restart the
+      // client", which was true and useless — the restart meant re-running the
+      // set-up command, so folders were the one setting this tab could not
+      // actually change.
     } catch (err) { say(err.detail || String(err)) }
   }
 

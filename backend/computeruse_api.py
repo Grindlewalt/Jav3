@@ -99,9 +99,13 @@ async def create_grant(body: GrantBody):
         g = await cu.add_grant(body.root, body.label, body.client)
     except cu.VerbError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # a live client only learns of a new folder when it reconnects, so say so
+    # Live, not on the next reconnect. This used to return restart_needed and
+    # mean it: the client read its folder list once at connect, so a folder
+    # added here did nothing until the operator went back to their laptop and
+    # re-ran the set-up command.
+    await cu.broadcast_grants()
     return {"id": g.id, "root": g.root, "label": g.label, "client": g.client,
-            "restart_needed": bool(cu.clients())}
+            "restart_needed": False}
 
 
 @router.put("/privileges")
@@ -116,6 +120,9 @@ async def set_privilege(body: PrivilegeBody):
 @router.delete("/grants/{grant_id}")
 async def delete_grant(grant_id: int):
     await cu.remove_grant(grant_id)
+    # revoking has to reach the machine at once — a folder the operator just
+    # took away must not stay readable until the client happens to restart
+    await cu.broadcast_grants()
     return {"ok": True}
 
 
@@ -400,7 +407,8 @@ async def agent_socket(ws: WebSocket):
             "ok": True, "client_id": client.id,
             # only this machine's folders: a path on the Mac is meaningless on
             # the Linux box, and sending it just gives that client a root it can
-            # never resolve
+            # never resolve. cu.push_grants sends the same list on every later
+            # change, so this is the first of many rather than the only one.
             "grants": [g.root for g in await cu.list_grants(client=client.name)],
         }))
         while True:

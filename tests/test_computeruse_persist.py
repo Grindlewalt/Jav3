@@ -165,8 +165,9 @@ def test_setup_saves_everything_the_service_will_need_then_connects(
 
 def test_setup_says_so_when_nothing_on_disk_will_be_reachable(
         agent_mod, tmp_path, monkeypatch, capsys):
-    """Without --allow-root the client connects, looks healthy, and refuses
-    every play — the ceiling is empty, so no grant can intersect it."""
+    """Without --allow-root the client connects and can play nothing yet — but
+    that is now a sentence about the Computer use tab, not about re-running this
+    command with another flag."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(agent_mod, "_ping", lambda *a, **k: (True, "reached it"))
 
@@ -175,7 +176,54 @@ def test_setup_says_so_when_nothing_on_disk_will_be_reachable(
     monkeypatch.setattr(agent_mod.Agent, "serve", fake_serve)
 
     agent_mod.main(["--setup", "--server", "https://x", "--token", TOKEN])
-    assert "no --allow-root" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "no --allow-root" in out
+    assert "Computer use tab" in out and "no restart" in out
+
+
+def test_uninstall_removes_the_service_and_keeps_the_token(
+        agent_mod, tmp_path, monkeypatch, capsys):
+    """Undoing an install must not throw the pairing token away — the usual
+    reason to run it is to replace the service, not to start over."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc, cfg = _mod("service"), _mod("config")
+    unit, _steps = svc.install(Path(agent_mod.__file__))
+    assert unit.exists()
+    cfg.save({"server": "https://x", "token": TOKEN})
+
+    assert agent_mod.main(["--uninstall"]) == 0
+    assert not unit.exists()
+    assert cfg.CONFIG_PATH.exists(), "--uninstall alone must keep the settings"
+    out = capsys.readouterr().out
+    assert str(unit) in out
+    assert TOKEN not in out
+
+
+def test_uninstall_purge_takes_the_token_with_it(
+        agent_mod, tmp_path, monkeypatch, capsys):
+    """Starting over. --purge is the flag that makes it a clean machine again."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    svc, cfg = _mod("service"), _mod("config")
+    svc.install(Path(agent_mod.__file__))
+    cfg.save({"server": "https://x", "token": TOKEN})
+
+    assert agent_mod.main(["--uninstall", "--purge"]) == 0
+    assert not cfg.CONFIG_PATH.exists()
+    assert TOKEN not in capsys.readouterr().out
+
+
+def test_uninstall_works_even_when_the_config_is_unreadable(
+        agent_mod, tmp_path, monkeypatch):
+    """A config that load() refuses is exactly when someone wants it gone. If
+    --uninstall parsed it first there would be no way back out."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    cfg = _mod("config")
+    cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.CONFIG_PATH.write_text("{ not json at all")
+    cfg.CONFIG_PATH.chmod(0o600)
+
+    assert agent_mod.main(["--uninstall", "--purge"]) == 0
+    assert not cfg.CONFIG_PATH.exists()
 
 
 def test_install_refuses_rather_than_writing_a_unit_that_cannot_start(
