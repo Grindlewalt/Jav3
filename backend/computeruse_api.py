@@ -150,7 +150,7 @@ async def cfaccess_get():
 
 
 @router.put("/cfaccess")
-async def cfaccess_put(body: CFAccessBody):
+async def cfaccess_put(body: CFAccessBody, request: Request):
     """Save a rotated token and get it onto every machine that is reachable.
 
     The reply names the machines that took it, because the ones it does not name
@@ -158,8 +158,14 @@ async def cfaccess_put(body: CFAccessBody):
     cannot be told anything, since Jarvis is behind the very thing being
     rotated.
     """
+    # Bind to the hostname this request arrived on. That is Jarvis's own public
+    # name, which the host cannot otherwise know and which is by definition one
+    # of the places this token is presented. Without it the token ends up bound
+    # only to the music server, which is the one host it was migrated from.
+    here = (request.url.hostname or "").lower()
+    bound = sorted(set(body.hosts or cfaccess.hosts()) | ({here} if here else set()))
     try:
-        cfaccess.set_token(body.client_id, body.secret, body.hosts or None)
+        cfaccess.set_token(body.client_id, body.secret, bound)
     except cfaccess.CFAccessError as e:
         raise HTTPException(status_code=400, detail=str(e))
     updated = await cu.broadcast_access_token()
