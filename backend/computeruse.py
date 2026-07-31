@@ -675,12 +675,25 @@ async def push_access_token(client: Client) -> bool:
     cid, sec = cfaccess.get()
     if not (cid and sec):
         return False
+    # Sent as a request and WAITED ON, rather than fired off. Reporting a
+    # machine as updated because the bytes left the host would be a lie in the
+    # one case that matters most: a client running an older build does not
+    # understand this message, answers with an error, and would otherwise be
+    # listed as current right up until it locked itself out on the next
+    # reconnect. An error reply and a timeout both count as not updated.
+    req_id = uuid.uuid4().hex[:12]
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    client._waits[req_id] = fut
     try:
         await client.send(json.dumps(
-            {"config": {"cf_access_id": cid, "cf_access_secret": sec}}))
-        return True
-    except Exception:
+            {"id": req_id,
+             "config": {"cf_access_id": cid, "cf_access_secret": sec}}))
+        reply = await asyncio.wait_for(fut, 8.0)
+        return bool(reply.get("ok"))
+    except (asyncio.TimeoutError, Exception):
         return False
+    finally:
+        client._waits.pop(req_id, None)
 
 
 async def broadcast_access_token() -> list[str]:

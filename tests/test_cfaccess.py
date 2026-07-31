@@ -93,23 +93,72 @@ def test_whitespace_inside_a_token_is_refused_not_silently_kept(store):
 
 # --- the live push -----------------------------------------------------------
 
+def _acking_client(cid, name, answer):
+    """A client that replies to the config push the way `answer` says."""
+    seen = []
+
+    async def send(raw):
+        msg = json.loads(raw)
+        seen.append(msg)
+        reply = dict(answer)
+        reply["id"] = msg["id"]
+        cu.resolve_result(cid, msg["id"], reply)
+
+    cu.register(cu.Client(id=cid, name=name, platform="linux", send=send))
+    return seen
+
+
 @pytest.mark.asyncio
 async def test_a_rotated_token_reaches_a_connected_machine(store):
     """The point of the whole feature: rotate once, and the machines that are
     online do not have to be visited."""
     cfaccess.set_token(TOKEN_ID, SECRET_B)
-    sent = []
-
-    async def send(raw):
-        sent.append(json.loads(raw))
-
-    cu.register(cu.Client(id="mac-1", name="mac", platform="darwin", send=send))
+    seen = _acking_client("mac-1", "mac", {"ok": True})
     try:
         assert await cu.broadcast_access_token() == ["mac"]
-        assert sent == [{"config": {"cf_access_id": TOKEN_ID,
-                                    "cf_access_secret": SECRET_B}}]
+        assert seen[0]["config"] == {"cf_access_id": TOKEN_ID,
+                                     "cf_access_secret": SECRET_B}
     finally:
         cu.unregister("mac-1")
+
+
+@pytest.mark.asyncio
+async def test_a_client_too_old_to_understand_it_is_not_called_updated(store):
+    """The case this is really guarding. An older build answers the push with
+    an error, and reporting it as current would leave the operator believing a
+    machine was covered right up until it locked itself out on reconnect."""
+    cfaccess.set_token(TOKEN_ID, SECRET_B)
+    _acking_client("old-1", "oldbox", {"ok": False, "error": "unknown verb None"})
+    try:
+        assert await cu.broadcast_access_token() == []
+    finally:
+        cu.unregister("old-1")
+
+
+@pytest.mark.asyncio
+async def test_a_machine_that_never_answers_is_not_called_updated(store):
+    """A silent client is indistinguishable from one that ignored the push, so
+    it counts as not done rather than assumed done."""
+    cfaccess.set_token(TOKEN_ID, SECRET_B)
+
+    async def mute(raw):
+        pass                    # accepted the bytes, never replies
+
+    cu.register(cu.Client(id="mute-1", name="mute", platform="linux", send=mute))
+    try:
+        import backend.computeruse as mod
+        # keep the test fast; the real wait is 8s
+        monkey = mod.asyncio.wait_for
+
+        async def quick(fut, _t):
+            return await monkey(fut, 0.2)
+        mod.asyncio.wait_for = quick
+        try:
+            assert await cu.broadcast_access_token() == []
+        finally:
+            mod.asyncio.wait_for = monkey
+    finally:
+        cu.unregister("mute-1")
 
 
 @pytest.mark.asyncio

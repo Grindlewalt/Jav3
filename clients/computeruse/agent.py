@@ -674,25 +674,30 @@ class Agent:
         Never printed. The whole point of the config file being 0600 is that the
         secret is not lying around in scrollback, log files, or a screenshot of
         this terminal.
+
+        Returns (ok, error) so the caller can answer Jarvis truthfully.
         """
         cid = str(cfg.get("cf_access_id") or "").strip()
         sec = str(cfg.get("cf_access_secret") or "").strip()
         if not (cid and sec):
-            return
+            return False, "the pushed token was incomplete"
         if (cid, sec) == (self.cf_id, self.cf_secret):
-            return                      # already current; say nothing
+            return True, ""             # already current; say nothing
         try:
             cfgmod = _sibling("config")
             saved = cfgmod.load()
             saved.update({"cf_access_id": cid, "cf_access_secret": sec})
             cfgmod.save(saved)
         except Exception as e:
+            # the class name only: the exception text can quote the file, and
+            # for a JSON error that means quoting what is in it
             print(f"! could not save the new Access token: "
                   f"{e.__class__.__name__}", file=sys.stderr, flush=True)
-            return
+            return False, f"could not save it: {e.__class__.__name__}"
         self.cf_id, self.cf_secret = cid, sec
         print("Cloudflare Access token updated from Jarvis; it takes effect on "
               "the next reconnect", flush=True)
+        return True, ""
 
     def check_playable(self, path, kind):
         """The client's own containment check. The backend did this too; doing
@@ -937,7 +942,13 @@ class Agent:
         # machine, because a client with a stale token cannot reach Jarvis to
         # be told anything.
         if verb is None and isinstance(msg.get("config"), dict):
-            self.save_access_token(msg["config"])
+            ok, err = self.save_access_token(msg["config"])
+            # Answered, so Jarvis can tell the operator which machines really
+            # took the rotation. A build that predates this branch replies with
+            # an error instead, which is the correct answer for it.
+            if req:
+                await ws.send(json.dumps(
+                    {"id": req, "ok": ok, **({} if ok else {"error": err})}))
             return
         try:
             # the OS calls are blocking; keep the socket responsive

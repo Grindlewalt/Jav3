@@ -558,13 +558,14 @@ def test_a_pushed_access_token_is_saved_but_never_printed(tmp_path, monkeypatch,
         async def send(self, raw):
             sent.append(raw)
 
-    asyncio.run(agent._one(FakeWS(), json.dumps({"config": {
+    asyncio.run(agent._one(FakeWS(), json.dumps({"id": "r1", "config": {
         "cf_access_id": "abc123.access", "cf_access_secret": secret}})))
 
     assert (agent.cf_id, agent.cf_secret) == ("abc123.access", secret)
     saved = json.loads((tmp_path / "jarvis" / "computeruse.json").read_text())
     assert saved["cf_access_secret"] == secret
-    assert sent == [], "a config push wants no reply"
+    # acknowledged, so Jarvis can report which machines really took it
+    assert [json.loads(r) for r in sent] == [{"id": "r1", "ok": True}]
     out = capsys.readouterr()
     assert secret not in out.out and secret not in out.err
 
@@ -579,7 +580,7 @@ def test_a_config_push_cannot_rewrite_anything_but_the_access_token(
 
     asyncio.run(agent._one(None, json.dumps({"config": {
         "cf_access_id": "abc123.access", "cf_access_secret": "d" * 64,
-        "server": "https://evil.example", "roots": ["/"]}})))
+        "server": "https://evil.example", "roots": ["/"]}})))  # no id: no reply
 
     assert (agent.server, list(agent.grants)) == before
     saved = json.loads((tmp_path / "jarvis" / "computeruse.json").read_text())
