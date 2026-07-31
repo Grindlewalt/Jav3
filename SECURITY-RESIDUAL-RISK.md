@@ -4,7 +4,7 @@ What the architecture is, what it actually buys, and — the point of this
 document — what it does **not** cover. Written to be read by someone deciding
 whether to trust the agent with a new capability. Last updated 2026-07-19,
 covering the monitored-egress build (Layers 1–6; deploy separation / Layer 7 is
-out of scope), amended 2026-07-20 for the **staging-quarantine removal** (operator decision: writes land live; git is the review/undo surface). **This supersedes the netless posture** — the guest now has a
+out of scope), amended 2026-07-20 for the **staging-quarantine removal** (operator decision: writes land live; git is the review/undo surface) and 2026-07-30 for the **computer-use folder-ceiling removal** (operator decision: the GUI grant list is authoritative, see risk #12). **This supersedes the netless posture** — the guest now has a
 real, monitored internet path, a deliberate trade of maximal containment for
 watchability and genuine developer autonomy.
 
@@ -143,6 +143,36 @@ a watched, policy-gated, cuttable pipe to the internet.
     #1 with the human click removed — the anomaly detectors and the undo log
     are the backstop.
 
+12. **Computer-use folder ceiling removed (2026-07-30, operator decision).**
+    The desktop client (`clients/computeruse/`) used to treat its `--allow-root`
+    launch flags as a hard ceiling: folder grants made in the GUI could only
+    narrow them, so a compromised Jarvis host could address nothing the operator
+    had not already pointed that client at on its own command line. That is
+    gone. The grant list in the GUI is now authoritative and is pushed to the
+    client live.
+
+    Why: the ceiling made the Computer use tab dishonest. A folder granted there
+    but absent from the launch flags looked accepted and reached nothing, and
+    the only cure was stopping the client and re-running set-up with another
+    flag — so folders, the setting that changes most, were the one thing the GUI
+    could not change. The operator chose usability here explicitly.
+
+    What still holds: grants are created only by a **logged-in operator in the
+    GUI**, never by a tool — there is no verb, and no route, that lets the agent
+    widen its own reach. The client still resolves every path and refuses
+    anything outside the granted list, refuses non-media extensions, and refuses
+    a granted path that is not really a directory on that machine. The no-shell
+    property is untouched: the wire still carries a closed table of verbs with
+    typed params, never a command line.
+
+    The residual: an attacker who gets **host-level control of Jarvis and an
+    operator session** can now name any folder on a paired desktop and read
+    media filenames out of it (`list`/`find`) or play a file from it. Before,
+    that same attacker was confined to the folders already on the client's
+    command line. This is a defence-in-depth loss against a compromised host,
+    not a widening of the prompt-injection boundary — a compromised *agent*
+    still cannot make a grant.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -158,6 +188,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
 | Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
 | Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
+| Desktop reach via computer-use grants | Medium | **Medium** | Ceiling removed 2026-07-30 (operator decision): the GUI grant list is authoritative. Grants still need a logged-in operator — no tool can make one — and the client still refuses paths outside them, non-media files, and no-shell stays absolute. Residual = a host-level attacker with a session can name any folder on a paired desktop. |
 
 **Closing frame:** the netless design made the room have no phone; this design
 gives the room a **monitored, policy-gated, cuttable phone with no address book of
