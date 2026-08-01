@@ -67,6 +67,7 @@ export default function Voice() {
       onDoubleClap: () => {
         if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'double_clap' }))
       },
+      onClap: () => push('sys', '(👏)'),   // each registered clap, for tuning
     })
     audioRef.current = audio
 

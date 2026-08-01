@@ -19,22 +19,27 @@ const VAD_BASE = 0.02
 const VAD_PLAYING_MULT = 3
 const VAD_TRIP_BATCHES = 2
 
-// Double clap: two sharp attacks (loud batch rising straight out of quiet —
-// speech ramps, a clap doesn't) 150-800ms apart. A single clap can't trip the
-// barge-in VAD (it needs two consecutive hot batches; a clap is one).
-const CLAP_MIN = 0.22
-const CLAP_QUIET = 0.07
-const CLAP_GAP_MIN = 150
-const CLAP_GAP_MAX = 800
+// Double clap: two sharp transients 120-900ms apart. Detection runs on the
+// batch PEAK (a clap is ~10ms of near-full-scale; averaged into a 60ms RMS
+// it vanishes) with a quiet-RMS precondition so speech can't qualify —
+// voiced sound keeps the average up, a clap rises straight out of silence.
+// A single clap can't trip the barge-in VAD (that needs two consecutive hot
+// batches; a clap occupies one).
+const CLAP_PEAK = 0.4
+const CLAP_QUIET = 0.08
+const CLAP_GAP_MIN = 120
+const CLAP_GAP_MAX = 900
 const CLAP_REFRACTORY = 1500
 
 export class VoiceAudio {
-  constructor({ onMicFrame, onBargeIn, onChunkPlayed, onLevel, onDoubleClap }) {
+  constructor({ onMicFrame, onBargeIn, onChunkPlayed, onLevel, onDoubleClap,
+                onClap }) {
     this.onMicFrame = onMicFrame
     this.onBargeIn = onBargeIn
     this.onChunkPlayed = onChunkPlayed
     this.onLevel = onLevel || (() => {})
     this.onDoubleClap = onDoubleClap || (() => {})
+    this.onClap = onClap || (() => {})   // single-clap cue, for feedback/tuning
     this.muted = false
     this._hot = 0
     this._prevRms = 0
@@ -63,7 +68,7 @@ export class VoiceAudio {
     this.node.port.onmessage = ({ data }) => {
       this.onLevel(data.rms)
       this._vad(data.rms)
-      this._clap(data.rms)
+      this._clap(data.rms, data.peak || 0)
       if (!this.muted) this.onMicFrame(data.pcm)
     }
     this.playCtx = new AudioContext({ sampleRate: PLAY_RATE })
@@ -201,12 +206,13 @@ export class VoiceAudio {
 
   // ---- barge-in VAD ------------------------------------------------------------
 
-  _clap(rms) {
-    const sharp = rms >= CLAP_MIN && this._prevRms <= CLAP_QUIET
+  _clap(rms, peak) {
+    const sharp = peak >= CLAP_PEAK && this._prevRms <= CLAP_QUIET
     this._prevRms = rms
     if (this.muted || !sharp) return
     const now = performance.now()
     if (now - this._clapFired < CLAP_REFRACTORY) return
+    this.onClap()
     const gap = now - this._lastClap
     if (this._lastClap && gap >= CLAP_GAP_MIN && gap <= CLAP_GAP_MAX) {
       this._lastClap = 0

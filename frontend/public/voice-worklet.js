@@ -24,13 +24,18 @@ class VoiceCapture extends AudioWorkletProcessor {
       if (this.n === BATCH) {
         const out = new Int16Array(BATCH)
         let sum = 0
+        let peak = 0
         for (let j = 0; j < BATCH; j++) {
           const s = Math.max(-1, Math.min(1, this.buf[j]))
+          const a = Math.abs(s)
+          if (a > peak) peak = a
           sum += s * s
           out[j] = s * 0x7fff
         }
+        // rms drives speech detection; peak drives clap detection — a clap
+        // is a ~10ms transient that a 60ms average happily hides
         this.port.postMessage(
-          { pcm: out.buffer, rms: Math.sqrt(sum / BATCH) }, [out.buffer])
+          { pcm: out.buffer, rms: Math.sqrt(sum / BATCH), peak }, [out.buffer])
         this.n = 0
       }
     }
