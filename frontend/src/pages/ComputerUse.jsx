@@ -40,6 +40,36 @@ const Block = ({ text }) => (
   <div className="cu-block"><Copy text={text} /><pre>{text}</pre></div>
 )
 
+// Everything that takes the client off a machine, in the order it has to happen.
+//
+// Written out by hand rather than calling `agent.py --uninstall`, and that is
+// deliberate: the copy being removed is by definition the OLD one, and it may
+// predate the flag. Every line is also safe to run when the thing it names is
+// not there, so this is one paste whether the client was installed as a
+// service, left running in a terminal, or half set up and abandoned.
+//
+// There is no button for this and there should not be. The client only ever
+// accepts verbs from the closed table in backend/computeruse.py, and none of
+// them can stop or uninstall it — a Jarvis that could remove itself from the
+// operator's machines is a remote-kill primitive, and the whole design assumes
+// Jarvis may be compromised. Ending access is the operator's own act, at their
+// own terminal. Closing the process is all it takes; nothing listens here.
+function removeCommands(platform) {
+  const mac = platform === 'darwin' || platform === 'mac'
+  return (mac
+    ? 'launchctl bootout gui/$UID/network.atomos.jarvis.computeruse 2>/dev/null\n'
+      + 'rm -f ~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist\n'
+    : 'systemctl --user disable --now jarvis-computeruse.service 2>/dev/null\n'
+      + 'rm -f ~/.config/systemd/user/jarvis-computeruse.service\n'
+      + 'systemctl --user daemon-reload\n')
+    // a client started by --setup runs in the foreground and has no service to
+    // stop, so the paste has to cover that too or it looks like it worked and
+    // the machine stays connected
+    + 'pkill -f computeruse/agent.py 2>/dev/null\n'
+    + 'rm -rf ~/jarvis-client\n'
+    + 'rm -f ~/.config/jarvis/computeruse.json'
+}
+
 export default function ComputerUse() {
   const [state, setState] = useState(null)
   const [token, setToken] = useState('')
@@ -400,6 +430,28 @@ function Machine({ m, caps, served, expanded, onToggle, probe, onProbe,
             : probe.loading ? <p className="dim">asking…</p>
             : probe.error ? <p className="error">{probe.error}</p>
             : <Hardware d={probe} />}
+
+          {/* Folded, because it is not the thing you came here for — but on the
+              card, not buried in the set-up wizard, because "get this off my
+              machine" is the one instruction you want to find in a hurry. */}
+          <details className="cu-remove">
+            <summary>Remove Jarvis from {m.name}</summary>
+            <p className="dim small">
+              Paste this into a terminal <strong>on {m.name}</strong>. It stops
+              the client however it was started, removes its service definition,
+              and deletes its folder and its saved pairing token. Every line is
+              harmless if that part is already gone. {m.name} disappears from
+              this page the moment the process ends.
+            </p>
+            <Block text={removeCommands(m.platform)} />
+            <p className="dim small">
+              Folders and privileges you granted {m.name} stay here, so setting
+              it up again picks them straight back up. Remove them above if you
+              want them gone. The pairing token is shared by every machine —
+              rotating it disconnects all of them, so only do that if this one
+              was compromised.
+            </p>
+          </details>
         </div>
       )}
     </section>
@@ -625,17 +677,9 @@ function Setup({ token, machines, onClose }) {
     ].join(' \\\n'),
     // no flags: --setup already wrote them to ~/.config/jarvis/computeruse.json
     install: `${py} ~/jarvis-client/computeruse/agent.py --install`,
-    // Written out by hand rather than calling agent.py --uninstall, because the
-    // copy being removed is by definition the OLD one and may predate that
-    // flag. Every line is safe to run when the thing it names is not there.
-    remove: (platform === 'mac'
-      ? 'launchctl bootout gui/$UID/network.atomos.jarvis.computeruse 2>/dev/null\n'
-        + 'rm -f ~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist\n'
-      : 'systemctl --user disable --now jarvis-computeruse.service 2>/dev/null\n'
-        + 'rm -f ~/.config/systemd/user/jarvis-computeruse.service\n'
-        + 'systemctl --user daemon-reload\n')
-      + 'rm -rf ~/jarvis-client\n'
-      + 'rm -f ~/.config/jarvis/computeruse.json',
+    // one source of truth with the card's own Remove section — a second copy of
+    // this is a second thing to forget when a path changes
+    remove: removeCommands(platform),
     enable: platform === 'mac'
       ? 'launchctl bootstrap gui/$UID '
         + '~/Library/LaunchAgents/network.atomos.jarvis.computeruse.plist\n'
