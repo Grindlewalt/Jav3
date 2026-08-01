@@ -1,5 +1,7 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
+websockets>=13         # voice.py's sidecar link (transitive via uvicorn, pinned
+                       # for the additional_headers API — renamed in ws14)
 aiosqlite>=0.20
 pydantic-settings>=2.4
 httpx[http2]>=0.27

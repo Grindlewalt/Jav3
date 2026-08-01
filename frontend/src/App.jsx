@@ -22,6 +22,7 @@ import Logs from './pages/Logs.jsx'
 import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
 import ComputerUse from './pages/ComputerUse.jsx'
+import Voice from './pages/Voice.jsx'
 import Notices, { useNotices } from './Notices.jsx'
 
 // Primary destinations stay on the bar; everything else lives behind "More".
@@ -293,6 +294,7 @@ function GuiBridge() {
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
   const [, setCfgReady] = useState(false) // bump once the media allowlist lands
+  const [voiceEnabled, setVoiceEnabled] = useState(false) // /voice link gate
   const [menuOpen, setMenuOpen] = useState(false) // mobile nav drawer
   const [moreOpen, setMoreOpen] = useState(false) // desktop overflow menu
   const [theme, toggleTheme] = useTheme()
@@ -386,7 +388,11 @@ export default function App() {
   useEffect(() => {
     api('/api/auth/me').then(setUser).catch(() => setUser(null))
     api('/api/config')
-      .then((c) => { setMediaHosts(c.media_hosts); setCfgReady(true) })
+      .then((c) => {
+        setMediaHosts(c.media_hosts)
+        setVoiceEnabled(!!c.voice_enabled)
+        setCfgReady(true)
+      })
       .catch(() => {})
   }, [])
 
@@ -398,6 +404,12 @@ export default function App() {
   if (user === undefined) return <div className="center">…</div>
   if (user === null && location.pathname !== '/login')
     return <Navigate to="/login" replace />
+
+  // Voice rides the overflow menu only when the backend says the mode is on
+  // (flag off = the sidecar isn't deployed; a dead link would just confuse)
+  const moreLinks = voiceEnabled
+    ? [{ to: '/voice', label: 'Voice' }, ...MORE_LINKS]
+    : MORE_LINKS
 
   // the same links either way — only the container and the label's visibility
   // differ, which is what lets the icons fly between the two
@@ -428,7 +440,7 @@ export default function App() {
         </button>
         {moreOpen && (
           <div className="notif-drop more-drop" role="menu">
-            {MORE_LINKS.map((l) => (
+            {moreLinks.map((l) => (
               <NavLink key={l.to} to={l.to} role="menuitem"
                        className="notif-item more-item"
                        onClick={closeMore}>{l.label}</NavLink>
@@ -482,7 +494,7 @@ export default function App() {
           )}
           <div className={menuOpen ? 'nav-drawer open' : 'nav-drawer'}
                aria-hidden={!menuOpen}>
-            {[...PRIMARY_LINKS, ...MORE_LINKS].map((l) => (
+            {[...PRIMARY_LINKS, ...moreLinks].map((l) => (
               <NavLink key={l.to} to={l.to} end={l.end}
                        tabIndex={menuOpen ? 0 : -1}>
                 {l.label}
@@ -519,6 +531,7 @@ export default function App() {
         <Route path="/review" element={<Review />} />
         <Route path="/network" element={<Network />} />
         <Route path="/computer" element={<ComputerUse />} />
+        <Route path="/voice" element={<Voice />} />
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />
         <Route path="/logs" element={<Logs />} />
