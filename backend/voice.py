@@ -79,10 +79,13 @@ LOCAL_CONTEXT_EXCLUDE = ("standing-memory", "all-projects.md", "agents-index",
 
 # The local tier's toolset: conversation + media control + a quick lookup.
 # Thirty tool schemas would drown an 8B (and slow its prefill); anything
-# beyond these is exactly what escalation exists for.
-LOCAL_TOOLS = ("play_music", "music_control", "music_search", "music_status",
+# beyond these is exactly what escalation exists for. NB music_play (the
+# library launcher), NOT play_music (project audio files) — shipping the
+# wrong twin left the first live session unable to start a song.
+LOCAL_TOOLS = ("music_play", "music_control", "music_search", "music_status",
                "play_movie", "computer_play", "computer_playback",
-               "computer_status", "computer_volume", "web_search", "web_read")
+               "computer_status", "computer_volume", "computer_open_link",
+               "web_search", "web_read")
 
 PEAK_ASK = "Heads up: peak pricing is in effect. Should I continue?"
 PEAK_DROPPED = "Okay, I'll hold off. Say it again later if you want it."

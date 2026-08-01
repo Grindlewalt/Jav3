@@ -56,7 +56,13 @@ async def run() -> str:
         + ("" if n else "  (nothing to play on there — but the Jarvis player "
                         "works without it)"))
     np = s.get("now_playing")
-    if np:
+    if np and not n:
+        # the server remembers its last track after every player closed; read
+        # verbatim this sent a voice agent chasing a phantom "already playing"
+        who = " — ".join(x for x in (np.get("title"), np.get("artist")) if x)
+        lines.append(f"music app: nothing actually playing (no player open — "
+                     f"the server just remembers its last track, {who})")
+    elif np:
         who = " — ".join(x for x in (np.get("title"), np.get("artist")) if x)
         state = "paused" if np.get("paused") else "playing"
         lines.append(f"music app: {state} {who}"
