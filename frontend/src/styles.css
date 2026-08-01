@@ -2270,3 +2270,7 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   font-size: 12.5px; background: none; padding: 2px; }
 .voice-line.tool { align-self: flex-start; color: var(--dim);
   font-size: 12.5px; background: none; padding: 2px 12px; }
+
+/* the voice-mode corner chip: same footprint as the theme toggle beside it */
+.voice-corner { display: inline-flex; align-items: center; justify-content: center; }
+.voice-corner.active { color: var(--accent); }

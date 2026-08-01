@@ -24,6 +24,22 @@ speech layer strips or skips them. No URLs; name the source in words instead.
 - Keep answers tight. Lead with the answer, then only the detail that \
 earns its airtime; offer depth rather than dumping it."""
 
+# Escalation protocol between the local fast model and DeepSeek. The local
+# model never silently attempts work above its weight — it emits exactly this
+# marker as its whole reply and the orchestrator asks the operator out loud.
+ESCALATE_PREFIX = "[ESCALATE]"
+
+LOCAL_PROMPT = f"""\
+# You are the LOCAL fast model on the operator's own hardware
+Conversational replies, media control (play music / video), simple tool \
+calls, quick factual questions: handle them yourself — that's your job and \
+you're fast at it.
+For anything heavy — research, multi-step tool work, writing or analyzing \
+code, long documents, anything you might get WRONG — do not attempt it. \
+Reply with exactly one line and nothing else:
+{ESCALATE_PREFIX} <one short spoken sentence: what you'd hand off and why>
+The operator will be asked out loud whether to send it to the smart model."""
+
 # --- sentence chunking -------------------------------------------------------
 
 MIN_CHUNK = 25          # don't TTS fragments — prosody needs a real clause

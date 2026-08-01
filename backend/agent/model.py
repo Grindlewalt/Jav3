@@ -356,7 +356,10 @@ class ModelGateway:
         model_name/base_url override the defaults so an agent can run on a
         different model or a local endpoint (e.g. ollama). A custom endpoint
         usually needs no key, so the DeepSeek-key requirement is relaxed there."""
-        if conversation_id is not None:
+        # the peak gate prices DEEPSEEK hours — a local endpoint (ollama) costs
+        # nothing at any hour, so only metered calls are gated
+        if conversation_id is not None and (
+                not base_url or _is_deepseek_endpoint(base_url)):
             check_peak_gate(conversation_id)
         budget = budget_mod.get(op_id) if op_id else budget_mod.current()
         if budget is not None and budget.over():

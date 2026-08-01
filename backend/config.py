@@ -42,7 +42,10 @@ class Settings(BaseSettings):
     # honored; anything else is refused and the call falls back to the default.
     # deepseek_base_url is always allowed on top of this list.
     model_base_url_allowlist: list[str] = ["http://127.0.0.1:11434",
-                                           "http://localhost:11434"]
+                                           "http://localhost:11434",
+                                           # the main server's ollama (both
+                                           # GPUs live there); voice local tier
+                                           "http://10.0.0.58:11434"]
     model_name: str = "deepseek-v4-flash"
     # Models the nav switcher may select at runtime (persisted in session_state,
     # no restart). Agents with an explicit model pin are unaffected by the switch.
@@ -244,6 +247,14 @@ class Settings(BaseSettings):
     voice_sidecar_url: str = "ws://10.0.0.58:8100/ws"
     voice_sidecar_token: str = ""       # must match VOICEBOX_TOKEN on the sidecar
     voice_max_workers: int = 3          # backgrounded twins per voice session
+    # Local fast tier: when set (e.g. "llama3.1:8b"), voice turns run on this
+    # ollama model by default — conversational stuff, media control, quick
+    # questions stay on the operator's own GPUs with no API cost or peak gate.
+    # The model escalates to DeepSeek only by [ESCALATE] + spoken permission,
+    # or immediately when the operator says "smart model" / "deepseek".
+    # Empty string = every voice turn runs on DeepSeek as before.
+    voice_local_model: str = ""
+    voice_local_base_url: str = "http://10.0.0.58:11434/v1"
 
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped

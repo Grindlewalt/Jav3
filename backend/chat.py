@@ -282,7 +282,10 @@ async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
 
 async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                          user_msg: str = "", tab: str | None = None,
-                         voice: bool = False) -> None:
+                         voice: bool = False, model_name: str | None = None,
+                         base_url: str | None = None,
+                         context_exclude: tuple = (),
+                         tools_only: tuple = ()) -> None:
     """One whole chat turn, detached from any HTTP connection: clicking off
     the tab no longer kills the work. Every event is published to the
     conversation's bus channel; any number of SSE tails (the original POST,
@@ -336,13 +339,19 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # tools deep in the loop (and spawn_agent children) resolve this pin
         # instead of the DB global — see toolctx.active_slug
         ptoken = runtime.active_project.set(active)
-        system_prompt = await assemble_system_prompt(db, active=active)
+        # context_exclude: the voice local tier runs an 8B with a small ctx
+        # window — it gets a slim sandwich (operator rules are never droppable)
+        system_prompt = await assemble_system_prompt(
+            db, active=active, exclude=set(context_exclude) or None)
         if voice:
             # spoken turns: narrate-before-acting + speakable-output rules.
             # Appended after everything (incl. the operator-rules tail) so it
-            # rides the same end-of-prompt salience the rules rely on.
-            from .voice_text import VOICE_PROMPT
+            # rides the same end-of-prompt salience the rules rely on. A turn
+            # routed to the local tier also gets the escalation protocol.
+            from .voice_text import LOCAL_PROMPT, VOICE_PROMPT
             system_prompt = f"{system_prompt}\n\n{VOICE_PROMPT}"
+            if base_url:
+                system_prompt = f"{system_prompt}\n\n{LOCAL_PROMPT}"
         # tool subsetting: with no project loaded, project-scoped run/git/
         # search tools can only error — withhold them. The FILE tools stay:
         # they fall back to the chat's hidden artifact store (persistent
@@ -360,6 +369,10 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         else:
             # per-project autonomy dial: withhold tools above the project's level
             entries = autonomy.filter_entries(entries, await _project_autonomy(db, active))
+        if tools_only:
+            # the voice local tier: an 8B gets a hand-picked conversational
+            # toolset, not thirty schemas — everything else is escalation's job
+            entries = [e for e in entries if e["name"] in tools_only]
         tools = openai_tool_specs(entries)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it
@@ -390,7 +403,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                               on_tool_call=db_tool_sink(db, conversation_id),
                               # voice turns skip the second-pass rules rewrite:
                               # the streamed text was already spoken aloud
-                              rewrite_rules=not voice)
+                              rewrite_rules=not voice,
+                              # voice local tier: run on the operator's ollama
+                              # (guest-loop branch above ignores these — voice
+                              # + guest loop is not a supported combination)
+                              model_name=model_name, base_url=base_url)
 
         sink = db_tool_sink(db, conversation_id)
         pending_tool: dict = {}
@@ -632,12 +649,17 @@ async def chat(body: ChatRequest):
 
 def start_turn(conversation_id: int, *, ephemeral: bool = False,
                user_msg: str = "", tab: str | None = None,
-               voice: bool = False) -> asyncio.Task:
+               voice: bool = False, model_name: str | None = None,
+               base_url: str | None = None,
+               context_exclude: tuple = (),
+               tools_only: tuple = ()) -> asyncio.Task:
     """Launch a chat turn as a detached task. The one shared seam between the
     HTTP endpoint above and the voice orchestrator: the caller has already
     inserted the user message row, run the peak gate, and (if it wants the
     early events) subscribed to the conversation's bus channel."""
     task = asyncio.create_task(
-        _run_chat_turn(conversation_id, ephemeral, user_msg, tab, voice=voice))
+        _run_chat_turn(conversation_id, ephemeral, user_msg, tab, voice=voice,
+                       model_name=model_name, base_url=base_url,
+                       context_exclude=context_exclude, tools_only=tools_only))
     _active_turns[conversation_id] = task
     return task

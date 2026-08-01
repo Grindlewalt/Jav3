@@ -44,8 +44,9 @@ from .agent.model import confirm_peak, in_peak_window, peak_confirmed
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import get_active_project
-from .voice_text import (CUTOFF_MARK, CUTOFF_NOTHING, SpeechChunker,
-                         annotate_cutoff, heard_upto_note, spoken_fraction)
+from .voice_text import (CUTOFF_MARK, CUTOFF_NOTHING, ESCALATE_PREFIX,
+                         SpeechChunker, annotate_cutoff, heard_upto_note,
+                         spoken_fraction)
 
 log = logging.getLogger(__name__)
 
@@ -58,12 +59,35 @@ THINKING = "thinking"
 SPEAKING = "speaking"
 BARGE_PENDING = "barge_pending"
 CONFIRM_PEAK = "confirm_peak"
+CONFIRM_ESCALATE = "confirm_escalate"
+CONFIRM_STATES = (CONFIRM_PEAK, CONFIRM_ESCALATE)
 
 AFFIRMATIVE = ("yes", "yeah", "yep", "sure", "go ahead", "continue",
-               "do it", "okay", "ok", "please do")
+               "do it", "okay", "ok", "please do", "send it")
+
+# operator override: these words anywhere in an utterance route the turn
+# straight to DeepSeek, skipping the local tier and its permission ask
+SMART_WORDS = ("smart model", "deepseek", "big model")
+
+# The slim context for local turns. An 8B in a 4-8k window can't carry the
+# full sandwich (and prefilling it costs seconds on a 3060) — it keeps soul,
+# user, env and the active project; the heavyweight indexes and the full
+# standing-memory notes are dropped. The operator-rules tail survives any
+# exclude by design (memory.assemble_system_prompt).
+LOCAL_CONTEXT_EXCLUDE = ("standing-memory", "all-projects.md", "agents-index",
+                         "secrets-index", "computers-index")
+
+# The local tier's toolset: conversation + media control + a quick lookup.
+# Thirty tool schemas would drown an 8B (and slow its prefill); anything
+# beyond these is exactly what escalation exists for.
+LOCAL_TOOLS = ("play_music", "music_control", "music_search", "music_status",
+               "play_movie", "computer_play", "computer_playback",
+               "computer_status", "computer_volume", "web_search", "web_read")
 
 PEAK_ASK = "Heads up: peak pricing is in effect. Should I continue?"
 PEAK_DROPPED = "Okay, I'll hold off. Say it again later if you want it."
+ESCALATE_ASK = "Want me to send it up?"
+ESCALATE_DROPPED = "Okay, leaving it."
 BUSY_LINE = "One second, I'm still working on that. I'll take this next."
 CAP_LINE = ("One second — my hands are completely full. I'll take that "
             "as soon as something finishes.")
@@ -227,9 +251,13 @@ class VoiceSession:
         self.order: list[int] = []          # emit order, current turn only
         self.barge_pos: tuple[int, int] | None = None
 
-        self.pending_peak: str | None = None
+        self.pending_peak: dict | None = None    # {text, smart, insert}
+        self.pending_escalate: str | None = None  # utterance awaiting send-up
         self.queued: list[str] = []      # transcripts parked while busy
         self.turn_user_msg = ""          # what started the running turn
+        self.turn_local = False          # this turn runs on the local tier
+        self._hold: str | None = None    # opening tokens held back until we
+        self._escalating = False         # know the reply isn't [ESCALATE]
         self.workers: dict[int, dict] = {}   # worker cid -> {task, watcher, …}
         self.pending_deliveries: list[str] = []   # spoken digests, FIFO
         self.dead = False                # browser gone: keep DB work, stop audio
@@ -340,10 +368,13 @@ class VoiceSession:
 
         await self._send_json({"type": "transcript", "text": text})
 
-        if self.state == CONFIRM_PEAK:
+        if self.state in CONFIRM_STATES:
             # if the ask's audio was still playing, the answer moots it
             await self._send_json({"type": "stop_playback"})
-            await self._on_peak_answer(text)
+            if self.state == CONFIRM_PEAK:
+                await self._on_peak_answer(text)
+            else:
+                await self._on_escalate_answer(text)
             return
 
         await self._route_speech(text, barge_pos=None)
@@ -486,7 +517,15 @@ class VoiceSession:
 
     # ---- turns ---------------------------------------------------------------
 
-    async def _begin_turn(self, text: str) -> None:
+    async def _begin_turn(self, text: str, *, smart: bool = False,
+                          insert: bool = True) -> None:
+        """Start a turn. Routing: with a local tier configured, turns run on
+        the operator's ollama unless `smart` (an escalation rerun) or the
+        utterance names the smart model outright. `insert=False` reruns an
+        utterance whose user row already exists (escalation)."""
+        if any(w in text.lower() for w in SMART_WORDS):
+            smart = True
+        local = bool(settings.voice_local_model) and not smart
         db = await get_db()
         try:
             await self._ensure_conversation(db, text)
@@ -496,24 +535,33 @@ class VoiceSession:
                 await self._send_json({"type": "queued", "text": text})
                 await self._speak_system(BUSY_LINE)
                 return
-            if in_peak_window() and not peak_confirmed(self.cid):
-                self.pending_peak = text
+            # local inference is free at any hour — only DeepSeek is gated
+            if not local and in_peak_window() and not peak_confirmed(self.cid):
+                self.pending_peak = {"text": text, "smart": smart,
+                                     "insert": insert}
                 self.state = CONFIRM_PEAK
                 await self._push_state()
                 await self._speak_system(PEAK_ASK)
                 return
-            await db.execute(
-                "INSERT INTO messages (conversation_id, role, content) "
-                "VALUES (?, 'user', ?)", (self.cid, text))
-            await db.commit()
+            if insert:
+                await db.execute(
+                    "INSERT INTO messages (conversation_id, role, content) "
+                    "VALUES (?, 'user', ?)", (self.cid, text))
+                await db.commit()
         finally:
             await db.close()
 
         self._reset_turn_state()
         self.turn_user_msg = text
+        self.turn_local = local
+        self._hold = "" if local else None   # watch for an [ESCALATE] opener
         self.turn_q = bus.subscribe(chat._chan(self.cid))
-        self.turn_task = chat.start_turn(self.cid, user_msg=text,
-                                         tab=self.tab, voice=True)
+        self.turn_task = chat.start_turn(
+            self.cid, user_msg=text, tab=self.tab, voice=True,
+            model_name=settings.voice_local_model if local else None,
+            base_url=settings.voice_local_base_url if local else None,
+            context_exclude=LOCAL_CONTEXT_EXCLUDE if local else (),
+            tools_only=LOCAL_TOOLS if local else ())
         self.turn_consumer = asyncio.create_task(self._consume_turn())
         self.state = THINKING
         await self._push_state()
@@ -532,6 +580,8 @@ class VoiceSession:
         self.raw_text = ""
         self.order = []
         self.barge_pos = None
+        self._escalating = False
+        self._hold = None
         if len(self.chunks) > 400:       # prune long-session bookkeeping
             for i in sorted(self.chunks)[:-200]:
                 del self.chunks[i]
@@ -543,8 +593,12 @@ class VoiceSession:
                 ev = await q.get()
                 kind = ev.get("type")
                 if kind == "token":
-                    self.raw_text += ev.get("text", "")
-                    for sentence in self.chunker.feed(ev.get("text", "")):
+                    text = ev.get("text", "")
+                    self.raw_text += text
+                    text = self._filter_escalate(text)
+                    if text is None:
+                        continue
+                    for sentence in self.chunker.feed(text):
                         await self._enqueue_speech(sentence)
                 elif kind == "tool":
                     self.turn_saw_tool = True
@@ -566,11 +620,34 @@ class VoiceSession:
         finally:
             bus.unsubscribe(chat._chan(cid), q)
 
+    def _filter_escalate(self, text: str) -> str | None:
+        """Local turns hold their opening tokens until it's clear the reply
+        isn't an [ESCALATE] line — that marker is protocol, never speech.
+        Returns text to speak now (may include the released hold), or None
+        while still deciding / once escalation is confirmed."""
+        if self._escalating:
+            return None
+        if self._hold is None:
+            return text
+        self._hold += text
+        lead = self._hold.lstrip()
+        if lead.startswith(ESCALATE_PREFIX):
+            self._escalating = True
+            self._hold = None
+            return None
+        if ESCALATE_PREFIX.startswith(lead[:len(ESCALATE_PREFIX)]):
+            return None                  # still a possible prefix — keep holding
+        released, self._hold = self._hold, None
+        return released
+
     async def _finish_turn(self, final: str) -> None:
         """Heal streamed-vs-final drift, then flush the chunker. Voice turns
         skip the rules rewrite, so normally final == raw_text and only the
         remainder flushes; if the bus shed tokens under load, speak the
         missing suffix of the final text instead."""
+        if self._escalating or final.lstrip().startswith(ESCALATE_PREFIX):
+            await self._propose_escalation(final)
+            return
         interrupted = (chat.INTERRUPTED_MARKER in final
                        or CUTOFF_MARK in final or final == CUTOFF_NOTHING)
         if not interrupted:
@@ -581,6 +658,41 @@ class VoiceSession:
                 await self._enqueue_speech(sentence)
         self.turn_done = True
         await self._maybe_idle()
+
+    async def _propose_escalation(self, final: str) -> None:
+        """The local model bounced the request. Scrub the protocol line from
+        the transcript (the history must end at the operator's utterance so
+        the smart rerun sees a clean turn), then ask out loud."""
+        reason = final.lstrip()[len(ESCALATE_PREFIX):].strip() \
+            if final.lstrip().startswith(ESCALATE_PREFIX) else ""
+        db = await get_db()
+        try:
+            await db.execute(
+                "DELETE FROM messages WHERE id = ("
+                "SELECT id FROM messages WHERE conversation_id = ? AND "
+                "role = 'assistant' ORDER BY id DESC LIMIT 1) "
+                "AND content LIKE ?",
+                (self.cid, ESCALATE_PREFIX + "%"))
+            await db.commit()
+        finally:
+            await db.close()
+        self.pending_escalate = self.turn_user_msg
+        self.turn_done = True
+        self.state = CONFIRM_ESCALATE
+        await self._push_state()
+        ask = f"{reason} {ESCALATE_ASK}" if reason else \
+            f"That needs the smart model. {ESCALATE_ASK}"
+        await self._speak_system(ask)
+
+    async def _on_escalate_answer(self, text: str) -> None:
+        pending, self.pending_escalate = self.pending_escalate, None
+        if any(a in text.lower() for a in AFFIRMATIVE):
+            self.state = LISTENING
+            await self._begin_turn(pending, smart=True, insert=False)
+        else:
+            self.state = LISTENING
+            await self._push_state()
+            await self._speak_system(ESCALATE_DROPPED)
 
     # ---- speech out -----------------------------------------------------------
 
@@ -634,7 +746,8 @@ class VoiceSession:
         if any(a in lowered for a in AFFIRMATIVE):
             confirm_peak(self.cid)
             self.state = LISTENING
-            await self._begin_turn(pending)
+            await self._begin_turn(pending["text"], smart=pending["smart"],
+                                   insert=pending["insert"])
         else:
             self.state = LISTENING
             await self._push_state()
@@ -676,8 +789,11 @@ class VoiceSession:
 
     async def _maybe_idle(self) -> None:
         """LISTENING once the turn is over and every non-system chunk of it
-        has been played; then drain anything that queued up meanwhile."""
-        if not self.turn_done or self.state == BARGE_PENDING:
+        has been played; then drain anything that queued up meanwhile. Never
+        fires out of a pending question — a played confirm-ask chunk must not
+        flip the state from under the expected yes/no."""
+        if not self.turn_done or self.state == BARGE_PENDING \
+                or self.state in CONFIRM_STATES:
             return
         if any(not self.chunks[i]["played"] for i in self.order):
             return

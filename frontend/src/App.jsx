@@ -104,6 +104,21 @@ const MoonIcon = () => (
   </svg>
 )
 
+// The hands-free corner button: rides beside the theme toggle (top bar, or
+// the rail's foot when the nav is collapsed) and drops you straight onto the
+// voice screen. Rendered only when the backend reports voice mode enabled.
+function VoiceCorner() {
+  return (
+    <NavLink to="/voice" className="nav-chip voice-corner"
+             aria-label="voice mode" title="Voice">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        <path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" />
+      </svg>
+    </NavLink>
+  )
+}
+
 function ThemeToggle({ theme, onToggle }) {
   const light = theme === 'light'
   return (
@@ -470,6 +485,7 @@ export default function App() {
               <div className="nav-links">{navLinks}</div>
               <div className="nav-status">
                 {phone && <VmStatus inBar />}
+                {voiceEnabled && <VoiceCorner />}
                 <ThemeToggle theme={theme} onToggle={toggleTheme} />
               </div>
               <button className="nav-toggle"
@@ -484,6 +500,7 @@ export default function App() {
             <>
               <div className="rail-links">{navLinks}</div>
               <span className="grow" />
+              {voiceEnabled && <VoiceCorner />}
               <ThemeToggle theme={theme} onToggle={toggleTheme} />
             </>, navSlot)}
 
