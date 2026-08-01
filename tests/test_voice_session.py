@@ -260,51 +260,6 @@ async def test_barge_on_finished_turn_annotates_heard_upto(seeded, monkeypatch):
     assert rows[2] == ("user", "hang on, new thing")
 
 
-async def test_second_utterance_queues_behind_tool_turn(seeded, monkeypatch):
-    """While the turn is mid-tool, new speech parks (phase-4 clones replace
-    this) and a canned busy line is spoken."""
-    from backend import chat as chat_mod, voice
-    session, out = make_session(monkeypatch)
-    release = asyncio.Event()
-
-    async def tool_turn(cid, system_prompt, history, tools=None, **kw):
-        yield {"type": "tool", "id": "t1", "name": "web_search", "args": {}}
-        await release.wait()
-        yield {"type": "tool_result", "id": "t1", "name": "web_search",
-               "ok": True, "result": "…"}
-        yield {"type": "final", "content": "Found it: the answer is 42."}
-
-    monkeypatch.setattr(chat_mod, "run_turn", tool_turn)
-    await session._on_transcript("look something up")
-    for _ in range(50):                      # let the tool event land
-        await asyncio.sleep(0.01)
-        if session.turn_saw_tool:
-            break
-    assert session.turn_saw_tool
-
-    await session._on_transcript("also what time is it")
-    assert session.queued == ["also what time is it"]
-    busy = [m for m in session.link.sent_json
-            if m["type"] == "tts" and m["text"] == voice.BUSY_LINE]
-    assert busy, "the canned busy line should be spoken"
-
-    release.set()
-    await settle(session)
-    # the queued utterance drains once the turn's audio is acked
-    tts = [m for m in session.link.sent_json if m["type"] == "tts"
-           and m["text"] != voice.BUSY_LINE]
-    for t in tts:
-        await session._on_sidecar_json(
-            {"type": "tts_done", "id": t["id"], "dur_ms": 500})
-        await session.on_browser_json(
-            {"type": "chunk_played", "chunk_id": t["id"]})
-    await settle(session)
-    db = await get_db()
-    try:
-        async with db.execute(
-            "SELECT content FROM messages WHERE conversation_id = ? AND "
-            "role = 'user' ORDER BY id", (session.cid,)) as cur:
-            users = [r["content"] for r in await cur.fetchall()]
-    finally:
-        await db.close()
-    assert users == ["look something up", "also what time is it"]
+# NOTE: speech during a tool-running turn is covered in test_voice_clone.py —
+# under the worker cap it clones (test_talk_while_working_clones_and_delivers),
+# at the cap it parks (test_cap_queues_instead_of_fourth_clone).

@@ -65,6 +65,61 @@ AFFIRMATIVE = ("yes", "yeah", "yep", "sure", "go ahead", "continue",
 PEAK_ASK = "Heads up: peak pricing is in effect. Should I continue?"
 PEAK_DROPPED = "Okay, I'll hold off. Say it again later if you want it."
 BUSY_LINE = "One second, I'm still working on that. I'll take this next."
+CAP_LINE = ("One second — my hands are completely full. I'll take that "
+            "as soon as something finishes.")
+
+TWIN_NOTE = ('[system note: this conversation was just cloned for voice mode. '
+             'Your twin — an identical agent with this same history — is '
+             'still working on: "{task}". Its result will be delivered into '
+             'this conversation when it finishes; do not redo that work. '
+             'Of its in-progress spoken reply, the operator heard: '
+             '"{spoken}". You are now the one talking. Continue naturally.]')
+TWIN_ACK = "Understood."
+DELIVERY_NOTE = ('[background result — the twin that was working on '
+                 '"{task}" just finished:]\n\n{final}')
+DELIVERY_ACK = "Got it — noted above."
+
+
+async def clone_conversation(db, old_cid: int, *, task: str, spoken: str) -> int:
+    """Mint the talking twin: a new kind='chat' conversation carrying the
+    exact model-facing history of `old_cid`. Rides the compaction checkpoint
+    instead of fighting it — the parent's summary is copied and compact_upto
+    reset to 0, so copying only the post-checkpoint messages reproduces what
+    compaction.assemble would have built for the parent. tool_calls rows come
+    along so the GUI's activity view stays whole. One transaction."""
+    async with db.execute(
+        "SELECT project_id, project_locked, summary, compact_summary, "
+        "compact_upto FROM conversations WHERE id = ?", (old_cid,)) as cur:
+        old = await cur.fetchone()
+    if old is None:
+        raise ValueError(f"no conversation {old_cid}")
+    new_cid = await open_conversation(
+        db, project=None, title=f"{old['summary'] or 'chat'} (voice)",
+        kind="chat", parent=old_cid, commit=False)
+    await db.execute(
+        "UPDATE conversations SET project_id = ?, project_locked = ?, "
+        "compact_summary = ?, compact_upto = 0 WHERE id = ?",
+        (old["project_id"], old["project_locked"],
+         old["compact_summary"], new_cid))
+    upto = old["compact_upto"] or 0
+    await db.execute(
+        "INSERT INTO messages (conversation_id, role, content, created_at) "
+        "SELECT ?, role, content, created_at FROM messages "
+        "WHERE conversation_id = ? AND id > ? ORDER BY id",
+        (new_cid, old_cid, upto))
+    await db.execute(
+        "INSERT INTO tool_calls (conversation_id, tool, args, result, created_at) "
+        "SELECT ?, tool, args, result, created_at FROM tool_calls "
+        "WHERE conversation_id = ? ORDER BY id", (new_cid, old_cid))
+    note = TWIN_NOTE.format(task=task[:200], spoken=spoken or "nothing yet")
+    await db.execute(
+        "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
+        (new_cid, note))
+    await db.execute(
+        "INSERT INTO messages (conversation_id, role, content) "
+        "VALUES (?, 'assistant', ?)", (new_cid, TWIN_ACK))
+    await db.commit()
+    return new_cid
 
 
 class SidecarLink:
@@ -174,6 +229,10 @@ class VoiceSession:
 
         self.pending_peak: str | None = None
         self.queued: list[str] = []      # transcripts parked while busy
+        self.turn_user_msg = ""          # what started the running turn
+        self.workers: dict[int, dict] = {}   # worker cid -> {task, watcher, …}
+        self.pending_deliveries: list[str] = []   # spoken digests, FIFO
+        self.dead = False                # browser gone: keep DB work, stop audio
 
     # ---- lifecycle ----------------------------------------------------------
 
@@ -189,11 +248,14 @@ class VoiceSession:
             # keep going: the link keeps retrying, ready fires when it lands
 
     async def close(self) -> None:
+        self.dead = True
         for t in (self.turn_consumer,):
             if t:
                 t.cancel()
-        # the turn itself is NOT cancelled: closing the tab must not kill
-        # in-flight work (same rule as the chat page)
+        # the turn is NOT cancelled (closing the tab must not kill in-flight
+        # work — same rule as the chat page), and worker watchers stay up so
+        # a twin that finishes after the tab closed still lands its result
+        # in the transcript; `dead` just silences the speech side.
         await self.link.stop()
 
     # ---- browser -> session -------------------------------------------------
@@ -291,11 +353,15 @@ class VoiceSession:
         turn_running = self.turn_task is not None and not self.turn_task.done()
 
         if turn_running and self.turn_saw_tool:
-            # the twin is mid-task: never interrupt real work. Phase 4 clones
-            # the conversation here; until then the utterance waits its turn.
-            self.queued.append(text)
-            await self._send_json({"type": "queued", "text": text})
-            await self._speak_system(BUSY_LINE)
+            # mid-task: never interrupt real work. Under the cap the working
+            # turn is left running as a background twin and the conversation
+            # is cloned for talking; at the cap the utterance waits its turn.
+            if len(self.workers) >= settings.voice_max_workers:
+                self.queued.append(text)
+                await self._send_json({"type": "queued", "text": text})
+                await self._speak_system(CAP_LINE)
+            else:
+                await self._background_and_clone(text, barge_pos)
             return
 
         if turn_running:
@@ -321,6 +387,103 @@ class VoiceSession:
 
         await self._begin_turn(text)
 
+    # ---- talk-while-working ----------------------------------------------------
+
+    async def _background_and_clone(self, text: str,
+                                    barge_pos: tuple[int, int] | None) -> None:
+        """The running turn becomes a background worker on the OLD
+        conversation (it is already a detached task — nothing to move); the
+        session rebinds to a full-history clone that knows about its twin."""
+        old_cid = self.cid
+        task_hint = " ".join(self.turn_user_msg.split())[:200]
+        spoken = self._spoken_through(barge_pos)
+
+        # stop routing the old turn's audio to the voice channel: fresh
+        # subscription first (no event gap), then retire the old consumer
+        watch_q = bus.subscribe(chat._chan(old_cid))
+        if self.turn_consumer and not self.turn_consumer.done():
+            self.turn_consumer.cancel()
+
+        db = await get_db()
+        try:
+            new_cid = await clone_conversation(
+                db, old_cid, task=task_hint, spoken=spoken)
+        finally:
+            await db.close()
+
+        watcher = asyncio.create_task(
+            self._watch_worker(old_cid, watch_q, task_hint))
+        self.workers[old_cid] = {"task": task_hint, "watcher": watcher,
+                                 "status": "working"}
+        self.cid = new_cid
+        await self._send_json({"type": "conversation", "id": new_cid,
+                               "reason": "cloned"})
+        await self._push_workers()
+        await self._begin_turn(text)
+
+    async def _watch_worker(self, worker_cid: int, q, task_hint: str) -> None:
+        """Follow a backgrounded twin to its final; deliver the result into
+        the talking conversation (durable rows first, speech when idle)."""
+        try:
+            while True:
+                ev = await q.get()
+                if ev.get("type") == "final":
+                    await self._deliver_worker(worker_cid, task_hint,
+                                               ev.get("content") or "")
+                    return
+                if ev.get("type") in ("error", "job_end"):
+                    await self._deliver_worker(
+                        worker_cid, task_hint,
+                        f"(the background task ended without a result: "
+                        f"{ev.get('message', 'stream closed')})")
+                    return
+        finally:
+            bus.unsubscribe(chat._chan(worker_cid), q)
+
+    async def _deliver_worker(self, worker_cid: int, task_hint: str,
+                              final: str) -> None:
+        w = self.workers.pop(worker_cid, None)
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO messages (conversation_id, role, content) "
+                "VALUES (?, 'user', ?)",
+                (self.cid, DELIVERY_NOTE.format(task=task_hint, final=final)))
+            await db.execute(
+                "INSERT INTO messages (conversation_id, role, content) "
+                "VALUES (?, 'assistant', ?)", (self.cid, DELIVERY_ACK))
+            await db.commit()
+        finally:
+            await db.close()
+        if self.dead:
+            return                        # transcript has it; nobody to tell
+        await self._push_workers()
+        await self._send_json({"type": "worker_done",
+                               "conversation_id": worker_cid,
+                               "task": (w or {}).get("task", task_hint)})
+        digest = self._delivery_digest(task_hint, final)
+        self.pending_deliveries.append(digest)
+        await self._maybe_idle()
+
+    @staticmethod
+    def _delivery_digest(task_hint: str, final: str) -> str:
+        """What gets SAID about a finished background task. Short results are
+        spoken whole; long ones get a sentence-bounded lead-in — the full
+        text is already in the transcript (no extra model call: token
+        thrift)."""
+        flat = " ".join(final.split())
+        if len(flat) <= 400:
+            return f"Done with the earlier task. {flat}"
+        cut = flat.rfind(". ", 0, 380)
+        lead = flat[:cut + 1] if cut > 0 else flat[:380]
+        return (f"Done with the earlier task. {lead} "
+                "The full result is in the transcript.")
+
+    async def _push_workers(self) -> None:
+        await self._send_json({"type": "workers", "list": [
+            {"conversation_id": cid, "task": w["task"], "status": w["status"]}
+            for cid, w in self.workers.items()]})
+
     # ---- turns ---------------------------------------------------------------
 
     async def _begin_turn(self, text: str) -> None:
@@ -331,6 +494,7 @@ class VoiceSession:
                 # a foreign turn (chat page) is running this conversation
                 self.queued.append(text)
                 await self._send_json({"type": "queued", "text": text})
+                await self._speak_system(BUSY_LINE)
                 return
             if in_peak_window() and not peak_confirmed(self.cid):
                 self.pending_peak = text
@@ -346,6 +510,7 @@ class VoiceSession:
             await db.close()
 
         self._reset_turn_state()
+        self.turn_user_msg = text
         self.turn_q = bus.subscribe(chat._chan(self.cid))
         self.turn_task = chat.start_turn(self.cid, user_msg=text,
                                          tab=self.tab, voice=True)
@@ -518,8 +683,10 @@ class VoiceSession:
             return
         self.state = LISTENING
         await self._push_state()
-        if self.queued:
+        if self.queued:                     # parked speech outranks announcements
             await self._begin_turn(self.queued.pop(0))
+        elif self.pending_deliveries:
+            await self._speak_system(self.pending_deliveries.pop(0))
 
     async def _push_state(self) -> None:
         turn_running = self.turn_task is not None and not self.turn_task.done()

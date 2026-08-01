@@ -82,5 +82,7 @@ async def voice_status():
             "conversation_id": s.cid,
             "sidecar_connected": s.link.connected,
             "queued": len(s.queued),
+            "workers": [{"conversation_id": cid, "task": w["task"]}
+                        for cid, w in s.workers.items()],
         },
     }
