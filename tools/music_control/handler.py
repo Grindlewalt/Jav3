@@ -6,7 +6,7 @@ pause/resume/next/prev and nothing else. Rather than pretend, `auto` sends the
 action to the player that currently holds a track, and volume/stop say plainly
 that the music app cannot do them.
 """
-from backend import gui, tarmac
+from backend import gui, runtime, tarmac
 
 ACTIONS = ("pause", "resume", "next", "prev", "volume", "stop")
 IN_PAGE_ONLY = ("volume", "stop")
@@ -47,13 +47,21 @@ async def run(action: str = "", level: int | None = None,
         fields = {}
         if action == "volume":
             fields["level"] = max(0, min(int(level), 100))
-        n = gui.player_push(action, **fields)
+        # The tab that is actually playing, not every open tab — the same
+        # addressing music_play uses. Pausing everywhere was less obviously
+        # wrong than playing everywhere, but it is the same mistake: it would
+        # stop a track on another machine that nobody asked about.
+        playing = gui.player_status().get("tab") or None
+        target, where_name = gui.resolve_tab(None, playing or runtime.gui_tab.get())
+        if target is None:
+            return (f"{where_name}, so there is no in-page player to control. "
+                    f"Pass where='app' for the music app.")
+        n = gui.player_push(action, tab=target, **fields)
         if not n:
-            return ("no Jarvis tab is open, so there is no in-page player to "
-                    "control. Pass where='app' for the music app.")
+            return f"'{where_name}' closed, so there was nothing to control."
         if action == "volume":
-            return f"set the Jarvis player to {fields['level']}%."
-        return f"{SAID[action]} in the Jarvis player."
+            return f"set the Jarvis player on {where_name} to {fields['level']}%."
+        return f"{SAID[action]} in the Jarvis player on {where_name}."
 
     try:
         r = await tarmac.remote(action)

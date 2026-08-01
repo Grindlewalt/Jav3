@@ -46,6 +46,7 @@ fails the build if any of that stops being true.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets as _secrets
@@ -63,12 +64,19 @@ from .db import get_db, get_state, set_state
 
 # Media a granted folder may yield. Anything else is not playable and not worth
 # the risk of handing an arbitrary file to a decoder.
+# Kept in step with clients/computeruse/agent.py — a file the client will play
+# and this host will not is a file that silently does not exist.
 AUDIO_EXT = frozenset({".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a",
-                       ".aac", ".wav", ".wma", ".aiff", ".alac"})
-VIDEO_EXT = frozenset({".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"})
+                       ".aac", ".wav", ".wma", ".aiff", ".aif", ".alac"})
+VIDEO_EXT = frozenset({".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v",
+                       ".ts", ".m2ts", ".mts", ".mpg", ".mpeg", ".wmv",
+                       ".flv", ".ogv", ".3gp"})
 MEDIA_EXT = AUDIO_EXT | VIDEO_EXT
 
-VOLUME_ACTIONS = ("up", "down", "set", "mute", "unmute")
+# "output" moves the sound to another speaker. It sits with volume rather than
+# in a verb of its own because it is the same decision from the operator's side —
+# where the sound comes out — and the same privilege governs both.
+VOLUME_ACTIONS = ("up", "down", "set", "mute", "unmute", "output")
 TRANSPORT_ACTIONS = ("play", "pause", "playpause", "next", "previous", "stop")
 MEDIA_KINDS = ("audio", "video")
 
@@ -140,6 +148,29 @@ VERBS: dict[str, dict] = {
 
 class VerbError(ValueError):
     """A verb or its parameters failed the contract."""
+
+
+def served_build_id() -> str:
+    """Fingerprint of the client source THIS host hands out.
+
+    The client computes the same digest over its own copy (agent.py:build_id)
+    and reports it on connect. Different means that machine is running an older
+    download — which has happened twice, because a CDN cached the tarball for
+    hours and set-up kept installing a build that predated the fix being chased.
+    A connected-but-stale client is indistinguishable from a broken one until
+    something says so.
+    """
+    d = Path(__file__).resolve().parent.parent / "clients" / "computeruse"
+    h = hashlib.sha256()
+    try:
+        for f in sorted(d.glob("*.py"), key=lambda p: p.name):
+            h.update(f.name.encode())
+            h.update(b"\0")
+            h.update(f.read_bytes())
+            h.update(b"\0")
+    except OSError:
+        return "unknown"
+    return h.hexdigest()[:12]
 
 
 def _check_url(value: str) -> str:
@@ -277,6 +308,9 @@ def validate(verb: str, params: dict | None) -> dict:
         raise VerbError("play needs either a path or a url")
     if verb == "volume" and clean["action"] == "set" and "percent" not in clean:
         raise VerbError("volume set needs a percent")
+    if verb == "volume" and clean["action"] == "output" and "device" not in clean:
+        raise VerbError("volume output needs a device — name the speaker to "
+                        "move the sound to (computer_status lists them)")
     return clean
 
 
@@ -291,8 +325,9 @@ CAPABILITIES: dict[str, dict] = {
                   "note": "from a granted folder, through this machine's speakers"},
     "video":     {"label": "Play video on a screen",
                   "note": "fullscreen on whichever monitor is asked for"},
-    "volume":    {"label": "Change the volume",
-                  "note": "the system volume, so it affects everything playing"},
+    "volume":    {"label": "Change the volume and where sound comes out",
+                  "note": "the system mixer, so it affects everything playing — "
+                          "including moving it to another speaker"},
     "transport": {"label": "Pause and skip",
                   "note": "whatever is playing, including apps Jarvis did not start"},
     "links":     {"label": "Open links in the browser",
@@ -453,10 +488,19 @@ async def path_within_grants(source: str, client: str | None = None) -> str:
     """
     grants = await list_grants(client=client)
     if not grants:
+        # A grant is scoped to a machine NAME, so a machine that reconnects
+        # under a different name inherits none of them — and the old message
+        # sent the operator to add folders they had already added. Name the
+        # other machines' grants when there are some: that is the whole tell.
+        others = {g.client for g in await list_grants() if g.client}
+        elsewhere = ("" if not others else
+                     f" There are folders granted to {', '.join(sorted(others))}"
+                     f" — if that is the same computer under an older name, the"
+                     f" grants need re-attaching to {client!r}.")
         raise VerbError(
-            "no folders have been granted for that machine yet — the operator "
-            "adds them on the Computer use tab; nothing on it is reachable "
-            "until they do")
+            f"no folders are granted to {client or 'any machine'} — the "
+            f"operator adds them on the Computer use tab; nothing on that "
+            f"machine is reachable until they do.{elsewhere}")
     raw = (source or "").strip()
     if not raw:
         raise VerbError("empty source")
@@ -567,8 +611,13 @@ class Client:
     _waits: dict = field(default_factory=dict)
 
     def describe(self) -> dict:
+        version = str(self.caps.get("version") or "")
         return {"id": self.id, "name": self.name, "platform": self.platform,
-                "caps": self.caps, "connected_at": self.connected_at}
+                "caps": self.caps, "connected_at": self.connected_at,
+                "version": version,
+                # unknown version = a build from before this was reported, which
+                # is itself old enough to be worth saying out loud
+                "stale": version != served_build_id()}
 
 
 _clients: dict[str, Client] = {}

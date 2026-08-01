@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import autonomy, bus, compaction, runtime
+from . import autonomy, bus, compaction, gui, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink, run_turn
@@ -33,6 +33,10 @@ class ChatRequest(BaseModel):
     # same tri-state as AssignProject.mode. Omitted it keeps the old shape: a
     # slug pins, no slug follows the globally-loaded project.
     project_mode: Literal["follow", "none", "pin"] | None = None
+    # which browser tab is asking. The SPA sends the id it registered on
+    # /api/gui/stream, so anything this turn plays comes out of the machine the
+    # operator is sitting at instead of every open tab at once.
+    tab: str | None = None
 
 
 def sse(event: dict) -> str:
@@ -267,7 +271,7 @@ async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
 
 
 async def _run_chat_turn(conversation_id: int, ephemeral: bool,
-                         user_msg: str = "") -> None:
+                         user_msg: str = "", tab: str | None = None) -> None:
     """One whole chat turn, detached from any HTTP connection: clicking off
     the tab no longer kills the work. Every event is published to the
     conversation's bus channel; any number of SSE tails (the original POST,
@@ -285,6 +289,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     # any team it deploys) dedup, while tomorrow's turn can re-read the page
     wtoken = runtime.web_session.set(f"turn:{conversation_id}:{uuid.uuid4().hex[:8]}")
     cidtoken = runtime.conversation_id.set(conversation_id)
+    # the tab this was asked from, so anything the turn plays comes out of that
+    # machine rather than every open Jarvis tab at once
+    tabtoken = runtime.gui_tab.set(tab or None)
+    if tab:
+        gui.touch_tab(tab)
     atoken = None
     ptoken = None
     db = None
@@ -464,6 +473,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             runtime.artifact_slug.reset(atoken)
         if ptoken is not None:
             runtime.active_project.reset(ptoken)
+        runtime.gui_tab.reset(tabtoken)
         runtime.conversation_id.reset(cidtoken)
         runtime.web_session.reset(wtoken)
         runtime.event_chan.reset(ctoken)
@@ -591,5 +601,5 @@ async def chat(body: ChatRequest):
     # run the turn as a detached task: it outlives this HTTP connection
     q = bus.subscribe(_chan(conversation_id))
     _active_turns[conversation_id] = asyncio.create_task(
-        _run_chat_turn(conversation_id, body.ephemeral, body.message))
+        _run_chat_turn(conversation_id, body.ephemeral, body.message, body.tab))
     return _tail(conversation_id, q)

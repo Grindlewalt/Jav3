@@ -18,6 +18,7 @@
 // what made other controls silently dead on the phone.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { TAB_ID } from './tab.js'
 
 const REPORT_EVERY = 10000   // keeps the host's `stale` flag from tripping
 
@@ -58,6 +59,9 @@ export default function Player() {
   const report = useCallback((over = {}) => {
     const s = snap.current
     const body = {
+      // whose report this is: another tab still playing from earlier must not
+      // be read as this tab having started
+      tab: TAB_ID,
       track_id: s.track?.id ?? null,
       title: s.track?.title || '',
       artist: s.track?.artist || '',

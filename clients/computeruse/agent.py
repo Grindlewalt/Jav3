@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -68,10 +69,19 @@ from urllib.parse import urlsplit
 USER_AGENT = "jarvis-computeruse/1.0"
 
 AUDIO_EXT = frozenset({".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a",
-                       ".aac", ".wav", ".wma", ".aiff", ".alac"})
-VIDEO_EXT = frozenset({".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"})
+                       ".aac", ".wav", ".wma", ".aiff", ".aif", ".alac"})
+# Widened because a library is not all mp4: .ts and .m2ts come off a recorder,
+# .mpg/.mpeg off anything older, and .wmv/.flv out of an archive. mpv plays all
+# of them, so the only thing the short list did was make files invisible — and
+# invisible reads exactly like "the folder is not granted".
+VIDEO_EXT = frozenset({".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v",
+                       ".ts", ".m2ts", ".mts", ".mpg", ".mpeg", ".wmv",
+                       ".flv", ".ogv", ".3gp"})
 
-VOLUME_ACTIONS = ("up", "down", "set", "mute", "unmute")
+# "output" moves the sound to another speaker. It sits with volume rather than
+# in a verb of its own because it is the same decision from the operator's side —
+# where the sound comes out — and the same privilege governs both.
+VOLUME_ACTIONS = ("up", "down", "set", "mute", "unmute", "output")
 TRANSPORT_ACTIONS = ("play", "pause", "playpause", "next", "previous", "stop")
 MEDIA_KINDS = ("audio", "video")
 
@@ -81,6 +91,53 @@ BINARIES = ("mpv", "pactl", "wpctl", "xdg-open", "xrandr",
             "open")   # macOS opener. osascript is deliberately NOT here:
                       # AppleScript can `do shell script "..."`, so allowing
                       # it would reopen the exact path this client closes.
+
+# Where to look for those, on top of PATH.
+#
+# PATH alone is not enough once this runs as a service, and that is the whole
+# reason this list exists. A launchd agent inherits launchd's PATH —
+# /usr/bin:/bin:/usr/sbin:/sbin — not the one from a login shell, so Homebrew's
+# /opt/homebrew/bin is simply not on it. The effect is that mpv works when the
+# operator runs the client in a terminal and vanishes the moment they install
+# it as a service: "mpv is not installed" on a machine where `which mpv` answers
+# fine. Same story for a systemd user unit and /usr/local/bin.
+#
+# This does not widen anything. The names being looked up are still exactly
+# BINARIES, and each is still resolved to one absolute path at startup.
+EXTRA_BIN_DIRS = ("/opt/homebrew/bin", "/opt/homebrew/sbin",   # Apple silicon
+                  "/usr/local/bin", "/usr/local/sbin",         # Intel brew
+                  "/opt/local/bin",                            # MacPorts
+                  "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+                  "/var/lib/flatpak/exports/bin",
+                  "/snap/bin")
+
+
+def build_id(directory=None) -> str:
+    """A fingerprint of the client's own source, so Jarvis can tell whether this
+    machine is running the build it is currently serving.
+
+    Twice now a fix has shipped and had no effect because the machine was still
+    running an older copy — a CDN in front of Jarvis cached the download for
+    four hours, and set-up kept installing a build that predated the fix being
+    chased. From the tab both cases look identical: a connected client that
+    behaves wrongly. This makes the difference visible instead of leaving it to
+    be deduced.
+
+    Content-addressed rather than a version number nobody remembers to bump.
+    backend/computeruse.py computes it the same way over the files it serves, so
+    equal means "same source", and that is the only claim being made.
+    """
+    d = Path(directory) if directory else Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    for f in sorted(d.glob("*.py"), key=lambda p: p.name):
+        h.update(f.name.encode())
+        h.update(b"\0")
+        try:
+            h.update(f.read_bytes())
+        except OSError:
+            return "unknown"
+        h.update(b"\0")
+    return h.hexdigest()[:12]
 
 
 class Refused(Exception):
@@ -221,10 +278,21 @@ class Runner:
     @staticmethod
     def _find_binaries():
         """Resolve the allowlist once, to absolute paths. After this the client
-        never consults PATH again."""
+        never consults PATH again.
+
+        PATH first, then EXTRA_BIN_DIRS — because a service inherits a bare PATH
+        that has no Homebrew on it (see EXTRA_BIN_DIRS). Still a closed set of
+        names, still one absolute path each, still frozen after this returns.
+        """
         found = {}
         for name in BINARIES:
             p = shutil.which(name)
+            if not p:
+                for d in EXTRA_BIN_DIRS:
+                    cand = os.path.join(d, name)
+                    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                        p = cand
+                        break
             if p:
                 real = os.path.realpath(p)
                 if os.path.isfile(real) and os.access(real, os.X_OK):
@@ -329,12 +397,51 @@ class Linux:
             return "pactl"
         raise Refused("neither wpctl nor pactl is installed — cannot reach the mixer")
 
+    def _is_muted(self, mixer, sink):
+        """Is this sink muted right now? False when we cannot tell.
+
+        An old pactl has no `get-sink-mute` and answers with an empty string,
+        which must not read as "muted" — the clear runs either way, so the only
+        thing riding on this is whether the reply mentions it.
+        """
+        try:
+            if mixer == "wpctl":
+                out = self.r.run("wpctl", "get-volume", sink)
+                return "MUTED" in (out or "").upper()
+            out = self.r.run("pactl", "get-sink-mute", sink)
+            return "yes" in (out or "").lower()
+        except Exception:
+            return False
+
     def volume(self, action, percent=None, device=None):
         m = self._mixer()
         if device:
             device = self._resolve_device(device, self.audio_devices(), "mixer output")
         sink = device or ("@DEFAULT_AUDIO_SINK@" if m == "wpctl" else "@DEFAULT_SINK@")
+        if action == "output":
+            if not device:
+                raise Refused("output needs a device — name the speaker")
+            # PipeWire/Pulse move the default sink AND everything already
+            # playing; moving only the default would leave the current track
+            # coming out of the old speaker, which is not what was asked.
+            self.r.run("pactl" if "pactl" in self.r.bin else m,
+                       "set-default-sink", sink)
+            if "pactl" in self.r.bin:
+                for line in (self.r.run("pactl", "list", "short",
+                                        "sink-inputs") or "").splitlines():
+                    stream = line.split("\t")[0].strip()
+                    if stream.isdigit():
+                        self.r.run("pactl", "move-sink-input", stream, sink)
+            return {"ok": True, "action": action, "device": sink}
         step = percent if percent is not None else 5
+        # A level written over a muted sink is silence with a number attached.
+        # Every "turn it up" on a muted machine did exactly that, so anything
+        # that raises the volume above zero clears the mute as well. Asked
+        # first, so the answer can say it truthfully rather than claiming an
+        # unmute on every single volume change.
+        clear_mute = (action in ("up", "set", "down")
+                      and not (action == "set" and step == 0))
+        unmuted = clear_mute and self._is_muted(m, sink)
         if m == "wpctl":
             if action == "up":
                 self.r.run(m, "set-volume", sink, f"{step}%+")
@@ -345,6 +452,8 @@ class Linux:
             elif action == "mute":
                 self.r.run(m, "set-mute", sink, "1")
             else:
+                self.r.run(m, "set-mute", sink, "0")
+            if clear_mute:
                 self.r.run(m, "set-mute", sink, "0")
         else:
             if action == "up":
@@ -357,7 +466,10 @@ class Linux:
                 self.r.run(m, "set-sink-mute", sink, "1")
             else:
                 self.r.run(m, "set-sink-mute", sink, "0")
-        return {"ok": True, "action": action, "device": sink}
+            if clear_mute:
+                self.r.run(m, "set-sink-mute", sink, "0")
+        return {"ok": True, "action": action, "device": sink,
+                "unmuted": unmuted}
 
     def audio_devices(self):
         """Mixer sinks — what `volume` can target."""
@@ -473,7 +585,11 @@ class Linux:
     def play(self, kind, path=None, url=None, title=None, screen=None,
              device=None, volume=None):
         if "mpv" not in self.r.bin:
-            raise Refused("mpv is not installed — it is what plays media here")
+            raise Refused(
+                "mpv is not installed on this machine, and it is what plays "
+                "media here — 'brew install mpv' on a Mac, 'sudo apt install "
+                "mpv' on Debian, then restart the client (it resolves its "
+                "binaries once, at startup)")
         target = path or url
         args = [
             # --no-config and --load-scripts=no matter: mpv will otherwise read
@@ -543,25 +659,47 @@ class MacOS(Linux):
         self.mac = _mac
 
     def volume(self, action, percent=None, device=None):
-        if device:
-            raise Refused("picking a specific output for the mixer is not "
-                          "wired up on macOS yet — this sets the default device")
         m = self.mac
         try:
+            # A named speaker is resolved against the devices this Mac reported,
+            # so what reaches CoreAudio is an id we enumerated, never the
+            # model's words. Same rule as the Linux path.
+            dev, where = None, "default output"
+            if device:
+                wanted = self._resolve_device(device, self.audio_devices(),
+                                              "output")
+                dev = m.device_by_id(wanted)
+                where = m.device_label(dev)
+
+            if action == "output":
+                if dev is None:
+                    raise Refused("output needs a device — name the speaker")
+                # the system default, so everything moves: Spotify, Safari, and
+                # anything started later, not just what Jarvis is playing
+                name = m.set_default_output(dev)
+                return {"ok": True, "action": action, "device": name,
+                        "note": "all system audio now goes here"}
             if action == "mute":
-                m.set_mute(True)
-                return {"ok": True, "action": action, "device": "default output"}
+                m.set_mute(True, dev)
+                return {"ok": True, "action": action, "device": where}
             if action == "unmute":
-                m.set_mute(False)
-                return {"ok": True, "action": action, "device": "default output"}
+                m.set_mute(False, dev)
+                return {"ok": True, "action": action, "device": where}
+
             step = (percent if percent is not None else 5) / 100.0
             if action == "set":
-                level = m.set_volume(step)
+                level = m.set_volume(step, dev)
             else:
-                cur = m.get_volume()
-                level = m.set_volume(cur + step if action == "up" else cur - step)
-            return {"ok": True, "action": action, "device": "default output",
-                    "level": round(level * 100)}
+                cur = m.get_volume(dev)
+                level = m.set_volume(cur + step if action == "up" else cur - step,
+                                     dev)
+            # Mute is a separate property from the level on macOS, so writing a
+            # level over a muted device left the machine silent while reporting
+            # a number — "set to 40%" and nothing audible. Anything that lands
+            # above zero clears it.
+            unmuted = m.clear_mute(dev) if level > 0 else False
+            return {"ok": True, "action": action, "device": where,
+                    "level": round(level * 100), "unmuted": unmuted}
         except m.CoreAudioError as e:
             raise Refused(str(e))
 
@@ -572,10 +710,25 @@ class MacOS(Linux):
             raise Refused(str(e))
 
     def audio_devices(self):
+        """Every speaker on this Mac, with the names Sound preferences uses.
+
+        This used to be one hardcoded row called "default", which meant the
+        Computer use tab listed a single meaningless entry and there was nothing
+        for the operator or the model to choose between — "put it on the desk
+        speakers" had no vocabulary to land in.
+        """
         try:
-            return [{"id": "default", "label": self.mac.device_name()}]
+            devs = self.mac.output_devices()
         except Exception:
-            return []
+            devs = []
+        if not devs:
+            try:
+                return [{"id": "default", "label": self.mac.device_name()}]
+            except Exception:
+                return []
+        return [{"id": d["id"],
+                 "label": d["label"] + (" (current)" if d.get("default") else "")}
+                for d in devs]
 
     def players(self):
         # macOS has no MPRIS; media keys go to whatever is frontmost for audio,
@@ -592,7 +745,15 @@ class MacOS(Linux):
         if "open" not in self.r.bin:
             raise Refused("/usr/bin/open is missing")
         self.r.run("open", url, background=True)
-        return {"ok": True, "url": url}
+        # `open` hands the URL to the default browser, which puts it wherever
+        # its own window already is. Moving a window between displays needs
+        # Accessibility scripting, which this client deliberately cannot do —
+        # so say so rather than accepting the screen and quietly ignoring it.
+        note = None if screen is None else (
+            "macOS opens links in the browser's existing window, so the screen "
+            "was not honoured — video (computer_play) can pick a screen, a link "
+            "cannot")
+        return {"ok": True, "url": url, "note": note}
 
 
 # --- the client -------------------------------------------------------------
@@ -626,6 +787,11 @@ class Agent:
                 print(f"! --allow-root {r} is not a directory; ignoring", flush=True)
         self.grants = list(self.roots)
         self.grant_note = ""
+        # What Jarvis last sent, and what happened to each one. Kept so `status`
+        # can answer "I added a folder and it says there are none" with the
+        # actual reason instead of the same empty list that caused the question.
+        self.grants_sent: list[str] = []
+        self.grants_rejected: list[dict] = []
 
     def set_grants(self, roots):
         """Adopt the folder list from Jarvis. It is authoritative.
@@ -648,30 +814,64 @@ class Agent:
         """
         self.grant_note = ""
         sent = list(roots or [])
-        kept, missing = [], []
+        self.grants_sent = list(sent)
+        kept, rejected = [], []
         for r in sent:
-            try:
-                p = Path(r).expanduser().resolve()
-            except OSError:
-                missing.append(r)
-                continue
-            # A path that is not a directory HERE is the common mistake now that
-            # the GUI can name anything: a Linux path granted to the Mac, or a
-            # typo. Dropping it silently would look like the old ceiling bug.
-            if p.is_dir():
-                kept.append(p)
+            why = self._why_unusable(r)
+            if why is None:
+                kept.append(Path(r).expanduser().resolve())
             else:
-                missing.append(r)
+                rejected.append({"root": r, "why": why})
         self.grants = kept
+        self.grants_rejected = rejected
         if not sent:
-            self.grant_note = ("no folders are granted in Jarvis, so nothing on "
-                               "disk is reachable — add one on the Computer use tab")
-        elif missing:
-            self.grant_note = (
-                "granted but not a folder on this machine: " + ", ".join(missing)
-                + " — check the path is right for this computer")
+            self.grant_note = ("Jarvis sent no folders for this machine. Either "
+                               "none is granted, or the ones that exist are "
+                               "attached to a different machine name — the "
+                               "Computer use tab shows which")
+        elif rejected:
+            self.grant_note = "; ".join(
+                f"{r['root']}: {r['why']}" for r in rejected)
         if self.grant_note:
             print(f"! {self.grant_note}", flush=True)
+
+    @staticmethod
+    def _why_unusable(root):
+        """None if this folder is usable here, else the reason in one phrase.
+
+        The reasons are the whole point. "It says I have no folders added" was
+        the symptom of every one of these, because a rejected folder was dropped
+        into the same empty list as a folder nobody ever granted:
+
+          * a Linux path granted to the Mac (or a typo) — never existed here
+          * a path that exists but is a file, or a dangling symlink
+          * macOS privacy: Desktop, Documents, Downloads, iCloud Drive and
+            external volumes are TCC-protected, so a folder that plainly exists
+            in Finder raises "Operation not permitted" for a process that has
+            not been granted access. A launchd agent is a different process from
+            the terminal that was allowed, so this appears exactly when the
+            client is made permanent.
+        """
+        try:
+            p = Path(root).expanduser().resolve()
+        except OSError as e:
+            return f"cannot be resolved on this machine ({e.strerror or e})"
+        try:
+            if not p.exists():
+                return "does not exist on this machine"
+            if not p.is_dir():
+                return "exists but is not a folder"
+            # is_dir() succeeding does not mean it can be read: TCC denies the
+            # listing, not the stat, so this is where a privacy block surfaces.
+            with os.scandir(p) as it:
+                next(it, None)
+        except PermissionError:
+            return ("macOS/Linux is refusing to let this client read it — on a "
+                    "Mac grant the app running the client Full Disk Access in "
+                    "System Settings > Privacy & Security")
+        except OSError as e:
+            return f"cannot be read ({e.strerror or e})"
+        return None
 
     def save_access_token(self, cfg):
         """Write a pushed Access token into our own 0600 config.
@@ -713,6 +913,8 @@ class Agent:
         """The client's own containment check. The backend did this too; doing
         it again here is the point — this side does not trust that one."""
         real = Path(path).resolve()
+        if not self.grants:
+            raise Refused(self._no_grants_text())
         if not any(real == g or g in real.parents for g in self.grants):
             raise Refused(f"{real} is outside every allowed root")
         if not real.is_file():
@@ -760,12 +962,24 @@ class Agent:
                 continue
         return n
 
+    def _no_grants_text(self):
+        """Why there is nothing to look in — never just "there is nothing".
+
+        The old text here blamed --allow-root, which stopped being the cause
+        when the launch flags stopped being a ceiling. It was still the sentence
+        the operator got told after granting a folder in the GUI and having it
+        rejected here, which sent them to fix the one thing that was fine.
+        """
+        if self.grants_rejected:
+            return ("every folder Jarvis granted this machine was refused here: "
+                    + "; ".join(f"{r['root']} — {r['why']}"
+                                for r in self.grants_rejected))
+        return (self.grant_note
+                or "no folders are granted to this machine on the Computer use tab")
+
     def do_list(self, folder=None, kind="both", limit=60):
         if not self.grants:
-            return {"ok": True, "text":
-                    "no folders are allowed on this machine — the client was "
-                    "started without --allow-root, or the granted folders are "
-                    "outside it"}
+            return {"ok": True, "text": self._no_grants_text()}
         exts = self._exts(kind)
         if folder:
             cand = Path(folder).expanduser()
@@ -822,6 +1036,11 @@ class Agent:
         if not words:
             raise Refused("empty query")
         exts = self._exts(kind)
+        # No searchable folder is not the same fact as "that film is not here",
+        # and returning an empty hit list for both is what turned a rejected
+        # grant into "nothing matches". The caller relays this verbatim.
+        if not self.grants:
+            return {"ok": True, "hits": [], "note": self._no_grants_text()}
         hits = []
         for g in self.grants:
             try:
@@ -846,12 +1065,25 @@ class Agent:
             roots = []
             for g in self.grants:
                 roots.append({
-                    "path": str(g),
+                    "path": str(g), "ok": True,
                     "audio": self._count_media(g, AUDIO_EXT),
                     "video": self._count_media(g, VIDEO_EXT)})
+            # The rejected ones ride in the SAME list rather than a separate
+            # field, because the question being answered is "what happened to
+            # the folders I added" and an answer that omits the broken ones is
+            # the answer that caused the question.
+            for r in self.grants_rejected:
+                roots.append({"path": r["root"], "ok": False, "why": r["why"],
+                              "audio": 0, "video": 0})
             return {"ok": True, "platform": self.os.name,
+                    "version": build_id(),
                     "roots_detail": roots,
                     "grant_note": getattr(self, "grant_note", ""),
+                    "grants_sent": list(self.grants_sent),
+                    # which of the allowlisted binaries this machine actually
+                    # has. "no video plays" and "mpv was never installed" are
+                    # different problems and used to look the same from here.
+                    "binaries": sorted(self.runner.bin),
                     "screens": self.os.screens(),
                     "audio_devices": self.os.audio_devices(),
                     "play_devices": self.os.play_devices(),
@@ -913,7 +1145,12 @@ class Agent:
                     await ws.send(json.dumps({
                         "token": self.token, "name": self.name,
                         "platform": self.os.name,
-                        "caps": {"screens": self.os.screens(),
+                        # version rides in the hello so the tab can flag a stale
+                        # build the moment a machine connects, rather than only
+                        # if somebody thinks to probe it
+                        "caps": {"version": build_id(),
+                                 "binaries": sorted(self.runner.bin),
+                                 "screens": self.os.screens(),
                                  "audio_devices": self.os.audio_devices(),
                                  "play_devices": self.os.play_devices(),
                                  "dry_run": self.dry_run},
@@ -1110,6 +1347,8 @@ def _selftest():
     """What can this machine actually do? Reports rather than assumes."""
     r = Runner(dry_run=False)
     print(f"platform      : {sys.platform}")
+    print(f"client build  : {build_id()}  (Jarvis flags this if it is not the "
+          f"build it serves)")
     cfgmod = _sibling("config")
     try:
         cfg = cfgmod.load()

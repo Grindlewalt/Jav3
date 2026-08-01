@@ -1,3 +1,5 @@
+import { TAB_ID } from './tab'
+
 export async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
@@ -40,11 +42,16 @@ async function readSse(res, onEvent) {
 
 // POST /api/chat and invoke onEvent for each SSE event. Throws ApiError on
 // non-200 (409 peak_confirmation_required included) before any event fires.
+//
+// Every turn carries this tab's id. That is what lets a tool put music or a
+// video on the machine the operator is actually sitting at instead of every
+// open Jarvis tab at once — added here rather than at each call site so no
+// entry point can forget it.
 export async function chatStream(body, onEvent, url = '/api/chat') {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ tab: TAB_ID, ...body }),
   })
   if (!res.ok) {
     let detail = res.statusText

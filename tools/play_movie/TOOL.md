@@ -1,7 +1,7 @@
 ---
 name: play_movie
-description: Play a video file in a floating player on the operator's screen (mp4/webm/mkv — a project file or an allowlisted URL).
-when_to_use: When the operator asks you to play a video or movie file. Pass a project-relative file path (preferred) or a direct http(s) video URL on the media allowlist. For streaming sites (YouTube, Netflix...) use open_website instead — they can't play in the floating player.
+description: Show a video file that is INSIDE A JARVIS PROJECT in a small floating player in the Jarvis browser tab. Not for the operator's own film library.
+when_to_use: Only for a video that lives in the active project's files, or a direct http(s) video URL on the media allowlist — a clip you produced or were given to review. To put on one of the operator's own films use computer_play, which plays fullscreen on their actual computer. For streaming sites (YouTube, Netflix...) use computer_open_link.
 enabled: true
 parameters:
   type: object

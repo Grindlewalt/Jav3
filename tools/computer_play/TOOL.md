@@ -29,6 +29,9 @@ parameters:
     volume:
       type: integer
       description: Start volume 0-100 for this playback only. Leave out to keep the current level.
+    client:
+      type: string
+      description: Which computer, by name (e.g. "macbook"). Only needed when more than one is connected; the error lists them if you guess wrong.
   required: []
 ---
 `device` and `screen` take an exact value or part of a name; if it does not

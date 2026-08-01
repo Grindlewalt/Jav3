@@ -36,18 +36,25 @@ def subscriber_count(channel: str) -> int:
     return len(_subscribers.get(channel, ()))
 
 
+def publish_to(q: asyncio.Queue, event: dict) -> None:
+    """One subscriber, not the whole channel. The GUI channel uses this to
+    address a single browser tab (backend/gui.py) — several tabs are the same
+    operator, but they are not the same speakers."""
+    try:
+        q.put_nowait(event)
+    except asyncio.QueueFull:
+        # protect against a slow browser: drop the oldest event and retry.
+        # Token events are the firehose, so this mostly sheds those.
+        try:
+            q.get_nowait()
+            q.put_nowait(event)
+        except (asyncio.QueueEmpty, asyncio.QueueFull):
+            pass
+
+
 def publish(job_id: str, event: dict) -> None:
     for q in list(_subscribers.get(job_id, ())):
-        try:
-            q.put_nowait(event)
-        except asyncio.QueueFull:
-            # protect against a slow browser: drop the oldest event and retry.
-            # Token events are the firehose, so this mostly sheds those.
-            try:
-                q.get_nowait()
-                q.put_nowait(event)
-            except (asyncio.QueueEmpty, asyncio.QueueFull):
-                pass
+        publish_to(q, event)
 
 
 def close_job(job_id: str) -> None:

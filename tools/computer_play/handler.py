@@ -26,20 +26,28 @@ async def run(query: str = "", path: str = "", kind: str = "audio",
     if path:
         try:
             # lexical containment only; the client checks the real file against
-            # its own roots, because only the client can see that disk
-            params["path"] = await cu.path_within_grants(path)
+            # its own roots, because only the client can see that disk. Scoped
+            # to the target machine: a folder granted to the Mac is not a folder
+            # on the Linux box, and checking against the union of both said yes
+            # to a path that machine could never open.
+            params["path"] = await cu.path_within_grants(path, client or None)
             title = Path(params["path"]).stem
         except cu.VerbError as e:
             return f"error: {e}"
     else:
         # search the operator's machine, not this host
-        hits = []
+        hits, note = [], ""
         if source in ("auto", "local"):
             try:
                 r = await cu.dispatch(
                     "find", {"query": query, "kind": kind,
                              "limit": MAX_SHOWN + 1}, client or None, timeout=30)
-                hits = (r.get("result") or {}).get("hits", []) if r.get("ok") else []
+                res = (r.get("result") or {}) if r.get("ok") else {}
+                hits = res.get("hits", [])
+                # why there was nothing to search, when that is the answer —
+                # "no folder is usable here" is a different fact from "that film
+                # is not in the library", and they used to read the same
+                note = str(res.get("note") or "")
             except cu.VerbError as e:
                 return f"error: {e}"
         if len(hits) > 1:
@@ -54,12 +62,15 @@ async def run(query: str = "", path: str = "", kind: str = "audio",
             try:
                 items = await cu.jellyfin_find(query, kind, limit=MAX_SHOWN + 1)
             except cu.VerbError as e:
-                return (f"nothing in the granted folders matches '{query}', "
-                        f"and {e}")
+                return (f"{note or f'nothing in the granted folders matches {query!r}'}"
+                        f", and {e}")
             except Exception as e:
-                return (f"nothing local matches '{query}', and Jellyfin could "
-                        f"not be reached: {e}")
+                return (f"{note or f'nothing local matches {query!r}'}, and "
+                        f"Jellyfin could not be reached: {e}")
             if not items:
+                if note:
+                    return (f"{note}. Nothing in Jellyfin matches '{query}' "
+                            f"either.")
                 return f"nothing matches '{query}' in the granted folders or Jellyfin."
             if len(items) > 1:
                 listing = "\n".join(
@@ -70,7 +81,7 @@ async def run(query: str = "", path: str = "", kind: str = "audio",
             params["url"] = await cu.jellyfin_stream_url(items[0]["id"], kind)
             title = items[0]["name"]
         else:
-            return f"nothing in the granted folders matches '{query}'."
+            return note or f"nothing in the granted folders matches '{query}'."
 
     if title:
         params["title"] = title[:300]

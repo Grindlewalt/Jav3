@@ -78,6 +78,10 @@ async def status():
     return {
         "clients": machines,
         "capabilities": cu.CAPABILITIES,
+        # what this host would hand out right now, so the tab can say "that
+        # machine is running an older download" instead of leaving a stale
+        # client looking like a broken one
+        "served_version": cu.served_build_id(),
         "grants": [{"id": g.id, "root": g.root, "label": g.label,
                     "client": g.client} for g in await cu.list_grants()],
     }
@@ -244,6 +248,9 @@ async def tarmac_stream(track_id: int, request: Request):
 
 
 class PlayerStateBody(BaseModel):
+    # which tab is reporting, so a second tab left playing from earlier cannot
+    # be mistaken for this request having started
+    tab: str = ""
     track_id: int | None = None
     title: str = ""
     artist: str = ""
@@ -271,7 +278,7 @@ async def tarmac_player_state(body: PlayerStateBody):
     state = gui.player_report({
         "track": track, "paused": body.paused, "position": body.position,
         "duration": body.duration, "queue": body.queue, "volume": body.volume,
-        "started": body.started, "error": body.error,
+        "started": body.started, "error": body.error, "tab": body.tab,
     })
     # count the play once, when a new track actually starts — /stream/:id does
     # not touch TARMAC's plays table, so nothing else would record it

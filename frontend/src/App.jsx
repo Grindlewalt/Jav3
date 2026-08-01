@@ -4,6 +4,7 @@ import {
 import { createPortal } from 'react-dom'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api.js'
+import { streamUrl } from './tab.js'
 import { useDismiss } from './useDismiss.js'
 import { setMediaHosts } from './mediaHosts.js'
 import Player from './Player.jsx'
@@ -235,7 +236,9 @@ function GuiBridge() {
   const [player, setPlayer] = useState(null)   // {kind, src, title}
 
   useEffect(() => {
-    const es = new EventSource('/api/gui/stream')
+    // the subscription carries this tab's id and name (src/tab.js), which is
+    // how a tool addresses ONE machine instead of every open tab
+    const es = new EventSource(streamUrl())
     const toast = (t) => {
       const id = Math.random().toString(36).slice(2)
       setToasts((ts) => [...ts, { id, ...t }])

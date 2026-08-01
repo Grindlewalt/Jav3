@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { TAB_ID, setTabName, tabName } from '../tab.js'
 
 // Cloudflare's dashboard shows a service token as whole header lines, so that is
 // what gets pasted. Strip the header name, quotes and whitespace rather than
@@ -113,6 +114,11 @@ export default function ComputerUse() {
       await api('/api/computeruse/grants', {
         method: 'POST', body: JSON.stringify({ root, client }) })
       refresh()
+      // and ask the machine what it made of it. A folder that exists here as a
+      // string and not there as a directory is the commonest way to end up
+      // being told there are no folders after adding one — the probe is what
+      // turns that into a line of text next to the folder.
+      runProbe(client)
       // No restart line any more: the host pushes the folder list to the
       // connected machine as part of this call. It used to say "restart the
       // client", which was true and useless — the restart meant re-running the
@@ -179,12 +185,20 @@ export default function ComputerUse() {
           </p>
         </section>
       ) : machines.map((m) => (
-        <Machine key={m.id} m={m} caps={caps}
+        <Machine key={m.id} m={m} caps={caps} served={state.served_version}
                  expanded={open === m.name}
-                 onToggle={() => setOpen(open === m.name ? null : m.name)}
+                 onToggle={() => {
+                   const opening = open !== m.name
+                   setOpen(opening ? m.name : null)
+                   // probe on open, not on a button: the folder health is the
+                   // reason to open this at all
+                   if (opening && !probe[m.name]) runProbe(m.name)
+                 }}
                  probe={probe[m.name]} onProbe={() => runProbe(m.name)}
                  onPriv={togglePriv} onAdd={addFolder} onRevoke={revoke} />
       ))}
+
+      <Tabs />
 
       {orphans.length > 0 && (
         <section className="panel">
@@ -281,12 +295,19 @@ export default function ComputerUse() {
 
 // --- one computer ------------------------------------------------------------
 
-function Machine({ m, caps, expanded, onToggle, probe, onProbe,
+function Machine({ m, caps, served, expanded, onToggle, probe, onProbe,
                    onPriv, onAdd, onRevoke }) {
   const [root, setRoot] = useState('')
   const privs = m.privileges || {}
   const off = Object.values(privs).filter((v) => v === false).length
   const folders = m.grants || []
+  // What that machine says about each granted folder. Keyed by path, because a
+  // grant is a string here and a real directory (or not) over there — and the
+  // gap between those two is exactly where "I added the folders" and "there are
+  // no folders" were both true.
+  const health = {}
+  for (const r of (probe?.roots_detail || [])) health[r.path] = r
+  const stale = served && m.version && m.version !== served
 
   return (
     <section className="panel cu-machine">
@@ -296,6 +317,12 @@ function Machine({ m, caps, expanded, onToggle, probe, onProbe,
           <strong>{m.name}</strong>
           <span className="dim"> · {m.platform === 'darwin' ? 'macOS' : m.platform}</span>
           {m.caps?.dry_run && <span className="tag">dry run</span>}
+          {/* A stale client and a broken one look identical from here, and the
+              difference has cost two evenings — a CDN pinned an old download
+              twice. Now it says so. */}
+          {stale && <span className="tag warn" title={
+            `running build ${m.version || 'unknown'}, this Jarvis serves ${served}`
+          }>old build — re-run set-up</span>}
         </span>
         <span className="dim small">
           {folders.length} folder{folders.length === 1 ? '' : 's'}
@@ -329,16 +356,34 @@ function Machine({ m, caps, expanded, onToggle, probe, onProbe,
             ? <p className="dim small">None, so nothing on it can be played.</p>
             : (
               <ul className="cu-grants">
-                {folders.map((g) => (
-                  <li key={g.id}>
-                    <code className="grow">{g.root}</code>
-                    {!g.client && <span className="tag">all computers</span>}
-                    <button className="ghost danger"
-                            onClick={() => onRevoke(g.id)}>remove</button>
-                  </li>
-                ))}
+                {folders.map((g) => {
+                  const h = health[g.root]
+                  return (
+                    <li key={g.id}>
+                      <code className="grow">{g.root}</code>
+                      {!g.client && <span className="tag">all computers</span>}
+                      {h && h.ok && (
+                        <span className="dim small">
+                          {h.audio} audio · {h.video} video</span>)}
+                      {h && !h.ok && (
+                        <span className="warn small" title={h.why}>{h.why}</span>)}
+                      <button className="ghost danger"
+                              onClick={() => onRevoke(g.id)}>remove</button>
+                    </li>
+                  )
+                })}
               </ul>
             )}
+          {probe?.grant_note && (
+            <p className="warn small">{probe.grant_note}</p>)}
+          {probe && !probe.loading && !probe.error
+            && Array.isArray(probe.binaries) && !probe.binaries.includes('mpv') && (
+            <p className="warn small">
+              mpv is not installed on this computer, so it can play nothing from
+              disk. <code>brew install mpv</code> on a Mac, then restart the
+              client.
+            </p>
+          )}
           <form className="row" onSubmit={(e) => {
             e.preventDefault(); onAdd(m.name, root.trim()); setRoot('')
           }}>
@@ -356,6 +401,69 @@ function Machine({ m, caps, expanded, onToggle, probe, onProbe,
             : probe.error ? <p className="error">{probe.error}</p>
             : <Hardware d={probe} />}
         </div>
+      )}
+    </section>
+  )
+}
+
+// --- open Jarvis tabs ---------------------------------------------------------
+//
+// The other kind of "computer" Jarvis can put sound on: a browser with Jarvis
+// open. Music used to start in ALL of them at once because none had a name and
+// there was nothing to address. They have names now, so this shows them and
+// lets you change what this one is called — which is what you then say to
+// Jarvis ("put it on the mac").
+
+function Tabs() {
+  const [tabs, setTabs] = useState([])
+  const [name, setName] = useState(tabName())
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    const load = () => api('/api/gui/tabs').then((r) => setTabs(r.tabs || []))
+                          .catch(() => {})
+    load()
+    const t = setInterval(load, 6000)
+    return () => clearInterval(t)
+  }, [])
+
+  function save(e) {
+    e.preventDefault()
+    setTabName(name)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 4000)
+  }
+
+  return (
+    <section className="panel">
+      <h2>Open Jarvis tabs</h2>
+      <p className="dim small">
+        Music and video play in ONE of these — the tab you asked from, unless you
+        name another. Say the name to Jarvis.
+      </p>
+      {tabs.length === 0
+        ? <p className="dim small">none reporting yet</p>
+        : (
+          <ul className="cu-grants">
+            {tabs.map((t) => (
+              <li key={t.id}>
+                <span className="grow">{t.name}</span>
+                {t.id === TAB_ID && <span className="tag">this one</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      <form className="row" onSubmit={save}>
+        <input className="grow" value={name} maxLength={60}
+               onChange={(e) => setName(e.target.value)}
+               placeholder="what to call this browser" />
+        <button type="submit" disabled={!name.trim()}>Rename this tab</button>
+      </form>
+      {saved && (
+        <p className="dim small">
+          Saved. It takes the new name when this tab next reconnects — reload to
+          do that now.
+        </p>
       )}
     </section>
   )

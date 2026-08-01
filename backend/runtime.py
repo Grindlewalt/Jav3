@@ -37,6 +37,14 @@ ACTIVE_UNSET = object()
 active_project = contextvars.ContextVar("jarvis_active_project",
                                         default=ACTIVE_UNSET)
 
+# The browser tab this turn was asked from (backend/gui.py's tab registry), so
+# a tool that puts something on a screen or through speakers can pick the right
+# machine. Without it "play something" started the track in every open Jarvis
+# tab at once — laptop, desktop and phone, slightly out of sync. None means the
+# turn has no asking tab (a schedule, an agent run), and the tool falls back to
+# the most recently used one rather than to all of them.
+gui_tab = contextvars.ContextVar("jarvis_gui_tab", default=None)
+
 # The conversation the running turn belongs to, so a tool that rebinds the
 # project mid-conversation (load_project) can pin the change onto the
 # conversation row instead of yanking the global session state.

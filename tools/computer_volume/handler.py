@@ -17,8 +17,16 @@ async def run(action: str = "", percent: int | None = None,
         return f"error: {r.get('error')}"
     d = r.get("result", {})
     where = d.get("device", "the default output")
+    if action == "output":
+        note = d.get("note") or "all system audio now goes here"
+        return f"moved the sound to {where} — {note}."
     if action in ("mute", "unmute"):
         return f"{action}d {where}."
+    # said out loud, because the machine going from silent to audible is a
+    # bigger change than the number moving and the operator did not ask for it
+    tail = " (it was muted, so that was cleared too)" if d.get("unmuted") else ""
+    level = d.get("level")
+    at = f" — now {level}%" if isinstance(level, int) else ""
     if action == "set":
-        return f"set {where} to {percent}%."
-    return f"volume {action} {percent or 5} points on {where}."
+        return f"set {where} to {percent}%{tail}."
+    return f"volume {action} {percent or 5} points on {where}{at}{tail}."

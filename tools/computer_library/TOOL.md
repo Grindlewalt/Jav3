@@ -17,6 +17,9 @@ parameters:
     limit:
       type: integer
       description: Most files to list at this level (default 60). Subfolder counts are always shown.
+    client:
+      type: string
+      description: Which computer, by name (e.g. "macbook"). Only needed when more than one is connected; the error lists them if you guess wrong.
   required: []
 ---
 Read-only, and it only ever sees inside the granted folders — there is no way to

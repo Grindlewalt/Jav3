@@ -31,6 +31,9 @@ parameters:
     client:
       type: string
       description: Which computer to search for local files, by name.
+    tab:
+      type: string
+      description: Which open Jarvis tab to play in, by name ("the mac", "phone"). Omit it — the default is the tab the operator is talking to you from, which is almost always what they mean.
   required: []
 ---
 Do not call music_search first. This searches everywhere itself and plays the
@@ -45,6 +48,9 @@ There are three places sound can come out, and `auto` picks for you:
 - **the Jarvis player** — a player inside the Jarvis tab. Preferred whenever a
   tab is open, because the operator is already touching that tab, and a browser
   only starts audio in a tab that has been touched. Volume and output work here.
+  It plays in ONE tab: the one the operator asked from. If they say "put it on
+  the mac" and they are talking to you from somewhere else, pass `tab`; the
+  error lists the open tabs by name if the guess misses.
 - **the music app** — TARMAC's own players on a phone or desktop. This is the one
   that goes silent: it accepts the request and plays nothing until the operator
   presses play once in that app.

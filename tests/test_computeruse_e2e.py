@@ -512,3 +512,179 @@ def test_the_client_download_refuses_to_be_cached():
         assert "_NO_CACHE" in src, (
             f"{fn.__name__} serves the client without cache headers — a CDN "
             f"will cache it by extension and pin an old build")
+
+
+# --- "I added the folders and it says there are none" -------------------------
+#
+# The operator's report, and it was true from both sides: a folder rejected by
+# the client and a folder nobody ever granted arrived here as the same empty
+# list. These tests are about the failure being legible, not about it being
+# impossible — a Linux path granted to a Mac SHOULD be refused; it just has to
+# say so.
+
+@pytest.mark.asyncio
+async def test_a_rejected_folder_says_why_instead_of_reading_as_none(tmp_path):
+    mod = _load_client()
+    agent = mod.Agent("http://x", "t", [], "mac", dry_run=True)
+    agent.set_grants(["/Users/nobody/Movies"])          # not a folder here
+
+    assert agent.grants == []
+    why = agent.grants_rejected[0]["why"]
+    assert "/Users/nobody/Movies" in agent.grant_note and "exist" in why
+
+    # and the search says it too, rather than answering "no matches"
+    found = agent.do_find("dune", "video")
+    assert found["hits"] == []
+    assert "/Users/nobody/Movies" in found["note"]
+    listed = agent.do_list()
+    assert "/Users/nobody/Movies" in listed["text"]
+
+
+@pytest.mark.asyncio
+async def test_no_grants_at_all_does_not_blame_allow_root(tmp_path):
+    """The old text sent the operator to re-run set-up with --allow-root, which
+    stopped being the cause when the launch flags stopped being a ceiling."""
+    mod = _load_client()
+    agent = mod.Agent("http://x", "t", [], "mac", dry_run=True)
+    agent.set_grants([])
+    text = agent.do_list()["text"]
+    assert "--allow-root" not in text
+    assert "machine name" in text or "granted" in text
+
+
+@pytest.mark.asyncio
+async def test_status_carries_the_rejected_folders_to_the_model(tmp_path, monkeypatch):
+    """computer_status is where the model finds out. Without this it reports a
+    machine with no folders and no reason, which is what it did."""
+    good = tmp_path / "Music"
+    good.mkdir()
+    (good / "a.mp3").write_bytes(b"\0")
+
+    async def grants(db=None, client=None):
+        return [cu.Grant(1, str(good), "")]
+    monkeypatch.setattr(cu, "list_grants", grants)
+
+    mod = _load_client()
+    agent = mod.Agent("http://x", "t", [], "mac", dry_run=True)
+    agent.set_grants([str(good), "/Users/nobody/Movies"])
+
+    async def send(raw):
+        msg = json.loads(raw)
+        cu.resolve_result("mac-1", msg["id"], {
+            "id": msg["id"], "ok": True,
+            "result": agent.handle(msg["verb"], msg["params"])})
+
+    cu.register(cu.Client(id="mac-1", name="mac", platform="darwin", send=send))
+    try:
+        from tools.computer_status.handler import run
+        out = await run()
+    finally:
+        cu.unregister("mac-1")
+
+    assert str(good) in out and "1 audio" in out
+    assert "/Users/nobody/Movies" in out
+    assert "NOT usable" in out
+
+
+@pytest.mark.asyncio
+async def test_a_grant_on_another_machines_name_is_named(monkeypatch):
+    """A machine that reconnects under a different name inherits none of its
+    folders, and the old error told the operator to add folders they had
+    already added. Naming the other machine is the whole tell."""
+    async def grants(db=None, client=None):
+        rows = [cu.Grant(1, "/Users/you/Movies", "", "oldmac")]
+        return [g for g in rows if client is None or g.client == client]
+    monkeypatch.setattr(cu, "list_grants", grants)
+
+    with pytest.raises(cu.VerbError) as e:
+        await cu.path_within_grants("/Users/you/Movies/Dune.mkv", "newmac")
+    assert "oldmac" in str(e.value)
+
+
+def test_the_client_reports_which_build_it_is_running(tmp_path):
+    """A stale client and a broken one look identical from the tab, and the
+    difference has cost two evenings — a CDN pinned an old download twice."""
+    mod = _load_client()
+    served = cu.served_build_id()
+    assert served and served != "unknown"
+    assert mod.build_id() == served, (
+        "the client fingerprints its own source the same way the host "
+        "fingerprints the source it serves; if these drift, every connected "
+        "machine is reported stale")
+
+    # a machine whose caps predate this reports 'unknown' and counts as stale
+    c = cu.Client(id="x", name="x", platform="darwin", caps={})
+    assert c.describe()["stale"] is True
+    c.caps["version"] = served
+    assert c.describe()["stale"] is False
+
+
+def test_video_extensions_match_on_both_sides():
+    """A file the client will play and the host will not is a file that
+    silently does not exist."""
+    mod = _load_client()
+    assert mod.VIDEO_EXT == cu.VIDEO_EXT
+    assert mod.AUDIO_EXT == cu.AUDIO_EXT
+
+
+def test_binaries_are_found_when_path_is_bare(monkeypatch, tmp_path):
+    """A launchd agent inherits /usr/bin:/bin, not a login shell's PATH, so
+    Homebrew's mpv is invisible: "mpv is not installed" on a machine where
+    `which mpv` answers. It bites only once the client is made permanent."""
+    mod = _load_client()
+    brew = tmp_path / "opt" / "homebrew" / "bin"
+    brew.mkdir(parents=True)
+    fake = brew / "mpv"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)   # bare PATH
+    monkeypatch.setattr(mod, "EXTRA_BIN_DIRS", (str(brew),))
+    assert mod.Runner._find_binaries().get("mpv") == str(fake)
+
+
+# --- volume over a muted machine ---------------------------------------------
+
+@pytest.mark.asyncio
+async def test_setting_the_volume_clears_the_mute(wired):
+    """Mute is a separate flag from the level on every platform here, so
+    writing a level over a muted machine is silence with a number attached —
+    Jarvis said "set to 40%" and the operator heard nothing."""
+    from tools.computer_volume.handler import run
+    await run(action="set", percent=40)
+    ran = [" ".join(str(a) for a in argv) for argv in wired["calls"]]
+    assert any("mute" in c and c.rstrip().endswith("0") for c in ran), ran
+
+
+@pytest.mark.asyncio
+async def test_muting_is_not_undone_by_its_own_clear(wired):
+    from tools.computer_volume.handler import run
+    wired["calls"].clear()
+    await run(action="mute")
+    ran = [" ".join(str(a) for a in argv) for argv in wired["calls"]]
+    assert ran and ran[-1].rstrip().endswith("1"), ran
+
+
+@pytest.mark.asyncio
+async def test_moving_the_sound_to_another_speaker(wired):
+    """The operator's question — can it decide which speaker. On Linux that is
+    the default sink plus the streams already playing, or the current track
+    keeps coming out of the old speaker."""
+    wired["agent"].os._cache["sinks"] = (
+        __import__("time").monotonic(),
+        [{"id": "alsa_output.usb-Focusrite", "label": "Desk Speakers"}])
+    from tools.computer_volume.handler import run
+    out = await run(action="output", device="desk speakers")
+    assert "Focusrite" in out or "moved the sound" in out
+    ran = [" ".join(str(a) for a in argv) for argv in wired["calls"]]
+    assert any("set-default-sink" in c for c in ran), ran
+    # the model's words never reach argv: what does is the id we enumerated
+    assert not any("desk speakers" in c for c in ran), ran
+
+
+@pytest.mark.asyncio
+async def test_output_without_a_speaker_is_refused(wired):
+    from tools.computer_volume.handler import run
+    out = await run(action="output")
+    assert out.startswith("error:") and "device" in out
+    assert not wired["calls"]

@@ -39,11 +39,12 @@ have the client print what it would do and touch nothing.
 | Verb | Linux | macOS |
 |---|---|---|
 | volume up/down/set/mute | ✅ wpctl or pactl | ✅ CoreAudio via ctypes |
+| move all sound to another speaker | ✅ pactl default sink + move streams | ✅ CoreAudio default output |
 | pause / next / previous / stop | ✅ MPRIS over D-Bus | ✅ synthesized media keys |
 | open an http(s) link | ✅ xdg-open | ✅ open |
 | play audio/video, chosen screen + audio device | ✅ mpv | ✅ mpv |
 | list screens | ✅ xrandr | ✅ NSScreen |
-| list audio outputs | ✅ pactl + mpv | ⚠️ default device only |
+| list audio outputs | ✅ pactl + mpv | ✅ CoreAudio device list |
 
 **Run `--selftest` first on any new machine.** It reports what is actually
 reachable instead of failing silently later.
@@ -60,9 +61,18 @@ reachable instead of failing silently later.
   Accessibility). On macOS 15 that grant lapses after a reboot; the client
   checks with `CGPreflightPostEventAccess` and tells you rather than doing
   nothing.
-- Picking a specific *mixer* output on macOS is not wired up — volume applies to
-  the default device. Choosing where a *played file* goes does work
-  (`--audio-device`, from mpv's own list).
+- Speakers are enumerated from CoreAudio with the names Sound preferences uses,
+  and identified by their UID — which is also what mpv calls a device
+  (`coreaudio/<uid>`), so the mixer list and the playback list finally speak one
+  vocabulary. `volume action=output` moves the *system* default, the way the
+  menu-bar picker does, so Spotify and Safari move with it.
+- Raising the volume also clears the mute. Mute is a separate CoreAudio property
+  from the level, so setting a level on a muted Mac used to report "40%" into
+  silence.
+- Binaries are looked up on PATH **and** in `/opt/homebrew/bin`, `/usr/local/bin`
+  and friends. A launchd agent inherits launchd's PATH, not a login shell's, so
+  Homebrew's mpv is invisible to it — "mpv is not installed" on a machine where
+  `which mpv` answers fine, and only once you make the client permanent.
 - `osascript` is deliberately not in the binary allowlist. AppleScript can
   `do shell script "..."`, so allowing it would reopen the exact path this
   client exists to close.
@@ -206,6 +216,22 @@ pointing out of a granted tree is refused.
 Add or remove a folder there and this client is told at once — no restart, no
 re-running set-up. `--allow-root` only seeds the list for the seconds before
 Jarvis answers, and is optional.
+
+A folder that cannot be used **says why**, on the Computer use tab and in
+`status`: it does not exist here, it is not a directory, or macOS privacy is
+refusing the listing (Desktop, Documents, Downloads, iCloud Drive and external
+volumes are TCC-protected — grant Full Disk Access to whatever runs this).
+Before that, a rejected folder and a folder nobody had granted produced the
+same empty list, so adding folders and then being told there were none was
+consistent behaviour rather than a contradiction.
+
+## Which build this is
+
+`--selftest` prints a `client build` fingerprint, and the client reports it when
+it connects. Jarvis compares it with the source it serves and flags the machine
+if they differ. A CDN in front of Jarvis has twice cached the download and left
+a machine running a build that predated the fix being chased — from the tab that
+looked exactly like a broken client.
 
 ## Removing it
 

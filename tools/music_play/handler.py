@@ -19,7 +19,7 @@ Three destinations, and they are not interchangeable:
 """
 import asyncio
 
-from backend import computeruse as cu, gui, musicpick, tarmac
+from backend import computeruse as cu, gui, musicpick, runtime, tarmac
 
 SHOWN = 12
 FULL_LIST = 60
@@ -125,7 +125,7 @@ async def _confirm_started(track_id: str, tries: int = 5) -> bool | None:
     return False
 
 
-async def _confirm_in_page(track_id, tries: int = 8) -> tuple[bool, str]:
+async def _confirm_in_page(track_id, tab=None, tries: int = 8) -> tuple[bool, str]:
     """The same question for the in-page player, answered from the tab's own
     reports. Returns (started, error) — the error is whatever the browser said
     when it refused, which is worth passing on verbatim."""
@@ -133,6 +133,10 @@ async def _confirm_in_page(track_id, tries: int = 8) -> tuple[bool, str]:
         await asyncio.sleep(0.5)
         s = gui.player_status()
         track = s.get("track") or {}
+        # a different tab still playing something from earlier must not be read
+        # as this request having started
+        if tab and s.get("tab") and s["tab"] != tab:
+            continue
         if str(track.get("id") or "") != str(track_id):
             continue
         if s.get("error"):
@@ -143,11 +147,20 @@ async def _confirm_in_page(track_id, tries: int = 8) -> tuple[bool, str]:
 
 
 async def _play_in_page(ids: list[int], what: str, device: str,
-                        volume: int | None) -> str:
+                        volume: int | None, tab: str = "") -> str:
     rows = await _queue_rows(ids)
     if not rows:
         return ("error: the music server would not describe those tracks, so "
                 "there is nothing to stream")
+    # ONE tab. This used to go to every open Jarvis tab, so asking for a song
+    # started it on the laptop, the desktop and the phone at once — the
+    # operator's report. The tab that asked wins; gui.resolve_tab explains the
+    # rest of the order.
+    target, where = gui.resolve_tab(tab or None, runtime.gui_tab.get())
+    if target is None:
+        return (f"{where}, so there is no in-page player to play on. Ask the "
+                f"operator to open Jarvis, or pass where='app' to send it to "
+                f"the music app instead.")
     fields: dict = {"queue": rows, "index": 0}
     if volume is not None:
         fields["volume"] = max(0, min(int(volume), 100))
@@ -155,30 +168,28 @@ async def _play_in_page(ids: list[int], what: str, device: str,
         # the tab resolves this against its OWN enumerated outputs, exactly as
         # the desktop client does — a name from the model never becomes an id
         fields["output"] = device
-    n = gui.player_push("play", **fields)
+    n = gui.player_push("play", tab=target, **fields)
     if not n:
-        return ("no Jarvis tab is open, so there is no in-page player to play "
-                "on. Ask the operator to open Jarvis, or pass where='app' to "
-                "send it to the music app instead.")
-    started, err = await _confirm_in_page(rows[0]["id"])
+        return f"'{where}' closed before it could play."
+    started, err = await _confirm_in_page(rows[0]["id"], target)
     queued = f" ({len(rows)} queued)" if len(rows) > 1 else ""
     extra = "".join([f", output {device}" if device else "",
                      f", volume {volume}%" if volume is not None else ""])
     if started:
-        return f"playing {what} in the Jarvis player{queued}{extra}."
+        return f"playing {what} in the Jarvis player on {where}{queued}{extra}."
     if err:
-        return (f"{what} was loaded into the Jarvis player but the browser "
-                f"refused to start it: {err}. The operator can press play in "
-                f"the player.")
-    return (f"{what} was sent to the Jarvis player{queued} but no sound has "
-            f"been confirmed. The player is on screen — the operator may need "
-            f"to press play once.")
+        return (f"{what} was loaded into the Jarvis player on {where} but the "
+                f"browser refused to start it: {err}. The operator can press "
+                f"play in the player.")
+    return (f"{what} was sent to the Jarvis player on {where}{queued} but no "
+            f"sound has been confirmed. The player is on screen — the operator "
+            f"may need to press play once.")
 
 
 async def _play_ids(ids: list[int], where: str, what: str, device: str,
-                    volume: int | None) -> str:
+                    volume: int | None, tab: str = "") -> str:
     if where == "jarvis":
-        return await _play_in_page(ids, what, device, volume)
+        return await _play_in_page(ids, what, device, volume, tab)
     try:
         r = await tarmac.remote("play", ids)
     except tarmac.TarmacError as e:
@@ -193,7 +204,7 @@ async def _play_ids(ids: list[int], where: str, what: str, device: str,
 
 async def run(query: str = "", ids: list | None = None, tag: str = "",
               device: str = "", volume: int | None = None,
-              client: str = "", where: str = "auto") -> str:
+              client: str = "", where: str = "auto", tab: str = "") -> str:
     dest = _resolve_where(where)
 
     # explicit ids skip matching entirely
@@ -203,7 +214,7 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
         except (TypeError, ValueError):
             return "error: ids must be whole numbers"
         return await _play_ids(picked, dest, f"{len(picked)} track(s)",
-                               device, volume)
+                               device, volume, tab)
 
     if not query and not tag:
         return "error: say what to play, or give ids"
@@ -251,7 +262,7 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
     except ValueError:
         return f"error: the library gave a track id that is not a number: {win.ref}"
     return await _play_ids([track_id], dest, musicpick.describe(win),
-                           device, volume)
+                           device, volume, tab)
 
 
 def _playing_line(what: str, r: dict, started: bool | None) -> str:

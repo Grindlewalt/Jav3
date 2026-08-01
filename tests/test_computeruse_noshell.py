@@ -368,10 +368,15 @@ def test_containment_still_holds_against_anything_not_granted(tmp_path):
         agent.check_playable("/etc/passwd", "audio")
     with pytest.raises(mod.Refused):
         agent.check_playable(str(tmp_path / "elsewhere.mp3"), "audio")
-    # a granted path that is not a directory here is reported, not adopted
+    # a granted path that is not a directory here is reported, not adopted —
+    # and the report names the folder AND the reason, because "no folders are
+    # added" was the message the operator got after adding one
     agent.set_grants([str(granted), "/nope/not/here"])
     assert agent.grants == [granted.resolve()]
-    assert "not a folder on this machine" in agent.grant_note
+    assert "/nope/not/here" in agent.grant_note
+    assert "does not exist" in agent.grant_note
+    assert agent.grants_rejected == [
+        {"root": "/nope/not/here", "why": "does not exist on this machine"}]
 
 
 def test_a_pushed_folder_list_is_not_answered_as_a_verb(tmp_path):

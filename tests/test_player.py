@@ -191,7 +191,7 @@ def test_a_new_play_clears_the_previous_verdict(monkeypatch):
     """started/error describe one track. Carrying them into the next play would
     report the last song's silence as this song's success."""
     gui.player_report({"track": {"id": 1}, "started": True, "error": "boom"})
-    monkeypatch.setattr(gui, "push", lambda ev: 1)
+    monkeypatch.setattr(gui, "push", lambda ev, tab=None: 1)
     gui.player_push("play", queue=[], index=0)
     s = gui.player_status()
     assert s["started"] is False and s["error"] == ""
@@ -243,6 +243,9 @@ async def test_a_browser_refusal_is_reported_not_swallowed(configured, monkeypat
     real_sleep = asyncio.sleep
     monkeypatch.setattr(handler.asyncio, "sleep", lambda *_: real_sleep(0))
     monkeypatch.setattr(gui, "player_push", lambda a, **k: 1)
+    # music now plays in ONE tab, so there has to be one open. With none, the
+    # honest answer is "nowhere to play" — see tests/test_gui_tabs.py.
+    monkeypatch.setattr(gui, "resolve_tab", lambda want, asked: ("t1", "Mac"))
     monkeypatch.setattr(gui, "player_status", lambda: {
         "track": {"id": 3}, "started": False, "paused": True,
         "error": "the browser blocked autoplay until the page is clicked"})
@@ -264,6 +267,9 @@ async def test_a_confirmed_in_page_play_says_where_it_went(configured, monkeypat
     real_sleep = asyncio.sleep
     monkeypatch.setattr(handler.asyncio, "sleep", lambda *_: real_sleep(0))
     monkeypatch.setattr(gui, "player_push", lambda a, **k: 1)
+    # music now plays in ONE tab, so there has to be one open. With none, the
+    # honest answer is "nowhere to play" — see tests/test_gui_tabs.py.
+    monkeypatch.setattr(gui, "resolve_tab", lambda want, asked: ("t1", "Mac"))
     monkeypatch.setattr(gui, "player_status", lambda: {
         "track": {"id": 3}, "started": True, "paused": False, "error": ""})
     _mock(lambda r: httpx.Response(200, json={
@@ -309,13 +315,15 @@ async def test_volume_on_the_in_page_player_works(monkeypatch):
 
     pushed = {}
 
-    def fake_push(action, **fields):
-        pushed.update({"action": action, **fields})
+    def fake_push(action, tab=None, **fields):
+        pushed.update({"action": action, "tab": tab, **fields})
         return 1
 
     monkeypatch.setattr(gui, "player_push", fake_push)
+    monkeypatch.setattr(gui, "resolve_tab", lambda want, asked: ("t1", "Mac"))
     out = await run(action="volume", level=250, where="jarvis")
-    assert pushed == {"action": "volume", "level": 100}   # clamped, not rejected
+    # tab is the addressing, not a field of the action
+    assert pushed == {"action": "volume", "tab": "t1", "level": 100}
     assert "100%" in out
 
 
