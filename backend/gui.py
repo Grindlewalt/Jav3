@@ -101,6 +101,13 @@ def resolve_tab(want: str | None, asked_from: str | None = None) -> tuple[str | 
     order = tab_list()
     if order:
         return order[0]["id"], order[0]["name"]
+    if bus.subscriber_count(GUI_CHAN):
+        # Somebody is listening but nobody said who they are — a page still
+        # running the bundle from before tabs had names, left open across the
+        # deploy that added them. Refusing here would make music silently stop
+        # working until every browser was reloaded, so this is the one case
+        # where the old behaviour is still the right answer. "" means broadcast.
+        return "", "every open tab (an older Jarvis page — reload it to name it)"
     return None, "no Jarvis tab is open"
 
 
@@ -109,9 +116,10 @@ def push(event: dict, tab: str | None = None) -> int:
 
     Returns how many tabs will see it, so a tool can tell the model honestly
     whether anything saw it. A `tab` that has since closed returns 0 rather than
-    quietly going to all of them.
+    quietly going to all of them — "" is the deliberate broadcast (see
+    resolve_tab), None is "not addressed to anyone in particular".
     """
-    if tab is not None:
+    if tab:
         t = _tabs.get(tab)
         if not t:
             return 0

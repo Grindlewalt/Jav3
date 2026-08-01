@@ -160,3 +160,29 @@ def test_chat_carries_the_tab_into_the_turn():
     from backend import chat
     assert "tab" in chat.ChatRequest.model_fields
     assert "runtime.gui_tab.set" in inspect.getsource(chat._run_chat_turn)
+
+
+def test_a_page_from_before_named_tabs_still_gets_the_music():
+    """A browser left open across the deploy that added tab names subscribes
+    without saying who it is. Refusing it would make music silently stop
+    working until every window was reloaded."""
+    q = bus.subscribe(gui.GUI_CHAN)          # subscribed, never registered
+    try:
+        target, why = gui.resolve_tab(None, None)
+        assert target == "", why             # "" is the deliberate broadcast
+        assert "reload" in why
+        assert gui.push({"type": "player"}, tab=target) == 1
+        assert len(_drain(q)) == 1
+    finally:
+        bus.unsubscribe(gui.GUI_CHAN, q)
+
+
+def test_a_named_tab_is_still_preferred_over_the_fallback(tabs):
+    """The fallback must not reintroduce the bug for browsers that DO say who
+    they are — one unnamed subscriber alongside three named ones."""
+    q = bus.subscribe(gui.GUI_CHAN)
+    try:
+        target, _ = gui.resolve_tab(None, "t-mac")
+        assert target == "t-mac"
+    finally:
+        bus.unsubscribe(gui.GUI_CHAN, q)
