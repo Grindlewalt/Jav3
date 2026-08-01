@@ -58,6 +58,30 @@ def test_sanitize_strips_markdown():
     assert tts_sanitize("see https://example.com/x?y=1 there") == "see a link there"
 
 
+def test_first_chunk_cuts_at_clause():
+    """The opening piece speaks at the first clause boundary — the operator
+    has already waited through STT + model latency; don't add a sentence."""
+    ch = SpeechChunker()
+    out = ch.feed("Let me check the logs, ")
+    assert out == ["Let me check the logs,"]
+    # after the first emission, normal sentence rules apply again
+    out = ch.feed("this may take a moment, but not long. And next")
+    assert out == ["this may take a moment, but not long."]
+
+
+def test_first_chunk_force_cuts_without_punctuation():
+    ch = SpeechChunker()
+    out = ch.feed("word " * 30)          # 150 chars, no punctuation at all
+    assert out and len(out[0]) <= 80
+
+
+def test_first_chunk_waits_below_minimum():
+    ch = SpeechChunker()
+    assert ch.feed("Sure, ") == []       # 6 chars — too short to speak alone
+    assert ch.feed("that's an easy one to answer. More") \
+        == ["Sure, that's an easy one to answer."]
+
+
 def test_speech_chunker_code_fence_collapses():
     ch = SpeechChunker()
     out = []

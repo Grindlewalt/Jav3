@@ -15,6 +15,7 @@ and yields events as speech boundaries are crossed:
 The thresholds are deliberately asymmetric (easy to stay in speech, harder to
 enter it) — a barge-in false positive costs a playback hiccup on the Pi side,
 but a clipped utterance start costs a mis-transcription."""
+import os
 from collections import deque
 
 from pysilero_vad import SileroVoiceActivityDetector
@@ -26,7 +27,10 @@ FRAME_BYTES = FRAME_SAMPLES * 2
 START_PROB = 0.50
 KEEP_PROB = 0.35                       # stay-in-speech threshold
 START_FRAMES = 2                       # 64 ms of confident speech to trigger
-HANG_FRAMES = 13                       # ~416 ms of silence ends the utterance
+# how long a pause ends the utterance: the single biggest end-of-speech
+# latency knob. 300 ms default is snappy but will split very slow talkers —
+# raise VOICEBOX_HANG_MS if utterances come back in pieces.
+HANG_FRAMES = max(3, int(os.environ.get("VOICEBOX_HANG_MS", "300")) // 32)
 PRE_ROLL_FRAMES = 8                    # ~256 ms kept from before the trigger
 MAX_UTTERANCE_FRAMES = 30 * 1000 // 32  # hard cap ~30 s — flush, don't balloon
 

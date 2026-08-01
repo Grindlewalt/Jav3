@@ -136,6 +136,38 @@ async def _final_of(gen):
     return final
 
 
+async def test_voice_turn_gets_voice_prompt(client, monkeypatch):
+    """voice=True appends the narrate-before-acting block to the system
+    prompt; ordinary turns never see it."""
+    from backend import chat as chat_mod
+    from backend.voice_text import VOICE_PROMPT
+    seen = {}
+
+    def capture(voice_flag):
+        async def turn(cid, system_prompt, history, tools=None, **kw):
+            seen[voice_flag] = system_prompt
+            yield {"type": "final", "content": "ok"}
+        return turn
+
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT INTO conversations (summary) VALUES ('t')")
+        cid = cur.lastrowid
+        await db.commit()
+    finally:
+        await db.close()
+
+    monkeypatch.setattr(chat_mod, "run_turn", capture(True))
+    await chat_mod.start_turn(cid, user_msg="hi", voice=True)
+    monkeypatch.setattr(chat_mod, "run_turn", capture(False))
+    await chat_mod.start_turn(cid, user_msg="hi", voice=False)
+
+    assert VOICE_PROMPT in seen[True]
+    assert seen[True].rstrip().endswith(VOICE_PROMPT.rstrip())  # rides the tail
+    assert VOICE_PROMPT not in seen[False]
+
+
 async def test_rewrite_rules_default_still_rewrites(tmp_env, monkeypatch):
     """Sanity: with standing rules present, the default path still runs the
     second-pass rewrite (behavior unchanged for non-voice turns)."""

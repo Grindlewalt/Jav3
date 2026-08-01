@@ -13,6 +13,37 @@ SAMPLE_RATE = 24_000
 MODEL_FILE = "kokoro-v1.0.onnx"
 VOICES_FILE = "voices-v1.0.bin"
 
+# kokoro synthesizes a text in one blocking pass, so a long chunk would sit
+# silent for its whole synth time before the first slice streams. Texts are
+# pre-split at clause boundaries into pieces this size; each piece streams as
+# soon as ITS synth lands (~sub-second), which is what makes the TTS feel
+# on-the-fly. Also the grain at which a cancel takes effect.
+PIECE_CHARS = 120
+
+
+def split_tts_text(text: str) -> list[str]:
+    """Clause-boundary split into pieces ≤ ~PIECE_CHARS (best effort)."""
+    text = " ".join(text.split())
+    if len(text) <= PIECE_CHARS:
+        return [text] if text else []
+    pieces: list[str] = []
+    rest = text
+    while len(rest) > PIECE_CHARS:
+        window = rest[:PIECE_CHARS]
+        cut = -1
+        for sep in (". ", "! ", "? ", "; ", ": ", ", ", " "):
+            cut = window.rfind(sep)
+            if cut > PIECE_CHARS // 3:      # don't strand a tiny lead piece
+                cut += len(sep) - 1         # keep the punctuation on the left
+                break
+        if cut <= 0:
+            cut = PIECE_CHARS
+        pieces.append(rest[:cut + 1].strip())
+        rest = rest[cut + 1:].strip()
+    if rest:
+        pieces.append(rest)
+    return [p for p in pieces if p]
+
 
 def models_dir() -> Path:
     return Path(os.environ.get("VOICEBOX_MODELS", "./models"))

@@ -34,6 +34,21 @@ def _resample_24k_to_16k(pcm: bytes) -> bytes:
     return y.astype(np.int16).tobytes()
 
 
+def test_split_tts_text():
+    """Pure splitter (no inference, though the module-level skip still
+    gates it to boxes with models — it's sidecar-only code either way)."""
+    from tts import PIECE_CHARS, split_tts_text
+    assert split_tts_text("short line") == ["short line"]
+    assert split_tts_text("") == []
+    long = ("The first clause runs on for a while, then a second clause "
+            "follows it, and finally a third one wraps the whole thing up "
+            "after the pause. Then another sentence entirely.")
+    pieces = split_tts_text(long)
+    assert len(pieces) >= 2
+    assert all(len(p) <= PIECE_CHARS + 2 for p in pieces)
+    assert " ".join(pieces) == " ".join(long.split())   # nothing lost
+
+
 @pytest.fixture(scope="module")
 def synth():
     from tts import Synth

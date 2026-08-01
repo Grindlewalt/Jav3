@@ -33,7 +33,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 
 from stt import Transcriber
-from tts import SAMPLE_RATE as TTS_RATE, Synth, models_dir
+from tts import SAMPLE_RATE as TTS_RATE, Synth, models_dir, split_tts_text
 from vad import StreamingVAD
 
 log = logging.getLogger("voicebox")
@@ -135,20 +135,29 @@ async def voice_ws(ws: WebSocket):
             if g != gen:                 # cancelled while queued
                 continue
             await send({"type": "tts_start", "id": tts_id})
-            try:
-                pcm = await loop.run_in_executor(ex, tts.synth, text)
-            except Exception as exc:  # noqa: BLE001 — keep the lane alive
-                log.exception("tts failed")
-                await send({"type": "error", "message": f"tts: {exc}"})
-                continue
             header = struct.pack("<BI", TTS_FRAME, tts_id)
-            for off in range(0, len(pcm), SLICE_BYTES):
-                if g != gen:             # cancelled mid-stream: stop between slices
+            total = 0
+            failed = False
+            # piecewise: each clause streams the moment its synth lands, so
+            # a long chunk starts speaking after ~one piece of synth latency
+            for piece in split_tts_text(text):
+                if g != gen:             # cancelled between pieces
                     break
-                await ws.send_bytes(header + pcm[off:off + SLICE_BYTES])
-            if g == gen:
+                try:
+                    pcm = await loop.run_in_executor(ex, tts.synth, piece)
+                except Exception as exc:  # noqa: BLE001 — keep the lane alive
+                    log.exception("tts failed")
+                    await send({"type": "error", "message": f"tts: {exc}"})
+                    failed = True
+                    break
+                total += len(pcm)
+                for off in range(0, len(pcm), SLICE_BYTES):
+                    if g != gen:         # cancelled mid-stream
+                        break
+                    await ws.send_bytes(header + pcm[off:off + SLICE_BYTES])
+            if g == gen and not failed:
                 await send({"type": "tts_done", "id": tts_id,
-                            "dur_ms": len(pcm) * 1000 // (TTS_RATE * 2)})
+                            "dur_ms": total * 1000 // (TTS_RATE * 2)})
 
     workers = [asyncio.create_task(stt_worker()),
                asyncio.create_task(tts_worker())]

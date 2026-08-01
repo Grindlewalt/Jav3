@@ -1,10 +1,28 @@
 """Pure text helpers for voice mode: sentence chunking for streaming TTS,
-markdown-to-speakable sanitizing, and the cut-off bookkeeping that tells the
-next turn exactly how much of a reply the operator actually heard.
+markdown-to-speakable sanitizing, the voice-turn prompt block, and the
+cut-off bookkeeping that tells the next turn exactly how much of a reply the
+operator actually heard.
 
 Everything here is synchronous and side-effect free — unit-tested without a
 model, a browser, or the sidecar."""
 import re
+
+# Appended to the system prompt of voice turns (chat._run_chat_turn,
+# voice=True). Two jobs: the operator must never sit in unannounced silence
+# while tools run, and the output must be worth SPEAKING — the TTS layer
+# strips markdown and skips tables/code, so producing them is wasted tokens.
+VOICE_PROMPT = """\
+# Voice mode — you are SPEAKING aloud (TTS); the operator is listening, not reading
+- Narrate before you act: before the FIRST tool call, one short spoken \
+sentence saying what you're about to do ("Let me check the logs."). Whenever \
+the work shifts to a new stage, one more short line. Silence while tools run \
+reads as a hang — never go into tools unannounced.
+- Talk like a person: short sentences, plain words, contractions. No \
+markdown, no headings, no bullet lists, no tables, no code blocks — the \
+speech layer strips or skips them. No URLs; name the source in words instead.
+- Say numbers and units the way you'd speak them.
+- Keep answers tight. Lead with the answer, then only the detail that \
+earns its airtime; offer depth rather than dumping it."""
 
 # --- sentence chunking -------------------------------------------------------
 
@@ -60,6 +78,31 @@ def chunk_sentences(buf: str) -> tuple[list[str], str]:
     return out, buf
 
 
+# The opening of a reply gets a fast path: the operator has been waiting
+# through STT + model latency already, so the FIRST speakable piece cuts at
+# the first clause boundary (comma/colon/semicolon) instead of a full
+# sentence. Chunk 1 trades a little prosody for first-audio latency; every
+# later chunk uses the normal sentence rules.
+FIRST_CUT_MIN = 12
+FIRST_CUT_MAX = 80
+
+
+def first_clause_cut(buf: str) -> int | None:
+    """Earliest defensible cut for the first spoken piece, or None to wait."""
+    for i, ch in enumerate(buf):
+        if ch == "\n" and i >= 1:
+            return i + 1
+        if i + 1 >= FIRST_CUT_MIN and i + 1 < len(buf) and buf[i + 1].isspace():
+            if ch in _END and _cut_ok(buf, i):
+                return i + 1
+            if ch in ",;:":
+                return i + 1
+    if len(buf) > FIRST_CUT_MAX:
+        sp = buf.rfind(" ", FIRST_CUT_MIN, FIRST_CUT_MAX)
+        return sp + 1 if sp > 0 else FIRST_CUT_MAX
+    return None
+
+
 # --- markdown → speakable ----------------------------------------------------
 
 _MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -89,11 +132,21 @@ class SpeechChunker:
     def __init__(self) -> None:
         self._buf = ""
         self._in_fence = False
+        self._spoke = False              # first emission unlocks the fast path
 
     def feed(self, text: str) -> list[str]:
         self._buf += text
+        out: list[str] = []
+        if not self._spoke:
+            # opening fast path: get SOMETHING to the speakers at the first
+            # clause boundary rather than the first full sentence
+            cut = first_clause_cut(self._buf)
+            if cut is not None:
+                piece, self._buf = self._buf[:cut].strip(), self._buf[cut:].lstrip(" ")
+                out += self._filter([piece] if piece else [])
         chunks, self._buf = chunk_sentences(self._buf)
-        return self._filter(chunks)
+        out += self._filter(chunks)
+        return out
 
     def flush(self) -> list[str]:
         rest, self._buf = self._buf.strip(), ""
@@ -107,12 +160,14 @@ class SpeechChunker:
                 self._in_fence = not self._in_fence
                 if self._in_fence:
                     out.append("(code omitted.)")
+                    self._spoke = True
                 continue
             if self._in_fence:
                 continue
             s = tts_sanitize(c)
             if s:
                 out.append(s)
+                self._spoke = True
         return out
 
 

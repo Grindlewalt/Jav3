@@ -337,6 +337,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # instead of the DB global — see toolctx.active_slug
         ptoken = runtime.active_project.set(active)
         system_prompt = await assemble_system_prompt(db, active=active)
+        if voice:
+            # spoken turns: narrate-before-acting + speakable-output rules.
+            # Appended after everything (incl. the operator-rules tail) so it
+            # rides the same end-of-prompt salience the rules rely on.
+            from .voice_text import VOICE_PROMPT
+            system_prompt = f"{system_prompt}\n\n{VOICE_PROMPT}"
         # tool subsetting: with no project loaded, project-scoped run/git/
         # search tools can only error — withhold them. The FILE tools stay:
         # they fall back to the chat's hidden artifact store (persistent
