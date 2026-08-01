@@ -37,6 +37,7 @@ import json
 import logging
 import random
 import struct
+from datetime import datetime
 
 import websockets
 
@@ -44,7 +45,7 @@ from . import bus, chat, runtime
 from .agent.model import confirm_peak, in_peak_window, peak_confirmed
 from .agent.tools.registry import dispatch as tool_dispatch
 from .config import settings
-from .db import get_db, open_conversation
+from .db import get_db, get_state, open_conversation, set_state
 from .memory import get_active_project
 from .voice_text import (CUTOFF_MARK, CUTOFF_NOTHING, ESCALATE_PREFIX,
                          SpeechChunker, annotate_cutoff, heard_upto_note,
@@ -94,6 +95,18 @@ LOCAL_TOOLS = ("music_play", "music_control", "music_search", "music_status",
 # and this dispatches music_play directly (an algorithm, not a conversation).
 # The agent can still control the result — it's the same Jarvis player.
 CLAP_TRACKS = ("Kickstart My Heart", "Should I Stay or Should I Go")
+
+# First wake of the day = the startup procedure: greet, then the highlights
+# of whatever the overnight schedules produced. Runs as an ordinary (local)
+# turn, so it's spoken naturally and lands in the transcript.
+GREETING_KEY = "voice_last_greeting"
+GREETING_NOTE = (
+    "[startup — the operator just woke you for the first time today. Greet "
+    "them (it's {daypart}) in one short sentence, then give the highlights "
+    "of the overnight scheduled runs below in two or three spoken sentences "
+    "— the interesting substance, not a readout. No lists, no timestamps, "
+    "don't quote raw text verbatim. If there's nothing below, just greet "
+    "them and ask what they need.]\n\n{briefing}")
 
 PEAK_ASK = "Heads up: peak pricing is in effect. Should I continue?"
 PEAK_DROPPED = "Okay, I'll hold off. Say it again later if you want it."
@@ -349,6 +362,8 @@ class VoiceSession:
             await self._send_json({"type": "ready", "wake": ev.get("wake")})
             if self.wake_enabled and self.state == LISTENING:
                 await self._sleep()          # sessions start on standby
+            elif self.state == LISTENING:
+                await self._maybe_greet()    # no wake word: greet on arrival
         elif kind == "wake":
             await self._wake_up()
         elif kind in ("speech_start", "speech_end"):
@@ -783,9 +798,40 @@ class VoiceSession:
         await self._send_json({"type": "wake"})   # the chime
         await self._push_state()
         self._arm_sleep_timer()
+        if await self._maybe_greet():
+            return                       # the greeting turn has the floor
         # anything that finished while he was asleep gets said now
         if self.queued or self.pending_deliveries:
             await self._maybe_idle()
+
+    async def _maybe_greet(self) -> bool:
+        """The startup procedure, once per day at the first wake: greet +
+        speak the overnight briefing. Ordinary turn, local tier, so the
+        greeting costs nothing and varies naturally."""
+        if self.turn_task is not None and not self.turn_task.done():
+            return False
+        db = await get_db()
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            if await get_state(db, GREETING_KEY) == today:
+                return False
+            await set_state(db, GREETING_KEY, today)
+            async with db.execute(
+                "SELECT name, last_result FROM schedules WHERE enabled = 1 "
+                "AND last_result IS NOT NULL AND last_run > "
+                "datetime('now', '-18 hours') ORDER BY last_run DESC LIMIT 5"
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await db.close()
+        briefing = "\n\n".join(
+            f"## {r['name']}\n{(r['last_result'] or '')[:1500]}" for r in rows)
+        hour = datetime.now().hour
+        daypart = ("morning" if hour < 12 else
+                   "afternoon" if hour < 18 else "evening")
+        await self._begin_turn(GREETING_NOTE.format(
+            daypart=daypart, briefing=briefing or "(nothing ran overnight)"))
+        return True
 
     def _arm_sleep_timer(self) -> None:
         """(Re)start the doze countdown. Cancelled by activity; only ticks

@@ -8,7 +8,8 @@ from backend.auth import hash_password
 from backend.db import get_db, init_db
 from backend.memory import ensure_memory_seeds
 
-from tests.test_voice_session import make_session, scripted_turn, settle
+from tests.test_voice_session import (first_tts, make_session, scripted_turn,
+                                      settle)
 
 
 @pytest.fixture
@@ -25,8 +26,21 @@ async def seeded(tmp_env):
         await db.close()
 
 
+async def mark_greeted():
+    """Most tests aren't about the startup greeting — pre-spend it."""
+    from datetime import datetime
+    from backend.db import set_state
+    from backend.voice import GREETING_KEY
+    db = await get_db()
+    try:
+        await set_state(db, GREETING_KEY, datetime.now().strftime("%Y-%m-%d"))
+    finally:
+        await db.close()
+
+
 async def test_asleep_until_wake_word(seeded, monkeypatch):
     from backend import chat as chat_mod
+    await mark_greeted()
     session, out = make_session(monkeypatch)
     monkeypatch.setattr(chat_mod, "run_turn",
                         scripted_turn("Good morning, sir. "))
@@ -53,6 +67,7 @@ async def test_asleep_until_wake_word(seeded, monkeypatch):
 
 async def test_dozes_off_after_idle_timeout(seeded, monkeypatch):
     from backend import voice
+    await mark_greeted()
     monkeypatch.setattr(voice.settings, "voice_wake_timeout", 0.05)
     session, out = make_session(monkeypatch)
     await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
@@ -63,10 +78,58 @@ async def test_dozes_off_after_idle_timeout(seeded, monkeypatch):
 
 
 async def test_no_wake_model_means_always_listening(seeded, monkeypatch):
+    await mark_greeted()
     session, out = make_session(monkeypatch)
     await session._on_sidecar_json({"type": "ready", "wake": None})
     assert session.state == "listening"
     assert session._sleep_task is None
+
+
+async def test_first_wake_of_the_day_greets_with_briefing(seeded, monkeypatch):
+    from backend import chat as chat_mod
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO schedules (name, kind, task, cadence_kind, daily_at, "
+            "next_run, last_run, last_result) VALUES ('Morning News', 'agent', "
+            "'fetch news', 'daily', '06:00', datetime('now', '+1 day'), "
+            "datetime('now', '-1 hour'), 'Rain later today; the Mars rover "
+            "found something shiny.')")
+        await db.commit()
+    finally:
+        await db.close()
+
+    session, out = make_session(monkeypatch)
+    seen = {}
+
+    async def turn(cid, system_prompt, history, tools=None, **kw):
+        seen["user"] = history[-1]["content"]
+        yield {"type": "final", "content": "Morning, sir. Rain later; the "
+               "rover found something shiny. "}
+
+    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
+    assert session.state == "asleep"
+    await session._on_sidecar_json({"type": "wake"})
+    await settle(session)
+
+    assert "[startup" in seen["user"]
+    assert "Morning News" in seen["user"]
+    assert "something shiny" in seen["user"]
+
+    # play out the greeting so the session can settle back to sleep
+    for t in await first_tts(session):
+        await session._on_sidecar_json(
+            {"type": "tts_done", "id": t["id"], "dur_ms": 500})
+        await session.on_browser_json(
+            {"type": "chunk_played", "chunk_id": t["id"]})
+    assert session.state == "listening"
+
+    # same day, second wake: no second greeting turn
+    seen.clear()
+    await session._sleep()
+    await session._on_sidecar_json({"type": "wake"})
+    assert seen == {} and session.state == "listening"
 
 
 async def test_double_clap_dispatches_music_directly(seeded, monkeypatch):
