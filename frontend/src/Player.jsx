@@ -1,4 +1,4 @@
-// The in-page music player.
+// The music player.
 //
 // Why this exists: TARMAC is a SEPARATE Cloudflare Access application from
 // Jarvis, so a browser holding a Jarvis session cannot fetch its /stream/:id —
@@ -12,13 +12,21 @@
 // is refused anyway we report that rather than pretending — the host cannot see
 // an <audio> element, so every honest claim about playback comes from here.
 //
+// It can leave the browser. The controls portal into a detached OS window
+// (src/detached.js) that floats over the desktop and drags anywhere; the
+// <audio> stays here, in the page that started it, because moving a playing
+// media element between documents restarts it. So popping out, closing the
+// float and popping out again never interrupt a track.
+//
 // Driven by `player` events off the GUI bus (App.jsx re-dispatches them as a
 // `jarvis-player` window event) and by the operator's own clicks. No
 // window.confirm or alert anywhere: iOS standalone suppresses both, which is
 // what made other controls silently dead on the phone.
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from './api.js'
 import { TAB_ID } from './tab.js'
+import { CAN_DETACH, openDetached, watchClose } from './detached.js'
 
 const REPORT_EVERY = 10000   // keeps the host's `stale` flag from tripping
 
@@ -30,6 +38,55 @@ const CAN_PICK_OUTPUT = typeof HTMLMediaElement !== 'undefined'
 function clock(s) {
   if (!Number.isFinite(s) || s < 0) return '0:00'
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+}
+
+// Drawn rather than typed: the emoji transport glyphs (⏮ ❚❚ 🔊) render as a
+// different font on every platform and were the least native-looking thing on
+// screen. One monochrome set, sized by the button.
+const STROKE = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' }
+
+function Glyph({ name }) {
+  const paths = {
+    play: <path d="M8.4 5.3a.9.9 0 0 1 1.38-.76l9.9 6.7a.9.9 0 0 1 0 1.52l-9.9 6.7a.9.9 0 0 1-1.38-.76V5.3Z" />,
+    pause: <>
+      <rect x="7" y="5" width="3.4" height="14" rx="1.5" />
+      <rect x="13.6" y="5" width="3.4" height="14" rx="1.5" />
+    </>,
+    prev: <>
+      <rect x="5.4" y="5.6" width="2.1" height="12.8" rx="1" />
+      <path d="M19 6.4v11.2a.9.9 0 0 1-1.38.76l-8.8-5.6a.9.9 0 0 1 0-1.52l8.8-5.6A.9.9 0 0 1 19 6.4Z" />
+    </>,
+    next: <>
+      <rect x="16.5" y="5.6" width="2.1" height="12.8" rx="1" />
+      <path d="M5 6.4v11.2a.9.9 0 0 0 1.38.76l8.8-5.6a.9.9 0 0 0 0-1.52l-8.8-5.6A.9.9 0 0 0 5 6.4Z" />
+    </>,
+    volume: <>
+      <path d="M11.4 4.5 7 8.2H4.3a1 1 0 0 0-1 1v5.6a1 1 0 0 0 1 1H7l4.4 3.7a.8.8 0 0 0 1.32-.61V5.11a.8.8 0 0 0-1.32-.61Z" />
+      <path d="M16.1 9.2a.9.9 0 0 1 1.27.1 4.3 4.3 0 0 1 0 5.4.9.9 0 1 1-1.37-1.16 2.5 2.5 0 0 0 0-3.08.9.9 0 0 1 .1-1.26Z" />
+    </>,
+    // an AirPlay-shaped glyph, because that is what choosing an output means here
+    output: <>
+      <rect x="3.2" y="4.4" width="17.6" height="10.6" rx="2.4" {...STROKE} />
+      <path d="M12 13.9l4.3 5.2a.55.55 0 0 1-.42.9H8.12a.55.55 0 0 1-.42-.9L12 13.9Z" />
+    </>,
+    // the macOS picture-in-picture mark: a window with a window in it
+    popout: <>
+      <rect x="3.2" y="4.9" width="17.6" height="14.2" rx="2.6" {...STROKE} />
+      <rect x="11.4" y="10.7" width="7.2" height="5.7" rx="1.4" />
+    </>,
+    dock: <>
+      <rect x="3.2" y="4.9" width="17.6" height="14.2" rx="2.6" {...STROKE} />
+      <path d="M12 8.1v6.2m0 0 2.5-2.5M12 14.3l-2.5-2.5" {...STROKE} />
+    </>,
+    collapse: <path d="m7 10 5 5 5-5" {...STROKE} />,
+    expand: <path d="m7 14 5-5 5 5" {...STROKE} />,
+    close: <path d="m6.4 6.4 11.2 11.2M17.6 6.4 6.4 17.6" {...STROKE} />,
+  }
+  return (
+    <svg viewBox="0 0 24 24" width="100%" height="100%" fill="currentColor" aria-hidden="true">
+      {paths[name]}
+    </svg>
+  )
 }
 
 export default function Player() {
@@ -45,6 +102,7 @@ export default function Player() {
   const [sinkId, setSinkId] = useState('')
   const [showOutputs, setShowOutputs] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
+  const [float, setFloat] = useState(null)   // the detached Window, or null
   // bumped on every play event so "play that again" restarts the current track:
   // keying the load effect on src alone means an identical src is a no-op
   const [playToken, setPlayToken] = useState(0)
@@ -153,6 +211,51 @@ export default function Player() {
     report({ track_id: null, paused: true, started: false, queue: 0 })
   }, [report])
 
+  // --- the detached window ------------------------------------------------------
+
+  const popOut = useCallback(async () => {
+    if (float) return
+    try {
+      const { win, dispose } = await openDetached({
+        width: 404, height: 178, title: 'Jarvis · music',
+      })
+      // closing the float only re-docks the controls; the track never stops
+      const unwatch = watchClose(win, () => { dispose(); setFloat(null) })
+      win.__jarvisDispose = () => { unwatch(); dispose() }
+      setCollapsed(false)
+      setShowOutputs(false)
+      setFloat(win)
+    } catch (e) {
+      setError(e?.message || 'the pop-out window could not be opened')
+    }
+  }, [float])
+
+  const dock = useCallback(() => {
+    if (!float) return
+    float.__jarvisDispose?.()
+    setFloat(null)
+    float.close()
+  }, [float])
+
+  // stopping the music leaves nothing to control, so the window goes too
+  useEffect(() => {
+    if (!track && float) {
+      float.__jarvisDispose?.()
+      setFloat(null)
+      float.close()
+    }
+  }, [track, float])
+
+  // it is a window in a task switcher: it should say what is playing
+  useEffect(() => {
+    if (float && track) float.document.title = `${track.title} · Jarvis`
+  }, [float, track])
+
+  useEffect(() => () => {
+    // unmounting the player (logout) must not strand a floating window
+    if (float) { float.__jarvisDispose?.(); float.close() }
+  }, [float])
+
   // --- audio outputs ----------------------------------------------------------
 
   const loadOutputs = useCallback(async () => {
@@ -240,32 +343,13 @@ export default function Player() {
 
   const pct = duration > 0 ? (position / duration) * 100 : 0
   const left = queue.length - index - 1
+  const shut = collapsed && !float
 
-  return (
-    <div className={collapsed ? 'jplayer collapsed' : 'jplayer'}>
-      <audio
-        ref={audioRef}
-        src={track.src}
-        preload="metadata"
-        onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
-        onDurationChange={(e) => {
-          const d = e.currentTarget.duration
-          setDuration(Number.isFinite(d) ? d : (track.duration || 0))
-        }}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => {
-          if (index < queue.length - 1) step(1)
-          else { setPlaying(false); report({ paused: true, started: false }) }
-        }}
-        onError={() => {
-          const msg = 'the track could not be loaded from the music server'
-          setError(msg)
-          setPlaying(false)
-          report({ started: false, paused: true, error: msg })
-        }}
-      />
-
+  // One tree, rendered either into the page or into the detached window's body.
+  // It is the same React tree either way, so state, the audio element and the
+  // 10s reporter carry straight across the move.
+  const shell = (
+    <div className={`jplayer${float ? ' floating' : ''}${shut ? ' collapsed' : ''}`}>
       <div className="jp-head">
         <div className="jp-meta">
           <div className="jp-title ellipsis" title={track.title}>{track.title}</div>
@@ -274,19 +358,35 @@ export default function Player() {
             {left > 0 && <span className="jp-queued">+{left}</span>}
           </div>
         </div>
-        <button className="jp-icon" onClick={() => setCollapsed((c) => !c)}
-                aria-label={collapsed ? 'expand player' : 'collapse player'}
-                title={collapsed ? 'expand' : 'collapse'}>
-          {collapsed ? '▴' : '▾'}
-        </button>
+        {float ? (
+          <button className="jp-icon" onClick={dock}
+                  aria-label="put the player back in the page" title="put back in the page">
+            <Glyph name="dock" />
+          </button>
+        ) : (
+          <>
+            {CAN_DETACH && (
+              <button className="jp-icon" onClick={popOut}
+                      aria-label="float the player on the desktop" title="float on the desktop">
+                <Glyph name="popout" />
+              </button>
+            )}
+            <button className="jp-icon" onClick={() => setCollapsed((c) => !c)}
+                    aria-label={collapsed ? 'expand player' : 'collapse player'}
+                    title={collapsed ? 'expand' : 'collapse'}>
+              <Glyph name={collapsed ? 'expand' : 'collapse'} />
+            </button>
+          </>
+        )}
         <button className="jp-icon" onClick={close}
-                aria-label="close player" title="close">✕</button>
+                aria-label="stop and close player" title="stop">
+          <Glyph name="close" />
+        </button>
       </div>
 
-      {!collapsed && (
+      {!shut && (
         <>
           <div className="jp-seek">
-            <span className="jp-time">{clock(position)}</span>
             <input
               type="range" min="0" max={duration || 0} step="0.1"
               value={Math.min(position, duration || 0)}
@@ -299,37 +399,50 @@ export default function Player() {
                 setPosition(v)
               }}
             />
-            <span className="jp-time">{clock(duration)}</span>
+            <div className="jp-times">
+              <span>{clock(position)}</span>
+              <span>{clock(duration)}</span>
+            </div>
           </div>
 
           <div className="jp-controls">
-            <button className="jp-icon" onClick={() => step(-1)} disabled={index === 0}
-                    aria-label="previous track" title="previous">⏮</button>
-            <button className="jp-play" onClick={toggle}
-                    aria-label={playing ? 'pause' : 'play'}
-                    title={playing ? 'pause' : 'play'}>
-              {playing ? '❚❚' : '▶'}
-            </button>
-            <button className="jp-icon" onClick={() => step(1)}
-                    disabled={index >= queue.length - 1}
-                    aria-label="next track" title="next">⏭</button>
+            <span className="jp-side" />
 
-            <span className="grow" />
+            <div className="jp-transport">
+              <button className="jp-icon big" onClick={() => step(-1)} disabled={index === 0}
+                      aria-label="previous track" title="previous">
+                <Glyph name="prev" />
+              </button>
+              <button className="jp-play" onClick={toggle}
+                      aria-label={playing ? 'pause' : 'play'}
+                      title={playing ? 'pause' : 'play'}>
+                <Glyph name={playing ? 'pause' : 'play'} />
+              </button>
+              <button className="jp-icon big" onClick={() => step(1)}
+                      disabled={index >= queue.length - 1}
+                      aria-label="next track" title="next">
+                <Glyph name="next" />
+              </button>
+            </div>
 
-            <span className="jp-vol">
-              <span className="jp-icon flat" aria-hidden="true">🔊</span>
-              <input type="range" min="0" max="100" value={volume}
-                     aria-label="volume"
-                     style={{ '--jp-pct': `${volume}%` }}
-                     onChange={(e) => setVolume(Number(e.target.value))} />
-            </span>
+            <div className="jp-side end">
+              <span className="jp-vol">
+                <span className="jp-icon flat" aria-hidden="true"><Glyph name="volume" /></span>
+                <input type="range" min="0" max="100" value={volume}
+                       aria-label="volume"
+                       style={{ '--jp-pct': `${volume}%` }}
+                       onChange={(e) => setVolume(Number(e.target.value))} />
+              </span>
 
-            {CAN_PICK_OUTPUT && (
-              <button className="jp-icon" onClick={() => {
-                loadOutputs(); setShowOutputs((o) => !o)
-              }} aria-expanded={showOutputs}
-                      aria-label="choose audio output" title="audio output">⏻</button>
-            )}
+              {CAN_PICK_OUTPUT && (
+                <button className="jp-icon" onClick={() => {
+                  loadOutputs(); setShowOutputs((o) => !o)
+                }} aria-expanded={showOutputs}
+                        aria-label="choose audio output" title="audio output">
+                  <Glyph name="output" />
+                </button>
+              )}
+            </div>
           </div>
 
           {showOutputs && (
@@ -361,5 +474,35 @@ export default function Player() {
         </>
       )}
     </div>
+  )
+
+  return (
+    <>
+      {/* never portalled: a playing media element that changes document
+          restarts, so the sound stays put and only the controls travel */}
+      <audio
+        ref={audioRef}
+        src={track.src}
+        preload="metadata"
+        onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
+        onDurationChange={(e) => {
+          const d = e.currentTarget.duration
+          setDuration(Number.isFinite(d) ? d : (track.duration || 0))
+        }}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => {
+          if (index < queue.length - 1) step(1)
+          else { setPlaying(false); report({ paused: true, started: false }) }
+        }}
+        onError={() => {
+          const msg = 'the track could not be loaded from the music server'
+          setError(msg)
+          setPlaying(false)
+          report({ started: false, paused: true, error: msg })
+        }}
+      />
+      {float ? createPortal(shell, float.document.body) : shell}
+    </>
   )
 }

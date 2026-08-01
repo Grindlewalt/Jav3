@@ -1677,7 +1677,10 @@ kbd {
    window (.floating), where there is no page behind it to blur. */
 .jplayer {
   position: fixed; right: 16px; bottom: calc(16px + var(--sab)); z-index: 2950;
-  width: min(384px, calc(100vw - 32px));
+  /* 404 is not arbitrary: a centred transport needs (width - 32 - 126) / 2 to
+     clear the volume cluster on the right, and anything narrower has them
+     touching */
+  width: min(404px, calc(100vw - 32px));
   display: flex; flex-direction: column; gap: 13px;
   padding: 13px 16px 15px; border-radius: 18px;
   background: var(--glass);
@@ -1756,7 +1759,7 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .jp-side { display: flex; align-items: center; gap: 4px; }
 .jp-side.end { position: absolute; right: 0; top: 50%; transform: translateY(-50%); }
 .jp-vol { display: flex; align-items: center; gap: 7px; color: var(--dim); }
-.jp-vol input { width: 58px; }
+.jp-vol input { width: 52px; }
 
 .jplayer input[type='range'] {
   -webkit-appearance: none; appearance: none;
@@ -1803,11 +1806,15 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 }
 .jp-retry:hover { background: var(--panel-2); }
 
+/* :not(.floating) throughout — the detached window is ~404px wide, so it
+   matches this query while being anything but a phone */
 @media (max-width: 640px) {
-  .jplayer { left: 12px; right: 12px; width: auto; }
+  .jplayer:not(.floating) { left: 12px; right: 12px; width: auto; }
   /* 16px stops iOS zooming the page when a control takes focus */
-  .jplayer input[type='range'] { font-size: 16px; }
-  .jp-vol input { width: 52px; }
+  .jplayer:not(.floating) input[type='range'] { font-size: 16px; }
+  /* a phone has no room for both: the fill says loud enough on its own */
+  .jplayer:not(.floating) .jp-vol .jp-icon.flat { display: none; }
+  .jplayer:not(.floating) .jp-vol input { width: 46px; }
 }
 
 /* guest co-working terminal — deliberately dark in both themes */
