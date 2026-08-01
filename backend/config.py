@@ -44,8 +44,11 @@ class Settings(BaseSettings):
     model_base_url_allowlist: list[str] = ["http://127.0.0.1:11434",
                                            "http://localhost:11434",
                                            # the main server's ollama (both
-                                           # GPUs live there); voice local tier
-                                           "http://10.0.0.58:11434"]
+                                           # GPUs live there); voice local tier.
+                                           # :11435 is the pinned-to-the-3060
+                                           # voice instance when deployed.
+                                           "http://10.0.0.58:11434",
+                                           "http://10.0.0.58:11435"]
     model_name: str = "deepseek-v4-flash"
     # Models the nav switcher may select at runtime (persisted in session_state,
     # no restart). Agents with an explicit model pin are unaffected by the switch.

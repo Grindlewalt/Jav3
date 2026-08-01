@@ -20,8 +20,13 @@ class Transcriber:
                  download_root: str | None = None) -> None:
         self.model_size = model_size or os.environ.get("VOICEBOX_WHISPER", "small")
         self.lang = os.environ.get("VOICEBOX_LANG", "en")
-        self.model = WhisperModel(self.model_size, device="cpu",
-                                  compute_type="int8",
+        # VOICEBOX_DEVICE=cuda puts whisper on the GPU (72 ms/utterance on a
+        # 3060 Ti vs ~2 s CPU). Needs onnxruntime-gpu's sibling wheels — see
+        # requirements.txt — and LD_LIBRARY_PATH at the pip nvidia libs.
+        device = os.environ.get("VOICEBOX_DEVICE", "cpu")
+        compute = "float16" if device == "cuda" else "int8"
+        self.model = WhisperModel(self.model_size, device=device,
+                                  compute_type=compute,
                                   download_root=download_root)
 
     def transcribe(self, pcm: bytes) -> str:

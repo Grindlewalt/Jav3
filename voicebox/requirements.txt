@@ -7,3 +7,8 @@ kokoro-onnx>=0.4              # TTS: Kokoro 82M via onnxruntime
 pysilero-vad>=2.0             # VAD: silero v5, onnxruntime-only, model bundled
 numpy>=1.26
 pytest>=8.0                   # for tests/ (self-skips without models)
+# GPU whisper (VOICEBOX_DEVICE=cuda) additionally needs:
+#   pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
+# and LD_LIBRARY_PATH pointing at those wheels' lib dirs (see README).
+# Kokoro gains nothing from the GPU (~500 ms fixed cost either way) — leave
+# it on CPU and give whisper the whole card.
