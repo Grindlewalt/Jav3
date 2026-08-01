@@ -83,13 +83,28 @@ async def test_read_file_offset_past_eof(client):
     assert out == "error: notes.txt has only 10 lines (you asked for offset 99)."
 
 
-async def test_read_file_missing_with_did_you_mean(client):
+async def test_read_file_finds_the_only_file_with_that_name(client):
+    """It used to answer "did you mean code/utils.py?" and stop, which spends a
+    whole turn re-deriving a path this tool can resolve itself. One match is not
+    an ambiguity — read it, and say which file was read."""
     code = _project() / "code"
     code.mkdir(exist_ok=True)
     (code / "utils.py").write_text("x = 1\n")
     out = await registry.dispatch("read_file", {"path": "utils.py"})
-    assert out.startswith("error: no such file 'utils.py' in project 'demo'.")
-    assert "Did you mean 'code/utils.py'?" in out
+    assert "x = 1" in out
+    assert "code/utils.py" in out, "it has to say which file it actually read"
+
+
+async def test_read_file_asks_when_the_name_is_ambiguous(client):
+    """Two files with one name IS an ambiguity, and picking one would be a
+    guess at which the operator meant."""
+    for sub in ("a", "b"):
+        d = _project() / sub
+        d.mkdir(exist_ok=True)
+        (d / "dup.py").write_text(f"# {sub}\n")
+    out = await registry.dispatch("read_file", {"path": "dup.py"})
+    assert out.startswith("error: no such file 'dup.py' in project 'demo'.")
+    assert "a/dup.py" in out and "b/dup.py" in out
 
 
 async def test_read_file_missing_without_match(client):
@@ -151,3 +166,72 @@ async def test_require_project_message_names_the_fix(client):
     msg = str(ei.value)
     assert "no project is loaded — call load_project first" in msg
     assert "All projects" in msg
+
+
+# --- resolving what the model said to what exists -----------------------------
+#
+# From the tool_calls table: the top recurring failures were a file asked for by
+# the name a previous result had reported ("weather-report.html" for
+# "dashboards/weather-report.html") and a todo checked off by a stale index.
+# Both are string problems, so they are solved in the tool rather than left for
+# the model to get right from memory.
+
+async def test_open_file_resolves_a_bare_dashboard_name(client):
+    dash = _project() / "dashboards"
+    dash.mkdir(exist_ok=True)
+    (dash / "weather-report.html").write_text("<h1>hi</h1>")
+    out = await registry.dispatch("workspace_panel",
+                                  {"action": "open_file",
+                                   "path": "weather-report.html"})
+    assert "renderer" in out
+    assert "dashboards/weather-report.html" in out
+    assert not out.startswith("error:")
+
+
+async def test_open_file_lists_the_render_menu_when_it_cannot_match(client):
+    dash = _project() / "dashboards"
+    dash.mkdir(exist_ok=True)
+    (dash / "one.html").write_text("<p>1</p>")
+    (dash / "two.html").write_text("<p>2</p>")
+    out = await registry.dispatch("workspace_panel",
+                                  {"action": "open_file", "path": "three.html"})
+    assert out.startswith("error:")
+    # the answer to "which file did you mean" is the list, not another guess
+    assert "dashboards/one.html" in out and "dashboards/two.html" in out
+
+
+async def test_panel_list_shows_what_the_renderer_can_open(client):
+    dash = _project() / "dashboards"
+    dash.mkdir(exist_ok=True)
+    (dash / "chart.html").write_text("<p>c</p>")
+    (_project() / "notes.md").write_text("not renderable")
+    out = await registry.dispatch("workspace_panel", {"action": "list"})
+    assert "dashboards/chart.html" in out
+    assert "notes.md" not in out, "the render menu is html/pdf/images only"
+
+
+async def test_a_todo_is_checked_off_by_text(client):
+    for t in ("Fetch the RSS feeds", "Build the dashboard"):
+        await registry.dispatch("todo_update", {"action": "add", "text": t})
+    out = await registry.dispatch("todo_update",
+                                  {"action": "check", "text": "build the dashboard"})
+    assert "1. [x] Build the dashboard" in out
+    assert "0. [ ] Fetch the RSS feeds" in out, "only the named item moves"
+
+
+async def test_a_stale_index_answers_with_the_list(client):
+    await registry.dispatch("todo_update", {"action": "add", "text": "only item"})
+    out = await registry.dispatch("todo_update", {"action": "check", "index": 127})
+    assert out.startswith("error:")
+    assert "only item" in out, "the retry needs the list, not just a range"
+
+
+async def test_an_ambiguous_todo_text_asks_rather_than_picking(client):
+    for t in ("Write the report draft", "Write the report final"):
+        await registry.dispatch("todo_update", {"action": "add", "text": t})
+    out = await registry.dispatch("todo_update",
+                                  {"action": "check", "text": "write the report"})
+    assert out.startswith("error:") and "several" in out
+    # nothing was checked off on a guess
+    listing = await registry.dispatch("todo_update", {"action": "list"})
+    assert "[x]" not in listing

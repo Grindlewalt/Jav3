@@ -12,9 +12,13 @@ parameters:
       enum: [add, check, uncheck, delete, list]
     text:
       type: string
-      description: The item text (for add).
+      description: The item text. For add, the new item. For check/uncheck/delete, the item to act on — matched against the list, so a few distinctive words are enough.
     index:
       type: integer
-      description: 0-based item index (for check/uncheck/delete).
+      description: 0-based item index, only when `text` would be ambiguous. Positions shift as items are added, including by subagents running in parallel, so prefer text.
   required: [action]
 ---
+Check items off by `text`, not by an index you remember. Indexes move: your own
+adds and any parallel subagent's shift every position after them, so a number
+read a few calls ago points at a different item — and checking off the wrong one
+is worse than an error. Every call returns the current list.

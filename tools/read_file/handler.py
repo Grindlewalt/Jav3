@@ -1,5 +1,5 @@
 from backend.config import settings
-from backend.fsutil import list_tree
+from backend.fsutil import find_file, list_tree
 from backend.writes import resolve
 from backend.agent.tools.toolctx import require_project
 
@@ -16,9 +16,12 @@ def _coerce(name: str, value):
 def _missing(slug: str, path: str) -> str:
     base = f"error: no such file '{path}' in project '{slug}'."
     name = path.rsplit("/", 1)[-1]
-    for e in list_tree(settings.projects_dir / slug):
-        if e["path"].rsplit("/", 1)[-1] == name and e["path"] != path:
-            return f"{base} Did you mean '{e['path']}'?"
+    near = [e["path"] for e in list_tree(settings.projects_dir / slug)
+            if e["path"].rsplit("/", 1)[-1] == name and e["path"] != path]
+    if near:
+        # several files share the name — naming them all is the only useful
+        # answer, since picking one would be a guess
+        return f"{base} Did you mean: {', '.join(near[:6])}?"
     return f"{base} Use list_files to see what exists."
 
 
@@ -36,14 +39,24 @@ async def run(path: str, offset=None, limit=None) -> str:
         return "error: limit must be at least 1 line."
 
     p = resolve(slug, path)
+    note = ""
     if p is None:
-        return _missing(slug, path)
+        # "dashboards/weather.html" asked for as "weather.html" is the same
+        # file, and answering "no such file" spends a whole turn re-deriving a
+        # path this tool can just find. Only when it is unambiguous.
+        found, _ = find_file(settings.projects_dir / slug, path)
+        if found is None:
+            return _missing(slug, path)
+        note = f"(read '{found}' — the only file matching '{path}')\n"
+        path, p = found, resolve(slug, found)
+        if p is None:
+            return _missing(slug, path)
     try:
         text = p.read_text()
     except UnicodeDecodeError:
         return f"error: {path} is binary ({p.stat().st_size} bytes)"
     if not text:
-        return "(empty file)"
+        return note + "(empty file)"
 
     cap = settings.tool_result_max_chars
     lines = text.splitlines()
@@ -56,7 +69,7 @@ async def run(path: str, offset=None, limit=None) -> str:
                     "return whole. Re-call read_file with offset (1-based start line) and "
                     "limit (line count) to read a slice, or use search_codebase to find "
                     "the right region.")
-        return text
+        return note + text
 
     start = offset or 1
     if start > total:
@@ -66,4 +79,4 @@ async def run(path: str, offset=None, limit=None) -> str:
     body = "\n".join(lines[start - 1:end])
     if len(body) > cap:
         body = body[:cap] + f"\n...(slice truncated at {cap:,} chars — use a smaller limit)"
-    return f"(lines {start}-{end} of {total} — {path})\n{body}"
+    return f"{note}(lines {start}-{end} of {total} — {path})\n{body}"

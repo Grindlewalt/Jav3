@@ -111,6 +111,33 @@ EXTRA_BIN_DIRS = ("/opt/homebrew/bin", "/opt/homebrew/sbin",   # Apple silicon
                   "/var/lib/flatpak/exports/bin",
                   "/snap/bin")
 
+# macOS ships plenty of software as an .app bundle with no symlink on PATH at
+# all, and mpv is one of them: `brew install --cask mpv` (and every download
+# from mpv.io) puts the real binary at
+#
+#     /Applications/mpv.app/Contents/MacOS/mpv
+#
+# which no amount of PATH searching will find. The operator can double-click
+# mpv, use it all day, and this client still says "mpv is not installed" —
+# because by the only test it was making, it was not.
+#
+# Only the same allowlisted names are looked for, at the fixed sub-path inside a
+# bundle named after the binary. The result is still one absolute path, resolved
+# once, frozen.
+APP_DIRS = ("/Applications", "/Applications/Utilities",
+            str(Path.home() / "Applications"), "/System/Applications")
+
+
+def _app_bundle_binary(name):
+    """/Applications/mpv.app/Contents/MacOS/mpv, if that is where it lives."""
+    if sys.platform != "darwin":
+        return None
+    for d in APP_DIRS:
+        cand = os.path.join(d, f"{name}.app", "Contents", "MacOS", name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
 
 def build_id(directory=None) -> str:
     """A fingerprint of the client's own source, so Jarvis can tell whether this
@@ -293,6 +320,8 @@ class Runner:
                     if os.path.isfile(cand) and os.access(cand, os.X_OK):
                         p = cand
                         break
+            if not p:
+                p = _app_bundle_binary(name)
             if p:
                 real = os.path.realpath(p)
                 if os.path.isfile(real) and os.access(real, os.X_OK):
@@ -1362,11 +1391,26 @@ def _selftest():
     if sys.platform != "darwin":
         disp = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
         print(f"display       : {disp or 'NONE - opening links and video will fail'}")
-    print(f"binaries found: {', '.join(sorted(r.bin)) or 'NONE'}")
-    for need, why in (("mpv", "playing media"),
-                      ("xdg-open" if sys.platform != "darwin" else "open",
-                       "opening links")):
-        print(f"  {need:9s} {'ok' if need in r.bin else 'MISSING'}  ({why})")
+    # The absolute path, not just a tick. "mpv is not installed" on a machine
+    # where the operator has just USED mpv is the report that wasted an evening,
+    # and the answer was that it lives in an .app bundle. Print where each one
+    # was found — and, when one is missing, everywhere that was looked.
+    print("binaries:")
+    for name in BINARIES:
+        where = r.bin.get(name)
+        print(f"  {name:9s} {where or 'NOT FOUND'}")
+    missing_bins = [n for n in ("mpv",) if n not in r.bin]
+    if missing_bins:
+        print(f"\n  PATH as this process sees it: {os.environ.get('PATH', '(empty)')}")
+        print("  also searched: " + ", ".join(EXTRA_BIN_DIRS))
+        if sys.platform == "darwin":
+            print("  also searched app bundles: "
+                  + ", ".join(f"{d}/<name>.app/Contents/MacOS/<name>"
+                              for d in APP_DIRS))
+            print("  if mpv IS installed and still not found, run `which mpv` "
+                  "and send that path — an install somewhere else is a one-line "
+                  "fix here.\n  (IINA is not mpv: it embeds it but exposes no "
+                  "mpv binary this can drive.)")
     if sys.platform == "darwin":
         try:
             from . import macos as mac
