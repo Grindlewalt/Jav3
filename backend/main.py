@@ -121,7 +121,8 @@ async def put_model(body: ModelSelect):
 async def client_config():
     # Non-sensitive client config the SPA needs at boot. media_hosts is the
     # allowlist the render surfaces use to decide which remote media may load.
-    return {"media_hosts": settings.media_hosts}
+    return {"media_hosts": settings.media_hosts,
+            "voice_enabled": settings.voice_enabled}
 
 
 # Built SPA. In dev (no dist yet) the API still runs; the GUI just isn't served.

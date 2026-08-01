@@ -216,6 +216,16 @@ async def get_messages(conversation_id: int):
 # the HTTP connection that started it goes away.
 _active_turns: dict[int, asyncio.Task] = {}
 
+# Voice barge-in: the orchestrator knows exactly how much of a reply was
+# actually spoken, so it parks an annotated interruption note here before
+# cancelling the turn task. The CancelledError handler writes the note in
+# place of the bare marker. GUI stop sets nothing → old behavior.
+_interrupt_notes: dict[int, str] = {}
+
+
+def set_interrupt_note(conversation_id: int, note: str) -> None:
+    _interrupt_notes[conversation_id] = note
+
 # what an operator-stopped turn leaves behind, in the transcript and the
 # final event — the GUI shows it verbatim
 INTERRUPTED_MARKER = "[Request interrupted by operator]"
@@ -271,7 +281,8 @@ async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
 
 
 async def _run_chat_turn(conversation_id: int, ephemeral: bool,
-                         user_msg: str = "", tab: str | None = None) -> None:
+                         user_msg: str = "", tab: str | None = None,
+                         voice: bool = False) -> None:
     """One whole chat turn, detached from any HTTP connection: clicking off
     the tab no longer kills the work. Every event is published to the
     conversation's bus channel; any number of SSE tails (the original POST,
@@ -370,7 +381,10 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                                 active_slug=active, push_workspace=True)
         else:
             source = run_turn(conversation_id, system_prompt, history, tools=tools,
-                              on_tool_call=db_tool_sink(db, conversation_id))
+                              on_tool_call=db_tool_sink(db, conversation_id),
+                              # voice turns skip the second-pass rules rewrite:
+                              # the streamed text was already spoken aloud
+                              rewrite_rules=not voice)
 
         sink = db_tool_sink(db, conversation_id)
         pending_tool: dict = {}
@@ -414,17 +428,21 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # the operator hit stop. Leave the interruption in the transcript
         # (persistent chats — the ephemeral wipe in finally covers incognito)
         # and give every tail a final event so the UI settles, then re-raise
-        # so the task ends properly cancelled.
+        # so the task ends properly cancelled. A voice barge-in parks an
+        # annotated note (what was actually heard) via set_interrupt_note;
+        # without one this is the plain GUI stop marker.
+        note = _interrupt_notes.pop(conversation_id, None)
+        content = note if note is not None else INTERRUPTED_MARKER
         if not ephemeral:
             try:
                 await db.execute(
                     "INSERT INTO messages (conversation_id, role, content) "
                     "VALUES (?, 'assistant', ?)",
-                    (conversation_id, INTERRUPTED_MARKER))
+                    (conversation_id, content))
                 await db.commit()
             except Exception:  # noqa: BLE001 — the marker is best-effort
                 pass
-        bus.publish(chan, {"type": "final", "content": INTERRUPTED_MARKER,
+        bus.publish(chan, {"type": "final", "content": content,
                            "conversation_id": conversation_id})
         raise
     except Exception as exc:  # surfaced to any tail rather than lost
@@ -486,6 +504,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # signal end — a subscriber that still sees the flag is guaranteed
         # the job_end is ahead of it in the queue (both happen in this tick)
         _active_turns.pop(conversation_id, None)
+        _interrupt_notes.pop(conversation_id, None)   # stale note must not leak
         bus.close_job(chan)
 
 
@@ -600,6 +619,19 @@ async def chat(body: ChatRequest):
     # subscribe BEFORE spawning so this tail can't miss the first events, then
     # run the turn as a detached task: it outlives this HTTP connection
     q = bus.subscribe(_chan(conversation_id))
-    _active_turns[conversation_id] = asyncio.create_task(
-        _run_chat_turn(conversation_id, body.ephemeral, body.message, body.tab))
+    start_turn(conversation_id, ephemeral=body.ephemeral,
+               user_msg=body.message, tab=body.tab)
     return _tail(conversation_id, q)
+
+
+def start_turn(conversation_id: int, *, ephemeral: bool = False,
+               user_msg: str = "", tab: str | None = None,
+               voice: bool = False) -> asyncio.Task:
+    """Launch a chat turn as a detached task. The one shared seam between the
+    HTTP endpoint above and the voice orchestrator: the caller has already
+    inserted the user message row, run the peak gate, and (if it wants the
+    early events) subscribed to the conversation's bus channel."""
+    task = asyncio.create_task(
+        _run_chat_turn(conversation_id, ephemeral, user_msg, tab, voice=voice))
+    _active_turns[conversation_id] = task
+    return task

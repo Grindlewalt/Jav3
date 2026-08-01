@@ -235,6 +235,16 @@ class Settings(BaseSettings):
     web_cache_ttl_seconds: int = 900
     web_cache_max_entries: int = 50
 
+    # --- Voice desktop mode -------------------------------------------------
+    # OFF by default. The Pi never runs audio ML: the browser captures/plays,
+    # and STT/TTS run on the voicebox sidecar (voicebox/ in this repo, deployed
+    # on the main server) — the backend just relays opaque PCM bytes between
+    # the two websockets and orchestrates turns/barge-in/clones.
+    voice_enabled: bool = False
+    voice_sidecar_url: str = "ws://10.0.0.58:8100/ws"
+    voice_sidecar_token: str = ""       # must match VOICEBOX_TOKEN on the sidecar
+    voice_max_workers: int = 3          # backgrounded twins per voice session
+
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped
     # on and soaked, exactly like the use_guest_loop cutover. When true the guest

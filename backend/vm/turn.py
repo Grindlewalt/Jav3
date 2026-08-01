@@ -22,13 +22,14 @@ from ..config import settings
 async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
                          read_only=None, model_name=None, base_url=None,
                          self_check=True, max_iterations=None, on_tool_call=None,
-                         active_project=None):
+                         active_project=None, rewrite_rules=True):
     if not settings.use_guest_loop:
         async for ev in run_turn(conversation_id, system_prompt, history,
                                  tools=tools, model_name=model_name,
                                  base_url=base_url, self_check=self_check,
                                  max_iterations=max_iterations,
-                                 on_tool_call=on_tool_call):
+                                 on_tool_call=on_tool_call,
+                                 rewrite_rules=rewrite_rules):
             yield ev
         return
 

@@ -141,7 +141,7 @@ def _assemble_messages(system_prompt: str, history: list[dict],
 
 async def _force_conclusion(messages: list[dict], conversation_id: int,
                             model_name: str | None, base_url: str | None,
-                            rules: str) -> AsyncIterator[dict]:
+                            rules: str, rewrite_rules: bool = True) -> AsyncIterator[dict]:
     """Tools were withheld (final round or dead-end breaker) but the model still
     emitted calls — DSML text recovery can do that. Don't execute them: nudge for
     a plain-prose answer from what's already gathered, so the operator gets a real
@@ -174,7 +174,7 @@ async def _force_conclusion(messages: list[dict], conversation_id: int,
                  "summarize what you found above and what remains "
                  "unknown.")
     if conclusion.strip():
-        if rules:
+        if rules and rewrite_rules:
             conclusion = await _enforce_rules(conclusion, rules)
         yield {"type": "final", "content": conclusion}
     else:
@@ -260,6 +260,7 @@ async def run_turn(
     self_check: bool = True,
     max_iterations: int | None = None,
     on_tool_call=None,
+    rewrite_rules: bool = True,
 ) -> AsyncIterator[dict]:
     messages, tools, rules, can_delegate = _assemble_messages(
         system_prompt, history, tools, self_check)
@@ -304,7 +305,10 @@ async def run_turn(
             # tool-laden turn let slip. General — it checks against whatever
             # rules are in memory, nothing rule-specific is hardcoded. `rules`
             # is already empty when self_check is off, so this no-ops for subagents.
-            if rules and content.strip():
+            # rewrite_rules=False (voice turns) skips only this second-pass
+            # rewrite — the text was already SPOKEN as it streamed, so a
+            # post-hoc rewrite would silently diverge from what was heard.
+            if rules and content.strip() and rewrite_rules:
                 content = await _enforce_rules(content, rules)
             yield {"type": "final", "content": content}
             return
@@ -313,7 +317,8 @@ async def run_turn(
             # tools withheld but calls came back (DSML recovery) — nudge to a
             # plain-prose answer instead of executing them
             async for ev in _force_conclusion(messages, conversation_id,
-                                               model_name, base_url, rules):
+                                               model_name, base_url, rules,
+                                               rewrite_rules=rewrite_rules):
                 yield ev
             return
 
