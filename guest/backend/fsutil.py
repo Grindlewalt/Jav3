@@ -37,7 +37,9 @@ def find_file(base: Path, wanted: str, only=None) -> tuple[str | None, list[str]
     entries = [e["path"] for e in list_tree(base)]
     if only is not None:
         entries = [p for p in entries if only.search(p)]
-    wanted = (wanted or "").strip().lstrip("./").replace("\\", "/")
+    wanted = (wanted or "").strip().replace("\\", "/")
+    while wanted.startswith("./"):      # only a literal "./" prefix, so a
+        wanted = wanted[2:]             # ".." keeps its meaning and matches nothing
     if not wanted:
         return None, entries
     if wanted in entries:

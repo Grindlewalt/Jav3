@@ -77,7 +77,12 @@ async def run(action: str = "", panel: str = "", path: str = "") -> str:
             what = "can be rendered" if renderable else "are in this project"
             return (f"error: nothing matching '{path}' in '{slug}'. These {what}:\n"
                     f"{_menu(sorted(candidates))}")
-        if found != path.strip().lstrip("./").replace("\\", "/"):
+        asked = path.strip().replace("\\", "/")
+        while asked.startswith("./"):
+            asked = asked[2:]
+        if found != asked:
+            # say when the file opened is not the string that was asked for —
+            # a silent substitution is how the wrong dashboard gets shown
             resolved_note = f" — resolved '{path}' to '{found}'"
         path = found
         panel = "renderer" if RENDER_EXT.search(path) else "editor"
