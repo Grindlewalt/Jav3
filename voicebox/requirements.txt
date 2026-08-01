@@ -1,0 +1,9 @@
+# voicebox — STT/TTS inference sidecar. Runs on an x86 box (the main server),
+# NEVER on the Pi. All three engines are CPU + ONNX/CTranslate2 — no torch.
+fastapi>=0.115
+uvicorn[standard]>=0.30       # also provides websockets for demo_client.py
+faster-whisper>=1.0           # STT: Whisper via CTranslate2, int8 on CPU
+kokoro-onnx>=0.4              # TTS: Kokoro 82M via onnxruntime
+pysilero-vad>=2.0             # VAD: silero v5, onnxruntime-only, model bundled
+numpy>=1.26
+pytest>=8.0                   # for tests/ (self-skips without models)

@@ -1,0 +1,18 @@
+services:
+  voicebox:
+    build: .
+    container_name: voicebox
+    ports:
+      - "8100:8100"
+    environment:
+      VOICEBOX_TOKEN: ${VOICEBOX_TOKEN:?set VOICEBOX_TOKEN (openssl rand -hex 32)}
+      # VOICEBOX_WHISPER: small        # tiny/base/small/medium
+      # VOICEBOX_VOICE: bm_lewis
+      # VOICEBOX_SPEED: "1.0"
+      # VOICEBOX_LANG: en
+    volumes:
+      - voicebox-models:/models
+    restart: unless-stopped
+
+volumes:
+  voicebox-models:
