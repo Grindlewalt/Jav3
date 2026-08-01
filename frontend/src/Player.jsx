@@ -320,6 +320,21 @@ export default function Player() {
           }
           break
         }
+        case 'queue_add': {
+          // append behind whatever is playing — never interrupts. On an empty
+          // player this is just 'play' (there is nothing to be behind).
+          const rows = Array.isArray(ev.queue) ? ev.queue.filter((t) => t?.src) : []
+          if (!rows.length) return
+          const empty = snap.current.queue.length === 0
+          setError('')
+          setQueue((q) => [...q, ...rows])
+          if (empty) {
+            setIndex(0)
+            setCollapsed(false)
+            setPlayToken((t) => t + 1)
+          }
+          break
+        }
         case 'pause': {
           const el = audioRef.current
           if (el && !el.paused) { el.pause(); setPlaying(false); report({ paused: true, started: false }) }

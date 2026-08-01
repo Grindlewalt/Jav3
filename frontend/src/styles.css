@@ -2274,3 +2274,9 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 /* the voice-mode corner chip: same footprint as the theme toggle beside it */
 .voice-corner { display: inline-flex; align-items: center; justify-content: center; }
 .voice-corner.active { color: var(--accent); }
+
+/* wake-word standby: the orb visibly dozes */
+.voice-orb.asleep { opacity: 0.45; }
+.voice-orb.asleep .voice-orb-core { background: var(--panel-2);
+  animation: voice-breathe 4s ease-in-out infinite; }
+@keyframes voice-breathe { 50% { transform: scale(0.9); } }

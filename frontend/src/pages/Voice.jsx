@@ -17,6 +17,8 @@ const STATE_LABEL = {
   speaking: 'speaking',
   barge_pending: 'you were saying?',
   confirm_peak: 'confirm?',
+  confirm_escalate: 'send it up?',
+  asleep: 'say “hey Jarvis”',
   offline: 'voicebox offline',
   mic_denied: 'microphone blocked',
 }
@@ -62,6 +64,9 @@ export default function Voice() {
           ws.send(JSON.stringify({ type: 'chunk_played', chunk_id: id }))
       },
       onLevel: (rms) => setLevel((old) => old * 0.6 + rms * 0.4),
+      onDoubleClap: () => {
+        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'double_clap' }))
+      },
     })
     audioRef.current = audio
 
@@ -102,6 +107,8 @@ export default function Voice() {
         case 'stop_playback': audio.stopAll(); break
         case 'resume_playback': audio.resume(); break
         case 'queued': push('sys', `(queued: “${msg.text}”)`); break
+        case 'clap': push('sys', `(👏👏 ${msg.result || msg.title})`); break
+        case 'wake': audio.chime(); break
         case 'tool_activity':
           if (msg.phase === 'call') push('tool', msg.name)
           break

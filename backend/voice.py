@@ -35,12 +35,14 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 import struct
 
 import websockets
 
-from . import bus, chat
+from . import bus, chat, runtime
 from .agent.model import confirm_peak, in_peak_window, peak_confirmed
+from .agent.tools.registry import dispatch as tool_dispatch
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import get_active_project
@@ -61,6 +63,7 @@ BARGE_PENDING = "barge_pending"
 CONFIRM_PEAK = "confirm_peak"
 CONFIRM_ESCALATE = "confirm_escalate"
 CONFIRM_STATES = (CONFIRM_PEAK, CONFIRM_ESCALATE)
+ASLEEP = "asleep"          # wake-word standby: mic flows, words are ignored
 
 AFFIRMATIVE = ("yes", "yeah", "yep", "sure", "go ahead", "continue",
                "do it", "okay", "ok", "please do", "send it")
@@ -86,6 +89,11 @@ LOCAL_TOOLS = ("music_play", "music_control", "music_search", "music_status",
                "play_movie", "computer_play", "computer_playback",
                "computer_status", "computer_volume", "computer_open_link",
                "web_search", "web_read")
+
+# Double clap = music, no model in the loop: the browser detects the gesture
+# and this dispatches music_play directly (an algorithm, not a conversation).
+# The agent can still control the result — it's the same Jarvis player.
+CLAP_TRACKS = ("Kickstart My Heart", "Should I Stay or Should I Go")
 
 PEAK_ASK = "Heads up: peak pricing is in effect. Should I continue?"
 PEAK_DROPPED = "Okay, I'll hold off. Say it again later if you want it."
@@ -256,6 +264,8 @@ class VoiceSession:
 
         self.pending_peak: dict | None = None    # {text, smart, insert}
         self.pending_escalate: str | None = None  # utterance awaiting send-up
+        self.wake_enabled = False        # sidecar armed a wake word
+        self._sleep_task: asyncio.Task | None = None
         self.queued: list[str] = []      # transcripts parked while busy
         self.turn_user_msg = ""          # what started the running turn
         self.turn_local = False          # this turn runs on the local tier
@@ -280,7 +290,7 @@ class VoiceSession:
 
     async def close(self) -> None:
         self.dead = True
-        for t in (self.turn_consumer,):
+        for t in (self.turn_consumer, self._sleep_task):
             if t:
                 t.cancel()
         # the turn is NOT cancelled (closing the tab must not kill in-flight
@@ -315,6 +325,8 @@ class VoiceSession:
             if c:
                 c["played"] = True
             await self._maybe_idle()
+        elif kind == "double_clap":
+            asyncio.create_task(self._clap_play())
         elif kind == "mute":
             self.muted = bool(msg.get("on"))
         elif kind == "end_session":
@@ -333,7 +345,12 @@ class VoiceSession:
     async def _on_sidecar_json(self, ev: dict) -> None:
         kind = ev.get("type")
         if kind == "ready":
-            await self._send_json({"type": "ready"})
+            self.wake_enabled = bool(ev.get("wake"))
+            await self._send_json({"type": "ready", "wake": ev.get("wake")})
+            if self.wake_enabled and self.state == LISTENING:
+                await self._sleep()          # sessions start on standby
+        elif kind == "wake":
+            await self._wake_up()
         elif kind in ("speech_start", "speech_end"):
             await self._send_json(ev)       # UI listening indicator
         elif kind == "transcript":
@@ -351,6 +368,9 @@ class VoiceSession:
 
     async def _on_transcript(self, text: str) -> None:
         text = text.strip()
+
+        if self.state == ASLEEP:
+            return                       # not addressed until "hey Jarvis"
 
         if self.state == BARGE_PENDING:
             self.state = SPEAKING
@@ -741,6 +761,60 @@ class VoiceSession:
                     texts.append(frac)
         return " ".join(texts)
 
+    # ---- wake-word standby -------------------------------------------------------
+
+    async def _sleep(self) -> None:
+        """Standby: mic keeps flowing (the sidecar needs it to hear the wake
+        word) but transcripts are ignored. Only reachable from quiet states —
+        a running turn or pending question keeps him up."""
+        if self._sleep_task:
+            self._sleep_task.cancel()
+            self._sleep_task = None
+        if self.state != LISTENING:
+            return
+        self.state = ASLEEP
+        await self._push_state()
+
+    async def _wake_up(self) -> None:
+        if self.state != ASLEEP:
+            self._arm_sleep_timer()      # already up: just push the doze back
+            return
+        self.state = LISTENING
+        await self._send_json({"type": "wake"})   # the chime
+        await self._push_state()
+        self._arm_sleep_timer()
+        # anything that finished while he was asleep gets said now
+        if self.queued or self.pending_deliveries:
+            await self._maybe_idle()
+
+    def _arm_sleep_timer(self) -> None:
+        """(Re)start the doze countdown. Cancelled by activity; only ticks
+        while wake mode is on."""
+        if self._sleep_task:
+            self._sleep_task.cancel()
+            self._sleep_task = None
+        if not self.wake_enabled:
+            return
+
+        async def doze():
+            await asyncio.sleep(settings.voice_wake_timeout)
+            await self._sleep()
+
+        self._sleep_task = asyncio.create_task(doze())
+
+    async def _clap_play(self) -> None:
+        """👏👏 → one of the clap tracks, straight through the tool handler.
+        The gui_tab contextvar routes the audio to the machine that clapped."""
+        title = random.choice(CLAP_TRACKS)
+        token = runtime.gui_tab.set(self.tab or None)
+        try:
+            result = await tool_dispatch(
+                "music_play", {"query": title, "where": "jarvis"})
+        finally:
+            runtime.gui_tab.reset(token)
+        await self._send_json({"type": "clap", "title": title,
+                               "result": str(result)[:200]})
+
     # ---- plumbing --------------------------------------------------------------
 
     async def _on_peak_answer(self, text: str) -> None:
@@ -806,6 +880,8 @@ class VoiceSession:
             await self._begin_turn(self.queued.pop(0))
         elif self.pending_deliveries:
             await self._speak_system(self.pending_deliveries.pop(0))
+        elif self.state == LISTENING:       # genuinely idle: start the doze clock
+            self._arm_sleep_timer()
 
     async def _push_state(self) -> None:
         turn_running = self.turn_task is not None and not self.turn_task.done()

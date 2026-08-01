@@ -19,14 +19,27 @@ const VAD_BASE = 0.02
 const VAD_PLAYING_MULT = 3
 const VAD_TRIP_BATCHES = 2
 
+// Double clap: two sharp attacks (loud batch rising straight out of quiet —
+// speech ramps, a clap doesn't) 150-800ms apart. A single clap can't trip the
+// barge-in VAD (it needs two consecutive hot batches; a clap is one).
+const CLAP_MIN = 0.22
+const CLAP_QUIET = 0.07
+const CLAP_GAP_MIN = 150
+const CLAP_GAP_MAX = 800
+const CLAP_REFRACTORY = 1500
+
 export class VoiceAudio {
-  constructor({ onMicFrame, onBargeIn, onChunkPlayed, onLevel }) {
+  constructor({ onMicFrame, onBargeIn, onChunkPlayed, onLevel, onDoubleClap }) {
     this.onMicFrame = onMicFrame
     this.onBargeIn = onBargeIn
     this.onChunkPlayed = onChunkPlayed
     this.onLevel = onLevel || (() => {})
+    this.onDoubleClap = onDoubleClap || (() => {})
     this.muted = false
     this._hot = 0
+    this._prevRms = 0
+    this._lastClap = 0
+    this._clapFired = 0
     this._suspended = false     // local barge pause in effect
     this._segments = []         // {chunkId, source, start, end, stopped}
     this._ttsEnded = new Set()  // chunk ids the server finished sending
@@ -50,6 +63,7 @@ export class VoiceAudio {
     this.node.port.onmessage = ({ data }) => {
       this.onLevel(data.rms)
       this._vad(data.rms)
+      this._clap(data.rms)
       if (!this.muted) this.onMicFrame(data.pcm)
     }
     this.playCtx = new AudioContext({ sampleRate: PLAY_RATE })
@@ -107,6 +121,23 @@ export class VoiceAudio {
         this._segments = this._segments.filter((s) => s.chunkId !== id)
         this.onChunkPlayed(id)
       }
+    }
+  }
+
+  // Two quick rising notes — the "I'm listening" cue after a wake word.
+  chime() {
+    if (!this.playCtx) return
+    const t0 = this.playCtx.currentTime + 0.02
+    for (const [freq, at] of [[740, 0], [1109, 0.09]]) {
+      const osc = this.playCtx.createOscillator()
+      const gain = this.playCtx.createGain()
+      osc.frequency.value = freq
+      gain.gain.setValueAtTime(0.0001, t0 + at)
+      gain.gain.exponentialRampToValueAtTime(0.12, t0 + at + 0.015)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.12)
+      osc.connect(gain).connect(this.playCtx.destination)
+      osc.start(t0 + at)
+      osc.stop(t0 + at + 0.14)
     }
   }
 
@@ -169,6 +200,22 @@ export class VoiceAudio {
   }
 
   // ---- barge-in VAD ------------------------------------------------------------
+
+  _clap(rms) {
+    const sharp = rms >= CLAP_MIN && this._prevRms <= CLAP_QUIET
+    this._prevRms = rms
+    if (this.muted || !sharp) return
+    const now = performance.now()
+    if (now - this._clapFired < CLAP_REFRACTORY) return
+    const gap = now - this._lastClap
+    if (this._lastClap && gap >= CLAP_GAP_MIN && gap <= CLAP_GAP_MAX) {
+      this._lastClap = 0
+      this._clapFired = now
+      this.onDoubleClap()
+    } else {
+      this._lastClap = now
+    }
+  }
 
   _vad(rms) {
     const gate = this.playing ? VAD_BASE * VAD_PLAYING_MULT : VAD_BASE

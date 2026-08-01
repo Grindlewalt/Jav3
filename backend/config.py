@@ -258,6 +258,10 @@ class Settings(BaseSettings):
     # Empty string = every voice turn runs on DeepSeek as before.
     voice_local_model: str = ""
     voice_local_base_url: str = "http://10.0.0.58:11434/v1"
+    # wake-word standby: seconds of idle before he stops listening for
+    # anything but "hey Jarvis" again (only in effect when the sidecar
+    # reports a wake model in its ready message)
+    voice_wake_timeout: int = 30
 
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped

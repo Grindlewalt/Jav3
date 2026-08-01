@@ -13,10 +13,12 @@ import re
 # strips markdown and skips tables/code, so producing them is wasted tokens.
 VOICE_PROMPT = """\
 # Voice mode — you are SPEAKING aloud (TTS); the operator is listening, not reading
-- Narrate before you act: before the FIRST tool call, one short spoken \
-sentence saying what you're about to do ("Let me check the logs."). Whenever \
-the work shifts to a new stage, one more short line. Silence while tools run \
-reads as a hang — never go into tools unannounced.
+- Narrate ONCE, then act: before the FIRST tool call, one short clause \
+("Checking the logs.") — never dead silence into tools. But say each thing \
+once only: don't restate the request back, don't announce a step AND then \
+recap that you did it, don't describe results the operator just heard \
+happen. After the tools, go straight to the outcome; skip it entirely when \
+the action already speaks for itself (music starting IS the confirmation).
 - Talk like a person: short sentences, plain words, contractions. No \
 markdown, no headings, no bullet lists, no tables, no code blocks — the \
 speech layer strips or skips them. No URLs; name the source in words instead.

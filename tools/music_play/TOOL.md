@@ -34,6 +34,9 @@ parameters:
     tab:
       type: string
       description: Which open Jarvis tab to play in, by name ("the mac", "phone"). Omit it — the default is the tab the operator is talking to you from, which is almost always what they mean.
+    queue:
+      type: boolean
+      description: true = add BEHIND whatever is playing instead of replacing it — "queue up", "play next", "add to the queue". Jarvis player only. On an idle player it just plays.
   required: []
 ---
 Do not call music_search first. This searches everywhere itself and plays the
@@ -42,6 +45,9 @@ winner, so the normal case is a single call.
 If it cannot tell which track was meant it returns a shortlist — play one by
 passing its id. If nothing matched at all it returns the whole library, so the
 next call can be the right one. Two calls is the worst case, not a conversation.
+
+To queue SEVERAL tracks ("queue up some drive music"): one music_search by tag,
+then one call here with their ids and queue=true.
 
 There are three places sound can come out, and `auto` picks for you:
 

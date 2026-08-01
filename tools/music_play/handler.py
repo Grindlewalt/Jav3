@@ -147,7 +147,8 @@ async def _confirm_in_page(track_id, tab=None, tries: int = 8) -> tuple[bool, st
 
 
 async def _play_in_page(ids: list[int], what: str, device: str,
-                        volume: int | None, tab: str = "") -> str:
+                        volume: int | None, tab: str = "",
+                        append: bool = False) -> str:
     rows = await _queue_rows(ids)
     if not rows:
         return ("error: the music server would not describe those tracks, so "
@@ -161,6 +162,14 @@ async def _play_in_page(ids: list[int], what: str, device: str,
         return (f"{where}, so there is no in-page player to play on. Ask the "
                 f"operator to open Jarvis, or pass where='app' to send it to "
                 f"the music app instead.")
+    if append:
+        # behind the current track, never interrupting it — the player treats
+        # an append onto an empty queue as an ordinary play
+        n = gui.player_push("queue_add", tab=target, queue=rows)
+        if not n:
+            return f"'{where}' closed before it could queue."
+        return (f"queued {what} in the Jarvis player on {where} "
+                f"({len(rows)} track(s) added).")
     fields: dict = {"queue": rows, "index": 0}
     if volume is not None:
         fields["volume"] = max(0, min(int(volume), 100))
@@ -187,9 +196,13 @@ async def _play_in_page(ids: list[int], what: str, device: str,
 
 
 async def _play_ids(ids: list[int], where: str, what: str, device: str,
-                    volume: int | None, tab: str = "") -> str:
+                    volume: int | None, tab: str = "",
+                    append: bool = False) -> str:
     if where == "jarvis":
-        return await _play_in_page(ids, what, device, volume, tab)
+        return await _play_in_page(ids, what, device, volume, tab, append)
+    if append:
+        return ("error: only the Jarvis player has a queue — the music app "
+                "can't append. Pass where='jarvis' to queue tracks.")
     try:
         r = await tarmac.remote("play", ids)
     except tarmac.TarmacError as e:
@@ -204,7 +217,8 @@ async def _play_ids(ids: list[int], where: str, what: str, device: str,
 
 async def run(query: str = "", ids: list | None = None, tag: str = "",
               device: str = "", volume: int | None = None,
-              client: str = "", where: str = "auto", tab: str = "") -> str:
+              client: str = "", where: str = "auto", tab: str = "",
+              queue: bool = False) -> str:
     dest = _resolve_where(where)
 
     # explicit ids skip matching entirely
@@ -214,7 +228,7 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
         except (TypeError, ValueError):
             return "error: ids must be whole numbers"
         return await _play_ids(picked, dest, f"{len(picked)} track(s)",
-                               device, volume, tab)
+                               device, volume, tab, append=queue)
 
     if not query and not tag:
         return "error: say what to play, or give ids"
@@ -262,7 +276,7 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
     except ValueError:
         return f"error: the library gave a track id that is not a number: {win.ref}"
     return await _play_ids([track_id], dest, musicpick.describe(win),
-                           device, volume, tab)
+                           device, volume, tab, append=queue)
 
 
 def _playing_line(what: str, r: dict, started: bool | None) -> str:

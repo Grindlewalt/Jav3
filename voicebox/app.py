@@ -49,6 +49,19 @@ async def lifespan(app: FastAPI):
     app.state.token = os.environ.get("VOICEBOX_TOKEN", "")
     if not app.state.token:
         log.warning("VOICEBOX_TOKEN is not set — all connections will be refused")
+    # wake word: on by default, degrades to off if openwakeword isn't usable
+    # (wrong version, missing models) — the ready message tells the Pi which
+    app.state.wake_name = os.environ.get("VOICEBOX_WAKE", "hey_jarvis_v0.1")
+    app.state.wake = None
+    if app.state.wake_name:
+        try:
+            from wake import WakeDetector
+            app.state.wake = WakeDetector(app.state.wake_name)
+            log.info("wake word armed: %s", app.state.wake_name)
+        except Exception as exc:  # noqa: BLE001 — voice works fine without it
+            log.warning("wake word disabled: %s (see wake.py for the "
+                        "openwakeword 0.6 install note)", exc)
+            app.state.wake_name = ""
     # STT and TTS each get a lane so a transcription never queues behind a
     # synthesis; model loads share the same two threads at startup.
     app.state.executor = ThreadPoolExecutor(max_workers=2)
@@ -73,6 +86,7 @@ async def health():
     return {"ok": True,
             "stt": getattr(app.state, "stt", None) and app.state.stt.model_size,
             "tts": getattr(app.state, "tts", None) and app.state.tts.voice,
+            "wake": getattr(app.state, "wake_name", "") or None,
             "token_configured": bool(app.state.token),
             "client_connected": app.state.client is not None}
 
@@ -162,7 +176,8 @@ async def voice_ws(ws: WebSocket):
     workers = [asyncio.create_task(stt_worker()),
                asyncio.create_task(tts_worker())]
     await send({"type": "ready", "stt": stt.model_size,
-                "tts": f"kokoro/{tts.voice}"})
+                "tts": f"kokoro/{tts.voice}",
+                "wake": ws.app.state.wake_name or None})
     try:
         while True:
             msg = await ws.receive()
@@ -171,6 +186,9 @@ async def voice_ws(ws: WebSocket):
             data = msg.get("bytes")
             if data is not None:
                 if data[:1] == bytes([MIC_FRAME]):
+                    wake = ws.app.state.wake
+                    if wake is not None and wake.feed(data[1:]):
+                        await send({"type": "wake"})
                     for ev, payload in vad.feed(data[1:]):
                         if ev == "speech_start":
                             await send({"type": "speech_start"})
