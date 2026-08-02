@@ -24,7 +24,11 @@ class Transcriber:
         # 3060 Ti vs ~2 s CPU). Needs onnxruntime-gpu's sibling wheels — see
         # requirements.txt — and LD_LIBRARY_PATH at the pip nvidia libs.
         device = os.environ.get("VOICEBOX_DEVICE", "cpu")
-        compute = "float16" if device == "cuda" else "int8"
+        # VOICEBOX_COMPUTE overrides: int8_float16 halves whisper's VRAM
+        # (~0.7GB vs ~1.3GB) at no meaningful accuracy cost — the right pick
+        # when the LLM shares the same card.
+        compute = os.environ.get(
+            "VOICEBOX_COMPUTE", "float16" if device == "cuda" else "int8")
         self.model = WhisperModel(self.model_size, device=device,
                                   compute_type=compute,
                                   download_root=download_root)
