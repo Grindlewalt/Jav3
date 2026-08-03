@@ -374,10 +374,13 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # per-project autonomy dial: withhold tools above the project's level
             entries = autonomy.filter_entries(entries, await _project_autonomy(db, active))
         if tools_only:
-            # the voice local tier: an 8B gets a hand-picked conversational
+            # the voice local tier: a 4B gets a hand-picked conversational
             # toolset, not thirty schemas — everything else is escalation's job
             entries = [e for e in entries if e["name"] in tools_only]
-        tools = openai_tool_specs(entries)
+        # ...and no Notes bodies: they are written for the frontier model and
+        # are pure prefill tax on a local tier whose whole job is to answer
+        # fast or hand off (17.8k chars of schemas -> 9.3k).
+        tools = openai_tool_specs(entries, notes_max=0 if tools_only else None)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it
         history = await compaction.assemble(db, conversation_id, system_prompt)

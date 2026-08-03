@@ -79,7 +79,17 @@ SMART_WORDS = ("smart model", "deepseek", "big model")
 # standing-memory notes are dropped. The operator-rules tail survives any
 # exclude by design (memory.assemble_system_prompt).
 LOCAL_CONTEXT_EXCLUDE = ("standing-memory", "all-projects.md", "agents-index",
-                         "secrets-index", "computers-index")
+                         "secrets-index", "computers-index",
+                         # `behavior` is 9.9k chars of agentic doctrine (blast
+                         # radius, git, project discipline, memory rules) that
+                         # a tier which can only play media and search cannot
+                         # act on, and `env.md` documents an execution
+                         # environment it never touches. Dropping both takes
+                         # the voice system prompt from 18.3k chars to 5.9k:
+                         # the whole prompt+tools block used to overflow the
+                         # 8k window, which truncated the tool definitions and
+                         # made the model emit tool calls as prose JSON.
+                         "behavior", "env.md")
 
 # The local tier's toolset: conversation + media control + a quick lookup.
 # Thirty tool schemas would drown an 8B (and slow its prefill); anything

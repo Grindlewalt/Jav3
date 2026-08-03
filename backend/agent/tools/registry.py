@@ -129,10 +129,18 @@ def read_only_names(entries: list[dict] | None = None) -> frozenset[str]:
     return frozenset(e["name"] for e in entries if e.get("read_only") is True)
 
 
-def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
+def openai_tool_specs(entries: list[dict] | None = None,
+                      notes_max: int | None = None) -> list[dict]:
     """Registry entries in the wire format Model.complete expects.
-    Entries with `enabled: false` are catalogued but not granted to the model."""
+    Entries with `enabled: false` are catalogued but not granted to the model.
+
+    `notes_max` overrides SPEC_NOTES_MAX for this call; 0 drops the Notes
+    bodies entirely. The voice local tier uses that — the bodies are written
+    for a frontier model doing multi-step work and cost it 6.2k chars per
+    turn, which a 4B pays for twice (prefill latency, and attention spent on
+    guidance it will not use)."""
     entries = entries if entries is not None else load_registry()
+    notes_cap = SPEC_NOTES_MAX if notes_max is None else notes_max
     specs = []
     for e in entries:
         if e.get("enabled") is False:
@@ -148,8 +156,8 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
         # for discovery; invoking the skill returns the full SKILL.md.
         if e.get("kind") == "skill":
             desc += " (Invoking this skill loads its full instructions.)"
-        elif e.get("body"):
-            desc += f"\nNotes: {e['body'][:SPEC_NOTES_MAX]}"
+        elif e.get("body") and notes_cap:
+            desc += f"\nNotes: {e['body'][:notes_cap]}"
         specs.append({
             "type": "function",
             "function": {

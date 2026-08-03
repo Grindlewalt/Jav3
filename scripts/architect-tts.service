@@ -1,0 +1,29 @@
+# The "architect" voice (Chatterbox Nano clone of anchor.wav) as a service.
+#
+# Separate process because it needs torch 2.6 + chatterbox on Python 3.12,
+# and voicebox runs Python 3.14. voicebox/tts.py is the client and talks to
+# this over loopback; the PCM transfer is sub-millisecond.
+#
+# Lives on cuda:1 (the 12 GB 3060) so the Ti keeps the whole LLM.
+# The model is loaded and warmed at startup (~6 s) and never unloaded, so the
+# operator never waits on a load.
+#
+# Install: cp to /etc/systemd/system/, systemctl enable --now architect-tts
+[Unit]
+Description=Jarvis architect TTS voice (Chatterbox Nano, RTX 3060)
+After=network-online.target
+
+[Service]
+User=claude
+Environment=VOICE_DEVICE=cuda:1
+Environment=VOICE_PACK=/home/claude/voice-pack
+Environment=PYTHONPATH=/home/claude/voice-pack
+Environment=TQDM_DISABLE=1
+WorkingDirectory=/home/claude/voice-tts
+ExecStart=/home/claude/voice-pack/.venv/bin/uvicorn architect_tts:app \
+  --host 0.0.0.0 --port 8123 --log-level warning
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

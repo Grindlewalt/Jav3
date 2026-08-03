@@ -1,0 +1,36 @@
+# Jarvis voice local tier: qwen3.5:4b on llama.cpp, pinned to the 3060 Ti.
+#
+# Replaces the ollama-voice unit for the voice path. Two reasons llama.cpp
+# rather than ollama:
+#   1. ollama's qwen3.5 GGUF conversion breaks llama.cpp's loader anyway, and
+#      its own qwen3.5 template 500s when a tool result is replayed.
+#   2. slot prompt caching. The voice system prompt + tool schemas are ~3.9k
+#      stable tokens; llama.cpp keeps them in the slot KV and prefills only
+#      the new turn (~40 tokens), so a turn pays ~190 ms instead of ~4 s.
+#
+# The thinking switch is --chat-template-kwargs enable_thinking=false.
+# --reasoning-budget 0 alone does NOT work on this template: the model still
+# emits a reasoning block (69-197 tokens of silence before the first word).
+#
+# Install: cp to /etc/systemd/system/, systemctl enable --now llama-voice
+[Unit]
+Description=Jarvis voice LLM tier (llama.cpp, qwen3.5:4b, RTX 3060 Ti)
+After=network-online.target
+
+[Service]
+User=claude
+Environment=CUDA_VISIBLE_DEVICES=0
+ExecStart=/home/claude/llama.cpp/build/bin/llama-server \
+  -m /home/claude/models/Qwen3.5-4B-Q4_K_M.gguf \
+  --alias qwen3.5:4b \
+  --host 0.0.0.0 --port 11436 \
+  -ngl 99 -c 16384 -np 1 \
+  -fa on \
+  --jinja --chat-template-kwargs '{"enable_thinking":false}' \
+  --reasoning-budget 0 \
+  --metrics
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

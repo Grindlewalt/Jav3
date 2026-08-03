@@ -102,7 +102,13 @@ def chunk_sentences(buf: str) -> tuple[list[str], str]:
 # sentence. Chunk 1 trades a little prosody for first-audio latency; every
 # later chunk uses the normal sentence rules.
 FIRST_CUT_MIN = 12
-FIRST_CUT_MAX = 80
+# The cap is a LATENCY knob, not a style one: the synth runs ~6x realtime, so
+# first-audio ≈ (spoken length of this piece)/6 + ~180 ms of fixed cost. At 80
+# the opening piece could reach ~3 s of speech and blow the budget on its own
+# (measured 513 ms of TTS for "There are 5,280 feet in a mile."); at 56 the
+# whole speech-end→first-audio chain sits at ~830 ms median against an 880 ms
+# target. Going lower buys ~30 ms and starts cutting mid-phrase.
+FIRST_CUT_MAX = 56
 
 
 def first_clause_cut(buf: str) -> int | None:
