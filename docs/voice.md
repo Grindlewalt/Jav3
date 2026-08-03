@@ -101,22 +101,58 @@ DeepSeek instead:
 3. **The tier is off** (`voice_local_model` empty): everything runs on
    DeepSeek as before.
 
-Local turns get a slim context (`voice.LOCAL_CONTEXT_EXCLUDE` — soul, user,
-env and the active project survive; the heavyweight indexes and the full
-standing-memory notes don't): an 8B in a 4-8k window can't carry the full
-sandwich, and prefilling it costs seconds. The operator-rules tail is never
-droppable, so the hard rules still bind local turns.
+Local turns get a slim context (`voice.LOCAL_CONTEXT_EXCLUDE` — soul, user and
+the active project survive; the behaviour doctrine, env, heavyweight indexes
+and full standing-memory notes don't) and a tool set shipped without its Notes
+bodies: a 4B in an 8k window can't carry the full sandwich, and prefilling it
+costs seconds. See the latency budget below — this is not a nicety, an
+oversized prompt silently truncates the tool definitions. The operator-rules
+tail is never droppable, so the hard rules still bind local turns.
 
-**Ollama box notes (the main server):**
-- `OLLAMA_KEEP_ALIVE=24h` keeps the model resident — already set.
-- `OLLAMA_SCHED_SPREAD=1` splits even an 8B across both GPUs, which taxes
-  per-token latency and squats on the 3060 Ti that whisper/kokoro want. The
-  clean split is a **second ollama instance** pinned to the 3060
-  (`CUDA_VISIBLE_DEVICES=1 OLLAMA_HOST=0.0.0.0:11435`) with the big-model
-  instance keeping both GPUs; point `voice_local_base_url` at :11435. Needs
-  the operator (systemd unit).
-- The stock runner loads at ctx 4096; set `OLLAMA_CONTEXT_LENGTH=8192` on
-  the voice instance so a long voice conversation doesn't truncate.
+## The latency budget (rebuilt 2026-08-03)
+
+Target: **speech end → first audio ≤ 880 ms**. Measured median **808 ms**:
+
+| leg | cost | where |
+|---|---|---|
+| whisper (small, int8_float16) | 73 ms | voicebox, cuda:0 |
+| LLM to first spoken clause | ~400 ms | llama.cpp :11436, cuda:0 |
+| TTS of that clause | ~310 ms | architect-tts :8123, cuda:1 |
+
+Three things hold that number up, and all three are easy to undo by accident:
+
+1. **The prompt must fit the window.** Voice system prompt + tool schemas used
+   to be ~8.8k tokens against an 8k window. Overflow truncated the prompt,
+   killed the KV prefix cache (a full 4.0 s re-prefill *every turn*) and ate
+   part of the tool block — which is why the model would emit tool calls as
+   prose JSON. `LOCAL_CONTEXT_EXCLUDE` now also drops `behavior` and `env.md`,
+   and the local toolset ships with `notes_max=0`. Budget: ~4.5k tokens.
+2. **Thinking must be off.** qwen3.5 defaults to a reasoning block — 69–197
+   tokens of silence before the first word. The switch is llama-server's
+   `--chat-template-kwargs '{"enable_thinking":false}'`; `--reasoning-budget 0`
+   alone does **not** work.
+3. **The first spoken clause must be short.** The synth runs ~6× realtime, so
+   first-audio ≈ (spoken seconds)/6 + ~180 ms — driven by *spoken length*, not
+   character count. `VOICE_PROMPT` asks for a six-word opener and
+   `FIRST_CUT_MAX` caps it at 40 chars. The one case still over budget is a
+   short-but-slow answer like "There are 5,280 feet in a mile." (31 chars, 3 s
+   of speech, 550 ms of TTS).
+
+`VoiceSession.start` also warms the prompt prefix the moment the tab opens:
+resident weights are only half of "no waiting" — cold, the ~4.5k-token prefix
+is a 2.3 s prefill on the operator's first word.
+
+Remaining known floor: llama.cpp costs a flat **~190 ms per request** on this
+box regardless of prompt size, flags, batch size or CUDA graphs (CPU-only is
+140 ms). That is the next real win if voice ever needs to be faster.
+
+**Serving the local tier (the main server, needs operator sudo):**
+- `scripts/llama-voice.service` — llama.cpp on :11436, qwen3.5:4b, cuda:0.
+- `scripts/architect-tts.service` — the architect voice on :8123, cuda:1.
+- **Disable `ollama-voice`** once these are in: it pins a 5.4 GB model on the
+  same 8 GB card llama-server needs.
+- Ollama's own qwen3.5 GGUF will not load in llama.cpp (`rope.dimension_sections`
+  is length 3, llama.cpp wants 4) — use the `unsloth/Qwen3.5-4B-GGUF` build.
 
 ## Configuration
 
@@ -126,6 +162,8 @@ Pi (`~/.config/jarvis/env`):
 JARVIS_VOICE_ENABLED=true
 JARVIS_VOICE_SIDECAR_URL=ws://10.0.0.58:8100/ws
 JARVIS_VOICE_SIDECAR_TOKEN=<the sidecar's VOICEBOX_TOKEN>
+JARVIS_VOICE_LOCAL_MODEL=qwen3.5:4b
+JARVIS_VOICE_LOCAL_BASE_URL=http://10.0.0.58:11436/v1
 # JARVIS_VOICE_MAX_WORKERS=3
 ```
 
