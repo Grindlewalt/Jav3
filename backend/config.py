@@ -48,7 +48,11 @@ class Settings(BaseSettings):
                                            # :11435 is the pinned-to-the-3060
                                            # voice instance when deployed.
                                            "http://10.0.0.58:11434",
-                                           "http://10.0.0.58:11435"]
+                                           "http://10.0.0.58:11435",
+                                           # :11436 is llama.cpp serving
+                                           # qwen3.5:4b on the 3060 Ti — the
+                                           # voice local tier since 2026-08-03
+                                           "http://10.0.0.58:11436"]
     model_name: str = "deepseek-v4-flash"
     # Models the nav switcher may select at runtime (persisted in session_state,
     # no restart). Agents with an explicit model pin are unaffected by the switch.
