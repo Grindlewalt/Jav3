@@ -40,6 +40,7 @@ def capturing_turn(script):
         idx = len(calls)
         calls.append({"model_name": kw.get("model_name"),
                       "base_url": kw.get("base_url"),
+                      "rewrite_rules": kw.get("rewrite_rules"),
                       "system_prompt": system_prompt})
         tokens, final = script[min(idx, len(script) - 1)]
         for t in tokens:
@@ -67,7 +68,7 @@ async def test_local_routing_and_prompt(seeded, monkeypatch):
     turn, calls = capturing_turn([
         (["It's about, three thirty in the afternoon. "],
          "It's about, three thirty in the afternoon. ")])
-    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
 
     await session._on_transcript("what time is it")
     await settle(session)
@@ -75,6 +76,10 @@ async def test_local_routing_and_prompt(seeded, monkeypatch):
     assert calls[0]["model_name"] == "llama3.1:8b"
     assert calls[0]["base_url"] == voice.settings.voice_local_base_url
     assert LOCAL_PROMPT in calls[0]["system_prompt"]
+    # M4e: these three ride the guest loop, which is now the ONLY loop. Before
+    # it, they were passed to a host path production never took — the local
+    # tier was configured on the Pi and silently answering from DeepSeek.
+    assert calls[0]["rewrite_rules"] is False   # already spoken; don't re-pass
     tts = [m for m in session.link.sent_json if m["type"] == "tts"]
     assert tts, "local reply must be spoken"
 
@@ -85,7 +90,7 @@ async def test_smart_word_skips_local(seeded, monkeypatch):
     local_tier(monkeypatch)
     session, out = make_session(monkeypatch)
     turn, calls = capturing_turn([([], "On it.")])
-    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
 
     await session._on_transcript("use the smart model to plan my week")
     await settle(session)
@@ -107,7 +112,7 @@ async def test_escalation_ask_and_accept(seeded, monkeypatch):
         (["Here's the full picture, researched properly. "],
          "Here's the full picture, researched properly. "),
     ])
-    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
 
     await session._on_transcript("compare every music server out there")
     await settle(session)
@@ -136,7 +141,7 @@ async def test_escalation_declined(seeded, monkeypatch):
     local_tier(monkeypatch)
     session, out = make_session(monkeypatch)
     turn, calls = capturing_turn([([], "[ESCALATE] Too big for me.")])
-    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
 
     await session._on_transcript("audit the whole codebase")
     await settle(session)
@@ -155,7 +160,7 @@ async def test_local_turns_skip_peak_gate(seeded, monkeypatch):
     session, out = make_session(monkeypatch)   # in_peak_window -> False here
     monkeypatch.setattr(voice, "in_peak_window", lambda: True)  # force peak ON
     turn, calls = capturing_turn([([], "Cheap and local, any hour.")])
-    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
 
     await session._on_transcript("quick one, what's two plus two")
     await settle(session)
@@ -171,7 +176,7 @@ async def test_confirm_state_survives_ask_playback(seeded, monkeypatch):
     local_tier(monkeypatch)
     session, out = make_session(monkeypatch)
     turn, calls = capturing_turn([([], "[ESCALATE] Needs the big model.")])
-    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
 
     await session._on_transcript("do the enormous thing")
     await settle(session)

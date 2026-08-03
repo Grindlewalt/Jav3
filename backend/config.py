@@ -202,10 +202,10 @@ class Settings(BaseSettings):
     vm_memory_mb: int = 768
     vm_cpus: int = 2
     vm_boot_timeout_seconds: int = 120
-    # When true, chat turns run the ReAct loop INSIDE the guest (Phase 3), with
-    # host tools brokered over vsock. Off by default until the guest path is the
-    # proven default (cutover in M4); flip per-turn tests via the flag.
-    use_guest_loop: bool = False
+    # (`use_guest_loop` is gone — M4e, 2026-08-02. Every turn's ReAct loop runs
+    # inside the guest with host tools brokered over vsock; there is no host-side
+    # loop left to fall back to. The Pi ran the guest path from 07-15 to 08-02
+    # without once needing the fallback.)
     # True only inside the guest (the guest config shim overrides it). run_code
     # keys on this: on the host it is always False, so the tool refuses to run
     # code anywhere the sandbox isn't.

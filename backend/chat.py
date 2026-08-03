@@ -11,12 +11,16 @@ from pydantic import BaseModel
 from . import autonomy, bus, compaction, gui, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
-from .agent.loop import db_tool_sink, run_turn
+from .agent.loop import db_tool_sink
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
 from .auth import require_user
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import assemble_system_prompt, get_active_project, standing_rules_tail
+# module level, not function level: it is the turn's single loop entry now, and
+# the offline tests substitute it here to run a turn without a model
+from .vm.broker import TurnEnvelope
+from .vm.guest_turn import guest_turn
 
 router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_user)])
 
@@ -384,30 +388,25 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             tools_before = (await cur.fetchone())["m"]
 
         final_content = ""
-        if settings.use_guest_loop:
-            # run the ReAct loop INSIDE the guest; host tools brokered over vsock.
-            from .vm.broker import TurnEnvelope
-            from .vm.guest_turn import guest_turn
-            envelope = TurnEnvelope(
-                op_id=op_id, conversation_id=conversation_id, active_project=active,
-                artifact_slug=(f"chat-{conversation_id}" if atoken is not None else None),
-                web_session=runtime.web_session.get(), ephemeral=ephemeral,
-                event_chan=chan)
-            source = guest_turn(conversation_id, system_prompt, history,
-                                rules=standing_rules_tail(), tool_specs=tools,
-                                read_only=list(read_only_names(entries)),
-                                op_id=op_id, envelope=envelope,
-                                active_slug=active, push_workspace=True)
-        else:
-            source = run_turn(conversation_id, system_prompt, history, tools=tools,
-                              on_tool_call=db_tool_sink(db, conversation_id),
-                              # voice turns skip the second-pass rules rewrite:
-                              # the streamed text was already spoken aloud
-                              rewrite_rules=not voice,
-                              # voice local tier: run on the operator's ollama
-                              # (guest-loop branch above ignores these — voice
-                              # + guest loop is not a supported combination)
-                              model_name=model_name, base_url=base_url)
+        # the ReAct loop runs INSIDE the guest; host tools brokered over vsock.
+        # This is the only path — the host-side fallback went with M4e.
+        envelope = TurnEnvelope(
+            op_id=op_id, conversation_id=conversation_id, active_project=active,
+            artifact_slug=(f"chat-{conversation_id}" if atoken is not None else None),
+            web_session=runtime.web_session.get(), ephemeral=ephemeral,
+            event_chan=chan)
+        source = guest_turn(conversation_id, system_prompt, history,
+                            rules=standing_rules_tail(), tool_specs=tools,
+                            read_only=list(read_only_names(entries)),
+                            op_id=op_id, envelope=envelope,
+                            active_slug=active, push_workspace=True,
+                            # voice turns skip the second-pass rules rewrite:
+                            # the streamed text was already spoken aloud
+                            rewrite_rules=not voice,
+                            # voice local tier: run on the operator's ollama.
+                            # The guest never dials it — the host gateway makes
+                            # the call, so base_url is honoured host-side.
+                            model_name=model_name, base_url=base_url)
 
         sink = db_tool_sink(db, conversation_id)
         pending_tool: dict = {}
@@ -415,15 +414,14 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             if event["type"] == "final":
                 final_content = event["content"]
                 continue
-            if settings.use_guest_loop:
-                # the guest loop runs with on_tool_call=None, so persist tool_calls
-                # here by pairing each tool (args) event with its tool_result.
-                if event["type"] == "tool":
-                    pending_tool[event.get("id")] = (event.get("name"),
-                                                     event.get("args") or {})
-                elif event["type"] == "tool_result":
-                    nm, ar = pending_tool.pop(event.get("id"), (event.get("name"), {}))
-                    await sink(nm, ar, event.get("result", ""))
+            # the guest loop runs with on_tool_call=None, so persist tool_calls
+            # here by pairing each tool (args) event with its tool_result.
+            if event["type"] == "tool":
+                pending_tool[event.get("id")] = (event.get("name"),
+                                                 event.get("args") or {})
+            elif event["type"] == "tool_result":
+                nm, ar = pending_tool.pop(event.get("id"), (event.get("name"), {}))
+                await sink(nm, ar, event.get("result", ""))
             bus.publish(chan, event)
 
         await db.execute(

@@ -18,18 +18,12 @@ def _guest(monkeypatch, tmp_path, slug="proj"):
     monkeypatch.setattr(toolctx, "active_slug", fake_slug)
 
 
-async def test_not_offered_without_guest_loop(tmp_env):
+async def test_offered(tmp_env):
+    """Every turn's loop runs in the guest (M4e removed the host path), so
+    run_code is simply part of the registry — no flag gates it any more. The
+    host handler still self-guards on in_guest; see test_host_dispatch_refuses."""
     await init_db()
     registry.compile_registry()
-    assert settings.use_guest_loop is False
-    names = {s["function"]["name"] for s in registry.openai_tool_specs()}
-    assert "run_code" not in names
-
-
-async def test_offered_with_guest_loop(tmp_env, monkeypatch):
-    await init_db()
-    registry.compile_registry()
-    monkeypatch.setattr(settings, "use_guest_loop", True)
     names = {s["function"]["name"] for s in registry.openai_tool_specs()}
     assert "run_code" in names
 

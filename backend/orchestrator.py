@@ -250,7 +250,7 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     # lifecycle — prime one copy the concurrent leaves reuse, reconcile it at the
     # end. A NESTED job (under a guest chat that already pushed + will pack) skips
     # both. Best-effort: a guest hiccup must not sink the whole job.
-    prime_guest = (settings.use_guest_loop and optok is not None and bool(project))
+    prime_guest = (optok is not None and bool(project))
     acquired = False
     owns_ws = False
     if prime_guest:

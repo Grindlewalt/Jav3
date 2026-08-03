@@ -61,7 +61,8 @@ def config_snapshot() -> dict:
 async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                      tool_specs=None, read_only=None, op_id=None, envelope=None,
                      active_slug=None, push_workspace=False, model_name=None,
-                     base_url=None, self_check=True, max_iterations=None):
+                     base_url=None, self_check=True, max_iterations=None,
+                     rewrite_rules=True):
     """Run one turn in the guest, yielding its events. Raises on a transport
     failure (connect/read) so the caller can fall back or surface an error.
 
@@ -105,6 +106,10 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         "model_name": model_name,
         "base_url": base_url,
         "self_check": self_check,
+        # voice turns skip the second-pass rules rewrite — the streamed text was
+        # already spoken aloud, so rewriting it costs a model call and changes
+        # nothing the operator will hear
+        "rewrite_rules": rewrite_rules,
         "max_iterations": max_iterations,
         "config": config_snapshot(),
         "active_slug": active_slug,

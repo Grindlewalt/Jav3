@@ -96,7 +96,7 @@ async def first_tts(session, n=1):
 async def test_happy_path_speaks_sentences_and_persists(seeded, monkeypatch):
     from backend import chat as chat_mod
     session, out = make_session(monkeypatch)
-    monkeypatch.setattr(chat_mod, "run_turn", scripted_turn(
+    monkeypatch.setattr(chat_mod, "guest_turn", scripted_turn(
         "The weather is looking pretty clear today. ",
         "Do you want the full forecast"))
 
@@ -161,7 +161,7 @@ async def test_barge_in_real_speech_cancels_and_annotates(seeded, monkeypatch):
     session, out = make_session(monkeypatch)
     release = asyncio.Event()
     sentence = "Let me walk you through the whole history of this. "
-    monkeypatch.setattr(chat_mod, "run_turn",
+    monkeypatch.setattr(chat_mod, "guest_turn",
                         blocking_prose_turn(release, sentence))
 
     await session._on_transcript("tell me everything")
@@ -208,7 +208,7 @@ async def test_barge_in_false_alarm_resumes(seeded, monkeypatch):
     session, out = make_session(monkeypatch)
     release = asyncio.Event()
     sentence = "Here is a very long explanation you asked about earlier. "
-    monkeypatch.setattr(chat_mod, "run_turn",
+    monkeypatch.setattr(chat_mod, "guest_turn",
                         blocking_prose_turn(release, sentence))
 
     await session._on_transcript("go on then")
@@ -232,7 +232,7 @@ async def test_barge_on_finished_turn_annotates_heard_upto(seeded, monkeypatch):
     from backend import chat as chat_mod
     session, out = make_session(monkeypatch)
     text = "The full answer is forty-two, per the usual sources. "
-    monkeypatch.setattr(chat_mod, "run_turn", scripted_turn(text))
+    monkeypatch.setattr(chat_mod, "guest_turn", scripted_turn(text))
 
     await session._on_transcript("what is the answer")
     await settle(session)

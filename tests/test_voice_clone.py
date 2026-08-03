@@ -117,7 +117,7 @@ async def test_talk_while_working_clones_and_delivers(seeded, monkeypatch):
     from backend.voice import DELIVERY_ACK, TWIN_ACK
     session, out = make_session(monkeypatch)
     release = asyncio.Event()
-    monkeypatch.setattr(chat_mod, "run_turn", two_phase_turn(release))
+    monkeypatch.setattr(chat_mod, "guest_turn", two_phase_turn(release))
 
     await session._on_transcript("count every file in the project")
     for _ in range(300):
@@ -183,7 +183,7 @@ async def test_cap_queues_instead_of_fourth_clone(seeded, monkeypatch):
     from backend import chat as chat_mod, voice
     session, out = make_session(monkeypatch)
     release = asyncio.Event()
-    monkeypatch.setattr(chat_mod, "run_turn", two_phase_turn(release))
+    monkeypatch.setattr(chat_mod, "guest_turn", two_phase_turn(release))
     # three phantom workers occupy the cap
     for fake_cid in (901, 902, 903):
         session.workers[fake_cid] = {"task": "…", "watcher": None,

@@ -137,11 +137,6 @@ def openai_tool_specs(entries: list[dict] | None = None) -> list[dict]:
     for e in entries:
         if e.get("enabled") is False:
             continue
-        # requires_guest tools (run_code) exist ONLY inside the sandbox VM:
-        # with the guest loop off there is nowhere safe to execute them, so
-        # they are not offered at all — no silent host fallback, by design
-        if e.get("requires_guest") and not settings.use_guest_loop:
-            continue
         desc = e["description"]
         if e.get("when_to_use"):
             desc += f" Use when: {e['when_to_use']}"

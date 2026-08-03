@@ -42,7 +42,7 @@ async def test_asleep_until_wake_word(seeded, monkeypatch):
     from backend import chat as chat_mod
     await mark_greeted()
     session, out = make_session(monkeypatch)
-    monkeypatch.setattr(chat_mod, "run_turn",
+    monkeypatch.setattr(chat_mod, "guest_turn",
                         scripted_turn("Good morning, sir. "))
 
     # sidecar announces a wake model → session starts on standby
@@ -107,7 +107,7 @@ async def test_first_wake_of_the_day_greets_with_briefing(seeded, monkeypatch):
         yield {"type": "final", "content": "Morning, sir. Rain later; the "
                "rover found something shiny. "}
 
-    monkeypatch.setattr(chat_mod, "run_turn", turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
     await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
     assert session.state == "asleep"
     await session._on_sidecar_json({"type": "wake"})

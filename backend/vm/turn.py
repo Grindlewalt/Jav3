@@ -1,13 +1,15 @@
-"""One entry point the loop callers share so the guest cutover is a per-caller
-flag flip, not five bespoke wirings.
+"""One entry point the loop callers share, so where the loop runs is decided in
+one place rather than five bespoke wirings.
 
 `run_agent_turn` has `run_turn`'s exact event contract (yields token / tool /
-tool_result / final) and its persistence hook (`on_tool_call`). With
-`use_guest_loop` off it IS `run_turn`. With it on, it runs the loop in the guest
-via `guest_turn`: it builds the turn's context envelope from the ambient runtime
-contextvars the caller already set (web_session / ephemeral / event_chan /
-artifact_slug), and pairs the guest's tool + tool_result events to feed
-`on_tool_call` (the guest loop carries no db handle, so the host sink runs here).
+tool_result / final) and its persistence hook (`on_tool_call`). It runs the loop
+in the guest via `guest_turn`: it builds the turn's context envelope from the
+ambient runtime contextvars the caller already set (web_session / ephemeral /
+event_chan / artifact_slug), and pairs the guest's tool + tool_result events to
+feed `on_tool_call` (the guest loop carries no db handle, so the host sink runs
+here). The host-side fallback is gone (M4e, 2026-08-02) — the guest loop had
+soaked since 07-15 without ever needing it, and two live paths meant knobs kept
+being threaded into one and silently dropped by the other.
 
 Nesting: if a Budget is already in scope we are inside an operation (e.g. a
 brokered spawn_agent running under a guest chat) — the turn then shares that
@@ -15,24 +17,10 @@ operation's guest + Budget and does NOT re-push the workspace (its parent alread
 did; re-pushing would wipe the parent's in-flight staged edits). A top-level turn
 pushes a fresh workspace and its edits reconcile at turn end.
 """
-from ..agent.loop import run_turn
-from ..config import settings
-
-
 async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
                          read_only=None, model_name=None, base_url=None,
                          self_check=True, max_iterations=None, on_tool_call=None,
                          active_project=None, rewrite_rules=True):
-    if not settings.use_guest_loop:
-        async for ev in run_turn(conversation_id, system_prompt, history,
-                                 tools=tools, model_name=model_name,
-                                 base_url=base_url, self_check=self_check,
-                                 max_iterations=max_iterations,
-                                 on_tool_call=on_tool_call,
-                                 rewrite_rules=rewrite_rules):
-            yield ev
-        return
-
     from .. import runtime
     from ..agent import budget as budget_mod
     from ..agent.tools.registry import openai_tool_specs, read_only_names
@@ -60,7 +48,7 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
             active_slug=active_project,
             push_workspace=(not nested and bool(active_project)),
             model_name=model_name, base_url=base_url, self_check=self_check,
-            max_iterations=max_iterations):
+            max_iterations=max_iterations, rewrite_rules=rewrite_rules):
         if on_tool_call is not None:
             if ev["type"] == "tool":
                 pending[ev.get("id")] = (ev.get("name"), ev.get("args") or {})

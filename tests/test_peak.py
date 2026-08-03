@@ -83,7 +83,7 @@ async def test_peak_409_on_new_chat_leaves_no_orphan(client, monkeypatch):
 
     async def stub_turn(db, cid, system_prompt, history, tools=None, **kw):
         yield {"type": "final", "content": "ok"}
-    monkeypatch.setattr(chat_mod, "run_turn", stub_turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", stub_turn)
 
     r = await client.post("/api/chat", json={"message": "hello"})
     assert r.status_code == 409
@@ -106,7 +106,7 @@ async def test_peak_409_on_existing_chat_keeps_id_and_state(client, monkeypatch)
 
     async def stub_turn(db, cid, system_prompt, history, tools=None, **kw):
         yield {"type": "final", "content": "ok"}
-    monkeypatch.setattr(chat_mod, "run_turn", stub_turn)
+    monkeypatch.setattr(chat_mod, "guest_turn", stub_turn)
 
     # first exchange outside peak creates the conversation
     monkeypatch.setattr(chat_mod, "in_peak_window", lambda *a, **k: False)

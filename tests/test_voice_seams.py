@@ -49,7 +49,7 @@ def _slow_turn(release: asyncio.Event, started: asyncio.Event, text: str):
 async def _start_blocked_turn(client, monkeypatch, text="done"):
     from backend import chat as chat_mod
     release, started = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(chat_mod, "run_turn", _slow_turn(release, started, text))
+    monkeypatch.setattr(chat_mod, "guest_turn", _slow_turn(release, started, text))
     post = asyncio.create_task(client.post(
         "/api/chat", json={"message": "hi", "confirm_peak": True}))
     await asyncio.wait_for(started.wait(), 5)
@@ -158,9 +158,9 @@ async def test_voice_turn_gets_voice_prompt(client, monkeypatch):
     finally:
         await db.close()
 
-    monkeypatch.setattr(chat_mod, "run_turn", capture(True))
+    monkeypatch.setattr(chat_mod, "guest_turn", capture(True))
     await chat_mod.start_turn(cid, user_msg="hi", voice=True)
-    monkeypatch.setattr(chat_mod, "run_turn", capture(False))
+    monkeypatch.setattr(chat_mod, "guest_turn", capture(False))
     await chat_mod.start_turn(cid, user_msg="hi", voice=False)
 
     assert VOICE_PROMPT in seen[True]

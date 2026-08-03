@@ -50,7 +50,7 @@ async def _start_blocked_turn(client, monkeypatch, text="done"):
     (post_task, conversation_id, release_event)."""
     from backend import chat as chat_mod
     release, started = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(chat_mod, "run_turn", _slow_turn(release, started, text))
+    monkeypatch.setattr(chat_mod, "guest_turn", _slow_turn(release, started, text))
     post = asyncio.create_task(client.post(
         "/api/chat", json={"message": "hi", "confirm_peak": True}))
     await asyncio.wait_for(started.wait(), 5)
@@ -160,7 +160,7 @@ async def test_job_announce_reaches_chat_channel(client, monkeypatch):
         bus.announce_job("jobabc", 4242, "Research: pi facts")
         yield {"type": "final", "content": "done"}
 
-    monkeypatch.setattr(chat_mod, "run_turn", turn_that_launches_a_job)
+    monkeypatch.setattr(chat_mod, "guest_turn", turn_that_launches_a_job)
     r = await client.post("/api/chat", json={"message": "go", "confirm_peak": True})
     # the POST tail returns on the final event while the detached turn task is
     # still in its finally (usage log, db.close) — await it, or pytest closes

@@ -99,6 +99,7 @@ async def _handle(loop, conn) -> None:
                     model_name=spec.get("model_name"),
                     base_url=spec.get("base_url"),
                     self_check=spec.get("self_check", True),
+                    rewrite_rules=spec.get("rewrite_rules", True),
                     max_iterations=spec.get("max_iterations"),
                     on_tool_call=None):
                 await send(ev)
