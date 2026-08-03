@@ -136,13 +136,23 @@ function ThemeToggle({ theme, onToggle }) {
 // elsewhere. The status read itself never mutates.
 // (The runtime model switch lives in the chat composer now — ComposerModel in
 // Chat.jsx; the bar copy was redundant and the operator asked for its removal.)
-function VmStatus({ inBar = false }) {
-  const [s, setS] = useState(null)
+// It rides the status cluster beside the theme toggle — in the top bar, or in
+// the rail's foot when the nav is collapsed. No prop for the two cases: the
+// rail's container carries .side-nav, which is all the CSS needs.
+let lastVmStatus = null   // survives the bar <-> rail remount; see below
+function VmStatus() {
+  // Railing the nav moves the chip between two places in the tree, so this
+  // unmounts and remounts. Seeding from the last known status keeps it on
+  // screen through the move — without it the chip renders null and blinks out
+  // until the first poll of the new instance comes back.
+  const [s, setS] = useState(lastVmStatus)
   const [open, setOpen] = useState(false)
   const [nuking, setNuking] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const [toast, setToast] = useState('')
-  const load = () => api('/api/vm/status').then(setS).catch(() => setS(null))
+  const load = () => api('/api/vm/status')
+    .then((r) => { lastVmStatus = r; setS(r) })
+    .catch(() => { lastVmStatus = null; setS(null) })
   useEffect(() => {
     load()
     const t = setInterval(load, 10000)
@@ -162,6 +172,7 @@ function VmStatus({ inBar = false }) {
     try {
       const r = await api('/api/vm/nuke', {
         method: 'POST', body: JSON.stringify({ confirm: true }) })
+      lastVmStatus = r
       setS(r)
     } catch (err) { window.alert(err.detail || String(err)) }
     setNuking(false)
@@ -192,7 +203,7 @@ function VmStatus({ inBar = false }) {
   const imageAge = s.image_age_days != null
     ? `${s.image_age_days}d old` : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
   return (
-    <div className={`notif-wrap vm-wrap${inBar ? '' : ' vm-corner'}`} ref={wrapRef}>
+    <div className="notif-wrap vm-wrap" ref={wrapRef}>
       <button className="nav-chip" onClick={() => setOpen((o) => !o)}
               aria-expanded={open}
               aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
@@ -318,16 +329,6 @@ export default function App() {
   // one exists the nav renders into it as a rail instead of onto the top bar
   const [navSlot, setNavSlot] = useState(null)
   const railed = !!navSlot
-  // phone: the VM chip rides the top bar (operator's call) instead of holding
-  // the bottom-left corner. One instance either way — it polls.
-  const [phone, setPhone] = useState(
-    () => window.matchMedia('(max-width: 768px)').matches)
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 768px)')
-    const h = (e) => setPhone(e.matches)
-    mq.addEventListener('change', h)
-    return () => mq.removeEventListener('change', h)
-  }, [])
   const icoRefs = useRef(new Map())     // route -> icon element, for the FLIP
   const lastRects = useRef(null)
 
@@ -484,7 +485,7 @@ export default function App() {
               <span className="brand">Jarvis</span>
               <div className="nav-links">{navLinks}</div>
               <div className="nav-status">
-                {phone && <VmStatus inBar />}
+                <VmStatus />
                 {voiceEnabled && <VoiceCorner />}
                 <ThemeToggle theme={theme} onToggle={toggleTheme} />
               </div>
@@ -500,6 +501,7 @@ export default function App() {
             <>
               <div className="rail-links">{navLinks}</div>
               <span className="grow" />
+              <VmStatus />
               {voiceEnabled && <VoiceCorner />}
               <ThemeToggle theme={theme} onToggle={toggleTheme} />
             </>, navSlot)}
@@ -534,10 +536,6 @@ export default function App() {
       {user && <Player />}
       {user && <Notices toasts={notices.toasts} dismiss={notices.dismiss}
                         clear={notices.clear} />}
-      {/* the guest VM sits on its own in the bottom-left corner, off away from
-          the destinations and the page's own controls — on a phone it moved
-          into the top bar above */}
-      {user && !phone && <VmStatus />}
       <NavSlotContext.Provider value={setNavSlot}>
       <Routes>
         <Route path="/login" element={<Login onLogin={setUser} />} />

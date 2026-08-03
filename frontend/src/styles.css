@@ -186,6 +186,19 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
 /* the rail's More flyout opens sideways, not down over the chats */
 .rail-links .more-drop { left: calc(100% + 10px); right: auto; top: 0; }
 .side-nav .grow { flex: 1; }
+/* the VM chip in the rail: the column is 38px, so the labelled pill has to
+   drop to the dot alone, and its 230px dropdown has to open sideways for the
+   same reason the More flyout does — anchored right:0 on a 38px wrap it would
+   hang off the left edge of the screen. */
+.side-nav .vm-wrap .nav-chip {
+  width: 38px; min-width: 0; padding: 0; justify-content: center;
+}
+/* with the word gone the dot is the whole control — its label gap would
+   otherwise push it off-centre in the column */
+.side-nav .vm-wrap .vm-word { display: none; }
+.side-nav .vm-wrap .run-dot { margin-right: 0; }
+.side-nav .vm-drop { left: calc(100% + 10px); right: auto; top: 0;
+  transform-origin: top left; }
 
 /* overflow menu ("More") */
 .more-wrap { margin-left: 2px; }
@@ -211,40 +224,10 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
   color: var(--text); filter: none; transform: none; background: var(--panel-2);
 }
 
-/* right-hand status cluster: theme toggle (the model select, bell and shield
-   are gone; the VM moved to its own corner) */
+/* right-hand status cluster: VM chip, voice, theme toggle (the model select,
+   bell and shield are gone) */
 .nav-status { display: flex; align-items: center; gap: 2px; flex-shrink: 0;
   margin-left: auto; }
-
-/* ---- guest VM, bottom-left ----
-   Off on its own, away from the destinations and from whatever the page puts
-   in its corners. Fixed, so it holds that corner on every route, and its
-   dropdown rises rather than dropping off the bottom of the screen. */
-/* .notif-wrap sets position:relative further down the sheet — same specificity,
-   so this has to out-weigh it or the chip flows back into the top-left */
-.notif-wrap.vm-corner {
-  position: fixed; left: 12px; bottom: 12px; z-index: 40;
-}
-.vm-corner .nav-chip {
-  height: 34px; min-width: 0; padding: 0 11px; font-size: 12.5px;
-  border: 1px solid var(--border); border-radius: 999px;
-  background: var(--glass);
-  backdrop-filter: blur(14px) saturate(1.15);
-  -webkit-backdrop-filter: blur(14px) saturate(1.15);
-  transition: width 0.28s ease, padding 0.28s ease;
-}
-/* railed, the corner is a 56px column — the labelled pill hung out past its
-   edge. Drop to the dot alone, sized like the rail's other buttons. */
-.app.railed .vm-corner { left: 9px; }
-.app.railed .vm-corner .nav-chip {
-  width: 38px; padding: 0; justify-content: center;
-}
-.app.railed .vm-corner .nav-chip .vm-word { display: none; }
-.vm-corner .vm-drop {
-  top: auto; bottom: calc(100% + 8px); left: 0; right: auto;
-  transform-origin: bottom left;
-  animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
-}
 
 /* hamburger: hidden until the bar collapses (media query below) */
 .nav-toggle {
