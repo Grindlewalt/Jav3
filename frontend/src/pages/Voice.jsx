@@ -26,6 +26,7 @@ const STATE_LABEL = {
 export default function Voice() {
   const [state, setState] = useState('connecting')
   const [working, setWorking] = useState(false)
+  const [tier, setTier] = useState('local')     // which brain answered
   const [feed, setFeed] = useState([])          // {role, text, id}
   const [workers, setWorkers] = useState([])
   const [muted, setMuted] = useState(false)
@@ -99,6 +100,7 @@ export default function Voice() {
         case 'state':
           setState(msg.state)
           setWorking(!!msg.turn_working)
+          if (msg.tier) setTier(msg.tier)
           if (msg.conversation_id) setCid(msg.conversation_id)
           break
         case 'conversation': setCid(msg.id); break
@@ -110,6 +112,7 @@ export default function Voice() {
         case 'queued': push('sys', `(queued: “${msg.text}”)`); break
         case 'clap': push('sys', `(👏👏 ${msg.result || msg.title})`); break
         case 'wake': audio.chime(); break
+        case 'shutdown': push('sys', '(shutting down — say “hey Jarvis” after reload)'); break
         case 'tool_activity':
           if (msg.phase === 'call') push('tool', msg.name)
           break
@@ -149,6 +152,7 @@ export default function Voice() {
           <div className="voice-orb-core" />
         </div>
         <div className="voice-state">{STATE_LABEL[state] || state}
+          {tier === 'smart' && <span className="voice-tier-tag">smart model</span>}
           {working && <span className="voice-working-tag">background work running</span>}
         </div>
         {err && <div className="voice-err">{err}</div>}

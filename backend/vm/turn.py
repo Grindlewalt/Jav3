@@ -20,7 +20,8 @@ pushes a fresh workspace and its edits reconcile at turn end.
 async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
                          read_only=None, model_name=None, base_url=None,
                          self_check=True, max_iterations=None, on_tool_call=None,
-                         active_project=None, rewrite_rules=True):
+                         active_project=None, rewrite_rules=True,
+                         inject_rules=True):
     from .. import runtime
     from ..agent import budget as budget_mod
     from ..agent.tools.registry import openai_tool_specs, read_only_names
@@ -48,7 +49,8 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
             active_slug=active_project,
             push_workspace=(not nested and bool(active_project)),
             model_name=model_name, base_url=base_url, self_check=self_check,
-            max_iterations=max_iterations, rewrite_rules=rewrite_rules):
+            max_iterations=max_iterations, rewrite_rules=rewrite_rules,
+            inject_rules=inject_rules):
         if on_tool_call is not None:
             if ev["type"] == "tool":
                 pending[ev.get("id")] = (ev.get("name"), ev.get("args") or {})

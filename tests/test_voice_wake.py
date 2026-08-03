@@ -110,7 +110,11 @@ async def test_first_wake_of_the_day_greets_with_briefing(seeded, monkeypatch):
     monkeypatch.setattr(chat_mod, "guest_turn", turn)
     await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
     assert session.state == "asleep"
+    # the acoustic detector only lifts standby; the briefing waits for the
+    # transcript, because a wake that CARRIES a request must get the request
     await session._on_sidecar_json({"type": "wake"})
+    assert seen == {}
+    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jarvis."})
     await settle(session)
 
     assert "[startup" in seen["user"]
@@ -128,8 +132,85 @@ async def test_first_wake_of_the_day_greets_with_briefing(seeded, monkeypatch):
     # same day, second wake: no second greeting turn
     seen.clear()
     await session._sleep()
-    await session._on_sidecar_json({"type": "wake"})
+    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jarvis."})
     assert seen == {} and session.state == "listening"
+
+
+async def test_wake_carrying_a_request_answers_it_instead_of_greeting(
+        seeded, monkeypatch):
+    """"Jarvis, what's my schedule" is one utterance, not a wake plus a wait —
+    and it must not cost the operator an unasked-for daily briefing first."""
+    from backend import chat as chat_mod
+    await mark_greeted()
+    session, out = make_session(monkeypatch)
+    seen = {}
+
+    async def turn(cid, system_prompt, history, tools=None, **kw):
+        seen["user"] = history[-1]["content"]
+        yield {"type": "final", "content": "Nothing until three, sir. "}
+
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
+    await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
+    assert session.state == "asleep"
+    await session._on_sidecar_json(
+        {"type": "transcript", "text": "Jarvis, what's my schedule today?"})
+    await settle(session)
+
+    # the wake phrase is stripped and the briefing is skipped entirely
+    assert seen["user"] == "what's my schedule today?"
+    assert "[startup" not in seen["user"]
+
+
+async def test_asleep_ignores_speech_without_the_wake_phrase(seeded, monkeypatch):
+    await mark_greeted()
+    session, out = make_session(monkeypatch)
+    started = []
+
+    async def record(*a, **k):
+        started.append(a)
+
+    monkeypatch.setattr(session, "_begin_turn", record)
+    await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
+    await session._on_sidecar_json(
+        {"type": "transcript", "text": "so anyway I told him it was fine"})
+    assert started == [] and session.state == "asleep"
+
+
+async def test_standby_and_shutdown_commands(seeded, monkeypatch):
+    await mark_greeted()
+    session, out = make_session(monkeypatch)
+    started = []
+
+    async def record(*a, **k):
+        started.append(a)
+
+    monkeypatch.setattr(session, "_begin_turn", record)
+    await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
+    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jarvis."})
+    session.state = "listening"
+
+    # "go to sleep" is a command, not a turn — and he answers it silently
+    await session._on_sidecar_json({"type": "transcript", "text": "Go to sleep."})
+    assert started == [] and session.state == "asleep"
+
+    # ...but a sentence that merely CONTAINS the phrase is a real request
+    await session._on_sidecar_json(
+        {"type": "transcript",
+         "text": "Jarvis, never mind the news, play something else"})
+    assert started and started[0][0] == "never mind the news, play something else"
+
+
+async def test_worker_result_never_wakes_him(seeded, monkeypatch):
+    """A background twin finishing at 3am must not talk to an empty room."""
+    await mark_greeted()
+    session, out = make_session(monkeypatch)
+    await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
+    assert session.state == "asleep"
+    session.turn_done = True
+    session.pending_deliveries.append("Done with the earlier task. All set.")
+    await session._maybe_idle()
+    assert session.state == "asleep"
+    assert session.pending_deliveries          # held, not spoken
 
 
 async def test_double_clap_dispatches_music_directly(seeded, monkeypatch):

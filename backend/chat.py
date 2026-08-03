@@ -352,10 +352,17 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # Appended after everything (incl. the operator-rules tail) so it
             # rides the same end-of-prompt salience the rules rely on. A turn
             # routed to the local tier also gets the escalation protocol.
-            from .voice_text import LOCAL_PROMPT, VOICE_PROMPT
+            from .voice_text import (LOCAL_PROMPT, SMART_PROMPT,
+                                     VOICE_CAPABILITIES, VOICE_PROMPT)
             system_prompt = f"{system_prompt}\n\n{VOICE_PROMPT}"
             if base_url:
-                system_prompt = f"{system_prompt}\n\n{LOCAL_PROMPT}"
+                # the local tier also gets the capability map: its slim context
+                # drops the behaviour bank, and a model that doesn't know the
+                # system CAN do a thing refuses instead of escalating
+                system_prompt = (f"{system_prompt}\n\n{VOICE_CAPABILITIES}"
+                                 f"\n\n{LOCAL_PROMPT}")
+            else:
+                system_prompt = f"{system_prompt}\n\n{SMART_PROMPT}"
         # tool subsetting: with no project loaded, project-scoped run/git/
         # search tools can only error — withhold them. The FILE tools stay:
         # they fall back to the chat's hidden artifact store (persistent
@@ -377,10 +384,14 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # the voice local tier: a 4B gets a hand-picked conversational
             # toolset, not thirty schemas — everything else is escalation's job
             entries = [e for e in entries if e["name"] in tools_only]
-        # ...and no Notes bodies: they are written for the frontier model and
-        # are pure prefill tax on a local tier whose whole job is to answer
-        # fast or hand off (17.8k chars of schemas -> 9.3k).
-        tools = openai_tool_specs(entries, notes_max=0 if tools_only else None)
+        # ...and a shortened Notes body. NOT zero: the first line of a body is
+        # where the load-bearing operating instruction lives ("Do not call
+        # music_search first", "use computer_library rather than guessing at
+        # filenames"), and dropping it entirely broke tool use on the local
+        # tier. 240 chars keeps that line and still sheds ~60% of the block.
+        from .voice_text import LOCAL_NOTES_MAX
+        tools = openai_tool_specs(entries,
+                                  notes_max=LOCAL_NOTES_MAX if tools_only else None)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it
         history = await compaction.assemble(db, conversation_id, system_prompt)
@@ -406,6 +417,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             # voice turns skip the second-pass rules rewrite:
                             # the streamed text was already spoken aloud
                             rewrite_rules=not voice,
+                            # ...and a voice turn on the LOCAL tier also skips
+                            # restating the rules in the user turn: a 4B answers
+                            # that text instead of obeying it. Escalated voice
+                            # turns (DeepSeek, base_url unset) keep it.
+                            inject_rules=not (voice and base_url),
                             # voice local tier: run on the operator's ollama.
                             # The guest never dials it — the host gateway makes
                             # the call, so base_url is honoured host-side.

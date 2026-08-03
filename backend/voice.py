@@ -48,6 +48,7 @@ from .config import settings
 from .db import get_db, get_state, open_conversation, set_state
 from .memory import assemble_system_prompt, get_active_project
 from .voice_text import (CUTOFF_MARK, CUTOFF_NOTHING, ESCALATE_PREFIX,
+                         is_shutdown_command, is_sleep_command, split_wake,
                          SpeechChunker, annotate_cutoff, heard_upto_note,
                          spoken_fraction)
 
@@ -463,8 +464,50 @@ class VoiceSession:
     async def _on_transcript(self, text: str) -> None:
         text = text.strip()
 
+        # The wake phrase is stripped from EVERY utterance, awake or asleep, so
+        # "Jarvis, turn it down" is the same request as "turn it down".
+        wake_heard, rest = split_wake(text)
+
         if self.state == ASLEEP:
-            return                       # not addressed until "hey Jarvis"
+            if not wake_heard:
+                return                   # not addressed
+            await self._wake_up()
+            if not rest:
+                # bare wake: he is listening, that is the whole answer. The
+                # once-a-day briefing rides here — a wake that CARRIES a
+                # request gets the request answered instead, because making
+                # the operator sit through a briefing they didn't ask for is
+                # the whole complaint about the first message being slow.
+                await self._maybe_greet()
+                return
+            await self._greeting_consumed()
+            text = rest
+        elif wake_heard:
+            if not rest:
+                # "Jarvis?" while already up — usually because the acoustic
+                # detector fired first and this is the same breath. Stay up,
+                # and let the once-a-day briefing land here too, or it would
+                # be swallowed by whichever path saw the wake first.
+                self._arm_sleep_timer()
+                await self._maybe_greet()
+                return
+            text = rest
+
+        if text and is_shutdown_command(text):
+            await self._send_json({"type": "transcript", "text": text})
+            await self._send_json({"type": "shutdown"})
+            await self.close()
+            return
+
+        if text and is_sleep_command(text):
+            # Silent on purpose: he was asked to stop talking. The UI state
+            # flip and the chime are the acknowledgement.
+            await self._send_json({"type": "transcript", "text": text})
+            await self.link.send_json({"type": "tts_cancel"})
+            await self._send_json({"type": "stop_playback"})
+            self.state = LISTENING       # _sleep only leaves a quiet state
+            await self._sleep()
+            return
 
         if self.state == BARGE_PENDING:
             self.state = SPEAKING
@@ -859,8 +902,13 @@ class VoiceSession:
 
     async def _sleep(self) -> None:
         """Standby: mic keeps flowing (the sidecar needs it to hear the wake
-        word) but transcripts are ignored. Only reachable from quiet states —
-        a running turn or pending question keeps him up."""
+        word) but transcripts are ignored until the wake phrase.
+
+        Only reachable from quiet states — mid-turn or mid-question he stays
+        up. Background WORKERS do not hold him awake: they run on their own
+        conversations and announce themselves at the next idle, so dozing off
+        while three of them grind away is correct, not a lost result.
+        """
         if self._sleep_task:
             self._sleep_task.cancel()
             self._sleep_task = None
@@ -877,11 +925,22 @@ class VoiceSession:
         await self._send_json({"type": "wake"})   # the chime
         await self._push_state()
         self._arm_sleep_timer()
-        if await self._maybe_greet():
-            return                       # the greeting turn has the floor
-        # anything that finished while he was asleep gets said now
+        # NB the greeting is NOT started here. This runs off the acoustic wake
+        # detector, which fires mid-utterance — starting a long briefing turn
+        # here means the operator's actual first sentence lands on top of it
+        # and immediately barges it. _on_transcript greets instead, once it
+        # knows whether the wake carried a request.
         if self.queued or self.pending_deliveries:
             await self._maybe_idle()
+
+    async def _greeting_consumed(self) -> None:
+        """Mark the daily briefing as spent without speaking it — the operator
+        woke him with a request, so they are already engaged."""
+        db = await get_db()
+        try:
+            await set_state(db, GREETING_KEY, datetime.now().strftime("%Y-%m-%d"))
+        finally:
+            await db.close()
 
     async def _maybe_greet(self) -> bool:
         """The startup procedure, once per day at the first wake: greet +
@@ -1007,6 +1066,11 @@ class VoiceSession:
         if not self.turn_done or self.state == BARGE_PENDING \
                 or self.state in CONFIRM_STATES:
             return
+        if self.state == ASLEEP:
+            # Standby means standby. A worker that lands while he is dozing
+            # must NOT talk its way back into the room — the digest waits in
+            # pending_deliveries and _wake_up drains it on the next "Jarvis".
+            return
         if any(not self.chunks[i]["played"] for i in self.order):
             return
         self.state = LISTENING
@@ -1022,4 +1086,8 @@ class VoiceSession:
         turn_running = self.turn_task is not None and not self.turn_task.done()
         await self._send_json({"type": "state", "state": self.state,
                                "turn_working": turn_running and self.turn_saw_tool,
+                               # which brain answered/is answering: the operator
+                               # could not tell an escalated turn from a local
+                               # one, and the two cost very different things
+                               "tier": "local" if self.turn_local else "smart",
                                "conversation_id": self.cid})

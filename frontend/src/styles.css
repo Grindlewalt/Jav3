@@ -2230,6 +2230,11 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   display: flex; align-items: center; gap: 10px; }
 .voice-working-tag { font-size: 12px; color: var(--dim);
   border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; }
+/* the escalated tier is the one that costs money — it reads as active, not
+   as another muted chip like the background-work tag next to it */
+.voice-tier-tag { font-size: 12px; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 2px 10px;
+  margin-left: 8px; letter-spacing: .02em; }
 .voice-err { color: var(--red); font-size: 13px; text-align: center; }
 .voice-controls { display: flex; gap: 10px; align-items: center; }
 

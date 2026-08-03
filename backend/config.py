@@ -265,7 +265,11 @@ class Settings(BaseSettings):
     # wake-word standby: seconds of idle before he stops listening for
     # anything but "hey Jarvis" again (only in effect when the sidecar
     # reports a wake model in its ready message)
-    voice_wake_timeout: int = 30
+    # Seconds of quiet before he drops back to wake-word standby. Short on
+    # purpose: re-arming costs one word ("Jarvis, ...") and the same utterance
+    # carries the request, so a tight window is cheap — and it stops him
+    # answering a conversation that was never aimed at him.
+    voice_wake_timeout: int = 15
 
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped

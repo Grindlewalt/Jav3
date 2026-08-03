@@ -112,7 +112,8 @@ def db_tool_sink(db, conversation_id: int):
 
 
 def _assemble_messages(system_prompt: str, history: list[dict],
-                       tools: list[dict] | None, self_check: bool):
+                       tools: list[dict] | None, self_check: bool,
+                       inject_rules: bool = True):
     """Build the turn's message array and the round-1 steering. Returns
     (messages, tools, rules, can_delegate). Tool schemas pull the model's
     attention off the system-prompt rules (measured on deepseek-v4-flash:
@@ -129,7 +130,14 @@ def _assemble_messages(system_prompt: str, history: list[dict],
     tool_names = {t["function"]["name"] for t in (tools or [])}
     can_delegate = bool(tool_names & {"research", "spawn_agent", "deploy_agents"})
     triage = _triage_note(tool_names) if (tools and self_check) else ""
-    inject = "\n\n".join(x for x in (triage, rules) if x)
+    # inject_rules=False for the voice local tier. The restatement was measured
+    # on deepseek-v4-flash against ~30 tool schemas; a 4B with 12 slim schemas
+    # and a 6k-char prompt does not lose the system-prompt rules — it instead
+    # reads the appended text as something the operator SAID, and answers it
+    # ("Got it, sir. No em dashes, and I'll keep the visuals clean." in reply
+    # to "That's great."). The rules still ride the system-prompt tail, which
+    # assemble_system_prompt never lets anything drop.
+    inject = "\n\n".join(x for x in (triage, rules) if x) if inject_rules else ""
     if tools and inject:
         for i in range(len(messages) - 1, -1, -1):
             if messages[i]["role"] == "user":
@@ -261,9 +269,10 @@ async def run_turn(
     max_iterations: int | None = None,
     on_tool_call=None,
     rewrite_rules: bool = True,
+    inject_rules: bool = True,
 ) -> AsyncIterator[dict]:
     messages, tools, rules, can_delegate = _assemble_messages(
-        system_prompt, history, tools, self_check)
+        system_prompt, history, tools, self_check, inject_rules)
 
     n_iter = max_iterations or settings.max_react_iterations
     offered = {t["function"]["name"] for t in (tools or [])}

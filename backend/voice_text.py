@@ -34,6 +34,38 @@ earns its airtime; offer depth rather than dumping it."""
 # marker as its whole reply and the orchestrator asks the operator out loud.
 ESCALATE_PREFIX = "[ESCALATE]"
 
+# How much of each tool's Notes body the local tier gets. The first line is the
+# operating instruction that makes the tool work at all; the rest is written for
+# a frontier model doing multi-step work.
+LOCAL_NOTES_MAX = 240
+
+# The local tier gets a slim context that drops the behaviour bank, so without
+# this it does not know what Jarvis IS — and a model that doesn't know the
+# system has a capability says "I can't do that" instead of escalating. This is
+# the capability map in the smallest form that still routes correctly.
+VOICE_CAPABILITIES = """\
+# What Jarvis can do (you are his fast tier, not all of him)
+You handle directly: conversation, music and video playback, volume and
+playback control on his computers, opening a link, and quick web lookups.
+The wider system — which the smart model drives, so ESCALATE rather than
+saying it can't be done — also has: reading and writing files in projects,
+running code in a sandbox VM, driving the operator's GUI (arranging the
+project board, opening dashboards and reports), web research, writing and
+scheduling agents that run on their own, memory notes, and his own manual.
+If the operator asks for any of that, escalate; never tell him the system
+lacks a capability it has."""
+
+# Appended when a voice turn runs on DeepSeek instead of the local tier, so the
+# reply can reflect the upgrade the operator paid for (and asked to be able to
+# tell apart from the fast tier).
+SMART_PROMPT = """\
+# You are the SMART model on this turn
+The operator escalated to you deliberately — either they named you or they
+approved a handoff — so this turn is worth real work: full tool access, more
+steps, and an answer the fast tier could not give. Open by making the upgrade
+audible in one short clause ("Smart model here." / "On the big model now.")
+before anything else, then do the work."""
+
 LOCAL_PROMPT = f"""\
 # You are the LOCAL fast model on the operator's own hardware
 Conversational replies, media control (play music / video), simple tool \
@@ -44,6 +76,96 @@ code, long documents, anything you might get WRONG — do not attempt it. \
 Reply with exactly one line and nothing else:
 {ESCALATE_PREFIX} <one short spoken sentence: what you'd hand off and why>
 The operator will be asked out loud whether to send it to the smart model."""
+
+# --- wake / standby phrases ---------------------------------------------------
+
+# openwakeword gives a fast "hey jarvis" flip, but it is one fixed model: it
+# does not fire on a bare "Jarvis", and whisper cheerfully renders the name as
+# Dervis/Jervis/Charvis (all observed live). The sidecar transcribes every
+# utterance whether or not the wake model fired, so the authoritative wake test
+# is done HERE on the text — the acoustic detector is only an early chime.
+_WAKE_NAMES = ("jarvis", "jervis", "dervis", "javis", "charvis", "jarvi",
+               "darvis", "garvis")
+# Consumed before the name: "hey there Jarvis", "um, ok Jarvis". Bounded at two
+# so a real sentence can never be eaten looking for a name that isn't coming.
+_WAKE_LEADS = ("hey", "hi", "hello", "ok", "okay", "yo", "there", "um", "uh", "so")
+# Politeness the operator adds to a standby command; ignored when matching.
+_TRAILING_FILLER = ("please", "now", "thanks", "thank you", "for now", "buddy")
+
+# Said while awake, these put him back on standby without a reply. "Never mind"
+# is in here deliberately: mid-request it means stop, and stopping is exactly
+# what standby is.
+SLEEP_PHRASES = ("go to sleep", "go back to sleep", "back to sleep", "sleep now",
+                 "stand down", "stop listening", "stand by", "standby",
+                 "that's all", "thats all", "that is all", "never mind",
+                 "nevermind", "nothing", "forget it", "dismissed")
+
+# Harder stop: end the session outright (mic released, socket closed).
+SHUTDOWN_PHRASES = ("shut down", "shutdown", "shut yourself down", "power down",
+                    "power off", "goodbye", "good bye", "log off", "sign off",
+                    "end session", "turn off")
+
+_PUNCT = " \t\n.,!?;:—-\"'"
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.lower().strip(_PUNCT).split())
+
+
+def split_wake(text: str) -> tuple[bool, str]:
+    """(wake_heard, remainder).
+
+    "Hey Jarvis, what's my schedule" -> (True, "what's my schedule")
+    "Jarvis"                         -> (True, "")
+    "what's my schedule"             -> (False, "what's my schedule")
+
+    The remainder keeps the ORIGINAL casing/punctuation — only the wake prefix
+    is removed, because the remainder becomes the operator's actual turn.
+    """
+    flat = _norm(text)
+    if not flat:
+        return False, ""
+    # strip punctuation off each token: whisper writes "Hey Jarvis, what..." and
+    # "Okay Jarvis: turn it down", so the name arrives glued to a comma/colon
+    words = [w.strip(_PUNCT) for w in flat.split()]
+    used = 0
+    while used < len(words) and used < 2 and words[used] in _WAKE_LEADS:
+        used += 1
+    if used < len(words) and words[used] in _WAKE_NAMES:
+        used += 1
+    else:
+        # a lead word alone ("hey") is not a wake; put it back
+        return False, text.strip()
+    if used >= len(words):
+        return True, ""
+    # walk the same number of words off the ORIGINAL string
+    rest = text.strip().lstrip(_PUNCT)
+    for _ in range(used):
+        rest = rest.lstrip(_PUNCT)
+        sp = rest.find(" ")
+        rest = "" if sp < 0 else rest[sp + 1:]
+    return True, rest.lstrip(_PUNCT).strip()
+
+
+def _phrase_hit(text: str, phrases: tuple[str, ...]) -> bool:
+    """True when the utterance IS one of these phrases (not merely contains
+    one) — "never mind the news, play something" must not put him to sleep."""
+    _, flat = split_wake(text)          # "Jarvis, stand down" -> "stand down"
+    flat = " ".join(w.strip(_PUNCT) for w in _norm(flat).split())
+    for filler in sorted(_TRAILING_FILLER, key=len, reverse=True):
+        if flat.endswith(" " + filler):
+            flat = flat[: -len(filler) - 1].strip()
+            break
+    return flat in phrases
+
+
+def is_sleep_command(text: str) -> bool:
+    return _phrase_hit(text, SLEEP_PHRASES)
+
+
+def is_shutdown_command(text: str) -> bool:
+    return _phrase_hit(text, SHUTDOWN_PHRASES)
+
 
 # --- sentence chunking -------------------------------------------------------
 

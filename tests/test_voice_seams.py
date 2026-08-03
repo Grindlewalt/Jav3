@@ -163,9 +163,16 @@ async def test_voice_turn_gets_voice_prompt(client, monkeypatch):
     monkeypatch.setattr(chat_mod, "guest_turn", capture(False))
     await chat_mod.start_turn(cid, user_msg="hi", voice=False)
 
+    from backend.voice_text import SMART_PROMPT
+
     assert VOICE_PROMPT in seen[True]
-    assert seen[True].rstrip().endswith(VOICE_PROMPT.rstrip())  # rides the tail
+    # VOICE_PROMPT plus the tier block ride the tail, in that order: the
+    # speakable-output rules first, then which brain is answering. (A local
+    # turn ends with LOCAL_PROMPT instead — same shape, see test_voice_local.)
+    assert seen[True].rstrip().endswith(SMART_PROMPT.rstrip())
+    assert seen[True].index(VOICE_PROMPT) < seen[True].index(SMART_PROMPT)
     assert VOICE_PROMPT not in seen[False]
+    assert SMART_PROMPT not in seen[False]
 
 
 async def test_rewrite_rules_default_still_rewrites(tmp_env, monkeypatch):
