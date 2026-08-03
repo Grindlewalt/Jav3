@@ -197,8 +197,13 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
    otherwise push it off-centre in the column */
 .side-nav .vm-wrap .vm-word { display: none; }
 .side-nav .vm-wrap .run-dot { margin-right: 0; }
-.side-nav .vm-drop { left: calc(100% + 10px); right: auto; top: 0;
-  transform-origin: top left; }
+/* ...and it RISES: the chip sits at the foot of the rail, so a drop anchored
+   to its top ran past the bottom of the viewport and cut off the nuke and
+   rebuild rows — the two things in it worth reaching. */
+.side-nav .vm-drop { left: calc(100% + 10px); right: auto;
+  top: auto; bottom: 0; margin-top: 0;
+  transform-origin: bottom left;
+  animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both; }
 
 /* overflow menu ("More") */
 .more-wrap { margin-left: 2px; }
