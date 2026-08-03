@@ -1,6 +1,13 @@
-"""Is the 4B smart enough for the voice tier? Runs the REAL slim voice
-prompt + the REAL LOCAL_TOOLS schemas against a candidate model, with faked
-tool results — Jarvis itself is never involved, nothing is persisted.
+"""Is a candidate model smart enough for the voice tier?
+
+NB: run this against a server with THINKING OFF and a prompt that FITS the
+context window. The 2026-08-02 run that disqualified qwen3.5:4b did neither:
+the reasoning block was still on and the prompt overflowed 8k, so the tool
+definitions were truncated. Both faults look exactly like a stupid model.
+
+Runs the REAL slim voice prompt + the REAL LOCAL_TOOLS schemas against a
+candidate model, with faked tool results — Jarvis itself is never involved,
+nothing is persisted.
 
 Usage (on the Pi): .venv/bin/python scripts/voice_model_gauntlet.py <model> [base_url]
 Judging: watch for fabricated actions (says it played, no tool call), tool
@@ -11,7 +18,7 @@ import urllib.request
 sys.path.insert(0, "/home/grindlewalt/jarvis")
 
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3.5:4b"
-BASE = sys.argv[2] if len(sys.argv) > 2 else "http://10.0.0.58:11437/v1"
+BASE = sys.argv[2] if len(sys.argv) > 2 else "http://10.0.0.58:11436/v1"
 
 # canned tool results — realistic shapes lifted from the live transcripts
 FAKE_RESULTS = {
@@ -59,7 +66,7 @@ async def build_prompt():
     finally:
         await db.close()
     entries = [e for e in load_registry() if e["name"] in LOCAL_TOOLS]
-    tools = openai_tool_specs(entries)
+    tools = openai_tool_specs(entries, notes_max=0)   # production path
     return f"{base}\n\n{VOICE_PROMPT}\n\n{LOCAL_PROMPT}", tools
 
 
