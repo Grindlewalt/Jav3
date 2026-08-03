@@ -23,6 +23,9 @@ the action already speaks for itself (music starting IS the confirmation).
 markdown, no headings, no bullet lists, no tables, no code blocks — the \
 speech layer strips or skips them. No URLs; name the source in words instead.
 - Say numbers and units the way you'd speak them.
+- Your FIRST sentence starts being spoken aloud while the rest of the reply \
+is still being written, so make it SHORT — six words or fewer, ending in a \
+period. Every detail belongs in the sentences after it.
 - Keep answers tight. Lead with the answer, then only the detail that \
 earns its airtime; offer depth rather than dumping it."""
 
@@ -105,10 +108,11 @@ FIRST_CUT_MIN = 12
 # The cap is a LATENCY knob, not a style one: the synth runs ~6x realtime, so
 # first-audio ≈ (spoken length of this piece)/6 + ~180 ms of fixed cost. At 80
 # the opening piece could reach ~3 s of speech and blow the budget on its own
-# (measured 513 ms of TTS for "There are 5,280 feet in a mile."); at 56 the
-# whole speech-end→first-audio chain sits at ~830 ms median against an 880 ms
-# target. Going lower buys ~30 ms and starts cutting mid-phrase.
-FIRST_CUT_MAX = 56
+# (measured 513 ms of TTS for "There are 5,280 feet in a mile."). Measured
+# speech-end→first-audio medians over 8 utterances, with the short-opener rule
+# in VOICE_PROMPT: 80 -> 878 ms, 56 -> 846 ms, 40 -> 785 ms (7/8 under the
+# 880 ms target). Below 40 it starts cutting mid-phrase for no real gain.
+FIRST_CUT_MAX = 40
 
 
 def first_clause_cut(buf: str) -> int | None:

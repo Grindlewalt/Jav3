@@ -46,7 +46,7 @@ from .agent.model import confirm_peak, in_peak_window, peak_confirmed
 from .agent.tools.registry import dispatch as tool_dispatch
 from .config import settings
 from .db import get_db, get_state, open_conversation, set_state
-from .memory import get_active_project
+from .memory import assemble_system_prompt, get_active_project
 from .voice_text import (CUTOFF_MARK, CUTOFF_NOTHING, ESCALATE_PREFIX,
                          SpeechChunker, annotate_cutoff, heard_upto_note,
                          spoken_fraction)
@@ -323,6 +323,15 @@ class VoiceSession:
 
     async def start(self) -> None:
         self.link.start()
+        # The local tier keeps the model resident, but resident weights are
+        # only half of "no waiting": llama.cpp also caches the prompt PREFIX in
+        # its slot, and the voice system prompt + tool schemas are ~4.5k stable
+        # tokens. Cold, that prefill is ~2.3 s on the operator's first word;
+        # warm, the turn prefills only the new utterance (~40 tokens). So spend
+        # it here, the moment the tab opens, while they are still reaching for
+        # the mic. Fire-and-forget: a failure only costs the cold prefill back.
+        if settings.voice_local_model:
+            asyncio.create_task(self._warm_local_prefix())
         try:
             await asyncio.wait_for(self.link.ready.wait(), timeout=8)
             await self._send_json({"type": "ready"})
@@ -331,6 +340,40 @@ class VoiceSession:
                 {"type": "error", "message": "voicebox offline — check the "
                  "sidecar on the main server; retrying in the background"})
             # keep going: the link keeps retrying, ready fires when it lands
+
+    async def _warm_local_prefix(self) -> None:
+        """Push the voice system prompt + tool specs through the local model
+        once, asking for a single token, so its slot KV holds the prefix.
+
+        This mirrors the assembly in chat._run_chat_turn's voice path. If the
+        two ever drift the only cost is a cache miss — the warm request is not
+        load-bearing for correctness — but keep them in step.
+        """
+        from .agent.model import Model
+        from .agent.tools.registry import load_registry, openai_tool_specs
+        from .voice_text import LOCAL_PROMPT, VOICE_PROMPT
+        try:
+            db = await get_db()
+            try:
+                active = await get_active_project(db)
+                system = await assemble_system_prompt(
+                    db, active=active, exclude=set(LOCAL_CONTEXT_EXCLUDE))
+            finally:
+                await db.close()
+            system = f"{system}\n\n{VOICE_PROMPT}\n\n{LOCAL_PROMPT}"
+            tools = openai_tool_specs(
+                [e for e in load_registry() if e["name"] in LOCAL_TOOLS],
+                notes_max=0)
+            async for _ in Model().complete(
+                    [{"role": "system", "content": system},
+                     {"role": "user", "content": "."}],
+                    tools=tools, model_name=settings.voice_local_model,
+                    base_url=settings.voice_local_base_url, key="local"):
+                pass
+            log.info("voice: local prefix warmed (%d chars system, %d tools)",
+                     len(system), len(tools))
+        except Exception as exc:      # noqa: BLE001 — best-effort warm only
+            log.warning("voice: local prefix warm failed (%s)", exc)
 
     async def close(self) -> None:
         self.dead = True
