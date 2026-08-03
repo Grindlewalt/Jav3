@@ -157,6 +157,90 @@ async def test_double_clap_dispatches_music_directly(seeded, monkeypatch):
     assert clap and "playing" in clap[0]["result"]
 
 
+async def test_double_clap_fires_once_per_session(seeded, monkeypatch):
+    from backend import voice
+    session, out = make_session(monkeypatch)
+    calls = []
+
+    async def fake_dispatch(name, args):
+        calls.append((name, args))
+        return "playing."
+
+    monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
+    await session.on_browser_json({"type": "double_clap"})
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if calls:
+            break
+    assert len(calls) == 1
+
+    # the detector misfires again mid-session — nothing happens
+    await session.on_browser_json({"type": "double_clap"})
+    await asyncio.sleep(0.1)
+    assert len(calls) == 1
+
+
+async def test_clap_tracks_tool_edits_the_list_live(seeded, monkeypatch):
+    """The tool edits, the session reads: add + remove in one call, forgiving
+    spelling on remove, and the very next clap uses the edited list."""
+    import tools.clap_tracks.handler as h
+    from backend import voice
+
+    async def no_library(titles):
+        return []
+
+    monkeypatch.setattr(h, "_library_check", no_library)
+    result = await h.run(add=["Thunderstruck"],
+                         remove=["should i stay or should i go"])
+    assert "added: Thunderstruck" in result
+    assert "removed: Should I Stay or Should I Go" in result
+    assert "Kickstart My Heart; Thunderstruck" in result
+
+    db = await get_db()
+    try:
+        tracks = await voice.get_clap_tracks(db)
+    finally:
+        await db.close()
+    assert tracks == ["Kickstart My Heart", "Thunderstruck"]
+
+    session, out = make_session(monkeypatch)
+    calls = []
+
+    async def fake_dispatch(name, args):
+        calls.append(args)
+        return "playing."
+
+    monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
+    await session.on_browser_json({"type": "double_clap"})
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if calls:
+            break
+    assert calls and calls[0]["query"] in tracks
+
+
+async def test_empty_clap_list_disables_the_gesture(seeded, monkeypatch):
+    import tools.clap_tracks.handler as h
+    from backend import voice
+
+    result = await h.run(remove=["kickstart", "should i stay"])
+    assert "EMPTY" in result
+
+    session, out = make_session(monkeypatch)
+    calls = []
+
+    async def fake_dispatch(name, args):
+        calls.append(args)
+        return "playing."
+
+    monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
+    await session.on_browser_json({"type": "double_clap"})
+    await asyncio.sleep(0.1)
+    assert not calls
+    clap = [m for m in out if isinstance(m, dict) and m.get("type") == "clap"]
+    assert clap and "empty" in clap[0]["result"]
+
+
 async def test_music_play_queue_param_appends(tmp_env, monkeypatch):
     """The tool pushes 'queue_add' (never 'play') when queue=true, and the
     reply says queued — the current track must not be interrupted."""

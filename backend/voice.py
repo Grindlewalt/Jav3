@@ -87,14 +87,34 @@ LOCAL_CONTEXT_EXCLUDE = ("standing-memory", "all-projects.md", "agents-index",
 # library launcher), NOT play_music (project audio files) — shipping the
 # wrong twin left the first live session unable to start a song.
 LOCAL_TOOLS = ("music_play", "music_control", "music_search", "music_status",
-               "play_movie", "computer_play", "computer_playback",
-               "computer_status", "computer_volume", "computer_open_link",
-               "web_search", "web_read")
+               "clap_tracks", "play_movie", "computer_play",
+               "computer_playback", "computer_status", "computer_volume",
+               "computer_open_link", "web_search", "web_read")
 
 # Double clap = music, no model in the loop: the browser detects the gesture
 # and this dispatches music_play directly (an algorithm, not a conversation).
 # The agent can still control the result — it's the same Jarvis player.
+# The live list is in session_state, edited by the clap_tracks tool; the
+# tuple is only the never-configured default.
 CLAP_TRACKS = ("Kickstart My Heart", "Should I Stay or Should I Go")
+CLAP_TRACKS_KEY = "voice_clap_tracks"
+
+
+async def get_clap_tracks(db) -> list[str]:
+    """The double-clap songs. Unset or garbled state falls back to the
+    built-in pair; an explicitly emptied list stays empty — that is how the
+    gesture gets disabled on purpose."""
+    raw = await get_state(db, CLAP_TRACKS_KEY)
+    if raw is None:
+        return list(CLAP_TRACKS)
+    try:
+        return [str(t).strip() for t in json.loads(raw) if str(t).strip()]
+    except (TypeError, ValueError):
+        return list(CLAP_TRACKS)
+
+
+async def set_clap_tracks(db, tracks: list[str]) -> None:
+    await set_state(db, CLAP_TRACKS_KEY, json.dumps(list(tracks)))
 
 # First wake of the day = the startup procedure: greet, then the highlights
 # of whatever the overnight schedules produced. Runs as an ordinary (local)
@@ -279,6 +299,7 @@ class VoiceSession:
         self.pending_escalate: str | None = None  # utterance awaiting send-up
         self.wake_enabled = False        # sidecar armed a wake word
         self._sleep_task: asyncio.Task | None = None
+        self.clap_done = False           # 👏👏 fires at most once per session
         self.queued: list[str] = []      # transcripts parked while busy
         self.turn_user_msg = ""          # what started the running turn
         self.turn_local = False          # this turn runs on the local tier
@@ -339,7 +360,12 @@ class VoiceSession:
                 c["played"] = True
             await self._maybe_idle()
         elif kind == "double_clap":
-            asyncio.create_task(self._clap_play())
+            # once per session: the detector still misfires on speech
+            # transients, and a repeat gesture mid-music would yank the song
+            # out from under the operator
+            if not self.clap_done:
+                self.clap_done = True
+                asyncio.create_task(self._clap_play())
         elif kind == "mute":
             self.muted = bool(msg.get("on"))
         elif kind == "end_session":
@@ -851,7 +877,17 @@ class VoiceSession:
     async def _clap_play(self) -> None:
         """👏👏 → one of the clap tracks, straight through the tool handler.
         The gui_tab contextvar routes the audio to the machine that clapped."""
-        title = random.choice(CLAP_TRACKS)
+        db = await get_db()
+        try:
+            tracks = await get_clap_tracks(db)
+        finally:
+            await db.close()
+        if not tracks:
+            await self._send_json({"type": "clap", "title": None,
+                                   "result": "the double-clap list is empty — "
+                                   "ask me to add a song to it"})
+            return
+        title = random.choice(tracks)
         token = runtime.gui_tab.set(self.tab or None)
         try:
             result = await tool_dispatch(
