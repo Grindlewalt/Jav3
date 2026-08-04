@@ -477,9 +477,10 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         if not ephemeral:
             try:
                 await db.execute(
-                    "INSERT INTO messages (conversation_id, role, content) "
-                    "VALUES (?, 'assistant', ?)",
-                    (conversation_id, content))
+                    "INSERT INTO messages (conversation_id, role, content, model) "
+                    "VALUES (?, 'assistant', ?, ?)",
+                    (conversation_id, content,
+                     model_name or settings.model_name))
                 await db.commit()
             except Exception:  # noqa: BLE001 — the marker is best-effort
                 pass
