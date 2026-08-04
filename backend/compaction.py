@@ -40,7 +40,13 @@ Summarize the conversation with exactly these sections:
 _failures: dict[int, int] = {}
 
 
-def effective_window() -> int:
+def effective_window(window: int | None = None) -> int:
+    """Room for system prompt + history. `window` overrides the computed
+    default outright — callers that know their real budget (the voice local
+    tier, which runs in llama.cpp's 16k slot and can measure its own tool
+    specs) pass it rather than being sized against DeepSeek's 1M."""
+    if window is not None:
+        return window
     return (settings.model_context_window - settings.model_max_tokens
             - settings.compact_buffer_tokens)
 
@@ -50,11 +56,12 @@ def history_tokens(history: list[dict]) -> int:
 
 
 def needs_compaction(system_prompt: str, history: list[dict],
-                     prior_summary: str | None) -> bool:
+                     prior_summary: str | None,
+                     window: int | None = None) -> bool:
     total = (estimate_tokens(system_prompt)
              + estimate_tokens(prior_summary or "")
              + history_tokens(history))
-    return total > effective_window()
+    return total > effective_window(window)
 
 
 def split_index(history: list[dict]) -> int:
@@ -146,16 +153,19 @@ async def load_history(db: aiosqlite.Connection,
 
 
 async def assemble(db: aiosqlite.Connection, conversation_id: int,
-                   system_prompt: str, tool_trace: int = 0) -> list[dict]:
+                   system_prompt: str, tool_trace: int = 0,
+                   window: int | None = None) -> list[dict]:
     """The model-facing history for a turn: [summary messages?] + verbatim
     tail, compacting first if the effective window demands it. This is what
     chat.py hands to run_turn in place of the old LIMIT-40 query.
 
     `tool_trace` > 0 replays each past turn's tool calls alongside its prose,
     with every result truncated to that many characters — see _with_tool_trace.
+    `window` is the real token budget for system + history when the caller
+    knows it (the voice local tier's 16k slot).
     """
     summary, rows = await load_history(db, conversation_id)
-    if len(rows) > 1 and needs_compaction(system_prompt, rows, summary):
+    if len(rows) > 1 and needs_compaction(system_prompt, rows, summary, window):
         new_summary = await compact(db, conversation_id, rows, summary)
         if new_summary is not None:
             summary, rows = await load_history(db, conversation_id)

@@ -16,7 +16,8 @@ from .agent.tools.registry import load_registry, openai_tool_specs, read_only_na
 from .auth import require_user
 from .config import settings
 from .db import get_db, open_conversation
-from .memory import assemble_system_prompt, get_active_project, standing_rules_tail
+from .memory import (assemble_system_prompt, estimate_tokens,
+                     get_active_project, standing_rules_tail)
 # module level, not function level: it is the turn's single loop entry now, and
 # the offline tests substitute it here to run a turn without a model
 from .vm.broker import TurnEnvelope
@@ -418,9 +419,18 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # tier also gets past turns' TOOL work replayed: a 4B reading a history
         # of prose-only replies concludes that announcing an action is the
         # action, and stops calling tools entirely (compaction._with_tool_trace).
+        # It is sized against llama.cpp's slot rather than DeepSeek's 1M, too,
+        # or a long session would never compact and would instead overflow —
+        # which silently drops the front of the prompt, tool specs included.
+        # The tool specs are measured, not guessed: they are the biggest and
+        # most variable part of that budget, and they are right here.
         history = await compaction.assemble(
             db, conversation_id, system_prompt,
-            tool_trace=settings.voice_local_tool_trace_chars if tools_only else 0)
+            tool_trace=settings.voice_local_tool_trace_chars if tools_only else 0,
+            window=(settings.voice_local_context_window
+                    - settings.voice_local_max_tokens
+                    - estimate_tokens(json.dumps(tools))
+                    - 512) if tools_only else None)
 
         async with db.execute(
             "SELECT COALESCE(MAX(id), 0) AS m FROM tool_calls "

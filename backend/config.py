@@ -270,10 +270,17 @@ class Settings(BaseSettings):
     # Sampling for the local tier only (never sent to DeepSeek). A 4B with a
     # prose-heavy history loops on its own last phrasing; a small presence
     # penalty is the cheap half of the fix. The token cap is a runaway guard —
-    # a spoken reply is a few dozen tokens, and the default 384k is nonsense
-    # against a 16k window.
+    # generous, because truncating a real answer mid-sentence is a worse
+    # failure than a rare long ramble the operator can simply talk over
+    # (barge-in is the real backstop). The 384k default is nonsense here.
     voice_local_presence_penalty: float = 0.5
-    voice_local_max_tokens: int = 512
+    voice_local_max_tokens: int = 4096
+    # llama.cpp's -c for the voice tier. Keep in step with scripts/
+    # llama-voice.service: this is what compaction sizes the local tier's
+    # history against, and overflowing it does not error — it silently drops
+    # the front of the prompt, taking the tool definitions with it, which
+    # looks exactly like a model too dumb to call tools.
+    voice_local_context_window: int = 16_384
     # All ~30 library titles ride the local tier's system prompt: matching a
     # spoken title against a list it can already see beats a music_search
     # round trip (see one-call-tools-not-conversations). Refreshed on this

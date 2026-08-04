@@ -5,7 +5,7 @@ Why the replay exists, measured against the live tier with the production
 prompt: qwen3.5:4b called a tool on "play some Zach Bryan" 6/6 times with no
 history and 0/6 after two prose-only exchanges — a history where every past
 action reads as a bare sentence teaches a small model that talking IS acting.
-With the same exchanges carrying their tool turns it recovered to 4/6.
+Replaying the same exchanges with their tool turns took it to 12/12.
 """
 import json
 
@@ -150,3 +150,24 @@ def test_library_block_is_stable_and_names_real_ids():
 
 def test_library_block_survives_a_track_with_only_a_title():
     assert "[4] Untitled Demo" in library_block([{"id": 4, "title": "Untitled Demo"}])
+
+
+# --- the local tier's window ------------------------------------------------
+
+def test_local_tier_compacts_against_its_own_window():
+    """The local tier runs in llama.cpp's 16k slot, not DeepSeek's 1M. Sizing
+    it against the global default means compaction never fires and the prompt
+    silently loses its front — tool definitions first."""
+    from backend.config import settings
+    history = [{"role": "user", "content": "x" * 40_000}]        # ~10k tokens
+
+    assert not compaction.needs_compaction("sys", history, None)
+    local = (settings.voice_local_context_window
+             - settings.voice_local_max_tokens - 5_000)
+    assert compaction.needs_compaction("sys", history, None, window=local)
+
+
+def test_explicit_window_overrides_the_global_budget():
+    from backend import compaction as c
+    assert c.effective_window(4_242) == 4_242
+    assert c.effective_window() == c.effective_window(None)
