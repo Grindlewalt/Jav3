@@ -142,14 +142,16 @@ def test_library_block_is_stable_and_names_real_ids():
 
     block = library_block(tracks)
 
-    assert block.index("[27]") < block.index("[30]")     # id order, not input
-    assert "[27] Many Men — 50 Cent #fast" in block
+    assert block.index("(id 27)") < block.index("(id 30)")   # id order, not input
+    # the id trails the title it belongs to: leading it cost gemma-4:12b the
+    # right track 0/4 on "play Mockingbird" (see library_block's comment)
+    assert "Many Men — 50 Cent #fast (id 27)" in block
     assert library_block(list(reversed(tracks))) == block   # byte-stable prefix
     assert library_block([]) == ""
 
 
 def test_library_block_survives_a_track_with_only_a_title():
-    assert "[4] Untitled Demo" in library_block([{"id": 4, "title": "Untitled Demo"}])
+    assert "Untitled Demo (id 4)" in library_block([{"id": 4, "title": "Untitled Demo"}])
 
 
 # --- the local tier's window ------------------------------------------------

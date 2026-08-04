@@ -94,11 +94,20 @@ def library_block(tracks: list[dict]) -> str:
     """
     lines = []
     for t in sorted(tracks, key=lambda t: t.get("id") or 0):
-        bits = [f"[{t.get('id')}]", (t.get("title") or "(untitled)").strip()]
+        bits = [(t.get("title") or "(untitled)").strip()]
         if t.get("artist"):
             bits.append(f"— {str(t['artist']).strip()}")
         if t.get("tag"):
             bits.append(f"#{t['tag']}")
+        # The id goes LAST, attached to the title it belongs to. Leading it
+        # ("[26] Mockingbird — Eminem") reads fine but a model tracking thirty
+        # rows can lose the alignment and hand back a neighbour's number, which
+        # plays the WRONG SONG confidently — the worst failure available here,
+        # because nothing in the reply looks wrong. Measured on gemma-4:12b over
+        # six requests x4: id-first 16/24 with "play Mockingbird" 0/4 (it kept
+        # answering 31, Mr. Brightside); id-trailing 24/24. qwen3.5:9b is
+        # unaffected either way, so this costs nothing and removes a landmine.
+        bits.append(f"(id {t.get('id')})")
         lines.append(" ".join(bits))
     if not lines:
         return ""
