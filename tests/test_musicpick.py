@@ -75,8 +75,37 @@ def test_two_recordings_of_the_same_song_are_not_guessed_between():
     cands = [C("Take On Me", "a-ha"), C("Take On Me", "MTV Unplugged")]
     win, shortlist, why = choose("take on me", cands)
     assert win is None
-    assert why == "several equally good matches"
+    assert why == "several recordings of the same song"
     assert len(shortlist) == 2
+
+
+# --- the cases where asking is a refusal --------------------------------------
+
+def test_an_artist_with_several_tracks_plays_one_instead_of_asking():
+    """Every tied candidate answers what was asked, so stopping to ask is just
+    a refusal. This is what made "play some Zach Bryan" play nothing at all —
+    8 of his tracks in a dead heat, no winner, and 12 of the operator's 30
+    tracks unreachable by artist name."""
+    cands = [C("Pink Skies", "Zach Bryan"), C("28", "Zach Bryan"),
+             C("Revival", "Zach Bryan"), C("Hey Driver", "Zach Bryan")]
+    win, _shortlist, why = choose("zach bryan", cands)
+    assert win is not None
+    assert why == "confident"
+    assert win.artist == "Zach Bryan"
+
+
+def test_a_tie_across_different_songs_is_not_ambiguous():
+    cands = [C("We Will Rock You", "Queen"), C("Another One Bites the Dust", "Queen")]
+    win, _shortlist, why = choose("queen", cands)
+    assert win is not None and why == "confident"
+
+
+def test_same_title_by_different_artists_still_asks():
+    """Squashed titles match, so this is the duplicate case even though the
+    performers differ — a cover is exactly the wrong-version risk."""
+    cands = [C("Hurt", "Nine Inch Nails"), C("Hurt", "Johnny Cash")]
+    win, _shortlist, why = choose("hurt", cands)
+    assert win is None and why == "several recordings of the same song"
 
 
 def test_nothing_close_returns_no_winner():
@@ -150,3 +179,38 @@ def test_squashing_does_not_make_everything_match_everything():
     assert win is None, why
     win, _, _ = choose("stairway to heaven", cands)
     assert win is None
+
+
+# --- "play some music" names no track ----------------------------------------
+
+def _generic():
+    import importlib.util
+    from backend.config import settings
+    spec = importlib.util.spec_from_file_location(
+        "mp_handler", settings.tools_dir / "music_play" / "handler.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._generic_ask
+
+
+@pytest.mark.parametrize("query,generic,tag", [
+    ("play some music", True, ""),
+    ("something", True, ""),
+    ("a good song", True, ""),
+    ("something upbeat", True, ""),
+    # a genre word IS the tag, not a title fragment — matching the literal
+    # word "fast" against titles finds nothing, which is how "put on something
+    # fast" ended up returning the whole library
+    ("something fast", True, "fast"),
+    ("drive", True, "drive"),
+    # a real name is never generic, however much filler surrounds it
+    ("Zach Bryan", False, ""),
+    ("play some Radiohead", False, ""),
+    ("Thunderstruck", False, ""),
+])
+def test_generic_asks_are_told_apart_from_named_tracks(query, generic, tag):
+    assert _generic()(query, "") == (generic, tag)
+
+
+def test_an_explicit_tag_survives_a_generic_query():
+    assert _generic()("something", "drive") == (True, "drive")

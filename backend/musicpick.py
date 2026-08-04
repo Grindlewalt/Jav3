@@ -143,9 +143,23 @@ def choose(query: str, candidates: list[Candidate]
     runner = scored[1][0] if len(scored) > 1 else 0
     if top_score - runner < MARGIN:
         tied = [c for s, c in scored if top_score - s < MARGIN][:8]
-        if len(tied) > 1:
-            return None, tied, "several equally good matches"
+        # A tie only means "ask" when the tied candidates are the SAME SONG —
+        # the duplicate-recording case this margin was written for. Tied
+        # DIFFERENT songs mean the query matched an artist or an album, where
+        # every candidate is a correct answer to what was asked and stopping to
+        # ask is just a refusal: "play some Zach Bryan" put 8 of his tracks in
+        # a dead heat and played none of them, and 12 of the operator's 30
+        # tracks were unreachable by artist name for the same reason.
+        if len(tied) > 1 and _same_song(tied):
+            return None, tied, "several recordings of the same song"
     return top, [c for _, c in scored[:8]], "confident"
+
+
+def _same_song(cands: list[Candidate]) -> bool:
+    """Are these all the same title (so picking one silently risks the wrong
+    recording), or different songs that merely scored alike?"""
+    titles = {_squash(normalise(c.title or "")) for c in cands}
+    return len(titles) == 1
 
 
 def describe(cand: Candidate) -> str:

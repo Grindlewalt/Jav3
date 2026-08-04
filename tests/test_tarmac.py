@@ -282,26 +282,56 @@ async def test_a_play_that_makes_no_sound_is_reported_as_such(configured, monkey
     assert "playing" not in out.split("no sound")[0].lower() or True
 
 
+def _catalogue_handler(request, catalogue):
+    if request.url.path == "/api/search":
+        q = request.url.params.get("q", "")
+        # a real search for the query finds nothing; the empty listing
+        # request returns everything
+        return httpx.Response(200, json=[] if q else catalogue)
+    return httpx.Response(200, json={"ok": True, "players": 1})
+
+
+CATALOGUE = [{"id": 1, "title": "Nightcall", "artist": "Kavinsky"},
+             {"id": 2, "title": "Uptown Funk", "artist": "Ronson"}]
+
+
 @pytest.mark.asyncio
-async def test_nothing_matched_returns_the_whole_library_to_pick_from(
+async def test_a_genuine_miss_is_one_short_line_not_the_library(
         configured, monkeypatch):
-    """One extra turn at most: the model does not have to search again."""
-    def handler(request):
-        if request.url.path == "/api/search":
-            q = request.url.params.get("q", "")
-            catalogue = [{"id": 1, "title": "Nightcall", "artist": "Kavinsky"},
-                         {"id": 2, "title": "Uptown Funk", "artist": "Ronson"}]
-            # a real search for the query finds nothing; the empty listing
-            # request returns everything
-            return httpx.Response(200, json=[] if q else catalogue)
-        return httpx.Response(200, json={"ok": True, "players": 1})
-    _mock(handler, monkeypatch)
+    """This used to hand back every title so the model could pick without
+    searching again. In a spoken turn that listing became a script: the voice
+    tier read thirty titles out loud and then claimed to play one. A miss is a
+    miss — say so."""
+    _mock(lambda r: _catalogue_handler(r, CATALOGUE), monkeypatch)
 
     from tools.music_play.handler import run
     out = await run(query="bohemian rhapsody")
+
     assert "not in the library" in out
-    assert "Nightcall" in out and "Uptown Funk" in out
-    assert "[1]" in out and "[2]" in out
+    assert "Nightcall" not in out and "Uptown Funk" not in out
+    assert len(out) < 300, "a miss must stay speakable"
+
+
+@pytest.mark.asyncio
+async def test_asking_for_music_rather_than_a_track_just_plays_something(
+        configured, monkeypatch):
+    """"Play some music" names nothing to match, so matching it found nothing
+    and the operator got a refusal. There is nothing to disambiguate: any track
+    answers the request."""
+    played = []
+
+    def handler(request):
+        if request.url.path == "/api/remote":
+            played.append(request.url.params.get("action"))
+            return httpx.Response(200, json={"ok": True, "players": 1})
+        return _catalogue_handler(request, CATALOGUE)
+    _mock(handler, monkeypatch)
+
+    from tools.music_play.handler import run
+    out = await run(query="play some music", where="app")
+
+    assert "not in the library" not in out
+    assert any(t["title"] in out for t in CATALOGUE), out
 
 
 @pytest.mark.asyncio

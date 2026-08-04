@@ -18,12 +18,49 @@ Three destinations, and they are not interchangeable:
           destination with true system audio-device selection.
 """
 import asyncio
+import random
+import re
 
 from backend import computeruse as cu, gui, musicpick, runtime, tarmac
 
 SHOWN = 12
 FULL_LIST = 60
 MAX_QUEUE = 25          # a queue the model asked for, not the whole library
+
+# "Play some music" names no track, so it matches nothing, so the old code
+# handed back the whole library and asked the model to choose — and a model
+# reading thirty titles aloud into a voice channel is the worst outcome
+# available. There is nothing to disambiguate here: the operator asked for
+# music, any track answers it. Pick one. (Same instinct as the double-clap
+# path, which has always just played something.)
+GENERIC = frozenset((
+    "music", "song", "songs", "tune", "tunes", "track", "tracks", "something",
+    "anything", "some", "a", "an", "the", "any", "good", "nice", "great",
+    "fun", "upbeat", "chill", "whatever", "stuff", "jams", "vibes", "vibe",
+    "beat", "beats", "mood", "play", "please", "now", "on", "of", "me", "us",
+    "my", "for", "sir", "bangers", "hype", "random"))
+
+
+def _generic_ask(query: str, tag: str) -> tuple[bool, str]:
+    """(they asked for music rather than a track, tag to honour).
+
+    A word that IS one of the library's genres counts as the tag, not as part
+    of a title — "put on something fast" is a request for the fast tag, and
+    matching the literal word "fast" against titles finds nothing.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", (query or "").lower()) if w]
+    found_tag = next((w for w in words if w in tarmac.TAGS), "")
+    rest = [w for w in words if w not in GENERIC and w not in tarmac.TAGS]
+    return (not rest), (tag or found_tag)
+
+
+async def _pick_anything(tag: str) -> list:
+    """One track, at random, for a request that named none."""
+    try:
+        rows = await tarmac.search("", tag or None, limit=FULL_LIST)
+    except tarmac.TarmacError:
+        return []
+    return [rows[random.randrange(len(rows))]] if rows else []
 
 
 async def _tarmac_candidates(query: str, tag: str) -> list:
@@ -233,6 +270,22 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
     if not query and not tag:
         return "error: say what to play, or give ids"
 
+    # "play some music" / "put on something upbeat": nothing to match, so don't
+    # try — matching returns nothing, and the no-match branch below used to
+    # answer with the entire library.
+    generic, want_tag = _generic_ask(query, tag)
+    if generic:
+        chosen = await _pick_anything(want_tag)
+        if not chosen:
+            return ("nothing in the library"
+                    + (f" carries the {want_tag} tag." if want_tag else "."))
+        t = chosen[0]
+        what = " ".join(x for x in (t.get("title"),
+                                    f"— {t['artist']}" if t.get("artist") else "")
+                        if x)
+        return await _play_ids([int(t["id"])], dest, what, device, volume,
+                               tab, append=queue)
+
     cands = []
     for group in await asyncio.gather(_tarmac_candidates(query, tag),
                                       _local_candidates(query, client)):
@@ -244,11 +297,14 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
 
     if win is None:
         if why == "nothing matched":
-            listing = await _library_listing()
-            return (f"'{query}' is not in the library or the granted folders.\n"
-                    f"Everything available:\n{listing}\n\n"
-                    f"Play the closest of these by passing its id, or tell the "
-                    f"operator it is not available.")
+            # Deliberately NOT the whole library. That listing was meant to save
+            # a round trip and instead became a script: the voice tier read
+            # thirty titles out loud and then claimed to play one. A genuine
+            # miss is one short line — the voice tier already carries the
+            # library in its prompt, and chat can call music_search.
+            return (f"'{query}' is not in the library or the granted folders. "
+                    f"Say so plainly — do not read the library out, and do not "
+                    f"substitute something else without asking.")
         lines = "\n".join(f"  {musicpick.describe(c)}"
                           + (f"  id={c.ref}" if c.source == "tarmac" else "")
                           for c in shortlist[:SHOWN])
