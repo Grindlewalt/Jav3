@@ -158,5 +158,30 @@ async def assemble(db: aiosqlite.Connection, conversation_id: int,
         else:
             # circuit open / summarize failed: degrade to the old cliff
             rows = rows[-settings.recent_message_limit:]
-    history = [{"role": r["role"], "content": r["content"]} for r in rows]
+    history = [{"role": r["role"], "content": r["content"]} for r in rows
+               if not _is_empty_interrupt(r["role"], r["content"])]
     return (summary_messages(summary) if summary else []) + history
+
+
+def _is_empty_interrupt(role: str, content: str | None) -> bool:
+    """An interrupt that carries NOTHING is transcript bookkeeping, not
+    conversation, and it must not reach the model.
+
+    A barge-in before the first word persists an assistant turn whose entire
+    content is the marker. In the transcript that is correct — it is what
+    happened. In the model-facing history it is an assistant turn with no
+    words and no tool call, and a small model reads that as a demonstration
+    that replying with nothing is normal. Measured on qwen3.5:4b against a
+    real session: tool calls on "play some Zach Bryan" fell from 5/6 to 2/6
+    with these present, which is how a voice session full of barge-ins ended
+    up claiming it had played music twenty times without once calling
+    music_play.
+
+    The ANNOTATED cutoff ("...you heard up to X") is kept: that one carries
+    information the next turn genuinely needs.
+    """
+    if role != "assistant" or not content:
+        return False
+    from .chat import INTERRUPTED_MARKER
+    from .voice_text import CUTOFF_NOTHING
+    return content.strip() in (CUTOFF_NOTHING, INTERRUPTED_MARKER)

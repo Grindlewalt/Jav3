@@ -32,6 +32,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 
+from clap import ClapDetector
 from stt import Transcriber
 from tts import SAMPLE_RATE as TTS_RATE, Synth, models_dir, split_tts_text
 from vad import StreamingVAD
@@ -121,6 +122,7 @@ async def voice_ws(ws: WebSocket):
     tts: Synth = ws.app.state.tts
 
     vad = StreamingVAD()
+    clap = ClapDetector()
     stt_q: asyncio.Queue[bytes] = asyncio.Queue()
     tts_q: asyncio.Queue[tuple[int, int, str]] = asyncio.Queue()  # (gen, id, text)
     gen = 0                              # bumped by tts_cancel: stale = silent
@@ -189,6 +191,10 @@ async def voice_ws(ws: WebSocket):
                     wake = ws.app.state.wake
                     if wake is not None and wake.feed(data[1:]):
                         await send({"type": "wake"})
+                    # the gesture is measured on the raw 16 kHz stream here,
+                    # not on the browser's 60 ms RMS batches — a clap is 10 ms
+                    if clap.feed(data[1:]):
+                        await send({"type": "clap"})
                     for ev, payload in vad.feed(data[1:]):
                         if ev == "speech_start":
                             await send({"type": "speech_start"})
@@ -209,6 +215,7 @@ async def voice_ws(ws: WebSocket):
                 gen += 1                 # queued + in-flight all go stale
             elif kind == "reset":
                 vad.reset()
+                clap.reset()
             else:
                 await send({"type": "error", "message": f"unknown: {kind}"})
     except Exception:  # noqa: BLE001 — a dead socket is a normal ending

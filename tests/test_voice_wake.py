@@ -223,7 +223,7 @@ async def test_double_clap_dispatches_music_directly(seeded, monkeypatch):
         return "playing Kickstart My Heart in the Jarvis player on Mac."
 
     monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
-    await session.on_browser_json({"type": "double_clap"})
+    await session._on_sidecar_json({"type": "clap"})
     for _ in range(100):
         await asyncio.sleep(0.01)
         if calls:
@@ -248,7 +248,7 @@ async def test_double_clap_fires_once_per_session(seeded, monkeypatch):
         return "playing."
 
     monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
-    await session.on_browser_json({"type": "double_clap"})
+    await session._on_sidecar_json({"type": "clap"})
     for _ in range(100):
         await asyncio.sleep(0.01)
         if calls:
@@ -256,7 +256,7 @@ async def test_double_clap_fires_once_per_session(seeded, monkeypatch):
     assert len(calls) == 1
 
     # the detector misfires again mid-session — nothing happens
-    await session.on_browser_json({"type": "double_clap"})
+    await session._on_sidecar_json({"type": "clap"})
     await asyncio.sleep(0.1)
     assert len(calls) == 1
 
@@ -292,7 +292,7 @@ async def test_clap_tracks_tool_edits_the_list_live(seeded, monkeypatch):
         return "playing."
 
     monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
-    await session.on_browser_json({"type": "double_clap"})
+    await session._on_sidecar_json({"type": "clap"})
     for _ in range(100):
         await asyncio.sleep(0.01)
         if calls:
@@ -315,7 +315,7 @@ async def test_empty_clap_list_disables_the_gesture(seeded, monkeypatch):
         return "playing."
 
     monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
-    await session.on_browser_json({"type": "double_clap"})
+    await session._on_sidecar_json({"type": "clap"})
     await asyncio.sleep(0.1)
     assert not calls
     clap = [m for m in out if isinstance(m, dict) and m.get("type") == "clap"]
@@ -345,3 +345,39 @@ async def test_music_play_queue_param_appends(tmp_env, monkeypatch):
 
     result = await h.run(ids=[7], queue=True, where="app")
     assert "only the Jarvis player has a queue" in result
+
+
+async def test_empty_interrupt_markers_are_kept_out_of_model_history(seeded):
+    """A barge-in before the first word leaves a contentless assistant turn.
+    It belongs in the transcript and NOT in the model's history: qwen3.5:4b
+    imitates it and stops calling tools (measured 5/6 -> 2/6 on a real
+    session). The annotated cutoff, which carries what was heard, stays."""
+    from backend import compaction
+    from backend.chat import INTERRUPTED_MARKER
+    from backend.db import get_db, open_conversation
+    from backend.voice_text import CUTOFF_MARK, CUTOFF_NOTHING
+
+    db = await get_db()
+    try:
+        cid = await open_conversation(db, project=None, title="barge-ins")
+        rows = [("user", "play some music"),
+                ("assistant", CUTOFF_NOTHING),
+                ("user", "no, the other one"),
+                ("assistant", INTERRUPTED_MARKER),
+                ("user", "the third one"),
+                ("assistant", f"Playing it now. {CUTOFF_MARK}"),
+                ("user", "thanks")]
+        for role, content in rows:
+            await db.execute(
+                "INSERT INTO messages (conversation_id, role, content) "
+                "VALUES (?, ?, ?)", (cid, role, content))
+        await db.commit()
+        history = await compaction.assemble(db, cid, "sys")
+    finally:
+        await db.close()
+
+    contents = [m["content"] for m in history]
+    assert CUTOFF_NOTHING not in contents
+    assert INTERRUPTED_MARKER not in contents
+    assert any(CUTOFF_MARK in c for c in contents)     # this one informs
+    assert contents[0] == "play some music"

@@ -19,32 +19,20 @@ const VAD_BASE = 0.02
 const VAD_PLAYING_MULT = 3
 const VAD_TRIP_BATCHES = 2
 
-// Double clap: two sharp transients 120-900ms apart. Detection runs on the
-// batch PEAK (a clap is ~10ms of near-full-scale; averaged into a 60ms RMS
-// it vanishes) with a quiet-RMS precondition so speech can't qualify —
-// voiced sound keeps the average up, a clap rises straight out of silence.
-// A single clap can't trip the barge-in VAD (that needs two consecutive hot
-// batches; a clap occupies one).
-const CLAP_PEAK = 0.4
-const CLAP_QUIET = 0.08
-const CLAP_GAP_MIN = 120
-const CLAP_GAP_MAX = 900
-const CLAP_REFRACTORY = 1500
+// Clap detection lives in the sidecar now (voicebox/clap.py). It was here
+// because the mic is here, but this side only ever sees 60 ms RMS/peak
+// batches — and a clap is a 10 ms event, so the one measurement that
+// separates it from a door or a mug on a desk (how LONG the burst is) was
+// never available. The sidecar has the raw 16 kHz stream.
 
 export class VoiceAudio {
-  constructor({ onMicFrame, onBargeIn, onChunkPlayed, onLevel, onDoubleClap,
-                onClap }) {
+  constructor({ onMicFrame, onBargeIn, onChunkPlayed, onLevel }) {
     this.onMicFrame = onMicFrame
     this.onBargeIn = onBargeIn
     this.onChunkPlayed = onChunkPlayed
     this.onLevel = onLevel || (() => {})
-    this.onDoubleClap = onDoubleClap || (() => {})
-    this.onClap = onClap || (() => {})   // single-clap cue, for feedback/tuning
     this.muted = false
     this._hot = 0
-    this._prevRms = 0
-    this._lastClap = 0
-    this._clapFired = 0
     this._suspended = false     // local barge pause in effect
     this._segments = []         // {chunkId, source, start, end, stopped}
     this._ttsEnded = new Set()  // chunk ids the server finished sending
@@ -68,7 +56,6 @@ export class VoiceAudio {
     this.node.port.onmessage = ({ data }) => {
       this.onLevel(data.rms)
       this._vad(data.rms)
-      this._clap(data.rms, data.peak || 0)
       if (!this.muted) this.onMicFrame(data.pcm)
     }
     this.playCtx = new AudioContext({ sampleRate: PLAY_RATE })
@@ -206,22 +193,6 @@ export class VoiceAudio {
 
   // ---- barge-in VAD ------------------------------------------------------------
 
-  _clap(rms, peak) {
-    const sharp = peak >= CLAP_PEAK && this._prevRms <= CLAP_QUIET
-    this._prevRms = rms
-    if (this.muted || !sharp) return
-    const now = performance.now()
-    if (now - this._clapFired < CLAP_REFRACTORY) return
-    this.onClap()
-    const gap = now - this._lastClap
-    if (this._lastClap && gap >= CLAP_GAP_MIN && gap <= CLAP_GAP_MAX) {
-      this._lastClap = 0
-      this._clapFired = now
-      this.onDoubleClap()
-    } else {
-      this._lastClap = now
-    }
-  }
 
   _vad(rms) {
     const gate = this.playing ? VAD_BASE * VAD_PLAYING_MULT : VAD_BASE

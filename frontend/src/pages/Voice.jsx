@@ -65,10 +65,6 @@ export default function Voice() {
           ws.send(JSON.stringify({ type: 'chunk_played', chunk_id: id }))
       },
       onLevel: (rms) => setLevel((old) => old * 0.6 + rms * 0.4),
-      onDoubleClap: () => {
-        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'double_clap' }))
-      },
-      onClap: () => push('sys', '(👏)'),   // each registered clap, for tuning
     })
     audioRef.current = audio
 

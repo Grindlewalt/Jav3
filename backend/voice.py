@@ -413,13 +413,6 @@ class VoiceSession:
             if c:
                 c["played"] = True
             await self._maybe_idle()
-        elif kind == "double_clap":
-            # once per session: the detector still misfires on speech
-            # transients, and a repeat gesture mid-music would yank the song
-            # out from under the operator
-            if not self.clap_done:
-                self.clap_done = True
-                asyncio.create_task(self._clap_play())
         elif kind == "mute":
             self.muted = bool(msg.get("on"))
         elif kind == "end_session":
@@ -446,6 +439,13 @@ class VoiceSession:
                 await self._maybe_greet()    # no wake word: greet on arrival
         elif kind == "wake":
             await self._wake_up()
+        elif kind == "clap":
+            # sidecar-side detector (voicebox/clap.py). Fires at most once per
+            # session for the same reason as before: a repeat gesture mid-song
+            # would yank the track out from under the operator.
+            if not self.clap_done:
+                self.clap_done = True
+                asyncio.create_task(self._clap_play())
         elif kind in ("speech_start", "speech_end"):
             await self._send_json(ev)       # UI listening indicator
         elif kind == "transcript":
