@@ -279,6 +279,14 @@ async def init_db() -> None:
             for col in ("triage_verdict", "triage_reason", "triage_at"):
                 if col not in tcols:
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        # messages gained `model`: with voice running a 4B locally and DeepSeek
+        # only on escalation, "which brain wrote this" stopped being knowable
+        # from the reply alone — and that is exactly what the operator needs to
+        # trust a transcript. NULL means the turn predates this column.
+        async with db.execute("PRAGMA table_info(messages)") as cur:
+            mcols = [r["name"] for r in await cur.fetchall()]
+        if mcols and "model" not in mcols:
+            await db.execute("ALTER TABLE messages ADD COLUMN model TEXT")
         # cu_grants gained a `client` column: a grant is a path on a specific
         # machine, and with two connected there was no way to say which.
         async with db.execute("PRAGMA table_info(cu_grants)") as cur:

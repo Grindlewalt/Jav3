@@ -172,7 +172,7 @@ async def get_messages(conversation_id: int):
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT id, role, content, created_at FROM messages "
+            "SELECT id, role, content, model, created_at FROM messages "
             "WHERE conversation_id = ? ORDER BY id", (conversation_id,)
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -444,8 +444,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             bus.publish(chan, event)
 
         await db.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', ?)",
-            (conversation_id, final_content),
+            "INSERT INTO messages (conversation_id, role, content, model) "
+            "VALUES (?, 'assistant', ?, ?)",
+            (conversation_id, final_content, model_name or settings.model_name),
         )
         await db.commit()
         if not ephemeral:

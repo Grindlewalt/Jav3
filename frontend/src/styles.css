@@ -2273,3 +2273,12 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .voice-orb.asleep .voice-orb-core { background: var(--panel-2);
   animation: voice-breathe 4s ease-in-out infinite; }
 @keyframes voice-breathe { 50% { transform: scale(0.9); } }
+
+/* Per-message attribution. Deliberately quiet — it is a provenance mark, not
+   a status. Only non-default models render one, so a transcript full of these
+   is itself the signal that the local tier did the work. */
+.msg-model { display: inline-block; margin-top: 8px; font-size: 11px;
+  color: var(--dim); border: 1px solid var(--border); border-radius: 999px;
+  padding: 1px 8px; letter-spacing: .02em; }
+.voice-line-tier { margin-left: 8px; font-size: 11px; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 0 7px; }

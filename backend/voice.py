@@ -864,7 +864,11 @@ class VoiceSession:
         if not system:
             self.order.append(chunk_id)
         await self._send_json({"type": "assistant_text", "chunk_id": chunk_id,
-                               "text": sentence, "system": system})
+                               "text": sentence, "system": system,
+                               # per-line attribution: a transient status chip
+                               # cannot tell you which brain wrote the reply
+                               # you are reading three lines later
+                               "tier": "local" if self.turn_local else "smart"})
         sent = await self.link.send_json(
             {"type": "tts", "id": chunk_id, "text": sentence})
         if not sent:

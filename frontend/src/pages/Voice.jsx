@@ -38,8 +38,8 @@ export default function Voice() {
   const feedRef = useRef(null)
   const seq = useRef(0)
 
-  const push = (role, text) =>
-    setFeed((f) => [...f.slice(-199), { role, text, id: seq.current++ }])
+  const push = (role, text, tier) =>
+    setFeed((f) => [...f.slice(-199), { role, text, tier, id: seq.current++ }])
 
   useEffect(() => {
     let dead = false
@@ -105,7 +105,9 @@ export default function Voice() {
           break
         case 'conversation': setCid(msg.id); break
         case 'transcript': push('user', msg.text); break
-        case 'assistant_text': push(msg.system ? 'sys' : 'assistant', msg.text); break
+        case 'assistant_text':
+          push(msg.system ? 'sys' : 'assistant', msg.text, msg.tier)
+          break
         case 'tts_end': audio.chunkComplete(msg.chunk_id); break
         case 'stop_playback': audio.stopAll(); break
         case 'resume_playback': audio.resume(); break
@@ -185,6 +187,8 @@ export default function Voice() {
         {feed.map((m) => (
           <div key={m.id} className={`voice-line ${m.role}`}>
             {m.role === 'tool' ? `⚙ ${m.text}` : m.text}
+            {m.role === 'assistant' && m.tier === 'smart' &&
+              <span className="voice-line-tier">smart</span>}
           </div>
         ))}
       </div>

@@ -132,6 +132,14 @@ function Typing() {
   return <span className="typing"><span /><span /><span /></span>
 }
 
+// Which brain wrote this. Only rendered when it was NOT the default smart
+// model — voice runs a 4B locally, and "who actually did this work" is not
+// something you can tell from the prose.
+function ModelTag({ model }) {
+  if (!model || model.startsWith('deepseek')) return null
+  return <span className="msg-model" title={`answered by ${model}`}>{model}</span>
+}
+
 export function MessageBody({ m }) {
   if (m.parts) {
     return (
@@ -147,6 +155,7 @@ export function MessageBody({ m }) {
           )
           return <ToolRow key={p.id || i} part={p} />
         })}
+        <ModelTag model={m.model} />
       </div>
     )
   }
@@ -155,6 +164,7 @@ export function MessageBody({ m }) {
     <div className="bubble">
       {m.activity?.length > 0 && <ActivityGroup parts={m.activity} />}
       <Md text={m.content} />
+      <ModelTag model={m.model} />
     </div>
   )
 }
