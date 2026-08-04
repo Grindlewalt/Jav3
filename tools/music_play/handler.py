@@ -267,12 +267,12 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
         return await _play_ids(picked, dest, f"{len(picked)} track(s)",
                                device, volume, tab, append=queue)
 
-    if not query and not tag:
-        return "error: say what to play, or give ids"
-
     # "play some music" / "put on something upbeat": nothing to match, so don't
     # try — matching returns nothing, and the no-match branch below used to
-    # answer with the entire library.
+    # answer with the entire library. A BARE music_play() lands here too: no
+    # query, no tag, no ids is the clearest "just play something" there is, and
+    # it used to be an error ("say what to play") that the operator heard as a
+    # refusal — the 9B answers "play some music" with exactly that call.
     generic, want_tag = _generic_ask(query, tag)
     if generic:
         chosen = await _pick_anything(want_tag)

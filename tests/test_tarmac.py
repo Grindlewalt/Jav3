@@ -356,3 +356,21 @@ async def test_a_confident_match_plays_without_a_second_call(configured, monkeyp
     out = await run(query="kick start my heart")     # spacing differs
     assert "playing" in out and "Kickstart My Heart" in out
     assert calls.count("/api/remote") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_bare_music_play_call_plays_something(configured, monkeypatch):
+    """No query, no tag, no ids. It used to answer "say what to play, or give
+    ids", which in a spoken turn is a refusal — and it is what the 9B actually
+    emits for "play some music"."""
+    def handler(request):
+        if request.url.path == "/api/remote":
+            return httpx.Response(200, json={"ok": True, "players": 1})
+        return _catalogue_handler(request, CATALOGUE)
+    _mock(handler, monkeypatch)
+
+    from tools.music_play.handler import run
+    out = await run(where="app")
+
+    assert "error" not in out.lower()
+    assert any(t["title"] in out for t in CATALOGUE), out
