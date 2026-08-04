@@ -1,28 +1,65 @@
-# Jarvis voice local tier: qwen3.5:4b on llama.cpp, pinned to the 3060 Ti.
+# Jarvis voice local tier: qwen3.5:9b on llama.cpp, pinned to the 3060 (12 GB).
+#
+# !! THIS UNIT IS NOT CURRENTLY INSTALLED. !!  As of 2026-08-04 the live voice
+# tier on main is a bare nohup'd process in a login-session scope (PPID 1, user
+# claude) — so it does NOT survive a reboot and nothing restarts it if it dies.
+# Installing this file fixes both and needs the operator's sudo:
+#     sudo cp scripts/llama-voice.service /etc/systemd/system/
+#     sudo systemctl enable --now llama-voice
+# Until then, the equivalent by hand, as user claude on main:
+#     CUDA_VISIBLE_DEVICES=1 setsid nohup ~/llama.cpp/build/bin/llama-server \
+#       -m ~/models/Qwen3.5-9B-Q4_K_M.gguf --alias qwen3.5:9b ... &
 #
 # Replaces the ollama-voice unit for the voice path. Two reasons llama.cpp
 # rather than ollama:
 #   1. ollama's qwen3.5 GGUF conversion breaks llama.cpp's loader anyway, and
 #      its own qwen3.5 template 500s when a tool result is replayed.
-#   2. slot prompt caching. The voice system prompt + tool schemas are ~3.9k
+#   2. slot prompt caching. The voice system prompt + tool schemas are ~4.5k
 #      stable tokens; llama.cpp keeps them in the slot KV and prefills only
-#      the new turn (~40 tokens), so a turn pays ~190 ms instead of ~4 s.
+#      the new turn (~40 tokens), so a turn pays ~110 ms instead of ~3.5 s.
 #
 # The thinking switch is --chat-template-kwargs enable_thinking=false.
 # --reasoning-budget 0 alone does NOT work on this template: the model still
 # emits a reasoning block (69-197 tokens of silence before the first word).
 #
-# Install: cp to /etc/systemd/system/, systemctl enable --now llama-voice
+# WHY THE 9B, AND WHY GPU 1 (both measured 2026-08-04, medians of 18 runs
+# against the real production prompt; "chain" = whisper 73 + first clause +
+# TTS 310, against the 880 ms target):
+#
+#     4B on the Ti  (the old config)   TTFT 264 ms   clause 439 ms   822 ms
+#     9B on the 3060 (this config)     TTFT 108 ms   clause 308 ms   691 ms
+#
+# The bigger model is FASTER in place, because the Ti was the problem: it also
+# hosts whisper, and that contention — not any llama.cpp floor — was costing
+# ~150 ms of TTFT. Moving to the 12 GB card pays for the extra parameters twice
+# over and leaves the Ti to whisper alone. The 9B costs ~75 ms of first clause
+# against the 4B on the SAME card, far less than bandwidth scaling suggests,
+# because TTFT dominates a clause this short.
+#
+# The 9B buys judgement, not speed: on the voice gauntlet it stops fabricating
+# actions ("Pausing the music for you." with no tool call) — 1/5 -> 4/5 on
+# pause, 34/50 overall vs 29/50. It is WORSE at escalating heavy work (2/5),
+# so it will attempt research locally rather than hand up.
+#
+# VRAM: 5.9 GB resident at -c 16384, sharing the 12 GB card with architect-tts
+# (~3.1 GB), leaving ~2.9 GB. Keep -c in step with JARVIS_VOICE_LOCAL_CONTEXT_
+# WINDOW on the Pi — compaction sizes the local tier's history against it, and
+# overflowing does not error, it silently drops the front of the prompt
+# (tool definitions first), which looks exactly like a model too dumb to call
+# tools.
+#
+# Rollback to the 4B: CUDA_VISIBLE_DEVICES=0, Qwen3.5-4B-Q4_K_M.gguf,
+# --alias qwen3.5:4b, and JARVIS_VOICE_LOCAL_MODEL=qwen3.5:4b on the Pi.
 [Unit]
-Description=Jarvis voice LLM tier (llama.cpp, qwen3.5:4b, RTX 3060 Ti)
+Description=Jarvis voice LLM tier (llama.cpp, qwen3.5:9b, RTX 3060 12GB)
 After=network-online.target
 
 [Service]
 User=claude
-Environment=CUDA_VISIBLE_DEVICES=0
+Environment=CUDA_VISIBLE_DEVICES=1
 ExecStart=/home/claude/llama.cpp/build/bin/llama-server \
-  -m /home/claude/models/Qwen3.5-4B-Q4_K_M.gguf \
-  --alias qwen3.5:4b \
+  -m /home/claude/models/Qwen3.5-9B-Q4_K_M.gguf \
+  --alias qwen3.5:9b \
   --host 0.0.0.0 --port 11436 \
   -ngl 99 -c 16384 -np 1 \
   -fa on \

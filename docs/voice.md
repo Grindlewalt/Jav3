@@ -84,7 +84,7 @@ both threads are visible in the sidebar.
 
 ## The local fast tier
 
-With `JARVIS_VOICE_LOCAL_MODEL` set (e.g. `llama3.1:8b`), voice turns run on
+With `JARVIS_VOICE_LOCAL_MODEL` set (`qwen3.5:9b` since 2026-08-04), voice turns run on
 the operator's own ollama box by default — conversation, media control,
 quick questions: no API cost, no peak gate (the gate only prices DeepSeek
 hours), first token in ~120 ms over the LAN. Three ways a turn reaches
@@ -143,15 +143,26 @@ replaces, and it stops the model inventing plausible songs. The rules under the
 list are load-bearing and the obvious wordings measure *worse than nothing* —
 see the comment on `LIBRARY_RULES` before touching them.
 
-## The latency budget (rebuilt 2026-08-03)
+## The latency budget (rebuilt 2026-08-03, re-measured 2026-08-04)
 
-Target: **speech end → first audio ≤ 880 ms**. Measured median **808 ms**:
+Target: **speech end → first audio ≤ 880 ms**. Measured median **691 ms**:
 
 | leg | cost | where |
 |---|---|---|
 | whisper (small, int8_float16) | 73 ms | voicebox, cuda:0 |
-| LLM to first spoken clause | ~400 ms | llama.cpp :11436, cuda:0 |
+| LLM to first spoken clause | ~308 ms | llama.cpp :11436, **cuda:1** |
 | TTS of that clause | ~310 ms | architect-tts :8123, cuda:1 |
+
+**Card placement is worth more than model size.** The LLM used to share cuda:0
+with whisper, and that contention — not any llama.cpp floor — cost ~150 ms of
+TTFT. The note that once claimed a "hard ~190 ms per-request floor" was wrong:
+the same 4B on an idle card does 76–79 ms. Moving to cuda:1 paid for a model
+twice the size and still came out 131 ms ahead:
+
+| config | TTFT | first clause | chain |
+|---|---|---|---|
+| 4B on cuda:0 (until 2026-08-04) | 264 ms | 439 ms | 822 ms |
+| **9B on cuda:1 (current)** | **108 ms** | **308 ms** | **691 ms** |
 
 Three things hold that number up, and all three are easy to undo by accident:
 
@@ -181,7 +192,9 @@ box regardless of prompt size, flags, batch size or CUDA graphs (CPU-only is
 140 ms). That is the next real win if voice ever needs to be faster.
 
 **Serving the local tier (the main server, needs operator sudo):**
-- `scripts/llama-voice.service` — llama.cpp on :11436, qwen3.5:4b, cuda:0.
+- `scripts/llama-voice.service` — llama.cpp on :11436, qwen3.5:9b, cuda:1.
+  **Not actually installed**: the live tier is a nohup'd process, so it dies
+  on reboot and nothing restarts it. Installing the unit needs sudo on main.
 - `scripts/architect-tts.service` — the architect voice on :8123, cuda:1.
 - **Disable `ollama-voice`** once these are in: it pins a 5.4 GB model on the
   same 8 GB card llama-server needs.
@@ -196,7 +209,7 @@ Pi (`~/.config/jarvis/env`):
 JARVIS_VOICE_ENABLED=true
 JARVIS_VOICE_SIDECAR_URL=ws://10.0.0.58:8100/ws
 JARVIS_VOICE_SIDECAR_TOKEN=<the sidecar's VOICEBOX_TOKEN>
-JARVIS_VOICE_LOCAL_MODEL=qwen3.5:4b
+JARVIS_VOICE_LOCAL_MODEL=qwen3.5:9b
 JARVIS_VOICE_LOCAL_BASE_URL=http://10.0.0.58:11436/v1
 # JARVIS_VOICE_MAX_WORKERS=3
 ```
