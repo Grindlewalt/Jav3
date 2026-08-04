@@ -4,23 +4,35 @@
 # and voicebox runs Python 3.14. voicebox/tts.py is the client and talks to
 # this over loopback; the PCM transfer is sub-millisecond.
 #
-# Lives on cuda:1 (the 12 GB 3060) so the Ti keeps the whole LLM.
+# !! NOT CURRENTLY INSTALLED — the live TTS is a nohup'd process in a
+# login-session scope, same as llama-voice, so it dies on reboot and nothing
+# restarts it. Install both together; commands are in llama-voice.service.
+#
+# Lives on **cuda:0 (the 8 GB Ti)** alongside whisper, since 2026-08-04. The
+# operator's rule: "the llm should live on its own gpu, there should be no
+# sharing of cards with the tts or whisper... we need more memory than we need
+# power." The Ti is the faster card per byte but the smaller one, and TTS and
+# whisper are both small; the LLM is what needs the 12 GB. Budget on the Ti:
+# whisper ~502 MiB + this ~2340 MiB, leaving ~5 GB free.
+#
 # The model is loaded and warmed at startup (~6 s) and never unloaded, so the
 # operator never waits on a load.
 #
-# Install: cp to /etc/systemd/system/, systemctl enable --now architect-tts
+# The module is `tts_service:app` in /home/claude/voice-tts, NOT
+# `architect_tts:app` — this file claimed the latter until 2026-08-04 and would
+# have failed to start had anyone installed it. Same for VOICE_PACK, which the
+# live process does not set; PYTHONPATH is what actually resolves the package.
 [Unit]
-Description=Jarvis architect TTS voice (Chatterbox Nano, RTX 3060)
+Description=Jarvis architect TTS voice (Chatterbox Nano, RTX 3060 Ti)
 After=network-online.target
 
 [Service]
 User=claude
-Environment=VOICE_DEVICE=cuda:1
-Environment=VOICE_PACK=/home/claude/voice-pack
+Environment=VOICE_DEVICE=cuda:0
 Environment=PYTHONPATH=/home/claude/voice-pack
 Environment=TQDM_DISABLE=1
 WorkingDirectory=/home/claude/voice-tts
-ExecStart=/home/claude/voice-pack/.venv/bin/uvicorn architect_tts:app \
+ExecStart=/home/claude/voice-pack/.venv/bin/uvicorn tts_service:app \
   --host 0.0.0.0 --port 8123 --log-level warning
 Restart=on-failure
 RestartSec=5
