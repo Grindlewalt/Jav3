@@ -84,7 +84,7 @@ both threads are visible in the sidebar.
 
 ## The local fast tier
 
-With `JARVIS_VOICE_LOCAL_MODEL` set (`qwen3.5:9b` since 2026-08-04), voice turns run on
+With `JARVIS_VOICE_LOCAL_MODEL` set (`gemma-4:12b` since 2026-08-04), voice turns run on
 the operator's own ollama box by default — conversation, media control,
 quick questions: no API cost, no peak gate (the gate only prices DeepSeek
 hours), first token in ~120 ms over the LAN. Three ways a turn reaches
@@ -139,9 +139,11 @@ carry no trace and replay as prose.
 
 **The whole music library, in the prompt** (`voice_text.library_block`). Thirty
 titles is a few hundred tokens, cheaper than the `music_search` round trip it
-replaces, and it stops the model inventing plausible songs. The rules under the
-list are load-bearing and the obvious wordings measure *worse than nothing* —
-see the comment on `LIBRARY_RULES` before touching them.
+replaces, and it stops the model inventing plausible songs. Two things there are
+load-bearing and both measure *worse than nothing* if done the obvious way: the
+rules under the list (see `LIBRARY_RULES`), and the fact that each track's id
+**trails** its title rather than leading it — `[26] Mockingbird` had gemma-4:12b
+returning a neighbour's number 4/4, i.e. confidently playing the wrong song.
 
 ## The latency budget (rebuilt 2026-08-03, re-measured 2026-08-04)
 
@@ -162,7 +164,15 @@ twice the size and still came out 131 ms ahead:
 | config | TTFT | first clause | chain |
 |---|---|---|---|
 | 4B on cuda:0 (until 2026-08-04) | 264 ms | 439 ms | 822 ms |
-| **9B on cuda:1 (current)** | **108 ms** | **308 ms** | **691 ms** |
+| 9B on cuda:1 | 107 ms | 344 ms | 727 ms |
+| **gemma-4:12b on cuda:1 (current)** | 405 ms | 663 ms | **1046 ms** |
+
+The 12B is deliberately over the 880 ms target. It was chosen on capability:
+30/50 → 44/50 on the voice gauntlet, and the 9B's failures were almost all
+fabrication ("Playing Seven Nation Army, sir." with no tool call) on the two
+commonest ways music gets asked for. 1046 ms is inside the 1-1.5 s band
+research calls acceptable. Its `--reasoning-budget 0` is load-bearing — see
+`scripts/llama-voice.service`.
 
 Three things hold that number up, and all three are easy to undo by accident:
 
@@ -192,7 +202,7 @@ box regardless of prompt size, flags, batch size or CUDA graphs (CPU-only is
 140 ms). That is the next real win if voice ever needs to be faster.
 
 **Serving the local tier (the main server, needs operator sudo):**
-- `scripts/llama-voice.service` — llama.cpp on :11436, qwen3.5:9b, cuda:1.
+- `scripts/llama-voice.service` — llama.cpp on :11436, gemma-4:12b, cuda:1.
   **Not actually installed**: the live tier is a nohup'd process, so it dies
   on reboot and nothing restarts it. Installing the unit needs sudo on main.
 - `scripts/architect-tts.service` — the architect voice on :8123, cuda:1.
@@ -209,7 +219,7 @@ Pi (`~/.config/jarvis/env`):
 JARVIS_VOICE_ENABLED=true
 JARVIS_VOICE_SIDECAR_URL=ws://10.0.0.58:8100/ws
 JARVIS_VOICE_SIDECAR_TOKEN=<the sidecar's VOICEBOX_TOKEN>
-JARVIS_VOICE_LOCAL_MODEL=qwen3.5:9b
+JARVIS_VOICE_LOCAL_MODEL=gemma-4:12b
 JARVIS_VOICE_LOCAL_BASE_URL=http://10.0.0.58:11436/v1
 # JARVIS_VOICE_MAX_WORKERS=3
 ```
