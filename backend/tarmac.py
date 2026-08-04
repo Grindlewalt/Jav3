@@ -32,6 +32,7 @@ one is typed in by the operator and is usually a LAN address
 """
 from __future__ import annotations
 
+import time
 from urllib.parse import urlsplit
 
 from . import cfaccess
@@ -214,6 +215,47 @@ async def search(query: str, tag: str | None = None, limit: int = 25) -> list[di
         params["tag"] = tag
     rows = await _call("GET", "/api/search", params=params)
     return rows if isinstance(rows, list) else []
+
+
+# The whole library, cached, for the voice tier's system prompt. A ~30-track
+# library is a few hundred tokens — cheaper than the music_search round trip it
+# replaces, and it lets the model match a half-heard spoken title against real
+# ones instead of inventing a plausible song. (limit, expiry, rows)
+_library_cache: tuple[int, float, list[dict]] = (0, 0.0, [])
+
+
+async def cached_library(limit: int, ttl: int) -> list[dict]:
+    """Every track, memoised for `ttl` seconds. Returns [] rather than raising:
+    this feeds a prompt, and a music server that is down must not take voice
+    mode with it."""
+    global _library_cache
+    want, expiry, rows = _library_cache
+    now = time.monotonic()
+    if rows and want == limit and now < expiry:
+        return rows
+    try:
+        fresh = await search("", None, limit)
+    except Exception:  # noqa: BLE001 — unreachable/unconfigured/timeout alike
+        return rows if want == limit else []
+    _library_cache = (limit, now + max(1, ttl), fresh)
+    return fresh
+
+
+async def voice_library_prompt() -> str:
+    """The library block for the voice local tier's system prompt, or ''.
+
+    ONE definition on purpose: chat.py builds the real turn's prompt and
+    voice.py pre-warms the same prefix into llama.cpp's slot KV, and if those
+    two ever disagree by a byte the warm is wasted.
+    """
+    from .config import settings
+    from .voice_text import library_block
+    if not settings.voice_library_in_prompt:
+        return ""
+    tracks = await cached_library(settings.voice_library_max_tracks,
+                                  settings.voice_library_ttl_seconds)
+    block = library_block(tracks)
+    return f"\n\n{block}" if block else ""
 
 
 async def track(track_id: int) -> dict:

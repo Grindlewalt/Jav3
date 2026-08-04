@@ -262,6 +262,26 @@ class Settings(BaseSettings):
     # Empty string = every voice turn runs on DeepSeek as before.
     voice_local_model: str = ""
     voice_local_base_url: str = "http://10.0.0.58:11434/v1"
+    # How much of each past tool result the local tier's history replays. The
+    # trace exists to show that acting happens through tool calls, not to
+    # re-feed the payload — a couple of lines is the whole signal, and the
+    # window is 16k. 0 disables the replay.
+    voice_local_tool_trace_chars: int = 200
+    # Sampling for the local tier only (never sent to DeepSeek). A 4B with a
+    # prose-heavy history loops on its own last phrasing; a small presence
+    # penalty is the cheap half of the fix. The token cap is a runaway guard —
+    # a spoken reply is a few dozen tokens, and the default 384k is nonsense
+    # against a 16k window.
+    voice_local_presence_penalty: float = 0.5
+    voice_local_max_tokens: int = 512
+    # All ~30 library titles ride the local tier's system prompt: matching a
+    # spoken title against a list it can already see beats a music_search
+    # round trip (see one-call-tools-not-conversations). Refreshed on this
+    # TTL, in the background — the prompt is the llama.cpp KV prefix, so it
+    # must stay byte-stable between refreshes.
+    voice_library_in_prompt: bool = True
+    voice_library_max_tracks: int = 120
+    voice_library_ttl_seconds: int = 900
     # wake-word standby: seconds of idle before he stops listening for
     # anything but "hey Jarvis" again (only in effect when the sidecar
     # reports a wake model in its ready message)

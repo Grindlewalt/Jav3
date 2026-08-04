@@ -34,6 +34,15 @@ def _is_deepseek_endpoint(url: str) -> bool:
     return _endpoint(url)[1] == _endpoint(settings.deepseek_base_url)[1]
 
 
+def _is_voice_local(name: str, base: str) -> bool:
+    """This exact call is the voice fast tier — the operator's own model on the
+    operator's own endpoint. Narrow on purpose: the sampling below is tuned for
+    a 4B speaking one or two sentences and must not touch DeepSeek, or an agent
+    pinned to some other local model."""
+    return bool(settings.voice_local_model) and name == settings.voice_local_model \
+        and _endpoint(base) == _endpoint(settings.voice_local_base_url)
+
+
 # deepseek-v4-flash sometimes emits tool calls in its native markup as plain
 # TEXT instead of the structured tool_calls field, so the serving layer doesn't
 # parse them and they arrive as garbage content (the tool never runs). Recover
@@ -222,6 +231,16 @@ class ModelClient:
         }
         if tools:
             payload["tools"] = tools
+        if _is_voice_local(name, base):
+            # A 4B answering out loud needs a few dozen tokens, not 384k (which
+            # is also nonsense against a 16k window), and it will happily loop
+            # on its own last phrasing — the operator's "it keeps saying the
+            # same stuff". The structural half of that fix is replaying tool
+            # turns into the history (compaction._with_tool_trace); this is the
+            # sampling half.
+            payload["max_tokens"] = settings.voice_local_max_tokens
+            if settings.voice_local_presence_penalty:
+                payload["presence_penalty"] = settings.voice_local_presence_penalty
 
         # Transient failures (connect errors, 5xx) retry with backoff — but only
         # while nothing has streamed to the caller yet: once a token is out, a

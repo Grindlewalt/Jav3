@@ -187,3 +187,105 @@ async def test_confirm_state_survives_ask_playback(seeded, monkeypatch):
     await session.on_browser_json(
         {"type": "chunk_played", "chunk_id": ask["id"]})
     assert session.state == "confirm_escalate"  # still waiting for yes/no
+
+
+# --- the page's tier switch --------------------------------------------------
+
+async def test_flash_switch_sends_every_turn_to_deepseek(seeded, monkeypatch):
+    """The /voice page's switch, not a spoken keyword: with a local tier
+    configured, "Flash" routes straight to DeepSeek and no escalation question
+    can happen — that is the point of choosing it before you start talking."""
+    from backend import chat as chat_mod, voice
+    from backend.voice_text import LOCAL_PROMPT
+    local_tier(monkeypatch)
+    session, out = make_session(monkeypatch)
+    turn, calls = capturing_turn([([], "On it.")])
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
+    monkeypatch.setattr(voice, "in_peak_window", lambda: False)
+
+    await session.on_browser_json({"type": "tier", "value": "smart"})
+    await session._on_transcript("plan my week")
+    await settle(session)
+
+    assert calls[0]["model_name"] is None and calls[0]["base_url"] is None
+    assert LOCAL_PROMPT not in calls[0]["system_prompt"]
+    # and the browser was told which way the switch now sits
+    assert [m for m in out if isinstance(m, dict)
+            and m.get("force_tier") == "smart"]
+
+
+async def test_tier_switch_persists_and_reloads(seeded, monkeypatch):
+    """It survives a page reload: the operator sets it once, not every visit."""
+    from backend import voice
+    from backend.db import get_db
+    local_tier(monkeypatch)
+    session, _ = make_session(monkeypatch)
+
+    await session.on_browser_json({"type": "tier", "value": "smart"})
+    db = await get_db()
+    try:
+        assert await voice.get_force_tier(db) == "smart"
+    finally:
+        await db.close()
+
+    fresh, _ = make_session(monkeypatch)
+    fresh.link.ready.set()
+    await fresh.start()
+    assert fresh.force_tier == "smart"
+
+
+async def test_tier_switch_ignores_junk(seeded, monkeypatch):
+    from backend import voice
+    local_tier(monkeypatch)
+    session, _ = make_session(monkeypatch)
+
+    await session.on_browser_json({"type": "tier", "value": "gpt-9"})
+
+    assert session.force_tier == "local"
+
+
+async def test_local_switch_still_escalates(seeded, monkeypatch):
+    """"Local" is not "never DeepSeek" — the escalation path is intact."""
+    from backend import chat as chat_mod
+    local_tier(monkeypatch)
+    session, _ = make_session(monkeypatch)
+    turn, calls = capturing_turn([([], "[ESCALATE] Needs the big model.")])
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
+
+    await session.on_browser_json({"type": "tier", "value": "local"})
+    await session._on_transcript("do the enormous thing")
+    await settle(session)
+
+    assert session.state == "confirm_escalate"
+
+
+async def test_warm_prefix_matches_the_real_turn(seeded, monkeypatch):
+    """The tab-open warm exists to put the voice prompt + tool specs in
+    llama.cpp's slot KV so the operator's first word doesn't pay the prefill.
+    That only works if it warms the SAME prefix the turn then sends: the two
+    assemblies had already drifted (the warm was missing VOICE_CAPABILITIES and
+    shipped tool specs with no Notes bodies), which quietly bought nothing."""
+    from backend import chat as chat_mod, voice
+    from backend.agent import model as model_mod
+    local_tier(monkeypatch)
+    warmed = {}
+
+    class FakeModel:
+        async def complete(self, messages, **kw):
+            warmed["system"] = messages[0]["content"]
+            warmed["tools"] = kw.get("tools")
+            yield {"type": "message", "content": "", "tool_calls": [], "usage": {}}
+
+    monkeypatch.setattr(model_mod, "Model", FakeModel)
+    session, _ = make_session(monkeypatch)
+    await session._warm_local_prefix()
+
+    turn, calls = capturing_turn([([], "Sure.")])
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
+    await session._on_transcript("what time is it")
+    await settle(session)
+
+    assert warmed["system"] == calls[0]["system_prompt"]
+    assert {t["function"]["name"] for t in warmed["tools"]} <= set(voice.LOCAL_TOOLS)
+    assert warmed["tools"], "the warm must carry the tool specs — they are most "\
+        "of the prefix, and the schemas are what a 4B needs cached"

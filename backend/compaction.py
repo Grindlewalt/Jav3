@@ -146,10 +146,14 @@ async def load_history(db: aiosqlite.Connection,
 
 
 async def assemble(db: aiosqlite.Connection, conversation_id: int,
-                   system_prompt: str) -> list[dict]:
+                   system_prompt: str, tool_trace: int = 0) -> list[dict]:
     """The model-facing history for a turn: [summary messages?] + verbatim
     tail, compacting first if the effective window demands it. This is what
-    chat.py hands to run_turn in place of the old LIMIT-40 query."""
+    chat.py hands to run_turn in place of the old LIMIT-40 query.
+
+    `tool_trace` > 0 replays each past turn's tool calls alongside its prose,
+    with every result truncated to that many characters — see _with_tool_trace.
+    """
     summary, rows = await load_history(db, conversation_id)
     if len(rows) > 1 and needs_compaction(system_prompt, rows, summary):
         new_summary = await compact(db, conversation_id, rows, summary)
@@ -158,9 +162,56 @@ async def assemble(db: aiosqlite.Connection, conversation_id: int,
         else:
             # circuit open / summarize failed: degrade to the old cliff
             rows = rows[-settings.recent_message_limit:]
-    history = [{"role": r["role"], "content": r["content"]} for r in rows
-               if not _is_empty_interrupt(r["role"], r["content"])]
+    rows = [r for r in rows if not _is_empty_interrupt(r["role"], r["content"])]
+    if tool_trace:
+        history = await _with_tool_trace(db, conversation_id, rows, tool_trace)
+    else:
+        history = [{"role": r["role"], "content": r["content"]} for r in rows]
     return (summary_messages(summary) if summary else []) + history
+
+
+async def _with_tool_trace(db: aiosqlite.Connection, conversation_id: int,
+                           rows: list[dict], cap: int) -> list[dict]:
+    """History with each assistant turn's tool work replayed in front of its
+    prose, as real assistant(tool_calls) + tool messages.
+
+    Without this the history is prose only, and a past turn that played a song
+    reads back as "the operator asked, the assistant said 'Playing it now.'" —
+    a worked example of talking instead of acting. Measured on qwen3.5:4b
+    against the live voice prompt: tool calls on "play some Zach Bryan" ran
+    6/6 with no history, 0/6 after two prose-only exchanges, and 4/6 with the
+    same exchanges carrying their tool turns. deepseek-v4-flash shrugs it off;
+    a 4B does not, so this is on for the voice local tier and off elsewhere —
+    replaying full results into every chat turn would cost real context.
+
+    Results are truncated to `cap` chars: the point is to show THAT the tool
+    ran and roughly what came back, not to re-feed a 10k page. Rows written
+    before the message_id column simply carry no trace.
+    """
+    ids = [r["id"] for r in rows if r["role"] == "assistant"]
+    if not ids:
+        return [{"role": r["role"], "content": r["content"]} for r in rows]
+    marks = ",".join("?" * len(ids))
+    async with db.execute(
+        f"SELECT id, message_id, tool, args, result FROM tool_calls "
+        f"WHERE conversation_id = ? AND message_id IN ({marks}) ORDER BY id",
+            (conversation_id, *ids)) as cur:
+        calls = await cur.fetchall()
+    by_msg: dict[int, list] = {}
+    for c in calls:
+        by_msg.setdefault(c["message_id"], []).append(c)
+
+    out: list[dict] = []
+    for r in rows:
+        for c in by_msg.get(r["id"], ()):
+            call_id = f"h{c['id']}"
+            out.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": call_id, "type": "function",
+                 "function": {"name": c["tool"], "arguments": c["args"] or "{}"}}]})
+            out.append({"role": "tool", "tool_call_id": call_id,
+                        "content": (c["result"] or "")[:cap]})
+        out.append({"role": r["role"], "content": r["content"]})
+    return out
 
 
 def _is_empty_interrupt(role: str, content: str | None) -> bool:

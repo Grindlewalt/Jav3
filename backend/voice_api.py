@@ -79,6 +79,7 @@ async def voice_status():
         "enabled": settings.voice_enabled,
         "session": None if s is None else {
             "state": s.state,
+            "force_tier": s.force_tier,
             "conversation_id": s.cid,
             "sidecar_connected": s.link.connected,
             "queued": len(s.queued),

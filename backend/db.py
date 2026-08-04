@@ -287,6 +287,18 @@ async def init_db() -> None:
             mcols = [r["name"] for r in await cur.fetchall()]
         if mcols and "model" not in mcols:
             await db.execute("ALTER TABLE messages ADD COLUMN model TEXT")
+        # tool_calls gained `message_id`: which assistant reply this call
+        # belongs to. Without it a past turn's tool work cannot be replayed
+        # into the model-facing history (timestamps are second-resolution and
+        # a voice turn fits inside one second), and a history that shows only
+        # prose teaches a small model that talking IS acting. NULL == a row
+        # from before this column, which simply replays without its trace.
+        async with db.execute("PRAGMA table_info(tool_calls)") as cur:
+            tcols = [r["name"] for r in await cur.fetchall()]
+        if tcols and "message_id" not in tcols:
+            await db.execute("ALTER TABLE tool_calls ADD COLUMN message_id INTEGER")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_msg ON tool_calls(message_id)")
         # cu_grants gained a `client` column: a grant is a path on a specific
         # machine, and with two connected there was no way to say which.
         async with db.execute("PRAGMA table_info(cu_grants)") as cur:

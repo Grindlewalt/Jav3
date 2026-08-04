@@ -61,6 +61,51 @@ scheduling agents that run on their own, memory notes, and his own manual.
 If the operator asks for any of that, escalate; never tell him the system
 lacks a capability it has."""
 
+# The instructions under the track list are load-bearing, and the obvious
+# wordings are worse than nothing. Measured on qwen3.5:4b, 12 in-library
+# requests each, with the tool-trace history in place:
+#
+#   no library at all      12/12 tool calls,  1/12 passed an id
+#   bare list, no rules     6/12 tool calls,  0/12 — it reads the list as
+#                                             knowledge and answers from it
+#                                             ("It's already playing, sir.")
+#   the wording below      11/12 tool calls,  7/12 passed an id
+#
+# So the list only pays off attached to a rule that says what to DO with it,
+# and the rule must not be a prohibition on searching — telling it not to
+# search for a listed track is what pushed it into answering with no tool at
+# all. Say what to call, and cover the not-in-the-list case explicitly.
+LIBRARY_RULES = (
+    "When they name something on this list, pass its id to music_play as "
+    "`ids` instead of guessing a query. Anything not on this list: call "
+    "music_play with `query` anyway — it also searches their computers. "
+    "Never say you are playing a title you made up.")
+
+
+def library_block(tracks: list[dict]) -> str:
+    """The operator's whole music library as prompt text. '' for no tracks.
+
+    The library is small (~30 titles), so showing it beats searching it: the
+    model matches a half-heard spoken title against real ones itself and plays
+    it in one call instead of two, and it stops inventing songs — the fast tier
+    answered "play some Zach Bryan" with a confident, fictional track name.
+    Ordered by id so the text is byte-stable between refreshes; this rides the
+    system prompt, which is llama.cpp's cached KV prefix.
+    """
+    lines = []
+    for t in sorted(tracks, key=lambda t: t.get("id") or 0):
+        bits = [f"[{t.get('id')}]", (t.get("title") or "(untitled)").strip()]
+        if t.get("artist"):
+            bits.append(f"— {str(t['artist']).strip()}")
+        if t.get("tag"):
+            bits.append(f"#{t['tag']}")
+        lines.append(" ".join(bits))
+    if not lines:
+        return ""
+    return ("# The operator's music library — every track they have, with real ids\n"
+            + "\n".join(lines) + "\n\n" + LIBRARY_RULES)
+
+
 # Appended when a voice turn runs on DeepSeek instead of the local tier, so the
 # reply can reflect the upgrade the operator paid for (and asked to be able to
 # tell apart from the fast tier).

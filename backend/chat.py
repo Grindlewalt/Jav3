@@ -250,6 +250,24 @@ ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files"
 _JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request"})
 
 
+async def _link_tool_calls(db, conversation_id: int, before_id: int | None,
+                           message_id: int | None) -> None:
+    """Bind the tool_calls this turn produced to the assistant row it produced
+    them for. That link is what lets compaction replay a past turn's tool work
+    into the model-facing history instead of showing prose alone — see
+    compaction.assemble(tool_trace=...). Best-effort: a turn is not worth
+    failing over its own bookkeeping."""
+    if before_id is None or message_id is None:
+        return
+    try:
+        await db.execute(
+            "UPDATE tool_calls SET message_id = ? WHERE conversation_id = ? "
+            "AND message_id IS NULL AND id > ?",
+            (message_id, conversation_id, before_id))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _project_autonomy(db, slug: str) -> str | None:
     """The project's autonomy level (None == full/unrestricted)."""
     async with db.execute("SELECT autonomy FROM projects WHERE slug = ?",
@@ -315,6 +333,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     atoken = None
     ptoken = None
     db = None
+    tools_before = None      # set once the turn's tool_calls high-water mark is known
     try:
         # inside the try: if the connect fails, the finally must still evict
         # _active_turns and close the bus channel or the conversation bricks
@@ -352,6 +371,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # Appended after everything (incl. the operator-rules tail) so it
             # rides the same end-of-prompt salience the rules rely on. A turn
             # routed to the local tier also gets the escalation protocol.
+            from .tarmac import voice_library_prompt
             from .voice_text import (LOCAL_PROMPT, SMART_PROMPT,
                                      VOICE_CAPABILITIES, VOICE_PROMPT)
             system_prompt = f"{system_prompt}\n\n{VOICE_PROMPT}"
@@ -361,6 +381,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 # system CAN do a thing refuses instead of escalating
                 system_prompt = (f"{system_prompt}\n\n{VOICE_CAPABILITIES}"
                                  f"\n\n{LOCAL_PROMPT}")
+                system_prompt += await voice_library_prompt()
             else:
                 system_prompt = f"{system_prompt}\n\n{SMART_PROMPT}"
         # tool subsetting: with no project loaded, project-scoped run/git/
@@ -393,8 +414,13 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         tools = openai_tool_specs(entries,
                                   notes_max=LOCAL_NOTES_MAX if tools_only else None)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
-        # first when the effective context window demands it
-        history = await compaction.assemble(db, conversation_id, system_prompt)
+        # first when the effective context window demands it. The voice local
+        # tier also gets past turns' TOOL work replayed: a 4B reading a history
+        # of prose-only replies concludes that announcing an action is the
+        # action, and stops calling tools entirely (compaction._with_tool_trace).
+        history = await compaction.assemble(
+            db, conversation_id, system_prompt,
+            tool_trace=settings.voice_local_tool_trace_chars if tools_only else 0)
 
         async with db.execute(
             "SELECT COALESCE(MAX(id), 0) AS m FROM tool_calls "
@@ -443,11 +469,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 await sink(nm, ar, event.get("result", ""))
             bus.publish(chan, event)
 
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, model) "
             "VALUES (?, 'assistant', ?, ?)",
             (conversation_id, final_content, model_name or settings.model_name),
         )
+        await _link_tool_calls(db, conversation_id, tools_before, cur.lastrowid)
         await db.commit()
         if not ephemeral:
             async with db.execute(
@@ -476,11 +503,16 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         content = note if note is not None else INTERRUPTED_MARKER
         if not ephemeral:
             try:
-                await db.execute(
+                cur = await db.execute(
                     "INSERT INTO messages (conversation_id, role, content, model) "
                     "VALUES (?, 'assistant', ?, ?)",
                     (conversation_id, content,
                      model_name or settings.model_name))
+                # a barge-in cancels the turn but the tools it already ran are
+                # real — bind them to the marker so the next turn still sees
+                # that acting happens through tool calls
+                await _link_tool_calls(db, conversation_id, tools_before,
+                                       cur.lastrowid)
                 await db.commit()
             except Exception:  # noqa: BLE001 — the marker is best-effort
                 pass

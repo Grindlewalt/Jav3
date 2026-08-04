@@ -74,6 +74,23 @@ AFFIRMATIVE = ("yes", "yeah", "yep", "sure", "go ahead", "continue",
 # straight to DeepSeek, skipping the local tier and its permission ask
 SMART_WORDS = ("smart model", "deepseek", "big model")
 
+# Standing tier choice from the /voice page's switch, persisted so it survives
+# a reload. "local" is the default and means the fast tier WITH escalation —
+# not "never use DeepSeek"; "smart" sends every turn straight to DeepSeek, which
+# is what you want when you are about to ask for real work out loud and don't
+# want to sit through an escalation question first. Spoken SMART_WORDS still
+# force one turn up regardless.
+TIER_KEY = "voice_force_tier"
+TIERS = ("local", "smart")
+
+
+async def get_force_tier(db) -> str:
+    return (await get_state(db, TIER_KEY)) or "local"
+
+
+async def set_force_tier(db, tier: str) -> None:
+    await set_state(db, TIER_KEY, tier if tier in TIERS else "local")
+
 # The slim context for local turns. An 8B in a 4-8k window can't carry the
 # full sandwich (and prefilling it costs seconds on a 3060) — it keeps soul,
 # user, env and the active project; the heavyweight indexes and the full
@@ -314,6 +331,7 @@ class VoiceSession:
         self.queued: list[str] = []      # transcripts parked while busy
         self.turn_user_msg = ""          # what started the running turn
         self.turn_local = False          # this turn runs on the local tier
+        self.force_tier = "local"        # the page's tier switch (see TIER_KEY)
         self._hold: str | None = None    # opening tokens held back until we
         self._escalating = False         # know the reply isn't [ESCALATE]
         self.workers: dict[int, dict] = {}   # worker cid -> {task, watcher, …}
@@ -324,6 +342,11 @@ class VoiceSession:
 
     async def start(self) -> None:
         self.link.start()
+        db = await get_db()
+        try:
+            self.force_tier = await get_force_tier(db)
+        finally:
+            await db.close()
         # The local tier keeps the model resident, but resident weights are
         # only half of "no waiting": llama.cpp also caches the prompt PREFIX in
         # its slot, and the voice system prompt + tool schemas are ~4.5k stable
@@ -352,7 +375,9 @@ class VoiceSession:
         """
         from .agent.model import Model
         from .agent.tools.registry import load_registry, openai_tool_specs
-        from .voice_text import LOCAL_PROMPT, VOICE_PROMPT
+        from .tarmac import voice_library_prompt
+        from .voice_text import (LOCAL_NOTES_MAX, LOCAL_PROMPT,
+                                 VOICE_CAPABILITIES, VOICE_PROMPT)
         try:
             db = await get_db()
             try:
@@ -361,10 +386,12 @@ class VoiceSession:
                     db, active=active, exclude=set(LOCAL_CONTEXT_EXCLUDE))
             finally:
                 await db.close()
-            system = f"{system}\n\n{VOICE_PROMPT}\n\n{LOCAL_PROMPT}"
+            system = (f"{system}\n\n{VOICE_PROMPT}\n\n{VOICE_CAPABILITIES}"
+                      f"\n\n{LOCAL_PROMPT}")
+            system += await voice_library_prompt()
             tools = openai_tool_specs(
                 [e for e in load_registry() if e["name"] in LOCAL_TOOLS],
-                notes_max=0)
+                notes_max=LOCAL_NOTES_MAX)
             async for _ in Model().complete(
                     [{"role": "system", "content": system},
                      {"role": "user", "content": "."}],
@@ -413,6 +440,16 @@ class VoiceSession:
             if c:
                 c["played"] = True
             await self._maybe_idle()
+        elif kind == "tier":
+            tier = msg.get("value")
+            if tier in TIERS:
+                self.force_tier = tier
+                db = await get_db()
+                try:
+                    await set_force_tier(db, tier)
+                finally:
+                    await db.close()
+                await self._push_state()
         elif kind == "mute":
             self.muted = bool(msg.get("on"))
         elif kind == "end_session":
@@ -683,7 +720,7 @@ class VoiceSession:
         the operator's ollama unless `smart` (an escalation rerun) or the
         utterance names the smart model outright. `insert=False` reruns an
         utterance whose user row already exists (escalation)."""
-        if any(w in text.lower() for w in SMART_WORDS):
+        if any(w in text.lower() for w in SMART_WORDS) or self.force_tier == "smart":
             smart = True
         local = bool(settings.voice_local_model) and not smart
         db = await get_db()
@@ -1094,4 +1131,7 @@ class VoiceSession:
                                # could not tell an escalated turn from a local
                                # one, and the two cost very different things
                                "tier": "local" if self.turn_local else "smart",
+                               # the standing switch, distinct from `tier`
+                               # (which brain answered the LAST turn)
+                               "force_tier": self.force_tier,
                                "conversation_id": self.cid})

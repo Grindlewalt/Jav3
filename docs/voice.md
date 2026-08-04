@@ -98,7 +98,12 @@ DeepSeek instead:
    utterance reruns on DeepSeek against clean history. No → dropped.
 2. **The operator names it**: "smart model" / "deepseek" / "big model"
    anywhere in an utterance routes it straight up, no ask.
-3. **The tier is off** (`voice_local_model` empty): everything runs on
+3. **The switch at the top of the page**: Local / Flash, persisted in
+   `session_state` under `voice_force_tier`, so it survives a reload. Local is
+   the default and still escalates; Flash sends every turn to DeepSeek with no
+   escalation question — the setting you flip *before* asking for real work out
+   loud. Spoken keywords still force a single turn up either way.
+4. **The tier is off** (`voice_local_model` empty): everything runs on
    DeepSeek as before.
 
 Local turns get a slim context (`voice.LOCAL_CONTEXT_EXCLUDE` — soul, user and
@@ -108,6 +113,35 @@ bodies: a 4B in an 8k window can't carry the full sandwich, and prefilling it
 costs seconds. See the latency budget below — this is not a nicety, an
 oversized prompt silently truncates the tool definitions. The operator-rules
 tail is never droppable, so the hard rules still bind local turns.
+
+They also get two things the smart tier does not:
+
+**Past turns' tool work, replayed** (`compaction.assemble(tool_trace=...)`).
+The model-facing history is `role`/`content` only, so a turn that actually
+played a song reads back as "the operator asked, the assistant said 'Playing it
+now.'" — a worked example of talking instead of acting. DeepSeek shrugs that
+off; a 4B copies it, and stops calling tools at all. Measured against the live
+tier with the production prompt, on "play some Zach Bryan":
+
+| history | tool calls |
+|---|---|
+| none | 6/6 |
+| 2 prose-only exchanges | 0/6 |
+| 5 prose-only exchanges | 0/6 |
+| 5 exchanges replayed with their tool turns | 12/12 |
+
+`tool_calls.message_id` (added 2026-08-04) is the link that makes the replay
+possible; second-resolution timestamps can't do it, because a voice turn fits
+inside one second. Results are truncated to
+`voice_local_tool_trace_chars` — the point is to show that acting happens
+through tool calls, not to re-feed a page. Rows written before the column
+carry no trace and replay as prose.
+
+**The whole music library, in the prompt** (`voice_text.library_block`). Thirty
+titles is a few hundred tokens, cheaper than the `music_search` round trip it
+replaces, and it stops the model inventing plausible songs. The rules under the
+list are load-bearing and the obvious wordings measure *worse than nothing* —
+see the comment on `LIBRARY_RULES` before touching them.
 
 ## The latency budget (rebuilt 2026-08-03)
 

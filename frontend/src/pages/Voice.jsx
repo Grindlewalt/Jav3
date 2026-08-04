@@ -27,6 +27,7 @@ export default function Voice() {
   const [state, setState] = useState('connecting')
   const [working, setWorking] = useState(false)
   const [tier, setTier] = useState('local')     // which brain answered
+  const [forceTier, setForceTier] = useState('local')  // the standing switch
   const [feed, setFeed] = useState([])          // {role, text, id}
   const [workers, setWorkers] = useState([])
   const [muted, setMuted] = useState(false)
@@ -97,6 +98,7 @@ export default function Voice() {
           setState(msg.state)
           setWorking(!!msg.turn_working)
           if (msg.tier) setTier(msg.tier)
+          if (msg.force_tier) setForceTier(msg.force_tier)
           if (msg.conversation_id) setCid(msg.conversation_id)
           break
         case 'conversation': setCid(msg.id); break
@@ -139,11 +141,33 @@ export default function Voice() {
     if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'mute', on: next }))
   }
 
+  // Which brain takes the NEXT turn. "Local" still escalates on request; "Flash"
+  // sends every turn to DeepSeek, which is what you want before asking for real
+  // work out loud instead of being asked permission first.
+  const chooseTier = (value) => {
+    setForceTier(value)
+    const ws = wsRef.current
+    if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'tier', value }))
+  }
+
   const orbClass = `voice-orb ${state}${working ? ' working' : ''}`
   const glow = Math.min(1, level * 12)
 
   return (
     <div className="voice-page">
+      <div className="voice-tier-switch" role="group" aria-label="Model tier">
+        {[['local', 'Local', 'qwen3.5:4b on your GPU — free, fast, escalates when asked'],
+          ['smart', 'Flash', 'deepseek-v4-flash for every turn — costs money, no escalation question'],
+        ].map(([value, label, hint]) => (
+          <button key={value} type="button" title={hint}
+                  className={forceTier === value ? 'on' : ''}
+                  aria-pressed={forceTier === value}
+                  onClick={() => chooseTier(value)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
       <div className="voice-stage">
         <div className={orbClass}
              style={{ '--mic-glow': state === 'listening' ? glow : 0 }}>
