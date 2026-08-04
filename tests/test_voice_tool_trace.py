@@ -159,11 +159,13 @@ def test_local_tier_compacts_against_its_own_window():
     it against the global default means compaction never fires and the prompt
     silently loses its front — tool definitions first."""
     from backend.config import settings
-    history = [{"role": "user", "content": "x" * 40_000}]        # ~10k tokens
-
-    assert not compaction.needs_compaction("sys", history, None)
     local = (settings.voice_local_context_window
              - settings.voice_local_max_tokens - 5_000)
+    # comfortably over the local tier's window, still far under the global one,
+    # derived from the setting so raising -c does not silently void this test
+    history = [{"role": "user", "content": "x" * (local * 8)}]
+
+    assert not compaction.needs_compaction("sys", history, None)
     assert compaction.needs_compaction("sys", history, None, window=local)
 
 

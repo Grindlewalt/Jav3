@@ -280,7 +280,11 @@ class Settings(BaseSettings):
     # history against, and overflowing it does not error — it silently drops
     # the front of the prompt, taking the tool definitions with it, which
     # looks exactly like a model too dumb to call tools.
-    voice_local_context_window: int = 16_384
+    # 32k since 2026-08-04: the LLM now has the 12 GB card to itself (TTS and
+    # whisper both moved to the Ti), so the KV for it is free real estate —
+    # 9B weights + 32k KV is 6.3 GB of 12 GB. This roughly triples how long a
+    # voice conversation runs before compaction has to stall a turn.
+    voice_local_context_window: int = 32_768
     # All ~30 library titles ride the local tier's system prompt: matching a
     # spoken title against a list it can already see beats a music_search
     # round trip (see one-call-tools-not-conversations). Refreshed on this

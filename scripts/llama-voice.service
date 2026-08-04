@@ -8,7 +8,7 @@
 #     sudo systemctl enable --now llama-voice
 # Until then, the equivalent by hand, as user claude on main:
 #     CUDA_VISIBLE_DEVICES=1 setsid nohup ~/llama.cpp/build/bin/llama-server \
-#       -m ~/models/Qwen3.5-9B-Q4_K_M.gguf --alias qwen3.5:9b ... &
+#       -m ~/models/Qwen3.5-9B-Q4_K_M.gguf --alias qwen3.5:9b -c 32768 ... &
 #
 # Replaces the ollama-voice unit for the voice path. Two reasons llama.cpp
 # rather than ollama:
@@ -41,8 +41,9 @@
 # pause, 34/50 overall vs 29/50. It is WORSE at escalating heavy work (2/5),
 # so it will attempt research locally rather than hand up.
 #
-# VRAM: 5.9 GB resident at -c 16384, sharing the 12 GB card with architect-tts
-# (~3.1 GB), leaving ~2.9 GB. Keep -c in step with JARVIS_VOICE_LOCAL_CONTEXT_
+# VRAM: 6.3 GB resident at -c 32768, and the 12 GB card is now LLM-ONLY —
+# architect-tts and whisper both live on the Ti (operator's call, 2026-08-04:
+# "there should be no sharing of cards"). 5.6 GB spare. Keep -c in step with JARVIS_VOICE_LOCAL_CONTEXT_
 # WINDOW on the Pi — compaction sizes the local tier's history against it, and
 # overflowing does not error, it silently drops the front of the prompt
 # (tool definitions first), which looks exactly like a model too dumb to call
@@ -61,7 +62,7 @@ ExecStart=/home/claude/llama.cpp/build/bin/llama-server \
   -m /home/claude/models/Qwen3.5-9B-Q4_K_M.gguf \
   --alias qwen3.5:9b \
   --host 0.0.0.0 --port 11436 \
-  -ngl 99 -c 16384 -np 1 \
+  -ngl 99 -c 32768 -np 1 \
   -fa on \
   --jinja --chat-template-kwargs '{"enable_thinking":false}' \
   --reasoning-budget 0 \
