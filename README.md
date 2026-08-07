@@ -55,7 +55,7 @@ Roughly 21k lines of Python and 8k of JS across ~80 test modules and 43 tools.
 ## Deploy (test Pi)
 
 ```
-git clone https://github.com/grindlewalt/jav3.git ~/jarvis
+git clone https://github.com/Grindlewalt/Jav3.git ~/jarvis
 cd ~/jarvis && bash scripts/setup_pi.sh
 echo 'JARVIS_DEEPSEEK_API_KEY=sk-...' >> ~/.config/jarvis/env
 .venv/bin/python -m backend.cli create-user <name>
