@@ -13,14 +13,18 @@ projects/*
 agents/*
 !agents/.gitkeep
 
-# personal ops notes, not shared
-CLAUDE.md
-
-# cross-session backlog, personal — not shared
-BACKLOG.md
-
-# Opus backlog execution plan, personal — not shared
-OPUS-PLAN.md
+# Working notes (backlogs, audits, plans, ops notes) accumulate as ad-hoc *.md at
+# the repo root. Ignore root-level markdown by default and opt in what ships.
+# Covers CLAUDE.md, BACKLOG.md, OPUS-PLAN.md and anything like them.
+#
+# NOTE the leading slash — it anchors this to the root ONLY, and that is
+# load-bearing. Nested markdown is runtime data, not documentation: the registry
+# loads tools/<name>/TOOL.md at startup, agents/<slug>/AGENT.md and
+# skills/<name>/SKILL.md the same way, and the self_docs tool serves docs/SELF.md.
+# A blanket `*.md` would ship a Pi that has no tools. Don't remove the slash.
+/*.md
+!/README.md
+!/SECURITY-RESIDUAL-RISK.md
 
 # vendored external research dump (Claude Code source study) — huge, not ours
 collection-claude-code-source-code/
