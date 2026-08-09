@@ -1250,7 +1250,10 @@ class VoiceSession:
         this conversation, and a machine that is asleep or unplugged must not
         be able to stall a turn. Failures are logged at debug and nowhere else.
         """
-        if not settings.voice_projector_feed:
+        # cheap check first: _push_state runs on every state change, and
+        # spawning a task per push to discover there is no projector is churn
+        if not (settings.voice_projector_feed and settings.mcp_projector_url
+                and settings.mcp_projector_token):
             return
         from . import mcp
         asyncio.create_task(mcp.push_voice(
