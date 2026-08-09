@@ -1,0 +1,9 @@
+# voicedesk — the headless voice client. Runs on the operator's machine.
+# No audio ML here on purpose: wake word, VAD and transcription are the
+# sidecar's, reached through the Pi. This is a microphone, a speaker and a
+# socket.
+sounddevice>=0.4.6        # PortAudio bindings. Needs the C library:
+                          #   macOS   brew install portaudio
+                          #   Debian  apt install libportaudio2
+numpy>=1.26               # PCM16 <-> float, and the RMS for the barge-in gate
+websockets>=12.0          # the /api/voice/ws leg

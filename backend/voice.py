@@ -1243,7 +1243,24 @@ class VoiceSession:
         elif self.state == LISTENING:       # genuinely idle: start the doze clock
             self._arm_sleep_timer()
 
+    def _mirror_to_projector(self) -> None:
+        """Put the voice state on the wall, if a projector is listening.
+
+        Fire-and-forget on purpose: the projection mapper is decoration for
+        this conversation, and a machine that is asleep or unplugged must not
+        be able to stall a turn. Failures are logged at debug and nowhere else.
+        """
+        if not settings.voice_projector_feed:
+            return
+        from . import mcp
+        asyncio.create_task(mcp.push_voice(
+            self.state,
+            heard=self.turn_user_msg,
+            reply=" ".join(self.chunks[i]["text"] for i in self.order[-2:]),
+            tier="local" if self.turn_local else "smart"))
+
     async def _push_state(self) -> None:
+        self._mirror_to_projector()
         turn_running = self.turn_task is not None and not self.turn_task.done()
         await self._send_json({"type": "state", "state": self.state,
                                "turn_working": turn_running and self.turn_saw_tool,

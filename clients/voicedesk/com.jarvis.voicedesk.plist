@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Start voicedesk at login and keep it running.
+
+  Edit the two absolute paths below, then:
+    cp com.jarvis.voicedesk.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.jarvis.voicedesk.plist
+
+  Run it in the foreground ONCE first so macOS attaches the microphone
+  permission prompt to a terminal — a background agent has no window to show it
+  in, and without the grant it starts fine and hears nothing.
+
+  KeepAlive restarts it if it dies; the client also reconnects on its own, so
+  this only covers a real crash or the machine waking from sleep.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.jarvis.voicedesk</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGEME/jarvis/clients/voicedesk/.venv/bin/python</string>
+    <string>-m</string>
+    <string>voicedesk.agent</string>
+  </array>
+  <key>WorkingDirectory</key>   <string>/Users/CHANGEME/jarvis/clients</string>
+  <key>RunAtLoad</key>          <true/>
+  <key>KeepAlive</key>          <true/>
+  <key>ProcessType</key>        <string>Interactive</string>
+  <key>StandardOutPath</key>    <string>/tmp/voicedesk.log</string>
+  <key>StandardErrorPath</key>  <string>/tmp/voicedesk.log</string>
+</dict>
+</plist>

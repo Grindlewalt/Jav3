@@ -310,6 +310,24 @@ class Settings(BaseSettings):
     voice_clap_curfew: bool = True
     voice_clap_curfew_start: str = "22:30"
     voice_clap_curfew_end: str = "07:30"
+    # Where the voice display is mirrored, if anywhere: the projection mapper's
+    # /voice endpoint (same host/token as its MCP server). Empty = off, and the
+    # push is best-effort — a projector that is not plugged in must never slow
+    # a spoken turn down.
+    voice_projector_feed: bool = True
+    # Bearer token for the headless desktop client (clients/voicedesk/). It has
+    # no browser and no login session, so it cannot present the cookie the
+    # /voice page does. Empty = the token path does not exist, which is the
+    # right default: an unset secret must never mean "no check".
+    voice_client_token: str = ""
+
+    # --- MCP clients (Jarvis reaching OUT) ---------------------------------
+    # The projection mapper's in-app MCP server. Off unless both are set. What
+    # Jarvis may do there is fixed by OUR tools/projector_*/TOOL.md manifest,
+    # not by what the server advertises — see backend/mcp.py for why that
+    # distinction is the whole security design.
+    mcp_projector_url: str = ""          # e.g. http://10.0.0.40:8765/mcp
+    mcp_projector_token: str = ""
 
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped

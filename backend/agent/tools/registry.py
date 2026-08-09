@@ -129,6 +129,25 @@ def read_only_names(entries: list[dict] | None = None) -> frozenset[str]:
     return frozenset(e["name"] for e in entries if e.get("read_only") is True)
 
 
+def _requirements_met(entry: dict) -> bool:
+    """`requires_settings:` in TOOL.md frontmatter — a list of config keys that
+    must be non-empty for this tool to be offered at all.
+
+    For integrations that only exist when the operator has wired something up
+    (the projector's MCP server is the first). Without this the model is handed
+    tools that can only ever answer "not configured": tokens spent on every
+    turn, and an invitation to promise something that cannot happen. The tool
+    is still catalogued on the Tools tab, so it is discoverable rather than
+    invisible — it just is not granted.
+    """
+    required = entry.get("requires_settings")
+    if not required:
+        return True
+    if isinstance(required, str):
+        required = [required]
+    return all(bool(getattr(settings, str(key), None)) for key in required)
+
+
 def openai_tool_specs(entries: list[dict] | None = None,
                       notes_max: int | None = None) -> list[dict]:
     """Registry entries in the wire format Model.complete expects.
@@ -144,6 +163,8 @@ def openai_tool_specs(entries: list[dict] | None = None,
     specs = []
     for e in entries:
         if e.get("enabled") is False:
+            continue
+        if not _requirements_met(e):
             continue
         desc = e["description"]
         if e.get("when_to_use"):

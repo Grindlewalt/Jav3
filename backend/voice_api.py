@@ -1,11 +1,24 @@
-"""Voice mode transport: the browser-facing WebSocket plus a status probe.
+"""Voice mode transport: the client-facing WebSocket plus a status probe.
 
 The WS carries mixed frames (binary 0x01 mic PCM up / 0x02 TTS PCM down,
-JSON control both ways — the shapes live in voice.py's docstring). Auth is
-the session cookie, validated manually because a WebSocket can't use
-Depends(require_user) — same pattern as guest_shell.py."""
+JSON control both ways — the shapes live in voice.py's docstring).
+
+Two ways in, because there are two kinds of client:
+
+- **the browser /voice page** — the session cookie, validated by hand because a
+  WebSocket cannot use Depends(require_user) (same pattern as guest_shell.py).
+- **the headless desktop client** (`clients/voicedesk/`) — a bearer token. It
+  runs as a background service on the operator's machine with no browser and no
+  login session, so a cookie is not available to it. Same discipline as the
+  computeruse pairing token: compare_digest, and a penalty delay on failure so
+  the socket is not a fast oracle for guessing.
+
+Both land in the same VoiceSession — one protocol, two transports. Nothing in
+backend/voice.py knows or cares which one is connected."""
+import asyncio
 import json
 import logging
+import secrets
 
 from fastapi import APIRouter, Depends, WebSocket
 
@@ -22,13 +35,26 @@ router = APIRouter()
 _current: voice.VoiceSession | None = None
 
 
+def _client_token_ok(ws: WebSocket) -> bool:
+    """The headless client's bearer token. Empty setting = no token path at
+    all, so leaving it unset does not silently open a second door."""
+    configured = settings.voice_client_token
+    if not configured:
+        return False
+    supplied = (ws.headers.get("authorization") or "")
+    supplied = supplied.removeprefix("Bearer ").strip()
+    return bool(supplied) and secrets.compare_digest(supplied, configured)
+
+
 @router.websocket("/api/voice/ws")
 async def voice_ws(ws: WebSocket):
     global _current
     if not settings.voice_enabled:
         await ws.close(code=4404)
         return
-    if user_from_token(ws.cookies.get(COOKIE_NAME)) is None:
+    if user_from_token(ws.cookies.get(COOKIE_NAME)) is None \
+            and not _client_token_ok(ws):
+        await asyncio.sleep(1)          # blunt the guessing rate
         await ws.close(code=4401)
         return
     await ws.accept()
