@@ -301,6 +301,15 @@ class Settings(BaseSettings):
     # carries the request, so a tight window is cheap — and it stops him
     # answering a conversation that was never aimed at him.
     voice_wake_timeout: int = 15
+    # Quiet hours for the double-clap gesture. The clap is the one trigger with
+    # no confirmation step and no words in it, so a dropped book at 3am starts
+    # music; overnight it is muted. "hey Jarvis" is deliberately NOT gated —
+    # it takes a spoken sentence to fire, so it cannot go off by accident, and
+    # the operator still wants a working Jarvis at night. The window wraps
+    # midnight; set start == end to disable without touching the flag.
+    voice_clap_curfew: bool = True
+    voice_clap_curfew_start: str = "22:30"
+    voice_clap_curfew_end: str = "07:30"
 
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped

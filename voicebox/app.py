@@ -9,11 +9,18 @@ tiny mixed protocol:
   text  up     {"type": "tts", "id": N, "text": "..."}
                {"type": "tts_cancel"}          drop queued + abort current TTS
                {"type": "reset"}               drop any partial utterance state
+               {"type": "vocab", "words": [...]}  bias STT toward these names
   text  down   {"type": "ready", "stt": ..., "tts": ...}
                {"type": "speech_start"} / {"type": "speech_end"}
-               {"type": "transcript", "text": "...", "dur_ms": D}   '' = noise
+               {"type": "transcript", "text": "...", "dur_ms": D, ...}  '' = noise
                {"type": "tts_start", "id": N} / {"type": "tts_done", "id": N, "dur_ms": D}
                {"type": "error", "message": "..."}
+
+A `transcript` carries evidence, not just words: `confident`, `phantom`,
+`no_speech_prob`, `avg_logprob` from whisper and `speech_ratio` / `mean_prob`
+from silero. The Pi needs all of it to answer "was that the operator, or the
+guitar in the background?" — see stt.py and vad.py for why non-empty text is
+not the same question.
 
 The box holds no Jarvis state and no secrets beyond its own bearer token:
 audio in, text out; text in, audio out. Auth follows the computeruse pairing
@@ -123,7 +130,7 @@ async def voice_ws(ws: WebSocket):
 
     vad = StreamingVAD()
     clap = ClapDetector()
-    stt_q: asyncio.Queue[bytes] = asyncio.Queue()
+    stt_q: asyncio.Queue = asyncio.Queue()          # of vad.Utterance
     tts_q: asyncio.Queue[tuple[int, int, str]] = asyncio.Queue()  # (gen, id, text)
     gen = 0                              # bumped by tts_cancel: stale = silent
 
@@ -134,15 +141,16 @@ async def voice_ws(ws: WebSocket):
         # one lane, in order: a fast second utterance must not overtake the
         # verdict for the first (the Pi's barge-in logic depends on ordering)
         while True:
-            pcm = await stt_q.get()
+            utt = await stt_q.get()
             try:
-                text = await loop.run_in_executor(ex, stt.transcribe, pcm)
+                res = await loop.run_in_executor(ex, stt.transcribe, utt.pcm)
             except Exception as exc:  # noqa: BLE001 — keep the lane alive
                 log.exception("stt failed")
                 await send({"type": "error", "message": f"stt: {exc}"})
-                text = ""
-            await send({"type": "transcript", "text": text,
-                        "dur_ms": len(pcm) // 32})
+                continue
+            # whisper's evidence and silero's, merged: the Pi weighs both
+            await send({"type": "transcript", **res.as_event(),
+                        **utt.as_event()})
 
     async def tts_worker() -> None:
         nonlocal gen
@@ -178,7 +186,7 @@ async def voice_ws(ws: WebSocket):
     workers = [asyncio.create_task(stt_worker()),
                asyncio.create_task(tts_worker())]
     await send({"type": "ready", "stt": stt.model_size,
-                "tts": f"kokoro/{tts.voice}",
+                "tts": tts.voice,
                 "wake": ws.app.state.wake_name or None})
     try:
         while True:
@@ -216,6 +224,17 @@ async def voice_ws(ws: WebSocket):
             elif kind == "reset":
                 vad.reset()
                 clap.reset()
+            elif kind == "vocab":
+                # The Pi knows the music library, project slugs and the names
+                # of people; this box knows none of that and holds no state, so
+                # the vocabulary is pushed down on every connect and simply
+                # biases whisper's decode.
+                words = cmd.get("words") or []
+                if isinstance(words, list):
+                    n = await loop.run_in_executor(ex, stt.set_vocab, words)
+                    await send({"type": "vocab_ok", "terms": n})
+                else:
+                    await send({"type": "error", "message": "vocab: not a list"})
             else:
                 await send({"type": "error", "message": f"unknown: {kind}"})
     except Exception:  # noqa: BLE001 — a dead socket is a normal ending

@@ -9,9 +9,9 @@ everything a typed conversation can do, a spoken one can too.
 
 ```
 Browser /voice page  ⇄  WS /api/voice/ws  ⇄  Pi backend        ⇄  WS  ⇄  voicebox (main server)
-mic capture, playback,   cookie auth          backend/voice.py     bearer   silero VAD
-local barge-in VAD                            state machine,       token    faster-whisper small int8
-                                              turns, clones                 kokoro bm_lewis
+mic capture, playback,   cookie auth          backend/voice.py     bearer   silero VAD (adaptive)
+local barge-in VAD                            state machine,       token    whisper large-v3-turbo
+                                              turns, clones                 architect (chatterbox)
 ```
 
 - Audio is PCM16 mono: 16 kHz up (mic), 24 kHz down (TTS). Binary WS frames
@@ -48,8 +48,28 @@ preserved) and `barge_in {chunk_id, played_ms}` goes up. Nothing else stops
 yet: TTS keeps streaming into the browser's buffer while the sidecar
 transcribes what the mic heard.
 
-- transcript is empty (cough, chair squeak) → `resume_playback`; the whole
-  event was a sub-second hiccup.
+The verdict is **evidence, not word count** (2026-08-09). It used to be "the
+transcript came back non-empty", which is how someone playing guitar in the
+same room could stop Jarvis mid-sentence: the RMS gate trips on any loud
+sound, whisper is handed music and returns fluent invented words, and
+non-empty text read as the operator talking. The sidecar now reports what it
+actually knows and `VoiceSession._is_interrupt` weighs all of it:
+
+| signal | source | rejects |
+|---|---|---|
+| `speech_ratio` | silero, fraction of frames scored as speech | music, thuds, room tone |
+| `phantom` | `stt.is_phantom` — a named list of whisper's stock fabrications | "Thanks for watching", `[Music]`, `you you you you` |
+| `confident` | whisper's `no_speech_prob` + `avg_logprob` | decodes it was guessing at |
+
+Measured separation: operator speech scores 0.39–0.97 on `speech_ratio` *even
+talking over a guitar*, guitar alone 0.00–0.07, strummed chords 0.00–0.15. The
+threshold sits at 0.30, in the middle of that gap — 100% of speech kept, 100%
+of music rejected. A phantom is dropped in **every** state, not just under
+playback: acting on "Thank you for watching" starts a turn nobody asked for.
+
+- transcript is empty, or the evidence says it was the room (cough, chair
+  squeak, a guitar) → `resume_playback`; the whole event was a sub-second
+  hiccup.
 - real speech → `tts_cancel` + `stop_playback`, and:
   - turn still streaming prose → it is cancelled with
     `chat.set_interrupt_note`: the assistant row becomes *exactly what was
@@ -222,7 +242,75 @@ JARVIS_VOICE_SIDECAR_TOKEN=<the sidecar's VOICEBOX_TOKEN>
 JARVIS_VOICE_LOCAL_MODEL=gemma-4:12b
 JARVIS_VOICE_LOCAL_BASE_URL=http://10.0.0.58:11436/v1
 # JARVIS_VOICE_MAX_WORKERS=3
+# quiet hours for the double clap — "hey Jarvis" is NOT gated (see below)
+# JARVIS_VOICE_CLAP_CURFEW=true
+# JARVIS_VOICE_CLAP_CURFEW_START=22:30
+# JARVIS_VOICE_CLAP_CURFEW_END=07:30
 ```
+
+Sidecar (`VOICEBOX_*`, on the main server):
+
+```
+VOICEBOX_WHISPER=large-v3-turbo   # rollback: small (see the STT note below)
+VOICEBOX_DEVICE=cuda
+VOICEBOX_COMPUTE=int8_float16     # 1201 MiB on cuda:0
+VOICEBOX_HANG_MS=300              # snappy hangover, for a whole sentence
+VOICEBOX_HANG_LONG_MS=500         # ...and for a lead-in that may continue
+VOICEBOX_STANDALONE_MS=1200       # below this, use the long hangover
+# VOICEBOX_TEMP_FALLBACK=          # auto by model class; force with 0/1
+```
+
+### Why the double clap has quiet hours and the wake word does not
+
+The clap is the one trigger with no words in it and no confirmation step — a
+dropped book at 3 a.m. starts music. Between 22:30 and 07:30 the gesture is
+ignored (`voice.in_clap_curfew`, window wraps midnight). "Hey Jarvis" is
+deliberately *not* gated: it takes a deliberate spoken sentence to fire, so it
+cannot go off by accident, and Jarvis should still work at night.
+
+### STT: why `large-v3-turbo` and adaptive endpointing (2026-08-09)
+
+Clean speech does not show the difference between whisper sizes — every model
+gets a close-mic'd clip right. The operator's condition is a room mic at a
+distance with a guitar going. Measured over 8 utterances × 3 noise
+realizations (reverb ≈0.45 s RT60 at 0.55 gain, guitar mixed at the stated
+SNR):
+
+| config | clean | room | gtr@10 | gtr@5 | gtr@0 | latency | VRAM |
+|---|---|---|---|---|---|---|---|
+| `small` / beam1 temp0 (old) | 10.8% | 19.4% | 17.2% | 22.6% | 26.5% | 79 ms | 777 MiB |
+| `small` / hardened + hotwords | 4.9% | 13.1% | 26.1% | 32.9% | 42.9% | 113 ms | 785 MiB |
+| `large-v3-turbo` / hardened | 4.9% | 8.7% | 11.3% | 12.6% | 13.9% | 216 ms | 1201 MiB |
+
+**The temperature fallback is only safe on a strong model** — look at the
+middle row. Hardening `small` helps in a quiet room and makes it 2–3× worse
+under a guitar, because a weak model re-sampling at temperature 0.4+ on noisy
+audio invents fluent text instead of returning the mangled-but-honest version.
+So the fallback is enabled by model class (`stt._wants_fallback`), not
+globally.
+
+**The bigger bug was endpointing, not the model.** At a flat 300 ms hangover
+the VAD split ordinary sentences at their internal pauses: "Jarvis, put
+Mockingbird on" ended at the comma, whisper saw one second of audio and
+returned "Jarvis, Kickstart", and the operator got an answer to something they
+never said. The hangover is now adaptive — a brief utterance must hold its
+silence longer than a whole sentence, because the pauses that cause splits
+follow a short lead-in ("Jarvis,", "So,", "Actually,") while a real end-of-turn
+comes after a full sentence:
+
+| hangover | sentences split | median endpoint latency |
+|---|---|---|
+| flat 300 ms | 1/12 | 80 ms |
+| flat 500 ms | 0/12 | 272 ms |
+| **adaptive 300/500 over 1200 ms** | **0/12** | **92 ms** |
+
+**Vocabulary is pushed, not configured.** The sidecar holds no Jarvis state,
+so on every connect the Pi sends `{"type":"vocab","words":[…]}` — the music
+library's titles and artists plus project names — and whisper biases its
+decode toward them (WER 4.6% → 2.7% on whole utterances, no invented terms).
+Note this is only safe *because* the endpointing was fixed: on a truncated
+fragment the bias dominates and substitutes a library title for what was
+actually said, which is the wrong-song failure mode.
 
 Off by default; the /voice nav link only renders when `/api/config` reports
 `voice_enabled`. Sidecar setup: `voicebox/README.md` (Docker or venv;
@@ -253,6 +341,12 @@ Off by default; the /voice nav link only renders when `/api/config` reports
 - `tests/test_voice_session.py` — the state machine with fake transports:
   happy path, all three barge-in verdicts.
 - `tests/test_voice_clone.py` — clone SQL vs. compaction, cap, delivery.
+- `tests/test_voice_noise.py` — the interrupt gate (guitar vs. operator),
+  phantom rejection, and the clap curfew's midnight-wrapping window.
+- `voicebox/tests/test_pipeline.py` — sidecar-only, two tiers: pure tests for
+  the phantom filter and the VAD's evidence arithmetic (run anywhere), and a
+  live round trip through architect-tts + silero + whisper that self-skips
+  unless the TTS service is up.
 - `voicebox/tests/test_pipeline.py` — TTS→VAD→STT round trip (x86 only,
   self-skips without models).
 

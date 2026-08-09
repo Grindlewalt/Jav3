@@ -28,6 +28,17 @@ noise → resume_playback and the pause was a sub-second hiccup. While the
 verdict is pending the TTS stream keeps flowing — the browser buffers it, so
 a false alarm loses nothing.
 
+**The verdict is evidence, not word count.** It used to be "the transcript came
+back non-empty", and that is why someone playing guitar in the same room could
+stop Jarvis mid-sentence: the browser's RMS gate trips on any loud sound,
+whisper is handed music and returns fluent invented words, and non-empty text
+read as the operator talking. The sidecar now sends what it actually knows —
+silero's speech ratio for the clip and whisper's own confidence — and
+`_is_interrupt` weighs both. Measured separation (voicebox/vad.py): operator
+speech scores 0.39-0.97 on speech_ratio even talking over a guitar, guitar
+alone scores 0.00-0.07 and strummed chords 0.00-0.15, so BARGE_MIN_SPEECH_RATIO
+sits at 0.30 in the middle of that gap.
+
 Talk-while-working (turn already ran a tool): the turn is left running and
 the utterance is parked; phase 4 replaces the parking with the clone-twin
 flow."""
@@ -37,7 +48,7 @@ import json
 import logging
 import random
 import struct
-from datetime import datetime
+from datetime import datetime, time as dtime
 
 import websockets
 
@@ -119,6 +130,13 @@ LOCAL_TOOLS = ("music_play", "music_control", "music_search", "music_status",
                "computer_playback", "computer_status", "computer_volume",
                "computer_open_link", "web_search", "web_read")
 
+# How much evidence a barge-in needs. speech_ratio is silero's — the fraction
+# of 32 ms frames in the clip it scored as speech. See the module docstring for
+# the measured separation; 0.30 keeps every operator utterance in the sweep
+# (worst case 0.39, talking over a guitar) and rejects every music-only clip
+# (worst case 0.15, strummed chords).
+BARGE_MIN_SPEECH_RATIO = 0.30
+
 # Double clap = music, no model in the loop: the browser detects the gesture
 # and this dispatches music_play directly (an algorithm, not a conversation).
 # The agent can still control the result — it's the same Jarvis player.
@@ -126,6 +144,34 @@ LOCAL_TOOLS = ("music_play", "music_control", "music_search", "music_status",
 # tuple is only the never-configured default.
 CLAP_TRACKS = ("Kickstart My Heart", "Should I Stay or Should I Go")
 CLAP_TRACKS_KEY = "voice_clap_tracks"
+
+
+def _parse_hhmm(value: str, fallback: dtime) -> dtime:
+    try:
+        hh, mm = str(value).split(":")
+        return dtime(int(hh), int(mm))
+    except (AttributeError, TypeError, ValueError):
+        return fallback
+
+
+def in_clap_curfew(now: datetime | None = None) -> bool:
+    """Is the double-clap gesture muted right now?
+
+    The clap is an acoustic trigger with no confirmation step — a dropped book
+    at three in the morning starting music is the failure this prevents. The
+    window wraps midnight (22:30 → 07:30), so the comparison is an OR, not the
+    usual BETWEEN. Only the gesture is muted: "hey Jarvis" works at every hour,
+    because that one takes a deliberate sentence to fire."""
+    if not settings.voice_clap_curfew:
+        return False
+    start = _parse_hhmm(settings.voice_clap_curfew_start, dtime(22, 30))
+    end = _parse_hhmm(settings.voice_clap_curfew_end, dtime(7, 30))
+    now_t = (now or datetime.now()).time()
+    if start == end:
+        return False
+    if start < end:                      # a window inside one day
+        return start <= now_t < end
+    return now_t >= start or now_t < end  # wraps midnight
 
 
 async def get_clap_tracks(db) -> list[str]:
@@ -470,6 +516,9 @@ class VoiceSession:
         if kind == "ready":
             self.wake_enabled = bool(ev.get("wake"))
             await self._send_json({"type": "ready", "wake": ev.get("wake")})
+            # The sidecar holds no Jarvis state, so the names the operator
+            # actually says have to be pushed to it on every connect.
+            asyncio.create_task(self._push_vocab())
             if self.wake_enabled and self.state == LISTENING:
                 await self._sleep()          # sessions start on standby
             elif self.state == LISTENING:
@@ -480,13 +529,20 @@ class VoiceSession:
             # sidecar-side detector (voicebox/clap.py). Fires at most once per
             # session for the same reason as before: a repeat gesture mid-song
             # would yank the track out from under the operator.
-            if not self.clap_done:
+            if in_clap_curfew():
+                log.info("clap ignored: inside the %s-%s curfew",
+                         settings.voice_clap_curfew_start,
+                         settings.voice_clap_curfew_end)
+                await self._send_json({"type": "clap", "title": None,
+                                       "curfew": True,
+                                       "result": "ignored — quiet hours"})
+            elif not self.clap_done:
                 self.clap_done = True
                 asyncio.create_task(self._clap_play())
         elif kind in ("speech_start", "speech_end"):
             await self._send_json(ev)       # UI listening indicator
         elif kind == "transcript":
-            await self._on_transcript(ev.get("text") or "")
+            await self._on_transcript(ev.get("text") or "", ev)
         elif kind == "tts_done":
             c = self.chunks.get(ev.get("id"))
             if c is not None:
@@ -496,10 +552,67 @@ class VoiceSession:
         elif kind == "error":
             await self._send_json(ev)
 
+    # ---- speech evidence -----------------------------------------------------
+
+    async def _push_vocab(self) -> None:
+        """Bias the sidecar's decoder toward the proper nouns this operator
+        actually says. Track titles and artists are the words whisper gets
+        wrong most, and they are exactly the ones a wrong guess acts on (the
+        wrong song plays). Best-effort: no vocabulary just means no bias."""
+        words: list[str] = ["Jarvis"]
+        try:
+            from .tarmac import cached_library
+            tracks = await cached_library(settings.voice_library_max_tracks,
+                                          settings.voice_library_ttl_seconds)
+            for t in tracks:
+                for field in ("title", "artist"):
+                    val = (t.get(field) or "").strip()
+                    if val:
+                        words.append(val)
+        except Exception as exc:  # noqa: BLE001 — a down music server is not fatal
+            log.debug("voice: no library for the STT vocabulary (%s)", exc)
+        try:
+            db = await get_db()
+            try:
+                async with db.execute(
+                    "SELECT name FROM projects WHERE deleted_at IS NULL "
+                    "ORDER BY updated_at DESC LIMIT 30") as cur:
+                    words += [r["name"] for r in await cur.fetchall() if r["name"]]
+            finally:
+                await db.close()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("voice: no project names for the STT vocabulary (%s)", exc)
+        if len(words) > 1:
+            await self.link.send_json({"type": "vocab", "words": words})
+
+    @staticmethod
+    def _is_interrupt(ev: dict | None) -> bool:
+        """Did the OPERATOR just interrupt, or did the room make a noise?
+
+        Only consulted for a barge-in, where a false positive cuts a reply off
+        mid-sentence and a false negative costs the operator one repeat. `None`
+        means the caller vouched for the utterance itself (the test seam and
+        any non-sidecar path), so it is taken at its word."""
+        if ev is None:
+            return True
+        if ev.get("phantom"):
+            return False                 # whisper's stock fabrications
+        if not ev.get("confident", True):
+            return False                 # it was guessing
+        ratio = ev.get("speech_ratio")
+        return ratio is None or ratio >= BARGE_MIN_SPEECH_RATIO
+
     # ---- the transcript router (the heart of the machine) --------------------
 
-    async def _on_transcript(self, text: str) -> None:
+    async def _on_transcript(self, text: str, ev: dict | None = None) -> None:
         text = text.strip()
+
+        # A phantom is dropped in every state, not just under playback: "Thank
+        # you for watching" is what whisper returns for room tone, and acting
+        # on it starts a turn nobody asked for.
+        if text and ev is not None and ev.get("phantom"):
+            log.info("voice: phantom transcript ignored (%r)", text[:80])
+            text = ""
 
         # The wake phrase is stripped from EVERY utterance, awake or asleep, so
         # "Jarvis, turn it down" is the same request as "turn it down".
@@ -549,7 +662,14 @@ class VoiceSession:
         if self.state == BARGE_PENDING:
             self.state = SPEAKING
             pos, self.barge_pos = self.barge_pos, None
-            if not text:                              # cough / noise
+            if not text or not self._is_interrupt(ev):
+                # cough, guitar, a door — or words whisper is not confident
+                # enough about to cut a reply short over. Resume; the operator
+                # heard at most a sub-second hiccup.
+                if text:
+                    log.info("voice: barge-in refused (%r, speech_ratio=%s, "
+                             "conf=%s)", text[:80], (ev or {}).get("speech_ratio"),
+                             (ev or {}).get("confident"))
                 await self._send_json({"type": "resume_playback"})
                 await self._push_state()
                 return
