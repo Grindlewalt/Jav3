@@ -29,6 +29,7 @@ class FakeProjector:
         self.result = result
         self.status = status
         self.calls = []
+        self.lists = 0            # how many times tools/list was requested
         self.auth = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -38,6 +39,7 @@ class FakeProjector:
         body = json.loads(request.content or b"{}")
         method, params = body.get("method"), body.get("params") or {}
         if method == "tools/list":
+            self.lists += 1
             return httpx.Response(200, json={
                 "jsonrpc": "2.0", "id": body.get("id"),
                 "result": {"tools": [{"name": n, "description": "x",
@@ -433,3 +435,98 @@ async def test_status_renders_prose_not_raw_json(monkeypatch):
     assert "Ceiling panel" in out
     assert "civilisation era, 3 civilisations" in out
     assert "{" not in out                      # no raw JSON reached the model
+
+
+# ---- the drift check actually runs -----------------------------------------
+# `verify()` was correct and tested from the day the pin was written, and had
+# no production caller at all: only `tools/call` ever went out, so
+# `mcp_unpinned_tools` could not fire on a live system no matter what the
+# server did. These pin the wiring, not the logic.
+
+async def test_a_call_runs_the_drift_check_once(projector, tmp_env):
+    await mcp.projector_call("pmu_status")
+    assert projector.lists == 1                     # the check ran…
+    assert projector.calls == [("pmu_status", {})]  # …and the call still went
+
+    await mcp.projector_call("pmu_status")
+    assert projector.lists == 1                     # cached: once per client
+    assert len(projector.calls) == 2
+
+
+async def test_a_token_rotation_re_checks(projector, monkeypatch, tmp_env):
+    """`projector()` rebuilds the client when the settings change, so the new
+    server — which may not be the same app at all — is checked afresh."""
+    await mcp.projector_call("pmu_status")
+    assert projector.lists == 1
+    _configure(monkeypatch, token="rotated")
+    _route(monkeypatch, projector.handler)
+    await mcp.projector_call("pmu_status")
+    assert projector.lists == 2
+
+
+async def test_the_check_never_breaks_a_call(monkeypatch, tmp_env):
+    """A projector that is off, or a build with no tools/list, must not turn
+    into a failed preflight — being unable to check is not a reason to refuse."""
+    fake = FakeProjector()
+
+    def handler(request):
+        body = json.loads(request.content or b"{}")
+        if body.get("method") == "tools/list":
+            return httpx.Response(500, json={"error": "no"})
+        return fake.handler(request)
+
+    _configure(monkeypatch)
+    _route(monkeypatch, handler)
+    assert "ok" in (await mcp.projector_call("pmu_status")).lower()
+    assert fake.calls == [("pmu_status", {})]
+
+
+async def test_the_automatic_check_does_not_alert_by_default(projector, tmp_env):
+    """No tools/list has ever been run against the real app, and raise_event
+    has no dedup — so an unpinned name found by the AUTOMATIC check logs and
+    waits for the operator rather than filing a warning on every call."""
+    await init_db()
+    projector.tools = sorted(mcp.PROJECTOR_MANIFEST) + ["pmu_set_corners"]
+
+    await mcp.projector_call("pmu_status")
+
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT COUNT(*) AS n FROM security_events "
+                "WHERE kind = 'mcp_unpinned_tools'") as cur:
+            assert (await cur.fetchone())["n"] == 0
+    finally:
+        await db.close()
+    # ...and the unpinned name is still not callable, which is the pin's job
+    assert "pmu_set_corners" not in mcp.PROJECTOR_MANIFEST
+
+
+async def test_switching_the_alert_on_files_the_event(projector, monkeypatch,
+                                                      tmp_env):
+    from backend.config import settings
+    await init_db()
+    monkeypatch.setattr(settings, "mcp_alert_unpinned", True)
+    projector.tools = sorted(mcp.PROJECTOR_MANIFEST) + ["run_shell"]
+
+    await mcp.projector_call("pmu_status")
+
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT detail FROM security_events "
+                "WHERE kind = 'mcp_unpinned_tools'") as cur:
+            rows = await cur.fetchall()
+    finally:
+        await db.close()
+    assert len(rows) == 1
+    assert json.loads(rows[0]["detail"])["ignored"] == ["run_shell"]
+
+
+async def test_the_check_can_be_switched_off_entirely(projector, monkeypatch,
+                                                      tmp_env):
+    from backend.config import settings
+    monkeypatch.setattr(settings, "mcp_verify_manifest", False)
+    await mcp.projector_call("pmu_status")
+    assert projector.lists == 0
+    assert projector.calls == [("pmu_status", {})]

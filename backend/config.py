@@ -328,6 +328,16 @@ class Settings(BaseSettings):
     # distinction is the whole security design.
     mcp_projector_url: str = ""          # e.g. http://10.0.0.40:8765/mcp
     mcp_projector_token: str = ""
+    # Run the drift check (the server's tools/list vs our pin) once per client,
+    # before the first call. Cheap and cached; a server that is off just skips it.
+    mcp_verify_manifest: bool = True
+    # ...and file a security event when the server offers something unpinned.
+    # OFF until a real tools/list has been seen once: no round trip has ever
+    # completed against the projector app, `security.raise_event` has no dedup,
+    # and a server whose names merely differ from our pin would file a warning
+    # per call. The journal line from the check above is what tells you it is
+    # safe to turn this on.
+    mcp_alert_unpinned: bool = False
 
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped

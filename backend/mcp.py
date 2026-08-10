@@ -137,11 +137,47 @@ async def projector_call(verb: str, args: dict | None = None) -> str:
         # forgets the manifest is the point of the pin in the first place
         raise McpError(f"{verb} is not in the pinned projector manifest")
     from . import runtime
+    client = projector()
+    await _verify_once(client)
     token = runtime.write_taint.set("mcp:projector")
     try:
-        return await projector().call(verb, args or {})
+        return await client.call(verb, args or {})
     finally:
         runtime.write_taint.reset(token)
+
+
+async def _verify_once(client: "McpClient") -> set[str] | None:
+    """Run the manifest drift check the first time we talk to a server.
+
+    `verify()` has existed and been unit-tested since the pin was written, with
+    no production caller at all — so `mcp_unpinned_tools` could never actually
+    fire on a live system. `tools/list` was never requested; only `tools/call`
+    was. This is the wiring that makes the tripwire real.
+
+    Deliberately ADVISORY: it records what the app offers, and alerts when
+    switched on, but it does not decide whether the call proceeds. Gating on it
+    would mean a server whose tool names merely differ from our pin silently
+    disables every projector verb — and since no `tools/list` has ever been run
+    against the real app, that difference is unobserved rather than ruled out.
+    The refusal in `projector_call` above is the control that actually blocks;
+    this is the thing that tells the operator the pin needs another look.
+
+    Never fatal. A projector that is switched off is the normal case, and the
+    call itself is about to report that far better than a failed preflight can.
+    """
+    if not settings.mcp_verify_manifest or client._verified is not None:
+        return client._verified
+    try:
+        names = await client.verify(PROJECTOR_MANIFEST,
+                                    alert=settings.mcp_alert_unpinned)
+    except McpError as exc:
+        log.debug("mcp %s: manifest not verified (%s)", client.cfg.name, exc)
+        return None
+    missing = PROJECTOR_MANIFEST - names
+    log.info("mcp %s: manifest check — %d of %d pinned verbs offered%s",
+             client.cfg.name, len(names), len(PROJECTOR_MANIFEST),
+             f"; MISSING {sorted(missing)}" if missing else "")
+    return names
 
 
 async def projector_surfaces() -> list[dict]:
@@ -234,7 +270,7 @@ class McpClient:
 
     # ---- the pinned manifest ------------------------------------------------
 
-    async def verify(self, expected: set[str]) -> set[str]:
+    async def verify(self, expected: set[str], *, alert: bool = True) -> set[str]:
         """Check the server really offers the tools OUR manifest names.
 
         Returns the intersection — what is actually callable. Two asymmetric
@@ -247,6 +283,10 @@ class McpClient:
           grew a tool overnight is either updated (and the operator should
           re-pin the manifest deliberately) or compromised, and neither is
           something to resolve by trusting it.
+
+        `alert=False` keeps the drift out of the Review Center but still logs
+        it — for the automatic pre-call check, which runs before anyone has
+        confirmed what the real server actually advertises.
         """
         async with self._lock:
             result = await self._rpc("tools/list", timeout=CONNECT_TIMEOUT * 2)
@@ -254,7 +294,10 @@ class McpClient:
                        if isinstance(t, dict) and t.get("name")}
             unexpected = offered - expected
             if unexpected:
-                await self._alert_unpinned(unexpected)
+                log.warning("mcp %s: ignoring unpinned tools %s",
+                            self.cfg.name, sorted(unexpected))
+                if alert:
+                    await self._alert_unpinned(unexpected)
             self._verified = offered & expected
             return set(self._verified)
 
@@ -263,8 +306,6 @@ class McpClient:
         lands in the Review Center rather than being resolved quietly, because
         the two explanations — the app was updated, or it was tampered with —
         are told apart by the operator, not by us."""
-        log.warning("mcp %s: ignoring unpinned tools %s",
-                    self.cfg.name, sorted(unexpected))
         try:
             db = await get_db()
             try:
