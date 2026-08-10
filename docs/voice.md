@@ -165,15 +165,25 @@ rules under the list (see `LIBRARY_RULES`), and the fact that each track's id
 **trails** its title rather than leading it — `[26] Mockingbird` had gemma-4:12b
 returning a neighbour's number 4/4, i.e. confidently playing the wrong song.
 
-## The latency budget (rebuilt 2026-08-03, re-measured 2026-08-04)
+## The latency budget (rebuilt 2026-08-03, re-measured 2026-08-04, restated 2026-08-10)
 
-Target: **speech end → first audio ≤ 880 ms**. Measured median **691 ms**:
+Target: **speech end → first audio ≤ 880 ms**. It was met — median **691 ms** on
+2026-08-04 — and has since been spent twice, deliberately, on capability. The
+current chain is **≈1.19 s**. Read the rest of this section as the story of
+where the 500 ms went, not as a budget that is being missed by accident.
 
 | leg | cost | where |
 |---|---|---|
-| whisper (small, int8_float16) | 73 ms | voicebox, cuda:0 |
-| LLM to first spoken clause | ~308 ms | llama.cpp :11436, **cuda:1** |
+| whisper (`large-v3-turbo`, hardened) | 216 ms | voicebox, cuda:0 |
+| LLM to first spoken clause | ~663 ms | llama.cpp :11436, **cuda:1** |
 | TTS of that clause | ~310 ms | architect-tts :8123, cuda:1 |
+
+⚠️ **The chain figure is arithmetic, not a measurement.** Every leg above was
+measured, but no speech-end→first-audio run has been taken since the STT change
+on 2026-08-09. The last true end-to-end number is the 691 ms median from
+08-04, which was a different model on both the STT and LLM legs. Re-measuring
+needs a human at a mic: the wake word is armed, so a session starts ASLEEP and
+`ws_e2e.py`'s wav never says "hey jarvis".
 
 **Card placement is worth more than model size.** The LLM used to share cuda:0
 with whisper, and that contention — not any llama.cpp floor — cost ~150 ms of
@@ -181,18 +191,31 @@ TTFT. The note that once claimed a "hard ~190 ms per-request floor" was wrong:
 the same 4B on an idle card does 76–79 ms. Moving to cuda:1 paid for a model
 twice the size and still came out 131 ms ahead:
 
-| config | TTFT | first clause | chain |
+| config | TTFT | first clause | chain (with `small` STT) |
 |---|---|---|---|
 | 4B on cuda:0 (until 2026-08-04) | 264 ms | 439 ms | 822 ms |
 | 9B on cuda:1 | 107 ms | 344 ms | 727 ms |
-| **gemma-4:12b on cuda:1 (current)** | 405 ms | 663 ms | **1046 ms** |
+| **gemma-4:12b on cuda:1 (current)** | 405 ms | 663 ms | 1046 ms |
 
-The 12B is deliberately over the 880 ms target. It was chosen on capability:
-30/50 → 44/50 on the voice gauntlet, and the 9B's failures were almost all
-fabrication ("Playing Seven Nation Army, sir." with no tool call) on the two
-commonest ways music gets asked for. 1046 ms is inside the 1-1.5 s band
-research calls acceptable. Its `--reasoning-budget 0` is load-bearing — see
-`scripts/llama-voice.service`.
+**Both numbers in that last row are still true of the LLM leg, and the 1046 ms
+chain is not.** It was computed when whisper was `small` at ~73 ms. Since
+2026-08-09 the STT leg is `large-v3-turbo` at 216 ms, so the same arithmetic now
+gives **≈1189 ms**. (The STT table below measures `small` at 79 ms rather than
+73 ms — different runs, and the 6 ms is not worth reconciling; the point is that
+the STT leg grew by roughly 140 ms and no line in this doc said so for a day.)
+
+So the target has been overspent twice, both times knowingly:
+
+- **+166 ms for the 12B**, on capability: 30/50 → 44/50 on the voice gauntlet,
+  and the 9B's failures were almost all fabrication ("Playing Seven Nation Army,
+  sir." with no tool call) on the two commonest ways music gets asked for. Its
+  `--reasoning-budget 0` is load-bearing — see `scripts/llama-voice.service`.
+- **+143 ms for `large-v3-turbo`**, on accuracy under noise: 19–27% → 9–14% WER
+  with a guitar in the room. See the STT section below.
+
+≈1.19 s is at the top of the 1–1.5 s band research calls acceptable, and there
+is no headroom left. Anything else that wants a slice of this budget has to
+take it from one of those two decisions rather than from the target.
 
 Three things hold that number up, and all three are easy to undo by accident:
 
