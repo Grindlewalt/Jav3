@@ -44,6 +44,11 @@ def register_turn(env: TurnEnvelope) -> None:
 def release_turn(op_id: str) -> None:
     _envelopes.pop(op_id, None)
     _tainted.discard(op_id)          # forget the turn's taint history too
+    # ...and hand egress attribution back to whatever turn is still running, or
+    # to nobody. Leaving it set meant a finished project kept policing the
+    # guest's later traffic.
+    from .. import egress
+    egress.clear_context(op_id)
 
 
 def get_turn(op_id: str) -> TurnEnvelope | None:

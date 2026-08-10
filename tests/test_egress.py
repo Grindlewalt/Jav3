@@ -7,6 +7,18 @@ from backend import db as db_mod
 from backend.config import settings
 
 
+@pytest.fixture(autouse=True)
+def clean_turn_attribution():
+    """Turn attribution is module state, and not every test here takes `db` —
+    reset it for all of them rather than leaving one test's stack to decide
+    another's answer."""
+    egress._stack.clear()
+    egress._context.update(egress._EMPTY)
+    yield
+    egress._stack.clear()
+    egress._context.update(egress._EMPTY)
+
+
 @pytest.fixture
 async def db(tmp_env):
     await db_mod.init_db()
@@ -185,3 +197,84 @@ async def test_security_event_roundtrip(db):
     assert events[0]["id"] == eid and events[0]["detail"]["host"] == "evil.com"
     await security.acknowledge(db, eid)
     assert await security.count_unacknowledged(db) == 0
+
+
+# --- turn attribution --------------------------------------------------------
+# The proxy has no op_id on the wire, so it asks who is driving the guest right
+# now. Getting that answer wrong picks the wrong project's allowlist.
+
+def test_the_last_turn_out_clears_attribution():
+    """Until 2026-08-10 it didn't, so a finished project went on policing
+    whatever the guest did next — a process outliving its run_code call, a
+    connection still draining."""
+    egress.set_context("alpha", "op-1", 7)
+    assert egress.current_context()["project"] == "alpha"
+    egress.clear_context("op-1")
+    assert egress.current_context() == {"project": None, "op_id": None,
+                                        "conversation_id": None}
+
+
+def test_a_child_release_hands_attribution_back_to_its_parent():
+    """spawn_agent runs a child turn inside its parent. The child ending must
+    not leave the parent's own remaining traffic unattributed."""
+    egress.set_context("alpha", "op-parent", 1)
+    egress.set_context("alpha", "op-child", 2)
+    assert egress.current_context()["op_id"] == "op-child"
+    egress.clear_context("op-child")
+    ctx = egress.current_context()
+    assert ctx["op_id"] == "op-parent" and ctx["conversation_id"] == 1
+    egress.clear_context("op-parent")
+    assert egress.current_context()["project"] is None
+
+
+def test_concurrent_turns_release_out_of_order():
+    """Several chats drive one guest. The turn that finishes first is usually
+    not the one that started last, so a release pops ITS entry, not the top."""
+    egress.set_context("alpha", "op-a", 1)
+    egress.set_context("beta", "op-b", 2)
+    egress.clear_context("op-a")             # the older one finishes first
+    assert egress.current_context()["project"] == "beta"
+    egress.clear_context("op-b")
+    assert egress.current_context()["project"] is None
+
+
+def test_releasing_an_unknown_op_disturbs_nothing():
+    egress.set_context("alpha", "op-a", 1)
+    egress.clear_context("op-nonexistent")
+    assert egress.current_context()["project"] == "alpha"
+
+
+def test_attribution_stack_cannot_grow_without_bound():
+    """Every push is paired with a pop in guest_turn's finally. If that pairing
+    ever breaks, this process runs for weeks — cap rather than leak."""
+    for i in range(egress._STACK_CAP + 25):
+        egress.set_context("alpha", f"op-{i}", i)
+    assert len(egress._stack) == egress._STACK_CAP
+    assert egress.current_context()["op_id"] == f"op-{egress._STACK_CAP + 24}"
+
+
+def test_broker_release_turn_clears_the_context():
+    """The real caller, not just the helper: guest_turn calls this in a finally."""
+    from backend.vm import broker
+    broker.register_turn(broker.TurnEnvelope(
+        op_id="op-real", conversation_id=3, active_project="alpha"))
+    assert egress.current_context()["project"] == "alpha"
+    broker.release_turn("op-real")
+    assert egress.current_context()["project"] is None
+
+
+async def test_unattributed_traffic_falls_back_to_the_general_baseline(db):
+    """What a cleared context MEANS for policy, stated rather than assumed.
+
+    A null slug resolves to the general allowlist — the same policy the very
+    first request after boot has always used, since the context starts empty.
+    That is stricter than a project carrying extra allowlisted hosts, and
+    LOOSER than one in denyall/denylist mode. Whether an unattributed request
+    should instead be refused outright is an operator policy call, not
+    something to decide inside a bug fix."""
+    pol = await egress.get_policy(db, None)
+    assert pol["source"] == "general"
+    verdict, _ = await egress.decide(db, None, "pypi.org")
+    assert verdict == "allow"
+    verdict, _ = await egress.decide(db, None, "evil.example")
+    assert verdict == "deny"

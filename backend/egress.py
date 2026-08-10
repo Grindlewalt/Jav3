@@ -31,12 +31,47 @@ EGRESS_CHAN = "egress"           # bus channel the live Network view subscribes 
 # register_turn (innermost/most-recent wins; nested turns share the project). A
 # plain module global — not a contextvar — because the proxy runs on a different
 # asyncio task than the turn.
-_context: dict = {"project": None, "op_id": None, "conversation_id": None}
+#
+# It is a STACK because turns overlap in both directions: a spawn_agent child
+# registers while its parent is still open, and several chats can drive the one
+# guest at once. So a turn ending has to hand attribution back to whatever is
+# still running rather than blanking it — and, when nothing is, actually clear.
+# Until 2026-08-10 it never cleared at all: `release_turn` dropped the envelope
+# and left the finished project's slug in place, so anything the guest did
+# afterwards (a process outliving its run_code call, a straggling connection)
+# was policed under the last project to have run. Unattributed traffic now
+# falls back to the general baseline, which is what the very first request
+# after boot has always used.
+_EMPTY: dict = {"project": None, "op_id": None, "conversation_id": None}
+_context: dict = dict(_EMPTY)
+_stack: list[dict] = []
+
+# A safety valve, not a design limit: every push is paired with a pop in
+# guest_turn's `finally`, so real depth is the number of turns in flight (a
+# handful). If that pairing is ever broken, drop the oldest rather than grow a
+# list forever in a process that runs for weeks.
+_STACK_CAP = 64
 
 
 def set_context(project: str | None, op_id: str | None = None,
                 conversation_id: int | None = None) -> None:
-    _context.update(project=project, op_id=op_id, conversation_id=conversation_id)
+    """Attribute the guest's egress to this turn, until it releases."""
+    entry = {"project": project, "op_id": op_id, "conversation_id": conversation_id}
+    _stack.append(entry)
+    del _stack[:-_STACK_CAP]
+    _context.update(entry)
+
+
+def clear_context(op_id: str | None) -> None:
+    """Drop a finished turn's attribution, restoring the turn underneath it.
+
+    Removes THIS op's entry wherever it sits, not the top one: with concurrent
+    turns the one that finishes first is usually not the one that started last."""
+    for i in range(len(_stack) - 1, -1, -1):
+        if _stack[i]["op_id"] == op_id:
+            del _stack[i]
+            break
+    _context.update(_stack[-1] if _stack else _EMPTY)
 
 
 def current_context() -> dict:
