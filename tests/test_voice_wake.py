@@ -26,6 +26,17 @@ async def seeded(tmp_env):
         await db.close()
 
 
+@pytest.fixture(autouse=True)
+def no_clap_curfew(monkeypatch):
+    """Quiet hours are not what any test here is about, but the clap path calls
+    `in_clap_curfew()` with no argument, so it reads the real clock: without
+    this the four clap tests fail for the nine hours a day the curfew is up.
+    The curfew's own behaviour is covered in test_voice_noise.py, which passes
+    a fixed datetime rather than depending on when the suite runs."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "voice_clap_curfew", False)
+
+
 async def mark_greeted():
     """Most tests aren't about the startup greeting — pre-spend it."""
     from datetime import datetime
