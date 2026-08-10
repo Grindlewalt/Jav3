@@ -2332,3 +2332,29 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   font-size: 12px; line-height: 1; cursor: pointer;
 }
 .notice-x:hover { color: var(--text); background: none; }
+
+/* --- in-page confirm / prompt (ask.jsx) -------------------------------------
+   Same layer as the security board's modal (4000), which is deliberately above
+   .notices (3000): a toast must never be clickable through an open dialog,
+   because tapping one navigates away mid-question. */
+.ask-scrim {
+  position: fixed; inset: 0; z-index: 4000; background: var(--overlay);
+  display: flex; align-items: center; justify-content: center;
+  padding: max(24px, var(--sat)) 20px max(24px, var(--sab));
+  animation: scrim-in 0.14s ease both;
+}
+.ask-modal {
+  width: min(440px, 100%);
+  background: var(--glass); border: 1px solid var(--border); border-radius: 16px;
+  backdrop-filter: blur(18px) saturate(1.15);
+  -webkit-backdrop-filter: blur(18px) saturate(1.15);
+  box-shadow: var(--shadow-win); overflow: hidden;
+  animation: drop-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
+}
+.ask-body { padding: 20px 20px 4px; }
+.ask-msg { margin: 0; font-size: 14.5px; line-height: 1.5; }
+.ask-sub { margin: 8px 0 0; color: var(--dim); font-size: 12.5px; line-height: 1.5; }
+.ask-input { width: 100%; margin-top: 14px; }
+.ask-foot {
+  display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px 18px;
+}

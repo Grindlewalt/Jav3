@@ -26,6 +26,7 @@ import Voice from './pages/Voice.jsx'
 import Notices, { useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import { notify, notifyError } from './notify.js'
+import { AskProvider } from './ask.jsx'
 
 // Primary destinations stay on the bar; everything else lives behind "More".
 // Eleven top-level links used to wrap the bar into two or three ragged rows
@@ -472,6 +473,7 @@ export default function App() {
   )
 
   return (
+    <AskProvider>
     <div className={railed ? 'app railed' : 'app'}>
       {user && (
         <>
@@ -563,5 +565,6 @@ export default function App() {
       </ErrorBoundary>
       </NavSlotContext.Provider>
     </div>
+    </AskProvider>
   )
 }

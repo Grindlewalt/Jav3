@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
 import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
+import { useAsk } from './ask.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
 // conversations are filtered to that project and new ones are linked to it.
@@ -16,6 +17,7 @@ export default function ChatBox({ projectSlug }) {
   const [peakAsk, setPeakAsk] = useState(null)
   const bottomRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
+  const ask = useAsk()
 
   useEffect(() => () => tailAbort.current?.abort(), [])
 
@@ -69,7 +71,8 @@ export default function ChatBox({ projectSlug }) {
 
   async function del(id, e) {
     e.stopPropagation()
-    if (!window.confirm(`delete chat #${id}?`)) return
+    if (!await ask.confirm(`Delete chat #${id}?`,
+                           { confirmLabel: 'Delete', danger: true })) return
     await api(`/api/conversations/${id}`, { method: 'DELETE' })
     if (id === cid) newChat()
     refresh()
