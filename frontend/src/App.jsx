@@ -24,6 +24,7 @@ import Review from './pages/Review.jsx'
 import ComputerUse from './pages/ComputerUse.jsx'
 import Voice from './pages/Voice.jsx'
 import Notices, { useNotices } from './Notices.jsx'
+import ErrorBoundary from './ErrorBoundary.jsx'
 
 // Primary destinations stay on the bar; everything else lives behind "More".
 // Eleven top-level links used to wrap the bar into two or three ragged rows
@@ -537,6 +538,10 @@ export default function App() {
       {user && <Notices toasts={notices.toasts} dismiss={notices.dismiss}
                         clear={notices.clear} />}
       <NavSlotContext.Provider value={setNavSlot}>
+      {/* Inside the provider and around the routes only: the nav, the player
+          and the toasts stay mounted through a page's failure, so there is
+          always a way out of a broken page. */}
+      <ErrorBoundary resetKey={location.pathname}>
       <Routes>
         <Route path="/login" element={<Login onLogin={setUser} />} />
         <Route path="/" element={<Chat />} />
@@ -554,6 +559,7 @@ export default function App() {
         <Route path="/skills" element={<Skills />} />
         <Route path="/tools" element={<Tools />} />
       </Routes>
+      </ErrorBoundary>
       </NavSlotContext.Provider>
     </div>
   )
