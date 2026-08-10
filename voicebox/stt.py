@@ -175,9 +175,22 @@ class Transcriber:
         self.model = WhisperModel(self.model_size, device=device,
                                   compute_type=compute,
                                   download_root=download_root)
-        log.info("whisper %s on %s/%s, beam=%d, temp-fallback=%s",
+        # `hotwords` arrived in faster-whisper 1.0.2. Passing it to an older
+        # build is a TypeError on EVERY utterance — voice would be completely
+        # dead rather than merely un-biased, and this box is deployed by hand
+        # on a machine the agent cannot restart. Ask the signature instead of
+        # assuming the requirements file was honoured.
+        import inspect
+        self._can_hotword = "hotwords" in inspect.signature(
+            self.model.transcribe).parameters
+        if not self._can_hotword:
+            log.warning("this faster-whisper has no `hotwords` support "
+                        "(needs >= 1.0.2) — the vocabulary push will be "
+                        "accepted and ignored")
+        log.info("whisper %s on %s/%s, beam=%d, temp-fallback=%s, hotwords=%s",
                  self.model_size, device, compute, self.beam_size,
-                 "on" if self.fallback else "off")
+                 "on" if self.fallback else "off",
+                 "yes" if self._can_hotword else "NO")
 
     def set_vocab(self, words: list[str]) -> int:
         """Bias decoding toward names the operator actually says. Returns the
@@ -208,6 +221,7 @@ class Transcriber:
 
         temperature = ([0.0, 0.2, 0.4, 0.6, 0.8, 1.0] if self.fallback
                        else [0.0])
+        extra = {"hotwords": self._hotwords} if self._can_hotword else {}
         segments, _info = self.model.transcribe(
             audio, language=self.lang, beam_size=self.beam_size,
             temperature=temperature,
@@ -220,7 +234,7 @@ class Transcriber:
             # Never carry context between utterances: it is the single largest
             # source of whisper drifting into invented continuations.
             condition_on_previous_text=False,
-            hotwords=self._hotwords)
+            **extra)
 
         kept, dropped, weights = [], [], []
         no_speech, logprob = [], []
