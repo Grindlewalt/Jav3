@@ -9,7 +9,12 @@ faster-whisper>=1.0.2         # STT: Whisper via CTranslate2. >=1.0.2 for the
                               # large-v3-turbo on the GPU — see docs/voice.md
                               # for the noise measurements that chose it, and
                               # VOICEBOX_WHISPER=small to roll back.
-kokoro-onnx>=0.4              # TTS: Kokoro 82M via onnxruntime
+# TTS is NOT installed here. The architect voice runs as its own service
+# (architect_tts.py) in a separate py3.12 venv, because it needs torch and this
+# one is deliberately torch-free; tts.py talks to it over HTTP with nothing but
+# stdlib. See scripts/architect-tts.service. Kokoro was the engine until
+# 2026-08-03 and is gone — it cost ~550 ms fixed, which was most of the old
+# latency budget.
 pysilero-vad>=2.0             # VAD: silero v5, onnxruntime-only, model bundled
 numpy>=1.26
 pytest>=8.0                   # for tests/ (self-skips without models)
@@ -20,5 +25,5 @@ pytest>=8.0                   # for tests/ (self-skips without models)
 # GPU whisper (VOICEBOX_DEVICE=cuda) additionally needs:
 #   pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
 # and LD_LIBRARY_PATH pointing at those wheels' lib dirs (see README).
-# Kokoro gains nothing from the GPU (~500 ms fixed cost either way) — leave
-# it on CPU and give whisper the whole card.
+# Whisper gets the whole card: the TTS is a separate process and, on the
+# current layout, a separate GPU (see docs/voice.md).

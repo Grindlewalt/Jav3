@@ -2,41 +2,28 @@
 
 Idempotent: existing files are kept, so this is safe as a container
 entrypoint step. Silero VAD ships inside the pysilero-vad wheel — nothing to
-fetch for it.
+fetch for it, and the TTS is a separate service with its own venv and its own
+weights (architect_tts.py), so nothing to fetch for that either.
 
-  kokoro-v1.0.onnx  (~310 MB)  + voices-v1.0.bin (~27 MB)   — kokoro-onnx release
-  faster-whisper $VOICEBOX_WHISPER (default: small, ~250 MB) — HF hub
+  faster-whisper $VOICEBOX_WHISPER (default: large-v3-turbo, ~1.6 GB) — HF hub
+
+The default MUST track stt.py's, or provisioning downloads one model and the
+app then loads a different one — which on a box with no HF access at runtime
+is a sidecar that starts and cannot transcribe.
 """
 import os
 import sys
-import urllib.request
 from pathlib import Path
 
-KOKORO_BASE = ("https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
-               "model-files-v1.0")
-KOKORO_FILES = ("kokoro-v1.0.onnx", "voices-v1.0.bin")
-
-
-def fetch(url: str, dest: Path) -> None:
-    if dest.exists() and dest.stat().st_size > 0:
-        print(f"  {dest.name}: already present")
-        return
-    print(f"  {dest.name}: downloading …")
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    urllib.request.urlretrieve(url, tmp)   # noqa: S310 — pinned https URLs
-    tmp.rename(dest)
-    print(f"  {dest.name}: done ({dest.stat().st_size // 1_000_000} MB)")
+# Keep in step with stt.py's VOICEBOX_WHISPER default.
+DEFAULT_WHISPER = "large-v3-turbo"
 
 
 def main() -> int:
     models = Path(os.environ.get("VOICEBOX_MODELS", "./models"))
     models.mkdir(parents=True, exist_ok=True)
 
-    print("kokoro:")
-    for name in KOKORO_FILES:
-        fetch(f"{KOKORO_BASE}/{name}", models / name)
-
-    size = os.environ.get("VOICEBOX_WHISPER", "small")
+    size = os.environ.get("VOICEBOX_WHISPER", DEFAULT_WHISPER)
     print(f"faster-whisper ({size}):")
     from faster_whisper.utils import download_model
     download_model(size, cache_dir=str(models / "whisper"))
