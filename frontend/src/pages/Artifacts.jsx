@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
+import { notify } from '../notify.js'
 
 // Everything Jarvis made in project-less chats, grouped by chat: view/edit,
 // turn a store into a real project, or merge its files into an existing one.
@@ -39,7 +40,7 @@ export default function Artifacts() {
     if (!name) return
     await api(`/api/artifacts/${a.slug}/convert`, {
       method: 'POST', body: JSON.stringify({ name }) })
-    window.alert(`now a project: ${name}`)
+    notify(`now a project: ${name}`, { sev: 'ok' })
     refresh()
   }
 
@@ -47,7 +48,7 @@ export default function Artifacts() {
     if (!target) return
     const r = await api(`/api/artifacts/${a.slug}/merge`, {
       method: 'POST', body: JSON.stringify({ target }) })
-    window.alert(`merged into ${target}: ${r.merged.join(', ')}`)
+    notify(`merged into ${target}: ${r.merged.join(', ')}`, { sev: 'ok' })
   }
 
   async function del(a) {

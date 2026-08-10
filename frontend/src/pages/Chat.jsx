@@ -5,6 +5,7 @@ import { api, chatStream, tailStream } from '../api.js'
 import { NavSlotContext } from '../App.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
+import { notifyError } from '../notify.js'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
 // day — a handful per period nod to it (capped at 5) so it doesn't read as a
@@ -127,7 +128,7 @@ function ComposerModel({ visible }) {
         method: 'PUT', body: JSON.stringify({ model }) })
       setM(next)
       window.dispatchEvent(new CustomEvent('jarvis-model-changed', { detail: next }))
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
   return (
     <div className={`composer-model${visible ? '' : ' gone'}`} ref={ref}>

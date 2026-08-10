@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import { notifyError } from '../notify.js'
 
 // Everything is INCLUDED by default; checkboxes remove. That way an agent
 // can't silently miss something necessary — you only take away what it
@@ -66,7 +67,7 @@ export default function Agents() {
       nameRef.current.value = ''
       await refresh()
       setSelected(r.slug)
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
 
   const patch = (p) => { setAgent((a) => ({ ...a, ...p })); setDirty(true) }
@@ -94,7 +95,7 @@ export default function Agents() {
       const r = await api('/api/agents/prompt-quiz', {
         method: 'POST', body: JSON.stringify({ description }) })
       setQuiz(r.questions.map((q) => ({ ...q, answer: q.kind === 'multi' ? [] : '' })))
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setGenBusy(false)
   }
 
@@ -110,7 +111,7 @@ export default function Agents() {
         body: JSON.stringify({ description: agent.description, answers }) })
       patch({ prompt: r.prompt })
       setQuiz(null)
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setGenBusy(false)
   }
 
@@ -132,7 +133,7 @@ export default function Agents() {
     try {
       await api(`/api/agents/${slug}/restore`, { method: 'POST' })
       refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
   async function purge(slug) {
     if (!window.confirm(`permanently delete "${slug}"? this can't be undone`)) return

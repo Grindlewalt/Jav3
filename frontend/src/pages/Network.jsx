@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
+import { notifyError } from '../notify.js'
 
 // The guest's live egress: a scrolling feed of every outbound request the
 // sandbox made, with a verdict chip (allow / deny / cut), an approval queue for
@@ -59,7 +60,7 @@ function PolicyEditor({ slug }) {
         method: 'PUT',
         body: JSON.stringify({ mode: pol.mode, inherit_general: pol.inherit_general, hosts }) })
       setStatus('saved'); setTimeout(() => setStatus(''), 1500); load()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setSaving(false)
   }
 
@@ -111,7 +112,7 @@ function Grants({ slug }) {
       await api(`/api/egress/grants/${slug}`, {
         method: 'POST', body: JSON.stringify({ secret, status: statusVal }) })
       load()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
   async function add() {
     const name = window.prompt('secret name to grant to this project')
@@ -176,7 +177,7 @@ export function NetworkPanel({ slug }) {
   }, [slug]) // eslint-disable-line
   async function decide(id, verb) {
     try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); reloadPending() }
-    catch (err) { window.alert(err.detail || String(err)) }
+    catch (err) { notifyError(err) }
   }
 
   return (
@@ -259,7 +260,7 @@ export default function Network() {
   }
   async function decide(id, verb) {
     try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); reloadPending() }
-    catch (err) { window.alert(err.detail || String(err)) }
+    catch (err) { notifyError(err) }
   }
 
   const shown = filter ? feed.filter((e) => e.project === filter) : feed

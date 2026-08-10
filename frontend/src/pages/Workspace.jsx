@@ -10,6 +10,7 @@ import Md from '../Md.jsx'
 import { ReviewQueue } from './Review.jsx'
 import { NetworkPanel } from './Network.jsx'
 import { cspMediaSources } from '../mediaHosts.js'
+import { notify, notifyError } from '../notify.js'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
@@ -790,7 +791,7 @@ function OrganizerPanel({ slug }) {
     try {
       await api(`/api/projects/${slug}/move`, {
         method: 'POST', body: JSON.stringify({ src, dest }) })
-    } catch (err) { window.alert(err.detail || err) }
+    } catch (err) { notifyError(err) }
     refresh()
   }
 
@@ -816,7 +817,7 @@ function OrganizerPanel({ slug }) {
     try {
       await api(`/api/projects/${slug}/dirs?path=${encodeURIComponent(dir)}`,
                 { method: 'DELETE' })
-    } catch (err) { window.alert(err.detail || err) }
+    } catch (err) { notifyError(err) }
     refresh()
   }
 
@@ -836,7 +837,7 @@ function OrganizerPanel({ slug }) {
                             { method: 'POST', body: form })
     if (!res.ok) {
       const detail = await res.json().then((d) => d.detail).catch(() => res.statusText)
-      window.alert(`upload failed: ${detail}`)
+      notify(`upload failed: ${detail}`)
     }
     e.target.value = ''
     refresh()
@@ -970,7 +971,7 @@ function ContextPanel({ slug }) {
       await api(`/api/projects/${slug}/context`, {
         method: 'PUT', body: JSON.stringify({ files: next }) })
       await refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setBusy(false)
   }
 
@@ -984,7 +985,7 @@ function ContextPanel({ slug }) {
         body: JSON.stringify({
           files: on ? files.filter((f) => !f.binary).map((f) => f.path) : [] }) })
       await refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setBusy(false)
   }
 
@@ -1152,7 +1153,7 @@ function ResearchPanel({ slug, state, setState }) {
     } catch (err) {
       if (err.status === 409 && err.detail === 'peak_confirmation_required') {
         setPeakAsk(true)
-      } else window.alert(err.detail || String(err))
+      } else notifyError(err)
     }
     setBusy(false)
   }
@@ -1261,13 +1262,13 @@ function GitPanel({ slug }) {
       await api(`/api/projects/${slug}/git/requests/${rid}/${verb}`, { method: 'POST' })
       await refresh()
       window.dispatchEvent(new Event('jarvis-files-changed'))
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setBusy(false)
   }
 
   async function remoteOp(fn) {
     setBusy(true)
-    try { await fn() } catch (err) { window.alert(err.detail || String(err)) }
+    try { await fn() } catch (err) { notifyError(err) }
     setBusy(false)
   }
   const connect = () => remoteOp(async () => {
@@ -1389,7 +1390,7 @@ function SecretsPanel({ slug }) {
       await api(`/api/egress/grants/${slug}`, {
         method: 'POST', body: JSON.stringify({ secret: name, status }) })
       await refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setBusy(false)
   }
 

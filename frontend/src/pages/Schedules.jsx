@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { notify, notifyError } from '../notify.js'
 
 // Heartbeats: "run X every day at 8am" / "every 6 hours". A schedule runs
 // either a defined agent or a plain Jarvis prompt, headless, in an optional
@@ -33,7 +34,7 @@ export default function Schedules() {
   async function save(e) {
     e.preventDefault()
     if (!form.name.trim() || !form.task.trim()) return
-    if (form.kind === 'agent' && !form.agent_slug) { window.alert('pick an agent'); return }
+    if (form.kind === 'agent' && !form.agent_slug) { notify('pick an agent'); return }
     const body = JSON.stringify({
       ...form,
       interval_minutes: Number(form.interval_minutes) || 360,
@@ -45,7 +46,7 @@ export default function Schedules() {
       else await api('/api/schedules', { method: 'POST', body })
       cancelEdit()
       refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
 
   function openEdit(s) {
@@ -84,7 +85,7 @@ export default function Schedules() {
   async function runNow(s) {
     setBusy(s.id)
     try { await api(`/api/schedules/${s.id}/run-now`, { method: 'POST' }) }
-    catch (err) { window.alert(err.detail || String(err)) }
+    catch (err) { notifyError(err) }
     setBusy(null)
     refresh()
   }

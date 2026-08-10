@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { notifyError } from './notify.js'
 
 // Control strip for the isolated triage reviewer (backend/reviewer.py), the
 // first section of the Review Center. It does not list the flagged
@@ -49,14 +50,14 @@ export default function TriagePanel() {
   async function act(path) {
     setBusy(true)
     try { await api(path, { method: 'POST' }); await load() }
-    catch (e) { window.alert(e.detail || String(e)) }
+    catch (e) { notifyError(e) }
     setBusy(false)
     window.dispatchEvent(new Event('jarvis-files-changed'))
   }
   async function toggle(on) {
     try { setS(await api('/api/reviewer', {
       method: 'PUT', body: JSON.stringify({ enabled: on }) })) }
-    catch (e) { window.alert(e.detail || String(e)) }
+    catch (e) { notifyError(e) }
   }
 
   return (

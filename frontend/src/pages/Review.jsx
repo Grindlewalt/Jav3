@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
+import { notifyError } from '../notify.js'
 
 // One cross-project queue of everything awaiting the operator: git commit
 // requests, egress host approvals, and security alerts (which now include the
@@ -102,17 +103,17 @@ export function ReviewQueue({ slug }) {
       await api(`/api/projects/${s}/git/requests/${id}/${verb}`, { method: 'POST' })
       loadProject(s)
       window.dispatchEvent(new Event('jarvis-files-changed'))
-    } catch (e) { window.alert(e.detail || String(e)) }
+    } catch (e) { notifyError(e) }
     setBusy(false)
   }
   async function egressAct(id, verb) {
     try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); loadEgress() }
-    catch (e) { window.alert(e.detail || String(e)) }
+    catch (e) { notifyError(e) }
   }
   async function ackAlert(id) {
     try { await api(`/api/security/events/${id}/ack`, { method: 'POST' })
       setAlerts((a) => a.filter((x) => x.id !== id)) }
-    catch (e) { window.alert(e.detail || String(e)) }
+    catch (e) { notifyError(e) }
   }
 
   // bulk verdicts — the queues reached hundreds; one server call each.
@@ -133,7 +134,7 @@ export function ReviewQueue({ slug }) {
         body: JSON.stringify({ action, project: slug || null }) })
       loadEgress()
       window.dispatchEvent(new Event('jarvis-files-changed'))
-    } catch (e) { window.alert(e.detail || String(e)) }
+    } catch (e) { notifyError(e) }
     setBusy(false)
   }
   async function ackAllAlerts() {
@@ -143,7 +144,7 @@ export function ReviewQueue({ slug }) {
       await api('/api/security/events/ack_all', { method: 'POST' })
       loadAlerts()
       window.dispatchEvent(new Event('jarvis-files-changed'))
-    } catch (e) { window.alert(e.detail || String(e)) }
+    } catch (e) { notifyError(e) }
     setBusy(false)
   }
 

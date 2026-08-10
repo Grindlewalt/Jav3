@@ -25,6 +25,7 @@ import ComputerUse from './pages/ComputerUse.jsx'
 import Voice from './pages/Voice.jsx'
 import Notices, { useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
+import { notify, notifyError } from './notify.js'
 
 // Primary destinations stay on the bar; everything else lives behind "More".
 // Eleven top-level links used to wrap the bar into two or three ragged rows
@@ -164,7 +165,7 @@ function VmStatus() {
 
   async function nuke() {
     if (s?.inflight > 0) {
-      window.alert(`${s.inflight} turn(s) in flight — wait for them to finish before nuking.`)
+      notify(`${s.inflight} turn(s) in flight — wait for them to finish before nuking.`)
       return
     }
     if (!window.confirm('Nuke the guest VM? Its overlay disk is discarded and it '
@@ -175,7 +176,7 @@ function VmStatus() {
         method: 'POST', body: JSON.stringify({ confirm: true }) })
       lastVmStatus = r
       setS(r)
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
     setNuking(false)
   }
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { notifyError } from '../notify.js'
 
 const ASSEMBLED = '::assembled'
 
@@ -32,7 +33,7 @@ export default function Context() {
     try {
       await api(`/api/memory/notes/${encodeURIComponent(name)}/promote`, { method: 'POST' })
       await refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
 
   async function addSecret() {
@@ -48,7 +49,7 @@ export default function Context() {
       await api(`/api/secrets/${encodeURIComponent(name)}`, {
         method: 'PUT', body: JSON.stringify({ value, hosts }) })
       refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
 
   async function editHosts(s) {
@@ -61,7 +62,7 @@ export default function Context() {
       await api(`/api/secrets/${encodeURIComponent(s.name)}`, {
         method: 'PUT', body: JSON.stringify({ value: '', hosts }) })
       refresh()
-    } catch (err) { window.alert(err.detail || String(err)) }
+    } catch (err) { notifyError(err) }
   }
 
   async function delSecret(name) {
