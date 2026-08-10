@@ -121,6 +121,7 @@ function AskDialog({ req, settle }) {
           {req.body && <p className="ask-sub">{req.body}</p>}
           {req.kind === 'prompt' && (
             <input className="ask-input" value={text} autoFocus
+                   type={req.password ? 'password' : 'text'}
                    placeholder={req.placeholder || ''}
                    onChange={(e) => setText(e.target.value)} />
           )}

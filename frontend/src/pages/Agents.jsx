@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // Everything is INCLUDED by default; checkboxes remove. That way an agent
 // can't silently miss something necessary — you only take away what it
@@ -10,6 +11,7 @@ export default function Agents() {
   const [trash, setTrash] = useState([])
   const [selected, setSelected] = useState(null)
   const [agent, setAgent] = useState(null)
+  const ask = useAsk()
   const [dirty, setDirty] = useState(false)
   const [contextItems, setContextItems] = useState([])
   const [toolItems, setToolItems] = useState([])
@@ -58,7 +60,8 @@ export default function Agents() {
     let name = nameRef.current.value.trim()
     if (!name) {
       // clicking + with an empty field should ask, not silently do nothing
-      name = (window.prompt('name the new agent') || '').trim()
+      name = (await ask.prompt('Name the new agent', '',
+                               { confirmLabel: 'Create' }) || '').trim()
       if (!name) { nameRef.current?.focus(); return }
     }
     try {
@@ -87,7 +90,8 @@ export default function Agents() {
 
   async function startQuiz() {
     const description = agent.description?.trim()
-      || window.prompt('one sentence: what should this agent do?')
+      || await ask.prompt('One sentence: what should this agent do?', '',
+                          { confirmLabel: 'Continue' })
     if (!description) return
     if (!agent.description?.trim()) patch({ description })
     setGenBusy(true)
@@ -123,7 +127,8 @@ export default function Agents() {
   }
 
   async function del() {
-    if (!window.confirm(`move agent "${selected}" to trash?`)) return
+    if (!await ask.confirm(`Move agent "${selected}" to trash?`,
+                           { confirmLabel: 'Move to trash' })) return
     await api(`/api/agents/${selected}`, { method: 'DELETE' })
     setSelected(null)
     refresh()
@@ -136,7 +141,9 @@ export default function Agents() {
     } catch (err) { notifyError(err) }
   }
   async function purge(slug) {
-    if (!window.confirm(`permanently delete "${slug}"? this can't be undone`)) return
+    if (!await ask.confirm(`Permanently delete "${slug}"?`,
+                           { body: "This can't be undone.",
+                             confirmLabel: 'Delete forever', danger: true })) return
     await api(`/api/agents/${slug}/purge`, { method: 'DELETE' })
     refresh()
   }

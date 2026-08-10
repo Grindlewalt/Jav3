@@ -4,6 +4,7 @@ import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 import { notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
 // requests, egress host approvals, and security alerts (which now include the
@@ -35,6 +36,7 @@ export function ReviewQueue({ slug }) {
   const [busy, setBusy] = useState(false)
   const [board, setBoard] = useState(null)   // {id, seed} — the open evidence board
   const loc = useLocation()
+  const ask = useAsk()
 
   // arriving from a security toast: open that event's board straight away.
   // Keyed on loc.key as well as the id so clicking a second toast for the SAME
@@ -97,7 +99,9 @@ export function ReviewQueue({ slug }) {
   }, [slug])
 
   async function gitAct(s, id, verb) {
-    if (verb === 'reject' && !window.confirm(`reject commit request #${id}?`)) return
+    if (verb === 'reject'
+        && !await ask.confirm(`Reject commit request #${id}?`,
+                              { confirmLabel: 'Reject', danger: true })) return
     setBusy(true)
     try {
       await api(`/api/projects/${s}/git/requests/${id}/${verb}`, { method: 'POST' })
@@ -126,7 +130,9 @@ export function ReviewQueue({ slug }) {
       + 'a host that is hit again comes back.',
   }
   async function egressBulk(action) {
-    if (!window.confirm(BULK_ASK[action](pending.length))) return
+    if (!await ask.confirm(BULK_ASK[action](pending.length),
+                           { confirmLabel: `${action[0].toUpperCase()}${action.slice(1)} all`,
+                             danger: action !== 'dismiss' })) return
     setBusy(true)
     try {
       await api('/api/egress/pending/bulk', {
@@ -138,7 +144,8 @@ export function ReviewQueue({ slug }) {
     setBusy(false)
   }
   async function ackAllAlerts() {
-    if (!window.confirm(`Acknowledge all ${alerts.length} alerts?`)) return
+    if (!await ask.confirm(`Acknowledge all ${alerts.length} alerts?`,
+                           { confirmLabel: 'Acknowledge all' })) return
     setBusy(true)
     try {
       await api('/api/security/events/ack_all', { method: 'POST' })

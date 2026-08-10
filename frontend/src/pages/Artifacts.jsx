@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
 import { notify } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // Everything Jarvis made in project-less chats, grouped by chat: view/edit,
 // turn a store into a real project, or merge its files into an existing one.
@@ -13,6 +14,7 @@ export default function Artifacts() {
   const [content, setContent] = useState('')
   const [dirty, setDirty] = useState(false)
   const [preview, setPreview] = useState(true)
+  const ask = useAsk()
 
   const refresh = (query = q) =>
     api(`/api/artifacts${query ? `?q=${encodeURIComponent(query)}` : ''}`)
@@ -36,7 +38,8 @@ export default function Artifacts() {
   }
 
   async function convert(a) {
-    const name = window.prompt('project name for this artifact store', a.title)
+    const name = await ask.prompt('Project name for this artifact store', a.title,
+                                  { confirmLabel: 'Create project' })
     if (!name) return
     await api(`/api/artifacts/${a.slug}/convert`, {
       method: 'POST', body: JSON.stringify({ name }) })
@@ -52,7 +55,9 @@ export default function Artifacts() {
   }
 
   async function del(a) {
-    if (!window.confirm(`delete artifact store from "${a.title}" (${a.files.length} files)?`)) return
+    if (!await ask.confirm(`Delete the artifact store from "${a.title}"?`,
+                           { body: `${a.files.length} file(s) will be removed.`,
+                             confirmLabel: 'Delete', danger: true })) return
     await api(`/api/artifacts/${a.slug}`, { method: 'DELETE' })
     if (sel?.slug === a.slug) setSel(null)
     refresh()

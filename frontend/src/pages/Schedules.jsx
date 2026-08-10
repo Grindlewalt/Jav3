@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { notify, notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // Heartbeats: "run X every day at 8am" / "every 6 hours". A schedule runs
 // either a defined agent or a plain Jarvis prompt, headless, in an optional
@@ -18,6 +19,7 @@ export default function Schedules() {
   const [form, setForm] = useState(BLANK)
   const [busy, setBusy] = useState(null)
   const [editing, setEditing] = useState(null)   // schedule id being edited
+  const ask = useAsk()
 
   const refresh = () => api('/api/schedules').then((r) => {
     setSchedules(r.schedules)
@@ -69,7 +71,8 @@ export default function Schedules() {
     refresh()
   }
   async function del(s) {
-    if (!window.confirm(`move "${s.name}" to recently deleted?`)) return
+    if (!await ask.confirm(`Move "${s.name}" to recently deleted?`,
+                           { confirmLabel: 'Move to bin' })) return
     await api(`/api/schedules/${s.id}`, { method: 'DELETE' })
     refresh()
   }
@@ -78,7 +81,9 @@ export default function Schedules() {
     refresh()
   }
   async function purge(s) {
-    if (!window.confirm(`permanently delete "${s.name}"? This cannot be undone.`)) return
+    if (!await ask.confirm(`Permanently delete "${s.name}"?`,
+                           { body: 'This cannot be undone.',
+                             confirmLabel: 'Delete forever', danger: true })) return
     await api(`/api/schedules/${s.id}/purge`, { method: 'DELETE' })
     refresh()
   }

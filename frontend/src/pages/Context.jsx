@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 const ASSEMBLED = '::assembled'
 
@@ -17,6 +18,7 @@ export default function Context() {
   const [status, setStatus] = useState('')
   const [secrets, setSecrets] = useState([])
   const [notes, setNotes] = useState({})   // stem -> {name,source,approved,taint,trusted}
+  const ask = useAsk()
 
   async function refresh() {
     const r = await api('/api/memory')
@@ -37,13 +39,18 @@ export default function Context() {
   }
 
   async function addSecret() {
-    const name = window.prompt('secret name (e.g. TBA_KEY)')
+    const name = await ask.prompt('Secret name', '',
+                                  { placeholder: 'e.g. TBA_KEY', confirmLabel: 'Next' })
     if (!name) return
-    const value = window.prompt(`value for ${name.toUpperCase()} (stored host-side; the agent only ever sees the name)`)
+    const value = await ask.prompt(`Value for ${name.toUpperCase()}`, '',
+      { body: 'Stored host-side; the agent only ever sees the name.',
+        password: true, confirmLabel: 'Next' })
     if (!value) return
-    const hostsRaw = window.prompt(
-      'web hosts this key may be sent to, comma-separated (e.g. newsapi.org).\n'
-      + 'Leave empty to keep it unusable — web_read refuses unbound keys.') || ''
+    const hostsRaw = await ask.prompt(
+      `Web hosts ${name.toUpperCase()} may be sent to`, '',
+      { body: 'Comma-separated (e.g. newsapi.org). Leave empty to keep it '
+              + 'unusable — web_read refuses unbound keys.',
+        confirmLabel: 'Save secret' }) || ''
     const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
     try {
       await api(`/api/secrets/${encodeURIComponent(name)}`, {
@@ -53,9 +60,9 @@ export default function Context() {
   }
 
   async function editHosts(s) {
-    const hostsRaw = window.prompt(
-      `web hosts ${s.name} may be sent to (comma-separated; empty = unusable)`,
-      (s.hosts || []).join(', '))
+    const hostsRaw = await ask.prompt(
+      `Web hosts ${s.name} may be sent to`, (s.hosts || []).join(', '),
+      { body: 'Comma-separated; empty = unusable.', confirmLabel: 'Save' })
     if (hostsRaw === null) return
     const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
     try {
@@ -66,7 +73,8 @@ export default function Context() {
   }
 
   async function delSecret(name) {
-    if (!window.confirm(`delete secret ${name}?`)) return
+    if (!await ask.confirm(`Delete secret ${name}?`,
+                           { confirmLabel: 'Delete', danger: true })) return
     await api(`/api/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
     refresh()
   }
@@ -96,7 +104,8 @@ export default function Context() {
   }
 
   async function newNote() {
-    const name = window.prompt('note name (e.g. ideas)')
+    const name = await ask.prompt('Note name', '',
+                                  { placeholder: 'e.g. ideas', confirmLabel: 'Create' })
     if (!name) return
     const path = `notes/${name.replace(/\.md$/, '')}.md`
     await api('/api/memory/file', {

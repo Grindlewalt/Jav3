@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
+import { useAsk } from '../ask.jsx'
 
 export default function Projects() {
   const [projects, setProjects] = useState([])
@@ -11,6 +12,7 @@ export default function Projects() {
   const [error, setError] = useState(null)
   const [repoUrl, setRepoUrl] = useState('')
   const [creating, setCreating] = useState(false)
+  const ask = useAsk()
 
   async function refresh() {
     const r = await api('/api/projects')
@@ -56,7 +58,8 @@ export default function Projects() {
     refresh()
   }
   async function softDelete(slug) {
-    if (!window.confirm(`move "${slug}" to recently deleted?`)) return
+    if (!await ask.confirm(`Move "${slug}" to recently deleted?`,
+                           { confirmLabel: 'Move to bin' })) return
     await api(`/api/projects/${slug}`, { method: 'DELETE' })
     refresh()
   }
@@ -65,7 +68,9 @@ export default function Projects() {
     refresh()
   }
   async function purge(slug) {
-    if (!window.confirm(`permanently delete "${slug}" and all its files? This cannot be undone.`)) return
+    if (!await ask.confirm(`Permanently delete "${slug}" and all its files?`,
+                           { body: 'This cannot be undone.',
+                             confirmLabel: 'Delete forever', danger: true })) return
     await api(`/api/projects/${slug}/purge`, { method: 'DELETE' })
     refresh()
   }
@@ -100,7 +105,8 @@ export default function Projects() {
             <button className="win-btn" title="rename project"
                     onClick={async (e) => {
                       e.preventDefault()
-                      const next = window.prompt('Rename project', p.name)
+                      const next = await ask.prompt('Rename project', p.name,
+                                                    { confirmLabel: 'Rename' })
                       if (next === null || !next.trim()) return
                       try {
                         await api(`/api/projects/${p.slug}/name`, {

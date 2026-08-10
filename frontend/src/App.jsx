@@ -26,7 +26,7 @@ import Voice from './pages/Voice.jsx'
 import Notices, { useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import { notify, notifyError } from './notify.js'
-import { AskProvider } from './ask.jsx'
+import { AskProvider, useAsk } from './ask.jsx'
 
 // Primary destinations stay on the bar; everything else lives behind "More".
 // Eleven top-level links used to wrap the bar into two or three ragged rows
@@ -163,14 +163,17 @@ function VmStatus() {
   }, [])
   const closeDrop = useCallback(() => setOpen(false), [])
   const wrapRef = useDismiss(open, closeDrop)
+  const ask = useAsk()
 
   async function nuke() {
     if (s?.inflight > 0) {
       notify(`${s.inflight} turn(s) in flight — wait for them to finish before nuking.`)
       return
     }
-    if (!window.confirm('Nuke the guest VM? Its overlay disk is discarded and it '
-      + 'reboots fresh from the golden image. In-flight work is lost.')) return
+    if (!await ask.confirm('Nuke the guest VM?',
+                           { body: 'Its overlay disk is discarded and it reboots fresh '
+                                   + 'from the golden image. In-flight work is lost.',
+                             confirmLabel: 'Nuke it', danger: true })) return
     setNuking(true)
     try {
       const r = await api('/api/vm/nuke', {
@@ -183,8 +186,12 @@ function VmStatus() {
 
   // Rebuild the golden image from scratch — heavy, so double-confirmed.
   async function rebuild() {
-    if (!window.confirm('Rebuild the guest image from scratch? This can take a while.')) return
-    if (!window.confirm('Are you sure? The current image is replaced once the build finishes.')) return
+    if (!await ask.confirm('Rebuild the guest image from scratch?',
+                           { body: 'This can take a while.',
+                             confirmLabel: 'Rebuild' })) return
+    if (!await ask.confirm('Are you sure?',
+                           { body: 'The current image is replaced once the build finishes.',
+                             confirmLabel: 'Yes, rebuild', danger: true })) return
     setRebuilding(true)
     setToast('rebuild started…')
     try {

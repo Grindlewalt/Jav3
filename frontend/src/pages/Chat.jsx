@@ -6,6 +6,7 @@ import { NavSlotContext } from '../App.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 import { notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
 // day — a handful per period nod to it (capped at 5) so it doesn't read as a
@@ -229,6 +230,7 @@ export default function Chat() {
   const [projects, setProjects] = useState([])
   const [greeting, setGreeting] = useState(pickGreeting)
   const [multiline, setMultiline] = useState(false)   // composer past one line
+  const ask = useAsk()
   // project chosen for a chat that doesn't exist yet; sent with the first turn
   const [pendingProject, setPendingProject] = useState('')
   const [pendingMode, setPendingMode] = useState('follow')
@@ -449,7 +451,8 @@ export default function Chat() {
   }
 
   async function renameConversation(id, current) {
-    const next = window.prompt('Rename this chat', current || '')
+    const next = await ask.prompt('Rename this chat', current || '',
+                                  { confirmLabel: 'Rename' })
     if (next === null) return
     if (!next.trim()) return
     await api(`/api/conversations/${id}`, {
@@ -458,7 +461,8 @@ export default function Chat() {
   }
 
   async function deleteConversation(id) {
-    if (!window.confirm(`delete chat #${id}?`)) return
+    if (!await ask.confirm(`Delete chat #${id}?`,
+                           { confirmLabel: 'Delete', danger: true })) return
     await api(`/api/conversations/${id}`, { method: 'DELETE' })
     if (id === conversationId) newConversation()
     refreshConvos()

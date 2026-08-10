@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // The guest's live egress: a scrolling feed of every outbound request the
 // sandbox made, with a verdict chip (allow / deny / cut), an approval queue for
@@ -102,6 +103,7 @@ function PolicyEditor({ slug }) {
 // ---- per-project secret grants ----------------------------------------------
 function Grants({ slug }) {
   const [grants, setGrants] = useState([])
+  const ask = useAsk()
   function load() {
     api(`/api/egress/grants/${slug}`).then((r) => setGrants(r.grants || [])).catch(() => setGrants([]))
   }
@@ -115,7 +117,8 @@ function Grants({ slug }) {
     } catch (err) { notifyError(err) }
   }
   async function add() {
-    const name = window.prompt('secret name to grant to this project')
+    const name = await ask.prompt('Secret name to grant to this project', '',
+                                  { confirmLabel: 'Grant' })
     if (!name) return
     set(name.trim(), 'granted')
   }

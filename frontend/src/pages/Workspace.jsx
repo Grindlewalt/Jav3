@@ -11,6 +11,7 @@ import { ReviewQueue } from './Review.jsx'
 import { NetworkPanel } from './Network.jsx'
 import { cspMediaSources } from '../mediaHosts.js'
 import { notify, notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
@@ -635,6 +636,7 @@ function JournalPanel({ slug, project, refreshProject }) {
 
 function EditorPanel({ slug, state, setState }) {
   const [files, setFiles] = useState([])
+  const ask = useAsk()
   const [content, setContent] = useState('')
   const [binary, setBinary] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -660,7 +662,8 @@ function EditorPanel({ slug, state, setState }) {
     setDirty(false)
   }
   async function newFile() {
-    const p = window.prompt('new file path (e.g. notes/plan.md, code/sim.py)')
+    const p = await ask.prompt('New file path', '',
+      { placeholder: 'e.g. notes/plan.md, code/sim.py', confirmLabel: 'Create' })
     if (!p) return
     await api(`/api/projects/${slug}/file`, {
       method: 'PUT', body: JSON.stringify({ path: p, content: '' }) })
@@ -796,17 +799,20 @@ function OrganizerPanel({ slug }) {
   }
 
   async function newDir() {
-    const path = window.prompt('new directory (e.g. images, docs/refs)')
+    const path = await ask.prompt('New directory', '',
+      { placeholder: 'e.g. images, docs/refs', confirmLabel: 'Next' })
     if (!path) return
-    const mark = window.prompt('mark for Jarvis — what belongs here? (optional)') || ''
+    const mark = await ask.prompt('Mark for Jarvis — what belongs here?', '',
+      { body: 'Optional.', confirmLabel: 'Create directory' }) || ''
     await api(`/api/projects/${slug}/mkdir`, {
       method: 'POST', body: JSON.stringify({ path, mark }) })
     refresh()
   }
 
   async function editMark(dir) {
-    const mark = window.prompt(
-      `mark for ${dir.path || 'project root'} — tell Jarvis what goes here`, dir.mark)
+    const mark = await ask.prompt(
+      `Mark for ${dir.path || 'project root'}`, dir.mark,
+      { body: 'Tell Jarvis what goes here.', confirmLabel: 'Save' })
     if (mark === null) return
     await api(`/api/projects/${slug}/dirs/mark`, {
       method: 'PUT', body: JSON.stringify({ path: dir.path, mark }) })
@@ -822,7 +828,8 @@ function OrganizerPanel({ slug }) {
   }
 
   async function del(path) {
-    if (!window.confirm(`delete ${path}?`)) return
+    if (!await ask.confirm(`Delete ${path}?`,
+                           { confirmLabel: 'Delete', danger: true })) return
     await api(`/api/projects/${slug}/file?path=${encodeURIComponent(path)}`,
               { method: 'DELETE' })
     refresh()
@@ -1224,6 +1231,7 @@ function ReviewPanel({ slug }) {
 // endpoints (this panel only *uses* the gate; the semantics live server-side).
 function GitPanel({ slug }) {
   const [status, setStatus] = useState('')
+  const ask = useAsk()
   const [requests, setRequests] = useState([])
   const [diff, setDiff] = useState(null)     // null = hidden
   const [busy, setBusy] = useState(false)
@@ -1256,7 +1264,9 @@ function GitPanel({ slug }) {
   }
 
   async function act(rid, verb) {
-    if (verb === 'reject' && !window.confirm(`reject commit request #${rid}?`)) return
+    if (verb === 'reject'
+        && !await ask.confirm(`Reject commit request #${rid}?`,
+                              { confirmLabel: 'Reject', danger: true })) return
     setBusy(true)
     try {
       await api(`/api/projects/${slug}/git/requests/${rid}/${verb}`, { method: 'POST' })
@@ -1276,8 +1286,10 @@ function GitPanel({ slug }) {
       method: 'PUT', body: JSON.stringify({ url: remoteUrl }) })
     setRemote({ ...remote, ...r }); setRemoteUrl(''); await refresh()
   })
-  const disconnect = () => {
-    if (!window.confirm('disconnect the remote? (nothing is deleted on GitHub)')) return
+  const disconnect = async () => {
+    if (!await ask.confirm('Disconnect the remote?',
+                           { body: 'Nothing is deleted on GitHub.',
+                             confirmLabel: 'Disconnect' })) return
     remoteOp(async () => {
       await api(`/api/projects/${slug}/git/remote`, {
         method: 'PUT', body: JSON.stringify({ url: null }) })
