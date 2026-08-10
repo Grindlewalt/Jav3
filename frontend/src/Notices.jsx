@@ -94,6 +94,16 @@ export function useNotices(enabled) {
     })
   }, [enabled, push])
 
+  // ...and the app's own fire-and-forget messages (see notify.js). These are
+  // marked `local`: they are not queue items, so they must not click through
+  // to the Review Center the way every other card does.
+  useEffect(() => {
+    if (!enabled) return
+    const onNotice = (e) => push({ ...(e.detail || {}), local: true })
+    window.addEventListener('jarvis-notice', onNotice)
+    return () => window.removeEventListener('jarvis-notice', onNotice)
+  }, [enabled, push])
+
   useEffect(() => {
     if (!enabled) return
     return subscribeSse('/api/agents/notices/stream', (ev) => {
@@ -116,7 +126,17 @@ export function useNotices(enabled) {
 export default function Notices({ toasts, dismiss, clear }) {
   const navigate = useNavigate()
   if (toasts.length === 0) return null
-  const shown = toasts.slice(-3)
+  // Which three survive. Straight `slice(-3)` meant a burst of "save failed"
+  // could push a critical security card off the screen — a UI convenience
+  // degrading the security notification path. Evict by rank first, recency
+  // second; render the survivors in arrival order.
+  const rank = (t) => (t.sev === 'crit' ? 2 : t.local ? 0 : 1)
+  const keep = new Set(
+    toasts.map((t, i) => ({ t, i }))
+      .sort((a, b) => rank(a.t) - rank(b.t) || a.i - b.i)
+      .slice(-3)
+      .map(({ t }) => t.id))
+  const shown = toasts.filter((t) => keep.has(t.id))
   const extra = toasts.length - shown.length
   const open = (t) => {
     dismiss(t.id)
@@ -127,7 +147,24 @@ export default function Notices({ toasts, dismiss, clear }) {
   }
   return (
     <div className="notices" role="status" aria-live="polite">
-      {shown.map((t) => (
+      {shown.map((t) => (t.local ? (
+        // the app talking about what just happened, not a queue item: there is
+        // nothing to open, so it is not a button and clicking it navigates
+        // nowhere. It also wraps instead of ellipsing — a failure reason the
+        // operator cannot finish reading is the same as no message.
+        <div key={t.id} className={`notice ${t.sev || 'warn'} local`} role="alert">
+          <span className="notice-head">
+            <span className="notice-dot" aria-hidden="true" />
+            <span className="notice-title">{t.title}</span>
+            <button type="button" className="notice-x" aria-label="dismiss"
+                    onClick={() => dismiss(t.id)}>✕</button>
+          </span>
+          {t.body && <span className="notice-body">{t.body}</span>}
+          <span className="notice-bar"
+                style={t.life ? { '--n-life': `${t.life}s` } : undefined}
+                onAnimationEnd={() => dismiss(t.id)} />
+        </div>
+      ) : (
         <button key={t.id} type="button" className={`notice ${t.sev}`}
                 title={t.project ? `open the ${t.project} board`
                   : t.eventId ? 'open the evidence for this alert'
@@ -142,7 +179,7 @@ export default function Notices({ toasts, dismiss, clear }) {
                 style={t.life ? { '--n-life': `${t.life}s` } : undefined}
                 onAnimationEnd={() => dismiss(t.id)} />
         </button>
-      ))}
+      )))}
       {extra > 0 && (
         <button type="button" className="notice-more"
                 onClick={() => { clear(); navigate('/review') }}>

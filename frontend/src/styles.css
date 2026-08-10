@@ -2319,3 +2319,16 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   border-radius: 8px; color: var(--dim);
   font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
 }
+
+/* A notice the app raised about what just happened (notify.js), as opposed to
+   a queue item. It opens nothing, so it carries its own dismiss instead of the
+   whole card being a click target, and the title wraps: a failure reason the
+   operator cannot finish reading is the same as no message at all. */
+.notice.local { cursor: default; }
+.notice.local .notice-title { white-space: normal; overflow: visible; }
+.notice-x {
+  flex-shrink: 0; margin: -4px -4px -4px 4px; padding: 2px 6px;
+  background: none; border: 0; color: var(--dim);
+  font-size: 12px; line-height: 1; cursor: pointer;
+}
+.notice-x:hover { color: var(--text); background: none; }
