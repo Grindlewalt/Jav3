@@ -217,3 +217,48 @@ async def test_wake_word_works_during_the_curfew(seeded, monkeypatch):
 
     await session._on_sidecar_json({"type": "wake"})
     assert session.state == voice_mod.LISTENING
+
+
+# ---- version skew between the Pi and the sidecar -----------------------------
+
+async def test_an_older_sidecar_does_not_put_an_error_on_the_page(seeded, monkeypatch):
+    """The Pi and the sidecar live on different hosts and deploy separately —
+    the sidecar is a system unit the agent cannot restart — so running a newer
+    Pi against an older voicebox is a normal state, not a fault. It answers
+    "unknown: vocab" to the vocabulary push; that must not reach the operator."""
+    session, out = make_session(monkeypatch)
+    await session._on_sidecar_json(
+        {"type": "error", "message": "unknown: vocab"})
+    assert not [m for m in out if isinstance(m, dict) and m["type"] == "error"]
+
+
+async def test_real_sidecar_errors_still_reach_the_page(seeded, monkeypatch):
+    session, out = make_session(monkeypatch)
+    await session._on_sidecar_json(
+        {"type": "error", "message": "stt: CUDA out of memory"})
+    errs = [m for m in out if isinstance(m, dict) and m["type"] == "error"]
+    assert errs and "CUDA" in errs[0]["message"]
+
+
+async def test_an_older_sidecar_still_barges_in_normally(seeded, monkeypatch):
+    """An old sidecar sends a transcript with no evidence fields. That must
+    behave exactly as it did before this change — permissive — rather than
+    silently refusing every interruption until the sidecar is upgraded."""
+    from backend import chat as chat_mod
+    session, out = make_session(monkeypatch)
+    monkeypatch.setattr(chat_mod, "guest_turn", scripted_turn(
+        "The forecast is clear all week. ", "Highs around twenty two."))
+    await session._on_transcript("what's the weather")
+    tts = await first_tts(session, 1)
+    session.state = "speaking"
+    await session.on_browser_json(
+        {"type": "barge_in", "chunk_id": tts[0]["id"], "played_ms": 300})
+
+    # exactly what an old voicebox sends: text and dur_ms, nothing else
+    await session._on_transcript("actually stop",
+                                 {"type": "transcript", "text": "actually stop",
+                                  "dur_ms": 900})
+
+    kinds = [m["type"] for m in out if isinstance(m, dict)]
+    assert "stop_playback" in kinds and "resume_playback" not in kinds
+    await settle(session)

@@ -550,6 +550,15 @@ class VoiceSession:
             await self._send_json({"type": "tts_end", "chunk_id": ev.get("id"),
                                    "dur_ms": ev.get("dur_ms")})
         elif kind == "error":
+            # "unknown: <type>" is an older sidecar refusing a message this
+            # build sends — version skew, not something the operator can act
+            # on. The Pi and the sidecar deploy separately (different hosts,
+            # and the sidecar is a system unit we cannot restart), so that
+            # window is a normal state and must not put an error on the page.
+            msg = str(ev.get("message") or "")
+            if msg.startswith("unknown:"):
+                log.info("voicebox is an older build: %s", msg)
+                return
             await self._send_json(ev)
 
     # ---- speech evidence -----------------------------------------------------
