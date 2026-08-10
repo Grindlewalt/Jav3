@@ -1023,6 +1023,7 @@ function AgentPanel({ slug, state, setState }) {
   const [task, setTask] = useState('')
   const [log, setLog] = useState([])
   const [busy, setBusy] = useState(false)
+  const [peakAsk, setPeakAsk] = useState(null)   // in-page; iOS eats confirm()
   const bottomRef = useRef(null)
   const unwatch = useRef(null)
   const which = state.agent || ''
@@ -1062,9 +1063,7 @@ function AgentPanel({ slug, state, setState }) {
     } catch (err) {
       setLog((l) => l.slice(0, -2))
       if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        if (window.confirm('Peak pricing right now — 2x cost. Run the agent anyway?')) {
-          setBusy(false); await run(true); return
-        }
+        setPeakAsk(true)
       } else setLog((l) => [...l, { role: 'err', text: err.detail || String(err) }])
     }
     setBusy(false)
@@ -1091,6 +1090,16 @@ function AgentPanel({ slug, state, setState }) {
         ))}
         <div ref={bottomRef} />
       </div>
+      {peakAsk && (
+        <div className="peak-ask compact" role="alertdialog"
+             aria-label="peak pricing confirmation">
+          <span className="grow">Peak pricing right now — running this agent costs 2×.</span>
+          <button type="button" className="ghost"
+                  onClick={() => setPeakAsk(null)}>Cancel</button>
+          <button type="button"
+                  onClick={() => { setPeakAsk(null); run(true) }}>Run anyway</button>
+        </div>
+      )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); run() }}>
         <textarea className="grow" rows={2} value={task} placeholder="task for the agent…"
                   onChange={(e) => setTask(e.target.value)}
@@ -1115,6 +1124,7 @@ function ResearchPanel({ slug, state, setState }) {
   const [open, setOpen] = useState({})      // id -> rollup expanded
   const [busy, setBusy] = useState(false)
   const [doc, setDoc] = useState(null)
+  const [peakAsk, setPeakAsk] = useState(null)   // in-page; iOS eats confirm()
   const topic = state.topic || ''
   const angles = state.angles || 4
 
@@ -1141,9 +1151,7 @@ function ResearchPanel({ slug, state, setState }) {
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (err) {
       if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        if (window.confirm('Peak pricing right now — 2x cost. Run the research anyway?')) {
-          setBusy(false); await run(true); return
-        }
+        setPeakAsk(true)
       } else window.alert(err.detail || String(err))
     }
     setBusy(false)
@@ -1151,6 +1159,16 @@ function ResearchPanel({ slug, state, setState }) {
 
   return (
     <div className="pane-col">
+      {peakAsk && (
+        <div className="peak-ask compact" role="alertdialog"
+             aria-label="peak pricing confirmation">
+          <span className="grow">Peak pricing right now — this research costs 2×.</span>
+          <button type="button" className="ghost"
+                  onClick={() => setPeakAsk(null)}>Cancel</button>
+          <button type="button"
+                  onClick={() => { setPeakAsk(null); run(true) }}>Research anyway</button>
+        </div>
+      )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); run() }}>
         <input className="grow" placeholder="research topic…" value={topic}
                onChange={(e) => setState({ topic: e.target.value })} />
