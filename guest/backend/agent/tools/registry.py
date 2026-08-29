@@ -35,8 +35,11 @@ def set_registry(specs, read_only) -> None:
     turnctx.read_only.set(frozenset(read_only or []))
 
 
-def set_turn(op_id, gateway_port=None) -> None:
+def set_turn(op_id, gateway_port=None, op_token=None) -> None:
     turnctx.op_id.set(op_id)
+    # the op_id alone is not a credential — the gateway rejects a call that
+    # cannot also present the turn's token (broker._op_tokens)
+    turnctx.op_token.set(op_token)
     if gateway_port:
         turnctx.gateway_port.set(gateway_port)
 
@@ -99,7 +102,7 @@ async def _broker_dispatch(name: str, args: dict) -> str:
     s.setblocking(False)
     try:
         req = {"op": "tool_broker_call", "op_id": turnctx.op_id.get(),
-               "name": name, "args": args}
+               "op_token": turnctx.op_token.get(), "name": name, "args": args}
         await loop.sock_sendall(s, (json.dumps(req) + "\n").encode())
         buf = b""
         while b"\n" not in buf:

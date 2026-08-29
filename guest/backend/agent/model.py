@@ -31,7 +31,8 @@ class VsockModelClient:
         await loop.run_in_executor(None, s.connect,
                                    (HOST_CID, turnctx.gateway_port.get()))
         s.setblocking(False)
-        req = {"op": "model_call", "op_id": turnctx.op_id.get(), "messages": messages,
+        req = {"op": "model_call", "op_id": turnctx.op_id.get(),
+               "op_token": turnctx.op_token.get(), "messages": messages,
                "tools": tools, "temperature": temperature,
                "conversation_id": conversation_id, "model_name": model_name,
                "base_url": base_url}

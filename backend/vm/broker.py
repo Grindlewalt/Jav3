@@ -58,6 +58,53 @@ def get_turn(op_id: str) -> TurnEnvelope | None:
     return _envelopes.get(op_id)
 
 
+# --- op_id capability tokens -------------------------------------------------
+# An op_id names a turn; it does not PROVE one. They are deterministic
+# (`chat:{cid}`, `guest:{cid}`), the guest supplies its own in every request,
+# and one guest legitimately runs several turns at once — so a compromised
+# guest holds a few real op_ids and can count to the rest. Presenting somebody
+# else's made the gateway serve it: `broker_dispatch` restored the victim's
+# envelope and the caller then acted as that turn, with its project pin, its
+# web session, its artifact store and its Budget.
+#
+# The fix is a per-turn secret minted host-side, shipped once in the turn spec,
+# and required on every request alongside the op_id. Binding to the CONNECTION
+# instead does not work here: the guest opens a fresh short-lived vsock
+# connection per model/tool call, and several concurrent turns in one guest
+# share both the gateway and the guest's CID, so there is nothing about a
+# connection that distinguishes them. The token is what does — it lives in the
+# guest's per-turn `turnctx`, the same task-local that already keeps concurrent
+# turns' op_ids apart.
+#
+# Honest limit: this stops op_id GUESSING, not a guest that can read another
+# concurrent turn's task-local state. Anything with that reach already had the
+# victim's op_id too, so the token does not make that case worse — it removes
+# the case where no reach at all was needed.
+_op_tokens: dict[str, str] = {}
+
+
+def register_token(op_id: str, token: str) -> None:
+    _op_tokens[op_id] = token
+
+
+def release_token(op_id: str) -> None:
+    _op_tokens.pop(op_id, None)
+
+
+def verify_token(op_id: str, token: str | None) -> bool:
+    """Whether this caller is entitled to act as `op_id`.
+
+    Fails closed on an unregistered op_id and on a missing token, so a guest
+    running older pushed code (or none) loses the ability to act rather than
+    keeping the hole open. compare_digest because this is a secret comparison,
+    even though a timing oracle over vsock is a stretch."""
+    import hmac
+    known = _op_tokens.get(op_id)
+    if not known or not token:
+        return False
+    return hmac.compare_digest(known, token)
+
+
 def live_turns() -> list[TurnEnvelope]:
     """Every turn in flight right now.
 

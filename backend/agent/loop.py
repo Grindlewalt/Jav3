@@ -91,9 +91,13 @@ async def _drain_inbox() -> str:
     iterations. `inbox_fetch` is a tool folder purely so this crosses
     `broker_dispatch`, where the op_id pinning that proves who is asking lives.
 
-    Failure is not loss. A dispatch that errors claims nothing, so the message
-    is still in the inbox and the next round tries again; that is why this
-    swallows rather than raising into a turn doing unrelated work."""
+    Swallowing the error is safe up to the claim: a dispatch that fails before
+    or during the claim's transaction leaves the message in the inbox and the
+    next round tries again. It is NOT safe after — a reply lost on the way back
+    has already consumed the row, and only the transcript copy the claim writes
+    rescues it (and only for a turn that has a next turn). See agentmsg.claim.
+    Swallowing is still right here: a mail check must not end a turn doing
+    unrelated work, and raising would not un-consume anything."""
     try:
         note = await registry.dispatch("inbox_fetch", {})
     except Exception:  # noqa: BLE001 — a mail check must never end a turn

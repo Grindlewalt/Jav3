@@ -26,8 +26,23 @@ async def _send(loop, conn, obj: dict) -> None:
     await loop.sock_sendall(conn, (json.dumps(obj) + "\n").encode())
 
 
+def _entitled(req: dict) -> bool:
+    """Whether this request may act as the op_id it names.
+
+    Registration answers "is this a real turn"; it never answered "is this YOUR
+    turn". op_ids are deterministic and guest-supplied, so guessing a live one
+    was enough to borrow its whole envelope — its project pin, web session,
+    artifact store and Budget. The per-turn token the host shipped in the turn
+    spec is the missing half. Checked on every op that carries an op_id."""
+    return broker.verify_token(req.get("op_id") or "", req.get("op_token"))
+
+
 async def _handle_model_call(loop, conn, req: dict) -> None:
     op_id = req.get("op_id") or "vm-anon"
+    if not _entitled(req):
+        await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
+                                 "message": f"op_id {op_id!r} is not this caller's turn"})
+        return
     # op_id pinning: only a turn the host already registered (guest_turn) may
     # spend. The gateway never opens a budget itself — a compromised guest can't
     # invent op_ids to escape the per-operation cap by rotating ids.
@@ -57,9 +72,9 @@ async def _handle_model_call(loop, conn, req: dict) -> None:
 
 async def _handle_tool_broker_call(loop, conn, req: dict) -> None:
     op_id = req.get("op_id") or "vm-anon"
-    if broker.get_turn(op_id) is None:      # same pinning as model_call
+    if not _entitled(req) or broker.get_turn(op_id) is None:   # same pinning as model_call
         await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
-                                 "message": f"op_id {op_id!r} has no broker turn context"})
+                                 "message": f"op_id {op_id!r} is not this caller's turn"})
         return
     res = await broker.broker_dispatch(op_id, req.get("name") or "", req.get("args") or {})
     await _send(loop, conn, {"type": "broker_result",

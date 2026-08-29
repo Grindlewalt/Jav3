@@ -21,12 +21,18 @@ async def _roundtrip(monkeypatch, request: dict, register_op=True):
     from backend.agent.budget import Budget
     monkeypatch.setattr(model, "api_key", "sk-secret")
     monkeypatch.setattr(model.transport, "api_key", "sk-secret")
+    from backend.vm import broker as brk
     op_id = request.get("op_id")
-    # op_id pinning: the gateway only serves turns the host registered. Tests that
-    # want to hit a real model_call register first; register_op=False exercises the
-    # rejection path.
+    # op_id pinning: the gateway only serves turns the host registered, AND only
+    # to a caller that can present that turn's capability token. Registering the
+    # budget without the token would leave these tests driving a shape
+    # `guest_turn` never produces — and would quietly stop exercising the
+    # gateway at all, since every call would bounce on the token check.
+    # register_op=False exercises the rejection path.
     if op_id and register_op:
         bmod.register(op_id, Budget(10**9, 10**9))
+        brk.register_token(op_id, "tok")
+        request.setdefault("op_token", "tok")
     a, b = socket.socketpair()
     a.setblocking(False)
     b.setblocking(False)
@@ -52,6 +58,7 @@ async def _roundtrip(monkeypatch, request: dict, register_op=True):
     finally:
         if op_id and register_op:
             bmod.release(op_id)
+            brk.release_token(op_id)
 
 
 async def test_model_call_streams_a_message(monkeypatch):
@@ -119,12 +126,14 @@ async def test_tool_broker_call_dispatches_and_stamps_taint(monkeypatch):
     monkeypatch.setattr(registry, "dispatch", fake_dispatch)
 
     broker.register_turn(broker.TurnEnvelope(op_id="op-b", web_session="ws"))
+    broker.register_token("op-b", "tok-b")     # the turn's credential, as guest_turn mints it
     try:
         events = await _roundtrip(monkeypatch, {
-            "op": "tool_broker_call", "op_id": "op-b",
+            "op": "tool_broker_call", "op_id": "op-b", "op_token": "tok-b",
             "name": "web_read", "args": {"url": "x"}}, register_op=False)
     finally:
         broker.release_turn("op-b")
+        broker.release_token("op-b")
     ev = events[0]
     assert ev["type"] == "broker_result"
     assert "ran web_read" in ev["result"]

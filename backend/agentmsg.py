@@ -20,13 +20,21 @@ delivery is the recipient claiming it later. So a message survives a restart —
 unlike `bus.announce_job`, which publishes a one-off event that nothing stores,
 which is why reloading a chat loses the pointer to the job it launched.
 
-**Nothing is dropped.** `bus.publish_to` sheds the oldest event when a queue
-fills, which is right for a token firehose into a slow browser and wrong for a
-message an agent was told to expect. There is no queue here to overflow: an
-unclaimed row simply stays unclaimed. And the claim also writes the message into
-the recipient's transcript, so even if the vsock reply carrying it were lost,
-the words are already in the recipient's persisted history and ride its next
-turn — the failure mode is "arrives late", never "vanishes".
+**Nothing is dropped by backpressure.** `bus.publish_to` sheds the oldest event
+when a queue fills, which is right for a token firehose into a slow browser and
+wrong for a message an agent was told to expect. There is no queue here to
+overflow: an unclaimed row simply stays unclaimed. The claim consumes the row
+and writes it into the recipient's transcript in ONE transaction, so a failure
+anywhere up to and including the commit rolls the claim back and leaves the
+message in the inbox.
+
+The honest remainder: once that commit lands, a reply lost in transit back to
+the guest has consumed the row. For a chat or a multi-turn agent the transcript
+copy covers it — the next turn assembles it out of the DB. For a ONE-SHOT
+headless run there is no next turn, so that message is one a human can read in
+the Jobs view and the run never saw. Closing it needs a two-phase ack costing a
+round trip per reasoning round; it is not closed, and it should not be
+described as if it were.
 
 **Delivery is PULLED, not pushed.** The host has no inbound path to a running
 guest — the gateway serves four ops, all guest-initiated, and `guest_turn`
@@ -106,6 +114,16 @@ async def live_peers(db, *, exclude_cid: int | None = None) -> list[dict]:
     return out
 
 
+def _is_incognito(cid: int) -> bool:
+    """Whether a live turn on this conversation is running incognito. Read from
+    the envelope registry, which is where `ephemeral` is authoritative — the
+    conversation row itself carries no such flag (that is the point of
+    incognito: the row is temporary and then gone)."""
+    from .vm import broker
+    return any(e.conversation_id == cid and e.ephemeral
+               for e in broker.live_turns())
+
+
 def format_peers(peers: list[dict]) -> str:
     if not peers:
         return "(no other agent turns are running right now)"
@@ -150,6 +168,14 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
         if not await _describe(db, [to_cid]):
             return {"error": f"no conversation {to_cid}. Running turns you can "
                              f"reach right now:\n" + format_peers(peers)}
+        if _is_incognito(to_cid):
+            # `live_peers` already hides incognito turns, so this is only
+            # reachable by naming the id directly — but "accept, promise, then
+            # let the recipient's wipe delete it" is the exact failure being
+            # designed out, and a guessed integer is enough to reach it.
+            return {"error": f"conversation {to_cid} is a temporary chat — it is "
+                             "erased when its turn ends, so a message to it "
+                             "could never be read. Nothing was sent."}
     else:
         to_slug = addr
         if not _agent_exists(to_slug) and not any(p["agent"] == to_slug for p in peers):
@@ -193,13 +219,27 @@ def _nudge(running: list[dict], me: dict, body: str) -> None:
 
 async def claim(db, *, cid: int, agent_slug: str | None,
                 limit: int = CLAIM_BATCH) -> list[dict]:
-    """Take everything addressed to this turn, atomically.
+    """Take everything addressed to this turn, atomically, and write it into the
+    recipient's transcript in the SAME transaction.
 
-    One UPDATE ... RETURNING, so two turns running the same agent slug can never
-    both take the same message — whichever statement lands first owns the rows,
-    and the loser's SELECT sees nothing. A row this claims can only be lost if
-    the process dies between the UPDATE and the recipient reading it; `deliver`
-    below closes even that by writing the words into the transcript."""
+    The claim is one UPDATE ... RETURNING, so two turns running the same agent
+    slug can never both take the same message — whichever statement lands first
+    owns the rows and the loser sees nothing.
+
+    Consuming the row and persisting it are one commit on purpose. They used to
+    be two: the claim committed, then the transcript rows were written. A crash
+    in between consumed a message that then existed nowhere, and "a failed drain
+    claims nothing" was only ever true of failures BEFORE the claim. Now a
+    failure anywhere in here rolls the claim back and the message is still in
+    the inbox.
+
+    The transcript copy is also what makes a lost reply survivable: the words
+    are in `messages`, so the recipient's next turn assembles them out of the DB
+    (compaction reads every role). That mitigation does NOT cover a one-shot
+    headless run, which has no next turn — for that case a reply lost in
+    transit is a message the run never sees, recoverable only by a human
+    reading the Jobs view. Closing it properly needs a two-phase ack, which
+    costs a round trip per round; it is not closed."""
     async with db.execute(
         "UPDATE agent_messages SET delivered_at = datetime('now'), delivered_to = ? "
         "WHERE id IN (SELECT id FROM agent_messages WHERE delivered_at IS NULL "
@@ -211,7 +251,14 @@ async def claim(db, *, cid: int, agent_slug: str | None,
         "          created_at",
         (cid, cid, agent_slug, limit)) as cur:
         rows = [dict(r) for r in await cur.fetchall()]
-    await db.commit()
+    for r in rows:
+        await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
+            (cid, f"[message from {r['from_label']}"
+                  + (f" (conversation {r['from_conversation_id']})"
+                     if r["from_conversation_id"] else "")
+                  + f"]\n{r['body']}"))
+    await db.commit()          # the claim and its transcript land together
     return rows
 
 
@@ -228,29 +275,16 @@ def render(rows: list[dict]) -> str:
     head = HEADER.format(n=len(rows), s="" if len(rows) == 1 else "s", who=who)
     parts = [head]
     for r in rows:
-        parts.append(
-            f"\nfrom {r['from_label']} (conversation {r['from_conversation_id']}"
-            f"{', project ' + r['project_slug'] if r['project_slug'] else ''}) "
-            f"at {r['created_at']}:\n{r['body']}")
+        # the sender's conversation can be gone (deleted while this was still in
+        # the inbox); from_label is denormalised onto the row for exactly that,
+        # so the message still says who sent it even with no address to reply to
+        where = ", ".join(x for x in (
+            f"conversation {r['from_conversation_id']}" if r["from_conversation_id"]
+            else "conversation since deleted",
+            f"project {r['project_slug']}" if r["project_slug"] else "") if x)
+        parts.append(f"\nfrom {r['from_label']} ({where}) "
+                     f"at {r['created_at']}:\n{r['body']}")
     return "\n".join(parts)
-
-
-async def deliver(db, cid: int, rows: list[dict]) -> None:
-    """Write the delivered messages into the recipient's transcript.
-
-    Not decoration — this is the durability half of "never silently dropped".
-    The claim above marks the rows delivered; if the vsock reply carrying them
-    back to the guest were lost, they would be marked and unseen. Persisting
-    them as a `user` row means the recipient's NEXT turn assembles them out of
-    the DB (compaction.assemble reads every role), so the worst case is that a
-    message arrives one turn late instead of never. It also puts the message in
-    the GUI transcript with no frontend work at all."""
-    for r in rows:
-        await db.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
-            (cid, f"[message from {r['from_label']} "
-                  f"(conversation {r['from_conversation_id']})]\n{r['body']}"))
-    await db.commit()
 
 
 # --- the two tool entry points ----------------------------------------------
@@ -265,6 +299,22 @@ async def send_tool(to: str, message: str) -> str:
     if not cid:
         return ("error: send_message only works inside a running turn — this "
                 "call has no turn identity, so there is no sender to send as.")
+    if runtime.ephemeral.get():
+        # Incognito's contract is that nothing survives the turn, and delivering
+        # a message copies its words into another agent's PERMANENT transcript
+        # (claim writes them into `messages`). Those cannot both be true, and
+        # the privacy promise is the one the operator made a deliberate choice
+        # about — so the send is refused, out loud.
+        #
+        # The alternative that was shipped is the one option that is definitely
+        # wrong: accept the call, tell the model it is queued, and then have the
+        # turn's own wipe delete the row on the way out. A promise followed by a
+        # silent destruction is worse than either honest answer.
+        return ("error: this is a temporary chat, so send_message is disabled — "
+                "delivering a message would copy it into another agent's "
+                "permanent transcript, which is exactly what a temporary chat "
+                "promises not to do. Say what you need to say in your reply "
+                "instead, or start a normal chat to coordinate.")
     db = await get_db()
     try:
         out = await send(db, sender_cid=cid, to=to, body=message)
@@ -305,10 +355,11 @@ async def fetch_tool() -> str:
         async with db.execute(
             "SELECT agent_slug FROM conversations WHERE id = ?", (cid,)) as cur:
             row = await cur.fetchone()
+        # claim now persists the transcript copy inside its own transaction —
+        # consuming a message and recording it are one commit, not two
         rows = await claim(db, cid=cid, agent_slug=row["agent_slug"] if row else None)
         if not rows:
             return ""
-        await deliver(db, cid, rows)
     finally:
         await db.close()
     # a peer's words are peer-authored content, and a peer may itself have been

@@ -130,10 +130,23 @@ async def _drop_references(db, conversation_id: int) -> None:
     await db.execute(
         "UPDATE conversations SET parent_conversation_id = NULL "
         "WHERE parent_conversation_id = ?", (conversation_id,))
+    # A message this conversation SENT is addressed to somebody else and may
+    # still be unclaimed; the sender going away is no reason to destroy it. Only
+    # the reply address goes (from_label is denormalised onto the row so it
+    # still says who sent it). Deleting these was how an incognito turn's
+    # messages vanished after the tool had promised delivery — that promise is
+    # now refused up front (agentmsg.send_tool), and this clause is the second
+    # half: an ordinary chat being deleted must not silently unsend its mail.
     await db.execute(
-        "DELETE FROM agent_messages WHERE from_conversation_id = ? "
-        "OR to_conversation_id = ? OR delivered_to = ?",
-        (conversation_id, conversation_id, conversation_id))
+        "UPDATE agent_messages SET from_conversation_id = NULL "
+        "WHERE from_conversation_id = ?", (conversation_id,))
+    await db.execute(
+        "UPDATE agent_messages SET delivered_to = NULL WHERE delivered_to = ?",
+        (conversation_id,))
+    # ...but a message addressed TO it can never be claimed by anyone now.
+    await db.execute(
+        "DELETE FROM agent_messages WHERE to_conversation_id = ?",
+        (conversation_id,))
 
 
 @router.delete("/conversations/{conversation_id}")
@@ -471,6 +484,14 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # chats only; incognito leaves no trace). The set is stable within a
         # project state, so the provider's prefix cache survives.
         entries = load_registry()
+        if ephemeral:
+            # a temporary chat cannot message another agent — delivery writes
+            # the words into a permanent transcript. The handler refuses anyway
+            # (agentmsg.send_tool, which is the authoritative check because a
+            # brokered call from a child turn reaches it too), but a tool that
+            # can only ever error should not be offered: it spends a schema on
+            # every turn and invites the model to promise something it can't do.
+            entries = [e for e in entries if e["name"] != "send_message"]
         if not active:
             if ephemeral:
                 entries = [e for e in entries if not e.get("requires_project")]

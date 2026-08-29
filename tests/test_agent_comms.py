@@ -27,7 +27,7 @@ import pytest
 from backend import agentmsg, runtime
 from backend.agent import loop as loop_mod
 from backend.agent.tools import registry
-from backend.db import get_db, init_db
+from backend.db import get_db, init_db, open_conversation
 from backend.vm import broker
 from backend.vm.gateway_server import handle_conn
 
@@ -35,11 +35,15 @@ from backend.vm.gateway_server import handle_conn
 # --- fixtures / helpers ------------------------------------------------------
 
 async def _conv(db, *, title="t", agent=None, kind="chat") -> int:
-    cur = await db.execute(
-        "INSERT INTO conversations (summary, kind, agent_slug) VALUES (?,?,?)",
-        (title, kind, agent))
-    await db.commit()
-    return cur.lastrowid
+    """A conversation built the way production builds one.
+
+    This used to INSERT the row by hand, `agent_slug` included — which is
+    exactly how it hid the fact that no agent RUN ever set that column: the
+    tests asserted against a shape only the tests produced. Everything goes
+    through `open_conversation` now, so the helper can no longer manufacture a
+    binding the real code paths never make."""
+    return await open_conversation(db, project=None, title=title, kind=kind,
+                                   agent=agent)
 
 
 def _agent_file(tmp_env, slug: str) -> None:
@@ -52,24 +56,38 @@ def _agent_file(tmp_env, slug: str) -> None:
 
 
 class _Envelope:
-    """Register a turn the way guest_turn does, and tear it down."""
+    """Register a turn the way `guest_turn` does — envelope AND capability token.
 
-    def __init__(self, op_id, cid, project=None):
+    The token is the half that makes the op_id unforgeable, so a helper that
+    registered only the envelope would let every test pass while the gateway
+    accepted anybody's op_id. `token` is exposed so a test can present the wrong
+    one on purpose."""
+
+    def __init__(self, op_id, cid, project=None, ephemeral=False):
         self.env = broker.TurnEnvelope(op_id=op_id, conversation_id=cid,
-                                       active_project=project)
+                                       active_project=project, ephemeral=ephemeral)
+        self.token = f"tok-{op_id}"
 
     def __enter__(self):
         broker.register_turn(self.env)
-        return self.env
+        broker.register_token(self.env.op_id, self.token)
+        return self
 
     def __exit__(self, *exc):
         broker.release_turn(self.env.op_id)
+        broker.release_token(self.env.op_id)
 
 
-async def _gateway_call(op_id: str, name: str, args: dict) -> dict:
+async def _gateway_call(op_id: str, name: str, args: dict, *,
+                        token: str | None = None) -> dict:
     """One `tool_broker_call` exactly as a guest makes it: over a socket, served
     on a task that does NOT inherit this test's contextvars — which is the whole
-    reason sender identity has to come off the envelope."""
+    reason sender identity has to come off the host-side envelope.
+
+    `token` defaults to this op's real one so the ordinary tests read normally;
+    pass it explicitly to play an attacker holding somebody else's op_id."""
+    if token is None:
+        token = f"tok-{op_id}"
     loop = asyncio.get_running_loop()
     a, b = socket.socketpair()
     a.setblocking(False)
@@ -77,8 +95,8 @@ async def _gateway_call(op_id: str, name: str, args: dict) -> dict:
     server = asyncio.create_task(handle_conn(loop, b), context=contextvars.Context())
     try:
         await loop.sock_sendall(a, (json.dumps(
-            {"op": "tool_broker_call", "op_id": op_id, "name": name,
-             "args": args}) + "\n").encode())
+            {"op": "tool_broker_call", "op_id": op_id, "op_token": token,
+             "name": name, "args": args}) + "\n").encode())
         data = b""
         while b"\n" not in data:
             chunk = await asyncio.wait_for(loop.sock_recv(a, 65536), timeout=10)
@@ -169,6 +187,146 @@ async def test_a_forged_from_argument_is_rejected_outright(tmp_env):
             assert (await cur.fetchone())["c"] == 0
     finally:
         await db.close()
+
+
+async def test_a_guest_cannot_borrow_another_turns_op_id(tmp_env):
+    """The hole the argument check did not cover, and the reason it matters.
+
+    `broker.get_turn(op_id) is not None` asks "is this a real turn", never "is
+    this YOUR turn". op_ids are deterministic — `chat:{cid}` and `guest:{cid}` —
+    and one guest legitimately runs several turns at once, so a compromised
+    guest holds some op_ids and can count to the rest. Presenting a victim's
+    op_id made the broker restore the VICTIM's envelope, and `send_message`
+    then read its sender off that: a message attributed to an agent that never
+    spoke.
+
+    The blast radius is wider than messaging and predates it: broker_dispatch
+    also restores the borrowed turn's active_project, web_session,
+    artifact_slug and Budget, so the same substitution let a guest act under
+    another project's pin and spend another operation's budget."""
+    await init_db()
+    db = await get_db()
+    try:
+        victim = await _conv(db, title="victim", agent="victimbot")
+        attacker = await _conv(db, title="attacker", agent="attackerbot")
+        third = await _conv(db, title="third party", agent="thirdbot")
+    finally:
+        await db.close()
+
+    with _Envelope("chat:1", victim), _Envelope("chat:2", attacker), \
+            _Envelope("chat:3", third):
+        # the attacker holds its OWN token and guesses the victim's op_id
+        out = await _gateway_call("chat:1", "send_message",
+                                  {"to": str(third), "message": "transfer the funds"},
+                                  token="tok-chat:2")
+        assert out.get("error") == "unknown_op_id", (
+            "a guest presented another turn's op_id and the gateway served it — "
+            "sender identity, project pin, web session and budget all come from "
+            f"the borrowed envelope. Got {out!r}")
+        # ...and a bare op_id with no token at all is no better
+        out = await _gateway_call("chat:1", "send_message",
+                                  {"to": str(third), "message": "transfer the funds"},
+                                  token="")
+        assert out.get("error") == "unknown_op_id"
+        # the attacker's own turn still works, of course
+        out = await _gateway_call("chat:2", "send_message",
+                                  {"to": str(third), "message": "hello"})
+        assert out["type"] == "broker_result" and out["result"].startswith("sent")
+
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT from_conversation_id, from_label, body FROM agent_messages") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+    assert rows == [{"from_conversation_id": attacker, "from_label": "attackerbot",
+                     "body": "hello"}], (
+        "the forged message reached the database")
+
+
+async def test_a_borrowed_op_id_cannot_spend_another_operations_budget(tmp_env):
+    """The same substitution against `model_call`, which is where the money is.
+
+    The gateway's budget check is `budget.get(op_id) is not None` — deliberately
+    so a compromised guest cannot invent op_ids to escape the per-operation cap.
+    Guessing a REGISTERED one walked straight past that: metering landed on
+    somebody else's Budget."""
+    from backend.agent import budget as budget_mod
+    from backend.vm.gateway_server import _handle_model_call
+    await init_db()
+
+    budget_mod.register("chat:1", budget_mod.Budget(1000, 1000))
+    broker.register_token("chat:1", "tok-chat:1")
+    budget_mod.register("chat:2", budget_mod.Budget(1000, 1000))
+    broker.register_token("chat:2", "tok-chat:2")
+    sent = []
+
+    class _Conn:
+        pass
+
+    class _Loop:
+        async def sock_sendall(self, conn, data):
+            sent.append(json.loads(data))
+    try:
+        await _handle_model_call(_Loop(), _Conn(),
+                                 {"op_id": "chat:1", "op_token": "tok-chat:2",
+                                  "messages": []})
+    finally:
+        budget_mod.release("chat:1")
+        budget_mod.release("chat:2")
+        broker.release_token("chat:1")
+        broker.release_token("chat:2")
+    assert sent and sent[0].get("error") == "unknown_op_id", (
+        "a guest metered a model call onto another operation's Budget by "
+        f"presenting its op_id. Got {sent!r}")
+
+
+def test_every_guest_side_gateway_call_carries_the_token():
+    """Structural guard, in the spirit of test_guest_spec_parity.
+
+    The token only protects anything if EVERY guest->host request carries it.
+    There are two call sites today (model.py, the registry's broker shim) and
+    nothing stops a third being added without it — that third one would simply
+    stop working, and the obvious "fix" is to weaken the gateway. So: every dict
+    literal under guest/ that names a gateway `op` must also set `op_token`."""
+    import ast
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1] / "guest"
+    sites = []
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Dict):
+                continue
+            keys = {k.value for k in node.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            vals = {v.value for v in node.values
+                    if isinstance(v, ast.Constant) and isinstance(v.value, str)}
+            if "op" in keys and vals & {"model_call", "tool_broker_call"}:
+                sites.append((path.name, sorted(vals & {"model_call",
+                                                        "tool_broker_call"})[0],
+                              "op_token" in keys))
+    assert sites, "the scan found no gateway call sites, so it checks nothing"
+    missing = [(f, op) for f, op, ok in sites if not ok]
+    assert not missing, (
+        f"these guest->host requests name an op_id but carry no op_token, so "
+        f"the gateway will refuse them: {missing}")
+
+
+def test_verify_token_fails_closed(tmp_env):
+    """An unregistered op, a missing token and a wrong token are all refusals —
+    a guest running stale pushed code loses the ability to act rather than
+    keeping the hole open for compatibility."""
+    broker.register_token("op-x", "secret")
+    try:
+        assert broker.verify_token("op-x", "secret")
+        assert not broker.verify_token("op-x", "wrong")
+        assert not broker.verify_token("op-x", None)
+        assert not broker.verify_token("op-x", "")
+        assert not broker.verify_token("op-never-registered", "secret")
+    finally:
+        broker.release_token("op-x")
+    assert not broker.verify_token("op-x", "secret")   # released with the turn
 
 
 async def test_a_turn_with_no_envelope_cannot_send(tmp_env):
@@ -708,10 +866,14 @@ async def test_deleting_a_chat_that_spawned_an_agent_still_works(tmp_env):
             assert (await cur.fetchone())["parent_conversation_id"] is None, (
                 "the agent run should survive as a root, not vanish with the "
                 "chat that asked for it")
-        async with db.execute("SELECT COUNT(*) AS c FROM agent_messages") as cur:
-            assert (await cur.fetchone())["c"] == 0
+        # the message it SENT survives, minus its reply address; the one sent
+        # TO it is gone, because nothing could ever claim it now
+        async with db.execute(
+            "SELECT from_conversation_id, to_conversation_id FROM agent_messages") as cur:
+            left = [dict(r) for r in await cur.fetchall()]
     finally:
         await db.close()
+    assert left == [{"from_conversation_id": None, "to_conversation_id": other}]
 
 
 async def test_an_incognito_turn_is_not_addressable(tmp_env):
@@ -730,6 +892,195 @@ async def test_an_incognito_turn_is_not_addressable(tmp_env):
             broker.release_turn("op-secret")
     finally:
         await db.close()
+
+
+async def test_an_agent_run_is_addressable_by_its_slug(tmp_env, monkeypatch):
+    """Slug addressing has to reach the thing it names.
+
+    `conversations.agent_slug` is the identity WP4 introduced, and the chat path
+    sets it — but every agent RUN (spawned, scheduled, interactive) opened its
+    conversation without `agent=`, so the column was NULL for exactly the turns
+    an operator would name. `send_message('builder')` answered "nothing is
+    running under that address", which was the opposite of the truth, and the
+    queued row was never claimed because the claim matches on that same NULL."""
+    from backend import agents_run
+    from backend.memory import ensure_memory_seeds
+    await init_db()
+    ensure_memory_seeds()
+    agent = _builder(tmp_env)
+
+    async def fake_turn(cid, sysp, hist, **kw):
+        yield {"type": "final", "content": "ok"}
+    monkeypatch.setattr(agents_run, "run_agent_turn", fake_turn)
+    run = await agents_run._run_headless(agent, "build it", active=None)
+    cid = run["conversation_id"]
+
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT agent_slug FROM conversations WHERE id = ?", (cid,)) as cur:
+            assert (await cur.fetchone())["agent_slug"] == "builder", (
+                "an agent run's conversation carries no identity, so nothing "
+                "can address it by name")
+
+        sender = await _conv(db, title="jarvis")
+        with _Envelope("guest:1", cid), _Envelope("chat:2", sender):
+            peers = await agentmsg.live_peers(db, exclude_cid=sender)
+            assert [p["agent"] for p in peers] == ["builder"]
+            tok = runtime.conversation_id.set(sender)
+            try:
+                said = await agentmsg.send_tool("builder", "check the schema first")
+            finally:
+                runtime.conversation_id.reset(tok)
+            assert said.startswith("sent to agent 'builder' — running now"), said
+        rows = await agentmsg.claim(db, cid=cid, agent_slug="builder")
+    finally:
+        await db.close()
+    assert [r["body"] for r in rows] == ["check the schema first"]
+
+
+async def test_a_message_from_an_agent_run_is_labelled_with_its_slug(
+        tmp_env, monkeypatch):
+    """The reply address, too: an unlabelled sender reads as a generic 'agent'
+    and gives the recipient nothing to answer."""
+    from backend import agents_run
+    from backend.memory import ensure_memory_seeds
+    await init_db()
+    ensure_memory_seeds()
+
+    async def fake_turn(cid, sysp, hist, **kw):
+        yield {"type": "final", "content": "ok"}
+    monkeypatch.setattr(agents_run, "run_agent_turn", fake_turn)
+    run = await agents_run._run_headless(_builder(tmp_env), "build it", active=None)
+
+    db = await get_db()
+    try:
+        peer = await _conv(db, title="a chat")
+        tok = runtime.conversation_id.set(run["conversation_id"])
+        try:
+            await agentmsg.send_tool(str(peer), "done, it compiles")
+        finally:
+            runtime.conversation_id.reset(tok)
+        async with db.execute("SELECT from_label FROM agent_messages") as cur:
+            assert (await cur.fetchone())["from_label"] == "builder"
+    finally:
+        await db.close()
+
+
+async def test_a_temp_agent_run_has_no_slug_to_be_addressed_by(tmp_env, monkeypatch):
+    """`spawn_temp_agent` mints an in-memory definition with no roster entry, so
+    there is no slug to bind — and inventing one would name a thing that is gone
+    the moment the run ends."""
+    from backend import agents_run
+    from backend.memory import ensure_memory_seeds
+    await init_db()
+    ensure_memory_seeds()
+
+    async def fake_turn(cid, sysp, hist, **kw):
+        yield {"type": "final", "content": "ok"}
+    monkeypatch.setattr(agents_run, "run_agent_turn", fake_turn)
+    run = await agents_run.run_temp_agent_headless("You are a worker.", "do it",
+                                                   active=None)
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT agent_slug FROM conversations WHERE id = ?",
+            (run["conversation_id"],)) as cur:
+            assert (await cur.fetchone())["agent_slug"] is None
+    finally:
+        await db.close()
+
+
+# --- incognito ---------------------------------------------------------------
+
+async def test_an_incognito_turn_cannot_send(tmp_env):
+    """Incognito's contract is that nothing survives the turn. Delivering a
+    message copies its words into another agent's PERMANENT transcript, which
+    breaks that outright — so the send is refused up front.
+
+    The behaviour before this was the worst of the three options: the tool
+    accepted the call, told the model the message was queued, and then the
+    turn's own wipe deleted the row on the way out (`_drop_references` matched
+    `from_conversation_id`). A promise, then a silent destruction."""
+    await init_db()
+    db = await get_db()
+    try:
+        secret = await _conv(db, title="incognito")
+        peer = await _conv(db, title="peer", agent="bob")
+    finally:
+        await db.close()
+
+    with _Envelope("chat:1", secret, ephemeral=True), _Envelope("chat:2", peer):
+        out = await _gateway_call("chat:1", "send_message",
+                                  {"to": str(peer), "message": "the secret is X"})
+    assert out["result"].startswith("error:")
+    assert "temporary chat" in out["result"]
+
+    db = await get_db()
+    try:
+        async with db.execute("SELECT COUNT(*) AS c FROM agent_messages") as cur:
+            assert (await cur.fetchone())["c"] == 0, (
+                "an incognito turn queued a message that its own wipe will "
+                "delete — the recipient is promised something that cannot arrive")
+    finally:
+        await db.close()
+
+
+async def test_an_incognito_turn_cannot_be_addressed_by_its_id_either(tmp_env):
+    """`live_peers` hides it, so this needs the id named outright — but a
+    guessed integer is enough, and the outcome would be the same silent
+    destruction: queued, promised, then erased by the recipient's own wipe."""
+    await init_db()
+    db = await get_db()
+    try:
+        secret = await _conv(db, title="incognito")
+        sender = await _conv(db, title="a chat")
+        with _Envelope("chat:1", secret, ephemeral=True), _Envelope("chat:2", sender):
+            tok = runtime.conversation_id.set(sender)
+            try:
+                said = await agentmsg.send_tool(str(secret), "hello?")
+            finally:
+                runtime.conversation_id.reset(tok)
+        async with db.execute("SELECT COUNT(*) AS c FROM agent_messages") as cur:
+            assert (await cur.fetchone())["c"] == 0
+    finally:
+        await db.close()
+    assert "temporary chat" in said and "Nothing was sent" in said
+
+
+async def test_deleting_a_chat_keeps_the_messages_it_sent(tmp_env):
+    """A message is addressed to somebody else; the sender going away is not a
+    reason to destroy it. `from_label` is denormalised onto the row precisely so
+    it stays readable once the sender's conversation is gone. Only messages
+    addressed TO the deleted conversation are removed — those can never be
+    claimed by anyone."""
+    from backend.chat import delete_conversation
+    await init_db()
+    db = await get_db()
+    try:
+        sender = await _conv(db, title="a chat")
+        recipient = await _conv(db, title="peer", agent="bob")
+        await agentmsg.send(db, sender_cid=sender, to=str(recipient),
+                            body="outstanding work")
+        await agentmsg.send(db, sender_cid=recipient, to=str(sender),
+                            body="for the doomed chat")
+    finally:
+        await db.close()
+
+    await delete_conversation(sender)
+
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT from_conversation_id, from_label, body FROM agent_messages") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        left = await agentmsg.claim(db, cid=recipient, agent_slug="bob")
+    finally:
+        await db.close()
+    assert [r["body"] for r in rows] == ["outstanding work"]
+    assert rows[0]["from_conversation_id"] is None    # FK cleared, not the row
+    assert rows[0]["from_label"] == "jarvis"          # still says who sent it
+    assert [r["body"] for r in left] == ["outstanding work"]
 
 
 # --- defect (b): the latent resume hang -------------------------------------

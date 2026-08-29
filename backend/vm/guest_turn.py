@@ -13,6 +13,7 @@ persistence reconstructed here from the tool/tool_result events.
 import asyncio
 import base64
 import json
+import secrets
 import socket
 
 from ..agent import budget as budget_mod
@@ -91,6 +92,14 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             settings.max_op_input_tokens, settings.max_op_output_tokens))
     if envelope is not None:
         broker.register_turn(envelope)
+    # The turn's capability token: an op_id names a turn, this proves one. Minted
+    # here because this is the single place op_ids are handed out, registered
+    # host-side, and shipped exactly once in the spec below — the guest keeps it
+    # task-local (turnctx) so concurrent turns in one guest cannot use each
+    # other's. Registered unconditionally, not just when there is an envelope,
+    # because `model_call` is gated on it too and a no-envelope turn still spends.
+    op_token = secrets.token_urlsafe(24)
+    broker.register_token(op_id, op_token)
     holds_ws = bool(push_workspace and active_slug)
     # first-in pushes a fresh copy; joiners reuse it (no await between check+set)
     owns_ws = acquire_workspace(active_slug) if holds_ws else False
@@ -102,6 +111,11 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         "tool_specs": tool_specs or [],
         "read_only": list(read_only or []),
         "op_id": op_id,
+        # ...and the secret that makes the op_id above mean something. Every
+        # model_call and tool_broker_call must carry it back or the gateway
+        # refuses: without it, guessing a live op_id was enough to act as that
+        # turn (see broker._op_tokens).
+        "op_token": op_token,
         "gateway_port": settings.vm_vsock_port,
         "model_name": model_name,
         "base_url": base_url,
@@ -169,6 +183,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             except Exception:  # noqa: BLE001 — best-effort sweep
                 pass
         guest_vm.release()
+        broker.release_token(op_id)
         if envelope is not None:
             broker.release_turn(op_id)
         if owns_budget:
