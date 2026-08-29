@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { human } from '../format.js'
+import EmptyState from '../components/EmptyState.jsx'
 
 // The guest's live egress: a scrolling feed of every outbound request the
 // sandbox made, with a verdict chip (allow / deny / cut), an approval queue for
@@ -12,13 +14,6 @@ import { useAsk } from '../ask.jsx'
 // traffic). It is only ever rendered as plain text nodes, never markup.
 
 const FEED_CAP = 300
-
-function human(n) {
-  const v = Number(n) || 0
-  if (v < 1024) return `${v} B`
-  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`
-  return `${(v / (1024 * 1024)).toFixed(1)} MB`
-}
 
 // allow -> green, cut -> red, everything else (deny / anomaly) -> amber
 const verdictClass = (v) => (v === 'allow' ? 'allow' : v === 'cut' ? 'cut' : 'deny')
@@ -128,7 +123,7 @@ function Grants({ slug }) {
       <div className="sbx-sec-head"><h3>Secret grants · {slug}</h3>
         <button className="ghost" onClick={add}>+ grant</button></div>
       <ul className="staged-list rev-list">
-        {grants.length === 0 && <li className="dim" style={{ cursor: 'default' }}>none granted</li>}
+        {grants.length === 0 && <EmptyState as="li">none granted</EmptyState>}
         {grants.map((g) => {
           const granted = g.status === 'granted'
           return (
@@ -146,72 +141,99 @@ function Grants({ slug }) {
   )
 }
 
-// Compact, project-scoped egress view for a Workspace panel: the live feed
-// filtered to this project, its host-approval queue, policy + grants. Same data
-// and endpoints as the full Network page, no project picker.
-export function NetworkPanel({ slug }) {
+// ---- the live egress feed ----------------------------------------------------
+// Seed from REST, then follow the stream. `project` scopes it: the panel wants
+// only its own project's rows, so it filters at the source; the page holds
+// everything and filters at render time, so switching its project picker never
+// drops the socket.
+function useEgressFeed(project) {
   const [feed, setFeed] = useState([])
-  const [pending, setPending] = useState([])
   const keyRef = useRef(0)
-
   useEffect(() => {
     let live = true
     api('/api/egress/events?limit=200').then((r) => {
       const evs = (Array.isArray(r) ? r : r.events) || []
       // REST rows carry project_slug; the live stream carries project
-      if (live) setFeed(evs.map((e) => ({ ...e, project: e.project ?? e.project_slug }))
-        .filter((e) => e.project === slug)
-        .map((e) => ({ ...e, _k: ++keyRef.current })))
+      const rows = evs.map((e) => ({ ...e, project: e.project ?? e.project_slug }))
+      const kept = project ? rows.filter((e) => e.project === project) : rows
+      if (live) setFeed(kept.map((e) => ({ ...e, _k: ++keyRef.current })))
     }).catch(() => {})
     const stop = subscribeSse('/api/egress/stream', (ev) => {
-      if (ev.type !== 'egress' || ev.project !== slug) return
+      if (ev.type !== 'egress') return
+      if (project && ev.project !== project) return
       setFeed((f) => [{ ...ev, _k: ++keyRef.current }, ...f].slice(0, FEED_CAP))
     })
     return () => { live = false; stop() }
-  }, [slug])
+  }, [project])
+  return feed
+}
 
-  const reloadPending = () =>
-    api(`/api/egress/pending?project=${encodeURIComponent(slug)}`)
+// ---- host approvals ----------------------------------------------------------
+// The hosts the guest's code tried to reach and could not, with approve (which
+// trains the allowlist up) and reject. This card was written out TWICE in this
+// file — once in the panel, once on the page — each with its own poll effect and
+// its own `decide`, 110 lines apart. One component, two mounts.
+//
+// `project` scopes the queue ('' = every project). The blurb differs between the
+// two mounts and stays a prop rather than being picked for them, and only the
+// unscoped page has anything to say with the project tag.
+function HostApprovals({ project = '', showProject = false, children }) {
+  const [pending, setPending] = useState([])
+  const reload = () =>
+    api(`/api/egress/pending${project ? `?project=${encodeURIComponent(project)}` : ''}`)
       .then((r) => setPending(r.pending || [])).catch(() => {})
   useEffect(() => {
-    reloadPending()
-    const t = setInterval(reloadPending, 10000)
+    reload()
+    const t = setInterval(reload, 10000)
     return () => clearInterval(t)
-  }, [slug]) // eslint-disable-line
+  }, [project]) // eslint-disable-line
   async function decide(id, verb) {
-    try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); reloadPending() }
+    try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); reload() }
     catch (err) { notifyError(err) }
   }
+  return (
+    <div className="sbx-card">
+      <div className="sbx-sec-head"><h3>Host approvals</h3>
+        <span className="dim small">{pending.length} waiting</span></div>
+      <div className="dim small">{children}</div>
+      <ul className="staged-list rev-list">
+        {pending.length === 0 && <EmptyState as="li">nothing waiting</EmptyState>}
+        {pending.map((p) => (
+          <li key={p.id}>
+            <span className="tag pending">{p.hit_count}×</span>
+            <span className="grow ellipsis mono" title={p.host}>{p.host}</span>
+            {p.triage_verdict === 'flag' && (
+              <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
+            {showProject && p.project_slug && <span className="tag">{p.project_slug}</span>}
+            <button className="win-btn ok" title="approve" onClick={() => decide(p.id, 'approve')}>✓</button>
+            <button className="win-btn" title="reject" onClick={() => decide(p.id, 'reject')}>✕</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+// Compact, project-scoped egress view for a Workspace panel: the live feed
+// filtered to this project, its host-approval queue, policy + grants. Same data
+// and endpoints as the full Network page, no project picker.
+export function NetworkPanel({ slug }) {
+  const feed = useEgressFeed(slug)
 
   return (
     <div className="pane-col net-panel">
-      <div className="sbx-card">
-        <div className="sbx-sec-head"><h3>Host approvals</h3>
-          <span className="dim small">{pending.length} waiting</span></div>
-        <div className="dim small">hosts the agent's code tried to reach — approve to
-          let it through (trains the allowlist), reject to keep it out</div>
-        <ul className="staged-list rev-list">
-          {pending.length === 0 && <li className="dim" style={{ cursor: 'default' }}>nothing waiting</li>}
-          {pending.map((p) => (
-            <li key={p.id}>
-              <span className="tag pending">{p.hit_count}×</span>
-              <span className="grow ellipsis mono" title={p.host}>{p.host}</span>
-              {p.triage_verdict === 'flag' && (
-                <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
-              <button className="win-btn ok" title="approve" onClick={() => decide(p.id, 'approve')}>✓</button>
-              <button className="win-btn" title="reject" onClick={() => decide(p.id, 'reject')}>✕</button>
-            </li>
-          ))}
-        </ul>
-      </div>
+      <HostApprovals project={slug}>
+        hosts the agent&#39;s code tried to reach — approve to
+        let it through (trains the allowlist), reject to keep it out
+      </HostApprovals>
       <PolicyEditor slug={slug} />
       <Grants slug={slug} />
       <div className="dim small" style={{ marginTop: 8 }}>live egress ·
         {' '}{feed.length} event{feed.length !== 1 && 's'}</div>
       <div className="net-feed-list grow-scroll">
         {feed.length === 0 && (
-          <div className="dim center-pad">no egress yet — outbound requests the
-            agent's code makes stream in here</div>
+          <EmptyState pad>no egress yet — outbound requests the
+            agent&#39;s code makes stream in here</EmptyState>
         )}
         {feed.map((e) => <FeedRow key={e._k} e={e} />)}
       </div>
@@ -223,48 +245,13 @@ export function NetworkPanel({ slug }) {
 export default function Network() {
   const [projects, setProjects] = useState([])
   const [filter, setFilter] = useState('')      // '' = all projects
-  const [feed, setFeed] = useState([])
-  const [pending, setPending] = useState([])
-  const keyRef = useRef(0)
+  // the page holds every project's events and narrows at render, so changing
+  // the filter never tears down the stream
+  const feed = useEgressFeed('')
 
   useEffect(() => {
     api('/api/projects').then((r) => setProjects(r.projects || [])).catch(() => {})
   }, [])
-
-  // seed the feed, then subscribe to the live stream (global; filtered for
-  // display client-side so switching the project filter never drops the socket)
-  useEffect(() => {
-    let live = true
-    api('/api/egress/events?limit=200').then((r) => {
-      const evs = (Array.isArray(r) ? r : r.events) || []
-      // REST rows carry project_slug; the live stream carries project
-      if (live) setFeed(evs.map((e) => (
-        { ...e, project: e.project ?? e.project_slug, _k: ++keyRef.current })))
-    }).catch(() => {})
-    const stop = subscribeSse('/api/egress/stream', (ev) => {
-      if (ev.type !== 'egress') return
-      setFeed((f) => [{ ...ev, _k: ++keyRef.current }, ...f].slice(0, FEED_CAP))
-    })
-    return () => { live = false; stop() }
-  }, [])
-
-  // approval queue, re-scoped when the project filter changes
-  useEffect(() => {
-    const load = () => api(`/api/egress/pending${filter ? `?project=${encodeURIComponent(filter)}` : ''}`)
-      .then((r) => setPending(r.pending || [])).catch(() => {})
-    load()
-    const t = setInterval(load, 10000)
-    return () => clearInterval(t)
-  }, [filter])
-
-  function reloadPending() {
-    api(`/api/egress/pending${filter ? `?project=${encodeURIComponent(filter)}` : ''}`)
-      .then((r) => setPending(r.pending || [])).catch(() => {})
-  }
-  async function decide(id, verb) {
-    try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); reloadPending() }
-    catch (err) { notifyError(err) }
-  }
 
   const shown = filter ? feed.filter((e) => e.project === filter) : feed
 
@@ -289,34 +276,18 @@ export default function Network() {
             {' '}· newest first · capped at {FEED_CAP}</div>
           <div className="net-feed-list">
             {shown.length === 0 && (
-              <div className="dim center-pad">no egress yet — the guest's outbound
-                requests stream in here as they happen</div>
+              <EmptyState pad>no egress yet — the guest&#39;s outbound
+                requests stream in here as they happen</EmptyState>
             )}
             {shown.map((e) => <FeedRow key={e._k} e={e} />)}
           </div>
         </div>
 
         <div className="net-side">
-          <div className="sbx-card">
-            <div className="sbx-sec-head"><h3>Host approvals</h3>
-              <span className="dim small">{pending.length} waiting</span></div>
-            <div className="dim small">hosts the guest keeps reaching for — approve to
-              train the allowlist up, reject to keep it out</div>
-            <ul className="staged-list rev-list">
-              {pending.length === 0 && <li className="dim" style={{ cursor: 'default' }}>nothing waiting</li>}
-              {pending.map((p) => (
-                <li key={p.id}>
-                  <span className="tag pending">{p.hit_count}×</span>
-                  <span className="grow ellipsis mono" title={p.host}>{p.host}</span>
-                  {p.triage_verdict === 'flag' && (
-                    <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
-                  {!filter && p.project_slug && <span className="tag">{p.project_slug}</span>}
-                  <button className="win-btn ok" title="approve" onClick={() => decide(p.id, 'approve')}>✓</button>
-                  <button className="win-btn" title="reject" onClick={() => decide(p.id, 'reject')}>✕</button>
-                </li>
-              ))}
-            </ul>
-          </div>
+          <HostApprovals project={filter} showProject={!filter}>
+            hosts the guest keeps reaching for — approve to
+            train the allowlist up, reject to keep it out
+          </HostApprovals>
 
           {filter ? (
             <>
