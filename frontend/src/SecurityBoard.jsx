@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { human, sevClass } from './format.js'
 
 // The evidence board for one security alert. A card in the Review Center says
 // "write flag: network_call in fetch.py"; this is where the operator finds out
@@ -12,16 +13,6 @@ import { api } from './api.js'
 // EVERYTHING on this board is UNTRUSTED: agent-written source, scanned
 // hostnames, guest request paths, attempted usernames. It is rendered as plain
 // text nodes only — no <Md>, no dangerouslySetInnerHTML, ever.
-
-function fmtBytes(n) {
-  if (n == null) return ''
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`
-  return `${(n / 1048576).toFixed(1)} MB`
-}
-
-const SEV = { info: 'info', warn: 'warn', warning: 'warn', critical: 'crit', crit: 'crit' }
-const sevClass = (s) => SEV[String(s || 'info').toLowerCase()] || 'info'
 
 function Facts({ s }) {
   return (
@@ -110,7 +101,7 @@ function Files({ s }) {
           <span className="dim small">
             {e.kind === 'dir'
               ? (e.count != null ? `${e.count} item${e.count === 1 ? '' : 's'}` : '')
-              : fmtBytes(e.size)}
+              : (e.size == null ? '' : human(e.size))}
           </span>
           <span className="dim small sbd-when">{e.ago}</span>
         </li>

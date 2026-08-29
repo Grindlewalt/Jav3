@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { tsShort as ts } from './format.js'
 import { notifyError } from './notify.js'
 
 // Control strip for the isolated triage reviewer (backend/reviewer.py), the
@@ -21,8 +22,6 @@ import { notifyError } from './notify.js'
 // EVERY item string here — hostnames, the reviewer's own reasons (a model
 // output derived from untrusted input) — is UNTRUSTED and is rendered as
 // plain text nodes only, never through <Md>.
-
-function ts(s) { return s ? String(s).replace('T', ' ').slice(5, 16) : '' }
 
 export default function TriagePanel() {
   const [s, setS] = useState(null)

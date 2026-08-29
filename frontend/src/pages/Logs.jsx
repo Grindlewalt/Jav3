@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
+import { human } from '../format.js'
+import EmptyState from '../components/EmptyState.jsx'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
 // message and every tool call with its args and result — plus the numbers that
@@ -11,14 +13,6 @@ import Md from '../Md.jsx'
 const RESULT_HOT = 4000       // a single result this big is re-sent every iteration
 const HEAVY_TOKENS = 500000   // runaway-conversation flags in the left rail
 const HEAVY_CALLS = 30
-
-// bytes -> B / KB / MB
-function human(n) {
-  const v = Number(n) || 0
-  if (v < 1024) return `${v} B`
-  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`
-  return `${(v / (1024 * 1024)).toFixed(1)} MB`
-}
 
 // token counts -> K / M
 function tok(n) {
@@ -294,7 +288,7 @@ export default function Logs() {
             )
           })}
           {convos.length === 0 && (
-            <li className="dim" style={{ cursor: 'default' }}>no conversations yet</li>
+            <EmptyState as="li">no conversations yet</EmptyState>
           )}
         </ul>
       </aside>
@@ -303,7 +297,7 @@ export default function Logs() {
         {view === 'cost' ? (
           <CostView />
         ) : !detail ? (
-          <div className="dim center-pad">pick a conversation to read its full transcript</div>
+          <EmptyState pad>pick a conversation to read its full transcript</EmptyState>
         ) : (
           <div className="log-detail">
             <div className="sbx-card">
@@ -385,7 +379,7 @@ export default function Logs() {
                   )
                 ))}
                 {(detail.timeline || []).length === 0 && (
-                  <div className="dim center-pad">no transcript</div>
+                  <EmptyState pad>no transcript</EmptyState>
                 )}
               </div>
             </section>
