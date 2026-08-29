@@ -368,7 +368,12 @@ def agents_index() -> str:
             rosters.append(f"- {md.parent.name}: {desc}")
     if not rosters:
         return ""
-    return ("# Agents you can summon with spawn_agent (by slug)\n"
+    # the same slug is both addresses: spawn_agent starts one, send_message
+    # talks to one that is already working. Saying so here is what makes the
+    # messaging tool findable — a tool spec alone never taught the model WHO it
+    # could address.
+    return ("# Agents — summon one with spawn_agent, or message one that is "
+            "already running with send_message (both take the slug)\n"
             + "\n".join(rosters))
 
 

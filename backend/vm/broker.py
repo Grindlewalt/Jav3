@@ -58,6 +58,17 @@ def get_turn(op_id: str) -> TurnEnvelope | None:
     return _envelopes.get(op_id)
 
 
+def live_turns() -> list[TurnEnvelope]:
+    """Every turn in flight right now.
+
+    This registry is the ONLY host-side answer to "who is running", and it is
+    already the thing a compromised guest cannot write to — which is why WP5's
+    addressing reads it rather than trusting anything the guest says about its
+    peers. Snapshot (a list, not the dict) because a caller awaits between
+    reading it and using it, and turns finish constantly."""
+    return list(_envelopes.values())
+
+
 # --- tier-4: taint tracking ------------------------------------------------
 # Tools whose output carries untrusted external content: a page, a search
 # result, a research report is content an attacker may have authored. Anything
@@ -93,6 +104,19 @@ def classify_taint(name: str) -> str:
 def op_tainted(op_id: str) -> bool:
     """Whether this operation has consumed untrusted tool output yet."""
     return op_id in _tainted
+
+
+def mark_tainted(op_id: str) -> None:
+    """Stamp an operation untrusted from outside the name-based classifier.
+
+    `classify_taint` decides from the tool NAME alone, which is right for
+    web_read (every call returns attacker-authorable text) and wrong for
+    inbox_fetch (an empty poll returns nothing, and polling happens every
+    round). The inbox handler calls this only when a peer's words actually
+    entered the turn — otherwise every turn in the system would come up
+    tainted for having checked an empty mailbox."""
+    if op_id:
+        _tainted.add(op_id)
 
 
 async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:

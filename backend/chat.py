@@ -130,6 +130,10 @@ async def _drop_references(db, conversation_id: int) -> None:
     await db.execute(
         "UPDATE conversations SET parent_conversation_id = NULL "
         "WHERE parent_conversation_id = ?", (conversation_id,))
+    await db.execute(
+        "DELETE FROM agent_messages WHERE from_conversation_id = ? "
+        "OR to_conversation_id = ? OR delivered_to = ?",
+        (conversation_id, conversation_id, conversation_id))
 
 
 @router.delete("/conversations/{conversation_id}")
@@ -546,6 +550,13 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             # an agent definition may cap its own rounds; None
                             # keeps the normal chat cap
                             max_iterations=(agent_def or {}).get("max_iterations") or None,
+                            # a chat thread is addressable — by its conversation
+                            # id, and by its agent slug when WP4 bound one. An
+                            # ephemeral turn is not: nothing about it is stored,
+                            # so a message delivered into it would leave the
+                            # sender's row marked delivered against a transcript
+                            # the finally block is about to erase.
+                            inbox=not ephemeral,
                             # voice local tier: run on the operator's ollama.
                             # The guest never dials it — the host gateway makes
                             # the call, so base_url is honoured host-side.

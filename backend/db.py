@@ -211,6 +211,28 @@ CREATE TABLE IF NOT EXISTS triage_log (
     undone INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- One agent addressing another (WP5). The row IS the message: `send_message`
+-- writes it and returns, the recipient's loop claims it between iterations.
+-- Nothing about delivery lives in memory, so a message survives a restart and
+-- can never be shed under backpressure the way the browser bus deliberately
+-- sheds token events (bus.publish_to).
+--
+-- Addressed EITHER to a conversation (to_conversation_id, exact) or to an agent
+-- slug (to_agent_slug, whichever turn running as that agent claims it first).
+-- delivered_at NULL is the inbox; the claim is a single UPDATE ... RETURNING,
+-- so two concurrent turns of one slug can never both take the same message.
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id INTEGER PRIMARY KEY,
+    from_conversation_id INTEGER REFERENCES conversations(id),
+    from_label TEXT NOT NULL,            -- agent slug, or 'jarvis' for a plain chat
+    to_conversation_id INTEGER REFERENCES conversations(id),
+    to_agent_slug TEXT,
+    project_slug TEXT,                   -- the SENDER's project, for context
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    delivered_at TEXT,                   -- NULL = still in the inbox
+    delivered_to INTEGER REFERENCES conversations(id)
+);
 """
 
 
@@ -336,6 +358,14 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_egress_pending_status ON egress_pending(status)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_security_events_ack ON security_events(acknowledged, created_at)")
+        # the inbox claim runs once per ReAct round of every addressable turn,
+        # so it has to be an index hit and not a scan of every message ever sent
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_msg_inbox_conv "
+            "ON agent_messages(delivered_at, to_conversation_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_msg_inbox_slug "
+            "ON agent_messages(delivered_at, to_agent_slug)")
         await db.commit()
     finally:
         await db.close()

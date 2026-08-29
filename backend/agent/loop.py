@@ -81,6 +81,27 @@ def _triage_note(tool_names: set[str]) -> str:
             + "; ".join(routes) + ".]")
 
 
+async def _drain_inbox() -> str:
+    """Anything another agent addressed to this turn, or "".
+
+    An inbox has to be PULLED. The host cannot reach into a running guest — the
+    gateway serves four ops and every one of them is guest-initiated — so the
+    loop asks, on the connection it already has, at the one moment where new
+    input can be added without corrupting an in-flight model call: between
+    iterations. `inbox_fetch` is a tool folder purely so this crosses
+    `broker_dispatch`, where the op_id pinning that proves who is asking lives.
+
+    Failure is not loss. A dispatch that errors claims nothing, so the message
+    is still in the inbox and the next round tries again; that is why this
+    swallows rather than raising into a turn doing unrelated work."""
+    try:
+        note = await registry.dispatch("inbox_fetch", {})
+    except Exception:  # noqa: BLE001 — a mail check must never end a turn
+        return ""
+    note = (note or "").strip()
+    return "" if note.startswith("error:") else note
+
+
 def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None:
     """An instructional error instead of dispatching an edit of a file the
     model never read here — prevents whole-class bad edits (stale find text,
@@ -272,9 +293,20 @@ async def run_turn(
     on_tool_call=None,
     rewrite_rules: bool = True,
     inject_rules: bool = True,
+    inbox: bool = False,
 ) -> AsyncIterator[dict]:
+    # Messages other agents addressed to this one (WP5). The first drain happens
+    # BEFORE the sandwich is assembled so anything waiting joins `history` and
+    # the standing-rules restatement still lands on the last user turn — append
+    # it afterwards and the rules end up a message early, which is the exact
+    # salience the restatement exists to buy.
+    waiting = await _drain_inbox() if inbox else ""
+    if waiting:
+        history = [*history, {"role": "user", "content": waiting}]
     messages, tools, rules, can_delegate = _assemble_messages(
         system_prompt, history, tools, self_check, inject_rules)
+    if waiting:
+        yield {"type": "inbox", "text": waiting}
 
     n_iter = max_iterations or settings.max_react_iterations
     offered = {t["function"]["name"] for t in (tools or [])}
@@ -291,6 +323,14 @@ async def run_turn(
     # Cleared whenever a mutating tool runs — state may have changed under it.
     seen_calls: dict[tuple, dict] = {}
     for i in range(n_iter):
+        # mail check. i == 0 was drained into `history` above; from here a
+        # message arriving mid-turn becomes its own user message, so it reads as
+        # something that happened DURING the work rather than part of the brief.
+        if inbox and i:
+            waiting = await _drain_inbox()
+            if waiting:
+                messages.append({"role": "user", "content": waiting})
+                yield {"type": "inbox", "text": waiting}
         # on the final allowed round — or once the dead-end breaker trips —
         # drop tools so the model must produce an answer from what it has
         # instead of another tool call it can't act on

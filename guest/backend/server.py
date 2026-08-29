@@ -102,6 +102,11 @@ async def _handle(loop, conn) -> None:
                     rewrite_rules=spec.get("rewrite_rules", True),
                     inject_rules=spec.get("inject_rules", True),
                     max_iterations=spec.get("max_iterations"),
+                    # WP5: drain messages other agents addressed to this turn
+                    # between iterations. The drain brokers to the host, which
+                    # resolves WHOSE inbox from the op_id envelope — the guest
+                    # supplies no identity and so cannot read another's.
+                    inbox=spec.get("inbox", False),
                     on_tool_call=None):
                 await send(ev)
         except Exception as e:  # noqa: BLE001 — surface any loop crash as a final

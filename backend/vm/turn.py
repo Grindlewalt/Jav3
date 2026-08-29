@@ -21,7 +21,7 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
                          read_only=None, model_name=None, base_url=None,
                          self_check=True, max_iterations=None, on_tool_call=None,
                          active_project=None, rewrite_rules=True,
-                         inject_rules=True, memory_slug=None):
+                         inject_rules=True, memory_slug=None, inbox=True):
     from .. import runtime
     from ..agent import budget as budget_mod
     from ..agent.tools.registry import openai_tool_specs, read_only_names
@@ -53,7 +53,13 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
             push_workspace=(not nested and bool(active_project)),
             model_name=model_name, base_url=base_url, self_check=self_check,
             max_iterations=max_iterations, rewrite_rules=rewrite_rules,
-            inject_rules=inject_rules):
+            inject_rules=inject_rules,
+            # addressable by default: every caller of this function (agent runs,
+            # scheduled runs, orchestrator leaves) is a turn with a conversation
+            # a peer can name. Research's scouts and readers never come through
+            # here — they call model.complete directly, no ReAct loop — so the
+            # short-lived internal nodes stay out of the address space for free.
+            inbox=inbox):
         if on_tool_call is not None:
             if ev["type"] == "tool":
                 pending[ev.get("id")] = (ev.get("name"), ev.get("args") or {})

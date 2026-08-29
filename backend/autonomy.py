@@ -29,6 +29,12 @@ _READ = {
 _STAGE = {
     "write_file", "edit_file", "dashboard", "crawl_codebase", "journal_update",
     "todo_update", "memory_write", "create_agent", "schedule_update",
+    # messaging a peer is not "observe": it persists a row, it enters another
+    # agent's context, and that agent may be running at a HIGHER autonomy than
+    # this project — so a read_only project must not be able to ask a full one
+    # to act on its behalf. Above read_only it is granted, because coordinating
+    # is the cheap half of not duplicating work.
+    "send_message",
 }
 _GATED = {
     "research", "spawn_agent", "spawn_temp_agent", "deploy_agents",

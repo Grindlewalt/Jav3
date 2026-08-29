@@ -62,7 +62,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                      tool_specs=None, read_only=None, op_id=None, envelope=None,
                      active_slug=None, push_workspace=False, model_name=None,
                      base_url=None, self_check=True, max_iterations=None,
-                     rewrite_rules=True, inject_rules=True):
+                     rewrite_rules=True, inject_rules=True, inbox=False):
     """Run one turn in the guest, yielding its events. Raises on a transport
     failure (connect/read) so the caller can fall back or surface an error.
 
@@ -114,6 +114,10 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         "max_iterations": max_iterations,
         "config": config_snapshot(),
         "active_slug": active_slug,
+        # WP5: whether this turn is addressable. On, the guest loop drains its
+        # inbox over the broker between iterations; off, it never asks and pays
+        # nothing. Off for anything with no identity worth writing to.
+        "inbox": inbox,
     }
     if owns_ws:
         # ship the workspace so the in-guest file tools work on a copy; the
