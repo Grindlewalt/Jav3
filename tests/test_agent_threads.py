@@ -550,3 +550,30 @@ async def test_own_memory_uses_a_private_notes_dir(client, monkeypatch, tmp_env)
     await client.post("/api/chat", json={"message": "hi", "confirm_peak": True})
     await _settle()
     assert seen[0]["envelope"].memory_slug is None
+
+
+async def test_ephemeral_chat_is_not_offered_send_message(client, monkeypatch):
+    """send_message has no `requires_project`, so it survived the ephemeral tool
+    filter and was offered to an incognito turn that can only ever be refused
+    when it calls it. It is dropped from the tool set now (chat.py), so the model
+    is not invited to promise a message it cannot send. Asserts ABSENCE, not
+    present-but-erroring."""
+    from backend import chat as chat_mod
+    seen: list[dict] = []
+    monkeypatch.setattr(chat_mod, "guest_turn", _capturing_turn(seen))
+
+    r = await client.post("/api/chat", json={"message": "hi", "ephemeral": True})
+    assert r.status_code == 200
+    await _settle()
+    assert len(seen) == 1
+    names = {t["function"]["name"] for t in seen[0]["tool_specs"]}
+    assert "send_message" not in names, (
+        "an incognito turn was handed send_message, which its own handler "
+        "refuses — a tool that can only error should not be offered")
+    # a persistent chat still gets it, so the filter is scoped to incognito
+    seen.clear()
+    r = await client.post("/api/chat", json={"message": "hi"})
+    assert r.status_code == 200
+    await _settle()
+    names = {t["function"]["name"] for t in seen[0]["tool_specs"]}
+    assert "send_message" in names

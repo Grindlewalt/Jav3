@@ -329,6 +329,51 @@ def test_verify_token_fails_closed(tmp_env):
     assert not broker.verify_token("op-x", "secret")   # released with the turn
 
 
+def test_verify_token_treats_non_string_input_as_a_miss():
+    """Both arguments arrive off guest JSON. A non-string token would make
+    compare_digest raise, and a dict op_id is unhashable so `.get` would raise —
+    fail-closed either way, but the raise kills the connection task with an
+    unretrieved exception. The guard turns each into a clean miss (-> the gateway
+    answers unknown_op_id) instead."""
+    broker.register_token("op-x", "secret")
+    try:
+        for bad_token in (123, True, ["secret"], {"t": "secret"}, b"secret", 1.5):
+            assert broker.verify_token("op-x", bad_token) is False
+        for bad_op in (123, ["op-x"], {"op": "x"}, None, True):
+            # must not raise (a dict op_id is unhashable), just miss
+            assert broker.verify_token(bad_op, "secret") is False
+    finally:
+        broker.release_token("op-x")
+
+
+async def test_the_gateway_answers_cleanly_on_non_string_op_credentials(tmp_env):
+    """End to end: a request whose op_id/op_token are the wrong JSON type gets a
+    single unknown_op_id back and the connection closes normally, rather than the
+    handler task dying on an unretrieved TypeError."""
+    await init_db()
+    loop = asyncio.get_running_loop()
+    a, b = socket.socketpair()
+    a.setblocking(False)
+    b.setblocking(False)
+    server = asyncio.create_task(handle_conn(loop, b), context=contextvars.Context())
+    try:
+        req = {"op": "tool_broker_call", "op_id": {"not": "a string"},
+               "op_token": ["also", "not"], "name": "send_message",
+               "args": {"to": "x", "message": "y"}}
+        await loop.sock_sendall(a, (json.dumps(req) + "\n").encode())
+        data = b""
+        while b"\n" not in data:
+            chunk = await asyncio.wait_for(loop.sock_recv(a, 65536), timeout=10)
+            if not chunk:
+                break
+            data += chunk
+        out = json.loads(data.split(b"\n", 1)[0])
+    finally:
+        a.close()
+        await asyncio.wait_for(server, timeout=5)
+    assert out["type"] == "error" and out["error"] == "unknown_op_id"
+
+
 async def test_a_turn_with_no_envelope_cannot_send(tmp_env):
     """op_id pinning: an unregistered op_id never reaches the tool at all."""
     await init_db()
@@ -1046,6 +1091,71 @@ async def test_an_incognito_turn_cannot_be_addressed_by_its_id_either(tmp_env):
     finally:
         await db.close()
     assert "temporary chat" in said and "Nothing was sent" in said
+
+
+async def test_incognito_by_id_is_refused_after_the_envelope_is_released(tmp_env):
+    """The residual window, closed at the source of truth.
+
+    The refusal used to read the broker registry, but the ephemeral envelope is
+    released in guest_turn's finally (~:201) several awaits BEFORE
+    _run_chat_turn wipes the row. In between, the row still exists and no live
+    envelope marks it ephemeral, so a registry read returned False and a guessed
+    id got the accept-promise-then-destroyed behaviour again. This models that
+    window by releasing the envelope exactly as guest_turn does, while the row
+    lives on, and asserts the refusal still holds — because it now reads the
+    row's own `ephemeral` column, which is deleted only WITH the row."""
+    await init_db()
+    db = await get_db()
+    try:
+        # a real incognito conversation: the row carries ephemeral=1, as the
+        # chat POST now sets it
+        secret = await open_conversation(db, project=None, title="incognito",
+                                         ephemeral=True)
+        sender = await _conv(db, title="a chat")
+    finally:
+        await db.close()
+
+    # the ephemeral turn's envelope goes up and then down — guest_turn.py:~201 —
+    # while _run_chat_turn has NOT yet reached its wipe. No live envelope now
+    # marks `secret` ephemeral; only the row does.
+    env = broker.TurnEnvelope(op_id="chat:secret", conversation_id=secret,
+                              ephemeral=True)
+    broker.register_turn(env)
+    broker.release_turn(env.op_id)
+    assert not any(e.conversation_id == secret and e.ephemeral
+                   for e in broker.live_turns()), "the window is not modelled"
+
+    db = await get_db()
+    try:
+        tok = runtime.conversation_id.set(sender)
+        try:
+            said = await agentmsg.send_tool(str(secret), "leak into the window?")
+        finally:
+            runtime.conversation_id.reset(tok)
+        async with db.execute("SELECT COUNT(*) AS c FROM agent_messages") as cur:
+            assert (await cur.fetchone())["c"] == 0, (
+                "a message was written into the post-release window of an "
+                "incognito turn — the wipe will destroy it and the sender was "
+                "told it was delivered")
+    finally:
+        await db.close()
+    assert "temporary chat" in said and "Nothing was sent" in said
+
+
+async def test_a_wiped_incognito_row_is_no_longer_incognito(tmp_env):
+    """Once the row is gone, so is the marker — _is_incognito falls to a normal
+    "no such conversation" further up send(), never a stale True."""
+    await init_db()
+    db = await get_db()
+    try:
+        cid = await open_conversation(db, project=None, title="gone",
+                                      ephemeral=True)
+        assert await agentmsg._is_incognito(db, cid) is True
+        await db.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+        await db.commit()
+        assert await agentmsg._is_incognito(db, cid) is False
+    finally:
+        await db.close()
 
 
 async def test_deleting_a_chat_keeps_the_messages_it_sent(tmp_env):

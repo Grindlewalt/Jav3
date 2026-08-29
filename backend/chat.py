@@ -831,7 +831,13 @@ async def chat(body: ChatRequest):
             title = " ".join(body.message.split())[:48] or "(empty)"
             conversation_id = await open_conversation(
                 db, project=active, title=title, locked=mode != "follow",
-                agent=body.agent or None)
+                agent=body.agent or None,
+                # persist the incognito marker on the row itself: it is the
+                # source of truth agentmsg._is_incognito reads to refuse a
+                # message to a turn about to be wiped, and it outlives the
+                # broker envelope that carries the same flag. Gone with the row
+                # at turn end.
+                ephemeral=body.ephemeral)
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:

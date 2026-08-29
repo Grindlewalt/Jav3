@@ -335,7 +335,20 @@ async def init_db() -> None:
                           # this column, so a funnel leaf stamped with its
                           # launcher's slug would steal that agent's messages.
                           # Provenance is parent_conversation_id instead.
-                          ("agent_slug", "TEXT")):
+                          ("agent_slug", "TEXT"),
+                          # incognito marker, and the source of truth for
+                          # "is this conversation ephemeral". The turn's
+                          # ephemeral flag lives on the broker envelope, which
+                          # is released BEFORE _run_chat_turn wipes the row —
+                          # so between the two a registry read said "not
+                          # ephemeral" while the row still existed, and a
+                          # guessed id could be messaged into a turn about to be
+                          # erased. This column outlives the envelope and is
+                          # deleted WITH the row (_drop_references), so the
+                          # incognito refusal holds until the row is actually
+                          # gone. It never persists past the turn: an incognito
+                          # row is wiped at turn end, and this goes with it.
+                          ("ephemeral", "INTEGER NOT NULL DEFAULT 0")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
@@ -393,7 +406,7 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
                             title: str, kind: str = "chat",
                             parent: int | None = None, job_id: str | None = None,
                             locked: bool = False, agent: str | None = None,
-                            commit: bool = True) -> int:
+                            ephemeral: bool = False, commit: bool = True) -> int:
     """Create a conversation node and return its id — the one place that resolves
     a project slug to its id and inserts the row.
 
@@ -408,7 +421,13 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
 
     `agent` is the definition slug this conversation runs AS (None = central
     Jarvis). Set once, at creation: an identity that could change mid-thread
-    would leave a transcript nobody can attribute."""
+    would leave a transcript nobody can attribute.
+
+    `ephemeral` marks an incognito conversation. It is the row-level source of
+    truth another agent's send_message consults (agentmsg._is_incognito) to
+    refuse messaging a turn that is about to be wiped — the broker envelope that
+    also carries this is released too early to be relied on. Deleted with the
+    row at turn end, so it leaves no trace."""
     project_id = None
     if project:
         async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
@@ -416,8 +435,9 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
         project_id = row["id"] if row else None
     cur = await db.execute(
         "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, "
-        "job_id, project_locked, agent_slug) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (project_id, title, kind, parent, job_id, 1 if locked else 0, agent))
+        "job_id, project_locked, agent_slug, ephemeral) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (project_id, title, kind, parent, job_id, 1 if locked else 0, agent,
+         1 if ephemeral else 0))
     if commit:
         await db.commit()
     return cur.lastrowid

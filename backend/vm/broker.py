@@ -91,16 +91,26 @@ def release_token(op_id: str) -> None:
     _op_tokens.pop(op_id, None)
 
 
-def verify_token(op_id: str, token: str | None) -> bool:
+def verify_token(op_id, token) -> bool:
     """Whether this caller is entitled to act as `op_id`.
 
-    Fails closed on an unregistered op_id and on a missing token, so a guest
+    Both arguments come straight off guest-supplied JSON, so both are guarded:
+    a non-string op_id (a dict is even unhashable, so `.get` would raise) or a
+    non-string token (int/list/dict/bool/non-ASCII would make compare_digest
+    raise) is simply a miss. The raise fails closed — no dispatch, nothing
+    written — but it kills the connection task with an unretrieved exception, so
+    it is turned into a clean `unknown_op_id` here at the input rather than
+    swallowed by a broadened except in the gateway.
+
+    Fails closed on an unregistered op_id and on a missing token too, so a guest
     running older pushed code (or none) loses the ability to act rather than
     keeping the hole open. compare_digest because this is a secret comparison,
     even though a timing oracle over vsock is a stretch."""
     import hmac
+    if not isinstance(op_id, str) or not isinstance(token, str):
+        return False
     known = _op_tokens.get(op_id)
-    if not known or not token:
+    if not known:
         return False
     return hmac.compare_digest(known, token)
 

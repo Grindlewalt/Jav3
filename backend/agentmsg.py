@@ -114,11 +114,28 @@ async def live_peers(db, *, exclude_cid: int | None = None) -> list[dict]:
     return out
 
 
-def _is_incognito(cid: int) -> bool:
-    """Whether a live turn on this conversation is running incognito. Read from
-    the envelope registry, which is where `ephemeral` is authoritative — the
-    conversation row itself carries no such flag (that is the point of
-    incognito: the row is temporary and then gone)."""
+async def _is_incognito(db, cid: int) -> bool:
+    """Whether conversation `cid` is an incognito (ephemeral) turn.
+
+    Reads the conversation ROW, not the broker registry, and that distinction is
+    the whole fix. The envelope that carries `ephemeral` is released in
+    guest_turn's finally, several awaits BEFORE _run_chat_turn's finally wipes
+    the row (persisting the reply, the bus publishes and the transcript dump all
+    sit in between). A registry read returned False in that window, so a guessed
+    id landing there got the accept-promise-then-destroyed behaviour again, just
+    in a narrower window. The `ephemeral` column is set at row creation, outlives
+    the envelope, and is deleted WITH the row (_drop_references) — so the refusal
+    holds until the row is actually gone.
+
+    The live-envelope check stays as a belt-and-suspenders for any path that
+    starts an ephemeral turn on a row whose column was not set (a direct
+    start_turn in a test, say); it can only ever add refusals, never remove the
+    ones the column already guarantees."""
+    async with db.execute(
+        "SELECT ephemeral FROM conversations WHERE id = ?", (cid,)) as cur:
+        row = await cur.fetchone()
+    if row is not None and row["ephemeral"]:
+        return True
     from .vm import broker
     return any(e.conversation_id == cid and e.ephemeral
                for e in broker.live_turns())
@@ -168,7 +185,7 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
         if not await _describe(db, [to_cid]):
             return {"error": f"no conversation {to_cid}. Running turns you can "
                              f"reach right now:\n" + format_peers(peers)}
-        if _is_incognito(to_cid):
+        if await _is_incognito(db, to_cid):
             # `live_peers` already hides incognito turns, so this is only
             # reachable by naming the id directly — but "accept, promise, then
             # let the recipient's wipe delete it" is the exact failure being
