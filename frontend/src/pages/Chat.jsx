@@ -103,9 +103,12 @@ function pickGreeting() {
 // same server-side setting as the nav switch (they sync over the
 // jarvis-model-changed window event) and only shows while the draft is empty —
 // the menu opens upward, since the bar lives at the bottom of the screen.
+// "deepseek-flash" is the API's rolling name for the current Flash (V4.1
+// since 2026-09-10). Pro left the menu the same day: the API routes it to
+// Flash at Flash price, so it would have been a name and not a model.
 const MODEL_SUB = {
-  flash: 'fast · everyday',
-  pro: 'deeper reasoning · ~3× price',
+  flash: 'V4.1 Flash · the model',
+  pro: 'deeper reasoning · when V4.1 Pro ships',
 }
 
 function ComposerModel({ visible }) {
@@ -120,7 +123,7 @@ function ComposerModel({ visible }) {
   const close = useCallback(() => setOpen(false), [])
   const ref = useDismiss(open, close)
   if (!m) return null
-  const short = (id) => id.replace(/^deepseek-v4-/, '')
+  const short = (id) => id.replace(/^deepseek-(v4(\.\d+)?-)?/, '')
   async function pick(model) {
     setOpen(false)
     if (model === m.active) return

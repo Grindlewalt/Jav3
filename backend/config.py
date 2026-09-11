@@ -53,13 +53,19 @@ class Settings(BaseSettings):
                                            # qwen3.5:4b on the 3060 Ti — the
                                            # voice local tier since 2026-08-03
                                            "http://10.0.0.58:11436"]
-    model_name: str = "deepseek-v4-flash"
+    # "deepseek-flash" is the API's name for the current Flash — V4.1 Flash
+    # since 2026-09-10. The old "deepseek-v4-flash" still resolves to it, and
+    # "deepseek-v4-pro" is routed to it (at Flash price) from 2026-09-14 until
+    # a V4.1 Pro exists, so Pro is not offered: the name would buy a costlier
+    # copy of the same model.
+    model_name: str = "deepseek-flash"
     # Models the nav switcher may select at runtime (persisted in session_state,
     # no restart). Agents with an explicit model pin are unaffected by the switch.
-    model_choices: list[str] = ["deepseek-v4-flash", "deepseek-v4-pro"]
-    # v4-flash caps output at 384K (verified accepted by the API). The old
-    # 4096 was a v3-era default: large tool-call payloads (whole-file writes)
-    # hit it mid-arguments and dispatched as empty {} args.
+    model_choices: list[str] = ["deepseek-flash"]
+    # Flash caps output at 384K (verified accepted by the API on v4, and the
+    # v4.1 limit is the same). The old 4096 was a v3-era default: large
+    # tool-call payloads (whole-file writes) hit it mid-arguments and
+    # dispatched as empty {} args.
     model_max_tokens: int = 384_000
     # Main generation temperature. 0.7 keeps personality and fluency; the
     # no-tools self-check pass (which runs at 0.0) is what enforces rules, so
@@ -70,10 +76,17 @@ class Settings(BaseSettings):
     # split by the API into cache hit/miss; output is flat. Override via
     # JARVIS_PRICE_* when the provider reprices. The flat price_* fields are
     # the fallback for models not in model_prices (and stay = flash).
-    price_cache_hit_per_m: float = 0.0028
-    price_cache_miss_per_m: float = 0.14
-    price_output_per_m: float = 0.28
+    #
+    # Off-peak list price (DeepSeek's peak — 01:00-04:00 and 06:00-10:00 UTC,
+    # Mon-Fri — is double; the peak gate in agent/model.py is what asks before
+    # spending in it). The old names keep the prices they were billed at, so
+    # rows recorded under them still cost what they cost.
+    price_cache_hit_per_m: float = 0.003
+    price_cache_miss_per_m: float = 0.15
+    price_output_per_m: float = 0.60
     model_prices: dict[str, dict[str, float]] = {
+        "deepseek-flash": {"cache_hit": 0.003, "cache_miss": 0.15,
+                           "output": 0.60},
         "deepseek-v4-flash": {"cache_hit": 0.0028, "cache_miss": 0.14,
                               "output": 0.28},
         "deepseek-v4-pro": {"cache_hit": 0.003625, "cache_miss": 0.435,

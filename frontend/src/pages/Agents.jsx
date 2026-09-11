@@ -233,7 +233,7 @@ export default function Agents() {
             </div>
             <div className="field-row">
               <label>model
-                <input value={agent.model} placeholder="inherit (deepseek-v4-flash)"
+                <input value={agent.model} placeholder="inherit (deepseek-flash)"
                        onChange={(e) => patch({ model: e.target.value })} />
               </label>
               <label>base url

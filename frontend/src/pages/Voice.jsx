@@ -157,7 +157,7 @@ export default function Voice() {
     <div className="voice-page">
       <div className="voice-tier-switch" role="group" aria-label="Model tier">
         {[['local', 'Local', 'qwen3.5:4b on your GPU — free, fast, escalates when asked'],
-          ['smart', 'Flash', 'deepseek-v4-flash for every turn — costs money, no escalation question'],
+          ['smart', 'Flash', 'DeepSeek Flash for every turn — costs money, no escalation question'],
         ].map(([value, label, hint]) => (
           <button key={value} type="button" title={hint}
                   className={forceTier === value ? 'on' : ''}

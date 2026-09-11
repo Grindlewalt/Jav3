@@ -33,28 +33,34 @@ async def client(tmp_env):
     model_mod.set_model_override(None)
 
 
-async def test_switch_api_and_persistence(client):
+async def test_switch_api_and_persistence(client, monkeypatch):
     r = await client.get("/api/model")
-    assert r.json() == {"active": "deepseek-v4-flash",
-                        "default": "deepseek-v4-flash",
-                        "choices": ["deepseek-v4-flash", "deepseek-v4-pro"]}
+    assert r.json() == {"active": "deepseek-flash",
+                        "default": "deepseek-flash",
+                        "choices": ["deepseek-flash"]}
 
     r = await client.put("/api/model", json={"model": "gpt-9"})
     assert r.status_code == 400
-
+    # Pro is gone from the switcher: the API routes it to Flash at Flash
+    # price anyway, so offering it would be offering a name
     r = await client.put("/api/model", json={"model": "deepseek-v4-pro"})
+    assert r.status_code == 400
+
+    # a second choice, when there is one, is switched to and persisted
+    monkeypatch.setattr(settings, "model_choices", ["deepseek-flash", "deepseek-v4.1-pro"])
+    r = await client.put("/api/model", json={"model": "deepseek-v4.1-pro"})
     assert r.status_code == 200
-    assert r.json()["active"] == "deepseek-v4-pro"
-    assert model_mod.get_model_override() == "deepseek-v4-pro"
+    assert r.json()["active"] == "deepseek-v4.1-pro"
+    assert model_mod.get_model_override() == "deepseek-v4.1-pro"
 
     # persisted: a fresh load (as at app startup) restores it
     model_mod.set_model_override(None)
     await model_mod.load_model_override()
-    assert model_mod.get_model_override() == "deepseek-v4-pro"
+    assert model_mod.get_model_override() == "deepseek-v4.1-pro"
 
     # selecting the default clears the override entirely
-    r = await client.put("/api/model", json={"model": "deepseek-v4-flash"})
-    assert r.json()["active"] == "deepseek-v4-flash"
+    r = await client.put("/api/model", json={"model": "deepseek-flash"})
+    assert r.json()["active"] == "deepseek-flash"
     assert model_mod.get_model_override() is None
     await model_mod.load_model_override()
     assert model_mod.get_model_override() is None
@@ -79,8 +85,8 @@ async def test_gateway_resolves_override(tmp_env, monkeypatch):
 
     model_mod.set_model_override(None)
     assert await run() == settings.model_name
-    model_mod.set_model_override("deepseek-v4-pro")
-    assert await run() == "deepseek-v4-pro"
+    model_mod.set_model_override("deepseek-v4.1-pro")
+    assert await run() == "deepseek-v4.1-pro"
     # an explicit per-call pin (agent model) beats the override
     assert await run(model_name="llama3:8b") == "llama3:8b"
     model_mod.set_model_override(None)
@@ -89,7 +95,8 @@ async def test_gateway_resolves_override(tmp_env, monkeypatch):
 async def test_costs_priced_per_model(client):
     db = await get_db()
     try:
-        for m, ch, cm, o in (("deepseek-v4-flash", 0, 1_000_000, 1_000_000),
+        for m, ch, cm, o in (("deepseek-flash", 0, 1_000_000, 1_000_000),
+                             ("deepseek-v4-flash", 0, 1_000_000, 1_000_000),
                              ("deepseek-v4-pro", 0, 1_000_000, 1_000_000)):
             await db.execute(
                 "INSERT INTO model_calls (conversation_id, model, input_tokens, "
@@ -100,7 +107,9 @@ async def test_costs_priced_per_model(client):
         await db.close()
     r = await client.get("/api/logs/costs")
     w = r.json()["windows"]["all"]
-    # flash: 0.14 + 0.28; pro: 0.435 + 0.87
+    # v4.1 flash: 0.15 + 0.60. The old names keep the prices their rows were
+    # billed at: v4 flash 0.14 + 0.28, v4 pro 0.435 + 0.87.
+    assert w["by_model"]["deepseek-flash"]["cost_usd"] == pytest.approx(0.75)
     assert w["by_model"]["deepseek-v4-flash"]["cost_usd"] == pytest.approx(0.42)
     assert w["by_model"]["deepseek-v4-pro"]["cost_usd"] == pytest.approx(1.305)
-    assert w["cost_usd"] == pytest.approx(1.725)
+    assert w["cost_usd"] == pytest.approx(2.475)

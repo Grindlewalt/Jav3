@@ -48,7 +48,7 @@ change what the reader does next.
 
 FIELD_DEFAULTS = {
     "description": "",
-    "model": "",          # "" = inherit the main model (deepseek-v4-flash)
+    "model": "",          # "" = inherit the main model (deepseek-flash)
     "base_url": "",       # "" = default DeepSeek endpoint; e.g. ollama: http://localhost:11434/v1
     "own_memory": False,  # experimental: agent keeps its own notes instead of sharing
     "context_exclude": [],
