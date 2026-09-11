@@ -1509,10 +1509,135 @@ def _ping(server, token, cf_id=None, cf_secret=None):
     return True, f"reached {server}, token accepted{note}"
 
 
+# --- pairing: credentials arrive by being confirmed in a browser ----------------
+#
+# The set-up command used to carry the pairing token and the Cloudflare Access
+# secret in plain text, because a paste was the only way to get them here.
+# --pair replaces that with a fifteen-minute code: this process claims it, prints
+# a confirm link, and polls until the operator says yes in a browser where they
+# are logged in to Jarvis. The reply to THAT poll carries the credentials, once,
+# to the process holding a device secret that was never displayed anywhere. The
+# code on its own is worth nothing — claim it, and the operator sees a machine
+# they did not set up asking to be confirmed, and denies it.
+
+def _http_json(url, body=None, timeout=20):
+    """(status, parsed body or None, raw bytes). HTTP errors are a status, not
+    an exception, and redirects are NOT followed: Cloudflare Access answers an
+    unauthenticated request with a 302 to its login page, and following it
+    would turn "this path needs a Bypass policy" into "not valid JSON"."""
+    import urllib.error
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url, data=data, method="POST" if data is not None else "GET",
+        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json",
+                 "Accept": "application/json"})
+    opener = urllib.request.build_opener(NoRedirect)
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            status, raw = r.status, r.read(65536)
+    except urllib.error.HTTPError as e:
+        status, raw = e.code, e.read(65536) if hasattr(e, "read") else b""
+    try:
+        parsed = json.loads(raw or b"")
+    except ValueError:
+        parsed = None
+    return status, (parsed if isinstance(parsed, dict) else None), raw
+
+
+def _detail(parsed, raw):
+    if parsed and parsed.get("detail"):
+        return str(parsed["detail"])
+    return (raw or b"")[:160].decode("utf-8", "replace")
+
+
+def _pair(server, code, name, os_name):
+    """Claim the code, print the confirm link, wait for the yes.
+
+    Returns (token, cf_id, cf_secret, name) or None, with the reason printed.
+    Every failure is a sentence naming what to do, because the operator is
+    looking at two screens at once and this one has to be the clear one.
+    """
+    base = server.rstrip("/") + "/api/computeruse/pair"
+    print(f"pairing  claiming code {code}" + (f" as {name}" if name else ""))
+    status, body, raw = _http_json(base + "/claim", {
+        "code": code, "name": name or "", "hostname": platform.node(),
+        "platform": os_name})
+    if status in (301, 302, 303, 307, 308):
+        print("     Cloudflare Access redirected the pairing request to a login "
+              "page.\n     The pairing routes are the one part of Jarvis a machine "
+              "with no\n     credentials yet has to reach, so the Access "
+              "application needs a\n     Bypass policy for the path "
+              "/api/computeruse/pair/* (Zero Trust > Access\n     > Applications "
+              "> this app > Policies). Everything else stays behind Access.")
+        return None
+    if status == 404:
+        print(f"     {_detail(body, raw)}")
+        return None
+    if status == 409:
+        print(f"     {_detail(body, raw)}\n     If this IS the machine you meant, "
+              "deny that code on the confirm page or the\n     Computer use tab "
+              "and make a fresh one — someone else got to it first.")
+        return None
+    if status == 429:
+        print(f"     {_detail(body, raw)}")
+        return None
+    if status != 200 or not body or not body.get("ok"):
+        print(f"     {server} answered {status} rather than Jarvis: "
+              f"{_detail(body, raw)!r}")
+        return None
+    secret = body["device_secret"]
+    interval = max(1, int(body.get("interval") or 3))
+    deadline = time.time() + int(body.get("expires_in") or 900) + 5
+    print("\n     Open this in a browser where you are logged in to Jarvis, "
+          "check that it\n     names THIS machine, and confirm:\n")
+    print(f"       {server.rstrip('/')}{body.get('confirm_path', '/pair/' + code)}\n")
+    print("     waiting for the confirm", end="", flush=True)
+    while time.time() < deadline:
+        time.sleep(interval)
+        status, body, raw = _http_json(base + "/poll",
+                                       {"code": code, "device_secret": secret})
+        if status == 200 and body:
+            state = body.get("state")
+            if state == "approved":
+                print(" confirmed.")
+                return (body.get("token") or "", body.get("cf_access_id") or None,
+                        body.get("cf_access_secret") or None,
+                        body.get("name") or name)
+            if state == "denied":
+                print("\n     denied on the confirm page. Nothing was saved here.")
+                return None
+            print(".", end="", flush=True)
+            continue
+        if status == 404:
+            print("\n     the code expired, or Jarvis restarted and forgot it. "
+                  "Make a new one\n     on the Computer use tab and run the "
+                  "command again.")
+            return None
+        if status == 429:
+            time.sleep(interval * 3)          # be polite; it is a shared budget
+            continue
+        print(f"\n     Jarvis answered {status} while waiting: {_detail(body, raw)!r}")
+        return None
+    print("\n     the code ran out before it was confirmed. Make a new one and "
+          "run the\n     command again.")
+    return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Jarvis computer-use client")
     ap.add_argument("--server", help="https://host:port of Jarvis")
     ap.add_argument("--token", help="pairing token from the Computer use tab")
+    ap.add_argument("--pair", metavar="CODE",
+                    help="a pairing code from the Computer use tab (XXXX-XXXX). "
+                         "This machine claims it, you confirm it in a browser, "
+                         "and the pairing token and Cloudflare service token "
+                         "arrive here without ever being pasted. Implies --setup.")
     ap.add_argument("--allow-root", action="append", default=[], metavar="DIR",
                     help="a folder Jarvis may play from, before it sends its own "
                          "list. Repeatable, and optional — the grants on the "
@@ -1627,10 +1752,24 @@ def main(argv=None):
         print(f"  {sys.executable} {Path(__file__).resolve()}")
         return 0
 
+    if a.pair:
+        if not server:
+            ap.error("--pair needs --server as well: the address the code was "
+                     "made on")
+        got = _pair(server, a.pair.strip().upper(), name, sys.platform)
+        if not got:
+            return 2
+        # what pairing delivered replaces anything given on the command line:
+        # the point is that nothing on the command line was a credential
+        token, cf_id, cf_secret, paired_name = got
+        name = name or paired_name
+        a.setup = True
+
     if not server or not token:
-        ap.error("--server and --token are needed the first time. The Computer "
-                 "use tab builds the whole command — it ends in --setup, which "
-                 "saves them for every run after this one. Or --selftest.")
+        ap.error("--server and --token are needed the first time, or --pair "
+                 "CODE. The Computer use tab builds the whole command — it ends "
+                 "in --pair, which fetches them, or --setup, which saves them "
+                 "for every run after this one. Or --selftest.")
 
     if a.setup:
         # Order matters. Reaching Jarvis is checked FIRST, because everything

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
 
 export default function Login({ onLogin }) {
@@ -7,6 +7,7 @@ export default function Login({ onLogin }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState(null)
   const navigate = useNavigate()
+  const location = useLocation()
 
   async function submit(e) {
     e.preventDefault()
@@ -17,7 +18,9 @@ export default function Login({ onLogin }) {
         body: JSON.stringify({ username, password }),
       })
       onLogin({ username: res.username })
-      navigate('/')
+      // back to where the redirect came from (a pairing confirm link, say)
+      const from = location.state?.from
+      navigate(from && from !== '/login' ? from : '/')
     } catch (err) {
       setError(err.detail || 'login failed')
     }

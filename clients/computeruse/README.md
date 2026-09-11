@@ -7,15 +7,41 @@ nothing listens on your computer and quitting the process ends all access.
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-.venv/bin/python agent.py --setup \
+.venv/bin/python agent.py --pair XXXX-XXXX \
   --server https://jarvis.example \
-  --token  <from the Computer use tab> \
   --allow-root ~/Music \
   --allow-root ~/Videos
 ```
 
-`--setup` is the whole first run, in order, so a failure stops at the step that
-caused it rather than three steps later:
+`--pair` takes a **pairing code** from the Computer use tab — eight characters,
+good for fifteen minutes, worth nothing on its own — and gets the credentials
+here without anyone pasting them:
+
+1. This process **claims** the code, telling Jarvis its name, hostname and
+   platform, and prints a confirm link.
+2. You open that link in a browser where you are logged in to Jarvis (or watch
+   the wizard on the Computer use tab, which shows the same thing). It names
+   the machine that claimed the code; you confirm it, or deny it if that is
+   not the machine you are sitting at. A code claimed twice is flagged.
+3. The reply to this process's next poll carries the pairing token and the
+   Cloudflare Access service token, once, and `--setup` continues from there.
+
+Nothing in the pasted command is a credential, so the terminal, its history
+and any screenshot of it hold nothing worth stealing. The old form still
+exists for a machine the pairing routes cannot reach:
+
+```
+.venv/bin/python agent.py --setup \
+  --server https://jarvis.example \
+  --token  <pairing token> \
+  --allow-root ~/Music
+```
+
+The Computer use tab builds it only while the Access secret has been made
+readable from the danger zone on the Settings page, and says so.
+
+`--setup` (which `--pair` runs into) is the whole first run, in order, so a
+failure stops at the step that caused it rather than three steps later:
 
 1. **Reaches Jarvis over plain HTTP** and reports what happened. A wrong
    address, a rotated pairing token and a missing Cloudflare service token are
@@ -30,9 +56,9 @@ caused it rather than three steps later:
    `zypper`, `apk`, `brew`) and that manager's names for the packages.
 4. **Connects**, in the foreground, so it appears on the Computer use tab.
 
-The Computer use tab builds that command with the token filled in. Run
-`--selftest` alone at any time for step 3 on its own, and add `--dry-run` to
-have the client print what it would do and touch nothing.
+The Computer use tab builds the whole command. Run `--selftest` alone at any
+time for step 3 on its own, and add `--dry-run` to have the client print what
+it would do and touch nothing.
 
 ## What it can do
 
@@ -100,7 +126,7 @@ That writes two files and prints the commands to enable the service:
 
 | file | mode | holds |
 |---|---|---|
-| `~/.config/jarvis/computeruse.json` | **0600** | server, pairing token, CF token, roots |
+| `~/.config/jarvis/computeruse.json` | **0600** | server, pairing token, CF token, roots — written by `--pair`/`--setup`, never typed |
 | systemd unit / launchd plist | 0644 | a path to the above, and nothing else |
 
 The service runs the *same interpreter you ran `--install` with*, so run it with
@@ -177,6 +203,21 @@ you can — a command line is visible in `ps`.
 
 Scope the Access policy to the path `/api/computeruse/agent` if you can, so the
 service token cannot be used to reach the rest of Jarvis.
+
+**Pairing needs one path open.** A machine being paired has no service token
+yet — getting one is the point — so the three routes it talks to have to be
+reachable through Access with no credential at all. Add a second Access
+application for the path `jarvis.example/api/computeruse/pair` with a single
+**Bypass** policy (include: Everyone). Nothing else changes: the confirm page
+`/pair/XXXX-XXXX` and every other route stay behind Access and behind the
+Jarvis login.
+
+Those three routes are built to face the internet: a code is one of 32^8 and
+dies after fifteen minutes or one use; an unknown code and an expired one are
+indistinguishable from outside; wrong guesses are throttled to sixty per
+quarter hour host-wide; and the reply that carries credentials goes only to
+the process holding the device secret issued at claim time, only after a
+logged-in operator has confirmed that machine by name.
 
 ## Why there is no shell
 

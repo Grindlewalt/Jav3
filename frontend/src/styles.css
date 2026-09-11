@@ -2358,3 +2358,57 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .ask-foot {
   display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px 18px;
 }
+
+/* --- pairing (Pair.jsx, and the Confirm step of the set-up wizard) ----------- */
+.pair-page { max-width: 640px; }
+.pair-card p { margin: 0 0 8px; }
+.pair-card .row { margin-top: 12px; }
+.pair-code { font-size: 15px; letter-spacing: 0.08em; padding: 1px 6px; }
+.pair-facts {
+  display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px;
+  margin: 10px 0; font-size: 13px;
+}
+.pair-facts dt { color: var(--dim); }
+.pair-facts dd { margin: 0; }
+.cu-settings-note { margin: 4px 0 14px; }
+
+/* --- Settings -------------------------------------------------------------------- */
+.settings-page { max-width: 760px; }
+.settings-page .panel { margin-bottom: 14px; }
+.settings-page select { min-width: 220px; }
+
+/* The red box. Borrowed from the shape everyone already knows, and for the
+   same reason: the things in it are the things you should have to mean. */
+.danger-zone {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent) inset;
+}
+.danger-zone h2 { color: var(--red); }
+.danger-row {
+  display: flex; align-items: flex-start; gap: 16px; padding: 12px 0;
+  border-top: 1px solid color-mix(in srgb, var(--red) 25%, var(--border));
+}
+.danger-row:first-of-type { border-top: 0; }
+.danger-row p { margin: 4px 0 0; }
+.danger-row > button { flex: none; margin-top: 2px; }
+
+/* hold-to-confirm: a ring that fills for three seconds while the button is
+   held. Letting go resets it; a click is a zero-length hold and does nothing. */
+.hold-modal .ask-input { margin-top: 8px; }
+.hold-word { display: block; margin-top: 14px; font-size: 13px; color: var(--dim); }
+.hold-word code { color: var(--text); }
+.hold-btn {
+  display: inline-flex; align-items: center; gap: 9px; user-select: none;
+  -webkit-user-select: none; touch-action: none;
+  border: 1px solid var(--red); background: transparent; color: var(--red);
+}
+.hold-btn:hover:not(:disabled), .hold-btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  filter: none; transform: none;
+}
+.hold-btn.off { opacity: 0.45; }
+.hold-ring { width: 20px; height: 20px; flex: none; transform: rotate(-90deg); }
+.hold-ring circle { fill: none; stroke-width: 3.5; }
+.hold-ring .track { stroke: color-mix(in srgb, var(--red) 25%, transparent); }
+.hold-ring .fill { stroke: currentColor; stroke-linecap: round;
+  transition: stroke-dashoffset 40ms linear; }

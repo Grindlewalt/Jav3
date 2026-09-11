@@ -1,44 +1,9 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api.js'
+import { Block } from '../copy.jsx'
 import { TAB_ID, setTabName, tabName } from '../tab.js'
-
-// Cloudflare's dashboard shows a service token as whole header lines, so that is
-// what gets pasted. Strip the header name, quotes and whitespace rather than
-// letting "CF-Access-Client-Id: abc.access" through as the id.
-function cleanToken(v) {
-  return String(v || '')
-    .replace(/^\s*CF[-_]?Access[-_]?Client[-_]?(Id|Secret)\s*[:=]\s*/i, '')
-    .replace(/^["'`]|["'`]$/g, '')
-    .replace(/\s+/g, '')
-    .trim()
-}
-
-// Copies what it is GIVEN, not what is on screen. The set-up command renders a
-// placeholder until the token is revealed, and copying the rendered text meant
-// pasting the literal "<reveal the token above>" into a terminal.
-function Copy({ text, label = 'copy' }) {
-  const [done, setDone] = useState(false)
-  return (
-    <button type="button" className="copy-btn" onClick={async () => {
-      try {
-        await navigator.clipboard.writeText(text)
-      } catch {
-        const ta = document.createElement('textarea')   // no secure context
-        ta.value = text
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        ta.remove()
-      }
-      setDone(true)
-      setTimeout(() => setDone(false), 1600)
-    }}>{done ? 'copied' : label}</button>
-  )
-}
-
-const Block = ({ text }) => (
-  <div className="cu-block"><Copy text={text} /><pre>{text}</pre></div>
-)
+import { ClaimCard, useTicket } from './Pair.jsx'
 
 // Everything that takes the client off a machine, in the order it has to happen.
 //
@@ -77,45 +42,16 @@ export default function ComputerUse() {
   const [probe, setProbe] = useState({})
   const [setupOpen, setSetupOpen] = useState(false)
   const [msg, setMsg] = useState(null)
-  const [tm, setTm] = useState({ url: '', cf_id: '', secret_set: false })
-  const [tmSecret, setTmSecret] = useState('')
-  const [tmTest, setTmTest] = useState(null)
-  const [jf, setJf] = useState({ url: '', key_set: false })
-  const [jfKey, setJfKey] = useState('')
-  const [cf, setCf] = useState({ configured: false, client_id: '', hosts: [] })
-  const [cfId, setCfId] = useState('')
-  const [cfSecret, setCfSecret] = useState('')
-  const [cfResult, setCfResult] = useState(null)
 
   const refresh = () => api('/api/computeruse/status').then(setState)
-  const loadCf = () => api('/api/computeruse/cfaccess')
-    .then((r) => { setCf(r); setCfId(r.client_id || '') }).catch(() => {})
   useEffect(() => {
     refresh()
+    // the pairing token is only needed for the testing-only command, and only
+    // while the Access secret is readable; fetched once so that path works
     api('/api/computeruse/token').then((r) => setToken(r.token)).catch(() => {})
-    api('/api/computeruse/tarmac').then(setTm).catch(() => {})
-    api('/api/computeruse/jellyfin').then(setJf).catch(() => {})
-    loadCf()
     const t = setInterval(refresh, 6000)
     return () => clearInterval(t)
   }, [])
-
-  // Rotating is the whole reason this panel exists, so it reports which
-  // machines took the new token and which it could not reach — the second list
-  // is the operator's remaining work, and leaving it out would imply the
-  // rotation was complete when it was not.
-  async function saveCf(e) {
-    e.preventDefault()
-    setCfResult(null)
-    try {
-      const r = await api('/api/computeruse/cfaccess', {
-        method: 'PUT',
-        body: JSON.stringify({ client_id: cfId, secret: cfSecret }) })
-      setCfSecret('')
-      setCfResult(r)
-      loadCf()
-    } catch (err) { setCfResult({ error: err.detail || String(err) }) }
-  }
 
   const say = (m) => { setMsg(m); setTimeout(() => setMsg(null), 6000) }
 
@@ -160,36 +96,6 @@ export default function ComputerUse() {
   const revoke = async (id) => {
     await api(`/api/computeruse/grants/${id}`, { method: 'DELETE' })
     refresh()
-  }
-
-  // Only the URL now. The music server's Access token stopped being its own
-  // thing — it is the one token, held above, and having a second copy here is
-  // precisely how rotating it broke music while everything else looked fine.
-  async function saveMusic(e) {
-    e.preventDefault()
-    setTmTest(null)
-    try {
-      setTm(await api('/api/computeruse/tarmac', {
-        method: 'PUT', body: JSON.stringify({ url: tm.url }) }))
-      say('Music server saved')
-    } catch (err) { say(err.detail || String(err)) }
-  }
-
-  async function testMusic() {
-    setTmTest({ testing: true })
-    try {
-      setTmTest(await api('/api/computeruse/tarmac/test', { method: 'POST' }))
-    } catch (err) { setTmTest({ ok: false, error: err.detail || String(err) }) }
-  }
-
-  async function saveJellyfin(e) {
-    e.preventDefault()
-    try {
-      setJf(await api('/api/computeruse/jellyfin', {
-        method: 'PUT', body: JSON.stringify({ url: jf.url, key: jfKey }) }))
-      setJfKey('')
-      say('Jellyfin saved')
-    } catch (err) { say(err.detail || String(err)) }
   }
 
   if (!state) return <div className="page"><p className="dim">loading…</p></div>
@@ -246,74 +152,13 @@ export default function ComputerUse() {
         </section>
       )}
 
-      <section className="panel">
-        <h2>Cloudflare Access token</h2>
-        <form className="row" onSubmit={saveCf}>
-          <input className="grow" placeholder="Client Id (ends in .access)"
-                 value={cfId}
-                 onChange={(e) => setCfId(cleanToken(e.target.value))} />
-          <input type="password"
-                 placeholder={cf.configured ? 'secret (stored)' : 'Client Secret'}
-                 value={cfSecret}
-                 onChange={(e) => setCfSecret(cleanToken(e.target.value))} />
-          <button type="submit" disabled={!cfId || !cfSecret}>Save & push</button>
-        </form>
-        {cfResult && (cfResult.error
-          ? <p className="error">{cfResult.error}</p>
-          : <p className="badge">
-              Saved.{' '}
-              {cfResult.updated?.length
-                ? `Pushed to ${cfResult.updated.join(', ')} — `
-                  + 'each takes it on its next reconnect.'
-                : 'No machine was connected to push it to.'}
-              {cfResult.missed?.length
-                ? ` Could not reach ${cfResult.missed.join(', ')}.` : ''}
-            </p>)}
-        <p className="dim small">
-          One token, held here and used for everything: Jarvis, the music server,
-          and the set-up command, which fills it in so you never type it. Saving
-          a rotated one pushes it to every machine that is connected right now —
-          a machine that is offline cannot be told, because Jarvis is behind the
-          thing being rotated, so that one needs it pasted in once.
-        </p>
-      </section>
-
-      <section className="panel">
-        <h2>Music server</h2>
-        <form className="row" onSubmit={saveMusic}>
-          <input className="grow" placeholder="https://music.atomos.network"
-                 value={tm.url}
-                 onChange={(e) => setTm({ ...tm, url: e.target.value })} />
-          <button type="submit">Save</button>
-          <button type="button" className="ghost" onClick={testMusic}
-                  disabled={!tm.url}>Test</button>
-        </form>
-        {tmTest && (
-          <p className={tmTest.ok ? 'badge' : 'error'}>
-            {tmTest.testing ? 'asking…' : tmTest.ok
-              ? `${tmTest.status?.tracks ?? '?'} tracks · `
-                + `${tmTest.status?.players_connected ?? 0} player(s) open`
-              : tmTest.error}
-          </p>
-        )}
-        <p className="dim small">
-          It is a separate Cloudflare Access application, so the token above
-          needs its own Service Auth policy there as well as on this one.
-        </p>
-      </section>
-
-      <section className="panel">
-        <h2>Jellyfin</h2>
-        <form className="row" onSubmit={saveJellyfin}>
-          <input className="grow" placeholder="https://jellyfin.example"
-                 value={jf.url}
-                 onChange={(e) => setJf({ ...jf, url: e.target.value })} />
-          <input type="password"
-                 placeholder={jf.key_set ? 'API key (stored)' : 'API key'}
-                 value={jfKey} onChange={(e) => setJfKey(e.target.value)} />
-          <button type="submit">Save</button>
-        </form>
-      </section>
+      {/* The Access token, music server and Jellyfin forms moved to Settings:
+          this tab is about machines, and three credential forms between the
+          machines and the set-up button were three things to scroll past. */}
+      <p className="dim small cu-settings-note">
+        The Cloudflare Access token, music server and Jellyfin are on{' '}
+        <Link to="/settings">Settings</Link>.
+      </p>
 
       {setupOpen && (
         <Setup token={token} machines={machines}
@@ -556,8 +401,18 @@ function Hardware({ d }) {
 // A fixed-height dialog: each step fits, so nothing scrolls and nothing gets
 // skipped. The previous version was one long column of prose, which is how a
 // placeholder ends up pasted into a terminal instead of a token.
+//
+// The command carries a pairing code and nothing else. It used to carry the
+// pairing token and the Cloudflare Access secret in plain text — the least
+// secure part of the whole design, kept that way only for want of a channel.
+// The channel is backend/pairing.py now: the machine claims the code, the
+// operator confirms it (on the Confirm step here, or on /pair/CODE from any
+// browser that is logged in), and the credentials go to the claiming process
+// and nowhere else. The old command still exists, for testing a machine the
+// pairing routes cannot reach, and only while the Settings page has made the
+// secret readable.
 
-const STEPS = ['Name', 'Access', 'Set up', 'Connected', 'Keep running']
+const STEPS = ['Name', 'Set up', 'Confirm', 'Connected', 'Keep running']
 
 // A path may contain a space, and one that does would otherwise arrive at the
 // client as two --allow-root values, neither of which exists.
@@ -567,24 +422,21 @@ function Setup({ token, machines, onClose }) {
   const [step, setStep] = useState(0)
   const [name, setName] = useState('')
   const [roots, setRoots] = useState('')
-  const [cfId, setCfId] = useState('')
-  const [cfSecret, setCfSecret] = useState('')
-  const [cfFromStore, setCfFromStore] = useState(false)
-  const [jumped, setJumped] = useState(false)
+  const [err, setErr] = useState(null)
+  const [made, setMade] = useState(null)         // the ticket as created
+  const [cf, setCf] = useState(null)             // configured / revealed_until
+  const [jumped, setJumped] = useState({})
   const [platform, setPlatform] = useState(
     () => (/Mac/.test(navigator.platform || navigator.userAgent) ? 'mac' : 'linux'))
+  const [polled, gone, setTicket] = useTicket(made?.code)
+  const ticket = polled || made
 
-  // The token is stored once, host-side, so setting up the fifth machine does
-  // not mean finding it in Zero Trust for the fifth time. Typing over it still
-  // works — the field is prefilled, not locked.
+  // Whether the secret is readable decides which commands this can build, and
+  // the Settings page can change that while this is open, so it is re-read
+  // on every step rather than once.
   useEffect(() => {
-    api('/api/computeruse/cfaccess').then((r) => {
-      if (!r.configured) return
-      setCfId(r.client_id)
-      setCfSecret(r.secret)
-      setCfFromStore(true)
-    }).catch(() => { /* not behind Access, or never configured */ })
-  }, [])
+    api('/api/computeruse/cfaccess').then(setCf).catch(() => setCf(null))
+  }, [step])
 
   const origin = window.location.origin
   // A unique URL per time this dialog is opened, because the origin saying
@@ -595,15 +447,38 @@ function Setup({ token, machines, onClose }) {
   // misses the old entry entirely — and it keeps working if this is ever put
   // behind a CDN that ignores the header again.
   const [bust] = useState(() => Date.now().toString(36))
-  const behind = !!(cfId && cfSecret)
   const here = machines.find((m) => m.name === name)
   const rootList = roots.split(',').map((s) => s.trim()).filter(Boolean)
+  const code = ticket?.code || ''
+  const revealed = !!(cf?.revealed_until && cf.revealed_until > Date.now() / 1000)
 
-  // It arrives connected or it does not arrive: the set-up step is one paste
-  // that ends with the client running, so the moment it lands the wizard should
-  // be showing what landed rather than waiting to be clicked forward.
+  // "Next" on the first step is what makes the code, so the command on the
+  // second step is real the moment it appears.
+  async function makeCode() {
+    setErr(null)
+    try {
+      const t = await api('/api/computeruse/enroll', {
+        method: 'POST', body: JSON.stringify({ name }) })
+      setMade(t)
+      setTicket(t)
+      setJumped({})
+      setStep(1)
+    } catch (e) { setErr(e.detail || String(e)) }
+  }
+
+  // The wizard follows the machine rather than waiting to be clicked: a claim
+  // moves it to Confirm, and a connection moves it to Connected. The second
+  // only from the Confirm step, so a machine of the same name that was already
+  // connected does not skip the command.
   useEffect(() => {
-    if (here && step === 2 && !jumped) { setJumped(true); setStep(3) }
+    if (ticket?.state === 'claimed' && step === 1 && !jumped.claim) {
+      setJumped((j) => ({ ...j, claim: true })); setStep(2)
+    }
+  }, [ticket?.state, step, jumped])
+  useEffect(() => {
+    if (here && step === 2 && !jumped.conn) {
+      setJumped((j) => ({ ...j, conn: true })); setStep(3)
+    }
   }, [here, step, jumped])
 
   // One chained command, on purpose. Every line of it used to be a step the
@@ -618,64 +493,88 @@ function Setup({ token, machines, onClose }) {
   //   - Starting the client before its settings were saved just printed the
   //     usage message: --server and --token were only saved by --install, which
   //     came a step later.
-  // So: && between every step so the first failure stops it, and --setup at the
-  // end, which checks it can reach Jarvis, saves the settings, says what is
-  // missing, and connects.
-  const py = '~/jarvis-client/.venv/bin/python'
-  const cmds = {
-    setup: [
-      `mkdir -p ~/jarvis-client && cd ~/jarvis-client`,
-      // Two changes from `curl -fsSL`, both of which cost real debugging time:
-      //
-      //   -f prints NOTHING on an HTTP error — no status, no body — so every
-      //   refusal looked the same and named nothing. -w '%{http_code}' keeps it.
-      //
-      //   -L silently FOLLOWED Cloudflare Access's 302 to its login page, which
-      //   answers 200 with HTML. The status check passed, and the operator got
-      //   "gzip: stdin: not in gzip format" from tar — an error about archives
-      //   for what is actually an authentication problem. Redirects are not
-      //   followed now, so a 302 is reported as a 302, and the gzip test below
-      //   catches an HTML page that arrives with a 200 anyway (a WAF block page
-      //   does exactly that).
-      // -A names this request. curl's own user-agent happens to be allowed
-      // today, but the very next step of set-up was refused with a 403 purely
-      // for sending "Python-urllib/3.x", so the lesson is that an anonymous
-      // request is a bot-rule away from failing. Both halves say the same name.
-      `  && code=$(curl -sS -o c.tgz -w '%{http_code}' -A 'jarvis-computeruse/1.0'`,
-      `  '${origin}/api/computeruse/client.tar.gz?v=${bust}'`,
-      `  -H 'X-Jarvis-Token: ${token}'`,
-      ...(behind ? [`  -H 'CF-Access-Client-Id: ${cfId}'`,
-                    `  -H 'CF-Access-Client-Secret: ${cfSecret}'`] : []),
-      `  )`,
-      `  && { [ "$code" = 200 ] || { echo "the download answered HTTP $code, not 200:";`,
-      `       head -c 300 c.tgz; echo;`,
+  // So: && between every step so the first failure stops it, and --pair (or
+  // --setup) at the end, which checks it can reach Jarvis, saves the settings,
+  // says what is missing, and connects.
+  const fetchLines = (url, headers) => [
+    `mkdir -p ~/jarvis-client && cd ~/jarvis-client`,
+    // Two changes from `curl -fsSL`, both of which cost real debugging time:
+    //
+    //   -f prints NOTHING on an HTTP error — no status, no body — so every
+    //   refusal looked the same and named nothing. -w '%{http_code}' keeps it.
+    //
+    //   -L silently FOLLOWED Cloudflare Access's 302 to its login page, which
+    //   answers 200 with HTML. The status check passed, and the operator got
+    //   "gzip: stdin: not in gzip format" from tar — an error about archives
+    //   for what is actually an authentication problem. Redirects are not
+    //   followed now, so a 302 is reported as a 302, and the gzip test below
+    //   catches an HTML page that arrives with a 200 anyway (a WAF block page
+    //   does exactly that).
+    // -A names this request. curl's own user-agent happens to be allowed
+    // today, but the very next step of set-up was refused with a 403 purely
+    // for sending "Python-urllib/3.x", so the lesson is that an anonymous
+    // request is a bot-rule away from failing. Both halves say the same name.
+    `  && code=$(curl -sS -o c.tgz -w '%{http_code}' -A 'jarvis-computeruse/1.0'`,
+    `  '${url}'`,
+    ...headers.map(([k, v]) => `  -H '${k}: ${v}'`),
+    `  )`,
+    `  && { [ "$code" = 200 ] || { echo "the download answered HTTP $code, not 200:";`,
+    `       head -c 300 c.tgz; echo;`,
+    ...(headers.length ? [
       `       echo '  301/302 -> Cloudflare Access. This app needs its own Service';`,
       `       echo '             Auth policy naming your service token — policies are';`,
       `       echo '             per-application, so one that works for another host';`,
       `       echo '             does not cover this one.';`,
       `       echo '  401     -> Jarvis itself answered: the pairing token is stale.';`,
       `       echo '             Copy it again from the Computer use tab.';`,
-      `       echo '  403     -> something in FRONT of Jarvis refused it. Jarvis never';`,
-      `       echo '             answers 403 here, so look at a WAF rule, Bot Fight';`,
-      `       echo '             Mode (it blocks curl by user-agent), or Access.';`,
-      `       rm -f c.tgz; false; }; }`,
-      `  && { gzip -t c.tgz 2>/dev/null || { echo 'that answered 200 but is not a tarball:';`,
-      `       head -c 300 c.tgz; echo;`,
-      `       echo 'HTML here means a login or block page replied instead of Jarvis.';`,
-      `       rm -f c.tgz; false; }; }`,
-      `  && tar xzf c.tgz && rm -f c.tgz`,
-      `  && python3 -m venv .venv`,
-      `  && .venv/bin/pip install -q -r computeruse/requirements.txt`,
+    ] : [
+      `       echo '  301/302 -> Cloudflare Access. The pairing routes are the one part';`,
+      `       echo '             a new machine reaches with no credentials, so the Access';`,
+      `       echo '             app needs a Bypass policy on /api/computeruse/pair/*.';`,
+      `       echo '  401     -> the pairing code expired or was used. Make a new one';`,
+      `       echo '             on the Computer use tab.';`,
+    ]),
+    `       echo '  403     -> something in FRONT of Jarvis refused it. Jarvis never';`,
+    `       echo '             answers 403 here, so look at a WAF rule, Bot Fight';`,
+    `       echo '             Mode (it blocks curl by user-agent), or Access.';`,
+    `       rm -f c.tgz; false; }; }`,
+    `  && { gzip -t c.tgz 2>/dev/null || { echo 'that answered 200 but is not a tarball:';`,
+    `       head -c 300 c.tgz; echo;`,
+    `       echo 'HTML here means a login or block page replied instead of Jarvis.';`,
+    `       rm -f c.tgz; false; }; }`,
+    `  && tar xzf c.tgz && rm -f c.tgz`,
+    `  && python3 -m venv .venv`,
+    `  && .venv/bin/pip install -q -r computeruse/requirements.txt`,
+  ]
+  const tail = `  || { rm -f c.tgz; echo 'set-up stopped — the error is above'; }`
+  const py = '~/jarvis-client/.venv/bin/python'
+  const cmds = {
+    // the one to use: a code, and nothing that is a credential
+    pair: [
+      ...fetchLines(`${origin}/api/computeruse/pair/client.tar.gz?code=${code}&v=${bust}`, []),
+      `  && .venv/bin/python computeruse/agent.py --pair ${code}`,
+      `       --server ${origin}`,
+      ...(name ? [`       --name ${name}`] : []),
+      ...rootList.map((r) => `       --allow-root ${shq(r)}`),
+      tail,
+    ].join(' \\\n'),
+    // testing only: the secrets inline, exactly as it used to be
+    legacy: [
+      ...fetchLines(`${origin}/api/computeruse/client.tar.gz?v=${bust}`, [
+        ['X-Jarvis-Token', token],
+        ...(cf?.secret ? [['CF-Access-Client-Id', cf.client_id],
+                          ['CF-Access-Client-Secret', cf.secret]] : []),
+      ]),
       `  && .venv/bin/python computeruse/agent.py --setup`,
       `       --server ${origin}`,
       `       --token ${token}`,
       ...(name ? [`       --name ${name}`] : []),
       ...rootList.map((r) => `       --allow-root ${shq(r)}`),
-      ...(behind ? [`       --cf-access-id ${cfId}`,
-                    `       --cf-access-secret ${cfSecret}`] : []),
-      `  || { rm -f c.tgz; echo 'set-up stopped — the error is above'; }`,
+      ...(cf?.secret ? [`       --cf-access-id ${cf.client_id}`,
+                        `       --cf-access-secret ${cf.secret}`] : []),
+      tail,
     ].join(' \\\n'),
-    // no flags: --setup already wrote them to ~/.config/jarvis/computeruse.json
+    // no flags: --pair/--setup already wrote them to ~/.config/jarvis/computeruse.json
     install: `${py} ~/jarvis-client/computeruse/agent.py --install`,
     // one source of truth with the card's own Remove section — a second copy of
     // this is a second thing to forget when a path changes
@@ -710,31 +609,27 @@ function Setup({ token, machines, onClose }) {
                  ? '~/Music, ~/Movies' : '~/Music, ~/Videos'}
                value={roots} onChange={(e) => setRoots(e.target.value)} />
       </label>
+      {err && <p className="error">{err}</p>}
     </>,
     <>
-      <label>Cloudflare Access token
-        <span className="dim small">
-          {cfFromStore
-            ? 'Filled in from the one Jarvis holds — nothing to type. Change it '
-              + 'here to use a different token for just this machine; to rotate '
-              + 'it everywhere, use the Access token panel on the Computer use '
-              + 'tab instead.'
-            : 'Only if Jarvis is behind Access. Save it on the Computer use tab '
-              + 'and it will be filled in here from then on.'}
-        </span>
-        <input placeholder="Client Id" value={cfId}
-               onChange={(e) => { setCfId(cleanToken(e.target.value)); setCfFromStore(false) }} />
-        <input type="password" placeholder="Client Secret" value={cfSecret}
-               onChange={(e) => { setCfSecret(cleanToken(e.target.value)); setCfFromStore(false) }} />
-      </label>
-    </>,
-    <>
-      <p>Paste this into a terminal on <strong>{name}</strong>:</p>
-      <Block text={cmds.setup} />
-      <p className="dim small">Downloads the client, gives it its own venv,
-        checks it can reach Jarvis, lists anything missing with the install
-        command for <em>this</em> machine, then connects and stays in the
-        foreground.</p>
+      {gone ? (
+        <>
+          <p className="warn">This code has expired or been used.</p>
+          <button onClick={makeCode}>Make a new code</button>
+        </>
+      ) : (
+        <>
+          <p>Paste this into a terminal on <strong>{name}</strong>:</p>
+          <Block text={cmds.pair} />
+          <p className="dim small">
+            Pairing code <code className="pair-code">{code}</code>
+            {ticket?.expires_in > 0 && ` · good for ${Math.ceil(ticket.expires_in / 60)} min`}
+            {' '}· carries no secrets. The command downloads the client, gives it
+            its own venv, claims the code and prints a confirm link; the next
+            step here fills in the moment it does.
+          </p>
+        </>
+      )}
       <details className="cu-remove">
         <summary>Already set one up on this machine?</summary>
         <p className="dim small">Run this first. It stops the old client, takes
@@ -742,6 +637,37 @@ function Setup({ token, machines, onClose }) {
           each line is harmless if that part is already gone.</p>
         <Block text={cmds.remove} />
       </details>
+      <details className="cu-remove">
+        <summary>The old command, secrets inline (testing only)</summary>
+        {revealed ? (
+          <>
+            <p className="warn small">
+              This carries the pairing token
+              {cf?.secret ? ' and the Cloudflare Access secret' : ''} in plain
+              text. Treat the terminal, its history and any screenshot as
+              holding them. Readable for another{' '}
+              {Math.ceil((cf.revealed_until - Date.now() / 1000) / 60)} min.
+            </p>
+            <Block text={cmds.legacy} />
+          </>
+        ) : (
+          <p className="dim small">
+            For a machine the pairing routes cannot reach. It is built only
+            while the Access secret is readable, which is switched on from the
+            danger zone at the bottom of <Link to="/settings">Settings</Link>.
+          </p>
+        )}
+      </details>
+    </>,
+    <>
+      {ticket && !gone
+        ? <ClaimCard ticket={ticket} onChange={setTicket} compact />
+        : <p className="warn">The code is no longer live — go back and make a new one.</p>}
+      <p className="dim small">
+        The same decision is at <code>{origin}/pair/{code}</code> from any
+        browser that is logged in to Jarvis — that is the link the terminal
+        prints.
+      </p>
     </>,
     <>
       {here ? (
@@ -760,23 +686,26 @@ function Setup({ token, machines, onClose }) {
       ) : (
         <>
           <p>Waiting for <strong>{name || 'the client'}</strong>…</p>
-          <p className="dim small">The command ends by connecting, and this
-            fills in the moment it does. If it is still spinning, the terminal
-            has the reason — a wrong address, a rotated token and a missing
-            Cloudflare service token each say so by name.</p>
+          <p className="dim small">Once confirmed, the client saves what it was
+            handed, checks it can reach Jarvis, and connects; this fills in the
+            moment it does. If it is still spinning, the terminal has the reason
+            — a wrong address and a missing Cloudflare policy each say so by
+            name.</p>
         </>
       )}
     </>,
     <>
       <p>Ctrl-C the client, then save what it is already using:</p>
       <Block text={cmds.install} />
-      <p className="dim small">No flags — set-up saved them to
+      <p className="dim small">No flags — pairing saved them to
         ~/.config/jarvis/computeruse.json at 0600. The service definition gets
         the path, never the token.</p>
       <p>Then keep it running:</p>
       <Block text={cmds.enable} />
     </>,
   ]
+
+  const next = () => (step === 0 ? makeCode() : setStep(step + 1))
 
   return (
     <div className="cu-scrim" onClick={onClose}>
@@ -798,7 +727,8 @@ function Setup({ token, machines, onClose }) {
                   onClick={() => setStep(step - 1)}>Back</button>
           <span className="grow" />
           {step < STEPS.length - 1
-            ? <button disabled={!name} onClick={() => setStep(step + 1)}>Next</button>
+            ? <button disabled={!name} onClick={next}>
+                {step === 0 ? 'Make a code' : 'Next'}</button>
             : <button onClick={onClose}>Done</button>}
         </div>
       </div>

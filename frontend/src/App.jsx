@@ -22,6 +22,8 @@ import Logs from './pages/Logs.jsx'
 import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
 import ComputerUse from './pages/ComputerUse.jsx'
+import Pair from './pages/Pair.jsx'
+import Settings from './pages/Settings.jsx'
 import Voice from './pages/Voice.jsx'
 import Notices, { useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
@@ -46,6 +48,7 @@ const MORE_LINKS = [
   { to: '/schedules', label: 'Schedules' },
   { to: '/skills', label: 'Skills' },
   { to: '/tools', label: 'Tools' },
+  { to: '/settings', label: 'Settings' },
 ]
 
 // Counts come from live queues and reached 294 in practice, which overflowed
@@ -428,8 +431,11 @@ export default function App() {
   }
 
   if (user === undefined) return <div className="center">…</div>
+  // The page being asked for rides along, so logging in lands back on it. A
+  // pairing confirm link opened in a fresh browser is the case that matters:
+  // it used to land on Chat, and the code went unconfirmed.
   if (user === null && location.pathname !== '/login')
-    return <Navigate to="/login" replace />
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />
 
   // Voice rides the overflow menu only when the backend says the mode is on
   // (flag off = the sidecar isn't deployed; a dead link would just confuse)
@@ -568,6 +574,8 @@ export default function App() {
         <Route path="/schedules" element={<Schedules />} />
         <Route path="/skills" element={<Skills />} />
         <Route path="/tools" element={<Tools />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/pair/:code" element={<Pair />} />
       </Routes>
       </ErrorBoundary>
       </NavSlotContext.Provider>

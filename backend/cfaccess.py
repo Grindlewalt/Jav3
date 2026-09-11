@@ -25,6 +25,7 @@ operator's front door.
 """
 from __future__ import annotations
 
+import time
 from urllib.parse import urlsplit
 
 from . import secrets as secretstore
@@ -126,3 +127,46 @@ def clear() -> None:
     raw.pop(NAME_ID, None)
     raw.pop(NAME_SECRET, None)
     secretstore.save(raw)
+
+
+# --- the reveal window -----------------------------------------------------------
+#
+# The GUI does not get to read the secret. It did: GET /cfaccess returned it to
+# any logged-in browser so the set-up command could carry it, and that made a
+# session cookie worth the front-door key. Pairing (backend/pairing.py) delivers
+# the token to a new machine without the browser ever holding it, so the normal
+# state is now "not readable", and the old command — secret inline — exists only
+# for testing a machine the pairing routes cannot reach.
+#
+# Getting there is deliberately a ceremony: on the Settings page, in the red
+# box, type the word, hold the button, and the secret is readable for ten
+# minutes on this host. It is a host-wide window rather than a per-browser one
+# because the point is that it CLOSES on its own; a per-session flag would
+# outlive the reason for opening it. Every opening is a security event, so the
+# Review Center has the record.
+
+REVEAL_SECONDS = 10 * 60
+REVEAL_WORD = "confirm"
+_reveal_until: float = 0.0
+
+
+def reveal(now: float | None = None) -> float:
+    """Open the window; returns when it closes (epoch seconds)."""
+    global _reveal_until
+    _reveal_until = (now or time.time()) + REVEAL_SECONDS
+    return _reveal_until
+
+
+def hide() -> None:
+    global _reveal_until
+    _reveal_until = 0.0
+
+
+def revealed_until(now: float | None = None) -> float | None:
+    """When the open window closes, or None when there is none."""
+    now = now or time.time()
+    return _reveal_until if _reveal_until > now else None
+
+
+def revealed(now: float | None = None) -> bool:
+    return revealed_until(now) is not None

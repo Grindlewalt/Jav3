@@ -25,7 +25,7 @@ from fastapi import (APIRouter, Depends, HTTPException, Request, WebSocket,
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import cfaccess, computeruse as cu, gui, security, tarmac
+from . import cfaccess, computeruse as cu, gui, pairing, security, tarmac
 from .auth import COOKIE_NAME, require_user, user_from_token
 from .config import settings
 from .db import get_db
@@ -138,19 +138,64 @@ class CFAccessBody(BaseModel):
 
 @router.get("/cfaccess")
 async def cfaccess_get():
-    """The stored Access service token, for a logged-in operator.
+    """The stored Access service token, for a logged-in operator — the id, the
+    bound hosts, and the secret ONLY while the reveal window is open.
 
-    This DOES return the secret, unlike the Jellyfin and TARMAC routes above,
-    and the difference is deliberate rather than an oversight. Those two keys are
-    only ever used by the host, so the tab never needs the value. This one has to
-    end up inside the set-up command that the operator pastes into a terminal on
-    another machine — the whole point is that they stop typing it — so the
-    browser cannot avoid handling it. It is the same exposure as GET /token,
-    which hands over the pairing token for exactly the same reason.
+    It used to return the secret unconditionally, so the set-up command could
+    carry it, and the docstring here defended that as the same exposure as the
+    pairing token. It was worse: the pairing token opens the computer-use
+    socket, the Access secret opens the front door of everything behind
+    Cloudflare. Pairing now gets both onto a new machine without the browser
+    holding either, so the secret leaves the host only inside the ten-minute
+    window the Settings page opens on purpose (see cfaccess.reveal).
     """
     cid, sec = cfaccess.get()
-    return {"client_id": cid, "secret": sec, "configured": bool(cid and sec),
-            "hosts": cfaccess.hosts()}
+    until = cfaccess.revealed_until()
+    return {"client_id": cid, "secret": sec if until else "",
+            "configured": bool(cid and sec), "hosts": cfaccess.hosts(),
+            "revealed_until": until}
+
+
+class RevealBody(BaseModel):
+    confirm: str = ""
+
+
+@router.post("/cfaccess/reveal")
+async def cfaccess_reveal(body: RevealBody, request: Request,
+                          user: dict = Depends(require_user)):
+    """Open the reveal window. Testing only, and the GUI says so.
+
+    The typed word is checked here as well as in the browser, because the
+    ceremony is the control: a request that skips the page must not skip it.
+    Every opening is a security event, so the Review Center holds the record of
+    when the secret was made readable and by whom.
+    """
+    if (body.confirm or "").strip().lower() != cfaccess.REVEAL_WORD:
+        raise HTTPException(status_code=400,
+                            detail=f"type {cfaccess.REVEAL_WORD!r} to confirm")
+    if not cfaccess.configured():
+        raise HTTPException(status_code=400, detail="no Access token is stored")
+    until = cfaccess.reveal()
+    db = await get_db()
+    try:
+        await security.raise_event(
+            db, kind="cfaccess_revealed", severity="warn",
+            summary=f"Cloudflare Access secret made readable in the GUI by "
+                    f"{user['username']} for {cfaccess.REVEAL_SECONDS // 60} min",
+            detail={"by": user["username"], "until": until,
+                    "peer": _peer(request),
+                    "note": "the Settings page danger zone. The secret is in "
+                            "the set-up command for that window; treat any "
+                            "machine it was pasted on as holding it."})
+    finally:
+        await db.close()
+    return {"ok": True, "revealed_until": until}
+
+
+@router.post("/cfaccess/hide")
+async def cfaccess_hide():
+    cfaccess.hide()
+    return {"ok": True, "revealed_until": None}
 
 
 @router.put("/cfaccess")
@@ -292,6 +337,182 @@ async def tarmac_player():
     return gui.player_status()
 
 
+def _peer(request: Request) -> str:
+    """Who a request came from, for the record and for throttling hints.
+    Forgeable by anything that can reach the app directly, so it is a hint
+    about who and never an input to a security decision (see auth._peer)."""
+    for h in ("cf-connecting-ip", "x-forwarded-for"):
+        v = request.headers.get(h)
+        if v:
+            return v.split(",")[0].strip()[:64]
+    return getattr(request.client, "host", "?") or "?"
+
+
+# --- pairing: the operator's side ----------------------------------------------
+#
+# These sit behind require_user like the rest of the router. The machine's side
+# is further down, on ws_router, under /pair/ — a different prefix on purpose,
+# so that the one Cloudflare Access Bypass policy this needs can be scoped to
+# exactly the routes built to be reachable without a credential.
+
+class PairCreateBody(BaseModel):
+    name: str = ""
+
+
+def _ticket_view(t: pairing.Ticket) -> dict:
+    d = t.public()
+    d["confirm_path"] = f"/pair/{t.code}"
+    d["download_path"] = f"/api/computeruse/pair/client.tar.gz?code={t.code}"
+    return d
+
+
+@router.post("/enroll")
+async def enroll_create(body: PairCreateBody):
+    """A fresh pairing code for a machine about to be set up."""
+    return _ticket_view(pairing.create(body.name))
+
+
+@router.get("/enroll")
+async def enroll_list():
+    return {"tickets": [_ticket_view(t) for t in pairing.live()],
+            "ttl_seconds": pairing.TTL_SECONDS}
+
+
+@router.get("/enroll/{code}")
+async def enroll_status(code: str):
+    """What the confirm page and the wizard both poll: has a machine claimed
+    it yet, and which one."""
+    t = pairing.get(code)
+    if t is None:
+        raise HTTPException(status_code=404, detail=pairing.Unknown().args[0])
+    return _ticket_view(t)
+
+
+@router.post("/enroll/{code}/approve")
+async def enroll_approve(code: str, request: Request,
+                         user: dict = Depends(require_user)):
+    """The operator's yes. This is the moment the credentials are committed to
+    leaving the host, so it is the moment that gets recorded."""
+    try:
+        t = pairing.approve(code, by=user["username"])
+    except pairing.PairingError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    db = await get_db()
+    try:
+        await security.raise_event(
+            db, kind="machine_paired", severity="info",
+            summary=f"{user['username']} paired machine "
+                    f"'{t.claim.get('name') or t.name or '?'}' "
+                    f"({t.claim.get('hostname') or '?'}, "
+                    f"{t.claim.get('platform') or '?'}) with code {t.code}",
+            detail={"code": t.code, "claim": t.claim, "contested": t.contested,
+                    "by": user["username"], "peer": _peer(request)})
+    finally:
+        await db.close()
+    return _ticket_view(t)
+
+
+@router.post("/enroll/{code}/deny")
+async def enroll_deny(code: str):
+    """Also how a code is cancelled before anything has claimed it."""
+    try:
+        t = pairing.deny(code)
+    except pairing.PairingError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    return _ticket_view(t)
+
+
+# --- pairing: the machine's side -----------------------------------------------
+#
+# No session, no pairing token: the whole point is that the machine has nothing
+# yet. Behind Cloudflare Access this prefix needs a Bypass policy, which makes
+# these reachable by anyone, and they are written for that: throttled, no
+# credential without an approved ticket and its device secret, and an unknown
+# code indistinguishable from an expired one.
+
+class ClaimBody(BaseModel):
+    code: str
+    name: str = ""
+    hostname: str = ""
+    platform: str = ""
+
+
+class PollBody(BaseModel):
+    code: str
+    device_secret: str
+
+
+def _throttled(request: Request) -> str:
+    peer = _peer(request)
+    try:
+        pairing.throttle(peer)
+    except pairing.TooMany as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    return peer
+
+
+@ws_router.post("/pair/claim")
+async def pair_claim(body: ClaimBody, request: Request):
+    peer = _throttled(request)
+    try:
+        t = pairing.claim(body.code, name=body.name, hostname=body.hostname,
+                          platform=body.platform, peer=peer,
+                          agent=request.headers.get("user-agent", ""))
+    except pairing.Unknown as e:
+        pairing.note_wrong_code(peer)
+        raise HTTPException(status_code=e.status, detail=str(e))
+    except pairing.PairingError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    return {"ok": True, "code": t.code, "name": t.name,
+            "device_secret": t.device_secret,
+            "confirm_path": f"/pair/{t.code}",
+            "interval": pairing.POLL_INTERVAL,
+            "expires_in": max(0, int(t.expires - time.time()))}
+
+
+@ws_router.post("/pair/poll")
+async def pair_poll(body: PollBody, request: Request):
+    """Pending, denied, or — once — the credentials.
+
+    The reply that carries them is the only place the pairing token and the
+    Access service token ever leave the host for a machine, and release() spends
+    the ticket in the same breath, so a replayed poll gets "released" and
+    nothing else.
+    """
+    peer = _throttled(request)
+    try:
+        t = pairing.poll(body.code, body.device_secret)
+    except pairing.Unknown as e:
+        pairing.note_wrong_code(peer)
+        raise HTTPException(status_code=e.status, detail=str(e))
+    if t.state != "approved":
+        return {"ok": True, "state": t.state, "interval": pairing.POLL_INTERVAL,
+                "expires_in": max(0, int(t.expires - time.time()))}
+    cid, sec = cfaccess.get()
+    creds = {"ok": True, "state": "approved", "name": t.name,
+             "token": await cu.pairing_token(),
+             "cf_access_id": cid, "cf_access_secret": sec}
+    pairing.release(t)
+    return creds
+
+
+@ws_router.get("/pair/client.tar.gz")
+async def pair_client_tar(request: Request, code: str = ""):
+    """The client source, for a machine holding a live pairing code.
+
+    Source only, exactly as /client.tar.gz — but let through by the code rather
+    than the pairing token, since the machine does not have that yet. A wrong
+    code costs guessing budget like everywhere else on this prefix.
+    """
+    peer = _throttled(request)
+    if pairing.get(code) is None:
+        pairing.note_wrong_code(peer)
+        raise HTTPException(status_code=401,
+                            detail=pairing.Unknown().args[0])
+    return StreamingResponse(_tar_bytes(), media_type="application/gzip",
+                             headers={**_TAR_DISPOSITION, **_NO_CACHE})
+
+
 async def _download_auth(request: Request, token: str | None) -> None:
     """Let the download through for a logged-in session OR the pairing token.
 
@@ -345,6 +566,22 @@ def _client_source() -> list[Path]:
             if f.is_file() and f.suffix in (".py", ".txt", ".md")]
 
 
+def _tar_bytes() -> io.BytesIO:
+    """The client source as a gzipped tarball. Each route that serves it adds
+    _NO_CACHE itself, in its own body, because a test reads the route's source
+    for exactly that name — the CDN pinning an old build was found the hard way
+    and the check is meant to stay visible at the point of serving."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        for f in _client_source():
+            t.add(f, arcname=f"computeruse/{f.name}")
+    buf.seek(0)
+    return buf
+
+
+_TAR_DISPOSITION = {"Content-Disposition": 'attachment; filename="computeruse.tar.gz"'}
+
+
 @ws_router.get("/client.tar.gz")
 async def client_tar(request: Request, token: str | None = None):
     """The client as a tarball — what the set-up command actually fetches.
@@ -355,15 +592,8 @@ async def client_tar(request: Request, token: str | None = None):
     macOS too, so this is the one that is always openable.
     """
     await _download_auth(request, token)
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as t:
-        for f in _client_source():
-            t.add(f, arcname=f"computeruse/{f.name}")
-    buf.seek(0)
-    return StreamingResponse(
-        buf, media_type="application/gzip",
-        headers={"Content-Disposition":
-                 'attachment; filename="computeruse.tar.gz"', **_NO_CACHE})
+    return StreamingResponse(_tar_bytes(), media_type="application/gzip",
+                             headers={**_TAR_DISPOSITION, **_NO_CACHE})
 
 
 @ws_router.get("/client.zip")
