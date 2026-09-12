@@ -465,19 +465,37 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
 
         sink = db_tool_sink(db, conversation_id)
         pending_tool: dict = {}
-        async for event in source:
-            if event["type"] == "final":
-                final_content = event["content"]
-                continue
-            # the guest loop runs with on_tool_call=None, so persist tool_calls
-            # here by pairing each tool (args) event with its tool_result.
-            if event["type"] == "tool":
-                pending_tool[event.get("id")] = (event.get("name"),
-                                                 event.get("args") or {})
-            elif event["type"] == "tool_result":
-                nm, ar = pending_tool.pop(event.get("id"), (event.get("name"), {}))
-                await sink(nm, ar, event.get("result", ""))
-            bus.publish(chan, event)
+        try:
+            async for event in source:
+                if event["type"] == "final":
+                    final_content = event["content"]
+                    continue
+                # the guest loop runs with on_tool_call=None, so persist tool_calls
+                # here by pairing each tool (args) event with its tool_result.
+                if event["type"] == "tool":
+                    pending_tool[event.get("id")] = (event.get("name"),
+                                                     event.get("args") or {})
+                elif event["type"] == "tool_result":
+                    nm, ar = pending_tool.pop(event.get("id"), (event.get("name"), {}))
+                    await sink(nm, ar, event.get("result", ""))
+                bus.publish(chan, event)
+        finally:
+            # guest_turn holds a per-slug workspace-push token that its OWN
+            # `finally` releases (and, for the last one out, sweeps the guest's
+            # writes home). But an operator interrupt cancels this task while the
+            # generator is suspended mid-turn, and Python does NOT finalize a
+            # suspended async generator synchronously — so without an explicit
+            # close that token leaks. A leaked token makes the NEXT top-level
+            # turn skip its workspace push (acquire_workspace sees a phantom
+            # concurrent holder), the guest then presents an EMPTY project, and
+            # the agent concludes its work was wiped and rebuilds from scratch.
+            # Closing here throws GeneratorExit in so that finally runs now. The
+            # token release is synchronous (before any await), so the hold is
+            # freed even if the close itself races the cancellation.
+            try:
+                await source.aclose()
+            except Exception:  # noqa: BLE001 — the hold is already released
+                pass
 
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, model) "
