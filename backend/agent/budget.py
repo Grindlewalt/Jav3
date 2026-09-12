@@ -9,7 +9,19 @@ Budget object — so the cap is "across all agents," exactly.
 
 DeepSeek caches prompt prefixes on disk automatically, which is why the input
 cap can be generous: within a loop the prefix is stable and grows, so repeated
-iterations mostly hit cache. We track hit/miss here to confirm that.
+iterations mostly hit cache. We track hit/miss here to confirm that — and, more
+than confirm, to *bill* it: the cap counts fresh (cache-miss) input at full
+weight and cached input at CACHE_HIT_WEIGHT, so the budget tracks real spend
+instead of raw re-sends. A long but cache-friendly loop (a build task re-sending
+a stable brief every iteration) no longer trips the fuse on tokens it barely
+paid for; a genuine runaway — one pulling in lots of NEW content every round —
+still generates fresh tokens and still gets caught. When a provider reports no
+cache accounting (hit stays 0), fresh == the whole prompt, i.e. the old
+full-weight behaviour, so the cap never silently vanishes.
+
+`input_tokens`/`cache_hit`/`cache_miss` stay the honest RAW counts (persisted to
+usage_log, shown in summaries); `charged_input` is the discounted figure the cap
+actually compares against `max_input`.
 """
 import contextvars
 from dataclasses import dataclass
@@ -19,32 +31,46 @@ class BudgetExceeded(Exception):
     pass
 
 
+# A cached-prefix re-send costs a small fraction of fresh input (DeepSeek prices
+# a cache hit at ~1/10th of a miss), so the budget charges it at that fraction.
+# This is what makes the cap a spend proxy rather than a re-send counter.
+CACHE_HIT_WEIGHT = 0.1
+
+
 @dataclass
 class Budget:
     max_input: int
     max_output: int
-    input_tokens: int = 0
+    input_tokens: int = 0        # raw prompt tokens, cached included (honest count)
     output_tokens: int = 0
     cache_hit: int = 0
     cache_miss: int = 0
+    charged_input: float = 0.0   # discounted input the cap is compared against
 
     def add(self, usage: dict) -> None:
         if not usage:
             return
-        self.input_tokens += usage.get("prompt_tokens", 0)
+        prompt = usage.get("prompt_tokens", 0)
+        self.input_tokens += prompt
         self.output_tokens += usage.get("completion_tokens", 0)
         # DeepSeek reports cache hit/miss on the input side (0 if unsupported)
-        self.cache_hit += usage.get("prompt_cache_hit_tokens", 0)
+        hit = usage.get("prompt_cache_hit_tokens", 0)
+        self.cache_hit += hit
         self.cache_miss += usage.get("prompt_cache_miss_tokens", 0)
+        # Fresh input is whatever the cache didn't serve. Deriving it from
+        # (prompt - hit) rather than the reported miss makes the no-accounting
+        # case (hit == 0) fall back to charging the whole prompt at full weight.
+        fresh = max(prompt - hit, 0)
+        self.charged_input += fresh + hit * CACHE_HIT_WEIGHT
 
     def over(self) -> bool:
-        return self.input_tokens >= self.max_input or self.output_tokens >= self.max_output
+        return self.charged_input >= self.max_input or self.output_tokens >= self.max_output
 
     def summary(self) -> str:
         total = self.cache_hit + self.cache_miss
         ratio = f"{100 * self.cache_hit // total}%" if total else "n/a"
         return (f"{self.input_tokens:,} in / {self.output_tokens:,} out "
-                f"(cache hit {ratio})")
+                f"(cache hit {ratio}, charged {int(self.charged_input):,})")
 
 
 # --- operation identity + the budget registry --------------------------------

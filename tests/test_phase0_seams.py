@@ -73,7 +73,7 @@ async def test_gateway_meters_budget(monkeypatch):
 
 async def test_gateway_refuses_when_budget_spent(monkeypatch):
     spy = _script_transport(monkeypatch)
-    b = Budget(max_input=100, max_output=100, input_tokens=100)
+    b = Budget(max_input=100, max_output=100, input_tokens=100, charged_input=100)
     token = budget_mod.active_budget.set(b)
     try:
         with pytest.raises(BudgetExceeded):

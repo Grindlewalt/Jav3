@@ -131,15 +131,28 @@ async def test_job_nodes_hidden_from_chat_list(client):
 # --- token budget ------------------------------------------------------------
 
 def test_budget_accounting_and_cap():
-    from backend.agent.budget import Budget
+    # The input cap is compared against CHARGED input: fresh (cache-miss)
+    # tokens at full weight, cached tokens discounted. Raw input_tokens stays
+    # the honest count, but no longer drives the cap.
+    from backend.agent.budget import Budget, CACHE_HIT_WEIGHT
     b = Budget(max_input=1000, max_output=500)
     assert not b.over()
     b.add({"prompt_tokens": 600, "completion_tokens": 100,
            "prompt_cache_hit_tokens": 400, "prompt_cache_miss_tokens": 200})
+    # raw = 600, but charged = 200 fresh + 400*0.1 = 240
+    assert b.input_tokens == 600
+    assert b.charged_input == 200 + 400 * CACHE_HIT_WEIGHT
     assert not b.over()
-    b.add({"prompt_tokens": 500, "completion_tokens": 50})  # input now 1100 >= 1000
+    # a huge but fully-cached re-send: raw blows past max_input, charged doesn't
+    b.add({"prompt_tokens": 5000, "completion_tokens": 50,
+           "prompt_cache_hit_tokens": 5000, "prompt_cache_miss_tokens": 0})
+    assert b.input_tokens == 5600            # raw is well over the 1000 cap
+    assert not b.over()                      # ...but charged (740) is not
+    # fresh tokens with no cache accounting are charged in full and DO trip it
+    b.add({"prompt_tokens": 500, "completion_tokens": 50})
     assert b.over()
     assert "cache hit" in b.summary()
+    assert "charged" in b.summary()
 
 
 def test_budget_over_on_output():

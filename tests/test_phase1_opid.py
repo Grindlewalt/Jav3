@@ -99,7 +99,7 @@ async def test_gateway_refuses_when_op_id_budget_spent(monkeypatch):
         yield {"type": "raw", "content": "hi", "tool_calls": [], "usage": None}
     monkeypatch.setattr(Model, "_stream_once", fake_stream_once)
 
-    b = Budget(max_input=100, max_output=100, input_tokens=100)
+    b = Budget(max_input=100, max_output=100, input_tokens=100, charged_input=100)
     bmod.register("op-3", b)
     try:
         with pytest.raises(BudgetExceeded):
