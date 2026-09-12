@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     data_dir: Path = BASE_DIR / "data"
     memory_dir: Path = BASE_DIR / "memory"
     projects_dir: Path = BASE_DIR / "projects"
+    # Serve each project's git repo read-only over HTTP at /git/<slug>, so the
+    # operator can `git clone/pull http://<host>/git/<slug>` over the LAN. Basic
+    # auth against the app's own users; pull-only (never receive-pack).
+    git_serve_enabled: bool = True
     skills_dir: Path = BASE_DIR / "skills"
     agents_dir: Path = BASE_DIR / "agents"
     tools_dir: Path = BASE_DIR / "tools"

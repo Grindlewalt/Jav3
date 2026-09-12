@@ -9,7 +9,7 @@ import asyncio
 
 from . import (agents_api, agents_run, artifacts_api, auth, chat,
                computeruse_api, egress_api,
-               git_api, gui, guest_shell, logs_api, memory_api,
+               git_api, git_serve_api, gui, guest_shell, logs_api, memory_api,
                notifications_api, projects, reviewer, reviewer_api, runs_api,
                schedules, skills_api, vm_api, voice_api, workspace, secrets)
 from .agent.model import (MODEL_STATE_KEY, get_model_override,
@@ -67,6 +67,7 @@ app.include_router(schedules.router)
 app.include_router(runs_api.router)
 app.include_router(runs_api.jobs_router)
 app.include_router(git_api.router)
+app.include_router(git_serve_api.router)
 app.include_router(notifications_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)
