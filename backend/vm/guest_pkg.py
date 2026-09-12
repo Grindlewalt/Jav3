@@ -18,6 +18,7 @@ from ..config import settings
 # pushed workspace; no host state). arcname -> repo path.
 _COPY_MODULES = {
     "backend/agent/loop.py": "backend/agent/loop.py",
+    "backend/agent/imageresult.py": "backend/agent/imageresult.py",
     "backend/codeindex.py": "backend/codeindex.py",
     "backend/agent/tools/todostore.py": "backend/agent/tools/todostore.py",
 }

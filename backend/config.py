@@ -148,6 +148,10 @@ class Settings(BaseSettings):
     tool_result_max_chars: int = 12_000
     tool_result_evict_chars: int = 4_000
     tool_result_keep_recent: int = 2
+    # How many recent screenshots stay in-context as real image blocks; older
+    # ones become a text stub. Each screenshot is ~1k+ tokens and re-sent every
+    # iteration, so a browsing loop only keeps the CURRENT view by default.
+    screenshot_keep_recent: int = 1
 
     # Dead-end circuit-breaker (the convo-12 post-mortem: 173 tool calls of
     # near-duplicate searches and failing installs, never concluding). After

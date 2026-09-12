@@ -152,6 +152,28 @@ async def load_model_override() -> None:
         await db.close()
 
 
+def _redact_images(messages: list[dict]) -> list[dict]:
+    """Swap base64 image data-URIs for a short placeholder before a message
+    array is logged — a captured screenshot is multi-MB and would bloat the
+    model_calls ledger with bytes that add nothing to the debug view."""
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "image_url":
+                url = (p.get("image_url") or {}).get("url", "")
+                parts.append({"type": "image_url", "image_url":
+                              {"url": f"<image redacted: {len(url):,} chars>"}})
+            else:
+                parts.append(p)
+        out.append({**m, "content": parts})
+    return out
+
+
 async def record_model_call(conversation_id: int | None, model_name: str,
                             usage: dict | None, messages: list[dict],
                             tools: list[dict] | None) -> None:
@@ -170,7 +192,7 @@ async def record_model_call(conversation_id: int | None, model_name: str,
     try:
         context = None
         if not ephemeral and await get_state(db, CAPTURE_STATE_KEY) == "1":
-            context = json.dumps({"messages": messages,
+            context = json.dumps({"messages": _redact_images(messages),
                                   "n_tools": len(tools or [])})
         await db.execute(
             "INSERT INTO model_calls (conversation_id, model, input_tokens, "

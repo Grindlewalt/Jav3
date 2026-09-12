@@ -7,12 +7,14 @@ is what M3+ tools plug into. Yields SSE-ready events:
   {"type": "final", "content": ...}       the finished assistant message
 """
 import asyncio
+import base64
 import json
 from collections import OrderedDict
 from typing import AsyncIterator
 
 from ..config import settings
 from ..memory import standing_rules_tail
+from . import imageresult
 from .budget import BudgetExceeded
 from .model import model
 from .tools import registry
@@ -282,6 +284,7 @@ async def run_turn(
     web_nudged = False
     read_only = registry.read_only_names()   # once per turn; hot-reload can wait
     tool_msgs: list[dict] = []   # {"idx", "round", "name"} per tool result added
+    image_msgs: list[dict] = []  # {"idx", "round"} per screenshot user-message added
     err_streak = 0               # consecutive failed/empty/duplicate results
     force_conclude = False       # dead-end breaker tripped: withdraw tools
     # (name, canonical args) -> tool_msgs entry, for duplicate read-only calls.
@@ -377,7 +380,12 @@ async def run_turn(
 
         # DB writes + message appends stay sequential and ordered — the single
         # aiosqlite connection must never be used concurrently
+        pending_images: list[str] = []   # PNG paths a tool rendered this round
         for (tc, name, args), result in zip(parsed, results):
+            # peel any screenshot off the result BEFORE persisting/capping, so
+            # the ledger and the tool message stay text-only (bytes ride a
+            # following user message instead)
+            result, img_path = imageresult.split(result)
             if on_tool_call is not None:
                 await on_tool_call(name, args, result)
             failed = (not result.strip() or result.startswith(
@@ -388,6 +396,8 @@ async def run_turn(
             messages.append({"role": "tool", "tool_call_id": tc["id"],
                              "content": content})
             tool_msgs.append({"idx": len(messages) - 1, "round": i, "name": name})
+            if img_path and not failed:
+                pending_images.append(img_path)
             # the GUI renders live activity rows from this: pair to the tool
             # event by id, mark ok/err, carry the result for click-to-expand
             yield {"type": "tool_result", "id": tc["id"], "name": name,
@@ -400,7 +410,15 @@ async def run_turn(
             err_streak = err_streak + 1 if failed else 0
             if name in WEB_HANDROLLED:
                 web_calls += 1
+        # attach screenshots so the model can SEE them — DeepSeek accepts image
+        # content only in a user message, never a tool one, so each rides its own
+        for img_path in pending_images:
+            msg = _image_message(img_path)
+            if msg is not None:
+                messages.append(msg)
+                image_msgs.append({"idx": len(messages) - 1, "round": i})
         _evict_stale_results(messages, tool_msgs, i)
+        _evict_stale_images(messages, image_msgs)
 
         # mid-flight steering: dead-end breaker + delegation/wrap-up nudges,
         # appended to the last tool result so they sit adjacent to the failure
@@ -428,6 +446,43 @@ def _cap_result(name: str, result: str) -> str:
         return result
     return (result[:cap] + f"\n...(truncated: {len(result):,} chars total. "
             f"Re-call {name} with a narrower target if you need the rest.)")
+
+
+_IMG_CAP = 4_500_000     # ~4.5MB PNG ceiling; DeepSeek rejects oversized images
+
+
+def _image_message(path: str) -> dict | None:
+    """A user message carrying a screenshot as an image block. Returns None on a
+    missing/unreadable/oversized file so a bad render never breaks the turn."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(_IMG_CAP + 1)
+    except OSError:
+        return None
+    if not data or len(data) > _IMG_CAP:
+        return None
+    b64 = base64.b64encode(data).decode()
+    return {"role": "user", "content": [
+        {"type": "text", "text": "[screenshot of the current page — act on what "
+         "you SEE here; coordinates are pixels from the top-left]"},
+        {"type": "image_url",
+         "image_url": {"url": f"data:image/png;base64,{b64}"}}]}
+
+
+def _evict_stale_images(messages: list[dict], image_msgs: list[dict]) -> None:
+    """Keep only the most recent `screenshot_keep_recent` screenshots as real
+    image blocks; replace older ones with a text stub. A screenshot is ~1k+
+    tokens re-sent every iteration, so stale ones are the biggest avoidable cost
+    of a browsing loop — the model only needs the CURRENT view."""
+    keep = settings.screenshot_keep_recent
+    live = [m for m in image_msgs if not m.get("evicted")]
+    stale = live if keep <= 0 else live[:-keep]
+    for m in stale:
+        messages[m["idx"]] = {"role": "user", "content":
+                              "[an earlier screenshot was dropped to keep "
+                              "context small; take another with the browser "
+                              "tool if you need to see that view again]"}
+        m["evicted"] = True
 
 
 def _evict_stale_results(messages: list[dict], tool_msgs: list[dict],
