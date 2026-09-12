@@ -16,8 +16,14 @@ parameters:
       type: integer
       description: Kill the run after this many seconds (default 60, max 300).
 ---
-The sandbox has NO network and no secrets — pip installs and web fetches will
-fail by design; use web tools for anything remote, then process it here. Your
-working directory is the project copy: read its files directly, write results
-as files (they sync back to the project at turn end). stdout/stderr are
+The sandbox has NO network and no secrets — pip/npm installs and web fetches
+will fail by design; use web tools for anything remote, then process it here.
+`node` and `npm` ARE installed, so JS projects run and test in place (e.g.
+`node --test`, or your package.json's own `npm test`/`npm run …` scripts).
+
+Your working directory is the project copy: read its files directly, and write
+results as files — they sync back to the project at turn end. That sync keeps
+EVERYTHING the run created under the project, so put throwaway scratch (probe
+scripts, scratch logs, one-off experiments) under /tmp instead, where it is NOT
+kept; node_modules and package caches are never kept. stdout/stderr are
 truncated past ~6k chars — print what matters, write the rest to a file.

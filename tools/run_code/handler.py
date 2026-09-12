@@ -12,6 +12,7 @@ project files. The rlimits keep the shared guest responsive; they are not the
 security boundary (the VM is).
 """
 import asyncio
+import functools
 import os
 import resource
 import signal
@@ -26,15 +27,29 @@ MAX_TIMEOUT = 300
 OUT_CAP = 6_000                     # chars kept per stream (head + tail)
 ARTIFACT_FILE_CAP = 2 * 1024 * 1024   # per-file capture cap
 ARTIFACT_TOTAL_CAP = 8 * 1024 * 1024  # total capture cap per run
-SKIP_TOP = {".staging", ".git"}     # never captured as artifacts
+# Never captured as artifacts: our own overlay/vcs, plus dependency and
+# package-manager cache trees. Once npm works in-guest a single `npm install`
+# would otherwise try to reconcile thousands of node_modules files back into
+# the project (each through the secret-scan + diff-gate) — skip them wholesale.
+SKIP_DIRS = {".staging", ".git", "node_modules", ".npm", ".cache"}
 
 
-def _limits() -> None:
+def _limits(cpu_seconds: int) -> None:
     # best-effort: a limit that can't apply must not kill the run — the VM is
-    # the boundary, these just keep the one shared guest responsive
+    # the boundary, these just keep the one shared guest responsive.
+    #
+    # No RLIMIT_AS on purpose. It caps *virtual* address space, and V8 (node,
+    # npm, and anything that embeds it — esbuild, vite) reserves far more
+    # virtual memory than it ever commits; a 512MB AS cap made `npm` abort with
+    # SIGABRT while bare `node` only just fit. On a fixed-RAM guest that cap
+    # bought almost nothing beyond physical RAM anyway — real memory is bounded
+    # by the guest's RAM ceiling + the OOM killer, which only touches this
+    # disposable guest. CPU time is the responsiveness guard instead, and it
+    # tracks the run's own wall-clock timeout (times a few cores of headroom) so
+    # a legitimate long build isn't SIGXCPU'd early while a runaway still can't
+    # outlast its deadline.
     for limit, val in (
-        (resource.RLIMIT_CPU, 120),
-        (resource.RLIMIT_AS, 512 * 1024 * 1024),
+        (resource.RLIMIT_CPU, cpu_seconds),
         (resource.RLIMIT_NPROC, 512),
         (resource.RLIMIT_FSIZE, 64 * 1024 * 1024),
     ):
@@ -57,7 +72,7 @@ def _snapshot(root) -> dict:
     snap = {}
     for p in root.rglob("*"):
         rel = p.relative_to(root)
-        if rel.parts and rel.parts[0] in SKIP_TOP:
+        if SKIP_DIRS.intersection(rel.parts):
             continue
         if p.is_file():
             st = p.stat()
@@ -108,7 +123,11 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
 
     argv = (["python3", "-c", code] if code else ["/bin/sh", "-c", command])
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(cwd),
-           "PYTHONUNBUFFERED": "1", "LANG": "C.UTF-8"}
+           "PYTHONUNBUFFERED": "1", "LANG": "C.UTF-8",
+           # Package-manager caches/scratch go to /tmp, never the project copy,
+           # so they don't ride the turn-end reconcile back as artifacts.
+           "npm_config_cache": "/tmp/.npm", "XDG_CACHE_HOME": "/tmp/.cache",
+           "npm_config_update_notifier": "false", "npm_config_fund": "false"}
     # Monitored egress: point every subprocess (pip/npm/curl/git) at the host
     # egress proxy so its traffic is policy-checked, secret-injected and watched.
     # Set by the guest boot when JARVIS_VM_EGRESS is on; absent = netless guest,
@@ -122,10 +141,14 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         env.update(HTTP_PROXY=_proxy, HTTPS_PROXY=_proxy,
                    http_proxy=_proxy, https_proxy=_proxy,
                    NO_PROXY=_local, no_proxy=_local)
+    # CPU-seconds backstop = a few cores busy for the whole wall window, plus
+    # headroom; the wall-clock SIGKILL below is the real deadline.
+    cpu_cap = timeout * 4 + 30
     t0 = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(cwd), env=env, preexec_fn=_limits,
+            *argv, cwd=str(cwd), env=env,
+            preexec_fn=functools.partial(_limits, cpu_cap),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL)
     except OSError as e:
