@@ -132,6 +132,50 @@ def require_user(request: Request) -> dict:
     return user
 
 
+def require_same_origin(request: Request) -> None:
+    """CSRF defense-in-depth for cookie-authed, state-changing routes: refuse a
+    request whose Origin is a different host than the app's own.
+
+    SameSite=Lax already blocks cross-SITE requests, but not a same-site sibling
+    subdomain — and this deployment shares a registrable domain with other apps
+    (one third-party). The browser sends Origin on those, so this catches them. A
+    MISSING Origin (a non-browser client like curl or the paired device's CLI) is
+    allowed: it carries no ambient session cookie to abuse.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    from urllib.parse import urlsplit
+    oh = (urlsplit(origin).hostname or "").lower()
+    host = (request.headers.get("host") or "").split(":")[0].lower()
+    allowed = {host, *(h.lower() for h in settings.csrf_allowed_hosts)}
+    if oh and oh in allowed:
+        return
+    raise HTTPException(status_code=403, detail="cross-origin request refused")
+
+
+async def require_actor(request: Request) -> dict:
+    """Operator cookie session OR an enrolled device's Bearer token.
+
+    For the routers a device/CLI is allowed to reach. The cookie path is checked
+    first and stays sync + DB-free, so a browser request pays nothing extra; only
+    a cookieless request touches the token store. A device actor is marked
+    `is_device` and carries no real user id (id=-1) — the sensitive control-plane
+    routers keep `require_user` (cookie only) and never see a device token.
+    """
+    user = user_from_token(request.cookies.get(COOKIE_NAME))
+    if user is not None:
+        return user
+    header = request.headers.get("authorization", "")
+    if header[:7].lower() == "bearer ":
+        from . import devicetokens
+        dev = await devicetokens.verify(header[7:].strip())
+        if dev is not None:
+            return {"id": -1, "username": f"device:{dev['name']}",
+                    "is_device": True, "device_id": dev["device_id"]}
+    raise HTTPException(status_code=401, detail="not authenticated")
+
+
 async def _alert(key: str, count: int, peer: str) -> None:
     """One security event per burst, so a scanner is a line in the Review Center
     rather than a flood that hides everything else."""
@@ -201,6 +245,7 @@ async def login(body: LoginRequest, request: Request, response: Response):
         make_token(row["id"], row["username"]),
         httponly=True,
         samesite="lax",
+        secure=settings.cookie_secure,
         max_age=settings.jwt_ttl_hours * 3600,
     )
     return {"ok": True, "username": row["username"]}
@@ -208,7 +253,10 @@ async def login(body: LoginRequest, request: Request, response: Response):
 
 @router.post("/logout")
 async def logout(response: Response):
-    response.delete_cookie(COOKIE_NAME)
+    # mirror the set-cookie attributes so deletion keeps matching if a Domain/
+    # Path is ever added to the login cookie
+    response.delete_cookie(COOKIE_NAME, samesite="lax",
+                           secure=settings.cookie_secure)
     return {"ok": True}
 
 

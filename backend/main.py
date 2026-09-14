@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 import asyncio
 
-from . import (agents_api, agents_run, artifacts_api, auth, chat,
+from . import (agents_api, agents_run, artifacts_api, auth, chat, devices_api,
                computeruse_api, egress_api,
                git_api, git_serve_api, gui, guest_shell, logs_api, memory_api,
                notifications_api, projects, reviewer, reviewer_api, runs_api,
@@ -55,7 +55,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Jarvis v3", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    """Refuse to be framed by another origin (SAMEORIGIN still allows Jarvis's
+    own same-origin previews), so a cookie-authed one-click action — the device
+    approve at /pair/<code>, the grant toggles — can't be clickjacked from a
+    sibling site. Cheap, and it hardens the whole SPA at once."""
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
+    return resp
+
+
 app.include_router(auth.router)
+app.include_router(devices_api.router)
+app.include_router(devices_api.pair_router)
 app.include_router(projects.router)
 app.include_router(chat.router)
 app.include_router(memory_api.router)

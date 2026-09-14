@@ -2371,6 +2371,12 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .pair-facts dt { color: var(--dim); }
 .pair-facts dd { margin: 0; }
 .cu-settings-note { margin: 4px 0 14px; }
+.device-enroll { margin: 10px 0 4px; }
+.device-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.device-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 8px 0; border-top: 1px solid var(--border);
+}
 
 /* --- Settings -------------------------------------------------------------------- */
 .settings-page { max-width: 760px; }

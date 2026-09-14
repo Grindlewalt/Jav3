@@ -32,6 +32,16 @@ class Settings(BaseSettings):
 
     jwt_secret: str = ""
     jwt_ttl_hours: int = 24 * 7
+    # Add `Secure` to the session cookie so it never rides plaintext HTTP. OFF
+    # by default because the test box is reached over plain http on the LAN
+    # (a Secure cookie would silently never be sent there); set true in prod,
+    # where the app is only reached over HTTPS (the Cloudflare tunnel).
+    cookie_secure: bool = False
+    # Extra hostnames allowed as the Origin of a cookie-authed state-changing
+    # request, on top of the request's own Host. The CSRF-origin check refuses a
+    # request whose Origin is any OTHER host — SameSite=Lax does not stop a
+    # same-site sibling subdomain (this deploy shares a domain with other apps).
+    csrf_allowed_hosts: list[str] = []
 
     # Operator API keys the agent uses by {{secret:NAME}} placeholder but
     # never sees (backend/secrets.py). Lives next to the env file.

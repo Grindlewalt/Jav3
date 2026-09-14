@@ -111,6 +111,11 @@ class Ticket:
     name: str                      # what the operator called the machine
     created: float
     expires: float
+    # What this code authorizes. One shared ticket store serves both the
+    # computer-use pairing and the generic device-enrollment flows; the kind
+    # keeps them in separate namespaces so a code minted for one can never be
+    # claimed/approved/polled — and thus never yield credentials — on the other.
+    kind: str = "computeruse"
     # waiting  — code issued, no machine has claimed it
     # claimed  — a machine has it and is polling; needs the operator's yes
     # approved — the operator said yes; credentials not yet collected
@@ -130,6 +135,7 @@ class Ticket:
         that must exist only in the claiming process."""
         now = now or time.time()
         return {"code": self.code, "name": self.name, "state": self.state,
+                "kind": self.kind,
                 "created_at": self.created, "expires_at": self.expires,
                 "expires_in": max(0, int(self.expires - now)),
                 "claim": dict(self.claim), "contested": list(self.contested),
@@ -168,34 +174,41 @@ def sweep(now: float | None = None) -> None:
         del _tickets[code]
 
 
-def create(name: str, now: float | None = None) -> Ticket:
+def create(name: str, kind: str = "computeruse",
+           now: float | None = None) -> Ticket:
     """A fresh code for a machine the operator is about to set up."""
     now = now or time.time()
     sweep(now)
-    t = Ticket(code=_new_code(), name=(name or "").strip()[:64],
+    t = Ticket(code=_new_code(), name=(name or "").strip()[:64], kind=kind,
                created=now, expires=now + TTL_SECONDS)
     _tickets[t.code] = t
     return t
 
 
-def live(now: float | None = None) -> list[Ticket]:
+def live(now: float | None = None, kind: str | None = None) -> list[Ticket]:
     sweep(now)
-    return sorted(_tickets.values(), key=lambda t: t.created)
+    ts = _tickets.values() if kind is None else [
+        t for t in _tickets.values() if t.kind == kind]
+    return sorted(ts, key=lambda t: t.created)
 
 
-def get(code: str | None, now: float | None = None) -> Ticket | None:
-    """A live ticket, or None. Expired reads as absent."""
+def get(code: str | None, now: float | None = None,
+        kind: str | None = None) -> Ticket | None:
+    """A live ticket, or None. Expired reads as absent. A `kind` mismatch also
+    reads as absent, so a code minted for one flow is invisible to the other —
+    no cross-namespace claim/approve/poll, and no existence oracle across kinds.
+    """
     now = now or time.time()
     key = normalize(code)
     t = _tickets.get(key) if key else None
-    if t is None or t.expired(now):
+    if t is None or t.expired(now) or (kind is not None and t.kind != kind):
         return None
     return t
 
 
 def claim(code: str | None, *, name: str = "", hostname: str = "",
           platform: str = "", peer: str = "", agent: str = "",
-          now: float | None = None) -> Ticket:
+          kind: str | None = None, now: float | None = None) -> Ticket:
     """The machine side: take the code, get a device secret.
 
     A second claim does not overwrite the first. The first claimant may be the
@@ -205,7 +218,7 @@ def claim(code: str | None, *, name: str = "", hostname: str = "",
     knows which machine they are sitting at, is the one who can decide.
     """
     now = now or time.time()
-    t = get(code, now)
+    t = get(code, now, kind=kind)
     if t is None:
         raise Unknown()
     attempt = {"name": (name or "").strip()[:64],
@@ -225,8 +238,9 @@ def claim(code: str | None, *, name: str = "", hostname: str = "",
     return t
 
 
-def approve(code: str | None, by: str = "", now: float | None = None) -> Ticket:
-    t = get(code, now)
+def approve(code: str | None, by: str = "", now: float | None = None,
+            kind: str | None = None) -> Ticket:
+    t = get(code, now, kind=kind)
     if t is None:
         raise Unknown()
     if t.state != "claimed":
@@ -239,9 +253,10 @@ def approve(code: str | None, by: str = "", now: float | None = None) -> Ticket:
     return t
 
 
-def deny(code: str | None, now: float | None = None) -> Ticket:
+def deny(code: str | None, now: float | None = None,
+         kind: str | None = None) -> Ticket:
     """Also how a code is cancelled before anything claimed it."""
-    t = get(code, now)
+    t = get(code, now, kind=kind)
     if t is None:
         raise Unknown()
     if t.state == "released":
@@ -252,14 +267,14 @@ def deny(code: str | None, now: float | None = None) -> Ticket:
 
 
 def poll(code: str | None, device_secret: str | None,
-         now: float | None = None) -> Ticket:
+         now: float | None = None, kind: str | None = None) -> Ticket:
     """The machine side: the ticket, if the device secret is the one issued.
 
     The caller reads `state` and, on "approved", collects the credentials and
     calls release(). A secret mismatch is Unknown, same as a bad code — a poll
     with the wrong secret must not confirm the code exists.
     """
-    t = get(code, now)
+    t = get(code, now, kind=kind)
     if t is None or not t.device_secret:
         raise Unknown()
     if not _secrets.compare_digest(device_secret or "", t.device_secret):
@@ -280,6 +295,16 @@ def forget(code: str | None) -> None:
 
 
 # --- throttling ----------------------------------------------------------------
+#
+# Budgets are namespaced by `kind` ("device:*" vs "computeruse:*"), so a flood on
+# one flow's public routes cannot spend the other's budget and lock it out — the
+# two share this module's store but not their rate limits. `peer` is a hint
+# (behind a proxy every request may share one, and CF-Connecting-IP is forgeable),
+# so the global-per-kind budget is the one that actually bounds an attacker; the
+# per-peer budget just stops a single stuck client spending the global one.
+
+_last_sweep = 0.0
+
 
 def _bump(table: dict, key: str, window: float, now: float) -> int:
     hits = [h for h in table.get(key, []) if now - h < window]
@@ -292,30 +317,43 @@ def _count(table: dict, key: str, window: float, now: float) -> int:
     return len([h for h in table.get(key, []) if now - h < window])
 
 
-def throttle(peer: str, now: float | None = None) -> None:
-    """Called before every unauthenticated pairing route. Raises TooMany.
+def _sweep_throttle(now: float) -> None:
+    """Drop keys whose hits have all aged out. `peer` is attacker-controlled
+    (a forged header per request), so without this the tables grow a key per
+    distinct peer forever — a slow memory leak. Runs at most once a minute."""
+    global _last_sweep
+    if now - _last_sweep < 60:
+        return
+    _last_sweep = now
+    for table, window in ((_wrong, _WRONG_CODE_WINDOW), (_calls, _CALLS_WINDOW)):
+        for k in [k for k, v in table.items()
+                  if not any(now - h < window for h in v)]:
+            del table[k]
 
-    The peer is a hint (behind a proxy every request may share one), so the
-    global budget is the one that actually bounds an attacker; the per-peer
-    budget is there so a single stuck client cannot spend the global one.
-    """
+
+def throttle(peer: str, kind: str = "", now: float | None = None) -> None:
+    """Called before every unauthenticated pairing route. Raises TooMany."""
     now = now or time.time()
-    if (_count(_wrong, "*", _WRONG_CODE_WINDOW, now) >= _WRONG_CODE_GLOBAL
-            or _count(_wrong, peer, _WRONG_CODE_WINDOW, now) >= _WRONG_CODE_PER_PEER):
+    _sweep_throttle(now)
+    g, p = f"{kind}:*", f"{kind}:{peer}"
+    if (_count(_wrong, g, _WRONG_CODE_WINDOW, now) >= _WRONG_CODE_GLOBAL
+            or _count(_wrong, p, _WRONG_CODE_WINDOW, now) >= _WRONG_CODE_PER_PEER):
         raise TooMany()
-    if (_bump(_calls, "*", _CALLS_WINDOW, now) > _CALLS_GLOBAL
-            or _bump(_calls, peer, _CALLS_WINDOW, now) > _CALLS_PER_PEER):
+    if (_bump(_calls, g, _CALLS_WINDOW, now) > _CALLS_GLOBAL
+            or _bump(_calls, p, _CALLS_WINDOW, now) > _CALLS_PER_PEER):
         raise TooMany()
 
 
-def note_wrong_code(peer: str, now: float | None = None) -> None:
+def note_wrong_code(peer: str, kind: str = "", now: float | None = None) -> None:
     """A miss costs the guesser budget; a hit costs nothing."""
     now = now or time.time()
-    _bump(_wrong, "*", _WRONG_CODE_WINDOW, now)
-    _bump(_wrong, peer, _WRONG_CODE_WINDOW, now)
+    _bump(_wrong, f"{kind}:*", _WRONG_CODE_WINDOW, now)
+    _bump(_wrong, f"{kind}:{peer}", _WRONG_CODE_WINDOW, now)
 
 
 def reset_for_tests() -> None:
+    global _last_sweep
+    _last_sweep = 0.0
     _tickets.clear()
     _wrong.clear()
     _calls.clear()

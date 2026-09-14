@@ -13,6 +13,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import { useAsk } from '../ask.jsx'
+import { Block } from '../copy.jsx'
 import { useDismiss } from '../useDismiss.js'
 
 // Cloudflare's dashboard shows a service token as whole header lines, so that is
@@ -40,6 +42,7 @@ export default function Settings() {
       <h1>Settings</h1>
       {msg && <p className="warn">{msg}</p>}
       <ModelPanel />
+      <DevicesPanel say={say} />
       <AccessPanel />
       <MusicPanel say={say} />
       <JellyfinPanel say={say} />
@@ -84,6 +87,110 @@ function ModelPanel() {
           </p>
         </>
       )}
+    </section>
+  )
+}
+
+// --- devices (API tokens for a CLI/machine via the pairing flow) -----------------
+
+// The command the operator runs on the device: claim the code, wait for the
+// browser confirm, then save the minted token 0600. curl + sed so it needs no
+// jq. String.raw keeps the sed backslashes intact; only ${origin}/${code}
+// interpolate (both from safe sources — the app origin and the code alphabet).
+function claimScript(origin, code) {
+  return String.raw`BASE="${origin}"
+CODE="${code}"
+name="$(hostname 2>/dev/null || echo cli)"
+plat="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+secret="$(curl -fsS -X POST "$BASE/api/devices/pair/claim" -H 'content-type: application/json' -d "{\"code\":\"$CODE\",\"name\":\"$name\",\"hostname\":\"$name\",\"platform\":\"$plat\"}" | sed -n 's/.*"device_secret":"\([^"]*\)".*/\1/p')"
+echo "Approve this device at: $BASE/pair/$CODE"
+while :; do
+  r="$(curl -fsS -X POST "$BASE/api/devices/pair/poll" -H 'content-type: application/json' -d "{\"code\":\"$CODE\",\"device_secret\":\"$secret\"}")"
+  case "$r" in *'"denied"'*) echo "Denied by the operator."; exit 1;; esac
+  token="$(printf '%s' "$r" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  [ -n "$token" ] && break
+  sleep 3
+done
+mkdir -p "$HOME/.config/jarvis"
+(umask 177; printf '%s\n' "$token" > "$HOME/.config/jarvis/device-token")
+chmod 600 "$HOME/.config/jarvis/device-token" 2>/dev/null || true
+echo "Paired. Token saved to ~/.config/jarvis/device-token (send it as: Authorization: Bearer <token>)"`
+}
+
+function DevicesPanel({ say }) {
+  const ask = useAsk()
+  const [devices, setDevices] = useState(null)
+  const [ticket, setTicket] = useState(null)
+  const origin = window.location.origin
+
+  const load = useCallback(() => {
+    api('/api/devices').then((r) => setDevices(r.devices)).catch(() => setDevices([]))
+  }, [])
+  useEffect(load, [load])
+
+  async function enroll() {
+    const name = await ask.prompt('Name this device', '',
+      { placeholder: 'e.g. laptop-cli' })
+    if (name === null) return
+    try {
+      setTicket(await api('/api/devices/enroll',
+        { method: 'POST', body: JSON.stringify({ name: name || '' }) }))
+    } catch (e) { say(e.detail || String(e)) }
+  }
+
+  async function revoke(d) {
+    const ok = await ask.confirm(`Revoke access for “${d.name}”?`, {
+      body: 'Any CLI using this token stops working immediately.',
+      confirmLabel: 'Revoke', danger: true })
+    if (!ok) return
+    try { await api(`/api/devices/${d.id}`, { method: 'DELETE' }); load() }
+    catch (e) { say(e.detail || String(e)) }
+  }
+
+  const script = ticket ? claimScript(origin, ticket.code) : ''
+
+  return (
+    <section className="panel">
+      <h2>Devices</h2>
+      <p className="dim small">
+        Authorize a CLI or machine to reach Jarvis’s API without pasting a key in
+        a terminal. Enroll here, run the command on the device, then confirm it
+        in the browser — it receives a revocable token, shown once and never
+        again. A token can drive Jarvis’s agent (chat) with the same tools you
+        have; it cannot reach the secrets, computer-use, or VM control panels.
+        Revoke it any time below.
+      </p>
+      {ticket ? (
+        <div className="device-enroll">
+          <p>Code <code>{ticket.code}</code> — run this on the device, then{' '}
+            <a href={`/pair/${ticket.code}`} target="_blank" rel="noreferrer">
+              approve it</a>. Good for about 15&nbsp;minutes.</p>
+          <Block text={script} />
+          <div className="row">
+            <button className="ghost" onClick={() => { setTicket(null); load() }}>
+              Done</button>
+          </div>
+        </div>
+      ) : (
+        <div className="row"><button onClick={enroll}>Enroll a device</button></div>
+      )}
+      {devices === null ? <p className="dim">loading…</p>
+        : devices.length === 0 ? <p className="dim small">No devices enrolled.</p>
+        : (
+          <ul className="device-list">
+            {devices.map((d) => (
+              <li key={d.id} className="device-row">
+                <span>
+                  <strong>{d.name}</strong>
+                  {d.hostname && <span className="dim"> · {d.hostname}</span>}
+                  <span className="dim small">
+                    {' · '}{d.last_seen ? `last seen ${d.last_seen} UTC` : 'never used'}</span>
+                </span>
+                <button className="ghost danger" onClick={() => revoke(d)}>Revoke</button>
+              </li>
+            ))}
+          </ul>
+        )}
     </section>
   )
 }

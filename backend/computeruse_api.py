@@ -26,12 +26,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import cfaccess, computeruse as cu, gui, pairing, security, tarmac
-from .auth import COOKIE_NAME, require_user, user_from_token
+from .auth import COOKIE_NAME, require_same_origin, require_user, user_from_token
 from .config import settings
 from .db import get_db
 
 router = APIRouter(prefix="/api/computeruse", tags=["computeruse"],
-                   dependencies=[Depends(require_user)])
+                   dependencies=[Depends(require_user), Depends(require_same_origin)])
 
 # the socket authenticates itself, so it must not sit behind require_user
 ws_router = APIRouter(prefix="/api/computeruse", tags=["computeruse"])
@@ -369,12 +369,12 @@ def _ticket_view(t: pairing.Ticket) -> dict:
 @router.post("/enroll")
 async def enroll_create(body: PairCreateBody):
     """A fresh pairing code for a machine about to be set up."""
-    return _ticket_view(pairing.create(body.name))
+    return _ticket_view(pairing.create(body.name, kind="computeruse"))
 
 
 @router.get("/enroll")
 async def enroll_list():
-    return {"tickets": [_ticket_view(t) for t in pairing.live()],
+    return {"tickets": [_ticket_view(t) for t in pairing.live(kind="computeruse")],
             "ttl_seconds": pairing.TTL_SECONDS}
 
 
@@ -382,7 +382,7 @@ async def enroll_list():
 async def enroll_status(code: str):
     """What the confirm page and the wizard both poll: has a machine claimed
     it yet, and which one."""
-    t = pairing.get(code)
+    t = pairing.get(code, kind="computeruse")
     if t is None:
         raise HTTPException(status_code=404, detail=pairing.Unknown().args[0])
     return _ticket_view(t)
@@ -394,7 +394,7 @@ async def enroll_approve(code: str, request: Request,
     """The operator's yes. This is the moment the credentials are committed to
     leaving the host, so it is the moment that gets recorded."""
     try:
-        t = pairing.approve(code, by=user["username"])
+        t = pairing.approve(code, by=user["username"], kind="computeruse")
     except pairing.PairingError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
     db = await get_db()
@@ -416,7 +416,7 @@ async def enroll_approve(code: str, request: Request,
 async def enroll_deny(code: str):
     """Also how a code is cancelled before anything has claimed it."""
     try:
-        t = pairing.deny(code)
+        t = pairing.deny(code, kind="computeruse")
     except pairing.PairingError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
     return _ticket_view(t)
@@ -445,7 +445,7 @@ class PollBody(BaseModel):
 def _throttled(request: Request) -> str:
     peer = _peer(request)
     try:
-        pairing.throttle(peer)
+        pairing.throttle(peer, kind="computeruse")
     except pairing.TooMany as e:
         raise HTTPException(status_code=e.status, detail=str(e))
     return peer
@@ -456,10 +456,10 @@ async def pair_claim(body: ClaimBody, request: Request):
     peer = _throttled(request)
     try:
         t = pairing.claim(body.code, name=body.name, hostname=body.hostname,
-                          platform=body.platform, peer=peer,
+                          platform=body.platform, peer=peer, kind="computeruse",
                           agent=request.headers.get("user-agent", ""))
     except pairing.Unknown as e:
-        pairing.note_wrong_code(peer)
+        pairing.note_wrong_code(peer, kind="computeruse")
         raise HTTPException(status_code=e.status, detail=str(e))
     except pairing.PairingError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
@@ -481,19 +481,22 @@ async def pair_poll(body: PollBody, request: Request):
     """
     peer = _throttled(request)
     try:
-        t = pairing.poll(body.code, body.device_secret)
+        t = pairing.poll(body.code, body.device_secret, kind="computeruse")
     except pairing.Unknown as e:
-        pairing.note_wrong_code(peer)
+        pairing.note_wrong_code(peer, kind="computeruse")
         raise HTTPException(status_code=e.status, detail=str(e))
     if t.state != "approved":
         return {"ok": True, "state": t.state, "interval": pairing.POLL_INTERVAL,
                 "expires_in": max(0, int(t.expires - time.time()))}
-    cid, sec = cfaccess.get()
-    creds = {"ok": True, "state": "approved", "name": t.name,
-             "token": await cu.pairing_token(),
-             "cf_access_id": cid, "cf_access_secret": sec}
+    # spend the ticket synchronously BEFORE any await, so a concurrent poll can't
+    # be handed the credentials twice, and a `deny` landing during the await
+    # can't be clobbered by an unconditional release afterwards
+    name = t.name
     pairing.release(t)
-    return creds
+    cid, sec = cfaccess.get()
+    return {"ok": True, "state": "approved", "name": name,
+            "token": await cu.pairing_token(),
+            "cf_access_id": cid, "cf_access_secret": sec}
 
 
 @ws_router.get("/pair/client.tar.gz")
@@ -505,8 +508,8 @@ async def pair_client_tar(request: Request, code: str = ""):
     code costs guessing budget like everywhere else on this prefix.
     """
     peer = _throttled(request)
-    if pairing.get(code) is None:
-        pairing.note_wrong_code(peer)
+    if pairing.get(code, kind="computeruse") is None:
+        pairing.note_wrong_code(peer, kind="computeruse")
         raise HTTPException(status_code=401,
                             detail=pairing.Unknown().args[0])
     return StreamingResponse(_tar_bytes(), media_type="application/gzip",

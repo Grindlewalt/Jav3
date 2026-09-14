@@ -9,6 +9,20 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- API tokens minted for an enrolled device/CLI (the device-authorization flow).
+-- Only the sha256 of the token is stored; the raw token is shown once, at the
+-- end of pairing, and never again. Revocable; last_seen updated on use.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    hostname TEXT,
+    platform TEXT,
+    paired_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen TEXT,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY,
     slug TEXT NOT NULL UNIQUE,

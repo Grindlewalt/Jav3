@@ -13,7 +13,7 @@ from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
-from .auth import require_user
+from .auth import require_actor
 from .config import settings
 from .db import get_db, open_conversation
 from .memory import (assemble_system_prompt, estimate_tokens,
@@ -23,7 +23,9 @@ from .memory import (assemble_system_prompt, estimate_tokens,
 from .vm.broker import TurnEnvelope
 from .vm.guest_turn import guest_turn
 
-router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_user)])
+# require_actor: the operator's cookie OR an enrolled device's Bearer token, so
+# a paired CLI can drive chat. Sensitive control-plane routers stay require_user.
+router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_actor)])
 
 
 class ChatRequest(BaseModel):
