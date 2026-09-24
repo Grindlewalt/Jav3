@@ -1494,6 +1494,14 @@ kbd {
 
 /* ---- chatbox history ---- */
 .cb-head { align-items: center; }
+/* who the open thread runs as: first thing on the bar, because whose voice a
+   transcript is in matters more than its title */
+.cb-head .cb-who { margin-left: 0; max-width: 120px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.cb-history .tag { flex-shrink: 0; }
+/* an agent's description is a sentence; one line of it is enough to tell two
+   agents apart in a 440px panel */
+.cb-new-menu .m-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cb-history { list-style: none; padding: 0; margin: 0 0 6px; max-height: 45%;
   overflow-y: auto; border: 1px solid var(--border); border-radius: 7px; }
 .cb-history li { display: flex; align-items: center; gap: 6px; padding: 6px 9px;

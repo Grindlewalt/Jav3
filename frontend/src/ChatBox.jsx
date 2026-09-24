@@ -2,12 +2,25 @@ import { useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
 import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
 import { useAsk } from './ask.jsx'
+import Button from './components/Button.jsx'
+import Menu, { MenuItem, MenuSep } from './components/Menu.jsx'
+import Tag from './components/Tag.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
 // conversations are filtered to that project and new ones are linked to it.
+//
+// A thread can run AS an agent (its AGENT.md prompt leads, its skills are its
+// own) — an agent thread is still a chat, so it keeps history, compaction,
+// detach/re-attach and stop. Identity binds at creation, like the project pin:
+// the "+ new" menu picks who the NEXT thread runs as, and an open thread shows
+// the identity it was created with.
 export default function ChatBox({ projectSlug }) {
   const [convos, setConvos] = useState([])
   const [cid, setCid] = useState(null)
+  const [agents, setAgents] = useState([])
+  const [newAs, setNewAs] = useState('')          // '' = Jarvis; for a thread not yet sent
+  const [threadAs, setThreadAs] = useState('')    // the open thread's agent_slug
+  const [newMenu, setNewMenu] = useState(false)
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -20,6 +33,10 @@ export default function ChatBox({ projectSlug }) {
   const ask = useAsk()
 
   useEffect(() => () => tailAbort.current?.abort(), [])
+  // the roster for the picker; failure just leaves it Jarvis-only
+  useEffect(() => {
+    api('/api/agents').then((r) => setAgents(r.agents)).catch(() => {})
+  }, [])
 
   // shared by the live POST stream and a resumed background-turn tail
   function handleTurnEvent(ev) {
@@ -62,8 +79,11 @@ export default function ChatBox({ projectSlug }) {
     await open(id)
   }
 
-  function newChat() {
+  function newChat(as = '') {
     setShowHistory(false)
+    setNewMenu(false)
+    setNewAs(as)
+    setThreadAs('')
     setCid(null)
     setMessages([])
     setPeakAsk(null)
@@ -89,9 +109,10 @@ export default function ChatBox({ projectSlug }) {
     tailAbort.current?.abort()
     setPeakAsk(null)
     setCid(id)
-    if (!id) { setMessages([]); return }
+    if (!id) { setMessages([]); setThreadAs(''); return }
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
+    setThreadAs(r.agent_slug || '')
     if (!r.running) return
     // a turn is still executing server-side — re-attach and watch it finish,
     // seeding the placeholder with the tool calls it already made
@@ -133,11 +154,15 @@ export default function ChatBox({ projectSlug }) {
         // a NEW conversation is created pre-pinned to this board's project, so
         // even its first turn runs in the right context (the old post-hoc PATCH
         // raced the turn's project resolution)
+        // identity binds the same way: new conversations only (the backend
+        // ignores it on an existing one, and 404s an unknown slug)
         { message: text, conversation_id: cid, confirm_peak: confirmPeak,
-          project: wasNew && projectSlug ? projectSlug : undefined },
+          project: wasNew && projectSlug ? projectSlug : undefined,
+          agent: wasNew && newAs ? newAs : undefined },
         (ev) => {
           if (ev.type === 'start') {
             setCid(ev.conversation_id)
+            if (wasNew) setThreadAs(ev.agent_slug || newAs)
             if (wasNew && projectSlug) refresh()
           }
           handleTurnEvent(ev)
@@ -164,14 +189,33 @@ export default function ChatBox({ projectSlug }) {
   }
 
   const current = convos.find((c) => c.id === cid)
+  const who = cid ? threadAs : newAs
+  const nameOf = (slug) => agents.find((a) => a.slug === slug)?.name || slug
+  const whoName = who ? nameOf(who) : 'Jarvis'
   return (
     <div className="chatbox">
       <div className="row cb-head">
         <button className="ghost" title="past chats"
                 onClick={() => setShowHistory((s) => !s)}>☰ {convos.length}</button>
+        <Tag tone={who ? 'running' : undefined} className="cb-who"
+             title={who ? `this thread runs as the ${whoName} agent` : 'central Jarvis'}>
+          {whoName}</Tag>
         <span className="grow ellipsis dim">
           {current ? (current.summary || `#${current.id}`) : 'new chat'}</span>
-        <button className="ghost" title="new chat" onClick={newChat}>+ new</button>
+        <Menu open={newMenu} onClose={() => setNewMenu(false)} width={240} className="cb-new-menu"
+              label="start a new chat as"
+              trigger={(
+                <Button variant="ghost" aria-haspopup="menu" aria-expanded={newMenu}
+                        title="new chat — as Jarvis or an agent"
+                        onClick={() => setNewMenu((o) => !o)}>+ new ▾</Button>
+              )}>
+          <MenuItem onClick={() => newChat('')}>Jarvis</MenuItem>
+          {agents.length > 0 && <MenuSep />}
+          {agents.map((a) => (
+            <MenuItem key={a.slug} sub={a.description || undefined}
+                      onClick={() => newChat(a.slug)}>{a.name}</MenuItem>
+          ))}
+        </Menu>
       </div>
       {showHistory && (
         <ul className="cb-history">
@@ -181,6 +225,7 @@ export default function ChatBox({ projectSlug }) {
                 onClick={() => pick(c.id)}>
               <span className="grow ellipsis">
                 {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
+              {c.agent_slug && <Tag>{nameOf(c.agent_slug)}</Tag>}
               <button className="win-btn" title="delete" onClick={(e) => del(c.id, e)}>×</button>
             </li>
           ))}
@@ -189,7 +234,7 @@ export default function ChatBox({ projectSlug }) {
       <div className="messages compact">
         {messages.length === 0 && (
           <div className="dim center-pad">
-            {projectSlug ? 'chat with Jarvis about this project' : 'say hi'}
+            {projectSlug ? `chat with ${whoName} about this project` : 'say hi'}
           </div>
         )}
         {messages.map((m, i) => (
@@ -215,7 +260,7 @@ export default function ChatBox({ projectSlug }) {
       )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); send() }}>
         <textarea className="grow" rows={2} value={input}
-                  placeholder="message Jarvis…"
+                  placeholder={`message ${whoName}…`}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
