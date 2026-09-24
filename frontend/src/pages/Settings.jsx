@@ -1,14 +1,18 @@
-/* Settings: the things that are configured once and consulted everywhere. */
+/* Settings: the things that are configured once and consulted everywhere.
+ *
+ * Every card is the Card primitive and every control Input/Select/Button, so
+ * one control is one size across the page (Model and Music used to be bare
+ * <select>/<input> at the body's 15px beside Backup's 13px fields). */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
 import { Copy } from '../copy.jsx'
+import { ts } from '../format.js'
 import { modelOption, setModel, useModel } from '../modelInfo.js'
 import { notifyError } from '../notify.js'
 import { useAuth } from '../auth.jsx'
+import { Button, Card, EmptyState, Input, Select, Tag } from '../components/index.js'
 import Page from '../components/Page.jsx'
-import Card from '../components/Card.jsx'
-import Button from '../components/Button.jsx'
 import BackupPanel from '../BackupPanel.jsx'
 
 const mmss = (secs) => {
@@ -17,16 +21,12 @@ const mmss = (secs) => {
 }
 
 export default function Settings() {
-  const [msg, setMsg] = useState(null)
-  const say = (m) => { setMsg(m); setTimeout(() => setMsg(null), 6000) }
-
   return (
     <Page title="Settings" className="settings-page">
-      {msg && <p className="warn">{msg}</p>}
       <ModelPanel />
-      <DevicesPanel say={say} />
+      <DevicesPanel />
       <BackupPanel />
-      <MusicPanel say={say} />
+      <MusicPanel />
       <SessionPanel />
     </Page>
   )
@@ -38,27 +38,21 @@ function ModelPanel() {
   const m = useModel()
   const active = modelOption(m, m?.active)
   return (
-    <section className="panel">
-      <h2>Model</h2>
-      {!m ? <p className="dim">loading…</p> : (
-        <>
-          <div className="row">
-            <select value={m.active}
-                    onChange={(e) => setModel(e.target.value).catch(notifyError)}
-                    disabled={m.choices.length < 2}>
-              {m.choices.map((c) => (
-                <option key={c} value={c}>{modelOption(m, c).label}</option>
-              ))}
-            </select>
-            {m.active !== m.default && <span className="tag">override</span>}
-          </div>
-          <p className="dim small">
+    <Card title="Model" headingLevel={2}
+          actions={m && m.active !== m.default ? <Tag>override</Tag> : null}>
+      {!m ? <p className="dim small">loading…</p> : (
+        <div className="stack">
+          <Select aria-label="Model" value={m.active}
+                  onChange={(e) => setModel(e.target.value).catch(notifyError)}
+                  disabled={m.choices.length < 2}
+                  options={m.choices.map((c) => ({ value: c, label: modelOption(m, c).label }))} />
+          <p className="dim small settings-note">
             <code>{active.id}</code>{active.blurb && <> — {active.blurb}</>}.
             Agents with a model pin of their own are unaffected.
           </p>
-        </>
+        </div>
       )}
-    </section>
+    </Card>
   )
 }
 
@@ -72,10 +66,10 @@ function ModelPanel() {
 const cancelLoginCode = () =>
   api('/api/devices/login-code', { method: 'DELETE' }).catch(() => {})
 
-function DevicesPanel({ say }) {
+function DevicesPanel() {
   const ask = useAsk()
   const [devices, setDevices] = useState(null)
-  const [login, setLogin] = useState(null)       // {login, ttl_seconds, plain_http, deadline}
+  const [login, setLogin] = useState(null)       // {login, install, ttl_seconds, plain_http, deadline}
   const [left, setLeft] = useState(0)
   const live = useRef(false)
 
@@ -106,7 +100,7 @@ function DevicesPanel({ say }) {
         { method: 'POST', body: JSON.stringify({ name: '' }) })
       live.current = true
       setLogin({ ...r, deadline: performance.now() / 1000 + r.ttl_seconds })
-    } catch (e) { say(e.detail || String(e)) }
+    } catch (e) { notifyError(e) }
   }
 
   function done() {
@@ -121,13 +115,18 @@ function DevicesPanel({ say }) {
       confirmLabel: 'Revoke', danger: true })
     if (!ok) return
     try { await api(`/api/devices/${d.id}`, { method: 'DELETE' }); load() }
-    catch (e) { say(e.detail || String(e)) }
+    catch (e) { notifyError(e) }
   }
 
+  // the line is `address=… code=…`; each half is its own unbreakable-looking
+  // piece so a phone wraps BETWEEN them, and a code too long for the line
+  // breaks at a character rather than at the hyphen inside it (which read as
+  // a line-break hyphen someone might type)
+  const parts = login ? login.login.split(' ') : []
+
   return (
-    <section className="panel">
-      <h2>Devices</h2>
-      <p className="dim small">
+    <Card title="Devices" headingLevel={2}>
+      <p className="dim small settings-note">
         Log a computer’s <code>jav3</code> command-line client in to this server.
         Each computer gets its own revocable token. A token can chat with the agent
         using the same tools you have; it cannot reach secrets, the VM or other
@@ -135,46 +134,61 @@ function DevicesPanel({ say }) {
       </p>
       {login ? (
         <div className="device-login">
-          <p className="small">On the other computer run <code>jav3 login</code> and
-            paste this line. It works once, for the next {mmss(left)}.</p>
+          <p className="small settings-note">On the other computer run
+            {' '}<code>jav3 login</code> and paste this line. It works once, for
+            the next {mmss(left)}.</p>
           <div className="device-login-line">
-            <code>{login.login}</code>
+            <code>
+              {parts.map((p, i) => (
+                <span key={i}>{i > 0 && ' '}<span className="device-login-part">{p}</span></span>
+              ))}
+            </code>
             <Copy text={login.login} />
           </div>
           {login.plain_http && (
-            <p className="warn">This address is plain http: the code, and the token
-              it is traded for, cross the network unencrypted. Only use it on a
-              network you trust.</p>)}
-          <p className="dim small">No CLI there yet?{' '}
-            <code>curl -fsSL {window.location.origin}/cli/install.sh | sh</code></p>
-          <div className="row">
-            <button className="ghost" onClick={done}>Done</button>
+            <p className="warn settings-note">This address is plain http: the code,
+              and the token it is traded for, cross the network unencrypted. Only
+              use it on a network you trust.</p>)}
+          {login.install && (
+            <p className="dim small settings-note">No CLI there yet?{' '}
+              <code className="device-install">{login.install}</code></p>)}
+          <div className="settings-actions">
+            <Button variant="ghost" onClick={done}>Done</Button>
           </div>
         </div>
       ) : (
-        <div className="row"><button onClick={addComputer}>Add computer</button></div>
+        <div className="settings-actions">
+          <Button onClick={addComputer}>Add computer</Button>
+        </div>
       )}
-      {devices === null ? <p className="dim">loading…</p>
-        : devices.length === 0 ? <p className="dim small">No computers logged in.</p>
+      {devices === null ? <EmptyState>loading…</EmptyState>
+        : devices.length === 0 ? <EmptyState>No computers logged in.</EmptyState>
         : (
           <ul className="device-list">
             {devices.map((d) => (
               <li key={d.id} className="device-row">
-                <span>
-                  <strong>{d.name}</strong>
-                  {d.hostname && <span className="dim"> · {d.hostname}</span>}
-                  <span className="dim small">
-                    {' · '}{d.last_used_at ? `last used ${d.last_used_at} UTC` : 'never used'}
-                    {' · '}{d.idle_expires_at < d.expires_at
-                      ? `expires ${d.idle_expires_at} UTC if unused`
-                      : `expires ${d.expires_at} UTC`}</span>
-                </span>
-                <button className="ghost danger" onClick={() => revoke(d)}>Revoke</button>
+                <div className="device-main">
+                  <div className="device-name">
+                    <strong className="ellipsis" title={d.name}>{d.name}</strong>
+                    {/* the CLI names a computer after its hostname by default,
+                        so the two are usually the same word printed twice */}
+                    {d.hostname && d.hostname !== d.name && (
+                      <span className="dim small ellipsis" title={d.hostname}>{d.hostname}</span>)}
+                  </div>
+                  <div className="dim small device-meta">
+                    <span>{d.last_used_at ? `Last used ${ts(d.last_used_at)} UTC`
+                      : 'Never used'}</span>
+                    <span>{d.idle_expires_at < d.expires_at
+                      ? `Expires ${ts(d.idle_expires_at)} UTC if unused`
+                      : `Expires ${ts(d.expires_at)} UTC`}</span>
+                  </div>
+                </div>
+                <Button variant="ghost" danger onClick={() => revoke(d)}>Revoke</Button>
               </li>
             ))}
           </ul>
         )}
-    </section>
+    </Card>
   )
 }
 
@@ -187,12 +201,12 @@ function SessionPanel() {
   const { user, logout } = useAuth()
   return (
     <Card title="Session" headingLevel={2}>
-      <p className="dim small">
+      <p className="dim small settings-note">
         Signed in as <strong>{user?.username}</strong>. Logging out ends this
         browser’s session; computers logged in with <code>jav3</code> keep
         their own tokens until revoked above.
       </p>
-      <div className="row">
+      <div className="settings-actions">
         <Button variant="ghost" onClick={logout}>Log out</Button>
       </div>
     </Card>
@@ -201,19 +215,23 @@ function SessionPanel() {
 
 // --- music server --------------------------------------------------------------
 
-function MusicPanel({ say }) {
+function MusicPanel() {
   const [tm, setTm] = useState({ url: '' })
+  const [saved, setSaved] = useState('')     // the url as the server holds it
   const [test, setTest] = useState(null)
-  useEffect(() => { api('/api/media/tarmac').then(setTm).catch(() => {}) }, [])
+  useEffect(() => {
+    api('/api/media/tarmac').then((r) => { setTm(r); setSaved(r.url || '') })
+      .catch(() => {})
+  }, [])
 
   async function save(e) {
     e.preventDefault()
     setTest(null)
     try {
-      setTm(await api('/api/media/tarmac', {
-        method: 'PUT', body: JSON.stringify({ url: tm.url }) }))
-      say('Music server saved')
-    } catch (err) { say(err.detail || String(err)) }
+      const r = await api('/api/media/tarmac', {
+        method: 'PUT', body: JSON.stringify({ url: tm.url }) })
+      setTm(r); setSaved(r.url || '')
+    } catch (err) { notifyError(err) }
   }
   async function probe() {
     setTest({ testing: true })
@@ -221,24 +239,28 @@ function MusicPanel({ say }) {
       setTest(await api('/api/media/tarmac/test', { method: 'POST' }))
     } catch (err) { setTest({ ok: false, error: err.detail || String(err) }) }
   }
+  const dirty = (tm.url || '') !== saved
   return (
-    <section className="panel">
-      <h2>Music server</h2>
-      <form className="row" onSubmit={save}>
-        <input className="grow" placeholder="http://<host>:<port>"
-               value={tm.url} onChange={(e) => setTm({ ...tm, url: e.target.value })} />
-        <button type="submit">Save</button>
-        <button type="button" className="ghost" onClick={probe} disabled={!tm.url}>
-          Test</button>
+    <Card title="Music server" headingLevel={2}>
+      {/* the field takes the line; Save and Test travel together, so on a
+          phone they drop under it as a pair instead of Test wrapping alone */}
+      <form className="settings-inline" onSubmit={save}>
+        <Input aria-label="Music server address" placeholder="http://<host>:<port>"
+               value={tm.url || ''} onChange={(e) => setTm({ ...tm, url: e.target.value })} />
+        <div className="settings-inline-actions">
+          <Button type="submit" disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</Button>
+          <Button variant="ghost" onClick={probe} disabled={!saved || test?.testing}>
+            Test</Button>
+        </div>
       </form>
       {test && (
-        <p className={test.ok ? 'badge' : 'error'}>
-          {test.testing ? 'asking…' : test.ok
+        <p className={`small settings-note ${test.ok ? 'dim' : 'error'}`}>
+          {test.testing ? 'Asking…' : test.ok
             ? `${test.status?.tracks ?? '?'} tracks · `
               + `${test.status?.players_connected ?? 0} player(s) open`
             : test.error}
         </p>
       )}
-    </section>
+    </Card>
   )
 }

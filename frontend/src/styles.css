@@ -68,6 +68,9 @@
   --sp-9: 20px;
   --sp-10: 26px;   /* .page padding, .section-h margin */
   --sp-11: 40px;   /* .center-pad — the one big empty-state inset */
+  /* page head -> first content, on every page variant: a doc page's heading
+     margin and a full-height shell's body inset are the same distance */
+  --page-gap: var(--sp-8);
 
   /* Control padding. The survey's "nine near-identical row paddings" are
      8px 10px (9), 7px 10px (7), 6px 9px (5), 6px 10px (5), 8px 12px (5),
@@ -144,6 +147,7 @@
   --term-cursor: #8caa93;      /* = dark --accent */
   --term-selection: rgba(140, 170, 147, 0.3);   /* the accent, translucent */
   --danger-ink: #ffffff;      /* text on a --red badge, both themes */
+  --knob: #f1efe9;            /* a switch's thumb: light on every track */
 }
 /* toned warm paper, not white — the first cut (#f5f3ec / #fcfbf7 cards) was
    bright enough to squint at */
@@ -176,6 +180,7 @@
   /* the terminal stays dark, but warm: carbon's cool black read as a hole
      punched through the paper */
   --term-bg: #221f1a;
+  --knob: #fbf8ef;
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
@@ -548,6 +553,12 @@ input:focus, textarea:focus { border-color: var(--accent);
    shove the workspace's own controls across the bar. */
 .ws-head > :first-child { margin: 0; }
 .page-lede { margin: 0 0 var(--sp-7); color: var(--dim); }
+/* a doc page's heading sits --page-gap above its first card — the distance
+   Review's body keeps under its heading bar — and a lede, when there is one,
+   takes that gap below itself instead */
+.page > .page-head { margin-bottom: var(--page-gap); }
+.page > .page-head:has(+ .page-lede) { margin-bottom: var(--sp-2); }
+.page > .page-lede { margin-bottom: var(--page-gap); }
 /* One size for a page title, whatever element carries it. It was UA-default
    before: 30px on Settings' <h1>, 22.5px on the <h2> pages, and an explicit
    18px on Workspace — the one that had been hand-tuned. A document page gets
@@ -745,14 +756,16 @@ input:focus, textarea:focus { border-color: var(--accent);
   position: absolute; top: var(--toggle-inset); left: var(--toggle-inset);
   width: calc(var(--toggle-h) - 2 * var(--toggle-inset));
   height: calc(var(--toggle-h) - 2 * var(--toggle-inset));
-  border-radius: var(--radius-round); background: var(--dim);
+  border-radius: var(--radius-round); background: var(--knob);
   box-shadow: var(--shadow-thumb);
   transition: transform 0.2s cubic-bezier(.4,0,.2,1),
               background 0.2s cubic-bezier(.4,0,.2,1);
 }
 .toggle.on .toggle-track { background: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent); }
-.toggle.on .toggle-thumb { background: var(--accent-ink);
+/* the knob stays light on: --accent-ink is carbon in the dark theme, and a
+   dark disc on the sage track read as a hole punched in it */
+.toggle.on .toggle-thumb {
   transform: translateX(calc(var(--toggle-w) - var(--toggle-h))); }
 .toggle.on .toggle-text { color: var(--accent); }
 .toggle:hover:not(:disabled) .toggle-track { box-shadow: inset 0 0 0 1px var(--accent); }
@@ -1952,7 +1965,7 @@ kbd {
 .review-body {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column;
-  padding: var(--sp-8) var(--sp-9) calc(var(--sp-8) + var(--sab));
+  padding: var(--page-gap) var(--sp-9) calc(var(--sp-8) + var(--sab));
 }
 .review-body > * { width: 100%; max-width: 1180px; margin: 0 auto; }
 .review-page { flex-shrink: 0; }
@@ -2087,7 +2100,7 @@ kbd {
     padding: var(--sp-4) max(var(--sp-8), env(safe-area-inset-right))
              var(--sp-4) max(var(--sp-8), env(safe-area-inset-left)); }
   .page-shell > .page-lede { padding: var(--sp-3) var(--sp-8) 0; }
-  .review-body { padding: var(--sp-6) max(var(--sp-8), env(safe-area-inset-right))
+  .review-body { padding: var(--page-gap) max(var(--sp-8), env(safe-area-inset-right))
     calc(var(--sp-6) + var(--sab)) max(var(--sp-8), env(safe-area-inset-left)); }
 
   /* ---- chat: the conversation list is an overlay, not a permanent block.
@@ -2934,29 +2947,72 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 }
 
 /* --- devices (Settings) ------------------------------------------------------ */
-.device-login { margin: 10px 0 4px; }
+.device-login { display: flex; flex-direction: column; gap: var(--sp-4);
+  margin-top: var(--sp-4); }
 .device-login-line { position: relative; }
 .device-login-line code {
-  display: block; margin: 8px 0; padding: 10px 62px 10px 12px;
+  display: block; padding: 10px 76px 10px 12px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
-  font: 12.5px/1.5 ui-monospace, Menlo, monospace; color: var(--text);
-  overflow-wrap: anywhere; user-select: all;
+  font: 12.5px/1.5 var(--font-mono); color: var(--text); user-select: all;
 }
+/* each half of `address=… code=…` wraps as a unit, onto its own line when
+   the two do not fit; a half too long for the box breaks at a character,
+   never preferentially at the hyphen inside a code */
+.device-login-part { display: inline-block; max-width: 100%;
+  word-break: break-all; white-space: pre-wrap; }
 .device-login-line .copy-btn { top: 8px; }
-.device-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.device-install { overflow-wrap: anywhere; }
+.device-list { list-style: none; margin: var(--sp-6) 0 0; padding: 0; }
 .device-row {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; padding: 8px 0; border-top: 1px solid var(--border);
+  gap: var(--sp-6); padding: var(--sp-4) 0; border-top: 1px solid var(--border);
 }
+.device-main { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+.device-name { display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
+/* each fact keeps its own words together; the pair wraps between them */
+.device-meta { display: flex; flex-wrap: wrap; column-gap: var(--sp-6); }
+.device-meta > span { white-space: nowrap; }
+.device-row > button { flex-shrink: 0; }
 
-/* --- Settings -------------------------------------------------------------------- */
-.settings-page { max-width: 760px; }
-.settings-page .panel, .settings-page .card { margin-bottom: 14px; }
-/* the hand-built panels' heads match the Card primitive's title, so the
-   Session card and the panels beside it read as one list */
-.settings-page .panel > h2 { margin: 0 0 var(--sp-5); font-size: var(--fs-lg);
-  font-weight: 600; }
-.settings-page select { min-width: 220px; }
+/* --- Settings --------------------------------------------------------------------
+   One control height and one text size for every field and button on the
+   page (Model and Music were bare controls at the body's 15px beside
+   Backup's fields). Cards are a stack with one rhythm: the card head, then
+   --sp-5 between everything inside it. */
+.settings-page { max-width: 760px; --ctl-h: 36px; }
+.settings-page .card { margin-bottom: var(--sp-7); }
+.settings-page .card > .card-head { margin-bottom: var(--sp-5); }
+.settings-page .card > .stack, .settings-page .card .stack { gap: var(--sp-5); }
+.settings-page :is(input, select, textarea) { font-size: var(--fs-md); }
+.settings-page :is(input, select) { height: var(--ctl-h); padding-block: 0; }
+.settings-page .card button:not(.toggle):not(.copy-btn):not(.link) {
+  min-height: var(--ctl-h); }
+.settings-page select { min-width: 220px; max-width: 100%; }
+.settings-page a { color: var(--accent); }
+/* prose inside a card: the card's gap does the spacing, not the <p> margins */
+.settings-note { margin: 0; }
+.settings-page .card > .settings-note + .settings-actions,
+.settings-page .card > .settings-note + .device-login { margin-top: var(--sp-5); }
+.settings-actions, .settings-tags { display: flex; flex-wrap: wrap;
+  align-items: center; gap: var(--sp-4); }
+.settings-tags .tag { margin-left: 0; }
+.settings-page .card > .empty-row { margin: var(--sp-5) 0 0; font-size: var(--fs-sm); }
+.settings-toggle { align-self: flex-start; }
+/* a field with its buttons: one line wide, and on a phone the field takes the
+   line and the buttons drop under it together */
+.settings-inline { display: flex; flex-wrap: wrap; gap: var(--sp-4);
+  align-items: center; }
+.settings-inline > input { flex: 1 1 240px; min-width: 0; }
+.settings-inline-actions { display: flex; gap: var(--sp-4); }
+.settings-page .card > .settings-inline + .settings-note { margin-top: var(--sp-5); }
+@media (max-width: 768px) {
+  /* 16px text is the iOS no-zoom floor; the page rule above must not undo the
+     phone's global one */
+  .settings-page { --ctl-h: 40px; }
+  .settings-page :is(input, select, textarea) { font-size: 16px; }
+  .settings-inline > input { flex-basis: 100%; }
+  .device-row { align-items: flex-start; }
+}
 
 /* ---- plan panel (the explicit orchestrator's checklist) ------------------ */
 .plan-head { margin: 0; }

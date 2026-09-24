@@ -3,7 +3,7 @@ import { useState } from 'react'
 // Copies what it is GIVEN, not what is on screen. The set-up command once
 // rendered a placeholder until a token was revealed, and copying the rendered
 // text meant pasting the literal "<reveal the token above>" into a terminal.
-export function Copy({ text, label = 'copy' }) {
+export function Copy({ text, label = 'Copy' }) {
   const [done, setDone] = useState(false)
   return (
     <button type="button" className="copy-btn" onClick={async () => {
@@ -19,6 +19,6 @@ export function Copy({ text, label = 'copy' }) {
       }
       setDone(true)
       setTimeout(() => setDone(false), 1600)
-    }}>{done ? 'copied' : label}</button>
+    }}>{done ? 'Copied' : label}</button>
   )
 }

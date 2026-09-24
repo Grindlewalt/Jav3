@@ -144,6 +144,8 @@ async def test_loopback_host_is_replaced_by_a_lan_address(clients, monkeypatch):
     monkeypatch.setattr(devices_api.lan, "advertised_hostname", lambda: "jav3.local")
     r = await op.post(MINT, json={}, headers={"Host": "localhost:8000"})
     assert r.json()["address"] == "jav3.local:8000"
+    # the "no CLI there yet?" line names the same host as the login line
+    assert r.json()["install"] == "curl -fsSL http://jav3.local:8000/cli/install.sh | sh"
 
 
 async def test_hostile_host_header_is_not_echoed(clients, monkeypatch):

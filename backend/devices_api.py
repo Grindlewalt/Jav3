@@ -136,7 +136,12 @@ async def mint_login_code(body: CodeBody, request: Request, response: Response,
     response.headers.update(_NO_STORE)
     # the ticket's clock is monotonic; expires_at is wall time for display
     # only — the GUI counts down from ttl_seconds, not its own clock
+    # the installer line points at the SAME address as the login line: built
+    # in the browser from its own origin it said `localhost` whenever the
+    # operator was browsing on the box, which the other computer cannot reach
+    base = address if address.startswith("https://") else f"http://{address}"
     return {"login": f"address={address} code={code}", "address": address,
+            "install": f"curl -fsSL {base}/cli/install.sh | sh",
             "code": code, "name": t.name,
             "expires_at": time.time() + pastelogin.TTL_SECONDS,
             "ttl_seconds": pastelogin.TTL_SECONDS,

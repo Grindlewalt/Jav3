@@ -14,7 +14,6 @@ import Button from './components/Button.jsx'
 import Input from './components/Input.jsx'
 import Tag from './components/Tag.jsx'
 import Toggle from './components/Toggle.jsx'
-import EmptyState from './components/EmptyState.jsx'
 
 const POLL_MS = 3000
 const POLL_MAX = 200             // ~10 minutes, then stop asking
@@ -23,7 +22,11 @@ const POLL_MAX = 200             // ~10 minutes, then stop asking
 // since the switch itself shows on/off.
 const SECRETS = 'Include secrets (encrypted)'
 
-const errText =(e) => e?.detail || String(e)
+const errText = (e) => e?.detail || String(e)
+
+// the server's hint is prose with a URL in it ("see https://…"); the URL
+// is the useful part, so it becomes the link and the prose is dropped
+const hintUrl = (h) => String(h || '').match(/https?:\/\/\S+/)?.[0] || null
 
 export default function BackupPanel() {
   const [st, setSt] = useState(null)
@@ -102,60 +105,65 @@ export default function BackupPanel() {
 
   return (
     <Card title="Backup" headingLevel={2}>
-      <p className="dim small">
-        Copies memory, projects, agents, skills and a snapshot of the database to
-        an rclone remote, on a timer and on demand. Uses rclone (MIT).
-      </p>
+      <div className="stack">
+        <p className="dim small settings-note">
+          Copies memory, projects, agents, skills and a snapshot of the database to
+          an rclone remote, on a timer and on demand. Uses rclone (MIT).
+        </p>
 
-      {!st ? <p className="dim">loading…</p>
-        : !st.rclone?.available ? (
-          <EmptyState hint={st.rclone?.install_hint}>
-            rclone is not installed on the server.
-          </EmptyState>
-        ) : <StatusRow st={st} running={running} />}
+        {!st ? <p className="dim small settings-note">loading…</p>
+          : !st.rclone?.available ? (
+            <p className="small settings-note">
+              <span className="warn">rclone is not installed on the server.</span>
+              {hintUrl(st.rclone?.install_hint) ? (
+                <>{' '}<a href={hintUrl(st.rclone.install_hint)} target="_blank"
+                          rel="noreferrer">How to install rclone</a></>
+              ) : st.rclone?.install_hint && <span className="dim"> {st.rclone.install_hint}</span>}
+            </p>
+          ) : <StatusRow st={st} running={running} />}
 
-      {form && (
-        <form onSubmit={save} className="stack">
-          <Input label="Remote" placeholder="remote:path" value={form.remote}
-                 hint="An rclone remote and path, as named in the server's rclone config."
-                 onChange={(e) => set('remote', e.target.value)} />
-          <div className="row">
+        {form && (
+          <form onSubmit={save} className="stack">
+            <Input label="Remote" placeholder="remote:path" value={form.remote}
+                   hint="An rclone remote and path, as named in the server's rclone config."
+                   onChange={(e) => set('remote', e.target.value)} />
             <Toggle checked={form.include_secrets} label={SECRETS}
-                    onText={SECRETS} offText={SECRETS}
+                    onText={SECRETS} offText={SECRETS} className="settings-toggle"
                     onChange={(v) => set('include_secrets', v)} />
-          </div>
-          {form.include_secrets && (
-            <>
-              <p className="dim small">
-                Secrets only ever go up through an rclone crypt layer: name a crypt
-                remote of your own, or set a password to have one built. With
-                neither, saving is refused.
-              </p>
-              <Input label="Crypt remote" placeholder="crypt:" value={form.crypt_remote}
-                     onChange={(e) => set('crypt_remote', e.target.value)} />
-              <Input label="Crypt password" type="password" autoComplete="new-password"
-                     value={pw}
-                     placeholder={cfg.crypt_password_set ? 'set — type to replace'
-                       : 'not set'}
-                     hint={cfg.crypt_password_set ? 'A password is set.' : 'No password set.'}
-                     onChange={(e) => setPw(e.target.value)} />
-            </>
-          )}
-          {saveErr && <p className="error">{saveErr}</p>}
-          <div className="row">
-            <Button type="submit" disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</Button>
-            <Button variant="ghost" onClick={runNow}
-                    disabled={running || !st?.rclone?.available || !st?.configured}>
-              {running ? 'Backing up…' : 'Back up now'}</Button>
-          </div>
-        </form>
-      )}
-      {runMsg && <p className={runMsg.error ? 'error' : 'dim small'}>{runMsg.text}</p>}
+            {form.include_secrets && (
+              <>
+                <p className="dim small settings-note">
+                  Secrets only ever go up through an rclone crypt layer: name a crypt
+                  remote of your own, or set a password to have one built. With
+                  neither, saving is refused.
+                </p>
+                <Input label="Crypt remote" placeholder="crypt:" value={form.crypt_remote}
+                       onChange={(e) => set('crypt_remote', e.target.value)} />
+                <Input label="Crypt password" type="password" autoComplete="new-password"
+                       value={pw}
+                       placeholder={cfg.crypt_password_set ? 'set — type to replace'
+                         : 'not set'}
+                       hint={cfg.crypt_password_set ? 'A password is set.' : 'No password set.'}
+                       onChange={(e) => setPw(e.target.value)} />
+              </>
+            )}
+            {saveErr && <p className="error settings-note">{saveErr}</p>}
+            <div className="settings-actions">
+              <Button type="submit" disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</Button>
+              <Button variant="ghost" onClick={runNow}
+                      disabled={running || !st?.rclone?.available || !st?.configured}>
+                {running ? 'Backing up…' : 'Back up now'}</Button>
+            </div>
+          </form>
+        )}
+        {runMsg && (
+          <p className={`small settings-note ${runMsg.error ? 'error' : 'dim'}`}>{runMsg.text}</p>)}
 
-      <p className="dim small">
-        Restore is command-line only: <code>python -m backend.cli restore</code> on
-        the server.
-      </p>
+        <p className="dim small settings-note">
+          Restore is command-line only: on the server, from the Jav3 checkout, run
+          {' '}<code>.venv/bin/python -m backend.cli restore</code>.
+        </p>
+      </div>
     </Card>
   )
 }
@@ -169,14 +177,14 @@ function StatusRow({ st, running }) {
   const last = st.last
   return (
     <>
-      <div className="row">
+      <div className="settings-tags">
         <Tag tone="done">rclone</Tag>
         {st.configured ? <Tag tone="done">remote set</Tag>
           : <Tag tone="pending">no remote</Tag>}
         {st.include_secrets && <Tag>secrets encrypted</Tag>}
         {running && <Tag tone="running">running</Tag>}
       </div>
-      <p className="small">
+      <p className="small settings-note">
         {last ? (
           <>
             Last run {ts(last.finished_at || last.started_at)} UTC{' '}
@@ -188,7 +196,8 @@ function StatusRow({ st, running }) {
           {' · '}{st.next_scheduled ? `next ${ts(st.next_scheduled)} UTC`
             : 'no timer scheduled'}</span>
       </p>
-      {last && !last.ok && last.error && <p className="error small">{last.error}</p>}
+      {last && !last.ok && last.error && (
+        <p className="error small settings-note">{last.error}</p>)}
     </>
   )
 }
