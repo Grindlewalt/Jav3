@@ -13,7 +13,6 @@ import importlib.machinery
 import importlib.util
 import inspect
 import io
-import json
 import os
 import stat
 import textwrap
@@ -77,6 +76,15 @@ async def _mint(op) -> str:
 
 async def _live_tokens() -> int:
     return len(await devicetokens.list_tokens())
+
+
+async def _turns_settled():
+    """Let detached turn tasks run their finally blocks (DB close) before the
+    test's event loop goes away — an unclosed aiosqlite thread hangs exit."""
+    for _ in range(200):
+        if not chat_mod._active_turns:
+            return
+        await asyncio.sleep(0.02)
 
 
 # =============================================================================
@@ -195,6 +203,7 @@ async def test_POC_revoked_device_turn_keeps_running_and_streaming(op, monkeypat
         assert ran_after_revoke == []
         assert "done-after-revoke" not in r.text
         assert chat_mod.INTERRUPTED_MARKER in r.text
+    await _turns_settled()
     db = await get_db()
     try:
         async with db.execute("SELECT device_id FROM conversations") as cur:
@@ -217,6 +226,10 @@ async def test_POC_revoke_self_stops_own_turns(op, monkeypatch):
             await release.wait()
             yield {"type": "final", "content": "fin"}
         monkeypatch.setattr(chat_mod, "guest_turn", turn)
+
+        async def no_naming(*a, **kw):     # the completed turn's naming task
+            return None                    # would outlive the test's loop
+        monkeypatch.setattr(chat_mod, "_name_conversation", no_naming)
         mine = asyncio.create_task(dev.post(
             "/api/chat", json={"message": "a", "confirm_peak": True}, headers=hdr))
         await asyncio.wait_for(started.wait(), 5)
@@ -229,6 +242,7 @@ async def test_POC_revoke_self_stops_own_turns(op, monkeypatch):
         release.set()
         assert chat_mod.INTERRUPTED_MARKER in (await asyncio.wait_for(mine, 5)).text
         assert "fin" in (await asyncio.wait_for(ops, 5)).text
+    await _turns_settled()
 
 
 async def test_POC_device_token_never_expires(op):
@@ -430,44 +444,47 @@ def cfg(tmp_path, monkeypatch):
     return tmp_path / "cfg" / "jav3"
 
 
-def test_POC_logout_reports_success_when_revoke_failed(cfg, monkeypatch):
-    """jav3:199 — the DELETE /api/devices/self status is never checked. A
-    5xx (DB locked, a proxy 502) or a 401/404 from a wrong `--server` still
-    prints 'logged out' and deletes the only local copy of the token while
-    it stays live server-side; only a network error prints the 'revoke in
-    Settings' hint."""
+@pytest.mark.parametrize("status", [500, 502, 401, 404])
+def test_POC_logout_reports_success_when_revoke_failed(cfg, monkeypatch, status):
+    """FIXED: logout checks the DELETE /self status. Anything but 200 keeps
+    the local token (the operator's only handle on a still-live token) and
+    prints the revoke-in-Settings hint; only a confirmed revoke forgets it."""
     jav3.save_credentials("jav3.lan:8000", "jvd_" + "x" * 43)
     seen = []
 
     def handler(request):
         seen.append((request.method, request.url.path))
-        return httpx.Response(500, json={"detail": "database is locked"})
+        return httpx.Response(status, json={"detail": "database is locked"})
     real = httpx.Client
     monkeypatch.setattr(jav3.httpx, "Client",
                         lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
     out = io.StringIO()
-    rc = jav3.cmd_logout(jav3.build_parser().parse_args(["logout"]), out)
+    with pytest.raises(jav3.CliError) as ei:
+        jav3.cmd_logout(jav3.build_parser().parse_args(["logout"]), out)
     assert seen == [("DELETE", "/api/devices/self")]
-    assert rc == 0 and "logged out" in out.getvalue()
-    assert "revoke" not in out.getvalue()
-    assert jav3.load_credentials() is None
+    assert "logged out" not in out.getvalue()
+    assert "Settings" in str(ei.value) and str(status) in str(ei.value)
+    assert jav3.load_credentials() is not None
+
+    def ok(request):
+        return httpx.Response(200, json={"ok": True})
+    monkeypatch.setattr(jav3.httpx, "Client",
+                        lambda **kw: real(transport=httpx.MockTransport(ok), **kw))
+    out = io.StringIO()
+    assert jav3.cmd_logout(jav3.build_parser().parse_args(["logout"]), out) == 0
+    assert "logged out" in out.getvalue() and jav3.load_credentials() is None
 
 
 def test_POC_concurrent_logins_corrupt_the_credentials_file(cfg, monkeypatch):
-    """jav3:54-63 — fixed temp name, O_TRUNC without O_EXCL or a lock. Two
-    `jav3 login` runs (two terminals, a retry) open/truncate the SAME temp
-    inode. The first rename moves that inode into place; the second writer
-    still holds an fd on it, so its shorter write lands over the longer one's
-    tail IN the live credentials.json, and its own os.replace then dies with
-    an uncaught FileNotFoundError. Result: a torn file that load_credentials
-    reads as 'not logged in', both codes spent, both tokens live server-side
-    with no local copy."""
+    """FIXED: each writer gets its own random O_EXCL temp file in the config
+    dir and renames it into place, so two interleaved `jav3 login`s both
+    succeed and credentials.json is one whole record — never a torn mix."""
     real_write = os.write
     both_open = threading.Barrier(2)
     long_done = threading.Event()
 
     def racing_write(fd, data):
-        both_open.wait(5)                    # both have open()+truncated
+        both_open.wait(5)                    # both have their temp file open
         if b"jvd_short" in data:
             long_done.wait(5)                # short writer goes second
         n = real_write(fd, data)
@@ -488,38 +505,39 @@ def test_POC_concurrent_logins_corrupt_the_credentials_file(cfg, monkeypatch):
     t2.start()
     t1.join(10)
     t2.join(10)
-    assert [type(e) for e in errs] == [FileNotFoundError]
-    raw = (cfg / "credentials.json").read_text()
-    with pytest.raises(ValueError):
-        json.loads(raw)
-    assert jav3.load_credentials() is None
+    assert errs == []
+    creds = jav3.load_credentials()
+    assert creds in ({"address": "long-host.example:8000", "token": "jvd_long" + "L" * 60},
+                     {"address": "s:1", "token": "jvd_short"})
+    assert sorted(p.name for p in cfg.iterdir()) == ["credentials.json"]   # no temp left
+    assert stat.S_IMODE((cfg / "credentials.json").stat().st_mode) == 0o600
 
 
 def test_POC_symlinked_config_dir_is_followed_and_chmodded(cfg, tmp_path):
-    """O_NOFOLLOW guards only the temp file's final component. A `jav3` dir
-    that is a symlink is followed by mkdir(exist_ok) and os.chmod: the target
-    is re-moded 0700 and receives the token. Needs write access to
-    $XDG_CONFIG_HOME (same user, or a shared XDG_CONFIG_HOME) — low."""
+    """FIXED: the config dir is opened O_NOFOLLOW and every write goes through
+    that descriptor — a `jav3` dir that is a symlink is refused, and its target
+    is neither re-moded nor written."""
     target = tmp_path / "elsewhere"
     target.mkdir(mode=0o755)
     cfg.parent.mkdir(parents=True)
     cfg.symlink_to(target)
-    jav3.save_credentials("h:1", "jvd_tok")
-    assert (target / "credentials.json").exists()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+    with pytest.raises(jav3.CliError):
+        jav3.save_credentials("h:1", "jvd_tok")
+    assert not (target / "credentials.json").exists()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
 
 
 def test_BLOCKED_symlink_at_temp_name_refused(cfg, tmp_path):
-    """The commit's claim holds: a symlink at credentials.json.tmp is not
-    written through (ELOOP). Note the error surfaces as an uncaught OSError
-    traceback AFTER the code was already spent server-side."""
+    """The temp name is now random and created O_EXCL|O_NOFOLLOW, so a
+    symlink planted at the OLD fixed name is simply never touched (and one at
+    the random name cannot be predicted)."""
     cfg.mkdir(parents=True, mode=0o700)
     victim = tmp_path / "victim"
     victim.write_text("keep")
     (cfg / "credentials.json.tmp").symlink_to(victim)
-    with pytest.raises(OSError):
-        jav3.save_credentials("h:1", "jvd_tok")
+    jav3.save_credentials("h:1", "jvd_tok")
     assert victim.read_text() == "keep"
+    assert jav3.load_credentials()["token"] == "jvd_tok"
 
 
 def test_BLOCKED_symlink_at_final_name_is_replaced_not_followed(cfg, tmp_path):

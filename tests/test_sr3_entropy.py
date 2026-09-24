@@ -356,17 +356,26 @@ def test_poc_global_miss_budget_locks_out_operator():
     assert pastelogin.redeem(code, now + 1) is not None     # the valid code redeems
 
 
-async def test_poc_default_login_line_is_cleartext_http(clients):
-    """MEDIUM (deployment). Unless cookie_secure is set, the login line's
-    address has no scheme and the CLI turns bare host:port into http://. The
-    code goes out in cleartext, the device token comes BACK in cleartext, and
-    every later chat call carries it in cleartext. A passive LAN observer
-    needs no entropy attack: sniff the redeem response and the token is
-    theirs until revoked."""
-    op, _ = clients
+async def test_poc_default_login_line_is_cleartext_http(clients, monkeypatch, capsys):
+    """RESIDUAL, now LOUD: a LAN install is plain http unless cookie_secure
+    (TLS in front) — that stays, and is in SECURITY-RESIDUAL-RISK.md. What
+    changed: the mint response says `plain_http` (Settings shows a warning)
+    and `jav3 login` warns on stderr before sending the code."""
+    op, dev = clients
     m = (await op.post(MINT, json={})).json()
-    assert "://" not in m["address"]
+    assert "://" not in m["address"] and m["plain_http"] is True
     assert jav3.base_url(m["address"]).startswith("http://")
+
+    def handler(request):
+        return httpx.Response(401, json={"detail": "nope"})
+    real = httpx.Client
+    monkeypatch.setattr(jav3.httpx, "Client",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(jav3.CliError):
+        jav3.cmd_login(jav3.build_parser().parse_args(["login"]),
+                       read=lambda: m["login"])
+    err = capsys.readouterr().err
+    assert "plain http" in err and m["code"] not in err
 
 
 async def test_poc_no_server_side_cancel_for_a_shown_code(clients):

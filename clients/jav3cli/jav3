@@ -17,7 +17,9 @@ import getpass
 import json
 import os
 import platform
+import secrets
 import socket
+import stat
 import sys
 from pathlib import Path
 
@@ -46,22 +48,53 @@ def cred_path() -> Path:
 
 
 def save_credentials(address: str, token: str) -> Path:
-    """Write atomically, 0600 from the first byte, in a 0700 directory."""
+    """Write atomically, 0600 from the first byte, in a 0700 directory.
+
+    Every step goes through a descriptor for the config dir itself, opened
+    with O_NOFOLLOW: a `jav3` dir that is a symlink (or is swapped for one
+    mid-write) is refused rather than followed and re-moded. The temp file has
+    a random name and is created O_EXCL, so two concurrent `jav3 login`s each
+    write their own file and the rename leaves one whole credentials.json —
+    never a torn mix of both.
+    """
     d = config_dir()
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(d, 0o700)
-    path = cred_path()
-    tmp = path.with_name(path.name + ".tmp")
-    # O_NOFOLLOW: a symlink planted at the temp name is refused, not written through
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    d.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.fchmod(fd, 0o600)
-        os.write(fd, json.dumps({"address": address, "token": token}).encode())
+        os.mkdir(d, 0o700)
+    except FileExistsError:
+        pass
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        dfd = os.open(d, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+    except OSError as e:
+        raise CliError(f"{d} is not a plain directory (a symlink?) — refusing to "
+                       f"store credentials there ({e.strerror})")
+    tmp = f".credentials.{secrets.token_hex(8)}.tmp"
+    try:
+        st = os.fstat(dfd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise CliError(f"{d} is not a directory you own — refusing to store "
+                           "credentials there")
+        os.fchmod(dfd, 0o700)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600,
+                     dir_fd=dfd)
+        try:
+            data = json.dumps({"address": address, "token": token}).encode()
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, "credentials.json", src_dir_fd=dfd, dst_dir_fd=dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        raise
     finally:
-        os.close(fd)
-    os.replace(tmp, path)
-    return path
+        os.close(dfd)
+    return d / "credentials.json"
 
 
 def load_credentials() -> dict | None:
@@ -96,6 +129,11 @@ def parse_login_line(line: str) -> tuple[str, str]:
         raise CliError("that doesn't look like the login line — expected "
                        "'address=<host:port> code=<code>' from Settings → Add computer")
     return fields["address"], fields["code"]
+
+
+PLAIN_HTTP = ("warning: {base} is plain http — the login code, and the token it "
+              "is traded for, cross the network unencrypted. Only use it on a "
+              "network you trust.")
 
 
 def base_url(address: str) -> str:
@@ -160,6 +198,8 @@ def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
     if args.server:
         address = args.server
     base = base_url(address)
+    if base.startswith("http://"):
+        print(PLAIN_HTTP.format(base=base), file=sys.stderr)
     host = socket.gethostname()
     with _client(base) as c:
         try:
@@ -171,7 +211,18 @@ def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
         if r.status_code in (401, 429):
             raise CliError(_detail(r))
         token = _check(r).json()["token"]
-    path = save_credentials(address, token)
+    try:
+        path = save_credentials(address, token)
+    except (OSError, CliError) as e:
+        # the code is spent and the token is live server-side: don't leave it
+        # orphaned — revoke it with itself, then say what went wrong
+        try:
+            with _client(base, token, timeout=10) as c:
+                c.delete("/api/devices/self")
+        except httpx.HTTPError:
+            pass
+        raise CliError(f"could not save credentials: {e}. The new token was "
+                       "revoked; fix that, then run jav3 login again with a new code")
     print(f"logged in to {base} — credentials in {path}", file=out)
     with _client(base, token) as c:
         who = _check(c.get("/api/devices/whoami")).json()
@@ -190,16 +241,30 @@ def cmd_whoami(args, out=sys.stdout) -> int:
     return 0
 
 
+REVOKE_HINT = ("the server did not confirm the revoke ({why}) — the token may "
+               "still be live. Revoke this computer in Settings → Devices; the "
+               "local copy is kept at {path} until then (delete it by hand, or "
+               "run jav3 logout again)")
+
+
 def cmd_logout(args, out=sys.stdout) -> int:
+    """Revoke server-side FIRST; forget the local copy only once the server
+    confirms. A 5xx, a 401/404 from the wrong --server, or no answer at all
+    leaves the file in place — deleting the only copy of a still-live token
+    would leave the operator nothing to identify it by."""
     creds = load_credentials()
-    if creds:
-        base = base_url(args.server or creds["address"])
-        try:
-            with _client(base, creds["token"], timeout=10) as c:
-                c.delete("/api/devices/self")
-        except httpx.HTTPError:
-            print("(server unreachable — revoke this computer in Settings → "
-                  "Devices)", file=out)
+    if not creds:
+        print("not logged in", file=out)
+        return 0
+    base = base_url(args.server or creds["address"])
+    try:
+        with _client(base, creds["token"], timeout=10) as c:
+            r = c.delete("/api/devices/self")
+    except httpx.HTTPError as e:
+        raise CliError(REVOKE_HINT.format(why=f"unreachable: {e}", path=cred_path()))
+    if r.status_code != 200:
+        raise CliError(REVOKE_HINT.format(why=f"{r.status_code} {_detail(r)}",
+                                          path=cred_path()))
     delete_credentials()
     print("logged out", file=out)
     return 0
