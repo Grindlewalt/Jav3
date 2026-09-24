@@ -13,7 +13,9 @@ export default function Agents() {
   const [selected, setSelected] = useState(null)
   const [agent, setAgent] = useState(null)
   const ask = useAsk()
-  const defaultModel = useModel()?.default
+  // an unpinned agent resolves pin > runtime override > default, so it
+  // inherits `active`, not `default`
+  const inheritedModel = useModel()?.active
   const [dirty, setDirty] = useState(false)
   const [contextItems, setContextItems] = useState([])
   const [toolItems, setToolItems] = useState([])
@@ -235,7 +237,7 @@ export default function Agents() {
             </div>
             <div className="field-row">
               <label>model
-                <input value={agent.model} placeholder={`inherit (${defaultModel || 'default'})`}
+                <input value={agent.model} placeholder={`inherit (${inheritedModel || 'default'})`}
                        onChange={(e) => patch({ model: e.target.value })} />
               </label>
               <label>base url
