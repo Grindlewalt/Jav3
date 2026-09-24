@@ -2,7 +2,7 @@ import {
   useCallback, useContext, useEffect, useLayoutEffect, useRef, useState,
 } from 'react'
 import { api, chatStream, tailStream } from '../api.js'
-import { NavSlotContext } from '../App.jsx'
+import { NavSlotContext } from '../nav.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { isPhone, useIsPhone } from '../breakpoints.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
@@ -622,7 +622,8 @@ export default function Chat() {
           {messages.length === 0 ? (
             <div className="chat-empty">
               <div className="orb" ref={orbRef} />
-              <h2>{greeting}</h2>
+              {/* the chat page's only heading, so it is the <h1> */}
+              <h1>{greeting}</h1>
               {phone && fresh && (
                 <div className="empty-controls">
                   {projectPicker}

@@ -1,17 +1,17 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import Page from '../components/Page.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 
 export default function Tools() {
   const [tools, setTools] = useState([])
   useEffect(() => { api('/api/tools').then((r) => setTools(r.tools)) }, [])
 
   return (
-    <div className="page">
-      <h2>Tools</h2>
-      <p className="dim">what Jarvis is allowed to do. Everything goes through the
-        registry + one calling convention; granting = flipping
-        <code> enabled</code> in the def once a handler exists.</p>
-
+    <Page title="Tools"
+          lede={<>what Jarvis is allowed to do. Everything goes through the
+            registry + one calling convention; granting = flipping
+            <code> enabled</code> in the def once a handler exists.</>}>
       <div className="tool-grid">
         {tools.map((t) => (
           <div key={t.name} className="tool-card">
@@ -25,8 +25,8 @@ export default function Tools() {
             {t.when_to_use && <p className="dim small">use when: {t.when_to_use}</p>}
           </div>
         ))}
-        {tools.length === 0 && <p className="dim">registry is empty</p>}
+        {tools.length === 0 && <EmptyState>registry is empty</EmptyState>}
       </div>
-    </div>
+    </Page>
   )
 }

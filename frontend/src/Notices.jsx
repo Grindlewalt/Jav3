@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { isWatched } from './agentWatch.js'
 import { api, subscribeSse } from './api.js'
@@ -27,6 +27,11 @@ import { api, subscribeSse } from './api.js'
 // UNTRUSTED model/guest output — rendered as plain text nodes only.
 
 let seq = 0
+
+// The pending count, for anything below App that wears it: the Review nav
+// link is App's own, but the Review page's Queue tab shows the same number
+// and must not run a second poll to get it. App provides useNotices().count.
+export const PendingCountContext = createContext(0)
 
 export function useNotices(enabled) {
   const [toasts, setToasts] = useState([])

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 
 // Heartbeats: "run X every day at 8am" / "every 6 hours". A schedule runs
 // either a defined agent or a plain Jarvis prompt, headless, in an optional
@@ -100,7 +102,7 @@ export default function Schedules() {
     : `every ${s.interval_minutes} min`
 
   return (
-    <div className="split-layout">
+    <Page variant="split" title="Schedules">
       <aside>
         <div className="side-title">{editing ? `Edit schedule #${editing}` : 'New schedule'}</div>
         <form className="sched-form" onSubmit={save}>
@@ -143,8 +145,8 @@ export default function Schedules() {
         </form>
       </aside>
       <main className="editor-pane">
-        <div className="side-title">Schedules</div>
-        {schedules.length === 0 && <p className="dim">none yet — set one up on the left</p>}
+        {schedules.length === 0 && (
+          <EmptyState>none yet — set one up on the left</EmptyState>)}
         <ul className="sched-list">
           {schedules.map((s) => (
             <li key={s.id} className={s.enabled ? '' : 'off'}>
@@ -194,6 +196,6 @@ export default function Schedules() {
           </details>
         )}
       </main>
-    </div>
+    </Page>
   )
 }

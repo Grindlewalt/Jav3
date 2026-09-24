@@ -1,12 +1,15 @@
-import { useEffect, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useContext, useEffect, useState } from 'react'
+import { Outlet, useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
+import { PendingCountContext } from '../Notices.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { sevClass, ts } from '../format.js'
 import EmptyState from '../components/EmptyState.jsx'
+import Page from '../components/Page.jsx'
+import Tabs from '../components/Tabs.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
 // requests, egress host approvals, and security alerts (which now include the
@@ -304,10 +307,41 @@ function AlertRow({ a, onAck, onOpen }) {
   )
 }
 
+// ---- the shell ----
+// Review is a layout route (routes.jsx): this is the <h1> and the tab strip,
+// and the tabs are real URLs — /review, /review/network, /review/logs,
+// /review/secrets — so each is linkable and NavLink lights the current one.
+// Network and Logs used to be top-level pages; they are the guest's traffic
+// and the agent's transcripts, which is to say evidence, and evidence belongs
+// beside the queue that cites it. The old /network and /logs redirect here.
+//
+// THE CONTRACT for a tab (an <Outlet> child): it renders inside .review-body,
+// a full-height flex column that owns the insets and scrolls if the child
+// does not. A tab that wants its own inner scrolling (Network's feed, Logs'
+// transcript) is `flex: 1; min-height: 0` and never overflows the body; a
+// tab that is a plain document (the queue, Secrets) just flows and the body
+// scrolls. No tab paints a heading of its own.
 export default function Review() {
+  const count = useContext(PendingCountContext)
   return (
-    <div className="page review-page">
-      <h2>Review Center</h2>
+    <Page variant="fill" title="Review" className="review-shell"
+          actions={(
+            <Tabs label="Review sections" items={[
+              { to: '/review', end: true, label: 'Queue', count },
+              { to: '/review/network', label: 'Network' },
+              { to: '/review/logs', label: 'Logs' },
+              { to: '/review/secrets', label: 'Secrets' },
+            ]} />
+          )}>
+      <div className="review-body"><Outlet /></div>
+    </Page>
+  )
+}
+
+// The index tab: Auto review's control strip, then the queue itself.
+export function ReviewHome() {
+  return (
+    <div className="review-page">
       <TriagePanel />
       <ReviewQueue />
     </div>

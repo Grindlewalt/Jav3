@@ -5,6 +5,10 @@ import { useAsk } from '../ask.jsx'
 import { Copy } from '../copy.jsx'
 import { modelOption, setModel, useModel } from '../modelInfo.js'
 import { notifyError } from '../notify.js'
+import { useAuth } from '../auth.jsx'
+import Page from '../components/Page.jsx'
+import Card from '../components/Card.jsx'
+import Button from '../components/Button.jsx'
 
 const mmss = (secs) => {
   const s = Math.max(0, Math.round(secs))
@@ -16,13 +20,13 @@ export default function Settings() {
   const say = (m) => { setMsg(m); setTimeout(() => setMsg(null), 6000) }
 
   return (
-    <div className="page settings-page">
-      <h1>Settings</h1>
+    <Page title="Settings" className="settings-page">
       {msg && <p className="warn">{msg}</p>}
       <ModelPanel />
       <DevicesPanel say={say} />
       <MusicPanel say={say} />
-    </div>
+      <SessionPanel />
+    </Page>
   )
 }
 
@@ -145,6 +149,27 @@ function DevicesPanel({ say }) {
           </ul>
         )}
     </section>
+  )
+}
+
+// --- session ---------------------------------------------------------------------
+
+// The door. Log out used to sit at the foot of the nav's overflow menu and
+// again at the foot of the phone drawer — a way out on every screen for a
+// thing done once a month. This card is the only one now.
+function SessionPanel() {
+  const { user, logout } = useAuth()
+  return (
+    <Card title="Session" headingLevel={2}>
+      <p className="dim small">
+        Signed in as <strong>{user?.username}</strong>. Logging out ends this
+        browser’s session; computers logged in with <code>jav3</code> keep
+        their own tokens until revoked above.
+      </p>
+      <div className="row">
+        <Button variant="ghost" onClick={logout}>Log out</Button>
+      </div>
+    </Card>
   )
 }
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
 
 export default function Projects() {
   const [projects, setProjects] = useState([])
@@ -81,8 +82,7 @@ export default function Projects() {
     refresh()
   }
   return (
-    <div className="page">
-      <h2>Projects</h2>
+    <Page title="Projects">
       <form className="create-project" onSubmit={create}>
         <input placeholder={repoUrl.trim()
                  ? 'project name (repo name if empty)' : 'project name'}
@@ -152,6 +152,6 @@ export default function Projects() {
           </ul>
         </details>
       )}
-    </div>
+    </Page>
   )
 }

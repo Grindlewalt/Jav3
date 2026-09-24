@@ -221,9 +221,10 @@ button, a, input, select, textarea, label { touch-action: manipulation; }
 /* ---- nav ----
    One fixed-height bar that must never wrap. Eleven links used to reflow into
    two or three ragged rows anywhere between 769px and ~1250px, which pushed
-   the bar to 135px tall and stranded Logout mid-header. Now only four primary
-   destinations sit on the bar; the rest live behind "More", and below
-   --nav-collapse the whole set moves into the drawer. */
+   the bar to 135px tall and stranded Logout mid-header. Six primary
+   destinations sit on the bar now; two more live behind ⋯, and below
+   --bp-wide the whole set moves into the drawer. The set itself is nav.jsx's,
+   and every placement here renders the same NavItem markup. */
 nav {
   display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;
   /* standalone iOS draws the app under the status bar (viewport-fit=cover):
@@ -281,21 +282,21 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
 /* child combinator, not descendant: the More flyout lives inside .rail-links,
    so the loose version squeezed each of its menu items into a 38px square and
    clipped the labels down to a few letters */
-.rail-links > a, .rail-links > .notif-wrap > .nav-more {
+.rail-links > a, .rail-links > .menu-wrap > .nav-more {
   width: 38px; height: 38px; padding: 0; justify-content: center; gap: 0;
   position: relative;
 }
-/* labels and the More chevron are a bar-only affordance; the rail is glyphs */
-.rail-links > a > .nav-label, .rail-links .nav-more > .nav-label,
-.rail-links .nav-more > .chev { display: none; }
+/* labels are a bar-only affordance; the rail is glyphs */
+.rail-links > a > .nav-label { display: none; }
 /* the button is 38px but its glyph is 19px, so anchoring the badge to the
    button's corner left it floating a clear 9px above the icon it belongs to */
 .rail-links > a .nav-count {
   position: absolute; top: 5px; right: 3px; margin: 0; min-width: 15px;
   padding: 0 3px; font-size: 9px; line-height: 15px;
 }
-/* the rail's More flyout opens sideways, not down over the chats */
-.rail-links .more-drop { left: calc(100% + 10px); right: auto; top: 0; }
+/* the rail's ⋯ flyout opens sideways, not down over the chats */
+.rail-links .nav-menu { left: calc(100% + 10px); right: auto; top: 0;
+  transform-origin: top left; }
 .side-nav .grow { flex: 1; }
 /* the VM chip in the rail: the column is 38px, so the labelled pill has to
    drop to the dot alone, and its 230px dropdown has to open sideways for the
@@ -316,29 +317,25 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
   transform-origin: bottom left;
   animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both; }
 
-/* overflow menu ("More") */
+/* ---- the ⋯ overflow menu ----
+   The trigger is a glyph alone, sized like a bar link; the popover is the
+   Menu primitive (.menu) carrying the same NavItem rows as the bar, so an
+   overflow destination has the icon and the count a bar one has. The old
+   "More ›" button, its 210px width that never applied, and the Log out row
+   at its foot are gone — Log out lives in Settings now. */
 .more-wrap { margin-left: 2px; }
 .nav-more {
-  background: none; color: var(--dim); font-weight: 400; font-size: 15px;
+  background: none; color: var(--dim); font-weight: 400;
   padding: 8px 10px; border-radius: 8px; display: flex; align-items: center;
-  gap: 5px; white-space: nowrap;
 }
-.nav-more:hover:not(:disabled) {
+.nav-more:hover:not(:disabled), .nav-more[aria-expanded="true"] {
   color: var(--text); background: var(--panel); filter: none; transform: none;
 }
-.nav-more .chev { transform: rotate(90deg); font-size: 12px; }
-.nav-more .chev.open { transform: rotate(-90deg); }
-.more-drop { width: 210px; }
-.more-item { text-decoration: none; }
-.more-item.active { color: var(--accent); }
-.more-drop .more-logout {
-  background: none; color: var(--dim); width: 100%; text-align: left;
-  font-weight: 400; font-size: 13px; margin-top: 4px; padding-top: 10px;
-  border-top: 1px solid var(--border); border-radius: 0 0 7px 7px;
-}
-.more-drop .more-logout:hover:not(:disabled) {
-  color: var(--text); filter: none; transform: none; background: var(--panel-2);
-}
+.nav-menu .menu-item { font-size: var(--fs-base); color: var(--dim); }
+.nav-menu .menu-item:hover:not(:disabled) { color: var(--text); }
+.nav-menu .menu-item.active { color: var(--text); background: var(--panel-2); }
+.nav-menu .nav-label { flex: 1; min-width: 0; }
+.nav-menu .nav-count { margin-left: 0; }
 
 /* right-hand status cluster: VM chip, voice, theme toggle (the model select,
    bell and shield are gone) */
@@ -468,6 +465,14 @@ input:focus, textarea:focus { border-color: var(--accent);
 .grow { flex: 1; }
 .center { display: flex; align-items: center; justify-content: center; height: 80vh; }
 .center-pad { padding: 40px; text-align: center; }
+.center-link { text-align: center; margin: 0; }
+.center-link a { color: var(--accent); }
+/* A lazily-loaded route's chunk, in flight. It paints nothing on purpose: the
+   chunks are prefetched on idle, so this is on screen for a few tens of
+   milliseconds if ever, and a spinner that appears and vanishes that fast
+   reads as a flicker rather than as progress. It still claims the space so
+   the page below does not jump when the chunk lands. */
+.route-pending { flex: 1; min-height: 0; }
 .dim { color: var(--dim); }
 .warn { color: var(--amber); font-size: 12.5px; }
 .error { color: var(--red); font-size: 13px; }
@@ -494,12 +499,43 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .card.flush, .panel.flush { padding: 0; overflow: hidden; }
 
-/* page header: <h2> + optional lede + right-aligned actions — the shape the
-   Workspace header already has. */
-.page-head { display: flex; align-items: center; gap: var(--sp-7);
+/* page header: the page's <h1> + optional lede + right-aligned actions — the
+   shape the Workspace header already had. .ws-head is folded into the same
+   rules rather than restyled: it was the model for them. */
+.page-head, .ws-head { display: flex; align-items: center; gap: var(--sp-7);
   margin-bottom: var(--sp-2); }
-.page-head > :first-child { margin: 0; flex: 1; min-width: 0; }
+/* `flex: 1 1 auto`, not `flex: 1`: the shorthand's 0% basis made the title
+   weightless when the head wraps on a phone, so a tab strip beside it never
+   broke onto its own line — it sat on top of a title squeezed to nothing. */
+.page-head > :first-child { margin: 0; flex: 1 1 auto; min-width: 0; }
+/* .ws-head is the exception: its title sits at natural width and a `.hint`
+   with margin-left:auto does the pushing, so growing the title here would
+   shove the workspace's own controls across the bar. */
+.ws-head > :first-child { margin: 0; }
 .page-lede { margin: 0 0 var(--sp-7); color: var(--dim); }
+/* One size for a page title, whatever element carries it. It was UA-default
+   before: 30px on Settings' <h1>, 22.5px on the <h2> pages, and an explicit
+   18px on Workspace — the one that had been hand-tuned. A document page gets
+   the wordmark's 21px; a header BAR (the full-height shells, the Workspace)
+   keeps the 18px that was chosen for it. */
+.page-head h1 { font-size: var(--fs-2xl); font-weight: 600; line-height: var(--lh-tight); }
+.page-shell > .page-head h1, .ws-head h1 { font-size: var(--fs-xl); }
+
+/* ---- the full-height page shell (components/Page.jsx `split` and `fill`) ----
+   The app has two page geometries and had no name for the second. `.page`
+   scrolls itself inside a 960px column; the other kind fills the viewport
+   and lets its children scroll — .split-layout, the Network page and
+   .workspace all hand-rolled it. `.page-shell` is that shape, and its header
+   is a bar across the top, which is what .ws-head already was. */
+.page-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.page-shell > .page-head, .ws-head {
+  flex-shrink: 0; margin: 0; gap: var(--sp-7);
+  padding: var(--sp-5) var(--sp-9);
+  border-bottom: 1px solid var(--border); background: var(--bg-soft);
+}
+.page-shell > .page-lede { flex-shrink: 0; margin: 0;
+  padding: var(--sp-4) var(--sp-9) 0; }
+.page-shell > .split-layout { flex: 1; min-height: 0; }
 
 /* toolbar: the .row shape without .row's vertical margin, for use as a
    header strip inside a card or pane. `.pane-head` is the same thing and
@@ -573,8 +609,8 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 
 /* ---- menu ----
-   The glass dropdown, written once. .notif-drop (the bell, the VM chip, More),
-   .proj-menu and .model-menu are this recipe under three names, and they keep
+   The glass dropdown, written once. .notif-drop (the VM chip), .proj-menu
+   and .model-menu are this recipe under three names, and they keep
    their classes until their call sites migrate to Menu.jsx. Values are
    .proj-menu's on the token ladder (its 9px item radius rounds to --radius-lg);
    `.up` is .model-menu's upward variant. The width is capped to the viewport
@@ -970,7 +1006,8 @@ input:focus, textarea:focus { border-color: var(--accent);
   0%, 100% { transform: scale(0.968); box-shadow: 0 8px 36px var(--orb-glow); }
   50% { transform: scale(1.055); box-shadow: 0 14px 66px var(--orb-glow); }
 }
-.chat-empty h2 { margin: 0; font-size: 22px; max-width: 480px; text-align: center; }
+/* the greeting is the chat page's <h1>; the size is unchanged */
+.chat-empty h1 { margin: 0; font-size: 22px; max-width: 480px; text-align: center; }
 /* phone, fresh chat: the toolbar is gone and its two controls — project and
    temporary — sit centred under the orb and the greeting instead */
 .chat-empty .empty-controls {
@@ -1138,11 +1175,9 @@ input:focus, textarea:focus { border-color: var(--accent);
 
 /* ---- workspace control board ---- */
 .workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.ws-head {
-  display: flex; gap: 14px; align-items: center; padding: 10px 20px;
-  border-bottom: 1px solid var(--border); background: var(--bg-soft);
-}
-.ws-head h2 { margin: 0; font-size: 18px; }
+/* .ws-head's layout, padding, border, background and title size are the
+   shared page-header rules now (`.page-shell > .page-head, .ws-head`) — this
+   header was the model for them. Only what is peculiar to it is left. */
 .ws-head .hint { font-size: 12px; margin-left: auto; }
 .board {
   position: relative; flex: 1; overflow: auto; min-height: 0;
@@ -1653,8 +1688,20 @@ kbd {
 .egr-bytes { color: var(--dim); font-size: 11.5px; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
 
-/* ---- Review Center ---- */
-.review-page { max-width: 1080px; }
+/* ---- Review Center ----
+   A layout route: the shell's header bar carries the <h1> and the tab strip;
+   .review-body is the one column every tab renders into. It owns the insets
+   and is the scroll container for a tab that just flows (the queue, Secrets);
+   a tab with its own inner scrolling (.net-view, .logs-view) is `flex: 1;
+   min-height: 0` and fills it exactly. Every tab is centred in the same
+   column, so switching never shifts the content sideways. */
+.review-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column;
+  padding: var(--sp-8) var(--sp-9) calc(var(--sp-8) + var(--sab));
+}
+.review-body > * { width: 100%; max-width: 1180px; margin: 0 auto; }
+.review-page { flex-shrink: 0; }
 .review-queue { display: flex; flex-direction: column; gap: 20px; }
 .review-scrollwrap { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
 .review-queue .sbx-sec { margin-bottom: 0; }
@@ -1695,8 +1742,8 @@ kbd {
 .tag.sev-crit-tag { color: var(--red); border-color: var(--red); }
 
 /* ============================================================
-   Collapsed nav (≤1024px). The bar can hold brand + 4 links + More +
-   the status cluster down to about 1050px; below that everything
+   Collapsed nav (≤1024px, --bp-wide). The bar holds brand + 6 links + ⋯ +
+   the status cluster down to about this width; below it everything
    navigational moves into the drawer.
    ============================================================ */
 @media (max-width: 1024px) {
@@ -1727,11 +1774,16 @@ kbd {
   .nav-drawer a {
     color: var(--dim); text-decoration: none;
     padding: 13px 14px; font-size: 15px; border-radius: 10px;
-    min-height: var(--tap); display: flex; align-items: center;
+    min-height: var(--tap); display: flex; align-items: center; gap: var(--sp-6);
     transition: color 0.15s, background 0.15s;
   }
   .nav-drawer a:hover { color: var(--text); background: var(--panel); }
   .nav-drawer a.active { color: var(--text); background: var(--panel-2); }
+  /* the drawer carries the same glyphs as the bar now — it was text-only, the
+     one placement where a destination looked like a different thing */
+  .nav-drawer .nav-label { flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav-drawer .nav-count { margin-left: 0; flex-shrink: 0; }
   .drawer-foot {
     margin-top: 10px; padding-top: 12px; display: flex; flex-direction: column;
     gap: 12px; border-top: 1px solid var(--border);
@@ -1763,7 +1815,15 @@ kbd {
      and a landscape notch ---- */
   .page { padding: 16px max(14px, env(safe-area-inset-right))
                    calc(16px + var(--sab)) max(14px, env(safe-area-inset-left)); }
-  .review-page, .review-page.page { max-width: 100%; }
+  /* the full-height shell's header is a bar, so only its sides tighten — its
+     height is the one thing a phone can least afford to grow. It wraps, so a
+     tab strip drops under the title instead of squeezing it. */
+  .page-shell > .page-head { flex-wrap: wrap; row-gap: var(--sp-4);
+    padding: var(--sp-4) max(var(--sp-6), env(safe-area-inset-right))
+             var(--sp-4) max(var(--sp-6), env(safe-area-inset-left)); }
+  .page-shell > .page-lede { padding: var(--sp-3) var(--sp-6) 0; }
+  .review-body { padding: var(--sp-6) max(var(--sp-6), env(safe-area-inset-right))
+    calc(var(--sp-6) + var(--sab)) max(var(--sp-6), env(safe-area-inset-left)); }
 
   /* ---- chat: the conversation list is an overlay, not a permanent block.
      It used to sit stacked above the thread at 34vh, so a third of the
@@ -2595,5 +2655,9 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 
 /* --- Settings -------------------------------------------------------------------- */
 .settings-page { max-width: 760px; }
-.settings-page .panel { margin-bottom: 14px; }
+.settings-page .panel, .settings-page .card { margin-bottom: 14px; }
+/* the hand-built panels' heads match the Card primitive's title, so the
+   Session card and the panels beside it read as one list */
+.settings-page .panel > h2 { margin: 0 0 var(--sp-5); font-size: var(--fs-lg);
+  font-weight: 600; }
 .settings-page select { min-width: 220px; }

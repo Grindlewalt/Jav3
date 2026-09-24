@@ -1,80 +1,28 @@
 import {
-  createContext, useCallback, useEffect, useLayoutEffect, useRef, useState,
+  useCallback, useEffect, useLayoutEffect, useRef, useState,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { NavLink, Navigate, useLocation } from 'react-router-dom'
 import { api } from './api.js'
 import { streamUrl } from './tab.js'
 import { useDismiss } from './useDismiss.js'
 import { setMediaHosts } from './mediaHosts.js'
 import Player from './Player.jsx'
-import Login from './pages/Login.jsx'
-import Chat from './pages/Chat.jsx'
-import Projects from './pages/Projects.jsx'
-import Artifacts from './pages/Artifacts.jsx'
-import Workspace from './pages/Workspace.jsx'
-import Context from './pages/Context.jsx'
-import Skills from './pages/Skills.jsx'
-import Tools from './pages/Tools.jsx'
-import Agents from './pages/Agents.jsx'
-import Schedules from './pages/Schedules.jsx'
-import Logs from './pages/Logs.jsx'
-import Network from './pages/Network.jsx'
-import Review from './pages/Review.jsx'
-import Settings from './pages/Settings.jsx'
-import Voice from './pages/Voice.jsx'
-import Notices, { useNotices } from './Notices.jsx'
+import AppRoutes from './routes.jsx'
+import {
+  MoreIcon, NAV_ITEMS, NavItem, NavList, NavSlotContext, OVERFLOW_ITEMS, PRIMARY_ITEMS,
+} from './nav.jsx'
+import { AuthContext } from './auth.jsx'
+import Menu from './components/Menu.jsx'
+import Notices, { PendingCountContext, useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import { notify, notifyError } from './notify.js'
 import { AskProvider, useAsk } from './ask.jsx'
 
-// Primary destinations stay on the bar; everything else lives behind "More".
-// Eleven top-level links used to wrap the bar into two or three ragged rows
-// between 769px and ~1250px, stranding Logout in the middle of the header.
-const PRIMARY_LINKS = [
-  { to: '/', label: 'Chat', end: true },
-  { to: '/projects', label: 'Projects' },
-  { to: '/agents', label: 'Agents' },
-  { to: '/review', label: 'Review' },
-]
-const MORE_LINKS = [
-  { to: '/network', label: 'Network' },
-  { to: '/context', label: 'Context' },
-  { to: '/logs', label: 'Logs' },
-  { to: '/schedules', label: 'Schedules' },
-  { to: '/skills', label: 'Skills' },
-  { to: '/tools', label: 'Tools' },
-  { to: '/settings', label: 'Settings' },
-]
-
-// Counts come from live queues and reached 294 in practice, which overflowed
-// the badge and smeared across the icon.
-const badge = (n) => (n > 99 ? '99+' : String(n))
-
-// One glyph per primary destination. The nav lives in two places — the top bar
-// and the chat sidebar's collapsed rail — and these are the constant that flies
-// between them, so every placement must draw the same mark.
-const ICONS = {
-  '/': <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4L3 21l1.2-3.6A8.4 8.4 0 1 1 21 11.5Z" />,
-  '/projects': <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5a1.5
-                        1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5Z" />,
-  '/agents': <><circle cx="12" cy="8.6" r="3.4" /><path d="M5.5 19.4a6.5 6.5 0 0 1 13 0" /></>,
-  '/review': <path d="M12 3.2 19.2 6v5.6c0 4-3 7.2-7.2 9.2-4.2-2-7.2-5.2-7.2-9.2V6Zm-2.6
-                      8.6 2 2.1 4-4.2" />,
-}
-const NavIcon = ({ to, innerRef }) => (
-  <span className="nav-ico" ref={innerRef} aria-hidden="true">
-    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      {ICONS[to]}
-    </svg>
-  </span>
-)
-
-// The nav's two homes exchange it through this: the Chat page hands up the DOM
-// node inside its collapsed sidebar, and App portals the links into it. A slot
-// means "render as a rail" — no second source of truth to keep in sync.
-export const NavSlotContext = createContext(() => {})
+// The destinations, their icons and their split between the bar and the ⋯
+// menu all live in nav.jsx, which is the ONE source the bar, the rail, the
+// overflow menu and the phone drawer are rendered from. They used to be three
+// hand-maintained copies here. The routes live in routes.jsx.
 
 // Light/dark switch. index.html stamps data-theme before first paint; this
 // keeps it, localStorage and the browser-chrome colour in sync afterwards.
@@ -84,8 +32,10 @@ function useTheme() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     try { localStorage.setItem('jarvis.theme', theme) } catch { /* private mode */ }
-    document.querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', theme === 'light' ? '#ece7da' : '#0a0a0b')
+    // the browser chrome takes the page background — read from the token
+    // once the theme attribute has switched it, so the two cannot drift
+    const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
+    if (bg) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', bg)
   }, [theme])
   const toggle = useCallback(
     () => setTheme((t) => (t === 'light' ? 'dark' : 'light')), [])
@@ -395,7 +345,6 @@ export default function App() {
   useEffect(() => { setMenuOpen(false); setMoreOpen(false) }, [location.pathname])
 
   const closeMore = useCallback(() => setMoreOpen(false), [])
-  const moreRef = useDismiss(moreOpen, closeMore)
 
   // the drawer is a fixed overlay; stop the page behind it from scrolling,
   // and let Escape dismiss it like every other popover in the bar
@@ -421,10 +370,10 @@ export default function App() {
       .catch(() => {})
   }, [])
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     await api('/api/auth/logout', { method: 'POST' })
     setUser(null)
-  }
+  }, [])
 
   if (user === undefined) return <div className="center">…</div>
   // The page being asked for rides along, so logging in lands back on it
@@ -432,54 +381,39 @@ export default function App() {
   if (user === null && location.pathname !== '/login')
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
 
-  // Voice and Artifacts are deliberately absent from the menus: their routes
-  // and pages still work, they are just not advertised.
-  const moreLinks = MORE_LINKS
+  const counts = { review: notices.count }
 
-  // the same links either way — only the container and the label's visibility
-  // differ, which is what lets the icons fly between the two
+  // The bar and the rail render the SAME markup — only the container's class
+  // and the label's visibility differ, which is what lets the icons fly
+  // between the two placements. The ⋯ menu is the glass Menu primitive with
+  // the same NavItem rows, so an overflow destination looks like a bar one.
   const navLinks = (
     <>
-      {PRIMARY_LINKS.map((l) => (
-        <NavLink key={l.to} to={l.to} end={l.end} title={l.label}>
-          <NavIcon to={l.to} innerRef={(el) => {
-            if (el) icoRefs.current.set(l.to, el)
-            else icoRefs.current.delete(l.to)
-          }} />
-          <span className="nav-label">{l.label}</span>
-          {l.to === '/review' && notices.count > 0 && (
-            <span className="nav-count">{badge(notices.count)}</span>)}
-        </NavLink>
+      {PRIMARY_ITEMS.map((item) => (
+        <NavItem key={item.to} item={item} count={counts[item.count] || 0}
+                 iconRef={(el) => {
+                   if (el) icoRefs.current.set(item.to, el)
+                   else icoRefs.current.delete(item.to)
+                 }} />
       ))}
-      <div className="notif-wrap more-wrap" ref={moreRef}>
-        <button className="nav-more" aria-expanded={moreOpen} aria-haspopup="menu"
-                title="More" onClick={() => setMoreOpen((o) => !o)}>
-          <span className="nav-ico" aria-hidden="true">
-            <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor">
-              <circle cx="5.5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" />
-              <circle cx="18.5" cy="12" r="1.6" />
-            </svg>
-          </span>
-          <span className="nav-label">More</span>
-          <span className={moreOpen ? 'chev open' : 'chev'} aria-hidden="true">›</span>
-        </button>
-        {moreOpen && (
-          <div className="notif-drop more-drop" role="menu">
-            {moreLinks.map((l) => (
-              <NavLink key={l.to} to={l.to} role="menuitem"
-                       className="notif-item more-item"
-                       onClick={closeMore}>{l.label}</NavLink>
-            ))}
-            <button className="notif-item more-item more-logout"
-                    role="menuitem" onClick={logout}>Log out</button>
-          </div>
-        )}
-      </div>
+      <Menu open={moreOpen} onClose={closeMore} label="More" width={200}
+            className="nav-menu" wrapClassName="more-wrap"
+            trigger={(
+              <button className="nav-more" aria-expanded={moreOpen} aria-haspopup="menu"
+                      aria-label="More" title="More" onClick={() => setMoreOpen((o) => !o)}>
+                <MoreIcon />
+              </button>
+            )}>
+        <NavList items={OVERFLOW_ITEMS} itemClassName="menu-item" itemRole="menuitem"
+                 counts={counts} onNavigate={closeMore} />
+      </Menu>
     </>
   )
 
   return (
     <AskProvider>
+    <AuthContext.Provider value={{ user, logout }}>
+    <PendingCountContext.Provider value={notices.count}>
     <div className={railed ? 'app railed' : 'app'}>
       {user && (
         <>
@@ -517,26 +451,20 @@ export default function App() {
             </>, navSlot)}
 
           {/* phone: a fixed drawer over a scrim, never an in-flow block that
-              shoves the page down */}
+              shoves the page down. It is the ONLY navigation a phone has, so
+              it shows the whole map — primaries and overflow alike — where it
+              used to be a separately-written flat list that had already
+              drifted (its own logout, no icons on any row). */}
           {menuOpen && (
             <div className="nav-scrim" onClick={() => setMenuOpen(false)} />
           )}
           <div className={menuOpen ? 'nav-drawer open' : 'nav-drawer'}
                aria-hidden={!menuOpen}>
-            {[...PRIMARY_LINKS, ...moreLinks].map((l) => (
-              <NavLink key={l.to} to={l.to} end={l.end}
-                       tabIndex={menuOpen ? 0 : -1}>
-                {l.label}
-                {l.to === '/review' && notices.count > 0 && (
-                  <span className="nav-count">{badge(notices.count)}</span>)}
-              </NavLink>
-            ))}
+            <NavList items={NAV_ITEMS} counts={counts} tabIndex={menuOpen ? 0 : -1} />
             <div className="drawer-foot">
               <button className="ghost" tabIndex={menuOpen ? 0 : -1}
                       onClick={toggleTheme}>
                 {theme === 'light' ? 'Dark mode' : 'Light mode'}</button>
-              <button className="ghost" tabIndex={menuOpen ? 0 : -1}
-                      onClick={logout}>Log out</button>
             </div>
           </div>
         </>
@@ -551,26 +479,12 @@ export default function App() {
           and the toasts stay mounted through a page's failure, so there is
           always a way out of a broken page. */}
       <ErrorBoundary resetKey={location.pathname}>
-      <Routes>
-        <Route path="/login" element={<Login onLogin={setUser} />} />
-        <Route path="/" element={<Chat />} />
-        <Route path="/projects" element={<Projects />} />
-        <Route path="/projects/:slug" element={<Workspace />} />
-        <Route path="/artifacts" element={<Artifacts />} />
-        <Route path="/review" element={<Review />} />
-        <Route path="/network" element={<Network />} />
-        <Route path="/voice" element={<Voice />} />
-        <Route path="/context" element={<Context />} />
-        <Route path="/agents" element={<Agents />} />
-        <Route path="/logs" element={<Logs />} />
-        <Route path="/schedules" element={<Schedules />} />
-        <Route path="/skills" element={<Skills />} />
-        <Route path="/tools" element={<Tools />} />
-        <Route path="/settings" element={<Settings />} />
-      </Routes>
+      <AppRoutes onLogin={setUser} authed={!!user} />
       </ErrorBoundary>
       </NavSlotContext.Provider>
     </div>
+    </PendingCountContext.Provider>
+    </AuthContext.Provider>
     </AskProvider>
   )
 }

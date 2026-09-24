@@ -427,7 +427,7 @@ export default function Workspace() {
   return (
     <div className="workspace">
       <header className="ws-head">
-        <h2>{project.name}</h2>
+        <h1>{project.name}</h1>
         {project.loaded
           ? <button className="ghost" onClick={async () => {
               await api('/api/projects/unload', { method: 'POST' }); refreshProject() }}>
