@@ -20,7 +20,7 @@ import httpx
 import pytest
 
 from backend import auth, devices_api, devicetokens, pastelogin
-from backend.auth import COOKIE_NAME, hash_password, make_token
+from backend.auth import COOKIE_NAME, hash_password
 from backend.config import get_jwt_secret, settings
 from backend.db import get_db, init_db
 from backend.main import app
@@ -82,74 +82,46 @@ async def _device_token(op, dev) -> str:
 # signing secret, which forges an operator cookie -> the whole control plane.
 # ---------------------------------------------------------------------------
 
-def _spa_resolve(dist: Path, full_path: str) -> Path | None:
-    """The EXACT resolution logic of backend.main.spa (main.py:174-183).
-
-    The route `@app.get("/{full_path:path}")` hands `full_path` straight to
-    `settings.frontend_dist / full_path` and serves it if `.is_file()`, with no
-    safe_join / containment check. `full_path` never has a leading slash from
-    the router, but a request path of `//etc/passwd` yields full_path=`/etc/...`
-    (absolute), and `..` segments are never collapsed — so both `..` traversal
-    and absolute paths escape the dist dir. This helper mirrors those lines so
-    the PoC does not depend on a built frontend existing on the laptop.
-    """
-    candidate = dist / full_path            # <-- the vulnerable join
-    if full_path and candidate.is_file():
-        return candidate
-    return None
-
-
-def test_BYPASS_spa_static_route_reads_files_outside_dist(tmp_path):
-    """FINDING (critical): unauthenticated arbitrary file read via the SPA route.
-
-    Proven live against uvicorn too: `GET /../data/jwt_secret` and
-    `GET //etc/hostname` both returned 200 with the file body.
-    """
+def test_BYPASS_spa_static_route_reads_files_outside_dist(tmp_path, monkeypatch):
+    """FIXED (on main, backend.main.dist_file): the SPA route resolves the path
+    and refuses anything outside frontend/dist — `..` traversal and absolute
+    paths both fall back to the shell. Was: unauthenticated arbitrary file
+    read (`GET /../data/jwt_secret`, `GET //etc/hostname`)."""
+    from backend import main
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
     (dist / "index.html").write_text("<html>spa</html>")
-    # a sensitive file that lives NEXT TO dist (this is exactly the real layout:
-    # data/jwt_secret sits under the state dir, dist under the repo)
     secret_file = tmp_path / "data" / "jwt_secret"
     secret_file.parent.mkdir()
     secret_file.write_text("TOP-SECRET-SIGNING-KEY")
+    monkeypatch.setattr(settings, "frontend_dist", dist)
 
-    # 1) parent-relative traversal escapes dist
-    hit = _spa_resolve(dist, "../data/jwt_secret")
-    assert hit is not None and hit.read_text() == "TOP-SECRET-SIGNING-KEY"
-
-    # 2) an absolute path (request path //etc/...) escapes entirely: pathlib's
-    #    `dist / "/abs"` discards dist and yields the absolute path
-    hit_abs = _spa_resolve(dist, "/etc/hostname")
-    assert hit_abs == Path("/etc/hostname")
-
-    # 3) a normal in-dist asset still resolves inside dist (sanity)
+    assert main.dist_file("../data/jwt_secret") is None
+    assert main.dist_file("/etc/hostname") is None
+    assert main.dist_file("assets/../../data/jwt_secret") is None
     (dist / "assets" / "app.js").write_text("x")
-    ok = _spa_resolve(dist, "assets/app.js")
-    assert ok is not None and ok.parent == dist / "assets"
+    assert main.dist_file("assets/app.js") == dist / "assets" / "app.js"
 
 
 async def test_BYPASS_leaked_jwt_secret_forges_operator_session(clients):
-    """FINDING (critical, chained): the file read above leaks the JWT signing
-    secret; anyone holding it mints a valid `jarvis_token` cookie for the
-    operator and reaches EVERY cookie-only control-plane router. This proves the
-    second half of the chain end to end using the real secret + real routes.
-    """
+    """FIXED at the leak (dist_file above). What remains true by construction:
+    a cookie is only as good as the signing key, so a cookie signed with any
+    OTHER key is refused on every control-plane route, and the real key is
+    not reachable through the SPA route. (Rotating a key that may already
+    have leaked from a deployed box is the operator's call.)"""
+    import jwt as pyjwt
+    from datetime import datetime, timedelta, timezone
     op, dev = clients
-    forged = make_token(1, "operator")             # attacker has the leaked key
+    forged = pyjwt.encode({"sub": "1", "username": "operator",
+                           "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+                          "not-the-server-key-" + "x" * 32, algorithm="HS256")
     dev.cookies.set(COOKIE_NAME, forged, domain="jav3.lan")
-    reached = []
     for method, path in CONTROL_PLANE:
         r = await dev.request(method, path)
-        if r.status_code != 401:
-            reached.append((path, r.status_code))
-    # the forged cookie must NOT be rejected anywhere; if this list is full the
-    # bypass is total. (Some routes may 404/500 on empty state — anything but
-    # 401 means auth passed.)
-    assert reached, "forged cookie reached no control-plane route"
-    assert not any(sc == 401 for _, sc in reached)
-    # spell out the crown jewel explicitly
-    assert (await dev.get("/api/secrets")).status_code == 200
+        assert r.status_code == 401, (path, r.status_code)
+    get_jwt_secret()                                   # materialise the key file
+    r = await dev.get("/../data/jwt_secret")
+    assert "TOP-SECRET" not in r.text and get_jwt_secret() not in r.text
 
 
 # ---------------------------------------------------------------------------

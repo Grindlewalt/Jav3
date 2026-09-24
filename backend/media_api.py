@@ -11,10 +11,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import gui, tarmac
-from .auth import require_same_origin, require_user
+from .auth import require_user
 
 router = APIRouter(prefix="/api/media", tags=["media"],
-                   dependencies=[Depends(require_user), Depends(require_same_origin)])
+                   dependencies=[Depends(require_user)])
 
 
 class TarmacBody(BaseModel):

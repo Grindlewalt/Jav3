@@ -24,9 +24,8 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 
-from .auth import verify_password
+from .auth import check_password_login
 from .config import settings
-from .db import get_db
 
 router = APIRouter(prefix="/git", tags=["git-serve"])
 
@@ -66,14 +65,8 @@ async def _require_basic(request: Request) -> None:
         raise _UNAUTH
     if not user or not pw:
         raise _UNAUTH
-    db = await get_db()
-    try:
-        async with db.execute(
-                "SELECT password_hash FROM users WHERE username = ?", (user,)) as cur:
-            row = await cur.fetchone()
-    finally:
-        await db.close()
-    if not row or not verify_password(pw, row["password_hash"]):
+    # the GUI login's check: same throttle, delay and login_failed alert
+    if await check_password_login(user, pw, request, via="git") is None:
         raise _UNAUTH
 
 

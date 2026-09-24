@@ -65,13 +65,20 @@ def fake_lan(monkeypatch):
     lan._own = None
 
 
-def test_csrf_list_derivation(fake_lan, monkeypatch):
-    monkeypatch.setattr(settings, "csrf_allowed_hosts", ["Extra.Example"])
-    hosts = lan.csrf_allowed_hosts()
-    # explicit list is kept (additive), own identity joins it
-    for h in ("extra.example", "jarvis.local", "boxy", "boxy.local", "192.168.5.20"):
-        assert h in hosts
-    assert "evil.example" not in hosts
+def test_csrf_origin_derivation(fake_lan, monkeypatch):
+    from backend.auth import origin_allowed
+    monkeypatch.setattr(settings, "csrf_allowed_hosts", ["Extra.Example", "proxy.lan:8443"])
+
+    def ok(origin):
+        return origin_allowed({"origin": origin, "host": "test"}, "http")
+    # own identity only on the server's own port
+    for h in ("jarvis.local", "boxy", "boxy.local", "192.168.5.20"):
+        assert ok(f"http://{h}:{settings.lan_port}"), h
+        assert not ok(f"http://{h}:31337"), h
+    # explicit list is additive; a bare entry is any port, host:port is exact
+    assert ok("http://extra.example:1234")
+    assert ok("http://proxy.lan:8443") and not ok("http://proxy.lan:8444")
+    assert not ok("http://evil.example")
 
 
 async def test_csrf_check_still_refuses_foreign_origin(fake_lan, tmp_env):

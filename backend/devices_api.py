@@ -22,12 +22,12 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import devicetokens, lan, pastelogin, security
-from .auth import require_actor, require_same_origin, require_user
+from .auth import require_actor, require_user
 from .config import settings
 from .db import get_db
 
 router = APIRouter(prefix="/api/devices", tags=["devices"],
-                   dependencies=[Depends(require_user), Depends(require_same_origin)])
+                   dependencies=[Depends(require_user)])
 pair_router = APIRouter(prefix="/api/devices", tags=["devices"])
 cli_router = APIRouter(prefix="/cli", tags=["devices"])
 
@@ -40,7 +40,11 @@ _BAD_CODE = ("invalid or expired login code — generate a new one in "
 # optional port. Anything else (spaces, '=', quotes, shell metacharacters) is
 # refused rather than echoed into the login string or a shell script.
 _HOST_RE = re.compile(
-    r"(\[[0-9a-f:.]{2,45}\]|[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)(?::(\d{1,5}))?")
+    r"(\[[0-9a-f:.]{2,45}\]|[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)(?::([1-9]\d{0,4}))?")
+# A final label that is numeric (or 0x-hex) makes the name an IPv4 literal to
+# a resolver — `127.1`, `2130706433`, `0x7f000001` are all 127.0.0.1 — so it
+# is accepted only in canonical dotted-quad form, which _is_loopback can judge.
+_NUMERIC_LABEL = re.compile(r"(?:\d+|0x[0-9a-f]*)")
 
 
 def _peer(request: Request) -> str:
@@ -61,12 +65,14 @@ def _throttled(request: Request) -> str:
 
 def _is_loopback(host: str) -> bool:
     h = host.strip("[]")
-    if h in ("localhost", "0.0.0.0") or h.endswith(".localhost"):
+    if h in ("localhost",) or h.endswith(".localhost"):
         return True
     try:
-        return ipaddress.ip_address(h).is_loopback
+        ip = ipaddress.ip_address(h)
     except ValueError:
         return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return ip.is_loopback or ip.is_unspecified or bool(mapped and mapped.is_loopback)
 
 
 def _host_header(request: Request) -> tuple[str, str] | None:
@@ -75,7 +81,17 @@ def _host_header(request: Request) -> tuple[str, str] | None:
     m = _HOST_RE.fullmatch(raw)
     if not m or (m.group(2) and not 0 < int(m.group(2)) < 65536):
         return None
-    return m.group(1), raw
+    host = m.group(1)
+    if not host.startswith("["):
+        if ".." in host:
+            return None
+        if _NUMERIC_LABEL.fullmatch(host.rsplit(".", 1)[-1]):
+            try:
+                if str(ipaddress.IPv4Address(host)) != host:
+                    return None
+            except ValueError:
+                return None
+    return host, raw
 
 
 def _scheme(request: Request) -> str:

@@ -74,6 +74,10 @@ async def _security_headers(request, call_next):
     return resp
 
 
+# CSRF: one same-origin gate for every cookie-carrying state change and
+# WebSocket handshake (auth.SameOriginMiddleware) — not a per-route opt-in.
+app.add_middleware(auth.SameOriginMiddleware)
+
 app.include_router(auth.router)
 app.include_router(devices_api.router)
 app.include_router(devices_api.pair_router)

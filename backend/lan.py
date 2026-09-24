@@ -92,14 +92,6 @@ def advertised_hostname() -> str:
     return _state["hostname"] if _state["advertised"] else ""
 
 
-def csrf_allowed_hosts() -> list[str]:
-    """The explicit csrf_allowed_hosts plus the server's own LAN identity. A
-    page served from this box's own name/IP is as same-origin as the Host
-    header (which the check already trusts); anything else is still refused."""
-    return list(dict.fromkeys([*(h.lower() for h in settings.csrf_allowed_hosts),
-                               *own_hosts()]))
-
-
 def media_hosts() -> list[str]:
     return list(dict.fromkeys([*(h.lower() for h in settings.media_hosts),
                                *own_hosts()]))

@@ -11,7 +11,7 @@ import stat
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from fastapi import APIRouter, Body, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -175,16 +175,47 @@ async def upload_archive(slug: str, file: UploadFile, dest: str = Form("code")):
             "dest": str(dest_dir.relative_to(base)) or "."}
 
 
+# Types a browser will run script in when opened top-level. These are only
+# ever handed out as downloads; the Workspace previews HTML in a sandboxed
+# srcDoc iframe instead.
+_ACTIVE_SUFFIXES = {".html", ".htm", ".xhtml", ".svg", ".svgz", ".xml", ".xsl",
+                    ".xslt", ".shtml", ".mht", ".mhtml"}
+
+
+def inert_file_response(p: Path) -> FileResponse:
+    """Serve a file the agent may have written WITHOUT giving it this app's
+    origin. Project files are agent-writable and the agent is assumed
+    compromised (web-tainted), so a file opened from here must never run as a
+    same-origin page: that page could mint a login code or call any cookie
+    route. `CSP: sandbox` puts any document in an opaque origin (no cookie
+    reach, no same-origin fetch), nosniff stops a .txt being sniffed into
+    HTML, and active types are forced to download. Images still render in
+    <img> — neither header affects a subresource load."""
+    headers = {"Content-Security-Policy": "sandbox; frame-ancestors 'self'",
+               "X-Content-Type-Options": "nosniff",
+               "Cache-Control": "no-store"}
+    if p.suffix.lower() in _ACTIVE_SUFFIXES:
+        return FileResponse(p, headers=headers, filename=p.name,
+                            content_disposition_type="attachment",
+                            media_type="application/octet-stream")
+    return FileResponse(p, headers=headers)
+
+
 @router.get("/raw/{path:path}")
 async def raw(slug: str, path: str):
     p = safe_join(await project_dir(slug), path)
     if not p.is_file():
         raise HTTPException(status_code=404, detail="no such file")
-    return FileResponse(p)
+    return inert_file_response(p)
 
 
 @router.post("/run")
-async def run(slug: str, body: RunRequest):
+async def run(slug: str, body: RunRequest, request: Request):
+    """The operator's convenience runner: executes Python ON THE HOST (not the
+    guest). Kept because the operator uses it; guarded by the global
+    same-origin check (main.py) and audited — every run is a security event, so
+    a run nobody clicked shows up in the Review Center. Whether it should exist
+    at all is recorded in SECURITY-RESIDUAL-RISK.md."""
     base = await project_dir(slug)
     if body.code is not None:
         rel = "code/scratch.py"
@@ -200,8 +231,28 @@ async def run(slug: str, body: RunRequest):
             raise HTTPException(status_code=400, detail="only .py files can be run")
     else:
         raise HTTPException(status_code=400, detail="give 'path' or 'code'")
+    await _audit_host_run(slug, rel, request)
     result = await run_python(base, rel)
     return {"script": rel, **result}
+
+
+async def _audit_host_run(slug: str, rel: str, request: Request) -> None:
+    from . import security
+    db = None
+    try:
+        db = await get_db()
+        await security.raise_event(
+            db, kind="host_run", severity="info", project=slug,
+            summary=f"host-side run of {slug}/{rel}",
+            detail={"project": slug, "script": rel,
+                    "peer": (getattr(request.client, "host", None) or "?")[:64],
+                    "origin": (request.headers.get("origin") or "")[:200],
+                    "agent": request.headers.get("user-agent", "")[:120]})
+    except Exception:  # noqa: BLE001 — the audit must not block the operator
+        pass
+    finally:
+        if db is not None:
+            await db.close()
 
 
 # --- organizer: dirs, marks, moves ------------------------------------------

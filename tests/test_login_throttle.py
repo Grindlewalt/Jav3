@@ -164,7 +164,7 @@ async def test_a_correct_login_is_never_delayed_by_someone_elses_failures():
     """
     import ast
     import inspect
-    tree = ast.parse(inspect.getsource(auth.login).lstrip())
+    tree = ast.parse(inspect.getsource(auth.check_password_login).lstrip())
     sleeps = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
               and getattr(n.func, "attr", "") == "sleep"]
     assert sleeps, "the throttle's sleep has gone missing"

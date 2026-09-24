@@ -35,7 +35,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .auth import require_same_origin, require_user
+from .auth import require_user
 from .config import has_state, settings
 from .statemigrate import integrity_ok, service_busy, snapshot_db
 
@@ -402,7 +402,7 @@ async def get_config():
     return public_config(load_config())
 
 
-@router.put("/config", dependencies=[Depends(require_same_origin)])
+@router.put("/config")
 async def put_config(body: BackupConfig):
     cfg = load_config()
     for k, v in body.model_dump(exclude_none=True).items():
@@ -418,7 +418,7 @@ async def put_config(body: BackupConfig):
     return public_config(cfg)
 
 
-@router.post("/run", dependencies=[Depends(require_same_origin)])
+@router.post("/run")
 async def post_run():
     """Start a backup in the background; poll /status for the result."""
     global _task
