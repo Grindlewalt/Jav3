@@ -1,5 +1,5 @@
 """Admin CLI:
-  python -m backend.cli create-user <username> [password]
+  python -m backend.cli create-user <username> [password]  # omit it: hidden prompt
   python -m backend.cli guest-shell [project-slug]   # drop into the sandbox guest
   python -m backend.cli services-check               # probe the companion services
   python -m backend.cli paths [name]                 # resolved state paths
@@ -140,10 +140,21 @@ def services_check() -> None:
         print(f"  {'ok  ' if r['reachable'] else 'DOWN'}  {r['service']:<14} {r['url']}")
 
 
+def _prompt_password() -> str:
+    pw = getpass.getpass("password: ")
+    if not pw:
+        sys.exit("empty password refused")
+    if getpass.getpass("again: ") != pw:
+        sys.exit("passwords did not match")
+    return pw
+
+
 def main() -> None:
     if len(sys.argv) >= 3 and sys.argv[1] == "create-user":
         username = sys.argv[2]
-        password = sys.argv[3] if len(sys.argv) > 3 else getpass.getpass("password: ")
+        # argv is kept for scripts, but it lands in shell history and `ps`;
+        # interactively, leave it off and type it at the hidden prompt
+        password = sys.argv[3] if len(sys.argv) > 3 else _prompt_password()
         asyncio.run(create_user(username, password))
     elif len(sys.argv) >= 2 and sys.argv[1] == "guest-shell":
         guest_shell(sys.argv[2] if len(sys.argv) > 2 else None)

@@ -496,12 +496,22 @@ pull_state() {
   # read or a missing -wal and the copy opens corrupt. .backup is consistent
   # even against a running Jarvis. Plain python3: a state dir has no venv.
   step "  snapshotting the source database"
-  ssh "$host" "cd '$root' && python3 - <<'PY'
+  # The snapshot holds every conversation and the users' bcrypt hashes: it is
+  # created 0600 (umask 077) and removed on ANY exit from here on, success or
+  # not — a failed migration must not leave a world-readable copy behind.
+  local cleanup
+  cleanup="rm -f '$root/data/jarvis.migrate.db'"
+  # expanded now: the EXIT trap may fire after this function's locals are gone
+  trap "ssh $(printf %q "$host") $(printf %q "$cleanup") >/dev/null 2>&1 || true" EXIT
+  ssh "$host" "cd '$root' && umask 077 && python3 - <<'PY'
 import sqlite3, os
 src = 'data/jarvis.db'
 dst = 'data/jarvis.migrate.db'
+if os.path.exists(dst):
+    os.remove(dst)
 con = sqlite3.connect(src)
 out = sqlite3.connect(dst)
+os.chmod(dst, 0o600)
 with out:
     con.backup(out)
 out.close(); con.close()
@@ -528,21 +538,25 @@ PY" || die "could not snapshot the source database"
       warn "  $d not present on the source — skipped"
     fi
   done
-  rsync -a "$host:$root/data/jarvis.migrate.db" "$STATE_DIR/data/jarvis.db"
+  # Secret-bearing files land 0600 from the first byte (--chmod), not with
+  # the source's mode until a chmod catches up.
+  local private=(--chmod=D0700,F0600)
+  rsync -a "${private[@]}" "$host:$root/data/jarvis.migrate.db" "$STATE_DIR/data/jarvis.db"
   # The JWT secret comes too, or every existing login token is invalidated.
-  rsync -a "$host:$root/data/jwt_secret" "$STATE_DIR/data/jwt_secret" 2>/dev/null \
+  rsync -a "${private[@]}" "$host:$root/data/jwt_secret" "$STATE_DIR/data/jwt_secret" 2>/dev/null \
     || warn "no data/jwt_secret on the source (existing sessions will need a re-login)"
   mkdir -p "$HOME/.config/jarvis"
-  rsync -a "$host:.config/jarvis/env" "$HOME/.config/jarvis/env" 2>/dev/null \
+  chmod 700 "$HOME/.config/jarvis"
+  rsync -a "${private[@]}" "$host:.config/jarvis/env" "$HOME/.config/jarvis/env" 2>/dev/null \
     || warn "no ~/.config/jarvis/env on the source — you will need to set the API key"
-  rsync -a "$host:.config/jarvis/secrets.json" "$HOME/.config/jarvis/secrets.json" 2>/dev/null \
+  rsync -a "${private[@]}" "$host:.config/jarvis/secrets.json" "$HOME/.config/jarvis/secrets.json" 2>/dev/null \
     || true
-  chmod 600 "$HOME/.config/jarvis/env" "$HOME/.config/jarvis/secrets.json" 2>/dev/null || true
   # The source's env may pin ITS state dir; this box's is $STATE_DIR.
   if grep -q '^JARVIS_STATE_DIR=' "$HOME/.config/jarvis/env" 2>/dev/null; then
     sed -i "s#^JARVIS_STATE_DIR=.*#JARVIS_STATE_DIR=$STATE_DIR#" "$HOME/.config/jarvis/env"
   fi
   ssh "$host" "rm -f '$root/data/jarvis.migrate.db'" || true
+  trap - EXIT
 
   step "  verifying the copy"
   python3 - "$STATE_DIR/data/jarvis.db" <<'PY'
@@ -572,7 +586,14 @@ user_phase() {
   if [ "$BUILD_FRONTEND" = 1 ]; then
     step "frontend build"
     if have npm; then
-      ( cd frontend && npm install --no-fund --no-audit --silent && npm run build )
+      # a lockfile means reproducible, integrity-checked installs: npm ci
+      # installs exactly what it pins (and fails on drift) instead of
+      # resolving fresh versions on every install
+      if [ -f frontend/package-lock.json ]; then
+        ( cd frontend && npm ci --no-fund --no-audit --silent && npm run build )
+      else
+        ( cd frontend && npm install --no-fund --no-audit --silent && npm run build )
+      fi
       ok "frontend built to frontend/dist"
     else
       warn "npm not installed — skipping (the API will run, the GUI will 404)"
@@ -721,7 +742,7 @@ user_phase
 
 printf '\n%sinstalled.%s\n' "$BOLD" "$OFF"
 printf '  state dir:            %s\n' "$(cd "$REPO_DIR" && .venv/bin/python -m backend.cli paths state_dir 2>/dev/null || echo "$STATE_DIR")"
-printf '  create a login user:  %s/.venv/bin/python -m backend.cli create-user <name>\n' "$REPO_DIR"
+printf '  create a login user:  %s/.venv/bin/python -m backend.cli create-user <name>   (prompts for the password)\n' "$REPO_DIR"
 printf '  backups (rclone):     set a remote via /api/backup/config, or JARVIS_BACKUP_REMOTE in ~/.config/jarvis/env\n'
 printf '  start:                systemctl --user restart jarvis\n'
 printf '  logs:                 journalctl --user -u jarvis -f\n'

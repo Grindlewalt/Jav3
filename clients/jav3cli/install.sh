@@ -7,8 +7,14 @@
 # ~/.local/share/jav3 and puts a `jav3` launcher in ~/.local/bin (override with
 # JAV3_BIN). httpx comes from the system python if it already has it, else from
 # a private venv — never `pip install` into the system interpreter.
-# Everything runs inside main(), so a download cut short executes nothing.
+# Everything runs inside main(), and the call is wrapped in `{ ...; }` so a
+# download cut short anywhere — even inside the last line — is a syntax error
+# that executes nothing.
 set -eu
+
+# Same constraint as the server's requirements.txt; the upper bound keeps an
+# incompatible major release from landing on a fresh install unannounced.
+HTTPX_SPEC='httpx>=0.27,<1'
 
 main() {
   BASE="@@BASE@@"
@@ -34,7 +40,7 @@ main() {
         echo "package manager (python3-httpx), then re-run this installer" >&2
         exit 1; }
     fi
-    "$share/venv/bin/python" -m pip install --quiet --disable-pip-version-check httpx
+    "$share/venv/bin/python" -m pip install --quiet --disable-pip-version-check "$HTTPX_SPEC"
     py="$share/venv/bin/python"
   fi
 
@@ -49,4 +55,4 @@ EOF
   echo "next: jav3 login   (paste the line from Settings → Add computer)"
 }
 
-main "$@"
+{ main "$@"; exit; }

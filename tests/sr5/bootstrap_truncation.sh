@@ -1,8 +1,10 @@
 #!/bin/sh
 # SR5: feed every byte-prefix of scripts/bootstrap.sh to `sh` (as a cut-short
 # `curl | sh` would) with git stubbed, and report which prefixes ran anything.
-# Expected: only the complete file, plus prefixes ending in the bare word
-# `main` (args dropped: `| sh -s -- --no-image --yes` runs as a plain install).
+# Originally a bare trailing `main` meant a prefix ending in that word ran
+# install.sh with its arguments dropped. Fixed: the call is `{ main "$@"; exit; }`,
+# so only the complete script (with or without its final newline) runs.
+# Exits 1 if any TRUNCATED prefix ran install.sh.
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 src="$here/scripts/bootstrap.sh"
@@ -18,7 +20,9 @@ printf '#!/bin/sh\necho "install.sh ran: [$*]" >> "%s/ran.log"\n' "$SR5_WORK" > 
 EOF
 chmod +x "$work/bin/git"
 size=$(wc -c < "$src")
+complete=$((size - 1))          # the whole script minus its trailing newline
 ran=0
+truncated=0
 i=${SR5_FROM:-1}
 while [ "$i" -le "$size" ]; do
   rm -rf "$work/home" "$work/ran.log"; mkdir -p "$work/home"
@@ -27,9 +31,11 @@ while [ "$i" -le "$size" ]; do
     >"$work/out" 2>&1
   if [ -s "$work/ran.log" ]; then
     ran=$((ran + 1))
+    [ "$i" -lt "$complete" ] && truncated=$((truncated + 1))
     printf 'prefix %d/%d ran: %s | tail=%s\n' "$i" "$size" "$(cat "$work/ran.log")" \
       "$(head -c "$i" "$src" | tail -c 12 | tr '\n' '~')"
   fi
   i=$((i + 1))
 done
-echo "prefixes that executed install.sh: $ran of $size"
+echo "prefixes that executed install.sh: $ran of $size (truncated ones: $truncated)"
+[ "$truncated" -eq 0 ]

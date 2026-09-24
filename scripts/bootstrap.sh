@@ -15,7 +15,10 @@
 # command when it is still owed. If git itself is missing this script installs
 # it (as root, or through sudo, which asks for a password on the terminal).
 #
-# Everything is inside main(), so a download cut short part-way runs nothing.
+# Everything is inside main(), and the call is wrapped in `{ ...; }`: a
+# download cut short anywhere — including part-way through that last line,
+# where a bare `main` would still have run with its arguments dropped — is a
+# syntax error that runs nothing (tests/sr5/bootstrap_truncation.sh).
 set -eu
 
 main() {
@@ -73,4 +76,4 @@ main() {
   exec bash "$dir/scripts/install.sh" "$@" </dev/null
 }
 
-main "$@"
+{ main "$@"; exit; }
