@@ -15,7 +15,7 @@ import { useAsk } from '../ask.jsx'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
-  chat: { label: 'Jarvis chat', w: 440, h: 520 },
+  chat: { label: 'Chat — Jarvis or an agent', w: 440, h: 520 },
   journal: { label: 'Journal — project.md', w: 460, h: 420 },
   editor: { label: 'Editor — text & markdown', w: 520, h: 440 },
   renderer: { label: 'Renderer — html / pdf / images', w: 520, h: 440 },
@@ -1032,6 +1032,7 @@ function AgentPanel({ slug, state, setState }) {
   const [log, setLog] = useState([])
   const [busy, setBusy] = useState(false)
   const [peakAsk, setPeakAsk] = useState(null)   // in-page; iOS eats confirm()
+  const [runId, setRunId] = useState(null)       // the in-flight run, for Stop
   const bottomRef = useRef(null)
   const unwatch = useRef(null)
   const which = state.agent || ''
@@ -1054,6 +1055,7 @@ function AgentPanel({ slug, state, setState }) {
       await chatStream(
         { task, confirm_peak: confirmPeak, project: slug }, (ev) => {
           if (ev.type === 'start') {
+            setRunId(ev.conversation_id)
             unwatch.current?.()
             unwatch.current = watchRun(ev.conversation_id)
           }
@@ -1074,7 +1076,15 @@ function AgentPanel({ slug, state, setState }) {
         setPeakAsk(true)
       } else setLog((l) => [...l, { role: 'err', text: err.detail || String(err) }])
     }
+    setRunId(null)
     setBusy(false)
+  }
+
+  // cancels the run server-side; its final "[Request interrupted]" event
+  // arrives on the stream above and settles the log the normal way
+  async function stopRun() {
+    if (!runId) return
+    try { await api(`/api/agents/runs/${runId}/stop`, { method: 'POST' }) } catch { /* already done */ }
   }
 
   return (
@@ -1112,7 +1122,10 @@ function AgentPanel({ slug, state, setState }) {
         <textarea className="grow" rows={2} value={task} placeholder="task for the agent…"
                   onChange={(e) => setTask(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); run() } }} />
-        <button type="submit" disabled={busy || !which}>{busy ? '…' : 'Run'}</button>
+        {busy && runId
+          ? <button type="button" className="ghost danger" title="stop this run"
+                    onClick={stopRun}>⏹</button>
+          : <button type="submit" disabled={busy || !which}>{busy ? '…' : 'Run'}</button>}
       </form>
     </div>
   )
