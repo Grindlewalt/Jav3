@@ -20,8 +20,9 @@ import { badge } from './format.js'
 // ---- icons ----
 // One glyph per destination — 24x24, 1.7 stroke, round caps, currentColor.
 // The nav lives in two places and the icons FLY between them (the FLIP in
-// App.jsx), so every placement must draw the same mark.
-const PATHS = {
+// App.jsx), so every placement must draw the same mark. ToolActivity borrows
+// these for its activity rows rather than drawing a second set.
+export const PATHS = {
   chat: <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4L3 21l1.2-3.6A8.4 8.4 0 1 1 21 11.5Z" />,
   projects: <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5a1.5
                       1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5Z" />,

@@ -263,8 +263,13 @@ nav a, .rail-links > a {
   border-radius: 8px; transition: color 0.15s, background 0.15s;
   white-space: nowrap; display: inline-flex; align-items: center; gap: 9px;
 }
-nav a:hover, .rail-links > a:hover { color: var(--text); background: var(--panel); }
+/* hover is half the active wash, and active also lights its glyph in the
+   accent: hover on --panel read BRIGHTER than active in the light theme (and
+   near-white), so the two states were indistinguishable at a glance */
+nav a:hover, .rail-links > a:hover { color: var(--text);
+  background: color-mix(in srgb, var(--panel-2) 50%, transparent); }
 nav a.active, .rail-links > a.active { color: var(--text); background: var(--panel-2); }
+nav a.active .nav-ico, .rail-links > a.active .nav-ico { color: var(--accent); }
 /* the icon is the piece that flies between the bar and the rail, so it is its
    own box in both placements and never inherits a layout that would resize it */
 .nav-ico { display: flex; align-items: center; justify-content: center;
@@ -309,6 +314,10 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
    otherwise push it off-centre in the column */
 .side-nav .vm-wrap .vm-word { display: none; }
 .side-nav .vm-wrap .run-dot { margin-right: 0; }
+/* railed, the dot is the whole chip, so the mark rides the dot's shoulder
+   instead of the (now empty) corner of a 38px cell */
+.side-nav .vm-wrap .nav-chip.has-badge { padding-right: 0; }
+.side-nav .vm-stale-badge { right: auto; left: 23px; top: 8px; }
 /* ...and it RISES: the chip sits at the foot of the rail, so a drop anchored
    to its top ran past the bottom of the viewport and cut off the nuke and
    rebuild rows — the two things in it worth reaching. */
@@ -328,12 +337,18 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
   background: none; color: var(--dim); font-weight: 400;
   padding: 8px 10px; border-radius: 8px; display: flex; align-items: center;
 }
-.nav-more:hover:not(:disabled), .nav-more[aria-expanded="true"] {
-  color: var(--text); background: var(--panel); filter: none; transform: none;
-}
+.nav-more:hover:not(:disabled) { color: var(--text);
+  background: color-mix(in srgb, var(--panel-2) 50%, transparent);
+  filter: none; transform: none; }
+/* open = the active wash, on the warm palette (--panel was a near-white slab
+   in the light theme) */
+.nav-more[aria-expanded="true"], .nav-more[aria-expanded="true"]:hover:not(:disabled) {
+  color: var(--text); background: var(--panel-2); }
 .nav-menu .menu-item { font-size: var(--fs-base); color: var(--dim); }
-.nav-menu .menu-item:hover:not(:disabled) { color: var(--text); }
+.nav-menu .menu-item:hover:not(:disabled) { color: var(--text);
+  background: color-mix(in srgb, var(--panel-2) 50%, transparent); }
 .nav-menu .menu-item.active { color: var(--text); background: var(--panel-2); }
+.nav-menu .menu-item.active .nav-ico { color: var(--accent); }
 .nav-menu .nav-label { flex: 1; min-width: 0; }
 .nav-menu .nav-count { margin-left: 0; }
 
@@ -403,6 +418,13 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
   background: var(--dim);
 }
 .nav-chip .run-dot.running { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+/* the stale-image mark is a notification dot, not a count: 13px, amber, in
+   the chip's top-right corner. The chip grows a right inset to hold it — as
+   a 17px count badge pinned to right:0 it sat on top of the "M" of "VM". */
+.nav-chip.has-badge { padding-right: 16px; }
+.vm-stale-badge { background: var(--amber); top: 8px; right: 1px;
+  min-width: 13px; height: 13px; padding: 0; border-radius: 50%;
+  font-size: 9px; line-height: 10px; }
 .vm-drop { width: 230px; }
 .vm-drop .notif-item { cursor: default; }
 .vm-nuke-row { padding: 6px 4px 2px; border-top: 1px solid var(--border);
@@ -465,8 +487,7 @@ input:focus, textarea:focus { border-color: var(--accent);
 .grow { flex: 1; }
 .center { display: flex; align-items: center; justify-content: center; height: 80vh; }
 .center-pad { padding: 40px; text-align: center; }
-.center-link { text-align: center; margin: 0; }
-.center-link a { color: var(--accent); }
+.not-found a { color: var(--accent); }
 /* A lazily-loaded route's chunk, in flight. It paints nothing on purpose: the
    chunks are prefetched on idle, so this is on screen for a few tens of
    milliseconds if ever, and a spinner that appears and vanishes that fast
@@ -792,11 +813,15 @@ input:focus, textarea:focus { border-color: var(--accent);
 .convo-list li {
   position: relative; display: flex; align-items: center; gap: 6px;
   padding: 9px 12px; border-radius: 10px; cursor: pointer;
-  font-size: 14px; color: var(--text);
+  font-size: 14px; color: var(--text); flex-shrink: 0;
   transition: background 0.15s, color 0.15s;
 }
+/* every row is two lines tall, caption or not — a row without a project
+   line was ~20px shorter and the list read as ragged. min-height is the two
+   lines (title + gap + caption) and a lone title centres in it. */
 .convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
-  gap: 2px; }
+  justify-content: center; gap: 2px;
+  min-height: calc(14px * 1.55 + 2px + 11px * 1.55); }
 /* the list is body copy, not chrome: title in the text colour at a normal
    weight, the slug as a quiet lowercase caption rather than monospace, which
    read as a code fragment sitting in a nav */
@@ -1703,8 +1728,13 @@ kbd {
 @keyframes spin { to { transform: rotate(360deg); } }
 .tool-ok { color: var(--green); font-size: 11px; }
 .tool-fail { color: var(--red); font-size: 11px; }
+.tool-glyph { flex-shrink: 0; opacity: 0.85; }
 .chev { display: inline-block; transition: transform 0.18s; font-size: 10px; }
 .chev.open { transform: rotate(90deg); }
+/* the disclosure "›" at the app's usual size — at the shared 10px it was a
+   speck beside a 12.5px row */
+.tool-row-head .chev, .steps-pill .chev { font-size: 15px; line-height: 1;
+  transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1); }
 .steps-pill {
   display: inline-flex; align-items: center; gap: 7px; padding: 4px 13px;
   margin-bottom: 8px; border: 1px solid var(--border); border-radius: 20px;
@@ -1738,7 +1768,6 @@ kbd {
 
 /* ---- taint / trust tags (Memory notes) ---- */
 .tag.untrusted { color: var(--amber); border-color: var(--amber); }
-.vm-stale-badge { background: var(--amber); }
 
 /* ---- Network page (live egress) ---- */
 /* the Network tab's body; the Review layout around it owns the insets */
@@ -1883,16 +1912,18 @@ kbd {
     color: var(--text); filter: none; transform: none;
     background: color-mix(in srgb, var(--panel-2) 50%, transparent); }
   .nav-drawer a.active { color: var(--text); background: var(--panel-2); }
+  .nav-drawer a.active .nav-ico { color: var(--accent); }
+  /* the drawer holds the theme switch while it is the navigation */
+  nav .nav-status .theme-chip { display: none; }
   /* the drawer carries the same glyphs as the bar now — it was text-only, the
      one placement where a destination looked like a different thing */
   .nav-drawer .nav-label { flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nav-drawer .nav-count { margin-left: 0; flex-shrink: 0; }
   .drawer-foot {
-    margin-top: 10px; padding-top: 12px; display: flex; flex-direction: column;
-    gap: 12px; border-top: 1px solid var(--border);
+    margin-top: 10px; padding-top: 10px; display: flex; flex-direction: column;
+    gap: 2px; border-top: 1px solid var(--border);
   }
-  .drawer-foot .ghost { min-height: var(--tap); }
   /* the drawer scrolls itself; the page behind it must not */
   body.nav-locked { overflow: hidden; }
 
@@ -1917,17 +1948,17 @@ kbd {
 
   /* ---- pages: tighter gutters; bottom + sides clear the home indicator
      and a landscape notch ---- */
-  .page { padding: 16px max(14px, env(safe-area-inset-right))
-                   calc(16px + var(--sab)) max(14px, env(safe-area-inset-left)); }
+  .page { padding: 16px max(16px, env(safe-area-inset-right))
+                   calc(16px + var(--sab)) max(16px, env(safe-area-inset-left)); }
   /* the full-height shell's header is a bar, so only its sides tighten — its
      height is the one thing a phone can least afford to grow. It wraps, so a
      tab strip drops under the title instead of squeezing it. */
   .page-shell > .page-head { flex-wrap: wrap; row-gap: var(--sp-4);
-    padding: var(--sp-4) max(var(--sp-6), env(safe-area-inset-right))
-             var(--sp-4) max(var(--sp-6), env(safe-area-inset-left)); }
-  .page-shell > .page-lede { padding: var(--sp-3) var(--sp-6) 0; }
-  .review-body { padding: var(--sp-6) max(var(--sp-6), env(safe-area-inset-right))
-    calc(var(--sp-6) + var(--sab)) max(var(--sp-6), env(safe-area-inset-left)); }
+    padding: var(--sp-4) max(var(--sp-8), env(safe-area-inset-right))
+             var(--sp-4) max(var(--sp-8), env(safe-area-inset-left)); }
+  .page-shell > .page-lede { padding: var(--sp-3) var(--sp-8) 0; }
+  .review-body { padding: var(--sp-6) max(var(--sp-8), env(safe-area-inset-right))
+    calc(var(--sp-6) + var(--sab)) max(var(--sp-8), env(safe-area-inset-left)); }
 
   /* ---- chat: the conversation list is an overlay, not a permanent block.
      It used to sit stacked above the thread at 34vh, so a third of the
@@ -1996,7 +2027,7 @@ kbd {
     text-overflow: ellipsis;
   }
   .proj-menu button { font-size: 14px; }
-  .messages { padding: 0 12px; }
+  .messages { padding: 0 16px; }
   .thread { padding: 16px 0 calc(96px + var(--sab)); }
   .msg { margin-bottom: 16px; }
   .msg.user pre { max-width: 88%; }
@@ -2135,8 +2166,6 @@ kbd {
 /* very small phones */
 @media (max-width: 400px) {
   nav .brand { font-size: 16px; }
-  .page { padding: 14px max(10px, env(safe-area-inset-right))
-                   calc(14px + var(--sab)) max(10px, env(safe-area-inset-left)); }
   .msg.user pre { max-width: 94%; }
 }
 

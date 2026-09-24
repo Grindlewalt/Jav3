@@ -75,7 +75,7 @@ function VoiceCorner() {
 function ThemeToggle({ theme, onToggle }) {
   const light = theme === 'light'
   return (
-    <button className="nav-chip" onClick={onToggle}
+    <button className="nav-chip theme-chip" onClick={onToggle}
             aria-label={light ? 'switch to dark theme' : 'switch to light theme'}
             title={light ? 'dark mode' : 'light mode'}>
       {light ? <MoonIcon /> : <SunIcon />}
@@ -164,7 +164,8 @@ function VmStatus() {
     ? `${s.image_age_days}d old` : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
   return (
     <div className="notif-wrap vm-wrap" ref={wrapRef}>
-      <button className="nav-chip" onClick={() => setOpen((o) => !o)}
+      <button className={`nav-chip${s.image_stale ? ' has-badge' : ''}`}
+              onClick={() => setOpen((o) => !o)}
               aria-expanded={open}
               aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
               title="guest VM status">
@@ -487,9 +488,13 @@ export default function App() {
                 centred white slab; the bar's own toggle hides while the
                 drawer is the navigation */}
             <div className="drawer-foot">
-              <button className="ghost" tabIndex={menuOpen ? 0 : -1}
+              <button type="button" className="drawer-row" tabIndex={menuOpen ? 0 : -1}
                       onClick={toggleTheme}>
-                {theme === 'light' ? 'Dark mode' : 'Light mode'}</button>
+                <span className="nav-ico" aria-hidden="true">
+                  {theme === 'light' ? <MoonIcon /> : <SunIcon />}</span>
+                <span className="nav-label">
+                  {theme === 'light' ? 'Dark mode' : 'Light mode'}</span>
+              </button>
             </div>
           </div>
         </>

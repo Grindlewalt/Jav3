@@ -9,11 +9,13 @@ import EmptyState from '../components/EmptyState.jsx'
 export default function NotFound() {
   const { pathname } = useLocation()
   return (
-    <Page title="Not found">
-      <EmptyState pad hint="Pick a destination from the menu, or go back to the chat.">
+    // one left edge: the heading, the line under it and the link share the
+    // column's inset — a centred body under a left heading read as two layouts
+    <Page title="Not found" className="not-found">
+      <EmptyState as="div" hint="Pick a destination from the menu, or go back to the chat.">
         Nothing lives at <code>{pathname}</code>.
       </EmptyState>
-      <p className="center-link"><Link to="/">Back to Chat</Link></p>
+      <p><Link to="/">Back to Chat</Link></p>
     </Page>
   )
 }
