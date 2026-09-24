@@ -1,189 +1,212 @@
-"""Device-authorization enrollment: authorize a new device/CLI against Jarvis's
-API by confirming it in a logged-in browser, instead of pasting a raw key into a
-terminal. Same RFC 8628 shape as the computer-use pairing (`backend/pairing.py`),
-but generic: on the operator's confirm, the approved poll mints a per-device,
-revocable API token (`backend/devicetokens.py`).
+"""Devices: authorize a computer's CLI against the API with a pasted code.
 
-Two routers:
-- `router`  (operator side)  — behind `require_user`, under /api/devices.
-- `pair_router` (device side) — NO auth (the device has no credential yet),
-  throttled; needs a Cloudflare Access Bypass policy on /api/devices/pair/*,
-  exactly like /api/computeruse/pair/* (see pairing.py's module docstring).
+Settings -> Add computer (an authenticated browser session) mints a one-time
+code and shows `address=<host:port> code=<code>`; `jav3 login` on the other
+machine posts the code to the address and receives a revocable device token
+(`backend/devicetokens.py`, stored sha256). The session that minted the code is
+the authorization, so there is no second approve step. Ticket lifecycle and the
+threat notes live in `backend/pastelogin.py`.
+
+Routers:
+- `router`       operator side: cookie session + same-origin, /api/devices.
+- `pair_router`  device side: redeem (NO auth — the device has no credential
+                 yet; throttled), whoami and revoke-self (device bearer).
+- `cli_router`   the CLI and its installer, as unauthenticated static files.
 """
-import time
+import ipaddress
+import re
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
 
-from . import devicetokens, pairing, security
+from . import devicetokens, lan, pastelogin, security
 from .auth import require_actor, require_same_origin, require_user
+from .config import settings
 from .db import get_db
-
-KIND = "device"
 
 router = APIRouter(prefix="/api/devices", tags=["devices"],
                    dependencies=[Depends(require_user), Depends(require_same_origin)])
 pair_router = APIRouter(prefix="/api/devices", tags=["devices"])
+cli_router = APIRouter(prefix="/cli", tags=["devices"])
+
+CLI_DIR = Path(__file__).resolve().parent.parent / "clients" / "jav3cli"
+_NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+_BAD_CODE = ("invalid or expired login code — generate a new one in "
+             "Settings → Add computer")
+
+# A Host header is a bracketed IPv6 literal or a DNS name / IPv4, plus an
+# optional port. Anything else (spaces, '=', quotes, shell metacharacters) is
+# refused rather than echoed into the login string or a shell script.
+_HOST_RE = re.compile(
+    r"(\[[0-9a-f:.]{2,45}\]|[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)(?::(\d{1,5}))?")
 
 
 def _peer(request: Request) -> str:
-    for h in ("cf-connecting-ip", "x-forwarded-for"):
-        v = request.headers.get(h)
-        if v:
-            return v.split(",")[0].strip()[:64]
-    return getattr(request.client, "host", "?") or "?"
+    """The TCP peer. Deliberately NOT X-Forwarded-For / CF-Connecting-IP: with
+    nothing trusted in front of a LAN server those are attacker-chosen, and a
+    forged value per request would be a fresh per-peer throttle budget."""
+    return (getattr(request.client, "host", None) or "?")[:64]
 
 
 def _throttled(request: Request) -> str:
     peer = _peer(request)
     try:
-        pairing.throttle(peer, kind="device")
-    except pairing.TooMany as e:
+        pastelogin.throttle(peer)
+    except pastelogin.TooMany as e:
         raise HTTPException(status_code=e.status, detail=str(e))
     return peer
 
 
-def _ticket_view(t: pairing.Ticket) -> dict:
-    d = t.public()
-    d["confirm_path"] = f"/pair/{t.code}"
-    return d
-
-
-# --- operator side (require_user) ---------------------------------------------
-
-class EnrollBody(BaseModel):
-    name: str = ""
-
-
-@router.post("/enroll")
-async def enroll_create(body: EnrollBody):
-    """A fresh enrollment code for a device the operator is about to authorize."""
-    return _ticket_view(pairing.create(body.name, kind=KIND))
-
-
-@router.get("/enroll")
-async def enroll_list():
-    return {"tickets": [_ticket_view(t) for t in pairing.live(kind=KIND)],
-            "ttl_seconds": pairing.TTL_SECONDS}
-
-
-@router.get("/enroll/{code}")
-async def enroll_status(code: str):
-    t = pairing.get(code, kind=KIND)
-    if t is None:
-        raise HTTPException(status_code=404, detail=pairing.Unknown().args[0])
-    return _ticket_view(t)
-
-
-@router.post("/enroll/{code}/approve")
-async def enroll_approve(code: str, request: Request,
-                         user: dict = Depends(require_user)):
-    """The operator's yes. The moment a device token is committed to being
-    minted, so it is the moment that gets recorded."""
+def _is_loopback(host: str) -> bool:
+    h = host.strip("[]")
+    if h in ("localhost", "0.0.0.0") or h.endswith(".localhost"):
+        return True
     try:
-        t = pairing.approve(code, by=user["username"], kind=KIND)
-    except pairing.PairingError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
-    db = await get_db()
-    try:
-        await security.raise_event(
-            db, kind="device_enrolled", severity="info",
-            summary=f"{user['username']} authorized device "
-                    f"'{t.claim.get('name') or t.name or '?'}' "
-                    f"({t.claim.get('hostname') or '?'}, "
-                    f"{t.claim.get('platform') or '?'}) with code {t.code}",
-            detail={"code": t.code, "claim": t.claim, "contested": t.contested,
-                    "by": user["username"], "peer": _peer(request)})
-    finally:
-        await db.close()
-    return _ticket_view(t)
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 
-@router.post("/enroll/{code}/deny")
-async def enroll_deny(code: str):
-    try:
-        t = pairing.deny(code, kind=KIND)
-    except pairing.PairingError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
-    return _ticket_view(t)
+def _host_header(request: Request) -> tuple[str, str] | None:
+    """(host, host[:port]) from a well-formed Host header, else None."""
+    raw = (request.headers.get("host") or "").strip().lower()
+    m = _HOST_RE.fullmatch(raw)
+    if not m or (m.group(2) and not 0 < int(m.group(2)) < 65536):
+        return None
+    return m.group(1), raw
+
+
+def _scheme(request: Request) -> str:
+    return "https" if (request.url.scheme == "https" or settings.cookie_secure) else "http"
+
+
+def _address(request: Request) -> str:
+    """Where the other computer should post the code.
+
+    The Host the operator's browser used is the one address proven to reach
+    this server, so it wins — unless it is loopback (browsing on the box itself,
+    or through an SSH tunnel), which another machine cannot use. Then the mDNS
+    name if it is being advertised, else the first LAN IP, on the LAN port.
+    http is left implicit; https is spelled out so the CLI never downgrades.
+    """
+    hh = _host_header(request)
+    if hh and not _is_loopback(hh[0]):
+        addr = hh[1]
+    else:
+        ips = lan.lan_ips()
+        host = lan.advertised_hostname() or (ips[0] if ips else "") or "localhost"
+        addr = f"{host}:{settings.lan_port}"
+    return addr if _scheme(request) == "http" else f"https://{addr}"
+
+
+# --- operator side (cookie session) -------------------------------------------
+
+class CodeBody(BaseModel):
+    name: str = Field("", max_length=64)
+
+
+@router.post("/login-code")
+async def mint_login_code(body: CodeBody, request: Request, response: Response,
+                          user: dict = Depends(require_user)):
+    """A pre-approved, single-use login code for `jav3 login`. The raw code is
+    in this response and nowhere else on the server."""
+    code, t = pastelogin.mint(body.name, by=user["username"])
+    address = _address(request)
+    response.headers.update(_NO_STORE)
+    return {"login": f"address={address} code={code}", "address": address,
+            "code": code, "name": t.name, "expires_at": t.expires,
+            "ttl_seconds": pastelogin.TTL_SECONDS}
 
 
 @router.get("")
 async def list_devices():
-    """Enrolled devices with live tokens (never the token itself)."""
+    """Computers with live tokens (never the token itself)."""
     return {"devices": await devicetokens.list_tokens()}
 
 
-@router.delete("/{token_id}")
+@router.delete("/{token_id:int}")
 async def revoke_device(token_id: int):
     if not await devicetokens.revoke(token_id):
         raise HTTPException(status_code=404, detail="no such device token")
     return {"ok": True}
 
 
-# --- device side (unauthenticated, throttled) ---------------------------------
+# --- device side ----------------------------------------------------------------
 
-class ClaimBody(BaseModel):
-    code: str
-    name: str = ""
-    hostname: str = ""
-    platform: str = ""
-
-
-class PollBody(BaseModel):
-    code: str
-    device_secret: str
+class RedeemBody(BaseModel):
+    code: str = Field(..., max_length=256)
+    name: str = Field("", max_length=256)
+    hostname: str = Field("", max_length=256)
+    platform: str = Field("", max_length=256)
 
 
-@pair_router.post("/pair/claim")
-async def pair_claim(body: ClaimBody, request: Request):
-    peer = _throttled(request)
-    try:
-        t = pairing.claim(body.code, name=body.name, hostname=body.hostname,
-                          platform=body.platform, peer=peer, kind=KIND,
-                          agent=request.headers.get("user-agent", ""))
-    except pairing.Unknown as e:
-        pairing.note_wrong_code(peer, kind="device")
-        raise HTTPException(status_code=e.status, detail=str(e))
-    except pairing.PairingError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
-    return {"ok": True, "code": t.code, "name": t.name,
-            "device_secret": t.device_secret,
-            "confirm_path": f"/pair/{t.code}",
-            "interval": pairing.POLL_INTERVAL,
-            "expires_in": max(0, int(t.expires - time.time()))}
+@pair_router.post("/login")
+async def redeem_login_code(body: RedeemBody, request: Request, response: Response):
+    """Trade a login code for a device token — once.
 
-
-@pair_router.post("/pair/poll")
-async def pair_poll(body: PollBody, request: Request):
-    """Pending, denied, or — once — the minted API token.
-
-    The ticket is spent SYNCHRONOUSLY (release before any await), so two
-    concurrent polls of one approved code cannot both mint a token: release
-    clears the device secret, so the second poll's pairing.poll() raises Unknown
-    (404). Release-before-mint is fail-closed: if minting then fails the code is
-    spent and the device must re-enroll — never a double-mint.
+    Every failure is the same 401 with the same text, whether the code was
+    malformed, never issued, expired or already used. `redeem` is synchronous
+    and pops the ticket, so the spend happens before the first await below.
     """
     peer = _throttled(request)
+    t = pastelogin.redeem(body.code)
+    if t is None:
+        pastelogin.note_wrong(peer)
+        raise HTTPException(status_code=401, detail=_BAD_CODE)
+    name = t.name or body.name.strip()[:64] or body.hostname.strip()[:64] or "cli"
+    raw, tid = await devicetokens.mint(name, hostname=body.hostname,
+                                       platform=body.platform, by=t.by)
+    db = await get_db()
     try:
-        t = pairing.poll(body.code, body.device_secret, kind=KIND)
-    except pairing.Unknown as e:
-        pairing.note_wrong_code(peer, kind="device")
-        raise HTTPException(status_code=e.status, detail=str(e))
-    if t.state != "approved":
-        return {"ok": True, "state": t.state, "interval": pairing.POLL_INTERVAL,
-                "expires_in": max(0, int(t.expires - time.time()))}
-    # capture what the token needs, then spend the ticket with no await in between
-    name, claim, by = t.name, dict(t.claim), t.approved_by
-    pairing.release(t)
-    raw, _tid = await devicetokens.mint(
-        name, hostname=claim.get("hostname", ""),
-        platform=claim.get("platform", ""), by=by)
-    return {"ok": True, "state": "approved", "name": name, "token": raw}
+        await security.raise_event(
+            db, kind="device_enrolled", severity="info",
+            summary=f"computer '{name}' logged in with a code minted by "
+                    f"{t.by or '?'} (from {peer})",
+            detail={"device_id": tid, "name": name,
+                    "hostname": body.hostname[:128], "platform": body.platform[:32],
+                    "peer": peer, "minted_by": t.by, "minted_at": t.created,
+                    "agent": request.headers.get("user-agent", "")[:120]})
+    except Exception:  # noqa: BLE001 — the audit line must not eat the token
+        pass
+    finally:
+        await db.close()
+    response.headers.update(_NO_STORE)
+    return {"ok": True, "token": raw, "device_id": tid, "name": name}
 
 
 @pair_router.get("/whoami")
 async def whoami(actor: dict = Depends(require_actor)):
-    """Echo the authenticated actor — works with either the operator cookie or a
-    device Bearer token, so a freshly paired device can prove its token works."""
+    """Echo the authenticated actor — the operator cookie or a device token."""
     return actor
+
+
+@pair_router.delete("/self")
+async def revoke_self(actor: dict = Depends(require_actor)):
+    """`jav3 logout`: a device revokes its own token. Only ever the presenting
+    token — there is no id parameter to point at another one."""
+    if not actor.get("is_device"):
+        raise HTTPException(status_code=400, detail="only a device token can "
+                            "revoke itself; use Settings → Devices")
+    await devicetokens.revoke(actor["device_id"])
+    return {"ok": True}
+
+
+# --- the CLI, as static files ------------------------------------------------------
+
+@cli_router.get("/jav3")
+async def cli_file():
+    return PlainTextResponse((CLI_DIR / "jav3").read_text(),
+                             media_type="text/x-python")
+
+
+@cli_router.get("/install.sh")
+async def cli_installer(request: Request):
+    """The CLI installer, pointed back at the address it was fetched from."""
+    hh = _host_header(request)
+    if hh is None:
+        raise HTTPException(status_code=400, detail="bad Host header")
+    script = (CLI_DIR / "install.sh").read_text().replace(
+        "@@BASE@@", f"{_scheme(request)}://{hh[1]}")
+    return PlainTextResponse(script, media_type="text/x-shellscript")

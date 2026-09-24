@@ -77,6 +77,7 @@ async def _security_headers(request, call_next):
 app.include_router(auth.router)
 app.include_router(devices_api.router)
 app.include_router(devices_api.pair_router)
+app.include_router(devices_api.cli_router)
 app.include_router(projects.router)
 app.include_router(chat.router)
 app.include_router(memory_api.router)

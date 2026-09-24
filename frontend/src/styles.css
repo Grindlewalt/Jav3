@@ -1928,13 +1928,7 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   font-size: 13px; }
   font-size: 13px; cursor: pointer; }
 
-/* a command with a copy button that copies the STRING, not the rendering */
-.cu-block { position: relative; }
-.cu-block pre {
-  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
-  padding: 12px 62px 12px 14px; margin: 8px 0; overflow-x: auto;
-  font: 12.5px/1.6 ui-monospace, Menlo, monospace; color: var(--text);
-}
+/* a copy button that copies the STRING it is given, not the rendering */
 .copy-btn {
   position: absolute; top: 15px; right: 8px; z-index: 1;
   padding: 3px 10px; font-size: 11.5px; border-radius: 7px;
@@ -2278,7 +2272,15 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 }
 .pair-facts dt { color: var(--dim); }
 .pair-facts dd { margin: 0; }
-.device-enroll { margin: 10px 0 4px; }
+.device-login { margin: 10px 0 4px; }
+.device-login-line { position: relative; }
+.device-login-line code {
+  display: block; margin: 8px 0; padding: 10px 62px 10px 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  font: 12.5px/1.5 ui-monospace, Menlo, monospace; color: var(--text);
+  overflow-wrap: anywhere; user-select: all;
+}
+.device-login-line .copy-btn { top: 8px; }
 .device-list { list-style: none; margin: 12px 0 0; padding: 0; }
 .device-row {
   display: flex; align-items: center; justify-content: space-between;

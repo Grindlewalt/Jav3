@@ -87,6 +87,11 @@ def own_hosts() -> list[str]:
     return _own
 
 
+def advertised_hostname() -> str:
+    """The mDNS name (`<name>.local`) while the advertisement is live, else ''."""
+    return _state["hostname"] if _state["advertised"] else ""
+
+
 def csrf_allowed_hosts() -> list[str]:
     """The explicit csrf_allowed_hosts plus the server's own LAN identity. A
     page served from this box's own name/IP is as same-origin as the Host

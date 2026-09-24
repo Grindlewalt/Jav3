@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""jav3 — a thin terminal client for a Jav3 server.
+
+    jav3 login                 paste the line from Settings -> Add computer
+    jav3 chat [message]        one turn, or a REPL with no message
+    jav3 whoami
+    jav3 logout
+
+Credentials live in $XDG_CONFIG_HOME/jav3/credentials.json (default
+~/.config/jav3), file 0600 in a 0700 directory: {"address", "token"}.
+Needs Python 3.11+ and httpx; nothing else.
+"""
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import platform
+import socket
+import sys
+from pathlib import Path
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover — the installer provides it
+    sys.exit("jav3 needs httpx: pip install httpx (or install your distro's python3-httpx)")
+
+PROMPT = "Paste the line from Settings → Add computer: "
+RELOGIN = "not logged in (token missing, revoked or expired) — run: jav3 login"
+
+
+class CliError(Exception):
+    """A message for the user; main() prints it and exits 1."""
+
+
+# --- credentials --------------------------------------------------------------------
+
+def config_dir() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "jav3"
+
+
+def cred_path() -> Path:
+    return config_dir() / "credentials.json"
+
+
+def save_credentials(address: str, token: str) -> Path:
+    """Write atomically, 0600 from the first byte, in a 0700 directory."""
+    d = config_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
+    path = cred_path()
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, json.dumps({"address": address, "token": token}).encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    return path
+
+
+def load_credentials() -> dict | None:
+    try:
+        data = json.loads(cred_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("token") or not data.get("address"):
+        return None
+    return data
+
+
+def delete_credentials() -> bool:
+    try:
+        cred_path().unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+# --- the pasted line ------------------------------------------------------------------
+
+def parse_login_line(line: str) -> tuple[str, str]:
+    """`address=<host:port> code=<code>` -> (address, code). Order-free,
+    tolerant of surrounding quotes/whitespace; refuses anything else."""
+    fields: dict[str, str] = {}
+    for part in (line or "").strip().strip("'\"`").split():
+        k, sep, v = part.partition("=")
+        if sep and k in ("address", "code") and v:
+            fields[k] = v.strip("'\"`")
+    if "address" not in fields or "code" not in fields:
+        raise CliError("that doesn't look like the login line — expected "
+                       "'address=<host:port> code=<code>' from Settings → Add computer")
+    return fields["address"], fields["code"]
+
+
+def base_url(address: str) -> str:
+    """An address as shown in Settings -> a URL. Bare host:port means http (the
+    LAN default); an explicit scheme is kept as given."""
+    a = address.strip().rstrip("/")
+    if not a:
+        raise CliError("empty server address")
+    if "://" in a:
+        if not a.startswith(("http://", "https://")):
+            raise CliError(f"unsupported scheme in {address!r}")
+        return a
+    return "http://" + a
+
+
+# --- HTTP -------------------------------------------------------------------------------
+
+def _client(base: str, token: str | None = None, timeout: float | None = 30.0) -> httpx.Client:
+    headers = {"User-Agent": "jav3-cli"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    # no redirects: a bearer token is never replayed to wherever a 3xx points
+    return httpx.Client(base_url=base, headers=headers, timeout=timeout,
+                        follow_redirects=False)
+
+
+def _detail(r: httpx.Response) -> str:
+    try:
+        return str(r.json().get("detail") or r.reason_phrase)
+    except (ValueError, AttributeError):
+        return r.reason_phrase or f"HTTP {r.status_code}"
+
+
+def _check(r: httpx.Response) -> httpx.Response:
+    if r.status_code == 401:
+        raise CliError(RELOGIN)
+    if r.status_code >= 400:
+        raise CliError(f"server said {r.status_code}: {_detail(r)}")
+    return r
+
+
+def _session(args) -> tuple[str, str]:
+    creds = load_credentials()
+    if not creds:
+        raise CliError(RELOGIN)
+    return base_url(args.server or creds["address"]), creds["token"]
+
+
+# --- commands ---------------------------------------------------------------------------
+
+def _read_login_line() -> str:
+    """Hidden when interactive (the code is a credential until it is used —
+    keep it out of scrollback and screenshots); a plain line from a pipe."""
+    if sys.stdin.isatty():
+        return getpass.getpass(PROMPT)
+    return sys.stdin.readline()
+
+
+def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
+    line = read()
+    address, code = parse_login_line(line)
+    if args.server:
+        address = args.server
+    base = base_url(address)
+    host = socket.gethostname()
+    with _client(base) as c:
+        try:
+            r = c.post("/api/devices/login", json={
+                "code": code, "name": host, "hostname": host,
+                "platform": platform.system().lower()})
+        except httpx.HTTPError as e:
+            raise CliError(f"could not reach {base}: {e}")
+        if r.status_code in (401, 429):
+            raise CliError(_detail(r))
+        token = _check(r).json()["token"]
+    path = save_credentials(address, token)
+    print(f"logged in to {base} — credentials in {path}", file=out)
+    with _client(base, token) as c:
+        who = _check(c.get("/api/devices/whoami")).json()
+    print(f"you are {who.get('username')}", file=out)
+    return 0
+
+
+def cmd_whoami(args, out=sys.stdout) -> int:
+    base, token = _session(args)
+    with _client(base, token) as c:
+        try:
+            who = _check(c.get("/api/devices/whoami")).json()
+        except httpx.HTTPError as e:
+            raise CliError(f"could not reach {base}: {e}")
+    print(f"{who.get('username')} @ {base}", file=out)
+    return 0
+
+
+def cmd_logout(args, out=sys.stdout) -> int:
+    creds = load_credentials()
+    if creds:
+        base = base_url(args.server or creds["address"])
+        try:
+            with _client(base, creds["token"], timeout=10) as c:
+                c.delete("/api/devices/self")
+        except httpx.HTTPError:
+            print("(server unreachable — revoke this computer in Settings → "
+                  "Devices)", file=out)
+    delete_credentials()
+    print("logged out", file=out)
+    return 0
+
+
+def iter_sse(lines):
+    """SSE `data:` lines -> event dicts. Blank lines separate events; the
+    server sends one JSON object per `data:` line."""
+    buf: list[str] = []
+    for line in lines:
+        if line == "":
+            if buf:
+                yield json.loads("\n".join(buf))
+                buf = []
+        elif line.startswith("data:"):
+            buf.append(line[5:].lstrip(" "))
+    if buf:
+        yield json.loads("\n".join(buf))
+
+
+def _short(v, n: int = 80) -> str:
+    s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+class Renderer:
+    """Turn events into terminal text: answer text as it streams, each tool
+    call as one line. If the final reply differs from what streamed (the
+    server's rules pass can rewrite it), the final version is printed too."""
+
+    def __init__(self, out=sys.stdout):
+        self.out = out
+        self.text = ""
+        self.at_line_start = True
+        self.conversation_id: int | None = None
+        self.error: str | None = None
+
+    def _w(self, s: str) -> None:
+        if s:
+            self.out.write(s)
+            self.out.flush()
+            self.at_line_start = s.endswith("\n")
+
+    def _line(self, s: str) -> None:
+        if not self.at_line_start:
+            self._w("\n")
+        self._w(s + "\n")
+
+    def feed(self, ev: dict) -> bool:
+        """Render one event; True when the turn is over."""
+        t = ev.get("type")
+        if t == "start" and ev.get("conversation_id") is not None:
+            self.conversation_id = ev["conversation_id"]
+        elif t == "token":
+            self.text += ev.get("text", "")
+            self._w(ev.get("text", ""))
+        elif t == "tool":
+            self._line(f"  · {ev.get('name', '?')}({_short(ev.get('args') or {})})")
+        elif t == "tool_result":
+            if ev.get("ok") is False:
+                self._line(f"  ! {ev.get('name', '?')} failed: {_short(ev.get('result', ''))}")
+        elif t == "job":
+            self._line(f"  · job: {ev.get('title', '')}")
+        elif t == "final":
+            if ev.get("conversation_id") is not None:
+                self.conversation_id = ev["conversation_id"]
+            final = ev.get("content") or ""
+            if final.strip() != self.text.strip():
+                if self.text.strip():
+                    self._line("--- revised ---")
+                self._w(final)
+            if not self.at_line_start:
+                self._w("\n")
+            return True
+        elif t == "error":
+            self.error = ev.get("message") or "error"
+            self._line(f"error: {self.error}")
+            return True
+        elif t == "idle":
+            return True
+        return False
+
+
+def run_turn(c: httpx.Client, message: str, conversation_id: int | None,
+             project: str | None, out=sys.stdout, confirm=input) -> int | None:
+    """POST one chat turn and render it. Returns the conversation id."""
+    body: dict = {"message": message, "conversation_id": conversation_id}
+    if project and conversation_id is None:
+        body["project"] = project
+    for _ in range(2):
+        with c.stream("POST", "/api/chat", json=body) as r:
+            if r.status_code == 409:
+                r.read()
+                if _detail(r) == "peak_confirmation_required" and not body.get("confirm_peak"):
+                    ans = confirm("Peak-pricing window — send anyway? [y/N] ")
+                    if ans.strip().lower().startswith("y"):
+                        body["confirm_peak"] = True
+                        continue
+                    raise CliError("not sent")
+                raise CliError(f"server said 409: {_detail(r)}")
+            if r.status_code >= 400:
+                r.read()
+                _check(r)
+            rend = Renderer(out)
+            header = r.headers.get("x-conversation-id")
+            if header and header.isdigit():
+                rend.conversation_id = int(header)
+            for ev in iter_sse(r.iter_lines()):
+                if rend.feed(ev):
+                    break
+            if rend.error:
+                raise CliError(rend.error)
+            return rend.conversation_id or conversation_id
+    raise CliError("not sent")
+
+
+def cmd_chat(args, out=sys.stdout, read=input) -> int:
+    base, token = _session(args)
+    # no read timeout: a turn can think for minutes between events
+    with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
+        try:
+            if args.message:
+                run_turn(c, " ".join(args.message), None, args.project, out, read)
+                return 0
+            cid = None
+            while True:
+                try:
+                    msg = read("› ")
+                except EOFError:
+                    print(file=out)
+                    return 0
+                if msg.strip() in ("/exit", "/quit"):
+                    return 0
+                if not msg.strip():
+                    continue
+                cid = run_turn(c, msg, cid, args.project, out, read)
+        except httpx.HTTPError as e:
+            raise CliError(f"connection to {base} failed: {e}")
+        except KeyboardInterrupt:
+            print(file=out)
+            return 130
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jav3", description="Terminal client for a Jav3 server.")
+    p.add_argument("--server", help="server address (host:port or URL), overriding the saved one")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    # the line is read from the terminal (or a pipe), never argv: argv lands in
+    # shell history and is visible to every user via ps
+    sub.add_parser("login", help="log in with the line from Settings → Add computer")
+    ch = sub.add_parser("chat", help="send a message, or start a REPL with none")
+    ch.add_argument("message", nargs="*")
+    ch.add_argument("--project", help="pin a new conversation to this project slug")
+    sub.add_parser("whoami", help="show who the saved token authenticates as")
+    sub.add_parser("logout", help="revoke this computer's token and forget it")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    cmds = {"login": cmd_login, "chat": cmd_chat, "whoami": cmd_whoami,
+            "logout": cmd_logout}
+    try:
+        return cmds[args.cmd](args)
+    except CliError as e:
+        print(f"jav3: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

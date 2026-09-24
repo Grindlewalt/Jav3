@@ -2,9 +2,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
-import { Block } from '../copy.jsx'
+import { Copy } from '../copy.jsx'
 import { modelOption, setModel, useModel } from '../modelInfo.js'
 import { notifyError } from '../notify.js'
+
+const mmss = (secs) => {
+  const s = Math.max(0, Math.round(secs))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
 
 export default function Settings() {
   const [msg, setMsg] = useState(null)
@@ -51,91 +56,79 @@ function ModelPanel() {
   )
 }
 
-// --- devices (API tokens for a CLI/machine via the pairing flow) -----------------
+// --- devices (computers logged in with `jav3 login`) ------------------------------
 
-// The command the operator runs on the device: claim the code, wait for the
-// browser confirm, then save the minted token 0600. curl + sed so it needs no
-// jq. String.raw keeps the sed backslashes intact; only ${origin}/${code}
-// interpolate (both from safe sources — the app origin and the code alphabet).
-function claimScript(origin, code) {
-  return String.raw`BASE="${origin}"
-CODE="${code}"
-name="$(hostname 2>/dev/null || echo cli)"
-plat="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
-secret="$(curl -fsS -X POST "$BASE/api/devices/pair/claim" -H 'content-type: application/json' -d "{\"code\":\"$CODE\",\"name\":\"$name\",\"hostname\":\"$name\",\"platform\":\"$plat\"}" | sed -n 's/.*"device_secret":"\([^"]*\)".*/\1/p')"
-echo "Approve this device at: $BASE/pair/$CODE"
-while :; do
-  r="$(curl -fsS -X POST "$BASE/api/devices/pair/poll" -H 'content-type: application/json' -d "{\"code\":\"$CODE\",\"device_secret\":\"$secret\"}")"
-  case "$r" in *'"denied"'*) echo "Denied by the operator."; exit 1;; esac
-  token="$(printf '%s' "$r" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
-  [ -n "$token" ] && break
-  sleep 3
-done
-mkdir -p "$HOME/.config/jarvis"
-(umask 177; printf '%s\n' "$token" > "$HOME/.config/jarvis/device-token")
-chmod 600 "$HOME/.config/jarvis/device-token" 2>/dev/null || true
-echo "Paired. Token saved to ~/.config/jarvis/device-token (send it as: Authorization: Bearer <token>)"`
-}
-
+// Add computer: this session mints a one-time code and the line the CLI wants.
+// The session IS the authorization — whoever holds the line in the next few
+// minutes gets a device token — so the line is shown with its countdown and
+// cleared when it lapses or the operator is done with it.
 function DevicesPanel({ say }) {
   const ask = useAsk()
   const [devices, setDevices] = useState(null)
-  const [ticket, setTicket] = useState(null)
-  const origin = window.location.origin
+  const [login, setLogin] = useState(null)       // {login, expires_at, ttl_seconds}
+  const [left, setLeft] = useState(0)
 
   const load = useCallback(() => {
     api('/api/devices').then((r) => setDevices(r.devices)).catch(() => setDevices([]))
   }, [])
   useEffect(load, [load])
 
-  async function enroll() {
-    const name = await ask.prompt('Name this device', '',
-      { placeholder: 'e.g. laptop-cli' })
-    if (name === null) return
+  useEffect(() => {
+    if (!login) return undefined
+    const tick = () => {
+      const s = login.expires_at - Date.now() / 1000
+      if (s <= 0) { setLogin(null); load() } else setLeft(s)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [login, load])
+
+  async function addComputer() {
     try {
-      setTicket(await api('/api/devices/enroll',
-        { method: 'POST', body: JSON.stringify({ name: name || '' }) }))
+      setLogin(await api('/api/devices/login-code',
+        { method: 'POST', body: JSON.stringify({ name: '' }) }))
     } catch (e) { say(e.detail || String(e)) }
   }
 
   async function revoke(d) {
     const ok = await ask.confirm(`Revoke access for “${d.name}”?`, {
-      body: 'Any CLI using this token stops working immediately.',
+      body: 'The CLI on that computer stops working immediately.',
       confirmLabel: 'Revoke', danger: true })
     if (!ok) return
     try { await api(`/api/devices/${d.id}`, { method: 'DELETE' }); load() }
     catch (e) { say(e.detail || String(e)) }
   }
 
-  const script = ticket ? claimScript(origin, ticket.code) : ''
-
   return (
     <section className="panel">
       <h2>Devices</h2>
       <p className="dim small">
-        Authorize a CLI or machine to reach Jarvis’s API without pasting a key in
-        a terminal. Enroll here, run the command on the device, then confirm it
-        in the browser — it receives a revocable token, shown once and never
-        again. A token can drive Jarvis’s agent (chat) with the same tools you
-        have; it cannot reach the secrets or VM control panels.
-        Revoke it any time below.
+        Log a computer’s <code>jav3</code> command-line client in to this server.
+        Each computer gets its own revocable token. A token can chat with the agent
+        using the same tools you have; it cannot reach secrets, the VM or other
+        control panels.
       </p>
-      {ticket ? (
-        <div className="device-enroll">
-          <p>Code <code>{ticket.code}</code> — run this on the device, then{' '}
-            <a href={`/pair/${ticket.code}`} target="_blank" rel="noreferrer">
-              approve it</a>. Good for about 15&nbsp;minutes.</p>
-          <Block text={script} />
+      {login ? (
+        <div className="device-login">
+          <p className="small">On the other computer run <code>jav3 login</code> and
+            paste this line. It works once, for the next {mmss(left)}.</p>
+          <div className="device-login-line">
+            <code>{login.login}</code>
+            <Copy text={login.login} />
+          </div>
+          <p className="dim small">No CLI there yet?{' '}
+            <code>curl -fsSL {window.location.origin}/cli/install.sh | sh</code></p>
           <div className="row">
-            <button className="ghost" onClick={() => { setTicket(null); load() }}>
+            <button className="ghost" onClick={() => { setLogin(null); load() }}>
               Done</button>
           </div>
         </div>
       ) : (
-        <div className="row"><button onClick={enroll}>Enroll a device</button></div>
+        <div className="row"><button onClick={addComputer}>Add computer</button></div>
       )}
       {devices === null ? <p className="dim">loading…</p>
-        : devices.length === 0 ? <p className="dim small">No devices enrolled.</p>
+        : devices.length === 0 ? <p className="dim small">No computers logged in.</p>
         : (
           <ul className="device-list">
             {devices.map((d) => (

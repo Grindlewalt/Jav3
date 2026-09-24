@@ -22,7 +22,3 @@ export function Copy({ text, label = 'copy' }) {
     }}>{done ? 'copied' : label}</button>
   )
 }
-
-export const Block = ({ text }) => (
-  <div className="cu-block"><Copy text={text} /><pre>{text}</pre></div>
-)
