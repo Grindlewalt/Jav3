@@ -1,25 +1,54 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link, Outlet } from 'react-router-dom'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { useModel } from '../modelInfo.js'
+import Page from '../components/Page.jsx'
+import Tabs from '../components/Tabs.jsx'
+import Button, { SaveButton } from '../components/Button.jsx'
+import Input, { Checkbox } from '../components/Input.jsx'
+import Select from '../components/Select.jsx'
+import Tag from '../components/Tag.jsx'
+import Toolbar from '../components/Toolbar.jsx'
+import EmptyState from '../components/EmptyState.jsx'
 
-// Everything is INCLUDED by default; checkboxes remove. That way an agent
-// can't silently miss something necessary — you only take away what it
-// shouldn't need.
+// The Agents page is a layout route: this shell owns the one <h1> and the tab
+// strip, and each tab is a real URL (/agents, /agents/skills,
+// /agents/outputs[/:slug]) rendered through the Outlet. `split` because two of
+// the three tabs are a list + editor; the Outputs tab is a lone <main>.
 export default function Agents() {
+  return (
+    <Page variant="split" title="Agents"
+          actions={(
+            <Tabs label="Agents sections" items={[
+              { to: '/agents', end: true, label: 'Definitions' },
+              { to: '/agents/skills', label: 'Skills' },
+              { to: '/agents/outputs', label: 'Outputs' },
+            ]} />
+          )}>
+      <Outlet />
+    </Page>
+  )
+}
+
+// The definitions tab. An agent gets EVERYTHING by default — context, tools,
+// skills — so the editor no longer offers the context/tools untick lists: a
+// necessary piece can't be forgotten, only a skill knowingly taken away. The
+// old *_exclude fields still round-trip untouched on save (hand-edited
+// AGENT.md files and the funnel may set them; the server still honours them).
+export function AgentDefinitions() {
   const [agents, setAgents] = useState([])
   const [trash, setTrash] = useState([])
   const [selected, setSelected] = useState(null)
   const [agent, setAgent] = useState(null)
   const ask = useAsk()
-  // an unpinned agent resolves pin > runtime override > default, so it
+  // an agent with no model resolves pin > runtime override > default, so it
   // inherits `active`, not `default`
   const inheritedModel = useModel()?.active
   const [dirty, setDirty] = useState(false)
-  const [contextItems, setContextItems] = useState([])
-  const [toolItems, setToolItems] = useState([])
   const [skillItems, setSkillItems] = useState([])
+  const [projects, setProjects] = useState([])
   const [quiz, setQuiz] = useState(null)        // [{question, kind, options, answer}]
   const [genBusy, setGenBusy] = useState(false)
   const [secrets, setSecrets] = useState([])
@@ -31,16 +60,13 @@ export default function Agents() {
   }
   useEffect(() => {
     refresh()
-    api('/api/memory').then((r) => setContextItems([
-      ...r.files.filter((f) => f.path.endsWith('.md')).map((f) => f.path),
-      'active-project',
-    ]))
-    api('/api/tools').then((r) => setToolItems(r.tools.map((t) => t.name)))
     api('/api/skills').then((r) => setSkillItems(r.skills.map((s) => s.name)))
+    api('/api/projects').then((r) => setProjects(r.projects || [])).catch(() => {})
     api('/api/secrets').then((r) => setSecrets(r.secrets)).catch(() => {})
   }, [])
 
   useEffect(() => {
+    setQuiz(null)
     if (!selected) { setAgent(null); return }
     api(`/api/agents/${selected}`).then((a) => { setAgent(a); setDirty(false) })
   }, [selected])
@@ -79,13 +105,10 @@ export default function Agents() {
 
   const patch = (p) => { setAgent((a) => ({ ...a, ...p })); setDirty(true) }
 
-  const toggleExclude = (field, item) => {
-    const list = agent[field] || []
-    patch({
-      [field]: list.includes(item)
-        ? list.filter((x) => x !== item)
-        : [...list, item],
-    })
+  const toggleSkill = (name) => {
+    const list = agent.skills_exclude || []
+    patch({ skills_exclude: list.includes(name)
+      ? list.filter((x) => x !== name) : [...list, name] })
   }
 
   function setAnswer(i, answer) {
@@ -124,10 +147,15 @@ export default function Agents() {
   }
 
   async function save() {
-    await api(`/api/agents/${selected}`, {
-      method: 'PUT', body: JSON.stringify(agent) })
-    setDirty(false)
-    refresh()
+    try {
+      // the whole definition goes back, including the exclusion lists this
+      // editor no longer shows — omitting them would reset them to [] and
+      // silently widen an agent someone narrowed by hand
+      await api(`/api/agents/${selected}`, {
+        method: 'PUT', body: JSON.stringify(agent) })
+      setDirty(false)
+      refresh()
+    } catch (err) { notifyError(err) }   // e.g. 400: the project no longer exists
   }
 
   async function del() {
@@ -152,49 +180,41 @@ export default function Agents() {
     refresh()
   }
 
-  function ExcludeList({ title, items, field, hint }) {
-    if (items.length === 0) return (
-      <div className="agent-section">
-        <div className="side-title">{title}</div>
-        <span className="dim small">{hint}</span>
-      </div>
-    )
-    return (
-      <div className="agent-section">
-        <div className="side-title">{title}</div>
-        <div className="check-grid">
-          {items.map((item) => {
-            const excluded = (agent[field] || []).includes(item)
-            return (
-              <label key={item} className={excluded ? 'excluded' : ''}>
-                <input type="checkbox" checked={!excluded}
-                       onChange={() => toggleExclude(field, item)} />
-                <span>{item}</span>
-              </label>
-            )
-          })}
-        </div>
-      </div>
-    )
-  }
+  // a binding to a project that has since been deleted still shows as itself,
+  // so the editor doesn't quietly display "none" over a stale value
+  const projectOptions = [
+    { value: '', label: 'no project — follows whoever starts it' },
+    ...projects.map((p) => ({ value: p.slug, label: p.name })),
+    ...(agent?.project && !projects.some((p) => p.slug === agent.project)
+      ? [{ value: agent.project, label: `${agent.project} (missing)` }] : []),
+  ]
+  const projectName = (slug) => projects.find((p) => p.slug === slug)?.name || slug
 
   return (
-    <div className="split-layout">
+    <>
       <aside>
-        <div className="side-title">Agents</div>
-        <form className="row" onSubmit={create}>
-          <input ref={nameRef} className="grow" placeholder="new agent name  (n)" />
-          <button type="submit">+</button>
+        <form className="row agent-new" onSubmit={create}>
+          <input ref={nameRef} className="grow" placeholder="new agent name  (n)"
+                 aria-label="new agent name" />
+          <Button type="submit" aria-label="create agent">+</Button>
         </form>
-        <ul className="file-list">
+        <ul className="agent-list">
           {agents.map((a) => (
-            <li key={a.slug} className={selected === a.slug ? 'active' : ''}
-                onClick={() => setSelected(a.slug)}>
-              {a.name}
-              {a.model && <span className="tag">{a.model}</span>}
+            <li key={a.slug}>
+              <button type="button" aria-current={selected === a.slug || undefined}
+                      className={selected === a.slug ? 'agent-row active' : 'agent-row'}
+                      onClick={() => setSelected(a.slug)}>
+                <span className="agent-row-name">{a.name}</span>
+                {(a.project || a.model) && (
+                  <span className="agent-row-sub">
+                    {a.project && <Tag>{projectName(a.project)}</Tag>}
+                    {a.model && <Tag>{a.model}</Tag>}
+                  </span>
+                )}
+              </button>
             </li>
           ))}
-          {agents.length === 0 && <li className="dim">none yet — press n</li>}
+          {agents.length === 0 && <EmptyState as="li">none yet — press n</EmptyState>}
         </ul>
         {trash.length > 0 && (
           <details className="trash-bin">
@@ -203,72 +223,80 @@ export default function Agents() {
               {trash.map((a) => (
                 <li key={a.slug} className="trashed">
                   <span className="grow ellipsis">{a.name}</span>
-                  <button className="win-btn" title="restore"
+                  <button className="win-btn" title="restore" aria-label={`restore ${a.name}`}
                           onClick={() => restore(a.slug)}>↺</button>
                   <button className="win-btn" title="delete forever"
+                          aria-label={`delete ${a.name} forever`}
                           onClick={() => purge(a.slug)}>×</button>
                 </li>
               ))}
             </ul>
           </details>
         )}
-        <p className="dim small">run an agent from a project board (Run an agent
-          panel), on a schedule, or have Jarvis summon one in chat. Everything
-          is included by default; untick to exclude.</p>
+        <p className="dim small">talk to an agent from a project board's chat panel,
+          give it a one-off task in the Run an agent panel, put it on a schedule, or
+          have Jarvis summon one in chat.</p>
       </aside>
       <main className="editor-pane">
         {!agent ? (
-          <div className="dim center-pad">select an agent, or press <kbd>n</kbd> to create one</div>
+          <EmptyState pad>select an agent, or press <kbd>n</kbd> to create one</EmptyState>
         ) : (
           <div className="agent-form">
-            <div className="pane-head">
-              <h3>{agent.name}</h3>
-              <button className="ghost danger" onClick={del}>delete</button>
-              <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
+            <Toolbar variant="pane" title={agent.name}>
+              <Link className="agent-outputs-link" to={`/agents/outputs/${agent.slug}`}>
+                outputs</Link>
+              <Button variant="ghost" danger onClick={del}>Delete</Button>
+              <SaveButton dirty={dirty} onSave={save} />
+            </Toolbar>
+            <div className="field-row">
+              <Input label="name" value={agent.name}
+                     onChange={(e) => patch({ name: e.target.value })} />
+              <Input label="description" value={agent.description}
+                     onChange={(e) => patch({ description: e.target.value })} />
             </div>
             <div className="field-row">
-              <label>name
-                <input value={agent.name} onChange={(e) => patch({ name: e.target.value })} />
-              </label>
-              <label>description
-                <input value={agent.description}
-                       onChange={(e) => patch({ description: e.target.value })} />
-              </label>
+              <Select label="works in" value={agent.project || ''} options={projectOptions}
+                      hint="its runs and threads start in this project unless the one
+                        starting it names another"
+                      onChange={(e) => patch({ project: e.target.value })} />
+              <Input label="max rounds" type="number" min="0" max="200"
+                     className="agent-num" value={agent.max_iterations ?? 0}
+                     hint="tool-calling rounds per run; 0 = the default for how it
+                       was started"
+                     onChange={(e) => patch({
+                       max_iterations: Math.max(0, parseInt(e.target.value, 10) || 0) })} />
             </div>
             <div className="field-row">
-              <label>model
-                <input value={agent.model} placeholder={`inherit (${inheritedModel || 'default'})`}
-                       onChange={(e) => patch({ model: e.target.value })} />
-              </label>
-              <label>base url
-                <input value={agent.base_url}
-                       placeholder="default endpoint · ollama: http://<host>:11434/v1"
-                       onChange={(e) => patch({ base_url: e.target.value })} />
-              </label>
+              <Input label="model" value={agent.model}
+                     placeholder={`inherit (${inheritedModel || 'default'})`}
+                     onChange={(e) => patch({ model: e.target.value })} />
+              <Input label="base url" value={agent.base_url}
+                     placeholder="default endpoint · ollama: http://<host>:11434/v1"
+                     onChange={(e) => patch({ base_url: e.target.value })} />
             </div>
-            <label className="prompt-label">system prompt
-              <span className="row" style={{ float: 'right', gap: 6 }}>
-                <button className="ghost" type="button" disabled={genBusy}
+            <label className="prompt-label">
+              <span className="row prompt-head">
+                <span className="grow">system prompt</span>
+                <Button variant="ghost" disabled={genBusy}
                         title="answer a short quiz, get a generated prompt"
-                        onClick={startQuiz}>{genBusy ? '…' : '✨ generate'}</button>
+                        onClick={startQuiz}>{genBusy ? '…' : 'Generate'}</Button>
               </span>
               <textarea className="md-editor" rows={7} spellCheck={false}
                         value={agent.prompt}
                         onChange={(e) => patch({ prompt: e.target.value })} />
               {secrets.length > 0 && (
-                <div className="dim small" style={{ marginTop: 4 }}>
+                <div className="dim small secret-refs">
                   API keys — click to reference (the agent uses the key, never
                   sees its value):{' '}
                   {secrets.map((s) => (
-                    <button key={s.name} type="button" className="ghost"
-                            style={{ marginRight: 4 }}
+                    <Button key={s.name} variant="ghost"
                             title={s.hosts?.length
                               ? `usable in web_read on ${s.hosts.join(', ')}`
                               : 'unusable — bind web hosts in Review → Secrets to allow web_read'}
                             onClick={() => patch({ prompt:
                               `${agent.prompt.trimEnd()}\n{{secret:${s.name}}}` })}>
                       {`{{secret:${s.name}}}`}
-                    </button>
+                    </Button>
                   ))}
                   — new keys are added in Review → Secrets.
                 </div>
@@ -301,29 +329,90 @@ export default function Agents() {
                   </div>
                 ))}
                 <div className="row">
-                  <button type="button" disabled={genBusy} onClick={generatePrompt}>
-                    {genBusy ? 'writing…' : 'write the prompt'}</button>
-                  <button type="button" className="ghost" onClick={() => setQuiz(null)}>cancel</button>
+                  <Button disabled={genBusy} onClick={generatePrompt}>
+                    {genBusy ? 'writing…' : 'Write the prompt'}</Button>
+                  <Button variant="ghost" onClick={() => setQuiz(null)}>Cancel</Button>
                 </div>
               </div>
             )}
-            <ExcludeList title="context (untick to exclude)" items={contextItems}
-                         field="context_exclude" />
-            <ExcludeList title="tools (untick to exclude)" items={toolItems}
-                         field="tools_exclude"
-                         hint="registry is empty — grants appear here as tools land" />
-            <ExcludeList title="skills (untick to exclude)" items={skillItems}
-                         field="skills_exclude" hint="no skills yet" />
-            <label className="own-memory">
-              <input type="checkbox" checked={agent.own_memory}
-                     onChange={(e) => patch({ own_memory: e.target.checked })} />
-              <span>own memory — agent keeps its own notes instead of writing to
-                shared memory <span className="dim">(experimental, semantics land
-                with the tool layer)</span></span>
-            </label>
+            <SkillPicker items={skillItems} excluded={agent.skills_exclude || []}
+                         onToggle={toggleSkill} />
+            <OwnMemory slug={agent.slug} on={!!agent.own_memory}
+                       onChange={(v) => patch({ own_memory: v })} />
           </div>
         )}
       </main>
+    </>
+  )
+}
+
+// Skills are the one thing still worth taking away per agent: every skill is
+// listed on every turn, and a narrow agent pays for a catalogue it never uses.
+// A pressed chip is a skill the agent keeps; unpressing removes it.
+function SkillPicker({ items, excluded, onToggle }) {
+  return (
+    <div className="agent-section">
+      <div className="side-title" id="agent-skills-h">skills</div>
+      {items.length === 0 ? (
+        <EmptyState>no skills yet — add one in the Skills tab</EmptyState>
+      ) : (
+        <>
+          <div className="skill-chips" role="group" aria-labelledby="agent-skills-h">
+            {items.map((name) => {
+              const kept = !excluded.includes(name)
+              return (
+                <button key={name} type="button" aria-pressed={kept}
+                        className={kept ? 'skill-chip' : 'skill-chip off'}
+                        title={kept ? 'click to take this skill away' : 'click to give it back'}
+                        onClick={() => onToggle(name)}>{name}</button>
+              )
+            })}
+          </div>
+          <span className="field-hint">
+            {excluded.length
+              ? `${excluded.length} of ${items.length} taken away`
+              : 'every skill — click one to take it away'}</span>
+        </>
+      )}
+    </div>
+  )
+}
+
+// own_memory redirects the agent's memory_read/write to agents/<slug>/memory/.
+// A silo nobody can read would be worse than none, so the notes are one
+// disclosure away; they load when it opens, not with the editor.
+function OwnMemory({ slug, on, onChange }) {
+  const [notes, setNotes] = useState(null)
+  useEffect(() => { setNotes(null) }, [slug])
+  const load = (e) => {
+    if (!e.currentTarget.open || notes) return
+    api(`/api/agents/${slug}/memory`).then((r) => setNotes(r.notes))
+      .catch(() => setNotes([]))
+  }
+  return (
+    <div className="agent-section">
+      <Checkbox checked={on} onChange={(e) => onChange(e.target.checked)}
+                label="own memory — keeps its notes to itself instead of writing to
+                  the shared notes (the operator's standing notes still lead its prompt)" />
+      <details className="agent-notes" onToggle={load}>
+        <summary>its private notes</summary>
+        {notes === null ? <span className="dim small">loading…</span>
+          : notes.length === 0 ? <EmptyState>none yet</EmptyState>
+          : (
+            <ul className="agent-notes-list">
+              {notes.map((n) => (
+                <li key={n.name}>
+                  <details>
+                    <summary><code>{n.name}</code>
+                      {n.description && <span className="dim"> — {n.description}</span>}
+                    </summary>
+                    <pre className="agent-note-body">{n.body}</pre>
+                  </details>
+                </li>
+              ))}
+            </ul>
+          )}
+      </details>
     </div>
   )
 }

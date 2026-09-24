@@ -1352,24 +1352,86 @@ kbd {
 /* ---- agents ---- */
 .agent-form { display: flex; flex-direction: column; gap: 14px;
   overflow-y: auto; padding-right: 6px; }
-.field-row { display: flex; gap: 12px; }
-.field-row label, .prompt-label {
-  display: flex; flex-direction: column; gap: 4px; flex: 1;
-  font-size: 12.5px; color: var(--dim);
+/* wraps rather than squeezing two fields into a phone's width */
+.field-row { display: flex; gap: var(--sp-6); flex-wrap: wrap; }
+.field-row > label, .prompt-label {
+  display: flex; flex-direction: column; gap: var(--sp-2); flex: 1 1 220px;
+  min-width: 0; font-size: var(--fs-sm); color: var(--dim);
 }
-.agent-section { display: flex; flex-direction: column; gap: 8px; }
-.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 6px; }
-.check-grid label {
-  display: flex; gap: 8px; align-items: center; font-size: 13px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 7px; padding: 6px 10px; cursor: pointer;
-  font-family: ui-monospace, Menlo, monospace;
+.prompt-head { margin: 0; }
+.secret-refs { margin-top: var(--sp-2); }
+.secret-refs button { margin-right: var(--sp-2); }
+.agent-num { max-width: 120px; }
+.agent-section { display: flex; flex-direction: column; gap: var(--sp-4); }
+.agent-outputs-link { font-size: var(--fs-md); color: var(--dim); }
+.agent-outputs-link:hover { color: var(--accent); }
+
+/* the roster (and the Skills tab's list): one button per row, so a row is a
+   focus stop and Enter opens it — the old <li onClick> rows were mouse-only */
+.agent-new { margin: 0; }
+.agent-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1;
+  display: flex; flex-direction: column; gap: var(--sp-1); }
+.agent-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2);
+  width: 100%; text-align: left; background: none; color: var(--dim);
+  padding: var(--pad-row-sm); border-radius: var(--radius-sm);
+  font-size: var(--fs-md); font-weight: 400;
 }
-.check-grid label.excluded { opacity: 0.45; text-decoration: line-through; }
-.check-grid input, .own-memory input { accent-color: var(--accent); }
-.own-memory { display: flex; gap: 10px; align-items: flex-start;
-  font-size: 13.5px; cursor: pointer; }
+.agent-row:hover:not(:disabled) { background: var(--panel-2); color: var(--text);
+  filter: none; transform: none; }
+.agent-row.active { background: var(--panel-2); color: var(--text); }
+.agent-row-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.agent-row-sub { display: flex; flex-wrap: wrap; gap: var(--sp-2); max-width: 100%; }
+.agent-row-sub .tag, .agent-row-sub .badge { margin-left: 0; }
+
+/* skills an agent keeps (pressed) or has had taken away (struck through) */
+.skill-chips { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
+.skill-chip {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  padding: var(--pad-row-sm); border-radius: var(--radius-sm);
+  font: 400 var(--fs-md) var(--font-mono);
+}
+.skill-chip:hover:not(:disabled) { border-color: var(--accent); filter: none;
+  transform: none; }
+.skill-chip.off { color: var(--dim); opacity: 0.55; text-decoration: line-through; }
+
+/* own-memory notes: agent-written, so plain text only */
+.agent-notes summary, .agent-notes-list summary { cursor: pointer; color: var(--dim);
+  font-size: var(--fs-md); }
+.agent-notes-list { list-style: none; margin: var(--sp-3) 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: var(--sp-2); }
+.agent-note-body { margin: var(--sp-2) 0 0; padding: var(--sp-3); white-space: pre-wrap;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: var(--fs-sm); max-height: 220px; overflow: auto; }
+
+.skill-param { margin: 0; }
+.skill-param-name { width: 110px; }
+
+/* ---- agent outputs ---- */
+.outputs-pane { overflow-y: auto; gap: var(--sp-6); }
+.outputs-bar select { min-width: 180px; }
+.outputs-list { display: flex; flex-direction: column; gap: var(--sp-5); }
+.output-card { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.output-card.running { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.output-head { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.output-head .tag { margin-left: 0; }
+.output-title { flex: 1; min-width: 0; font-weight: 600; font-size: var(--fs-base); }
+.output-meta { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-5); }
+.output-meta a { color: var(--dim); }
+.output-meta a:hover { color: var(--accent); }
+.output-meta button.link { margin-left: 0; font-size: var(--fs-sm); }
+.output-owner { color: var(--accent); }
+.output-snippet { margin: 0; font-size: var(--fs-md); color: var(--text);
+  overflow-wrap: anywhere; }
+.output-fold summary { cursor: pointer; color: var(--dim); font-size: var(--fs-sm); }
+.output-fold[open] > summary { margin-bottom: var(--sp-3); }
+.output-msg { margin-bottom: var(--sp-4); font-size: var(--fs-md); }
+.output-msg.user pre { margin: 0; white-space: pre-wrap; color: var(--dim); }
+.output-files { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-wrap: wrap; gap: var(--sp-3) var(--sp-6); font-size: var(--fs-sm); }
+.output-files a { color: var(--dim); }
+.output-files a:hover { color: var(--accent); }
 
 /* ---- todos ---- */
 .todo-list { list-style: none; padding: 0; }
@@ -2023,6 +2085,7 @@ kbd {
      under the pane below — hit-testing found them genuinely uncoverable. */
   .split-layout > aside { overflow-y: auto; }
   .split-layout > aside .file-list,
+  .split-layout > aside .agent-list,
   .split-layout > aside .sched-form,
   .split-layout > aside .agent-form,
   .split-layout > aside .skill-form {

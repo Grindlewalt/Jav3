@@ -23,7 +23,13 @@ import NotFound from './pages/NotFound.jsx'
 // a browser without requestIdleCallback just gets a short timer.
 const Projects = lazy(() => import('./pages/Projects.jsx'))
 const Workspace = lazy(() => import('./pages/Workspace.jsx'))
+// Agents is a layout route like Review: the shell + tab strip is the default
+// export, the definitions editor the index child, Skills and Outputs siblings.
 const Agents = lazy(() => import('./pages/Agents.jsx'))
+const AgentDefinitions = lazy(() => import('./pages/Agents.jsx')
+  .then((m) => ({ default: m.AgentDefinitions })))
+const SkillsPanel = lazy(() => import('./SkillsPanel.jsx'))
+const AgentOutputs = lazy(() => import('./AgentOutputs.jsx'))
 const Tools = lazy(() => import('./pages/Tools.jsx'))
 const Settings = lazy(() => import('./pages/Settings.jsx'))
 
@@ -41,7 +47,6 @@ const Memory = lazy(() => import('./pages/Memory.jsx'))
 const Schedules = lazy(() => import('./pages/Schedules.jsx'))
 
 // reachable, not advertised
-const Skills = lazy(() => import('./pages/Skills.jsx'))
 const Voice = lazy(() => import('./pages/Voice.jsx'))
 const Artifacts = lazy(() => import('./pages/Artifacts.jsx'))
 
@@ -51,7 +56,8 @@ const PREFETCH = [
   () => import('./pages/Tools.jsx'), () => import('./pages/Settings.jsx'),
   () => import('./pages/Network.jsx'), () => import('./pages/Logs.jsx'),
   () => import('./SecretsPanel.jsx'), () => import('./pages/Memory.jsx'),
-  () => import('./pages/Schedules.jsx'), () => import('./pages/Skills.jsx'),
+  () => import('./pages/Schedules.jsx'), () => import('./SkillsPanel.jsx'),
+  () => import('./AgentOutputs.jsx'),
   () => import('./pages/Voice.jsx'), () => import('./pages/Artifacts.jsx'),
 ]
 
@@ -84,7 +90,12 @@ export default function AppRoutes({ onLogin, authed }) {
         <Route path="/" element={<Chat />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/projects/:slug" element={<Workspace />} />
-        <Route path="/agents" element={<Agents />} />
+        <Route path="/agents" element={<Agents />}>
+          <Route index element={<AgentDefinitions />} />
+          <Route path="skills" element={<SkillsPanel />} />
+          <Route path="outputs" element={<AgentOutputs />} />
+          <Route path="outputs/:slug" element={<AgentOutputs />} />
+        </Route>
         <Route path="/review" element={<Review />}>
           <Route index element={<ReviewHome />} />
           <Route path="network" element={<Network />} />
@@ -102,9 +113,9 @@ export default function AppRoutes({ onLogin, authed }) {
         <Route path="/network" element={<Navigate to="/review/network" replace />} />
         <Route path="/logs" element={<Navigate to="/review/logs" replace />} />
         <Route path="/context" element={<Navigate to="/memory" replace />} />
+        <Route path="/skills" element={<Navigate to="/agents/skills" replace />} />
 
         {/* reachable, not advertised */}
-        <Route path="/skills" element={<Skills />} />
         <Route path="/voice" element={<Voice />} />
         <Route path="/artifacts" element={<Artifacts />} />
 
