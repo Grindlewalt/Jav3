@@ -108,7 +108,7 @@ async def test_skills_and_tools(client):
     assert r.status_code == 200
     r = await client.get("/api/tools")
     tools = {t["name"]: t for t in r.json()["tools"]}
-    assert tools["organize-project"]["enabled"] is False
+    assert tools[slug]["enabled"] is False
     from backend.agent.tools.registry import load_registry, openai_tool_specs
-    assert all(s["function"]["name"] != "organize-project"
+    assert all(s["function"]["name"] != slug
                for s in openai_tool_specs(load_registry()))
