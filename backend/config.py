@@ -2,6 +2,7 @@ import os
 import secrets
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -55,18 +56,10 @@ class Settings(BaseSettings):
     # an attacker endpoint, harvest the Bearer key). Only these hosts are
     # honored; anything else is refused and the call falls back to the default.
     # deepseek_base_url is always allowed on top of this list.
-    model_base_url_allowlist: list[str] = ["http://127.0.0.1:11434",
-                                           "http://localhost:11434",
-                                           # the main server's ollama (both
-                                           # GPUs live there); voice local tier.
-                                           # :11435 is the pinned-to-the-3060
-                                           # voice instance when deployed.
-                                           "http://10.0.0.58:11434",
-                                           "http://10.0.0.58:11435",
-                                           # :11436 is llama.cpp serving
-                                           # qwen3.5:4b on the 3060 Ti — the
-                                           # voice local tier since 2026-08-03
-                                           "http://10.0.0.58:11436"]
+    # Empty = derived (see _derive_service_urls): localhost ollama plus the
+    # services_host's ollama (:11434), its GPU-pinned voice instance (:11435)
+    # and llama.cpp voice tier (:11436). An explicit list replaces all of it.
+    model_base_url_allowlist: list[str] = []
     # "deepseek-flash" is the API's name for the current Flash — V4.1 Flash
     # since 2026-09-10. The old "deepseek-v4-flash" still resolves to it, and
     # "deepseek-v4-pro" is routed to it (at Flash price) from 2026-09-14 until
@@ -122,7 +115,24 @@ class Settings(BaseSettings):
     # dashboard iframe) may auto-load. Everything else is blocked, so a model
     # can't beacon data out through a resource URL to an arbitrary host. Same
     # spirit as an egress allowlist; tune via JARVIS_MEDIA_HOSTS (JSON list).
-    media_hosts: list[str] = ["atomosnas", "upload.wikimedia.org", "i.imgur.com"]
+    # The server's own LAN names/IPs are allowed on top of this (backend/lan.py).
+    media_hosts: list[str] = ["upload.wikimedia.org", "i.imgur.com"]
+
+    # --- LAN (backend/lan.py) -----------------------------------------------
+    # Advertise the server over mDNS (_http._tcp) so the LAN reaches it at
+    # http://<instance_name>.local:<lan_port>. Failure is non-fatal: a box with
+    # no multicast just isn't discoverable.
+    mdns: bool = True
+    # The mDNS instance/host label. Empty = the app's own name, lowercased; the
+    # machine's hostname if that yields nothing usable.
+    instance_name: str = ""
+    # The port uvicorn listens on (scripts/jarvis.service --port). Only used to
+    # advertise; it does not change the bind.
+    lan_port: int = 8000
+    # The host the companion services (SearXNG, ollama/llama.cpp, the voice
+    # sidecar) live on. Each service URL below that is left unset is derived
+    # from it; an explicitly set per-service URL always wins.
+    services_host: str = "localhost"
 
     # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
     peak_windows: list[str] = ["18:00-21:00", "23:00-03:00"]
@@ -265,7 +275,7 @@ class Settings(BaseSettings):
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,
     # and refuse internal/private targets (SSRF guard).
-    searxng_url: str = "http://10.0.0.58:8080"
+    searxng_url: str = ""               # derived: http://<services_host>:8080
     # SearXNG is a metasearch proxy; its default engine mix on the main server
     # is mostly rate-limited/blocked (google/ddg/brave/startpage/qwant all
     # return 0 results — measured 2026-07-21). Pin the engines that still work
@@ -290,7 +300,7 @@ class Settings(BaseSettings):
     # on the main server) — the backend just relays opaque PCM bytes between
     # the two websockets and orchestrates turns/barge-in/clones.
     voice_enabled: bool = False
-    voice_sidecar_url: str = "ws://10.0.0.58:8100/ws"
+    voice_sidecar_url: str = ""         # derived: ws://<services_host>:8100/ws
     voice_sidecar_token: str = ""       # must match VOICEBOX_TOKEN on the sidecar
     voice_max_workers: int = 3          # backgrounded twins per voice session
     # Local fast tier: when set (e.g. "llama3.1:8b"), voice turns run on this
@@ -300,7 +310,7 @@ class Settings(BaseSettings):
     # or immediately when the operator says "smart model" / "deepseek".
     # Empty string = every voice turn runs on DeepSeek as before.
     voice_local_model: str = ""
-    voice_local_base_url: str = "http://10.0.0.58:11434/v1"
+    voice_local_base_url: str = ""      # derived: http://<services_host>:11434/v1
     # How much of each past tool result the local tier's history replays. The
     # trace exists to show that acting happens through tool calls, not to
     # re-feed the payload — a couple of lines is the whole signal, and the
@@ -438,6 +448,26 @@ class Settings(BaseSettings):
     # The VM widget goes amber when the running image is older than this; a
     # monthly systemd timer rebuilds a fresh versioned base (never in place).
     vm_image_max_age_days: int = 35
+
+    @model_validator(mode="after")
+    def _derive_service_urls(self):
+        """Fill every service URL left unset from services_host. Emptiness (not
+        model_fields_set) is the test, so JARVIS_SEARXNG_URL= also means
+        "derive"; any non-empty explicit value wins untouched."""
+        h = self.services_host.strip() or "localhost"
+        if ":" in h and not h.startswith("["):
+            h = f"[{h}]"                 # bare IPv6 literal
+        if not self.searxng_url:
+            self.searxng_url = f"http://{h}:8080"
+        if not self.voice_sidecar_url:
+            self.voice_sidecar_url = f"ws://{h}:8100/ws"
+        if not self.voice_local_base_url:
+            self.voice_local_base_url = f"http://{h}:11434/v1"
+        if not self.model_base_url_allowlist:
+            self.model_base_url_allowlist = list(dict.fromkeys(
+                ["http://127.0.0.1:11434", "http://localhost:11434"]
+                + [f"http://{h}:{p}" for p in (11434, 11435, 11436)]))
+        return self
 
 
 settings = Settings()
