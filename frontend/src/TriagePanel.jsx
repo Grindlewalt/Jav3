@@ -8,7 +8,8 @@ import { Button, Toggle } from './components/index.js'
 // (backend/reviewer.py; "triage" stays the internal name) — the first section
 // of the Review Center. It does not list the flagged
 // hosts/alerts itself — those live once, as the ⚑ rows in the queue sections
-// below. What remains: the Auto/Manual switch, a run-now button, the last
+// below. What remains: the Auto/Manual switch (beside the heading), a
+// run-now button, the last
 // sweep's tally, and the reviewer's recent autonomous approves/acks with
 // one-click undo.
 //
@@ -68,26 +69,28 @@ export default function TriagePanel() {
     <section className="sbx-sec triage-card">
       <div className="sbx-sec-head">
         <h3>Auto review</h3>
+        {/* the switch sits against the heading it names, not among the
+            actions: "Auto review [on] Auto" reads as one setting */}
+        <Toggle checked={!!s.enabled} onChange={toggle} label="Auto review"
+                onText="Auto" offText="Manual"
+                title={s.enabled
+                  ? 'sweeps unreviewed queue items on its own every few '
+                    + 'minutes — never during peak pricing'
+                  : 'nothing is swept on its own — use Review now'} />
         {untriaged > 0
           ? <span className="sec-count">{untriaged} unreviewed</span>
           : <span className="sec-count clear">clear</span>}
         {flagged > 0 && (
           <span className="tag triage-flag">{flagged} ⚑ below</span>)}
-        <div className="sec-actions">
-          <Toggle checked={!!s.enabled} onChange={toggle} label="Auto review"
-                  onText="Auto" offText="Manual"
-                  title={s.enabled
-                    ? 'the reviewer sweeps untriaged queue items on its own every '
-                      + 'few minutes — never during peak pricing'
-                    : 'nothing is swept on its own — use Review now'} />
-          {(untriaged > 0 || s.running) && (
+        {(untriaged > 0 || s.running) && (
+          <div className="sec-actions">
             <Button variant="ghost" disabled={busy || s.running}
                     title={`run auto review over the ${untriaged} unreviewed item(s) now`}
                     onClick={() => act('/api/reviewer/run')}>
               {s.running ? 'running…' : 'Review now'}
             </Button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {last && (

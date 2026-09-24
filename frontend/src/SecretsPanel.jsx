@@ -71,12 +71,17 @@ export default function SecretsPanel() {
   }
 
   return (
-    <Card className="secrets-card" title="Secrets" actions={!adding && (
-      <Button variant="ghost" onClick={() => setAdding(true)}>+ add secret</Button>)}>
-      <p className="dim small secrets-lede">
-        Keys the agent uses as {'{{secret:NAME}}'} without ever reading them.
-        A key with no web hosts bound is unusable — web_read refuses it.
-      </p>
+    // No title: the Review tab strip already says "Secrets" (a tab paints no
+    // heading of its own). The lede and the add button share the head row.
+    <Card className="secrets-card">
+      <div className="toolbar secrets-head">
+        <p className="dim small secrets-lede">
+          Keys the agent uses as {'{{secret:NAME}}'} without ever reading them.
+          A key with no web hosts bound is unusable — web_read refuses it.
+        </p>
+        {!adding && (
+          <Button variant="ghost" onClick={() => setAdding(true)}>+ add secret</Button>)}
+      </div>
 
       {adding && (
         <form className="secrets-form" onSubmit={add}>
