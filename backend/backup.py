@@ -44,6 +44,9 @@ DIRS = ("memory", "projects", "agents", "skills")
 EXCLUDES = ("__pycache__/**", "*.pyc", ".venv/**", "node_modules/**",
             ".ephemeral-notes/**")
 CRYPT_NAME = "JAV3CRYPT"          # the on-the-fly crypt remote's config name
+# One line, surfaced by /status for the GUI's empty state and by the refusals.
+# A pointer rather than a distro command: the install differs per system.
+INSTALL_HINT = "see https://rclone.org/install/"
 _CONFIG_KEYS = ("remote", "rclone", "include_secrets", "crypt_remote",
                 "crypt_password", "crypt_password2")
 
@@ -166,7 +169,7 @@ def _preflight(cfg: dict) -> str:
     rclone = rclone_path(cfg)
     if not rclone:
         raise BackupError(f"rclone is not installed ('{cfg['rclone']}' not on PATH) "
-                          "— see https://rclone.org/install/")
+                          f"— {INSTALL_HINT}")
     if cfg["include_secrets"] and not crypt_configured(cfg):
         _crypt_target(cfg, rclone)          # raises the plaintext refusal
     return rclone
@@ -273,14 +276,24 @@ def run_backup() -> dict:
 
 
 def next_scheduled() -> str | None:
+    """The timer's next run as UTC ISO-8601, like the status record's times.
+    `list-timers -o json` gives epoch microseconds. `show
+    NextElapseUSecRealtime` was empty for this monotonic (OnUnitActiveSec)
+    timer, and where set it is a locale-shaped "Thu … BST" nothing parses."""
     try:
-        r = subprocess.run(["systemctl", "--user", "show", "jarvis-backup.timer",
-                            "--property=NextElapseUSecRealtime", "--value"],
+        r = subprocess.run(["systemctl", "--user", "list-timers",
+                            "jarvis-backup.timer", "--all", "-o", "json"],
                            capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
-    out = r.stdout.strip()
-    return out if r.returncode == 0 and out and out != "n/a" else None
+    if r.returncode != 0:
+        return None
+    try:
+        usec = json.loads(r.stdout)[0]["next"]
+        return datetime.fromtimestamp(int(usec) / 1e6, timezone.utc) \
+            .isoformat(timespec="seconds") if usec else None
+    except (ValueError, TypeError, LookupError, OverflowError, OSError):
+        return None
 
 
 def status() -> dict:
@@ -290,7 +303,8 @@ def status() -> dict:
         last = json.loads(_status_path().read_text())
     except (OSError, json.JSONDecodeError):
         last = None
-    return {"rclone": {"available": bool(rclone), "path": rclone},
+    return {"rclone": {"available": bool(rclone), "path": rclone,
+                       "install_hint": None if rclone else INSTALL_HINT},
             "configured": valid_remote(cfg["remote"]),
             "remote": cfg["remote"],
             "include_secrets": cfg["include_secrets"],
@@ -313,7 +327,7 @@ def restore(from_remote: str | None = None, to_dir: Path | None = None,
         raise BackupError("no remote to restore from")
     rclone = rclone_path(cfg)
     if not rclone:
-        raise BackupError("rclone is not installed — see https://rclone.org/install/")
+        raise BackupError(f"rclone is not installed — {INSTALL_HINT}")
     to = Path(to_dir or settings.state_dir).expanduser().resolve()
     if has_state(to) and not force:
         raise BackupError(f"{to} already holds Jarvis state — refusing to "

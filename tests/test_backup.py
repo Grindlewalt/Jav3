@@ -132,11 +132,23 @@ def test_rclone_absent_status_says_so(tmp_env, monkeypatch):
     monkeypatch.setattr(backup.shutil, "which", lambda name: None)
     st = backup.status()
     assert st["rclone"]["available"] is False
+    assert st["rclone"]["install_hint"] == backup.INSTALL_HINT
     cfg = backup.load_config()
     cfg["remote"] = "r:bk"
     backup.save_config(cfg)
     with pytest.raises(backup.BackupError, match="not installed"):
         backup.run_backup()
+
+
+def test_next_scheduled_is_iso_utc(monkeypatch):
+    out = '[{"next":1790212426795078,"unit":"jarvis-backup.timer"}]'
+    monkeypatch.setattr(backup.subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 0, stdout=out, stderr=""))
+    assert backup.next_scheduled() == "2026-09-24T01:13:46+00:00"
+    for bad in ("[]", '[{"next":0}]', "not json"):
+        monkeypatch.setattr(backup.subprocess, "run", lambda argv, bad=bad, **kw:
+                            subprocess.CompletedProcess(argv, 0, stdout=bad, stderr=""))
+        assert backup.next_scheduled() is None
 
 
 def test_rclone_failure_recorded(rc, monkeypatch):
