@@ -763,7 +763,7 @@ def test_subagents_keep_messaging(tmp_env):
     assert "send_message" not in autonomy.NON_DELEGABLE
 
 
-# --- defect (a): the run tree was disconnected where Jarvis delegates --------
+# --- defect (a): the run tree was disconnected where Jav3 delegates --------
 
 def _builder(tmp_env):
     _agent_file(tmp_env, "builder")
@@ -777,7 +777,7 @@ async def test_a_spawned_agent_is_a_child_of_the_turn_that_spawned_it(
         tmp_env, monkeypatch):
     """`spawn_agent`/`spawn_temp_agent` opened their child with no parent, while
     the orchestrator and research both set one — so the run tree was broken at
-    exactly the point Jarvis delegates from a chat, and a spawned agent was an
+    exactly the point Jav3 delegates from a chat, and a spawned agent was an
     orphan node with no way back to the conversation that asked for it.
 
     Driven through the broker, because that is the only path in production: the
@@ -815,7 +815,7 @@ async def test_a_spawned_agent_is_a_child_of_the_turn_that_spawned_it(
     assert len(rows) == 1
     assert rows[0]["parent_conversation_id"] == chat_cid, (
         "the spawned agent's conversation has no parent — the run tree is "
-        "disconnected exactly where Jarvis delegates")
+        "disconnected exactly where Jav3 delegates")
 
 
 async def test_a_scheduled_run_still_has_no_parent(tmp_env, monkeypatch):
@@ -896,7 +896,7 @@ async def test_deleting_a_chat_that_spawned_an_agent_still_works(tmp_env):
         other = await open_conversation(db, project=None, title="peer")
         await db.execute(
             "INSERT INTO agent_messages (from_conversation_id, from_label, "
-            "to_conversation_id, body) VALUES (?,?,?,?)", (chat, "jarvis", other, "hi"))
+            "to_conversation_id, body) VALUES (?,?,?,?)", (chat, "jav3", other, "hi"))
         await db.commit()
     finally:
         await db.close()
@@ -968,7 +968,7 @@ async def test_an_agent_run_is_addressable_by_its_slug(tmp_env, monkeypatch):
                 "an agent run's conversation carries no identity, so nothing "
                 "can address it by name")
 
-        sender = await _conv(db, title="jarvis")
+        sender = await _conv(db, title="jav3")
         with _Envelope("guest:1", cid), _Envelope("chat:2", sender):
             peers = await agentmsg.live_peers(db, exclude_cid=sender)
             assert [p["agent"] for p in peers] == ["builder"]
@@ -1189,7 +1189,7 @@ async def test_deleting_a_chat_keeps_the_messages_it_sent(tmp_env):
         await db.close()
     assert [r["body"] for r in rows] == ["outstanding work"]
     assert rows[0]["from_conversation_id"] is None    # FK cleared, not the row
-    assert rows[0]["from_label"] == "jarvis"          # still says who sent it
+    assert rows[0]["from_label"] == "jav3"          # still says who sent it
     assert [r["body"] for r in left] == ["outstanding work"]
 
 

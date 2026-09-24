@@ -16,7 +16,7 @@ import PlanPanel from '../PlanPanel.jsx'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
-  chat: { label: 'Chat — Jarvis or an agent', w: 440, h: 520 },
+  chat: { label: 'Chat — Jav3 or an agent', w: 440, h: 520 },
   journal: { label: 'Journal — project.md', w: 460, h: 420 },
   editor: { label: 'Editor — text & markdown', w: 520, h: 440 },
   renderer: { label: 'Renderer — html / pdf / images', w: 520, h: 440 },
@@ -25,7 +25,7 @@ const PANEL_TYPES = {
   todos: { label: 'To-dos', w: 360, h: 380 },
   git: { label: 'Git — review, approve, push', w: 560, h: 480 },
   board: { label: 'Task board — goal / plan / runs', w: 400, h: 540 },
-  context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
+  context: { label: 'Context files — load into Jav3', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
   research: { label: 'Research bots — live', w: 620, h: 560 },
   plan: { label: 'Plan — dump, checklist, agents', w: 560, h: 560 },
@@ -211,13 +211,13 @@ export default function Workspace() {
     // reset before loading: a stale panels array must never be debounce-saved
     // into the NEW slug's layout (cross-project board bleed)
     setPanels(null)
-    // opening a project's board loads it into Jarvis's context — this tab is
-    // where you live, so what you're looking at is what Jarvis is thinking about
+    // opening a project's board loads it into Jav3's context — this tab is
+    // where you live, so what you're looking at is what Jav3 is thinking about
     api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
     loadLayout()
   }, [slug, refreshProject, loadLayout])
 
-  // Jarvis rearranged the board server-side (workspace_panel tool) — refetch
+  // Jav3 rearranged the board server-side (workspace_panel tool) — refetch
   useEffect(() => {
     const h = (e) => { if (!e.detail?.slug || e.detail.slug === slug) loadLayout() }
     window.addEventListener('jarvis-layout-changed', h)
@@ -437,7 +437,7 @@ export default function Workspace() {
           : <button className="ghost" onClick={async () => {
               await api(`/api/projects/${slug}/load`, { method: 'POST' }); refreshProject() }}>
               load into context</button>}
-        <label className="dim small" title="which tools Jarvis is offered here — enforced server-side per turn">
+        <label className="dim small" title="which tools Jav3 is offered here — enforced server-side per turn">
           autonomy
           <select className="autonomy-dial" value={project.autonomy || 'full'}
                   onChange={async (e) => {
@@ -630,7 +630,7 @@ function JournalPanel({ slug, project, refreshProject }) {
       <textarea className="md-editor grow" spellCheck={false} value={md}
                 onChange={(e) => { setMd(e.target.value); setDirty(true) }} />
       <div className="row">
-        <span className="dim grow">the journal Jarvis loads with this project</span>
+        <span className="dim grow">the journal Jav3 loads with this project</span>
         <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
       </div>
     </div>
@@ -805,7 +805,7 @@ function OrganizerPanel({ slug }) {
     const path = await ask.prompt('New directory', '',
       { placeholder: 'e.g. images, docs/refs', confirmLabel: 'Next' })
     if (!path) return
-    const mark = await ask.prompt('Mark for Jarvis — what belongs here?', '',
+    const mark = await ask.prompt('Mark for Jav3 — what belongs here?', '',
       { body: 'Optional.', confirmLabel: 'Create directory' }) || ''
     await api(`/api/projects/${slug}/mkdir`, {
       method: 'POST', body: JSON.stringify({ path, mark }) })
@@ -815,7 +815,7 @@ function OrganizerPanel({ slug }) {
   async function editMark(dir) {
     const mark = await ask.prompt(
       `Mark for ${dir.path || 'project root'}`, dir.mark,
-      { body: 'Tell Jarvis what goes here.', confirmLabel: 'Save' })
+      { body: 'Tell Jav3 what goes here.', confirmLabel: 'Save' })
     if (mark === null) return
     await api(`/api/projects/${slug}/dirs/mark`, {
       method: 'PUT', body: JSON.stringify({ path: dir.path, mark }) })
@@ -856,7 +856,7 @@ function OrganizerPanel({ slug }) {
   return (
     <div className="pane-col">
       <div className="row">
-        <span className="dim grow">drag files between directories · marks tell Jarvis
+        <span className="dim grow">drag files between directories · marks tell Jav3
           what belongs where</span>
         <button className="ghost" onClick={newDir}>+ dir</button>
       </div>
@@ -871,7 +871,7 @@ function OrganizerPanel({ slug }) {
             <div className="dir-head">
               <span className="dir-name">📁 {d.path || 'project root'}</span>
               <span className="dir-mark" onClick={() => editMark(d)}
-                    title="click to edit the mark Jarvis reads">
+                    title="click to edit the mark Jav3 reads">
                 {d.mark || 'no mark — click to add'}
               </span>
               <button className="win-btn" title="upload here"
@@ -952,7 +952,7 @@ function RunPanel({ slug, state, setState }) {
   )
 }
 
-// Pick which project files are loaded into Jarvis's context. Nothing is
+// Pick which project files are loaded into Jav3's context. Nothing is
 // loaded by default — tick a file to include its full contents; the token
 // count and running total keep you honest about how big the context gets.
 function ContextPanel({ slug }) {
@@ -1242,7 +1242,7 @@ function ReviewPanel({ slug }) {
   )
 }
 
-// Git gate: the working tree, the diff, and Jarvis's pending commit requests
+// Git gate: the working tree, the diff, and Jav3's pending commit requests
 // with approve (commit + push) / reject — all through the existing gitgate
 // endpoints (this panel only *uses* the gate; the semantics live server-side).
 function GitPanel({ slug }) {
@@ -1584,7 +1584,7 @@ function TaskBoardPanel({ slug, state, setState }) {
             <button className="win-btn" onClick={() => act({ action: 'delete', index: i })}>×</button>
           </li>
         ))}
-        {todos.length === 0 && <li className="dim">no plan yet — Jarvis writes one with todo_update</li>}
+        {todos.length === 0 && <li className="dim">no plan yet — Jav3 writes one with todo_update</li>}
       </ul>
       <form className="row" onSubmit={(e) => {
         e.preventDefault()

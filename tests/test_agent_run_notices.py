@@ -4,7 +4,7 @@ Before this, the run WAS the response generator — closing the panel or leaving
 the page cancelled it and the agent's work died silently. So "tell me when the
 agent finishes if I clicked off" needed the run to survive being clicked off
 first; these tests pin both halves, plus the rule about which runs announce
-themselves (operator-started named agents only, never Jarvis's spawned ones).
+themselves (operator-started named agents only, never Jav3's spawned ones).
 
 Technique borrowed from test_background_chat: httpx's ASGITransport buffers a
 streaming response until the app finishes, so a run is driven as an asyncio
@@ -135,7 +135,7 @@ async def test_a_failed_run_still_announces(client, monkeypatch):
 
 
 async def test_spawned_and_temp_agents_never_announce(client, monkeypatch):
-    """Only the operator-started path publishes. Jarvis spawns named and temp
+    """Only the operator-started path publishes. Jav3 spawns named and temp
     agents constantly inside a turn that is already on screen; toasting those
     would bury the one run the operator actually walked away from."""
     from backend import agents_run

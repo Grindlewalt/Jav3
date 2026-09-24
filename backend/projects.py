@@ -125,7 +125,7 @@ async def import_project(body: ImportProject):
             await gitgate.clone_repo(url, project_dir)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=f"clone failed: {e}")
-        await gitgate.run_git(slug, "config", "user.name", "Jarvis")
+        await gitgate.run_git(slug, "config", "user.name", "Jav3")
         await gitgate.run_git(slug, "config", "user.email",
                               settings.git_author_email)
         md = project_md_path(slug)
@@ -324,7 +324,7 @@ async def unload_project():
 
 @router.get("/debug/context")
 async def debug_context():
-    """The exact system prompt Jarvis gets this turn — for eyeballing context assembly."""
+    """The exact system prompt Jav3 gets this turn — for eyeballing context assembly."""
     db = await get_db()
     try:
         prompt = await assemble_system_prompt(db)

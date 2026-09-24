@@ -147,10 +147,10 @@ a watched, policy-gated, cuttable pipe to the internet.
     The desktop client, its folder grants and the `computer_*` tools are gone,
     so the host can no longer reach into a paired desktop at all — the
     "desktop reach via grants" residual this entry used to carry no longer
-    exists. Jarvis is LAN-first: there is no Cloudflare service token to leak,
+    exists. Jav3 is LAN-first: there is no Cloudflare service token to leak,
     rotate or push, and the music server is reached host-to-host on the LAN.
     What that shifts: the unauthenticated device-login route is now
-    reachable by anything that can reach Jarvis on the network, with no Access
+    reachable by anything that can reach Jav3 on the network, with no Access
     policy in front — see entry 13 and the paste-code row below.
 
 13. **Paste-code login, the CLI, the installers and the web origin (2026-09-23

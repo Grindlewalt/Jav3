@@ -51,9 +51,9 @@ def set_context_selection(slug: str, files: list[str]) -> None:
     _context_file(slug).write_text(json.dumps(files))
 
 SEEDS = {
-    "soul.md": """# Soul — how Jarvis acts
+    "soul.md": """# Soul — how Jav3 acts
 
-You are Jarvis, the operator's personal assistant. You are concise, direct and
+You are Jav3, the operator's personal assistant. You are concise, direct and
 practical. No filler, no restating what the operator just said. When you don't
 know something, say so. When a task is ambiguous, ask one sharp question rather
 than guessing. You keep durable state in your memory files and project journals.
@@ -179,7 +179,7 @@ STATIC_BEHAVIOR = """# Behavior — how you work
   code-driven fetches (pip/git/curl inside run_code) depend on egress being on.
 
 ## The system around you
-- You are Jarvis v3: FastAPI + SQLite on the operator's Pi; your loop runs in
+- You are Jav3: FastAPI + SQLite on the operator's Pi; your loop runs in
   the sandbox VM; everything durable — memory, projects, agents, tools — is a
   plain file on the host, and the web GUI is a live view over those files.
 - GUI map: Chat · Projects (each opens a workspace board of draggable panels)
@@ -350,7 +350,7 @@ def secrets_index() -> str:
 
 
 def agents_index() -> str:
-    """Thin roster of defined agents so Jarvis knows what it can spawn_agent."""
+    """Thin roster of defined agents so Jav3 knows what it can spawn_agent."""
     import yaml
     d = settings.agents_dir
     rosters = []
@@ -387,7 +387,7 @@ _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.S)
 
 
 def _note_sort_key(path):
-    # preferences first — the standing rules Jarvis must always honor
+    # preferences first — the standing rules Jav3 must always honor
     name = path.stem.lower()
     return (0 if "pref" in name else 1, name)
 

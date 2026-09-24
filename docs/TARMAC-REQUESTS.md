@@ -1,28 +1,28 @@
-# What Jarvis needs from TARMAC
+# What Jav3 needs from TARMAC
 
 For whoever works on **MyTube-Music / TARMAC** (`github.com/the-shadow-walker/MyTube-Music`).
 Written from a read of `server/server.js` at the current HEAD, not from the
 README — line numbers are against that file.
 
-Jarvis now has its own in-page music player. It does **not** replace TARMAC's
+Jav3 now has its own in-page music player. It does **not** replace TARMAC's
 PWA; it is a second listening surface for when the operator is already in
-Jarvis. Nothing below is required for what already ships — the player works
+Jav3. Nothing below is required for what already ships — the player works
 today against the API as it stands. These are the things that are currently
 either impossible or forced into a workaround.
 
-## How Jarvis talks to TARMAC now, so nothing here surprises you
+## How Jav3 talks to TARMAC now, so nothing here surprises you
 
 - Calls go host-to-host over the LAN, to the URL the operator configured in
-  Jarvis's Settings.
-- **Jarvis proxies the audio**, so the browser only ever talks to Jarvis: the
-  host fetches `GET /stream/:id` and re-serves it on Jarvis's own origin, forwarding `Range` and passing the `206` straight back. Your README
+  Jav3's Settings.
+- **Jav3 proxies the audio**, so the browser only ever talks to Jav3: the
+  host fetches `GET /stream/:id` and re-serves it on Jav3's own origin, forwarding `Range` and passing the `206` straight back. Your README
   already blesses this ("agents can still stream the audio themselves via
   `/stream/:id`"). `res.sendFile` (server.js:196) gives us working Range for
   free — please keep it, or keep whatever replaces it Range-capable. Seeking and
   Safari both break the moment a `206` becomes a `200`.
-- Jarvis counts a play through `POST /api/play` when its own player starts a
-  track, so in-Jarvis listening still lands in your `plays` table.
-- Jarvis's player reports its state **to Jarvis**, not to `POST
+- Jav3 counts a play through `POST /api/play` when its own player starts a
+  track, so in-Jav3 listening still lands in your `plays` table.
+- Jav3's player reports its state **to Jav3**, not to `POST
   /api/player/state`. See request 2 for why, and why that is a workaround rather
   than a preference.
 
@@ -32,7 +32,7 @@ either impossible or forced into a workaround.
 `id, path, title, artist, album, duration, tag, added_at` and no art column, and
 no route serves an image.
 
-**Why it matters:** the whole ask for the Jarvis player was "glassy, translucent,
+**Why it matters:** the whole ask for the Jav3 player was "glassy, translucent,
 clean". A player with no cover art is a text row with buttons. This is the one
 item that changes how the thing feels rather than what it can do.
 
@@ -67,7 +67,7 @@ player reported last overwrites, and `/api/status` reads that one global
 **Why it matters:** with the phone PWA and a desktop PWA both open, "pause"
 pauses both, and "what's playing" answers for whichever device spoke most
 recently. There is no way to ask for or address a specific device. This is also
-exactly why the Jarvis player reports to Jarvis instead of to
+exactly why the Jav3 player reports to Jav3 instead of to
 `POST /api/player/state` — if it reported to you it would clobber the phone's
 state, and the operator would get a "now playing" that flickers between devices.
 
@@ -87,7 +87,7 @@ An id assigned by the server on subscribe and handed back down the SSE stream is
 enough; it does not need to survive a reconnect. If players could self-report a
 name we would show the operator real device names instead of "player 1".
 
-Once this exists, Jarvis's player can register as a normal TARMAC player and the
+Once this exists, Jav3's player can register as a normal TARMAC player and the
 two surfaces stop being separate worlds — that is the version worth building
 toward, but it needs your side first.
 
@@ -108,7 +108,7 @@ DELETE /api/playlists/:id
 ```
 
 Lower priority than 1 and 2. It only becomes interesting once the agent is
-building queues the operator wants to keep, and right now Jarvis constructs a
+building queues the operator wants to keep, and right now Jav3 constructs a
 queue per request and throws it away.
 
 ## 4. Small things
@@ -118,7 +118,7 @@ queue per request and throws it away.
   anything that wants to be a player. The cheat sheet is a good idea — it is
   worth keeping complete, since an agent reading it blind is the stated point.
 - **`/api/search` is `LIKE %q%` over title/artist/album** (server.js:355-361), so
-  it misses ordinary near-misses. Jarvis does its own ranking on top
+  it misses ordinary near-misses. Jav3 does its own ranking on top
   (`backend/musicpick.py`) and does not need this changed — flagging it only so
   you know why we over-fetch (`limit=60`) and re-rank locally rather than
   trusting the order you return.
@@ -126,8 +126,8 @@ queue per request and throws it away.
 ## What we are NOT asking for
 
 - Volume or output-device control in your API. Those belong to whatever is
-  actually rendering audio; for the Jarvis player that is an `<audio>` element we
+  actually rendering audio; for the Jav3 player that is an `<audio>` element we
   control.
-- CORS headers. Jarvis proxies server-side, so the browser never talks to you
+- CORS headers. Jav3 proxies server-side, so the browser never talks to you
   directly and cross-origin never enters into it.
 - Any change to `/stream/:id` beyond keeping Range working.

@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/agents", tags=["agents"],
 # tool specs), so explicit structure is cheap and measurably steadies flash.
 # The GUI generator (GENERATE_SYSTEM) fills the same skeleton.
 DEFAULT_PROMPT = """# Context
-You are {name}, an agent working for the operator inside Jarvis. You run
+You are {name}, an agent working for the operator inside Jav3. You run
 headless when spawned: there are no follow-up questions, so decide and act
 on the brief you were given.
 

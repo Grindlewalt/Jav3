@@ -18,7 +18,7 @@ const STATE_LABEL = {
   barge_pending: 'you were saying?',
   confirm_peak: 'confirm?',
   confirm_escalate: 'send it up?',
-  asleep: 'say “hey Jarvis”',
+  asleep: 'say “hey Jav3”',
   offline: 'voicebox offline',
   mic_denied: 'microphone blocked',
 }
@@ -112,7 +112,7 @@ export default function Voice() {
         case 'queued': push('sys', `(queued: “${msg.text}”)`); break
         case 'clap': push('sys', `(👏👏 ${msg.result || msg.title})`); break
         case 'wake': audio.chime(); break
-        case 'shutdown': push('sys', '(shutting down — say “hey Jarvis” after reload)'); break
+        case 'shutdown': push('sys', '(shutting down — say “hey Jav3” after reload)'); break
         case 'tool_activity':
           if (msg.phase === 'call') push('tool', msg.name)
           break

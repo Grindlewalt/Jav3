@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 # ---------------------------------------------------------------------------
 # Login throttling.
 #
-# This endpoint is the front door, and when Jarvis is published it is the one
+# This endpoint is the front door, and when Jav3 is published it is the one
 # thing an attacker can reach without a credential. bcrypt already caps guessing
 # at tens per second rather than millions, but that is a slow no rather than a
 # no, so failures now cost increasing time.

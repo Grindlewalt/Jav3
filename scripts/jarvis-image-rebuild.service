@@ -1,5 +1,5 @@
 [Unit]
-Description=Jarvis golden-image monthly rebuild (patched kernel)
+Description=Jav3 golden-image monthly rebuild (patched kernel)
 After=network-online.target
 Wants=network-online.target
 

@@ -4,7 +4,7 @@ import Md from '../Md.jsx'
 import { notify } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 
-// Everything Jarvis made in project-less chats, grouped by chat: view/edit,
+// Everything Jav3 made in project-less chats, grouped by chat: view/edit,
 // turn a store into a real project, or merge its files into an existing one.
 export default function Artifacts() {
   const [artifacts, setArtifacts] = useState([])
@@ -71,7 +71,7 @@ export default function Artifacts() {
         <input placeholder="search name or content…" value={q}
                onChange={(e) => { setQ(e.target.value); refresh(e.target.value) }} />
         {artifacts.length === 0 && (
-          <p className="dim small">nothing yet — files Jarvis creates in a chat
+          <p className="dim small">nothing yet — files Jav3 creates in a chat
             with no project loaded land here</p>
         )}
         {artifacts.map((a) => (

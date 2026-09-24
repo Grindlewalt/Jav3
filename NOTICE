@@ -1,7 +1,7 @@
 Third-party software
 ====================
 
-Jarvis invokes the following tools as separate programs. They are not
+Jav3 invokes the following tools as separate programs. They are not
 vendored or linked; each is installed from the host's package manager.
 
 rclone — https://rclone.org

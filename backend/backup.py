@@ -1,4 +1,4 @@
-"""Back up / restore Jarvis's durable state with rclone (https://rclone.org, MIT).
+"""Back up / restore Jav3's durable state with rclone (https://rclone.org, MIT).
 
 What goes up, under the configured remote path:
   memory/ projects/ agents/ skills/   `rclone sync` of each state dir
@@ -50,7 +50,7 @@ CRYPT_NAME = "JAV3CRYPT"          # the on-the-fly crypt remote's config name
 # A pointer rather than a distro command: the install differs per system.
 INSTALL_HINT = "see https://rclone.org/install/"
 # Restoring must never plant executable git hooks: a restored project's
-# .git/hooks would run on the HOST the next time Jarvis commits there, so a
+# .git/hooks would run on the HOST the next time Jav3 commits there, so a
 # tampered remote would be code execution. Hooks are never backed up either.
 GIT_HOOKS = "**/.git/hooks/**"
 # The rclone setting names a program the server will EXECUTE. Only rclone
@@ -348,7 +348,7 @@ def restore(from_remote: str | None = None, to_dir: Path | None = None,
             include_secrets: bool | None = None, force: bool = False) -> list[str]:
     """Pull a backup into a state-dir layout at `to_dir` (default: the
     configured state dir). Refuses to land on existing state unless `force`,
-    and refuses while Jarvis runs on it. Restored secrets are installed only
+    and refuses while Jav3 runs on it. Restored secrets are installed only
     where no file exists yet; otherwise they wait in data/.restored-secrets/."""
     cfg = load_config()
     remote = from_remote or cfg["remote"]
@@ -362,7 +362,7 @@ def restore(from_remote: str | None = None, to_dir: Path | None = None,
         raise BackupError(f"rclone is not installed — {INSTALL_HINT}")
     to = Path(to_dir or settings.state_dir).expanduser().resolve()
     if has_state(to) and not force:
-        raise BackupError(f"{to} already holds Jarvis state — refusing to "
+        raise BackupError(f"{to} already holds Jav3 state — refusing to "
                           "overwrite it (pass --force to restore over it)")
     why = service_busy(to / "data" / "jarvis.db")
     if why:

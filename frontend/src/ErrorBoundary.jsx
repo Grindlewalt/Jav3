@@ -31,7 +31,7 @@ export default class ErrorBoundary extends Component {
     // The console is the only place this is recoverable from after the fact:
     // these throws never reach the backend, so they are absent from the Logs
     // tab and from the journal.
-    console.error('[jarvis] render failed', error, info?.componentStack)
+    console.error('[jav3] render failed', error, info?.componentStack)
   }
 
   componentDidUpdate(prev) {
@@ -47,7 +47,7 @@ export default class ErrorBoundary extends Component {
       <div className="err-boundary" role="alert">
         <h2>This page hit an error.</h2>
         <p className="err-b-hint">
-          The rest of Jarvis is still running — the navigation above still
+          The rest of Jav3 is still running — the navigation above still
           works, and moving to another page clears this.
         </p>
         <pre className="err-b-detail">{String(error?.message || error)}</pre>
@@ -57,7 +57,7 @@ export default class ErrorBoundary extends Component {
           </button>
           <button type="button" className="ghost"
                   onClick={() => window.location.reload()}>
-            Reload Jarvis
+            Reload Jav3
           </button>
         </div>
       </div>

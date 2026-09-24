@@ -1,5 +1,5 @@
 [Unit]
-Description=Jarvis v3 orchestrator
+Description=Jav3 orchestrator
 After=network-online.target
 
 [Service]

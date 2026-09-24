@@ -213,7 +213,7 @@ function VmStatus() {
   )
 }
 
-// Jarvis -> browser bridge: one SSE subscription per tab (/api/gui/stream).
+// Jav3 -> browser bridge: one SSE subscription per tab (/api/gui/stream).
 // Tools push actions here: open a URL (popup-blocked -> clickable toast),
 // play media in a floating dock, or nudge an open Workspace to reload its
 // layout. Fire-and-forget — a missed event only matters on-screen.
@@ -235,7 +235,7 @@ function GuiBridge() {
       try { ev = JSON.parse(m.data) } catch { return }
       if (ev.type === 'open_url') {
         const w = window.open(ev.url, '_blank', 'noopener,noreferrer')
-        if (!w) toast({ text: 'Jarvis wants to open', url: ev.url })
+        if (!w) toast({ text: 'Jav3 wants to open', url: ev.url })
       } else if (ev.type === 'play_media') {
         setPlayer(ev)
       } else if (ev.type === 'player') {
@@ -426,7 +426,7 @@ export default function App() {
               flight. Empty while folded; the links are in the rail. */}
           <nav className={railed ? 'nav folded' : 'nav'} aria-hidden={railed}>
             {!railed && <>
-              <span className="brand">Jarvis</span>
+              <span className="brand">Jav3</span>
               <div className="nav-links">{navLinks}</div>
               <div className="nav-status">
                 <VmStatus />

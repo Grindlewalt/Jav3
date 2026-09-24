@@ -23,7 +23,7 @@ async def test_assemble_context_without_project(tmp_env):
         prompt = await assemble_system_prompt(db)
     finally:
         await db.close()
-    assert "Jarvis" in prompt          # soul.md
+    assert "Jav3" in prompt          # soul.md
     assert "# All projects" in prompt  # thin rollup always present
     assert "Active project" not in prompt
 

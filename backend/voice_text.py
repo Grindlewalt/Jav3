@@ -46,11 +46,11 @@ ESCALATE_PREFIX = "[ESCALATE]"
 LOCAL_NOTES_MAX = 240
 
 # The local tier gets a slim context that drops the behaviour bank, so without
-# this it does not know what Jarvis IS — and a model that doesn't know the
+# this it does not know what Jav3 IS — and a model that doesn't know the
 # system has a capability says "I can't do that" instead of escalating. This is
 # the capability map in the smallest form that still routes correctly.
 VOICE_CAPABILITIES = """\
-# What Jarvis can do (you are his fast tier, not all of him)
+# What Jav3 can do (you are his fast tier, not all of him)
 You handle directly: conversation, music and video playback, volume and
 playback control in the music player, and quick web lookups.
 The wider system — which the smart model drives, so ESCALATE rather than
@@ -139,14 +139,21 @@ The operator will be asked out loud whether to send it to the smart model."""
 
 # --- wake / standby phrases ---------------------------------------------------
 
-# openwakeword gives a fast "hey jarvis" flip, but it is one fixed model: it
-# does not fire on a bare "Jarvis", and whisper cheerfully renders the name as
+# openwakeword gives a fast "hey jarvis" flip, but it is one fixed pretrained
+# model — there is no "hey jav3" equivalent to swap in, so the acoustic trigger
+# still fires on the OLD name and could not be renamed with the agent. It also
+# does not fire on a bare name, and whisper cheerfully renders the name as
 # Dervis/Jervis/Charvis (all observed live). The sidecar transcribes every
 # utterance whether or not the wake model fired, so the authoritative wake test
 # is done HERE on the text — the acoustic detector is only an early chime.
-_WAKE_NAMES = ("jarvis", "jervis", "dervis", "javis", "charvis", "jarvi",
+# Both names wake him: the new one, and the legacy one the wake model still uses.
+_WAKE_NAMES = ("jav3", "jav", "javthree", "jave", "jarv",
+               "jarvis", "jervis", "dervis", "javis", "charvis", "jarvi",
                "darvis", "garvis")
-# Consumed before the name: "hey there Jarvis", "um, ok Jarvis". Bounded at two
+# Whisper writes the digit as its own word ("hey jav three, ..."), so eat it
+# after the name — otherwise the remainder starts with a stray "three".
+_WAKE_NAME_TAILS = ("three", "3")
+# Consumed before the name: "hey there Jav3", "um, ok Jav3". Bounded at two
 # so a real sentence can never be eaten looking for a name that isn't coming.
 _WAKE_LEADS = ("hey", "hi", "hello", "ok", "okay", "yo", "there", "um", "uh", "so")
 # Politeness the operator adds to a standby command; ignored when matching.
@@ -175,8 +182,8 @@ def _norm(text: str) -> str:
 def split_wake(text: str) -> tuple[bool, str]:
     """(wake_heard, remainder).
 
-    "Hey Jarvis, what's my schedule" -> (True, "what's my schedule")
-    "Jarvis"                         -> (True, "")
+    "Hey Jav3, what's my schedule" -> (True, "what's my schedule")
+    "Jav3"                         -> (True, "")
     "what's my schedule"             -> (False, "what's my schedule")
 
     The remainder keeps the ORIGINAL casing/punctuation — only the wake prefix
@@ -185,14 +192,16 @@ def split_wake(text: str) -> tuple[bool, str]:
     flat = _norm(text)
     if not flat:
         return False, ""
-    # strip punctuation off each token: whisper writes "Hey Jarvis, what..." and
-    # "Okay Jarvis: turn it down", so the name arrives glued to a comma/colon
+    # strip punctuation off each token: whisper writes "Hey Jav3, what..." and
+    # "Okay Jav3: turn it down", so the name arrives glued to a comma/colon
     words = [w.strip(_PUNCT) for w in flat.split()]
     used = 0
     while used < len(words) and used < 2 and words[used] in _WAKE_LEADS:
         used += 1
     if used < len(words) and words[used] in _WAKE_NAMES:
         used += 1
+        if used < len(words) and words[used] in _WAKE_NAME_TAILS:
+            used += 1
     else:
         # a lead word alone ("hey") is not a wake; put it back
         return False, text.strip()
@@ -210,7 +219,7 @@ def split_wake(text: str) -> tuple[bool, str]:
 def _phrase_hit(text: str, phrases: tuple[str, ...]) -> bool:
     """True when the utterance IS one of these phrases (not merely contains
     one) — "never mind the news, play something" must not put him to sleep."""
-    _, flat = split_wake(text)          # "Jarvis, stand down" -> "stand down"
+    _, flat = split_wake(text)          # "Jav3, stand down" -> "stand down"
     flat = " ".join(w.strip(_PUNCT) for w in _norm(flat).split())
     for filler in sorted(_TRAILING_FILLER, key=len, reverse=True):
         if flat.endswith(" " + filler):

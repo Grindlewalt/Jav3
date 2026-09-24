@@ -1,6 +1,6 @@
 ---
 name: open_website
-description: Open a URL in a new browser tab on the operator's screen (every open Jarvis GUI tab receives it). Purely visual — nothing is fetched server-side.
+description: Open a URL in a new browser tab on the operator's screen (every open Jav3 GUI tab receives it). Purely visual — nothing is fetched server-side.
 when_to_use: When the operator asks to "pull up", "open" or "show" a website, dashboard, video page or doc — or when the best answer is the live page itself rather than a summary of it.
 enabled: true
 parameters:

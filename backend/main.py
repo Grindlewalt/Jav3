@@ -77,12 +77,12 @@ async def lifespan(app: FastAPI):
             await vm.net_down()
 
 
-app = FastAPI(title="Jarvis v3", lifespan=lifespan)
+app = FastAPI(title="Jav3", lifespan=lifespan)
 
 
 @app.middleware("http")
 async def _security_headers(request, call_next):
-    """Refuse to be framed by another origin (SAMEORIGIN still allows Jarvis's
+    """Refuse to be framed by another origin (SAMEORIGIN still allows Jav3's
     own same-origin previews), so a cookie-authed one-click action — revoking a
     device, minting a login code — can't be clickjacked from a sibling site. Cheap, and it hardens the whole SPA at once."""
     resp = await call_next(request)

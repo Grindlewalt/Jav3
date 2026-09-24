@@ -8,7 +8,7 @@ parameters:
   properties:
     slug:
       type: string
-      description: The project's slug (shown in your all-projects context, e.g. "jarvis-v3").
+      description: The project's slug (shown in your all-projects context, e.g. "jav3").
   required: [slug]
 ---
 Your context refreshes with the new project.md on your NEXT reply — within

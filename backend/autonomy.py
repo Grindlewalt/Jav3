@@ -57,14 +57,14 @@ _COMMIT = {"git_commit_request", "git_remote_request"}
 NON_DELEGABLE = frozenset({
     "spawn_agent", "spawn_temp_agent", "deploy_agents", "create_agent",
     "schedule_update",
-    # a plan run is a team; only the operator or central Jarvis starts one — a
+    # a plan run is a team; only the operator or central Jav3 starts one — a
     # plan item that could launch a plan is the fork bomb with extra steps
     "orchestrate",
 })
 
 # the spawn tools alone nest, capped (2026-07-23 operator ask): an agent at
 # spawn depth d < MAX_SPAWN_DEPTH gets spawn_agent/spawn_temp_agent back
-# (head chat = depth 0, so Jarvis -> agent -> agent, then leaf). The cap is
+# (head chat = depth 0, so Jav3 -> agent -> agent, then leaf). The cap is
 # the fork-bomb fence; the shared per-op Budget fences total cost. Funnel
 # workers (deploy_agents, runs_api) keep the full NON_DELEGABLE set — the
 # orchestrator builds its own capped tree and workers must not sprout

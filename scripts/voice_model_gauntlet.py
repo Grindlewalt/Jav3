@@ -6,7 +6,7 @@ the reasoning block was still on and the prompt overflowed 8k, so the tool
 definitions were truncated. Both faults look exactly like a stupid model.
 
 Runs the REAL slim voice prompt + the REAL LOCAL_TOOLS schemas against a
-candidate model, with faked tool results — Jarvis itself is never involved,
+candidate model, with faked tool results — Jav3 itself is never involved,
 nothing is persisted.
 
 Usage (on the Pi): .venv/bin/python scripts/voice_model_gauntlet.py <model> [base_url]
@@ -22,21 +22,21 @@ BASE = sys.argv[2] if len(sys.argv) > 2 else "http://10.0.0.58:11436/v1"
 
 # canned tool results — realistic shapes lifted from the live transcripts
 FAKE_RESULTS = {
-    "music_play": "playing Yellow — Coldplay in the Jarvis player on Mac.",
+    "music_play": "playing Yellow — Coldplay in the Jav3 player on Mac.",
     "music_search": ("11 matches:\n  [22] Yellow — Coldplay #drive\n  [19] Hey "
                      "Driver — Zach Bryan #drive\n  [15] Motorcycle Drive By — "
                      "Zach Bryan #drive"),
-    "music_status": ("library: 30 tracks\nJarvis player: playing Yellow — "
+    "music_status": ("library: 30 tracks\nJav3 player: playing Yellow — "
                      "Coldplay at 1:02 of 4:29 at 80% volume\nmusic app: "
                      "nothing actually playing (no player open)"),
-    "music_control": "paused in the Jarvis player on Mac · Chrome.",
+    "music_control": "paused in the Jav3 player on Mac · Chrome.",
     "web_search": ("1. Mars weather — NASA: dust storm season begins...\n"
                    "2. Perseverance MEDA readings..."),
     "web_read": "Mars: -60C average, 6 mbar pressure, dust storms rising.",
 }
 
 SCENARIOS = [
-    ("greeting",      "Jarvis, are you there?"),
+    ("greeting",      "Jav3, are you there?"),
     ("quick fact",    "How many feet are in a mile?"),
     ("play music",    "Could you play some driving music for me?"),
     ("pause",         "Pause the music please."),

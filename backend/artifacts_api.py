@@ -1,4 +1,4 @@
-"""Artifacts: files Jarvis made in project-less chats.
+"""Artifacts: files Jav3 made in project-less chats.
 
 Each such chat gets a hidden per-conversation project (`chat-<id>`, created
 lazily by toolctx when a file tool first runs). This API is the operator's

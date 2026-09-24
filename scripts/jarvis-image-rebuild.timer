@@ -1,5 +1,5 @@
 [Unit]
-Description=Rebuild the Jarvis golden image monthly (security-patch refresh)
+Description=Rebuild the Jav3 golden image monthly (security-patch refresh)
 
 [Timer]
 # first of each month at 04:00 local; catch up if the Pi was off (Persistent)

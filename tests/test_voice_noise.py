@@ -1,7 +1,7 @@
 """The room, not the operator: barge-in evidence and the clap curfew.
 
 The failure these cover is specific and was reported live — someone playing
-guitar in the same room stopped Jarvis mid-sentence. The chain was: the
+guitar in the same room stopped Jav3 mid-sentence. The chain was: the
 browser's RMS gate trips on any loud sound, whisper is handed music and
 returns fluent invented words, and `if not text` read non-empty text as the
 operator talking. The sidecar now reports evidence (silero's speech ratio,
@@ -207,7 +207,7 @@ async def test_clap_fires_during_the_day(seeded, monkeypatch):
 # ---- the wake word is deliberately NOT curfewed -------------------------------
 
 async def test_wake_word_works_during_the_curfew(seeded, monkeypatch):
-    """Quiet hours mute the clap, not Jarvis. "hey Jarvis" takes a spoken
+    """Quiet hours mute the clap, not Jav3. "hey Jav3" takes a spoken
     sentence to fire, so it cannot go off by accident."""
     from backend import voice as voice_mod
     session, _out = make_session(monkeypatch)

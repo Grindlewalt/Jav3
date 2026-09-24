@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the versioned golden guest image for Jarvis's sandbox VM.
+# Build the versioned golden guest image for Jav3's sandbox VM.
 #
 # Flow (proven on this Pi in the pre-prune sandbox layer, trimmed for vsock):
 #   download Debian 13 genericcloud arm64 cloud image -> verify SHA512
@@ -101,7 +101,7 @@ write_files:
   - path: /etc/systemd/system/jarvis-guest.service
     content: |
       [Unit]
-      Description=Jarvis guest runtime bootstrap (fetch package over vsock, run loop)
+      Description=Jav3 guest runtime bootstrap (fetch package over vsock, run loop)
       After=multi-user.target
       [Service]
       Type=simple

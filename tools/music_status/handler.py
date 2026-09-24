@@ -1,7 +1,7 @@
 """music_status: what the music server and both its players are doing.
 
 Two destinations report separately and neither can see the other: TARMAC knows
-about its own PWA players, and the in-page Jarvis player reports to the host
+about its own PWA players, and the in-page Jav3 player reports to the host
 directly. Merging them into one "now playing" would be a guess, so both are
 stated.
 """
@@ -20,19 +20,19 @@ def _in_page_lines() -> list[str]:
     tabs = s.get("tabs", 0)
     track = s.get("track") or {}
     if not tabs:
-        return ["Jarvis player: no tab open"]
+        return ["Jav3 player: no tab open"]
     if not track or s.get("stale"):
-        return [f"Jarvis player: idle ({tabs} tab(s) open, ready to play)"]
+        return [f"Jav3 player: idle ({tabs} tab(s) open, ready to play)"]
     who = " — ".join(x for x in (track.get("title"), track.get("artist")) if x)
     state = "paused" if s.get("paused") else "playing"
     if s.get("error"):
-        return [f"Jarvis player: loaded {who} but the browser refused to start "
+        return [f"Jav3 player: loaded {who} but the browser refused to start "
                 f"it — {s['error']}"]
     if not s.get("started"):
-        return [f"Jarvis player: {who} loaded, no sound confirmed yet"]
+        return [f"Jav3 player: {who} loaded, no sound confirmed yet"]
     left = s.get("queue") or 0
     tail = f", {left} more queued" if left else ""
-    return [f"Jarvis player: {state} {who}"
+    return [f"Jav3 player: {state} {who}"
             f"{_at(s.get('position'), s.get('duration'))}"
             f" at {s.get('volume', 100)}% volume{tail}"]
 
@@ -53,7 +53,7 @@ async def run() -> str:
     lines.insert(0, f"library: {s.get('tracks', '?')} tracks")
     lines.append(
         f"music app players open: {n}"
-        + ("" if n else "  (nothing to play on there — but the Jarvis player "
+        + ("" if n else "  (nothing to play on there — but the Jav3 player "
                         "works without it)"))
     np = s.get("now_playing")
     if np and not n:

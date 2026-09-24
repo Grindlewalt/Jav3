@@ -18,7 +18,7 @@ export default function ChatBox({ projectSlug }) {
   const [convos, setConvos] = useState([])
   const [cid, setCid] = useState(null)
   const [agents, setAgents] = useState([])
-  const [newAs, setNewAs] = useState('')          // '' = Jarvis; for a thread not yet sent
+  const [newAs, setNewAs] = useState('')          // '' = Jav3; for a thread not yet sent
   const [threadAs, setThreadAs] = useState('')    // the open thread's agent_slug
   const [newMenu, setNewMenu] = useState(false)
   const [messages, setMessages] = useState([])
@@ -33,7 +33,7 @@ export default function ChatBox({ projectSlug }) {
   const ask = useAsk()
 
   useEffect(() => () => tailAbort.current?.abort(), [])
-  // the roster for the picker; failure just leaves it Jarvis-only
+  // the roster for the picker; failure just leaves it Jav3-only
   useEffect(() => {
     api('/api/agents').then((r) => setAgents(r.agents)).catch(() => {})
   }, [])
@@ -191,14 +191,14 @@ export default function ChatBox({ projectSlug }) {
   const current = convos.find((c) => c.id === cid)
   const who = cid ? threadAs : newAs
   const nameOf = (slug) => agents.find((a) => a.slug === slug)?.name || slug
-  const whoName = who ? nameOf(who) : 'Jarvis'
+  const whoName = who ? nameOf(who) : 'Jav3'
   return (
     <div className="chatbox">
       <div className="row cb-head">
         <button className="ghost" title="past chats"
                 onClick={() => setShowHistory((s) => !s)}>☰ {convos.length}</button>
         <Tag tone={who ? 'running' : undefined} className="cb-who"
-             title={who ? `this thread runs as the ${whoName} agent` : 'central Jarvis'}>
+             title={who ? `this thread runs as the ${whoName} agent` : 'central Jav3'}>
           {whoName}</Tag>
         <span className="grow ellipsis dim">
           {current ? (current.summary || `#${current.id}`) : 'new chat'}</span>
@@ -206,10 +206,10 @@ export default function ChatBox({ projectSlug }) {
               label="start a new chat as"
               trigger={(
                 <Button variant="ghost" aria-haspopup="menu" aria-expanded={newMenu}
-                        title="new chat — as Jarvis or an agent"
+                        title="new chat — as Jav3 or an agent"
                         onClick={() => setNewMenu((o) => !o)}>+ new ▾</Button>
               )}>
-          <MenuItem onClick={() => newChat('')}>Jarvis</MenuItem>
+          <MenuItem onClick={() => newChat('')}>Jav3</MenuItem>
           {agents.length > 0 && <MenuSep />}
           {agents.map((a) => (
             <MenuItem key={a.slug} sub={a.description || undefined}

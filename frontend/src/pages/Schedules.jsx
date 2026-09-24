@@ -6,7 +6,7 @@ import Page from '../components/Page.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 
 // Heartbeats: "run X every day at 8am" / "every 6 hours". A schedule runs
-// either a defined agent or a plain Jarvis prompt, headless, in an optional
+// either a defined agent or a plain Jav3 prompt, headless, in an optional
 // project's context. Peak pricing is auto-confirmed for scheduled runs.
 const BLANK = {
   name: '', kind: 'jarvis', agent_slug: '', project_slug: '',
@@ -110,7 +110,7 @@ export default function Schedules() {
                  onChange={(e) => set({ name: e.target.value })} />
           <label className="mini">what runs
             <select value={form.kind} onChange={(e) => set({ kind: e.target.value })}>
-              <option value="jarvis">Jarvis (main)</option>
+              <option value="jarvis">Jav3 (main)</option>
               <option value="agent">an agent</option>
             </select>
           </label>
@@ -152,7 +152,7 @@ export default function Schedules() {
             <li key={s.id} className={s.enabled ? '' : 'off'}>
               <div className="sched-head">
                 <span className="grow"><strong>{s.name}</strong>
-                  <span className="tag">{s.kind === 'agent' ? s.agent_slug : 'jarvis'}</span>
+                  <span className="tag">{s.kind === 'agent' ? s.agent_slug : 'jav3'}</span>
                   {s.project_slug && <span className="tag">{s.project_slug}</span>}
                   {!!s.pending_approval && <span className="tag pending">awaiting approval</span>}
                 </span>
@@ -182,7 +182,7 @@ export default function Schedules() {
                 <li key={s.id} className="deleted">
                   <div className="sched-head">
                     <span className="grow"><strong>{s.name}</strong>
-                      <span className="tag">{s.kind === 'agent' ? s.agent_slug : 'jarvis'}</span>
+                      <span className="tag">{s.kind === 'agent' ? s.agent_slug : 'jav3'}</span>
                       {s.project_slug && <span className="tag">{s.project_slug}</span>}
                     </span>
                     <button className="ghost" onClick={() => restore(s)}>restore</button>

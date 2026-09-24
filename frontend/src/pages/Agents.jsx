@@ -235,7 +235,7 @@ export function AgentDefinitions() {
         )}
         <p className="dim small">talk to an agent from a project board's chat panel,
           give it a one-off task in the Run an agent panel, put it on a schedule, or
-          have Jarvis summon one in chat.</p>
+          have Jav3 summon one in chat.</p>
       </aside>
       <main className={agent ? 'editor-pane' : 'editor-pane split-idle'}>
         {!agent ? (

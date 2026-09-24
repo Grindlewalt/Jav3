@@ -256,7 +256,7 @@ async def _audit_host_run(slug: str, rel: str, request: Request) -> None:
 
 
 # --- organizer: dirs, marks, moves ------------------------------------------
-# A dir's "mark" is a .about.md inside it — a note telling Jarvis what belongs
+# A dir's "mark" is a .about.md inside it — a note telling Jav3 what belongs
 # there ("anything pertaining to code goes here"). File-based so the
 # organize_project skill can read the same scheme later.
 
@@ -349,7 +349,7 @@ async def move_file(slug: str, body: MoveRequest):
     return {"ok": True, "src": body.src, "dest": body.dest}
 
 
-# --- context files: which project files are loaded into Jarvis's context ----
+# --- context files: which project files are loaded into Jav3's context ----
 # Selection lives in projects/<slug>/.context.json (a list of relative paths).
 # assemble_system_prompt reads it when the project is active. Token counts are
 # a cheap chars/4 estimate — enough to budget, not exact.

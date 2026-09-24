@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Jarvis v3 — one-shot installer.
+# Jav3 — one-shot installer.
 #
 #   bash scripts/install.sh --check              # report only, change nothing
 #   sudo bash scripts/install.sh --root-phase    # the part that needs root
@@ -19,7 +19,7 @@
 #
 # WHAT NEEDS ROOT, AND WHY (the list is deliberately short)
 #   packages          qemu, node, python venv module, rsync, rclone (backups)
-#   kvm modules       the agent loop runs inside a KVM guest; no KVM, no Jarvis
+#   kvm modules       the agent loop runs inside a KVM guest; no KVM, no Jav3
 #   vhost_vsock       the guest's only channel to the host supervisor
 #   kvm group         so rootless qemu can open /dev/kvm
 #   enable-linger     so the systemd --user service survives logout/reboot
@@ -348,10 +348,10 @@ check_linger() {
 }
 
 # Everything that depends on there being a checkout. Skipped in remote mode,
-# where we are asking "can this machine host Jarvis", not "is it installed".
+# where we are asking "can this machine host Jav3", not "is it installed".
 check_user_side() {
   if [ -z "$REPO_DIR" ] || [ ! -d "$REPO_DIR/backend" ]; then
-    warn "no Jarvis checkout here — skipping install-state checks"
+    warn "no Jav3 checkout here — skipping install-state checks"
     return 0
   fi
   if [ -x "$REPO_DIR/.venv/bin/python" ]; then ok "python venv built"
@@ -434,7 +434,7 @@ root_phase() {
 }
 
 # -------------------------------------------------------- state migration ----
-# Runs BEFORE anything else touches local state. Jarvis's durable data is all
+# Runs BEFORE anything else touches local state. Jav3's durable data is all
 # outside git — memory/, projects/, skills/, agents/ and the SQLite DB — so on a
 # migration it exists in exactly one place and a silent skip here loses it.
 # Hence: unreachable source is a hard failure, never a warning.
@@ -454,7 +454,7 @@ pull_state() {
 
   ssh -o ConnectTimeout=10 -o BatchMode=yes "$host" true 2>/dev/null \
     || die "cannot reach $host over ssh.
-       Refusing to continue: this phase is the only copy of Jarvis's durable
+       Refusing to continue: this phase is the only copy of Jav3's durable
        state (memory/, projects/, skills/, agents/, data/jarvis.db) and
        skipping it silently would start a fresh install over the top of a
        migration. Fix the source host, then re-run with the same --from."
@@ -494,7 +494,7 @@ pull_state() {
   # Snapshot the source DB through SQLite's backup API rather than copying the
   # file. A live database in WAL mode cannot be safely cp'd — you get a torn
   # read or a missing -wal and the copy opens corrupt. .backup is consistent
-  # even against a running Jarvis. Plain python3: a state dir has no venv.
+  # even against a running Jav3. Plain python3: a state dir has no venv.
   step "  snapshotting the source database"
   # The snapshot holds every conversation and the users' bcrypt hashes: it is
   # created 0600 (umask 077) and removed on ANY exit from here on, success or
@@ -669,7 +669,7 @@ verify() {
 
 # Remote preflight: ship THIS script down the pipe and run its --check there.
 # Nothing is installed and nothing is copied — it answers "could this machine
-# host Jarvis, and what exactly is it missing" in one command, which is the
+# host Jav3, and what exactly is it missing" in one command, which is the
 # question you want answered the moment you walk away from a BIOS screen.
 if [ -n "$TARGET_HOST" ]; then
   [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] \
@@ -678,7 +678,7 @@ if [ -n "$TARGET_HOST" ]; then
   ssh -o ConnectTimeout=10 "$TARGET_HOST" 'bash -s -- --check' < "${BASH_SOURCE[0]}"
   rc=$?
   if [ $rc -eq 0 ]; then
-    printf '\n%s%s is ready to host Jarvis.%s\n' "$GREEN" "$TARGET_HOST" "$OFF"
+    printf '\n%s%s is ready to host Jav3.%s\n' "$GREEN" "$TARGET_HOST" "$OFF"
   else
     printf '\n%s%s is not ready — see the fix lines above.%s\n' "$YELLOW" "$TARGET_HOST" "$OFF"
   fi

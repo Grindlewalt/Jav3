@@ -47,7 +47,7 @@ async def tarmac_test():
 
 @router.get("/tarmac/stream/{track_id}")
 async def tarmac_stream(track_id: int, request: Request):
-    """Re-serve a library track on Jarvis's own origin.
+    """Re-serve a library track on Jav3's own origin.
 
     Range is forwarded in and the 206 passed straight back out. That is not
     optional polish: without Content-Range the <audio> element cannot seek, and

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end smoke test against a LIVE Jarvis instance (run on the Pi).
+"""End-to-end smoke test against a LIVE Jav3 instance (run on the Pi).
 
 Exercises the real HTTP surfaces an autonomous agent depends on: auth,
 chat (SSE messaging with a real model turn), memory, projects, the tool

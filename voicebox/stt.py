@@ -30,7 +30,7 @@ turns the fallback off with it.
 
 `transcribe()` returns evidence, not just text. The Pi's barge-in decision used
 to be "the transcript was non-empty", which is exactly why a guitar could stop
-Jarvis mid-sentence: whisper hands back confident-looking words for music. The
+Jav3 mid-sentence: whisper hands back confident-looking words for music. The
 caller now gets `no_speech_prob`, `avg_logprob` and the hallucination verdict
 and can refuse to treat that as the operator talking.
 """
@@ -168,7 +168,7 @@ class Transcriber:
         self.fallback = _wants_fallback(self.model_size)
         # Live vocabulary, pushed down the socket by the Pi (which is the side
         # that knows the music library, project slugs and people's names). The
-        # sidecar holds no Jarvis state of its own — this is a cache, refreshed
+        # sidecar holds no Jav3 state of its own — this is a cache, refreshed
         # on every connect, and an empty one just means no bias.
         self._hotwords: str | None = None
         from faster_whisper import WhisperModel

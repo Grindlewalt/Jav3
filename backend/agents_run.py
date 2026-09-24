@@ -5,7 +5,7 @@ Agents tab's definitions; the operator kicks one off from the project board.
 
 The agent runs in the ACTIVE PROJECT: it gets the project's assembled context
 (minus any context items the agent excludes) and the same staged-write tools,
-so its file changes land in the approval queue exactly like Jarvis's own.
+so its file changes land in the approval queue exactly like Jav3's own.
 """
 import asyncio
 import json
@@ -97,7 +97,7 @@ def memory_slug(agent: dict) -> str | None:
     """The slug whose private notes dir this agent's memory tools use, or None
     for the shared notes. Only a real definition (it has a slug) can own one —
     a temp agent's notes are the whole point of it surviving, so they stay
-    shared where the operator and Jarvis will see them."""
+    shared where the operator and Jav3 will see them."""
     return agent.get("slug") if agent.get("own_memory") and agent.get("slug") else None
 
 
@@ -218,7 +218,7 @@ async def _open_run(db, agent: dict, task: str, active=_USE_DB, *,
     title = title or f"[{agent['name']}] " + " ".join(task.split())[:40]
     # parent: the turn that dispatched spawn_agent/spawn_temp_agent (the broker
     # restores runtime.conversation_id for a guest turn), so the run tree stays
-    # connected exactly where Jarvis delegates. None for a schedule, which
+    # connected exactly where Jav3 delegates. None for a schedule, which
     # really has no parent conversation.
     parent, _ = await launcher(db)
     conversation_id = await open_conversation(
@@ -240,7 +240,7 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB, **hooks) -> d
     return await _run_headless(agent, task, active, **hooks)
 
 
-# blocks a lean temp agent drops: Jarvis's identity, standing memory, the user
+# blocks a lean temp agent drops: Jav3's identity, standing memory, the user
 # profile and the rosters — the bulk that re-rides every iteration without
 # helping a narrow worker. env.md, the active project and the operator-rules
 # tail stay (the tail is non-excludable anyway).
@@ -260,7 +260,7 @@ outcome first, no process narration."""
 def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
     """An in-memory AGENT.md equivalent — same keys the _agent_* helpers read,
     never touches the roster on disk. `duplicate` mirrors the operator's ask:
-    a full copy of Jarvis's context only when the task truly needs it."""
+    a full copy of Jav3's context only when the task truly needs it."""
     return {
         "name": (label or "").strip()[:40] or "temp agent",
         "prompt": prompt.strip() + "\n\n" + TEMP_REPORT_BACK,
@@ -275,7 +275,7 @@ async def run_temp_agent_headless(prompt: str, task: str, *,
                                   duplicate: bool = False, label: str = "",
                                   active=_USE_DB, **hooks) -> dict:
     """A disposable agent: no AGENT.md, no roster entry — a role prompt layered
-    on Jarvis's own context (full when duplicate, lean otherwise), run once and
+    on Jav3's own context (full when duplicate, lean otherwise), run once and
     gone. What survives is the run's conversation row (Jobs view) and any
     memory note the agent writes."""
     return await _run_headless(_temp_agent_def(prompt, duplicate, label),
@@ -296,7 +296,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
                         on_open=None, on_event=None,
                         extra_tools: tuple[str, ...] = ()) -> dict:
     """Shared engine for named and temp headless runs. Peak is auto-confirmed:
-    the caller (a schedule or Jarvis itself) already intended this, there's no
+    the caller (a schedule or Jav3 itself) already intended this, there's no
     human to prompt. `active` pins the project context without disturbing the
     operator's live session.
 

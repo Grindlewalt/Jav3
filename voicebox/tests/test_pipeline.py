@@ -40,7 +40,7 @@ def test_is_phantom_catches_whisper_fabrications(text):
 
 @pytest.mark.parametrize("text", [
     "Play Kickstart My Heart.",
-    "Jarvis, turn it down.",
+    "Jav3, turn it down.",
     "Stop.",                       # a legitimate one-word barge-in
     "No, cancel that.",
     "What did the overnight schedules turn up?",
@@ -180,7 +180,7 @@ def test_roundtrip_tts_vad_stt(synth, transcriber):
 def test_vocabulary_biases_the_decoder(transcriber):
     """set_vocab must accept, dedupe and cap — the Pi pushes the whole music
     library and an over-long bias list starts costing ordinary words."""
-    n = transcriber.set_vocab(["Jarvis", "jarvis", "Kickstart My Heart", "",
+    n = transcriber.set_vocab(["Jav3", "jarvis", "Kickstart My Heart", "",
                                "  Mockingbird  "])
     assert n == 3                        # case-insensitive dedupe, blanks gone
     assert transcriber.set_vocab([f"term number {i}" for i in range(500)]) < 500

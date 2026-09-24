@@ -1,5 +1,5 @@
 """Disposable self-copies: spawn_temp_agent (2026-07-28). No AGENT.md, no
-roster entry — a role prompt on Jarvis's context, run once, report + memory
+roster entry — a role prompt on Jav3's context, run once, report + memory
 note survive."""
 import importlib.util
 from pathlib import Path
@@ -20,7 +20,7 @@ def test_temp_def_lean_vs_duplicate():
     assert "soul.md" in lean["context_exclude"]
     assert lean["name"] == "builder"
     dup = agents_run._temp_agent_def("You are a builder.", True)
-    assert dup["context_exclude"] == []           # a full copy of Jarvis
+    assert dup["context_exclude"] == []           # a full copy of Jav3
     assert dup["name"] == "temp agent"
     # the report-back contract rides on top of every temp role prompt
     for d in (lean, dup):

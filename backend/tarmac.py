@@ -3,18 +3,18 @@
     https://github.com/the-shadow-walker/MyTube-Music
 
 A separate service with its own library, its own players (the PWA, open on a
-phone or a desktop), and a documented agent API, so Jarvis drives it over HTTP.
+phone or a desktop), and a documented agent API, so Jav3 drives it over HTTP.
 
 Playback goes one of two ways.
 
 **TARMAC's own players**, via POST /api/remote — the PWA on a phone or desktop.
 
-**Jarvis's own in-page player**, via `open_stream` below. The host fetches
-/stream/:id and re-serves the bytes on Jarvis's own origin, so the browser only
-ever talks to Jarvis — one session, one origin, no mixed content. TARMAC's README
+**Jav3's own in-page player**, via `open_stream` below. The host fetches
+/stream/:id and re-serves the bytes on Jav3's own origin, so the browser only
+ever talks to Jav3 — one session, one origin, no mixed content. TARMAC's README
 blesses exactly this: "agents can still stream the audio themselves via
 /stream/:id". This is the path that fixes the autoplay silence, because the
-Jarvis tab is the one the operator is already touching.
+Jav3 tab is the one the operator is already touching.
 
 Deliberately NOT behind the SSRF guard in websec.py. That guard refuses
 non-public hosts, which is right for a URL the agent chose and wrong here — this
@@ -82,7 +82,7 @@ def _check_redirect(status: int, location: str) -> None:
     raise TarmacError(
         f"the music server redirected to {location[:80]} instead of answering — "
         f"something in front of it (a login page or auth proxy) is intercepting "
-        f"Jarvis's requests. Point the TARMAC URL at the server directly.")
+        f"Jav3's requests. Point the TARMAC URL at the server directly.")
 
 
 async def _base() -> str:
@@ -208,7 +208,7 @@ async def random_playlist(n: int = 20, tag: str | None = None) -> list[dict]:
 async def scrobble(track_id: int) -> None:
     """Count a play. The in-page player streams straight from /stream/:id, which
     does not touch the plays table, so without this a track listened to inside
-    Jarvis would never show up in TARMAC's play counts. Best-effort: a missed
+    Jav3 would never show up in TARMAC's play counts. Best-effort: a missed
     scrobble must never break playback."""
     try:
         await _call("POST", "/api/play", json_body={"id": int(track_id)})
@@ -240,7 +240,7 @@ async def remote(action: str, ids: list[int] | None = None, *,
     return await _call("POST", "/api/remote", json_body=body)
 
 
-# --- audio, re-served on Jarvis's origin --------------------------------------
+# --- audio, re-served on Jav3's origin --------------------------------------
 
 class StreamHandle:
     """An open /stream/:id response: status and headers now, bytes on demand.

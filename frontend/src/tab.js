@@ -1,6 +1,6 @@
-// Which machine this browser tab is, so Jarvis can play something HERE.
+// Which machine this browser tab is, so Jav3 can play something HERE.
 //
-// Every open Jarvis tab used to be an anonymous subscriber on one broadcast
+// Every open Jav3 tab used to be an anonymous subscriber on one broadcast
 // channel, so asking for music started it on the laptop, the desktop and the
 // phone at once — all slightly out of sync, with no way to say which one you
 // meant because none of them had a name. A tab now carries:

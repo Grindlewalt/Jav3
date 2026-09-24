@@ -10,7 +10,7 @@ from backend.orchestrator import run_job
 # node falling through with tools=None gets the full registry), a worker
 # can't deploy another team under itself — contextvars propagate into the
 # job's task tree, making this a cheap whole-subtree recursion fence
-_in_funnel = contextvars.ContextVar("jarvis_in_funnel", default=False)
+_in_funnel = contextvars.ContextVar("jav3_in_funnel", default=False)
 
 
 async def run(brief: str, title: str = "") -> str:

@@ -23,7 +23,7 @@
 # have failed to start had anyone installed it. Same for VOICE_PACK, which the
 # live process does not set; PYTHONPATH is what actually resolves the package.
 [Unit]
-Description=Jarvis architect TTS voice (Chatterbox Nano, RTX 3060 Ti)
+Description=Jav3 architect TTS voice (Chatterbox Nano, RTX 3060 Ti)
 After=network-online.target
 
 [Service]

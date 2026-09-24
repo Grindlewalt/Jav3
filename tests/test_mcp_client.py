@@ -1,6 +1,6 @@
 """The MCP client's security properties.
 
-Jarvis reaching OUT to a server is a different threat model from everything
+Jav3 reaching OUT to a server is a different threat model from everything
 else in this system, and the defence is structural rather than a check: our
 `tools/projector_*/TOOL.md` manifest is the authority for what exists, and the
 server's own `tools/list` is used only to confirm the things we intend to call

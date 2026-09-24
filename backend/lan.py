@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends
 from .auth import require_user
 from .config import settings
 
-log = logging.getLogger("jarvis.lan")
+log = logging.getLogger("jav3.lan")
 
 SERVICE_TYPE = "_http._tcp.local."
 # Interfaces that are never "the LAN": container bridges, VM taps/bridges.

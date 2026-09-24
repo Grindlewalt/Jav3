@@ -1,4 +1,4 @@
-"""Heartbeats: run an agent or a Jarvis prompt on a schedule.
+"""Heartbeats: run an agent or a Jav3 prompt on a schedule.
 
 A schedule is 'do this task every day at 08:00' or 'every 6 hours'. A single
 background loop (started in the app lifespan) wakes each minute, runs anything
@@ -202,7 +202,7 @@ async def toggle_schedule(sid: int, enabled: bool):
                                    row["interval_minutes"], _now())
                 await db.execute("UPDATE schedules SET next_run = ? WHERE id = ?",
                                  (nxt.isoformat(timespec="minutes"), sid))
-        # toggling is the operator's decision on a Jarvis-proposed schedule
+        # toggling is the operator's decision on a Jav3-proposed schedule
         # (resume = approve, pause = keep it parked) — either way it's no
         # longer awaiting one, so the bell stops showing it
         await db.execute(
@@ -219,7 +219,7 @@ async def toggle_schedule(sid: int, enabled: bool):
 async def delete_schedule(sid: int):
     """Move to the recently-deleted bin. The heartbeat skips it from here on
     (_tick filters the bin out), but it stays restorable for TRASH_DAYS.
-    pending_approval clears with it: deleting a Jarvis-proposed schedule IS a
+    pending_approval clears with it: deleting a Jav3-proposed schedule IS a
     decision, and the bell must never point at a row that's in the bin."""
     db = await get_db()
     try:

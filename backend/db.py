@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     daily_at TEXT,                   -- 'HH:MM' local, when cadence = daily
     interval_minutes INTEGER,        -- when cadence = interval
     enabled INTEGER NOT NULL DEFAULT 1,
-    pending_approval INTEGER NOT NULL DEFAULT 0,  -- Jarvis-proposed, not yet decided
+    pending_approval INTEGER NOT NULL DEFAULT 0,  -- Jav3-proposed, not yet decided
     next_run TEXT NOT NULL,          -- ISO local
     last_run TEXT,
     last_result TEXT,
@@ -228,7 +228,7 @@ CREATE TABLE IF NOT EXISTS triage_log (
 CREATE TABLE IF NOT EXISTS agent_messages (
     id INTEGER PRIMARY KEY,
     from_conversation_id INTEGER REFERENCES conversations(id),
-    from_label TEXT NOT NULL,            -- agent slug, or 'jarvis' for a plain chat
+    from_label TEXT NOT NULL,            -- agent slug, or 'jav3' for a plain chat
     to_conversation_id INTEGER REFERENCES conversations(id),
     to_agent_slug TEXT,
     project_slug TEXT,                   -- the SENDER's project, for context
@@ -295,7 +295,7 @@ async def init_db() -> None:
         # run-tree columns on an already-created conversations table
         async with db.execute("PRAGMA table_info(conversations)") as cur:
             ccols = [r["name"] for r in await cur.fetchall()]
-        # schedules proposed by Jarvis (schedule_update tool) land disabled
+        # schedules proposed by Jav3 (schedule_update tool) land disabled
         # with this flag set; the bell surfaces them and the operator's
         # enable/pause decision clears it
         async with db.execute("PRAGMA table_info(schedules)") as cur:
@@ -355,7 +355,7 @@ async def init_db() -> None:
                           # turn falls back to the chat's artifact store.
                           ("project_locked", "INTEGER NOT NULL DEFAULT 0"),
                           # which agent definition this conversation runs AS.
-                          # NULL is central Jarvis (every chat before this
+                          # NULL is central Jav3 (every chat before this
                           # column, funnel nodes, temp agents). A slug means the
                           # turn's system prompt IS agents/<slug>/AGENT.md —
                           # never "on behalf of": the comms inbox claims mail by
@@ -453,7 +453,7 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
     if `project` is None) instead of following whatever is loaded globally.
 
     `agent` is the definition slug this conversation runs AS (None = central
-    Jarvis). Set once, at creation: an identity that could change mid-thread
+    Jav3). Set once, at creation: an identity that could change mid-thread
     would leave a transcript nobody can attribute.
 
     `ephemeral` marks an incognito conversation. It is the row-level source of
@@ -483,7 +483,7 @@ async def launcher(db: aiosqlite.Connection) -> tuple[int | None, str | None]:
     The first is the running turn's conversation (runtime.conversation_id — the
     broker restores it for a brokered tool), so spawned agents and funnel/
     research heads record it as their `parent` and the run tree stays connected
-    where Jarvis delegates. None outside a turn (an HTTP-launched job, a
+    where Jav3 delegates. None outside a turn (an HTTP-launched job, a
     schedule), and None if that row is already gone — a dangling parent would
     fail the foreign key.
 

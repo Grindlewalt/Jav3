@@ -1,7 +1,7 @@
-"""voicedesk — Jarvis desktop mode without a browser.
+"""voicedesk — Jav3 desktop mode without a browser.
 
 A background service on the operator's machine: microphone and speaker always
-up, "hey Jarvis" to start, and the same conversation the /voice page has. It
+up, "hey Jav3" to start, and the same conversation the /voice page has. It
 speaks the SAME protocol as that page (see backend/voice.py's docstring), so
 backend/voice.py does not know or care which client is attached — one state
 machine, two front ends.
@@ -207,7 +207,7 @@ class VoiceDesk:
         elif kind == "transcript":
             log.info("heard: %s", ev.get("text", ""))
         elif kind == "assistant_text":
-            log.info("jarvis[%s]: %s", ev.get("tier", "?"), ev.get("text", ""))
+            log.info("jav3[%s]: %s", ev.get("tier", "?"), ev.get("text", ""))
         elif kind == "state":
             log.debug("state: %s", ev.get("state"))
         elif kind == "clap":
@@ -234,12 +234,12 @@ def _load_config(path: Path) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        prog="voicedesk", description="Jarvis desktop voice mode, headless.")
+        prog="voicedesk", description="Jav3 desktop voice mode, headless.")
     ap.add_argument("--config", type=Path,
                     default=Path.home() / ".config" / "jarvis" / "voicedesk.json")
-    ap.add_argument("--url", help="wss://<jarvis>/api/voice/ws")
+    ap.add_argument("--url", help="wss://<jav3>/api/voice/ws")
     ap.add_argument("--token", help="prefer the config file — argv is world-readable")
-    ap.add_argument("--name", help="what this machine is called in Jarvis")
+    ap.add_argument("--name", help="what this machine is called in Jav3")
     ap.add_argument("--project", help="pin this client's conversations to a project")
     ap.add_argument("--in-device", help="input device index or name")
     ap.add_argument("--out-device", help="output device index or name")

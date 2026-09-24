@@ -2,7 +2,7 @@
 //
 // Why this exists: the host re-serves TARMAC's /stream/:id on our own origin
 // (GET /api/media/tarmac/stream/:id, Range forwarded), so this <audio> element
-// just points at a same-origin URL and the browser only ever talks to Jarvis.
+// just points at a same-origin URL and the browser only ever talks to Jav3.
 //
 // It also fixes the silence. A browser refuses audio.play() in a tab that has
 // had no user gesture; TARMAC's PWA hits that constantly because nobody touches
@@ -215,7 +215,7 @@ export default function Player() {
     if (float) return
     try {
       const { win, dispose } = await openDetached({
-        width: 404, height: 178, title: 'Jarvis · music',
+        width: 404, height: 178, title: 'Jav3 · music',
       })
       // closing the float only re-docks the controls; the track never stops
       const unwatch = watchClose(win, () => { dispose(); setFloat(null) })
@@ -246,7 +246,7 @@ export default function Player() {
 
   // it is a window in a task switcher: it should say what is playing
   useEffect(() => {
-    if (float && track) float.document.title = `${track.title} · Jarvis`
+    if (float && track) float.document.title = `${track.title} · Jav3`
   }, [float, track])
 
   useEffect(() => () => {

@@ -1,4 +1,4 @@
-# Jarvis voice local tier: gemma-4:12b (Google QAT q4_0) on llama.cpp,
+# Jav3 voice local tier: gemma-4:12b (Google QAT q4_0) on llama.cpp,
 # alone on the 12 GB 3060.
 #
 # !! THIS UNIT IS NOT CURRENTLY INSTALLED. !!  As of 2026-08-04 the live voice
@@ -57,7 +57,7 @@
 # --alias qwen3.5:9b, add --chat-template-kwargs '{"enable_thinking":false}',
 # and JARVIS_VOICE_LOCAL_MODEL=qwen3.5:9b on the Pi.
 [Unit]
-Description=Jarvis voice LLM tier (llama.cpp, gemma-4:12b, RTX 3060 12GB)
+Description=Jav3 voice LLM tier (llama.cpp, gemma-4:12b, RTX 3060 12GB)
 After=network-online.target
 
 [Service]

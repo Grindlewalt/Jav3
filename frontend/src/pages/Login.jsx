@@ -29,7 +29,7 @@ export default function Login({ onLogin }) {
   return (
     <div className="center">
       <form className="login" onSubmit={submit}>
-        <h1>Jarvis</h1>
+        <h1>Jav3</h1>
         <input placeholder="username" value={username}
                onChange={(e) => setUsername(e.target.value)} autoFocus />
         <input type="password" placeholder="password" value={password}

@@ -1,4 +1,4 @@
-"""The login endpoint is the front door, and with Jarvis published it is the
+"""The login endpoint is the front door, and with Jav3 published it is the
 one thing reachable without a credential.
 
 What is being checked: failures get progressively more expensive, a burst is

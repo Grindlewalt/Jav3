@@ -25,7 +25,7 @@ def _has_content(d: Path) -> bool:
 
 
 def has_state(root: Path) -> bool:
-    """True when `root` holds a real Jarvis state layout (a DB, or any memory/
+    """True when `root` holds a real Jav3 state layout (a DB, or any memory/
     project/agent file) rather than empty scaffolding."""
     return ((root / "data" / "jarvis.db").exists()
             or any(_has_content(root / n) for n in _LEGACY_PROBE))
@@ -73,19 +73,19 @@ class Settings(BaseSettings):
     # Add `Secure` to the session cookie so it never rides plaintext HTTP. OFF
     # by default because a LAN deployment is reached over plain http (a Secure
     # cookie would silently never be sent there); set true only when every
-    # client reaches Jarvis over HTTPS, e.g. behind a TLS reverse proxy.
+    # client reaches Jav3 over HTTPS, e.g. behind a TLS reverse proxy.
     cookie_secure: bool = False
     # Extra hostnames allowed as the Origin of a cookie-authed state-changing
     # request, on top of the request's own Host. The CSRF-origin check refuses a
     # request whose Origin is any OTHER host — SameSite=Lax does not stop a
     # same-site sibling (another app served under the same parent domain).
     # Add a name here only for a page on another host that legitimately posts
-    # to Jarvis.
+    # to Jav3.
     # Each entry is a bare host (any port) or host:port. The server's own LAN
     # names are allowed without listing them, but only on lan_port.
     csrf_allowed_hosts: list[str] = []
-    # The committer email on every commit Jarvis makes in a project repo.
-    git_author_email: str = "jarvis@localhost"
+    # The committer email on every commit Jav3 makes in a project repo.
+    git_author_email: str = "jav3@localhost"
 
     # Operator API keys the agent uses by {{secret:NAME}} placeholder but
     # never sees (backend/secrets.py). Lives next to the env file.
@@ -396,18 +396,18 @@ class Settings(BaseSettings):
     voice_library_max_tracks: int = 120
     voice_library_ttl_seconds: int = 900
     # wake-word standby: seconds of idle before he stops listening for
-    # anything but "hey Jarvis" again (only in effect when the sidecar
+    # anything but "hey Jav3" again (only in effect when the sidecar
     # reports a wake model in its ready message)
     # Seconds of quiet before he drops back to wake-word standby. Short on
-    # purpose: re-arming costs one word ("Jarvis, ...") and the same utterance
+    # purpose: re-arming costs one word ("Jav3, ...") and the same utterance
     # carries the request, so a tight window is cheap — and it stops him
     # answering a conversation that was never aimed at him.
     voice_wake_timeout: int = 15
     # Quiet hours for the double-clap gesture. The clap is the one trigger with
     # no confirmation step and no words in it, so a dropped book at 3am starts
-    # music; overnight it is muted. "hey Jarvis" is deliberately NOT gated —
+    # music; overnight it is muted. "hey Jav3" is deliberately NOT gated —
     # it takes a spoken sentence to fire, so it cannot go off by accident, and
-    # the operator still wants a working Jarvis at night. The window wraps
+    # the operator still wants a working Jav3 at night. The window wraps
     # midnight; set start == end to disable without touching the flag.
     voice_clap_curfew: bool = True
     voice_clap_curfew_start: str = "22:30"
@@ -423,9 +423,9 @@ class Settings(BaseSettings):
     # right default: an unset secret must never mean "no check".
     voice_client_token: str = ""
 
-    # --- MCP clients (Jarvis reaching OUT) ---------------------------------
+    # --- MCP clients (Jav3 reaching OUT) ---------------------------------
     # The projection mapper's in-app MCP server. Off unless both are set. What
-    # Jarvis may do there is fixed by OUR tools/projector_*/TOOL.md manifest,
+    # Jav3 may do there is fixed by OUR tools/projector_*/TOOL.md manifest,
     # not by what the server advertises — see backend/mcp.py for why that
     # distinction is the whole security design.
     mcp_projector_url: str = ""          # e.g. http://10.0.0.40:8765/mcp
@@ -577,7 +577,7 @@ def ensure_dirs() -> None:
     if settings.legacy_layout and not _warned_legacy:
         _warned_legacy = True
         log.warning(
-            "Jarvis state is still inside the code checkout (%s) and the state "
+            "Jav3 state is still inside the code checkout (%s) and the state "
             "dir %s is empty — running from the old location. Stop the service "
             "and run `python -m backend.cli migrate-state` to move it.",
             settings.base_dir, settings.state_dir)

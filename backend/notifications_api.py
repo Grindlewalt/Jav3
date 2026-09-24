@@ -1,9 +1,9 @@
-"""Approval notification center — one place that answers "what is Jarvis waiting
+"""Approval notification center — one place that answers "what is Jav3 waiting
 on me for?" Aggregates the independent pending stores that otherwise each
 live behind their own page (or, for git, behind no page at all):
 
   - git push requests awaiting approval   (git_requests table)
-  - schedules Jarvis proposed             (schedules with pending_approval = 1)
+  - schedules Jav3 proposed             (schedules with pending_approval = 1)
 
 Read-only aggregation — it never approves anything, just surfaces a count + list
 so the nav can show a badge. Each source is wrapped so one failing store does not
@@ -40,7 +40,7 @@ async def _git_pending(slugs: list[str]) -> list[dict]:
 
 
 async def _schedules_pending() -> list[dict]:
-    """Schedules Jarvis proposed via schedule_update: paused until the
+    """Schedules Jav3 proposed via schedule_update: paused until the
     operator resumes (approve) or pauses (park) them in the GUI."""
     try:
         db = await get_db()

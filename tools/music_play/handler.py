@@ -8,11 +8,11 @@ is one more turn, not a conversation.
 
 Two destinations, and they are not interchangeable:
 
-  jarvis  the player inside the Jarvis tab. The host proxies the audio, so this
+  jav3    the player inside the Jav3 tab. The host proxies the audio, so this
           is the one that reliably makes sound — the operator is already
           touching that tab, which is the gesture a browser demands before it
           will start audio. Volume and output selection are real here.
-  app     TARMAC's own PWA players. What the operator listens on when Jarvis is
+  app     TARMAC's own PWA players. What the operator listens on when Jav3 is
           not open, but silent in a tab nobody has touched.
 """
 import asyncio
@@ -91,15 +91,15 @@ async def _library_listing() -> str:
 # --- destinations -------------------------------------------------------------
 
 def _resolve_where(where: str) -> str:
-    """Which player. `auto` prefers the in-page one whenever a Jarvis tab is
+    """Which player. `auto` prefers the in-page one whenever a Jav3 tab is
     open, because that is the destination that actually produces sound; with no
     tab open there is nothing to prefer and it falls back to the music app."""
     w = (where or "auto").strip().lower()
-    if w in ("jarvis", "page", "here", "browser"):
-        return "jarvis"
+    if w in ("jav3", "jarvis", "page", "here", "browser"):
+        return "jav3"
     if w in ("app", "tarmac", "pwa", "phone"):
         return "app"
-    return "jarvis" if gui.tabs() else "app"
+    return "jav3" if gui.tabs() else "app"
 
 
 async def _queue_rows(ids: list[int]) -> list[dict]:
@@ -170,14 +170,14 @@ async def _play_in_page(ids: list[int], what: str, device: str,
     if not rows:
         return ("error: the music server would not describe those tracks, so "
                 "there is nothing to stream")
-    # ONE tab. This used to go to every open Jarvis tab, so asking for a song
+    # ONE tab. This used to go to every open Jav3 tab, so asking for a song
     # started it on the laptop, the desktop and the phone at once — the
     # operator's report. The tab that asked wins; gui.resolve_tab explains the
     # rest of the order.
     target, where = gui.resolve_tab(tab or None, runtime.gui_tab.get())
     if target is None:
         return (f"{where}, so there is no in-page player to play on. Ask the "
-                f"operator to open Jarvis, or pass where='app' to send it to "
+                f"operator to open Jav3, or pass where='app' to send it to "
                 f"the music app instead.")
     if append:
         # behind the current track, never interrupting it — the player treats
@@ -185,7 +185,7 @@ async def _play_in_page(ids: list[int], what: str, device: str,
         n = gui.player_push("queue_add", tab=target, queue=rows)
         if not n:
             return f"'{where}' closed before it could queue."
-        return (f"queued {what} in the Jarvis player on {where} "
+        return (f"queued {what} in the Jav3 player on {where} "
                 f"({len(rows)} track(s) added).")
     fields: dict = {"queue": rows, "index": 0}
     if volume is not None:
@@ -202,12 +202,12 @@ async def _play_in_page(ids: list[int], what: str, device: str,
     extra = "".join([f", output {device}" if device else "",
                      f", volume {volume}%" if volume is not None else ""])
     if started:
-        return f"playing {what} in the Jarvis player on {where}{queued}{extra}."
+        return f"playing {what} in the Jav3 player on {where}{queued}{extra}."
     if err:
-        return (f"{what} was loaded into the Jarvis player on {where} but the "
+        return (f"{what} was loaded into the Jav3 player on {where} but the "
                 f"browser refused to start it: {err}. The operator can press "
                 f"play in the player.")
-    return (f"{what} was sent to the Jarvis player on {where}{queued} but no "
+    return (f"{what} was sent to the Jav3 player on {where}{queued} but no "
             f"sound has been confirmed. The player is on screen — the operator "
             f"may need to press play once.")
 
@@ -215,11 +215,11 @@ async def _play_in_page(ids: list[int], what: str, device: str,
 async def _play_ids(ids: list[int], where: str, what: str, device: str,
                     volume: int | None, tab: str = "",
                     append: bool = False) -> str:
-    if where == "jarvis":
+    if where == "jav3":
         return await _play_in_page(ids, what, device, volume, tab, append)
     if append:
-        return ("error: only the Jarvis player has a queue — the music app "
-                "can't append. Pass where='jarvis' to queue tracks.")
+        return ("error: only the Jav3 player has a queue — the music app "
+                "can't append. Pass where='jav3' to queue tracks.")
     try:
         r = await tarmac.remote("play", ids)
     except tarmac.TarmacError as e:
@@ -227,8 +227,8 @@ async def _play_ids(ids: list[int], where: str, what: str, device: str,
     started = await _confirm_started(ids[0])
     note = ""
     if device or volume is not None:
-        note = (" (the music app has no output or volume control — the Jarvis "
-                "player does, so pass where='jarvis' if they want that)")
+        note = (" (the music app has no output or volume control — the Jav3 "
+                "player does, so pass where='jav3' if they want that)")
     return _playing_line(what, r, started) + note
 
 
@@ -305,5 +305,5 @@ def _playing_line(what: str, r: dict, started: bool | None) -> str:
     return (f"{what} was accepted by {n} music-app player(s) but no sound has "
             f"started. Browsers block audio in a tab that has not been touched "
             f"yet — the operator can press play once in the music app, or pass "
-            f"where='jarvis' to use the player inside Jarvis, which does not "
+            f"where='jav3' to use the player inside Jav3, which does not "
             f"have that problem.")

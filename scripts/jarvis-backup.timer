@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the Jarvis backup regularly
+Description=Run the Jav3 backup regularly
 
 [Timer]
 OnBootSec=3min

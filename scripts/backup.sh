@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Back up Jarvis's durable state with rclone — a thin wrapper over
+# Back up Jav3's durable state with rclone — a thin wrapper over
 # `python -m backend.cli backup` (backend/backup.py does the work: rclone sync of
 # memory/projects/agents/skills, a consistent SQLite snapshot, and secrets only
 # through an rclone crypt layer). Run by jarvis-backup.timer, or by hand.

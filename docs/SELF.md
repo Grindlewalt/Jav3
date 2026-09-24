@@ -1,4 +1,4 @@
-# Jarvis v3 — technical self-reference
+# Jav3 — technical self-reference
 
 This is your own manual. `self_docs` with no args returns the section list;
 `self_docs(section="...")` returns one section. Everything here describes the

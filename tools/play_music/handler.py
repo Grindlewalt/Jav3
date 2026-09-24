@@ -1,6 +1,6 @@
 """play_music: start the GUI's floating audio player, in ONE tab.
 
-It used to play in every open Jarvis tab at once — the laptop, the desktop and
+It used to play in every open Jav3 tab at once — the laptop, the desktop and
 the phone, all slightly out of step. The tab that asked is the one that plays;
 see backend/gui.py:resolve_tab for the order it falls back through.
 """

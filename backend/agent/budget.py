@@ -87,8 +87,8 @@ class Budget:
 # sets a Budget directly (no op_id); real operations use register()+active_op_id.
 # It goes away once the loop is guest-side and the id is the only mechanism.
 
-active_op_id: contextvars.ContextVar = contextvars.ContextVar("jarvis_op_id", default=None)
-active_budget: contextvars.ContextVar = contextvars.ContextVar("jarvis_budget", default=None)
+active_op_id: contextvars.ContextVar = contextvars.ContextVar("jav3_op_id", default=None)
+active_budget: contextvars.ContextVar = contextvars.ContextVar("jav3_budget", default=None)
 
 _budgets: dict[str, Budget] = {}
 

@@ -19,7 +19,7 @@ but a clipped utterance start costs a mis-transcription.
 
 **Why the utterance carries statistics.** An amplitude gate cannot tell a
 guitar from a person, which is how a brother playing in the same room could
-stop Jarvis mid-sentence: the browser's RMS VAD trips, whisper is handed music
+stop Jav3 mid-sentence: the browser's RMS VAD trips, whisper is handed music
 and returns confident-looking words, and the Pi treated non-empty text as the
 operator talking. Silero is a speech model, not a loudness meter — sustained
 music sits low and erratic where speech sits high and steady — so the mean
@@ -42,9 +42,9 @@ START_FRAMES = 2                       # 64 ms of confident speech to trigger
 # How long a pause ends the utterance — the single biggest end-of-speech
 # latency knob, and it is ADAPTIVE, because a single number cannot be right.
 #
-# At a flat 300 ms it split ordinary sentences at their internal pauses: "Jarvis,
+# At a flat 300 ms it split ordinary sentences at their internal pauses: "Jav3,
 # put Mockingbird on" ended at the comma, whisper was handed one second of audio
-# and returned "Jarvis, Kickstart", and the operator got an answer to something
+# and returned "Jav3, Kickstart", and the operator got an answer to something
 # they never said. Measured on 12 sentences through the real VAD:
 #
 #     flat 300 ms      1/12 split    80 ms median endpoint latency
@@ -52,7 +52,7 @@ START_FRAMES = 2                       # 64 ms of confident speech to trigger
 #     adaptive         0/12 split    92 ms
 #
 # The insight is that the pauses which cause splits follow a SHORT lead-in
-# ("Jarvis,", "So,", "Actually,") while a real end-of-turn arrives after a
+# ("Jav3,", "So,", "Actually,") while a real end-of-turn arrives after a
 # whole sentence. So a brief utterance has to hold its silence longer to be
 # considered finished, and a substantial one ends on the snappy timer. That
 # buys the flat-500 correctness for +12 ms instead of +192 ms.

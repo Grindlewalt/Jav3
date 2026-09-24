@@ -295,7 +295,7 @@ export default function Chat() {
   }, [sideOpen])
 
   // Starting a chat doesn't replace the orb, it moves it: the big one is the
-  // same object as the little one beside Jarvis's first reply. send() measures
+  // same object as the little one beside Jav3's first reply. send() measures
   // it on the way out and this flies the avatar in from there, shrinking as it
   // goes. Runs on every message change but costs one null check unless a rect
   // is waiting.
@@ -666,8 +666,8 @@ export default function Chat() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
-              placeholder={temporary ? 'Message Jarvis (temporary chat)…'
-                                     : 'Message Jarvis…'}
+              placeholder={temporary ? 'Message Jav3 (temporary chat)…'
+                                     : 'Message Jav3…'}
               rows={1}
             />
             <ComposerModel visible={!input.trim()} />

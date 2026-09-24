@@ -36,7 +36,7 @@ export default function Input({
 }
 
 // The checkbox row — `<label className="mini row">` with a checkbox and a span,
-// as in Skills' "granted to Jarvis and agents" and Agents' switches. A
+// as in Skills' "granted to Jav3 and agents" and Agents' switches. A
 // checkbox's label must sit beside it, not above, so it is its own component
 // rather than a flag on Input.
 export function Checkbox({ label, className = '', ...rest }) {

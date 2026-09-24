@@ -104,7 +104,7 @@ export default function Memory() {
         {readOnly ? (
           <>
             <div className="pane-head">
-              <h3>What Jarvis sees right now</h3>
+              <h3>What Jav3 sees right now</h3>
               <span className="dim">
                 {assembled?.active_project
                   ? `project loaded: ${assembled.active_project}`

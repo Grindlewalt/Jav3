@@ -3,7 +3,7 @@
 A tool is a FOLDER: tools/<name>/TOOL.md + tools/<name>/handler.py. That is
 the entire contract for adding one — drop the folder in, it appears in the
 Tools tab, flip `enabled: true` to grant it. (This is also the seam through
-which Jarvis will one day author its own tools: two staged files + operator
+which Jav3 will one day author its own tools: two staged files + operator
 approval.)
 
 TOOL.md frontmatter:

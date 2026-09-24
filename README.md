@@ -1,4 +1,4 @@
-# Jarvis v3
+# Jav3
 
 A self-hosted personal AI agent with durable file-backed memory, multi-agent
 orchestration and a voice interface, running as a single service on a Raspberry

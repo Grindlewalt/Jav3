@@ -61,7 +61,7 @@ async def ensure_repo(slug: str) -> None:
         d = _project_dir(slug)
         if not (d / ".git").exists():
             await run_git(slug, "init", "-q", check=True)
-            await run_git(slug, "config", "user.name", "Jarvis", check=True)
+            await run_git(slug, "config", "user.name", "Jav3", check=True)
             await run_git(slug, "config", "user.email", settings.git_author_email,
                           check=True)
         gitignore = d / ".gitignore"
@@ -362,7 +362,7 @@ async def approve_request(rid: int) -> dict:
         else:
             await run_git(slug, "add", "-A", check=True)
         try:
-            await run_git(slug, "-c", "user.name=Jarvis",
+            await run_git(slug, "-c", "user.name=Jav3",
                           "-c", f"user.email={settings.git_author_email}",
                           "commit", "-m", message, check=True)
         except RuntimeError as e:

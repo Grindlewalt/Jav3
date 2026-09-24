@@ -77,7 +77,7 @@ async def test_agent_trash_lifecycle(client):
     await client.delete("/api/agents/scout")
     assert all(a["slug"] != "scout" for a in (await client.get("/api/agents")).json()["agents"])
     assert any(a["slug"] == "scout" for a in (await client.get("/api/agents/trash")).json()["agents"])
-    # trashed agent is not in Jarvis's roster
+    # trashed agent is not in Jav3's roster
     assert "scout" not in agents_index()
     # restore
     await client.post("/api/agents/scout/restore")

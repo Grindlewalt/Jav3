@@ -124,7 +124,7 @@ def test_mic_frames_carry_the_type_byte(desk):
 
 def test_muting_stops_sending_audio(desk):
     """A muted mic sends no audio AND cannot barge in — otherwise "mute" would
-    still be able to cut Jarvis off mid-sentence."""
+    still be able to cut Jav3 off mid-sentence."""
     desk.muted = True
     desk.play.playing = True
     desk._on_mic(b"\x00" * 16, 0.5)

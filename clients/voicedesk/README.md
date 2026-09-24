@@ -1,6 +1,6 @@
-# voicedesk — Jarvis desktop mode, headless
+# voicedesk — Jav3 desktop mode, headless
 
-Microphone and speaker always up, "hey Jarvis" to start, no browser tab. Starts
+Microphone and speaker always up, "hey Jav3" to start, no browser tab. Starts
 at login, survives reboots, reconnects on its own.
 
 It speaks exactly the protocol the `/voice` page speaks, so the Pi's state
@@ -30,7 +30,7 @@ to every process on the machine via `ps`.
 mkdir -p ~/.config/jarvis
 cat > ~/.config/jarvis/voicedesk.json <<'EOF'
 {
-  "url": "wss://jarvis.example.com/api/voice/ws",
+  "url": "wss://jav3.example.com/api/voice/ws",
   "token": "the same value as JARVIS_VOICE_CLIENT_TOKEN on the Pi",
   "name": "studio"
 }
@@ -74,9 +74,9 @@ in the foreground once first, grant the permission, then load the agent.
 
 ## How it behaves
 
-- **Standby.** Sessions start asleep. "Hey Jarvis" wakes it; two rising notes
+- **Standby.** Sessions start asleep. "Hey Jav3" wakes it; two rising notes
   are the cue. After `JARVIS_VOICE_WAKE_TIMEOUT` seconds of quiet it dozes off
-  again. "Jarvis, put something on" both wakes it and gets answered — the wake
+  again. "Jav3, put something on" both wakes it and gets answered — the wake
   phrase is stripped from every utterance.
 - **The double clap** plays one of the clap tracks, and is **ignored between
   22:30 and 07:30** so a dropped book at 3am does not start music. The wake
@@ -87,14 +87,14 @@ in the foreground once first, grant the permission, then load the agent.
   made on the Pi; this side only provides the hair trigger.
 - **Reconnects** with backoff (1→30s). Mic audio recorded while the socket is
   down is discarded rather than queued — replaying a minute of stale room noise
-  at Jarvis on reconnect is worse than losing it.
+  at Jav3 on reconnect is worse than losing it.
 
 ## Wiring it to the projector
 
 If the projection mapper is running with its MCP server on (see
 `src/mcp/README.md` in that repo), the Pi will also mirror what it is hearing
 and saying onto a chosen surface. Nothing is needed here — that feed goes Pi →
-projector directly. Ask Jarvis to "put the voice display on the wall".
+projector directly. Ask Jav3 to "put the voice display on the wall".
 
 ## Troubleshooting
 

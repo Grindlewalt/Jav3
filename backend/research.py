@@ -185,7 +185,7 @@ async def _synthesize(topic: str, findings: list[str]) -> str:
         "markdown document: a short intro, clear sections, and a final 'Sources' "
         "list of the URLs cited. Use only what the findings support. No preamble.",
         f"Topic: {topic}\n\nFindings:\n\n{joined}")
-    doc = (f"# Research: {topic}\n\n*Compiled {date.today().isoformat()} by Jarvis "
+    doc = (f"# Research: {topic}\n\n*Compiled {date.today().isoformat()} by Jav3 "
            "research agents.*\n\n" + body)
     rules = standing_rules_tail()
     return await _enforce_rules(doc, rules) if rules else doc

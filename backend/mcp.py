@@ -1,4 +1,4 @@
-"""MCP client — Jarvis reaching OUT to a local MCP server.
+"""MCP client — Jav3 reaching OUT to a local MCP server.
 
 Every other integration in this system is something reaching in. This is the
 first one that goes the other way, and the threat model is different enough to
@@ -317,7 +317,7 @@ class McpClient:
                     detail={"server": self.cfg.name,
                             "url": self.cfg.url,
                             "ignored": sorted(unexpected),
-                            "note": "Jarvis never registers what a server "
+                            "note": "Jav3 never registers what a server "
                                     "advertises — tools/<name>/TOOL.md in this "
                                     "repo is the authority. A server growing a "
                                     "tool means it was updated (re-pin the "

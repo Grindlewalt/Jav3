@@ -117,7 +117,7 @@ async def test_control_uses_prev_not_previous(configured, monkeypatch):
     # forwarding a call that would 400
     out = await run(action="stop", where="app")
     assert not out.startswith("error:")
-    assert "no stop control" in out and "where='jarvis'" in out
+    assert "no stop control" in out and "where='jav3'" in out
 
 
 @pytest.mark.asyncio

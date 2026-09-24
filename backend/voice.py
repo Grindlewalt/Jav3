@@ -30,7 +30,7 @@ a false alarm loses nothing.
 
 **The verdict is evidence, not word count.** It used to be "the transcript came
 back non-empty", and that is why someone playing guitar in the same room could
-stop Jarvis mid-sentence: the browser's RMS gate trips on any loud sound,
+stop Jav3 mid-sentence: the browser's RMS gate trips on any loud sound,
 whisper is handed music and returns fluent invented words, and non-empty text
 read as the operator talking. The sidecar now sends what it actually knows —
 silero's speech ratio for the clip and whisper's own confidence — and
@@ -137,7 +137,7 @@ BARGE_MIN_SPEECH_RATIO = 0.30
 
 # Double clap = music, no model in the loop: the browser detects the gesture
 # and this dispatches music_play directly (an algorithm, not a conversation).
-# The agent can still control the result — it's the same Jarvis player.
+# The agent can still control the result — it's the same Jav3 player.
 # The live list is in session_state, edited by the clap_tracks tool; the
 # tuple is only the never-configured default.
 CLAP_TRACKS = ("Kickstart My Heart", "Should I Stay or Should I Go")
@@ -158,7 +158,7 @@ def in_clap_curfew(now: datetime | None = None) -> bool:
     The clap is an acoustic trigger with no confirmation step — a dropped book
     at three in the morning starting music is the failure this prevents. The
     window wraps midnight (22:30 → 07:30), so the comparison is an OR, not the
-    usual BETWEEN. Only the gesture is muted: "hey Jarvis" works at every hour,
+    usual BETWEEN. Only the gesture is muted: "hey Jav3" works at every hour,
     because that one takes a deliberate sentence to fire."""
     if not settings.voice_clap_curfew:
         return False
@@ -514,7 +514,7 @@ class VoiceSession:
         if kind == "ready":
             self.wake_enabled = bool(ev.get("wake"))
             await self._send_json({"type": "ready", "wake": ev.get("wake")})
-            # The sidecar holds no Jarvis state, so the names the operator
+            # The sidecar holds no Jav3 state, so the names the operator
             # actually says have to be pushed to it on every connect.
             asyncio.create_task(self._push_vocab())
             if self.wake_enabled and self.state == LISTENING:
@@ -566,7 +566,7 @@ class VoiceSession:
         actually says. Track titles and artists are the words whisper gets
         wrong most, and they are exactly the ones a wrong guess acts on (the
         wrong song plays). Best-effort: no vocabulary just means no bias."""
-        words: list[str] = ["Jarvis"]
+        words: list[str] = ["Jav3"]
         try:
             from .tarmac import cached_library
             tracks = await cached_library(settings.voice_library_max_tracks,
@@ -622,7 +622,7 @@ class VoiceSession:
             text = ""
 
         # The wake phrase is stripped from EVERY utterance, awake or asleep, so
-        # "Jarvis, turn it down" is the same request as "turn it down".
+        # "Jav3, turn it down" is the same request as "turn it down".
         wake_heard, rest = split_wake(text)
 
         if self.state == ASLEEP:
@@ -641,7 +641,7 @@ class VoiceSession:
             text = rest
         elif wake_heard:
             if not rest:
-                # "Jarvis?" while already up — usually because the acoustic
+                # "Jav3?" while already up — usually because the acoustic
                 # detector fired first and this is the same breath. Stay up,
                 # and let the once-a-day briefing land here too, or it would
                 # be swallowed by whichever path saw the wake first.
@@ -1171,7 +1171,7 @@ class VoiceSession:
         token = runtime.gui_tab.set(self.tab or None)
         try:
             result = await tool_dispatch(
-                "music_play", {"query": title, "where": "jarvis"})
+                "music_play", {"query": title, "where": "jav3"})
         finally:
             runtime.gui_tab.reset(token)
         await self._send_json({"type": "clap", "title": title,
@@ -1237,7 +1237,7 @@ class VoiceSession:
         if self.state == ASLEEP:
             # Standby means standby. A worker that lands while he is dozing
             # must NOT talk its way back into the room — the digest waits in
-            # pending_deliveries and _wake_up drains it on the next "Jarvis".
+            # pending_deliveries and _wake_up drains it on the next "Jav3".
             return
         if any(not self.chunks[i]["played"] for i in self.order):
             return

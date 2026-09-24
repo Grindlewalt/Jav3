@@ -1,8 +1,8 @@
 # voicebox
 
-The Jarvis voice inference sidecar: silero VAD + faster-whisper STT +
+The Jav3 voice inference sidecar: silero VAD + faster-whisper STT +
 Kokoro TTS behind one authenticated WebSocket. Runs on an x86 box (the main
-server) — the Pi that hosts Jarvis only relays audio bytes to and from it.
+server) — the Pi that hosts Jav3 only relays audio bytes to and from it.
 
 CPU-only, no torch: whisper runs on CTranslate2 (int8), Kokoro and silero on
 onnxruntime.
@@ -16,7 +16,7 @@ docker compose logs -f     # first start downloads ~600 MB of models
 curl -s localhost:8100/health
 ```
 
-Keep the token: the Jarvis backend needs it as `JARVIS_VOICE_SIDECAR_TOKEN`.
+Keep the token: the Jav3 backend needs it as `JARVIS_VOICE_SIDECAR_TOKEN`.
 Models persist in the `voicebox-models` volume; restarts don't re-download.
 
 ## Run in a venv
@@ -33,7 +33,7 @@ VOICEBOX_TOKEN=$(openssl rand -hex 32) \
 
 | Var | Default | Meaning |
 |---|---|---|
-| `VOICEBOX_TOKEN` | *(unset — refuses all connections)* | bearer token the Jarvis backend presents |
+| `VOICEBOX_TOKEN` | *(unset — refuses all connections)* | bearer token the Jav3 backend presents |
 | `VOICEBOX_MODELS` | `./models` (`/models` in Docker) | model directory |
 | `VOICEBOX_WHISPER` | `small` | faster-whisper size (`tiny`/`base`/`small`/`medium`) |
 | `VOICEBOX_LANG` | `en` | STT language pin (autodetect costs latency) |

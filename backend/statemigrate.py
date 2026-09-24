@@ -3,7 +3,7 @@ JARVIS_STATE_DIR: `python -m backend.cli migrate-state [--to DIR]`.
 
 Never automatic. `config.ensure_dirs` only WARNS when it finds the old layout, so
 a deploy can't strand a running box; this command is the one place data moves,
-and it does so the cautious way: refuse while Jarvis is running, copy (hard-link
+and it does so the cautious way: refuse while Jav3 is running, copy (hard-link
 where the filesystem allows, so multi-GB guest images move instantly), snapshot
 the DB through SQLite's backup API, verify every file and every table's row
 count, and only then remove the source. Files git tracks (the shipped skills,
@@ -34,7 +34,7 @@ def _unit_active() -> bool:
 
 
 def service_busy(db_path: Path) -> str | None:
-    """Why a live Jarvis appears to own `db_path`, or None when it is safe to
+    """Why a live Jav3 appears to own `db_path`, or None when it is safe to
     move/replace. The unit check catches an idle server (which holds no DB
     connection between requests); the lock probe catches anything mid-write,
     and a WAL checkpoint that cannot complete means a reader is still attached."""
@@ -49,9 +49,9 @@ def service_busy(db_path: Path) -> str | None:
         con.rollback()
         busy = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
         if busy:
-            return f"{db_path} still has an active reader — is Jarvis running?"
+            return f"{db_path} still has an active reader — is Jav3 running?"
     except sqlite3.OperationalError as e:
-        return f"{db_path} is locked ({e}) — is Jarvis running?"
+        return f"{db_path} is locked ({e}) — is Jav3 running?"
     finally:
         con.close()
     return None
@@ -133,7 +133,7 @@ def migrate_state(to: Path | None = None) -> list[str]:
     if not has_state(src):
         raise MigrateError(f"no legacy state under {src} — nothing to migrate")
     if has_state(dst):
-        raise MigrateError(f"{dst} already holds Jarvis state — refusing to merge "
+        raise MigrateError(f"{dst} already holds Jav3 state — refusing to merge "
                            "into it. Move it aside or pick another --to.")
     src_db = src / "data" / "jarvis.db"
     why = service_busy(src_db)
@@ -208,5 +208,5 @@ def migrate_state(to: Path | None = None) -> list[str]:
     log.append(f"removed the old copies from {src}")
     if dst != settings.state_dir.expanduser().resolve():
         log.append(f"set JARVIS_STATE_DIR={dst} in ~/.config/jarvis/env before "
-                   "starting Jarvis")
+                   "starting Jav3")
     return log

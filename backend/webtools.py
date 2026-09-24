@@ -2,7 +2,7 @@
 fetch ledger so multiple agents don't scrape the same page (wasting tokens
 and narrowing the diversity of what's gathered).
 
-Everything here runs on the trusted host. When Jarvis moves into the VM, these
+Everything here runs on the trusted host. When Jav3 moves into the VM, these
 become the host proxy the VM calls — the VM never opens a raw socket to the
 internet; it only ever receives the sanitised text these functions return.
 """

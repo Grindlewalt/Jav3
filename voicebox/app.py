@@ -1,7 +1,7 @@
-"""voicebox — the Jarvis voice inference sidecar.
+"""voicebox — the Jav3 voice inference sidecar.
 
 Runs on an x86 box next to the Pi (the Pi cannot do audio ML). One privileged
-client — the Jarvis backend — connects over a single WebSocket and speaks a
+client — the Jav3 backend — connects over a single WebSocket and speaks a
 tiny mixed protocol:
 
   binary up    0x01 | PCM16 mono @ 16 kHz     mic audio, any chunking
@@ -22,7 +22,7 @@ from silero. The Pi needs all of it to answer "was that the operator, or the
 guitar in the background?" — see stt.py and vad.py for why non-empty text is
 not the same question.
 
-The box holds no Jarvis state and no secrets beyond its own bearer token:
+The box holds no Jav3 state and no secrets beyond its own bearer token:
 audio in, text out; text in, audio out. Auth is compare_digest plus a 1 s penalty sleep on failure. A second
 connection supersedes the first (a reconnecting Pi must not be locked out by
 its own half-dead socket).

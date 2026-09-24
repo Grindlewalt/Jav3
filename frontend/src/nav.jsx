@@ -9,7 +9,7 @@
 //
 // The bar carries six primaries — the surfaces work starts from, Review (the
 // one link that asks the operator for something, so it wears the pending
-// count), and Settings. Two more sit behind ⋯: Memory (what Jarvis reads
+// count), and Settings. Two more sit behind ⋯: Memory (what Jav3 reads
 // before every turn) and Schedules. Voice and Artifacts are deliberately
 // absent — their routes still work, they are just not advertised — and
 // Network and Logs are Review's sub-tabs now, not destinations of their own.
@@ -42,7 +42,7 @@ const PATHS = {
                        8.2 18.3 6.4 19.6 4.4 17.6 5.7 15.8 4.9 13.8 2.7 13.4 2.7 10.6
                        4.9 10.2 5.7 8.2 4.4 6.4 6.4 4.4 8.2 5.7Z" />
               <circle cx="12" cy="12" r="3" /></>,
-  // an open book: the memory files Jarvis reads before every turn
+  // an open book: the memory files Jav3 reads before every turn
   memory: <path d="M12 6.6C10.4 5.3 8.4 4.7 5 4.7v12.9c3.4 0 5.4.6 7 1.9 1.6-1.3
                    3.6-1.9 7-1.9V4.7c-3.4 0-5.4.6-7 1.9Zm0 0v12.9" />,
   // a calendar with one marked day

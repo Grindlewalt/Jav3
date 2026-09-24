@@ -247,7 +247,7 @@ nav {
    slides the page down instead of snapping it */
 nav.folded { height: 0; border-bottom-color: transparent; overflow: hidden; }
 /* the wordmark: slanted, tracked-out uppercase — a launch-provider badge, not
-   a gradient. The text node stays "Jarvis"; the transform does the shouting. */
+   a gradient. The text node stays "Jav3"; the transform does the shouting. */
 nav .brand {
   font-weight: 600; font-size: 15px; margin-right: 20px;
   letter-spacing: 0.42em; text-transform: uppercase; font-style: italic;
@@ -952,7 +952,7 @@ input:focus, textarea:focus { border-color: var(--accent);
   border-color: var(--bubble-border); border-radius: 16px 16px 6px 16px;
 }
 .msg.assistant { gap: 13px; }
-/* Jarvis signs his turns with the orb itself, shrunk — same sphere, same
+/* Jav3 signs his turns with the orb itself, shrunk — same sphere, same
    light. It was a lettered accent disc; one identity is better than two, and
    it is what the empty-state orb flies into when a chat starts. */
 .msg-avatar {
@@ -2118,7 +2118,7 @@ kbd {
   .msg.user pre { max-width: 94%; }
 }
 
-/* GUI bridge: Jarvis-driven toasts + floating media player */
+/* GUI bridge: Jav3-driven toasts + floating media player */
 .gui-toasts {
   position: fixed; right: 16px; bottom: calc(16px + var(--sab)); z-index: 3000;
   display: flex; flex-direction: column; gap: 8px; max-width: min(420px, 90vw);

@@ -1,7 +1,7 @@
 """Music plays on ONE machine — the one that asked.
 
 The operator's report: "playing music, it plays on all connected computers".
-It did. Every open Jarvis tab was an anonymous subscriber on one broadcast
+It did. Every open Jav3 tab was an anonymous subscriber on one broadcast
 channel, so a play event went to the laptop, the desktop and the phone at once,
 all slightly out of sync, and there was no way to say which was meant because
 none of them had a name.
@@ -100,7 +100,7 @@ def test_with_no_asking_tab_the_most_recent_one_is_used(tabs):
 
 def test_nothing_open_is_reported_not_broadcast():
     got, why = gui.resolve_tab(None, None)
-    assert got is None and "no Jarvis tab is open" in why
+    assert got is None and "no Jav3 tab is open" in why
 
 
 @pytest.mark.asyncio
@@ -136,7 +136,7 @@ async def test_play_music_says_so_when_there_is_nowhere_to_play(monkeypatch):
 
     from tools.play_music.handler import run
     out = await run(source="song.mp3")
-    assert "no Jarvis tab is open" in out
+    assert "no Jav3 tab is open" in out
 
 
 def test_a_tab_that_disconnects_is_forgotten(tabs):

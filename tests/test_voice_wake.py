@@ -125,7 +125,7 @@ async def test_first_wake_of_the_day_greets_with_briefing(seeded, monkeypatch):
     # transcript, because a wake that CARRIES a request must get the request
     await session._on_sidecar_json({"type": "wake"})
     assert seen == {}
-    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jarvis."})
+    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jav3."})
     await settle(session)
 
     assert "[startup" in seen["user"]
@@ -143,13 +143,13 @@ async def test_first_wake_of_the_day_greets_with_briefing(seeded, monkeypatch):
     # same day, second wake: no second greeting turn
     seen.clear()
     await session._sleep()
-    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jarvis."})
+    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jav3."})
     assert seen == {} and session.state == "listening"
 
 
 async def test_wake_carrying_a_request_answers_it_instead_of_greeting(
         seeded, monkeypatch):
-    """"Jarvis, what's my schedule" is one utterance, not a wake plus a wait —
+    """"Jav3, what's my schedule" is one utterance, not a wake plus a wait —
     and it must not cost the operator an unasked-for daily briefing first."""
     from backend import chat as chat_mod
     await mark_greeted()
@@ -164,7 +164,7 @@ async def test_wake_carrying_a_request_answers_it_instead_of_greeting(
     await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
     assert session.state == "asleep"
     await session._on_sidecar_json(
-        {"type": "transcript", "text": "Jarvis, what's my schedule today?"})
+        {"type": "transcript", "text": "Jav3, what's my schedule today?"})
     await settle(session)
 
     # the wake phrase is stripped and the briefing is skipped entirely
@@ -197,7 +197,7 @@ async def test_standby_and_shutdown_commands(seeded, monkeypatch):
 
     monkeypatch.setattr(session, "_begin_turn", record)
     await session._on_sidecar_json({"type": "ready", "wake": "hey_jarvis_v0.1"})
-    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jarvis."})
+    await session._on_sidecar_json({"type": "transcript", "text": "Hey Jav3."})
     session.state = "listening"
 
     # "go to sleep" is a command, not a turn — and he answers it silently
@@ -207,7 +207,7 @@ async def test_standby_and_shutdown_commands(seeded, monkeypatch):
     # ...but a sentence that merely CONTAINS the phrase is a real request
     await session._on_sidecar_json(
         {"type": "transcript",
-         "text": "Jarvis, never mind the news, play something else"})
+         "text": "Jav3, never mind the news, play something else"})
     assert started and started[0][0] == "never mind the news, play something else"
 
 
@@ -231,7 +231,7 @@ async def test_double_clap_dispatches_music_directly(seeded, monkeypatch):
 
     async def fake_dispatch(name, args):
         calls.append((name, args))
-        return "playing Kickstart My Heart in the Jarvis player on Mac."
+        return "playing Kickstart My Heart in the Jav3 player on Mac."
 
     monkeypatch.setattr(voice, "tool_dispatch", fake_dispatch)
     await session._on_sidecar_json({"type": "clap"})
@@ -242,7 +242,7 @@ async def test_double_clap_dispatches_music_directly(seeded, monkeypatch):
 
     assert calls and calls[0][0] == "music_play"
     assert calls[0][1]["query"] in voice.CLAP_TRACKS
-    assert calls[0][1]["where"] == "jarvis"
+    assert calls[0][1]["where"] == "jav3"
     # no turn, no conversation — the model was never involved
     assert session.turn_task is None and session.cid is None
     clap = [m for m in out if isinstance(m, dict) and m.get("type") == "clap"]
@@ -349,13 +349,13 @@ async def test_music_play_queue_param_appends(tmp_env, monkeypatch):
                         lambda action, tab=None, **f: pushes.append(
                             (action, f)) or 1)
 
-    result = await h.run(ids=[5, 6], queue=True, where="jarvis")
+    result = await h.run(ids=[5, 6], queue=True, where="jav3")
     assert pushes and pushes[0][0] == "queue_add"
     assert len(pushes[0][1]["queue"]) == 2
     assert "queued" in result and "2 track(s)" in result
 
     result = await h.run(ids=[7], queue=True, where="app")
-    assert "only the Jarvis player has a queue" in result
+    assert "only the Jav3 player has a queue" in result
 
 
 async def test_empty_interrupt_markers_are_kept_out_of_model_history(seeded):

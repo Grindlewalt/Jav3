@@ -41,7 +41,7 @@ def fake_lan(monkeypatch):
     monkeypatch.setattr(lan, "lan_ips", lambda: ["192.168.5.20"])
     monkeypatch.setattr(lan.socket, "gethostname", lambda: "boxy")
     monkeypatch.setattr(lan, "_own", None)
-    monkeypatch.setitem(lan._state, "hostname", "jarvis.local")
+    monkeypatch.setitem(lan._state, "hostname", "jav3.local")
     yield
     lan._own = None
 
@@ -228,12 +228,12 @@ async def test_poc_origin_check_ignores_port(op):
 async def test_poc_auto_allowed_lan_names_pass_on_any_port(op, fake_lan):
     """FIXED: the server's own LAN names are accepted only on its own port."""
     c, _ = op
-    for o in ["http://boxy:31337", "http://boxy.local:1", "http://jarvis.local:2",
+    for o in ["http://boxy:31337", "http://boxy.local:1", "http://jav3.local:2",
               "http://192.168.5.20:8080"]:
         r = await c.post(MINT, json={}, headers={"Origin": o})
         assert r.status_code == 403, o
     port = settings.lan_port
-    for o in [f"http://boxy:{port}", f"http://jarvis.local:{port}",
+    for o in [f"http://boxy:{port}", f"http://jav3.local:{port}",
               f"http://192.168.5.20:{port}"]:
         r = await c.post(MINT, json={}, headers={"Origin": o})
         assert r.status_code == 200, o

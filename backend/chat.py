@@ -41,7 +41,7 @@ class ChatRequest(BaseModel):
     # slug pins, no slug follows the globally-loaded project.
     project_mode: Literal["follow", "none", "pin"] | None = None
     # run this NEW conversation as an agent (agents/<slug>/AGENT.md) instead of
-    # as central Jarvis. Like `project`, it binds at creation and is ignored for
+    # as central Jav3. Like `project`, it binds at creation and is ignored for
     # an existing conversation: a thread's identity is what its transcript is
     # attributable to, so it must not shift mid-conversation. With no
     # project/project_mode given, the definition's own `project` pins the thread.
@@ -360,10 +360,10 @@ async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
 
 
 def _agent_def(slug: str | None) -> dict | None:
-    """The AGENT.md behind a conversation's identity, or None for Jarvis.
+    """The AGENT.md behind a conversation's identity, or None for Jav3.
 
     A missing or unparseable definition is an ERROR, not a silent fallback:
-    running a thread the operator opened as `scout` under Jarvis's own prompt
+    running a thread the operator opened as `scout` under Jav3's own prompt
     would be the wrong agent answering under the right name. The exception
     surfaces on the turn's bus channel like any other turn failure."""
     if not slug:
@@ -399,7 +399,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     wtoken = runtime.web_session.set(f"turn:{conversation_id}:{uuid.uuid4().hex[:8]}")
     cidtoken = runtime.conversation_id.set(conversation_id)
     # the tab this was asked from, so anything the turn plays comes out of that
-    # machine rather than every open Jarvis tab at once
+    # machine rather than every open Jav3 tab at once
     tabtoken = runtime.gui_tab.set(tab or None)
     if tab:
         gui.touch_tab(tab)

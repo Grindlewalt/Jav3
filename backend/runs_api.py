@@ -212,7 +212,7 @@ def _depths(nodes) -> dict:
 
 @router.get("/{cid}/stream")
 async def run_stream(cid: int):
-    """Follow a job live by its head id — including one Jarvis deployed from a
+    """Follow a job live by its head id — including one Jav3 deployed from a
     chat. Emits the tree-so-far as a snapshot, then streams live bus events
     until the job ends (or, if it already finished, closes right after)."""
     db = await get_db()

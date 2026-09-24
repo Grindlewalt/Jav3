@@ -9,7 +9,7 @@ export default function Tools() {
 
   return (
     <Page title="Tools"
-          lede={<>what Jarvis is allowed to do. Everything goes through the
+          lede={<>what Jav3 is allowed to do. Everything goes through the
             registry + one calling convention; granting = flipping
             <code> enabled</code> in the def once a handler exists.</>}>
       <div className="tool-grid">

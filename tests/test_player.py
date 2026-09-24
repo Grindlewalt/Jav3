@@ -1,7 +1,7 @@
 """The in-page music player: the stream proxy, the report channel, the routing.
 
-The host proxies TARMAC's /stream/:id onto Jarvis's own origin, so the browser
-only ever talks to Jarvis. Two things in here are load-bearing and easy to break
+The host proxies TARMAC's /stream/:id onto Jav3's own origin, so the browser
+only ever talks to Jav3. Two things in here are load-bearing and easy to break
 without noticing:
 
   * Range must survive both directions. Without Content-Range an <audio> element
@@ -66,7 +66,7 @@ async def test_range_is_forwarded_and_the_206_passed_back(configured, monkeypatc
     assert handle.headers["content-range"] == "bytes 10-16/999"
     assert handle.headers["accept-ranges"] == "bytes"
     # only the headers on the allowlist come back — a Set-Cookie from the music
-    # host has no business being replayed onto Jarvis's origin
+    # host has no business being replayed onto Jav3's origin
     assert "set-cookie" not in {k.lower() for k in handle.headers}
 
     assert b"".join([c async for c in handle.chunks()]) == b"PARTIAL"
@@ -201,14 +201,26 @@ def test_auto_prefers_the_player_that_can_actually_make_sound(monkeypatch):
     from tools.music_play.handler import _resolve_where
 
     monkeypatch.setattr(gui, "tabs", lambda: 1)
-    assert _resolve_where("auto") == "jarvis"
+    assert _resolve_where("auto") == "jav3"
     monkeypatch.setattr(gui, "tabs", lambda: 0)
     assert _resolve_where("auto") == "app"
     # an explicit choice always wins over the guess
     monkeypatch.setattr(gui, "tabs", lambda: 0)
-    assert _resolve_where("jarvis") == "jarvis"
+    assert _resolve_where("jav3") == "jav3"
     monkeypatch.setattr(gui, "tabs", lambda: 5)
     assert _resolve_where("app") == "app"
+
+
+def test_the_old_name_still_routes_to_the_in_page_player(monkeypatch):
+    """`jarvis` was the destination's name before the rename. Standing memory
+    notes and schedules still say it, so it stays an accepted alias."""
+    from tools.music_play.handler import _resolve_where
+    from tools.music_control.handler import _resolve_where as _control_where
+
+    monkeypatch.setattr(gui, "tabs", lambda: 0)
+    assert _resolve_where("jarvis") == "jav3"
+    monkeypatch.setattr(gui, "player_status", lambda: {})
+    assert _control_where("jarvis") == "jav3"
 
 
 @pytest.mark.asyncio
@@ -221,8 +233,8 @@ async def test_playing_in_page_with_no_tab_open_says_so(configured, monkeypatch)
         "id": 3, "title": "Nightcall", "artist": "Kavinsky", "duration": 258}),
         monkeypatch)
 
-    out = await run(ids=[3], where="jarvis")
-    assert "no Jarvis tab is open" in out
+    out = await run(ids=[3], where="jav3")
+    assert "no Jav3 tab is open" in out
     assert "where='app'" in out
 
 
@@ -247,7 +259,7 @@ async def test_a_browser_refusal_is_reported_not_swallowed(configured, monkeypat
         "id": 3, "title": "Nightcall", "artist": "Kavinsky", "duration": 258}),
         monkeypatch)
 
-    out = await handler.run(ids=[3], where="jarvis")
+    out = await handler.run(ids=[3], where="jav3")
     assert "refused to start it" in out
     assert "blocked autoplay" in out
 
@@ -270,8 +282,8 @@ async def test_a_confirmed_in_page_play_says_where_it_went(configured, monkeypat
         "id": 3, "title": "Nightcall", "artist": "Kavinsky", "duration": 258}),
         monkeypatch)
 
-    out = await handler.run(ids=[3], where="jarvis")
-    assert "in the Jarvis player" in out
+    out = await handler.run(ids=[3], where="jav3")
+    assert "in the Jav3 player" in out
 
 
 @pytest.mark.asyncio
@@ -300,7 +312,7 @@ async def test_volume_on_the_music_app_refuses_instead_of_pretending():
 
     out = await run(action="volume", level=40, where="app")
     assert "no volume control" in out
-    assert "where='jarvis'" in out
+    assert "where='jav3'" in out
 
 
 @pytest.mark.asyncio
@@ -315,7 +327,7 @@ async def test_volume_on_the_in_page_player_works(monkeypatch):
 
     monkeypatch.setattr(gui, "player_push", fake_push)
     monkeypatch.setattr(gui, "resolve_tab", lambda want, asked: ("t1", "Mac"))
-    out = await run(action="volume", level=250, where="jarvis")
+    out = await run(action="volume", level=250, where="jav3")
     # tab is the addressing, not a field of the action
     assert pushed == {"action": "volume", "tab": "t1", "level": 100}
     assert "100%" in out
@@ -326,7 +338,7 @@ async def test_transport_auto_follows_whichever_player_holds_the_track(monkeypat
     from tools.music_control.handler import _resolve_where
 
     gui.player_report({"track": {"id": 9}, "paused": False, "started": True})
-    assert _resolve_where("auto") == "jarvis"
+    assert _resolve_where("auto") == "jav3"
     gui.player_report({"track": None})
     assert _resolve_where("auto") == "app"
 
@@ -346,7 +358,7 @@ async def test_status_reports_both_players_separately(configured, monkeypatch):
         monkeypatch)
 
     out = await run()
-    assert "Jarvis player: playing Nightcall — Kavinsky" in out
+    assert "Jav3 player: playing Nightcall — Kavinsky" in out
     assert "1:01 of 4:18" in out
     assert "2 more queued" in out
     assert "music app players open: 0" in out
