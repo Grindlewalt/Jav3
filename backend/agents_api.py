@@ -254,6 +254,59 @@ async def list_trash():
     return {"agents": _list_dir(settings.agents_dir / ".trash")}
 
 
+# Every agent's outputs in one query, for the Outputs tab's all-agents view
+# (one request instead of one per roster entry). Same tree walk as
+# agents_run._OUTPUTS_SQL, seeded by EVERY stamped conversation and carrying
+# the root's slug down as `owner`. The walk stops at a descendant that is
+# itself stamped: that one is its own agent's output and seeds its own branch,
+# so no row appears twice. UNION over (id, owner) pairs ends a parent cycle.
+_ALL_OUTPUTS_SQL = """
+WITH RECURSIVE tree(id, owner) AS (
+    SELECT id, agent_slug FROM conversations
+     WHERE agent_slug IS NOT NULL AND agent_slug != ''
+    UNION
+    SELECT c.id, t.owner FROM conversations c JOIN tree t
+        ON c.parent_conversation_id = t.id
+     WHERE c.agent_slug IS NULL OR c.agent_slug = ''
+)
+SELECT c.id, c.kind, c.summary AS title, c.agent_slug, t.owner,
+       c.parent_conversation_id AS parent_id, c.job_id, c.rollup, c.started_at,
+       p.slug AS project,
+       (SELECT m.content FROM messages m WHERE m.conversation_id = c.id
+         ORDER BY m.id DESC LIMIT 1) AS last_message,
+       (SELECT MAX(m.created_at) FROM messages m
+         WHERE m.conversation_id = c.id) AS last_at
+FROM conversations c JOIN tree t ON t.id = c.id
+LEFT JOIN projects p ON p.id = c.project_id
+ORDER BY c.started_at DESC, c.id DESC
+LIMIT ?
+"""
+
+
+# Declared before the `/{slug}` catch-all, which would otherwise read
+# "outputs" as an agent slug and 404.
+@router.get("/outputs")
+async def all_agent_outputs(limit: int = 50):
+    """GET /api/agents/{slug}/outputs for every agent at once: the same row
+    shape plus `owner`, the agent whose work the row is (a funnel node or a
+    temp agent is unstamped, so its owner is the stamped ancestor it descends
+    from). A deleted agent's rows stay — past work is still past work."""
+    from .agents_run import _active_runs, _runs_files
+    from .chat import _active_turns
+    from .db import get_db
+    db = await get_db()
+    try:
+        async with db.execute(_ALL_OUTPUTS_SQL, (max(1, min(limit, 200)),)) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+    for r in rows:
+        r["snippet"] = " ".join((r.pop("last_message") or "").split())[:240]
+        r["running"] = r["id"] in _active_runs or r["id"] in _active_turns
+        r["runs_files"] = _runs_files(r["project"], r["job_id"])
+    return {"outputs": rows}
+
+
 @router.post("")
 async def create_agent(body: CreateAgent):
     slug = _slugify(body.name)

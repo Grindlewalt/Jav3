@@ -517,6 +517,39 @@ async def test_outputs_endpoint(client, tmp_env):
     assert (await client.get("/api/agents/ghost/outputs")).json()["outputs"] == []
 
 
+async def test_all_outputs_endpoint(client):
+    """The all-agents union: every stamped thread plus its unstamped
+    descendants, each row once, attributed to the nearest stamped ancestor —
+    and reachable at all, despite the `/{slug}` catch-all declared later."""
+    from backend.db import open_conversation
+    await _make_agent(client)
+    a = await _open_chat(agent="builder")
+    b = await _open_chat(agent="critic")                  # a deleted agent's past
+    plain = await _open_chat()                             # central Jarvis
+    db = await get_db()
+    try:
+        head = await open_conversation(db, project=None, title="[head] y",
+                                       kind="head", parent=a, job_id="j1")
+        # a child that runs as ANOTHER agent is that agent's output, not a's
+        spawned = await open_conversation(db, project=None, title="[critic] z",
+                                          kind="agent", parent=a, agent="critic")
+        leaf = await open_conversation(db, project=None, title="[sub] w",
+                                       kind="subagent", parent=spawned, job_id="j2")
+    finally:
+        await db.close()
+
+    r = await client.get("/api/agents/outputs")
+    assert r.status_code == 200
+    rows = r.json()["outputs"]
+    owner = {o["id"]: o["owner"] for o in rows}
+    assert len(rows) == len(owner)                         # no duplicates
+    assert owner == {a: "builder", head: "builder", b: "critic",
+                     spawned: "critic", leaf: "critic"}
+    assert plain not in owner
+    assert all({"snippet", "running", "runs_files", "kind"} <= set(o) for o in rows)
+    assert len((await client.get("/api/agents/outputs?limit=2")).json()["outputs"]) == 2
+
+
 async def test_own_memory_uses_a_private_notes_dir(client, monkeypatch, tmp_env):
     """own_memory was stored and checkboxed and read by nothing. Now a turn
     running as an own_memory agent carries memory_slug on its (host-side)
