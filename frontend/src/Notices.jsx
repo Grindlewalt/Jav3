@@ -166,13 +166,17 @@ export default function Notices({ toasts, dismiss, clear }) {
         </div>
       ) : (
         // a real <button> can't nest another button (dismiss), so this one is
-        // a div playing the role — same click target, same keyboard behaviour
+        // a div playing the role — same click target, same keyboard behaviour.
+        // The target check guards against the notice-x button's own keydown
+        // bubbling up here: without it, Enter on the dismiss button both
+        // clicks notice-x (dismiss) AND fires this handler (open) at once.
         <div key={t.id} className={`notice ${t.sev}`} role="button" tabIndex={0}
                 title={t.project ? `open the ${t.project} board`
                   : t.eventId ? 'open the evidence for this alert'
                     : 'open the Review Center'}
                 onClick={() => open(t)}
                 onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return
                   if (e.key !== 'Enter' && e.key !== ' ') return
                   e.preventDefault()
                   open(t)
