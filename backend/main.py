@@ -26,8 +26,25 @@ from .vm.gateway_server import gateway
 from .vm.lifecycle import reaper_loop, vm
 
 
+def require_single_process(env=None) -> None:
+    """Refuse to start as one of several workers. The login-code store, its
+    throttle, the live-turn registry and the event bus are all in-process:
+    under N workers a code minted in one is dead in another, every throttle
+    budget is multiplied by N, and /stop misses turns in a sibling. uvicorn
+    takes --workers from $WEB_CONCURRENCY, which a systemd --user unit
+    inherits from the user manager — so it is checked, not assumed."""
+    import os
+    raw = (os.environ if env is None else env).get("WEB_CONCURRENCY", "").strip()
+    if raw not in ("", "1"):
+        raise RuntimeError(
+            f"WEB_CONCURRENCY={raw!r}: Jav3 must run as a single process "
+            "(in-memory login codes, throttles and live turns). Unset it or set "
+            "it to 1; the systemd unit passes --workers 1.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    require_single_process()
     ensure_dirs()
     await init_db()
     ensure_memory_seeds()

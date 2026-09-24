@@ -1,5 +1,5 @@
 /* Settings: the things that are configured once and consulted everywhere. */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
 import { Copy } from '../copy.jsx'
@@ -66,24 +66,34 @@ function ModelPanel() {
 
 // Add computer: this session mints a one-time code and the line the CLI wants.
 // The session IS the authorization — whoever holds the line in the next few
-// minutes gets a device token — so the line is shown with its countdown and
-// cleared when it lapses or the operator is done with it.
+// minutes gets a device token — so the line is shown with its countdown, and
+// dismissing it (Done, or leaving the page) cancels the code on the server
+// too rather than leaving it live for the rest of its TTL.
+const cancelLoginCode = () =>
+  api('/api/devices/login-code', { method: 'DELETE' }).catch(() => {})
+
 function DevicesPanel({ say }) {
   const ask = useAsk()
   const [devices, setDevices] = useState(null)
-  const [login, setLogin] = useState(null)       // {login, expires_at, ttl_seconds}
+  const [login, setLogin] = useState(null)       // {login, ttl_seconds, plain_http, deadline}
   const [left, setLeft] = useState(0)
+  const live = useRef(false)
 
   const load = useCallback(() => {
     api('/api/devices').then((r) => setDevices(r.devices)).catch(() => setDevices([]))
   }, [])
   useEffect(load, [load])
 
+  // leaving Settings with a code on screen cancels it
+  useEffect(() => () => { if (live.current) cancelLoginCode() }, [])
+
   useEffect(() => {
     if (!login) return undefined
+    // counted from the server's ttl_seconds on this page's monotonic clock,
+    // never from the browser's wall clock against a server timestamp
     const tick = () => {
-      const s = login.expires_at - Date.now() / 1000
-      if (s <= 0) { setLogin(null); load() } else setLeft(s)
+      const s = login.deadline - performance.now() / 1000
+      if (s <= 0) { live.current = false; setLogin(null); load() } else setLeft(s)
     }
     tick()
     const id = setInterval(tick, 1000)
@@ -92,9 +102,17 @@ function DevicesPanel({ say }) {
 
   async function addComputer() {
     try {
-      setLogin(await api('/api/devices/login-code',
-        { method: 'POST', body: JSON.stringify({ name: '' }) }))
+      const r = await api('/api/devices/login-code',
+        { method: 'POST', body: JSON.stringify({ name: '' }) })
+      live.current = true
+      setLogin({ ...r, deadline: performance.now() / 1000 + r.ttl_seconds })
     } catch (e) { say(e.detail || String(e)) }
+  }
+
+  function done() {
+    live.current = false
+    setLogin(null)
+    cancelLoginCode().then(load)
   }
 
   async function revoke(d) {
@@ -123,11 +141,14 @@ function DevicesPanel({ say }) {
             <code>{login.login}</code>
             <Copy text={login.login} />
           </div>
+          {login.plain_http && (
+            <p className="warn">This address is plain http: the code, and the token
+              it is traded for, cross the network unencrypted. Only use it on a
+              network you trust.</p>)}
           <p className="dim small">No CLI there yet?{' '}
             <code>curl -fsSL {window.location.origin}/cli/install.sh | sh</code></p>
           <div className="row">
-            <button className="ghost" onClick={() => { setLogin(null); load() }}>
-              Done</button>
+            <button className="ghost" onClick={done}>Done</button>
           </div>
         </div>
       ) : (

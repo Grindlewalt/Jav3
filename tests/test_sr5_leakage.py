@@ -1,6 +1,6 @@
-"""SR5 (leakage / DoS) PoCs against the paste-code login. Findings, not fixes:
-tests named *_poc assert the CURRENT (vulnerable) behaviour so a fixer sees them
-flip; tests named *_holds are negative results that should stay green."""
+"""SR5 (leakage / DoS) review of the paste-code login. Tests named *_poc began
+as PoCs of the vulnerable behaviour; the fixer (SF) inverted each to assert the
+fix. Tests named *_holds are negative results that stay green."""
 import logging
 
 import httpx
@@ -45,42 +45,56 @@ def _dev(ip):
 
 
 async def test_shared_peer_lockout_poc(op):
-    """Attacker behind the same NAT / reverse proxy / ssh tunnel as the operator:
-    10 junk codes and the operator's VALID code is refused 429 for 10 min —
-    as long as the code's TTL, so the code dies unused. Renewable forever."""
+    """FIXED: an attacker behind the operator's NAT / proxy / ssh tunnel can
+    spend the shared address's miss budget — further misses get 429 — but the
+    operator's VALID code still redeems from that same address."""
     async with _dev("10.0.0.1") as shared:
         for _ in range(pastelogin._WRONG_PER_PEER):
             assert (await shared.post(LOGIN, json={"code": BAD})).status_code == 401
+        assert (await shared.post(LOGIN, json={"code": BAD})).status_code == 429
         code = (await op.post(MINT, json={})).json()["code"]
         r = await shared.post(LOGIN, json={"code": code})
-        assert r.status_code == 429
+        assert r.status_code == 200
 
 
 async def test_global_miss_budget_lockout_poc(op):
-    """50 source addresses x 10 misses trips _WRONG_GLOBAL; then a valid code
-    from a peer that never missed is refused. One LAN host can hold 50 IPv4
-    aliases, so this is one machine's work (500 requests)."""
+    """FIXED: 50 addresses x 10 misses trips _WRONG_GLOBAL for misses only; a
+    valid code from a fresh peer still redeems."""
     for i in range(pastelogin._WRONG_GLOBAL // pastelogin._WRONG_PER_PEER):
         async with _dev(f"10.1.{i // 250}.{i % 250 + 1}") as d:
             for _ in range(pastelogin._WRONG_PER_PEER):
                 await d.post(LOGIN, json={"code": BAD})
     code = (await op.post(MINT, json={})).json()["code"]
     async with _dev("192.168.1.77") as fresh:
-        assert (await fresh.post(LOGIN, json={"code": code})).status_code == 429
+        assert (await fresh.post(LOGIN, json={"code": BAD})).status_code == 429
+        assert (await fresh.post(LOGIN, json={"code": code})).status_code == 200
 
 
 async def test_oversized_body_parsed_before_throttle_poc(op):
-    """Body validation runs before the throttle: a locked-out peer still gets
-    its whole body buffered and parsed (422, not 429), and the 422 reflects the
-    oversized input back — unauthenticated, unthrottled work and bandwidth."""
+    """FIXED: the redeem body is read by hand with a 4 KB cap — a declared
+    Content-Length over it is 413 before any byte is read, a chunked body is
+    cut off at the cap — and a malformed body gets one fixed 422 that echoes
+    nothing back."""
+    from backend import devices_api
     async with _dev("10.0.0.2") as d:
-        for _ in range(pastelogin._WRONG_PER_PEER):
-            await d.post(LOGIN, json={"code": BAD})
-        assert (await d.post(LOGIN, json={"code": BAD})).status_code == 429
         big = "x" * 2_000_000
         r = await d.post(LOGIN, json={"code": big})
-        assert r.status_code == 422
-        assert len(r.content) > 2_000_000          # echoed back
+        assert r.status_code == 413 and len(r.content) < 200
+
+        async def chunks():
+            for _ in range(64):
+                yield b"x" * 1024
+        r = await d.post(LOGIN, content=chunks(),
+                         headers={"Content-Type": "application/json"})
+        assert r.status_code == 413
+        marker = "ECHO-" + "Q" * 300
+        for body in (b"{not json", f'{{"code": 5, "x": "{marker}"}}'.encode(),
+                     f'{{"code": "{marker * 2}"}}'.encode()):
+            r = await d.post(LOGIN, content=body,
+                             headers={"Content-Type": "application/json"})
+            assert r.status_code == 422, body[:30]
+            assert "ECHO-" not in r.text and len(r.content) < 200
+        assert len(body) < devices_api.MAX_LOGIN_BODY
 
 
 def test_throttle_maps_bounded_holds():

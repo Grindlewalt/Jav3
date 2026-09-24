@@ -14,12 +14,14 @@ Routers:
 - `cli_router`   the CLI and its installer, as unauthenticated static files.
 """
 import ipaddress
+import json
 import re
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from . import devicetokens, lan, pastelogin, security
 from .auth import require_actor, require_user
@@ -54,13 +56,14 @@ def _peer(request: Request) -> str:
     return (getattr(request.client, "host", None) or "?")[:64]
 
 
-def _throttled(request: Request) -> str:
-    peer = _peer(request)
+def _charge_miss(peer: str) -> None:
+    """A code that did not redeem: 429 once the miss budget is spent, else
+    charge it. Only ever reached on a miss — a valid code never sees this."""
     try:
         pastelogin.throttle(peer)
     except pastelogin.TooMany as e:
         raise HTTPException(status_code=e.status, detail=str(e))
-    return peer
+    pastelogin.note_wrong(peer)
 
 
 def _is_loopback(host: str) -> bool:
@@ -131,9 +134,21 @@ async def mint_login_code(body: CodeBody, request: Request, response: Response,
     code, t = pastelogin.mint(body.name, by=user["username"])
     address = _address(request)
     response.headers.update(_NO_STORE)
+    # the ticket's clock is monotonic; expires_at is wall time for display
+    # only — the GUI counts down from ttl_seconds, not its own clock
     return {"login": f"address={address} code={code}", "address": address,
-            "code": code, "name": t.name, "expires_at": t.expires,
-            "ttl_seconds": pastelogin.TTL_SECONDS}
+            "code": code, "name": t.name,
+            "expires_at": time.time() + pastelogin.TTL_SECONDS,
+            "ttl_seconds": pastelogin.TTL_SECONDS,
+            "plain_http": not address.startswith("https://")}
+
+
+@router.delete("/login-code")
+async def cancel_login_code(user: dict = Depends(require_user)):
+    """Settings "Done" / leaving the page: a dismissed code stops working now
+    rather than at the end of its TTL. Drops every live code this user
+    minted."""
+    return {"ok": True, "cancelled": pastelogin.cancel(user["username"])}
 
 
 @router.get("")
@@ -158,36 +173,74 @@ class RedeemBody(BaseModel):
     platform: str = Field("", max_length=256)
 
 
+MAX_LOGIN_BODY = 4096
+_BAD_BODY = "malformed login request"
+
+
+async def _login_body(request: Request) -> RedeemBody:
+    """The redeem body, read by hand so an unauthenticated caller cannot make
+    the server buffer and parse megabytes: a Content-Length over the cap is a
+    413 before a byte is read, and a chunked body is cut off at the cap. A
+    parse/validation failure is one fixed 422 that echoes nothing (FastAPI's
+    stock 422 reflects the input back, oversized or not)."""
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=_BAD_BODY)
+    if declared > MAX_LOGIN_BODY:
+        raise HTTPException(status_code=413, detail="request too large")
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_LOGIN_BODY:
+            raise HTTPException(status_code=413, detail="request too large")
+    try:
+        return RedeemBody.model_validate(json.loads(bytes(buf)))
+    except (ValueError, ValidationError):
+        raise HTTPException(status_code=422, detail=_BAD_BODY)
+
+
 @pair_router.post("/login")
-async def redeem_login_code(body: RedeemBody, request: Request, response: Response):
+async def redeem_login_code(request: Request, response: Response,
+                            body: RedeemBody = Depends(_login_body)):
     """Trade a login code for a device token — once.
 
     Every failure is the same 401 with the same text, whether the code was
     malformed, never issued, expired or already used. `redeem` is synchronous
     and pops the ticket, so the spend happens before the first await below.
+
+    The code is looked up BEFORE the throttle is consulted: a valid code always
+    redeems, and only a miss can be answered 429 (see pastelogin's docstring).
+    The body cap in `_login_body` bounds what a miss costs before this runs.
     """
-    peer = _throttled(request)
     t = pastelogin.redeem(body.code)
+    peer = _peer(request)
     if t is None:
-        pastelogin.note_wrong(peer)
+        _charge_miss(peer)
         raise HTTPException(status_code=401, detail=_BAD_CODE)
     name = t.name or body.name.strip()[:64] or body.hostname.strip()[:64] or "cli"
     raw, tid = await devicetokens.mint(name, hostname=body.hostname,
                                        platform=body.platform, by=t.by)
-    db = await get_db()
+    db = None
     try:
+        # opening the DB is inside the try too: SQLITE_BUSY here, after the
+        # token row committed, would 500 and orphan a live token nobody holds
+        db = await get_db()
         await security.raise_event(
             db, kind="device_enrolled", severity="info",
             summary=f"computer '{name}' logged in with a code minted by "
                     f"{t.by or '?'} (from {peer})",
             detail={"device_id": tid, "name": name,
                     "hostname": body.hostname[:128], "platform": body.platform[:32],
-                    "peer": peer, "minted_by": t.by, "minted_at": t.created,
+                    "peer": peer, "minted_by": t.by,
+                    # the ticket clock is monotonic; report wall time
+                    "minted_at": time.time() - (time.monotonic() - t.created),
                     "agent": request.headers.get("user-agent", "")[:120]})
     except Exception:  # noqa: BLE001 — the audit line must not eat the token
         pass
     finally:
-        await db.close()
+        if db is not None:
+            await db.close()
     response.headers.update(_NO_STORE)
     return {"ok": True, "token": raw, "device_id": tid, "name": name}
 

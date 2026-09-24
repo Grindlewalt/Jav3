@@ -4,7 +4,14 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=%h/jarvis
-ExecStart=%h/jarvis/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000
+# --no-proxy-headers: nothing trusted sits in front of a LAN server, so
+#   uvicorn must not rewrite the client address from X-Forwarded-For (its
+#   default trusts it from 127.0.0.1 — any local process or ssh -L forward
+#   could then forge the peer the login throttle and audit events key on).
+# --workers 1: login codes, throttles and live turns are in-process state;
+#   pinned here so an inherited WEB_CONCURRENCY cannot fork a second worker
+#   (the app also refuses to start if WEB_CONCURRENCY is set above 1).
+ExecStart=%h/jarvis/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers --workers 1
 Restart=on-failure
 RestartSec=3
 

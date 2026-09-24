@@ -1,7 +1,9 @@
 """SR3 adversarial review — ENTROPY / TIMING / ORACLES on paste-code login.
 
-Tests named `test_poc_*` DEMONSTRATE a finding (they pass while the weakness
-exists). Everything else pins a property that held up under attack. Timing
+Tests named `test_poc_*` began as demonstrations of a finding; the fixer
+(SF) inverted each to assert the fixed behaviour (or, for the accepted INFO
+item, kept it pinned). Everything else pins a property that held up under
+attack. Timing
 harnesses print medians (run with -s to see them) and only assert generous
 bounds: on this laptop anything under a few hundred µs is scheduler noise.
 """
@@ -19,7 +21,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from backend import devicetokens, pastelogin
 from backend.auth import hash_password
@@ -172,10 +173,11 @@ async def test_redeem_401_is_byte_identical_for_every_failure(clients, monkeypat
     assert (await dev.post(LOGIN, json={"code": used_code})).status_code == 200
     used = await dev.post(LOGIN, json={"code": used_code})
     exp_code = await fresh()
-    real = pastelogin.time.time
-    monkeypatch.setattr(pastelogin.time, "time", lambda: real() + pastelogin.TTL_SECONDS + 1)
+    real = pastelogin.time.monotonic
+    monkeypatch.setattr(pastelogin.time, "monotonic",
+                        lambda: real() + pastelogin.TTL_SECONDS + 1)
     expired = await dev.post(LOGIN, json={"code": exp_code})
-    monkeypatch.setattr(pastelogin.time, "time", real)
+    monkeypatch.setattr(pastelogin.time, "monotonic", real)
     shapes = {_shape(r) for r in (unknown, malformed, used, expired)}
     assert len(shapes) == 1, shapes
     assert unknown.status_code == 401
@@ -255,7 +257,7 @@ def test_timing_redeem_function_unknown_expired_used():
     for _ in range(N):
         pastelogin.reset_for_tests()
         u = pastelogin._secrets.token_urlsafe(32)
-        e, _ = pastelogin.mint(by="op", now=time.time() - pastelogin.TTL_SECONDS - 5)
+        e, _ = pastelogin.mint(by="op", now=time.monotonic() - pastelogin.TTL_SECONDS - 5)
         s, _ = pastelogin.mint(by="op")
         assert pastelogin.redeem(s) is not None
         order = [("unknown", u), ("expired", e), ("used", s)]
@@ -279,7 +281,7 @@ async def test_timing_redeem_endpoint_unknown_expired_used(clients):
         assert (await dev.post(LOGIN, json={"code": s})).status_code == 200
         e = (await op.post(MINT, json={})).json()["code"]
         for tk in pastelogin._tickets.values():      # age `e` out in place
-            tk.expires = time.time() - 1
+            tk.expires = time.monotonic() - 1
         u = pastelogin._secrets.token_urlsafe(32)
         order = [("unknown", u), ("expired", e), ("used", s)]
         random.shuffle(order)
@@ -322,41 +324,36 @@ async def test_timing_bearer_revoked_vs_unknown(clients):
 # =============================================================================
 
 async def test_poc_xff_from_loopback_rewrites_peer_and_bypasses_per_peer_throttle(tmp_env):
-    """MEDIUM (conditional). `_peer` reads request.client.host and its comment
-    promises forwarding headers are never trusted — but scripts/jarvis.service
-    runs bare `uvicorn backend.main:app`, whose defaults are proxy_headers=True,
-    forwarded_allow_ips=127.0.0.1. Any TCP peer on loopback (an SSH -L forward,
-    a local reverse proxy/tunnel, any local process) gets request.client.host =
-    its chosen X-Forwarded-For: a fresh per-peer miss budget per request, and a
-    forged `peer` in the device_enrolled / login_failed security events. The
-    existing test_wrong_codes_are_throttled_per_peer misses this because
-    httpx.ASGITransport doesn't install uvicorn's middleware."""
+    """FIXED: the unit runs uvicorn with --no-proxy-headers, so uvicorn's
+    ProxyHeadersMiddleware (which trusts X-Forwarded-For from 127.0.0.1 by
+    default) is not installed and client.host stays the TCP peer. Without it,
+    a loopback peer forging a fresh XFF per request shares ONE budget."""
     await _operator()
-    wrapped = ProxyHeadersMiddleware(app, trusted_hosts="127.0.0.1")   # uvicorn default
-    transport = httpx.ASGITransport(app=wrapped, client=("127.0.0.1", 40000))
+    unit = (Path(__file__).resolve().parent.parent / "scripts" / "jarvis.service").read_text()
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    assert "--no-proxy-headers" in exec_line
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 40000))
     async with httpx.AsyncClient(transport=transport, base_url="http://jav3.lan:8000") as c:
         statuses = []
-        for i in range(pastelogin._WRONG_PER_PEER * 3):
+        for i in range(pastelogin._WRONG_PER_PEER + 3):
             r = await c.post(LOGIN, json={"code": "B" * 43},
-                             headers={"X-Forwarded-For": f"10.66.{i // 250}.{i % 250}"})
+                             headers={"X-Forwarded-For": f"10.66.0.{i}"})
             statuses.append(r.status_code)
-    assert statuses == [401] * len(statuses)            # never 429
-    assert len(pastelogin._wrong) == len(statuses) + 1  # one bucket per forged IP, + '*'
+    assert statuses == [401] * pastelogin._WRONG_PER_PEER + [429] * 3
+    assert set(pastelogin._wrong) == {"*", "127.0.0.1"}
 
 
 def test_poc_global_miss_budget_locks_out_operator():
-    """LOW (DoS, not an oracle). 50 source addresses × 10 misses fill
-    _WRONG_GLOBAL (500), and `throttle` then refuses EVERY peer for the
-    10-minute window — including the operator redeeming a fresh valid code.
-    One LAN host can hold many IPv6 addresses; with the loopback-XFF PoC one
-    local peer suffices. Guessing is hopeless at 256 bits; this is lockout."""
-    now = time.time()
+    """FIXED: the global miss budget still refuses further MISSES, but the
+    operator's valid code is looked up before any budget is consulted."""
+    now = time.monotonic()
     for p in range(pastelogin._WRONG_GLOBAL // pastelogin._WRONG_PER_PEER):
         for _ in range(pastelogin._WRONG_PER_PEER):
             pastelogin.note_wrong(f"fe80::{p:x}", now)
-    pastelogin.mint(by="operator", now=now)
+    code, _ = pastelogin.mint(by="operator", now=now)
     with pytest.raises(pastelogin.TooMany):
-        pastelogin.throttle("192.168.1.50", now + 1)       # operator's laptop
+        pastelogin.throttle("192.168.1.50", now + 1)       # a miss would 429
+    assert pastelogin.redeem(code, now + 1) is not None     # the valid code redeems
 
 
 async def test_poc_default_login_line_is_cleartext_http(clients):
@@ -372,14 +369,18 @@ async def test_poc_default_login_line_is_cleartext_http(clients):
     assert jav3.base_url(m["address"]).startswith("http://")
 
 
-def test_poc_no_server_side_cancel_for_a_shown_code():
-    """LOW. Settings "Done" (and the countdown reaching 0) only clears React
-    state; no route drops a ticket. A dismissed code — pasted into the wrong
-    window, or kept by a clipboard manager via <Copy> — stays redeemable for
-    the full TTL. The countdown also compares the browser clock to the
-    server's absolute `expires_at`, so a skewed client hides a live code."""
-    routes = [(set(getattr(r, "methods", None) or ()), getattr(r, "path", "")) for r in app.routes]
-    assert not any("DELETE" in m and "login-code" in p for m, p in routes)
+async def test_poc_no_server_side_cancel_for_a_shown_code(clients):
+    """FIXED: `DELETE /api/devices/login-code` (cookie + same-origin) drops the
+    caller's live codes — Settings calls it on Done and on leaving the page —
+    and the GUI counts down from `ttl_seconds`, not the browser clock."""
+    op, dev = clients
+    m = (await op.post(MINT, json={})).json()
+    assert m["ttl_seconds"] == pastelogin.TTL_SECONDS
+    r = await op.delete(MINT)
+    assert r.status_code == 200 and r.json()["cancelled"] == 1
+    assert (await dev.post(LOGIN, json={"code": m["code"]})).status_code == 401
+    assert (await dev.delete(MINT)).status_code == 401                 # cookie only
+    assert (await op.delete(MINT, headers={"Origin": "http://evil.example"})).status_code == 403
 
 
 # =============================================================================

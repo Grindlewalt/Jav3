@@ -176,8 +176,8 @@ async def test_concurrent_redeems_mint_exactly_one_token(clients):
 async def test_expired_code_fails(clients, monkeypatch):
     op, dev = clients
     code = (await _mint(op))["code"]
-    real = pastelogin.time.time
-    monkeypatch.setattr(pastelogin.time, "time",
+    real = pastelogin.time.monotonic
+    monkeypatch.setattr(pastelogin.time, "monotonic",
                         lambda: real() + pastelogin.TTL_SECONDS + 1)
     assert (await _redeem(dev, code)).status_code == 401
 
@@ -186,14 +186,16 @@ async def test_wrong_codes_are_throttled_per_peer(clients):
     op, dev = clients
     for _ in range(pastelogin._WRONG_PER_PEER):
         assert (await _redeem(dev, "B" * 43)).status_code == 401
-    # budget spent: refused before the code is even looked at — a valid one too
-    good = (await _mint(op))["code"]
-    assert (await _redeem(dev, good)).status_code == 429
-    # forged forwarding headers do not buy a fresh budget
-    r = await dev.post(LOGIN, json={"code": good},
+    # budget spent: further misses are refused...
+    assert (await _redeem(dev, "B" * 43)).status_code == 429
+    # ...and forged forwarding headers do not buy a fresh budget
+    r = await dev.post(LOGIN, json={"code": "B" * 43},
                        headers={"X-Forwarded-For": "9.9.9.9",
                                 "CF-Connecting-IP": "8.8.8.8"})
     assert r.status_code == 429
+    # but a valid code is looked up first and always redeems
+    good = (await _mint(op))["code"]
+    assert (await _redeem(dev, good)).status_code == 200
 
 
 def test_global_call_budget():

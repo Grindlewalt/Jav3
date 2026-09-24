@@ -2,11 +2,11 @@
 login (backend/pastelogin.py, devices_api.py, devicetokens.py, the jav3 CLI).
 
 Two kinds of test live here:
-- POC_*     PASSES because the weakness is real (it asserts the bad
-            behaviour). A fix should make it fail — flip it then.
+- POC_*     began as a PoC asserting the weakness; the fixer (SF) inverted
+            each to assert the fixed behaviour, keeping the name so the
+            finding stays traceable.
 - BLOCKED_* a hypothesis that was tried and is defended; kept as a
-            regression guard.
-No production code is changed by this file."""
+            regression guard."""
 import ast
 import asyncio
 import importlib.machinery
@@ -16,7 +16,6 @@ import io
 import json
 import os
 import stat
-import sys
 import textwrap
 import threading
 import time
@@ -144,12 +143,9 @@ async def test_BLOCKED_mint_failure_after_pop_is_fail_closed(op, monkeypatch):
 
 
 async def test_POC_audit_db_open_failure_orphans_a_live_token(op, monkeypatch):
-    """devices_api.py:350 — `db = await get_db()` sits OUTSIDE the try whose
-    except exists so 'the audit line must not eat the token'. If opening the
-    DB for the security event fails (SQLITE_BUSY while parallel agents write),
-    the handler 500s AFTER the token row is committed: code spent, CLI never
-    sees the token, and a live operator-reach token nobody holds sits in
-    Devices with no device_enrolled event."""
+    """FIXED: opening the DB for the device_enrolled event is inside the try
+    whose job is 'the audit line must not eat the token' — a SQLITE_BUSY there
+    now costs the audit row, not the token: the CLI still gets its 200."""
     code = await _mint(op)
     real_get_db = devices_api.get_db
 
@@ -159,15 +155,8 @@ async def test_POC_audit_db_open_failure_orphans_a_live_token(op, monkeypatch):
     async with _client("10.0.2.2", raise_app_exceptions=False) as dev:
         r = await dev.post(LOGIN, json={"code": code})
     monkeypatch.setattr(devices_api, "get_db", real_get_db)
-    assert r.status_code == 500
-    assert await _live_tokens() == 1                       # minted, undelivered
-    db = await get_db()
-    try:
-        async with db.execute("SELECT COUNT(*) FROM security_events "
-                              "WHERE kind='device_enrolled'") as cur:
-            assert (await cur.fetchone())[0] == 0          # and unaudited
-    finally:
-        await db.close()
+    assert r.status_code == 200 and r.json()["token"].startswith("jvd_")
+    assert await _live_tokens() == 1
 
 
 # =============================================================================
@@ -252,21 +241,19 @@ async def test_BLOCKED_login_response_replay(op):
 # =============================================================================
 
 async def test_POC_fifty_lan_addresses_lock_everyone_out_of_redeem(op):
-    """_WRONG_GLOBAL=500 / _WRONG_PER_PEER=10: one LAN host that claims 50
-    IPv4 addresses (static aliases / ARP — cheap on a home /24) spends the
-    global miss budget in one burst; the operator's VALID fresh code then
-    429s for the next 10 minutes, renewable indefinitely. 'Loose so a
-    neighbour can't lock us out' only holds for a neighbour with <50 IPs."""
+    """FIXED: the miss budgets gate misses only. After 50 addresses spend the
+    global miss budget, further MISSES get 429 — but the operator's valid
+    code, checked against the store first, still redeems."""
     good = await _mint(op)
     for i in range(pastelogin._WRONG_GLOBAL // pastelogin._WRONG_PER_PEER):
         async with _client(f"10.0.9.{i + 1}") as atk:
             for _ in range(pastelogin._WRONG_PER_PEER):
                 assert (await atk.post(LOGIN, json={"code": "B" * 43})).status_code == 401
     async with _client("10.0.0.77") as laptop:
+        assert (await laptop.post(LOGIN, json={"code": "B" * 43})).status_code == 429
         r = await laptop.post(LOGIN, json={"code": good})
-    assert r.status_code == 429
-    # the code was not consumed (throttle runs before redeem) — DoS only
-    assert pastelogin.live_count() == 1
+    assert r.status_code == 200
+    assert pastelogin.live_count() == 0
 
 
 async def test_BLOCKED_single_peer_cannot_drain_global_call_budget(op):
@@ -286,25 +273,31 @@ async def test_BLOCKED_single_peer_cannot_drain_global_call_budget(op):
         assert (await laptop.post(LOGIN, json={"code": good})).status_code == 200
 
 
-def test_POC_wall_clock_step_back_extends_code_life():
-    """TTL uses time.time(). The Pi has no RTC; an NTP step backwards after
-    mint keeps a code redeemable for TTL + the step. time.monotonic() would
-    not."""
-    code, _ = pastelogin.mint(by="op", now=100_000.0)
-    # 10 min + 1 s of real time later, but the clock was stepped back 1 h
-    assert pastelogin.redeem(
-        code, now=100_000.0 + pastelogin.TTL_SECONDS + 1 - 3600) is not None
+def test_POC_wall_clock_step_back_extends_code_life(monkeypatch):
+    """FIXED: TTLs run on time.monotonic(). A wall-clock step (the Pi has no
+    RTC) neither stretches a code's life nor matters at all."""
+    mono = [1000.0]
+    monkeypatch.setattr(pastelogin.time, "monotonic", lambda: mono[0])
+    monkeypatch.setattr(pastelogin.time, "time", lambda: 100_000.0)
+    code, _ = pastelogin.mint(by="op")
+    mono[0] += pastelogin.TTL_SECONDS + 1                  # real time passed
+    monkeypatch.setattr(pastelogin.time, "time", lambda: 100_000.0 - 3600)  # NTP step back
+    assert pastelogin.redeem(code) is None
 
 
-def test_POC_wall_clock_step_back_prolongs_throttle_lockout():
-    """Same root cause: after a backward step every recorded miss is 'in the
-    future', `now - h` is negative (< window), so a lockout lasts window +
-    step. (A forward step conversely wipes every budget at once.)"""
+def test_POC_wall_clock_step_back_prolongs_throttle_lockout(monkeypatch):
+    """FIXED: the miss windows are monotonic too — a backward wall-clock step
+    does not keep a lockout alive past its window."""
+    mono = [5000.0]
+    monkeypatch.setattr(pastelogin.time, "monotonic", lambda: mono[0])
+    monkeypatch.setattr(pastelogin.time, "time", lambda: 200_000.0)
     for _ in range(pastelogin._WRONG_PER_PEER):
-        pastelogin.note_wrong("10.0.0.5", now=200_000.0)
-    later = 200_000.0 + pastelogin._WRONG_WINDOW + 5 - 3600   # real time: window over
+        pastelogin.note_wrong("10.0.0.5")
     with pytest.raises(pastelogin.TooMany):
-        pastelogin.throttle("10.0.0.5", now=later)
+        pastelogin.throttle("10.0.0.5")
+    mono[0] += pastelogin._WRONG_WINDOW + 5
+    monkeypatch.setattr(pastelogin.time, "time", lambda: 200_000.0 - 3600)
+    pastelogin.throttle("10.0.0.5")                         # window over: no raise
 
 
 # =============================================================================
@@ -312,11 +305,8 @@ def test_POC_wall_clock_step_back_prolongs_throttle_lockout():
 # =============================================================================
 
 async def test_POC_cap_eviction_is_global_not_per_user(tmp_env):
-    """MAX_LIVE=16 evicts the globally-oldest ticket regardless of `by`. With
-    two accounts (backend.cli create-user allows several), bob minting 16
-    codes silently kills alice's code in flight. Single-operator variant: a
-    tab that re-mints (retry loop, double-click x16) evicts the code the
-    operator is about to paste — generic 401, no hint why."""
+    """FIXED: the live-code cap is per user — bob minting MAX_LIVE codes
+    evicts only bob's oldest, never alice's code in flight."""
     await init_db()
     await _seed_user("alice", "pw-a")
     await _seed_user("bob", "pw-b")
@@ -325,10 +315,11 @@ async def test_POC_cap_eviction_is_global_not_per_user(tmp_env):
         await a.post("/api/auth/login", json={"username": "alice", "password": "pw-a"})
         await b.post("/api/auth/login", json={"username": "bob", "password": "pw-b"})
         alice_code = await _mint(a)
-        for _ in range(pastelogin.MAX_LIVE):
+        for _ in range(pastelogin.MAX_LIVE + 3):
             await _mint(b)
         r = await dev.post(LOGIN, json={"code": alice_code})
-        assert r.status_code == 401
+        assert r.status_code == 200
+    assert pastelogin.live_count() == pastelogin.MAX_LIVE      # bob's, capped
 
 
 async def test_BLOCKED_eviction_gives_attacker_no_oracle(op):
@@ -353,30 +344,18 @@ async def test_BLOCKED_eviction_gives_attacker_no_oracle(op):
 # =============================================================================
 
 def test_POC_single_process_is_not_enforced():
-    """Ticket store, throttle, chat._active_turns and the bus are all
-    process-local. scripts/jarvis.service does not pin `--workers 1`, and
-    uvicorn takes --workers from $WEB_CONCURRENCY, which a systemd --user
-    unit inherits from the user manager's environment. Nothing at startup
-    refuses a second worker. Simulated with two module instances: a code
-    minted in worker A is dead in worker B (fail-closed, confusing), and
-    each worker has its own miss budget (budget x N)."""
+    """FIXED: the unit pins `--workers 1`, and the app refuses to start when
+    WEB_CONCURRENCY asks for more than one process (the store, throttle,
+    chat._active_turns and the bus are process-local)."""
+    from backend.main import require_single_process
     unit = (ROOT / "scripts" / "jarvis.service").read_text()
-    assert "--workers" not in unit
-    spec = importlib.util.spec_from_file_location(
-        "pastelogin_worker_b", ROOT / "backend" / "pastelogin.py")
-    worker_b = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = worker_b       # @dataclass needs its module registered
-    try:
-        spec.loader.exec_module(worker_b)
-    finally:
-        del sys.modules[spec.name]
-    code, _ = pastelogin.mint(by="op")
-    assert worker_b.redeem(code) is None
-    for _ in range(pastelogin._WRONG_PER_PEER):
-        pastelogin.note_wrong("10.0.0.66")
-    with pytest.raises(pastelogin.TooMany):
-        pastelogin.throttle("10.0.0.66")
-    worker_b.throttle("10.0.0.66")          # fresh budget in the other worker
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    assert "--workers 1" in exec_line
+    for ok in ({}, {"WEB_CONCURRENCY": ""}, {"WEB_CONCURRENCY": "1"}):
+        require_single_process(ok)
+    for bad in ("2", "8", "0", "auto"):
+        with pytest.raises(RuntimeError):
+            require_single_process({"WEB_CONCURRENCY": bad})
 
 
 # =============================================================================
