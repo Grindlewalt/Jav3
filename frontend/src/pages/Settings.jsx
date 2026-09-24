@@ -164,7 +164,10 @@ function DevicesPanel({ say }) {
                   <strong>{d.name}</strong>
                   {d.hostname && <span className="dim"> · {d.hostname}</span>}
                   <span className="dim small">
-                    {' · '}{d.last_seen ? `last seen ${d.last_seen} UTC` : 'never used'}</span>
+                    {' · '}{d.last_used_at ? `last used ${d.last_used_at} UTC` : 'never used'}
+                    {' · '}{d.idle_expires_at < d.expires_at
+                      ? `expires ${d.idle_expires_at} UTC if unused`
+                      : `expires ${d.expires_at} UTC`}</span>
                 </span>
                 <button className="ghost danger" onClick={() => revoke(d)}>Revoke</button>
               </li>

@@ -65,6 +65,11 @@ class Settings(BaseSettings):
 
     jwt_secret: str = ""
     jwt_ttl_hours: int = 24 * 7
+    # A `jav3 login` device token dies this many days after it was minted, or
+    # after this many days without being used, whichever comes first. The CLI
+    # answers either with "run: jav3 login".
+    device_token_ttl_days: int = 90
+    device_token_idle_days: int = 30
     # Add `Secure` to the session cookie so it never rides plaintext HTTP. OFF
     # by default because a LAN deployment is reached over plain http (a Secure
     # cookie would silently never be sent there); set true only when every
@@ -76,6 +81,8 @@ class Settings(BaseSettings):
     # same-site sibling (another app served under the same parent domain).
     # Add a name here only for a page on another host that legitimately posts
     # to Jarvis.
+    # Each entry is a bare host (any port) or host:port. The server's own LAN
+    # names are allowed without listing them, but only on lan_port.
     csrf_allowed_hosts: list[str] = []
     # The committer email on every commit Jarvis makes in a project repo.
     git_author_email: str = "jarvis@localhost"

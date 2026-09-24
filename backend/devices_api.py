@@ -153,15 +153,28 @@ async def cancel_login_code(user: dict = Depends(require_user)):
 
 @router.get("")
 async def list_devices():
-    """Computers with live tokens (never the token itself)."""
-    return {"devices": await devicetokens.list_tokens()}
+    """Computers with live tokens (never the token itself), each with its
+    expires_at, last_used_at and idle deadline (idle_expires_at)."""
+    return {"devices": await devicetokens.list_tokens(),
+            "ttl_days": settings.device_token_ttl_days,
+            "idle_days": settings.device_token_idle_days}
 
 
 @router.delete("/{token_id:int}")
 async def revoke_device(token_id: int):
+    stopped = _stop_device_turns(token_id)
     if not await devicetokens.revoke(token_id):
         raise HTTPException(status_code=404, detail="no such device token")
-    return {"ok": True}
+    return {"ok": True, "stopped_turns": stopped}
+
+
+def _stop_device_turns(token_id: int) -> int:
+    """require_actor runs once, at request start, and the turn it admitted is
+    a detached task — so revoking the credential has to end what it started
+    as well, or a revoked computer's turn keeps calling tools. Cancelling
+    first is harmless if the id turns out not to exist (it started nothing)."""
+    from . import chat
+    return chat.stop_actor_turns(chat.device_actor(token_id))
 
 
 # --- device side ----------------------------------------------------------------
@@ -259,7 +272,7 @@ async def revoke_self(actor: dict = Depends(require_actor)):
         raise HTTPException(status_code=400, detail="only a device token can "
                             "revoke itself; use Settings → Devices")
     await devicetokens.revoke(actor["device_id"])
-    return {"ok": True}
+    return {"ok": True, "stopped_turns": _stop_device_turns(actor["device_id"])}
 
 
 # --- the CLI, as static files ------------------------------------------------------

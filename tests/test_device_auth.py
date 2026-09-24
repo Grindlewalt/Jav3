@@ -56,7 +56,18 @@ async def _redeem(dev, code, **kw):
 
 async def test_token_mint_verify_revoke(tmp_env):
     await init_db()
-    raw, tid = await devicetokens.mint("cli", hostname="box", platform="linux")
+    db = await get_db()
+    try:
+        await db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                         ("operator", hash_password("hunter2")))
+        await db.commit()
+    finally:
+        await db.close()
+    # a token belongs to the user who minted the code; no such user, no token
+    orphan, _ = await devicetokens.mint("cli", by="nobody")
+    assert await devicetokens.verify(orphan) is None
+    raw, tid = await devicetokens.mint("cli", hostname="box", platform="linux",
+                                       by="operator")
     assert raw.startswith("jvd_")
     who = await devicetokens.verify(raw)
     assert who and who["device_id"] == tid and who["name"] == "cli"

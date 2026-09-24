@@ -164,12 +164,11 @@ async def test_POC_audit_db_open_failure_orphans_a_live_token(op, monkeypatch):
 # =============================================================================
 
 async def test_POC_revoked_device_turn_keeps_running_and_streaming(op, monkeypatch):
-    """require_actor runs once, at request start; the chat turn is a detached
-    task (chat.py:start_turn) and its SSE tail is already open. After the
-    operator revokes the token, the device's turn still runs to completion
-    (tool calls included) and the device still receives the reply on the open
-    stream. Nothing ties /stop to revocation, and conversations carry no
-    device id, so the operator can't find which turns the device started."""
+    """FIXED: the live-turn registry records who started each turn; revoking
+    a device token (Settings, or DELETE /self) cancels that token's running
+    turns through the /stop path, so nothing runs after the revoke and the
+    open stream settles on the interruption. The conversation carries the
+    device id that opened it."""
     code = await _mint(op)
     async with _client("10.0.3.1") as dev:
         tok = (await dev.post(LOGIN, json={"code": code})).json()
@@ -187,41 +186,92 @@ async def test_POC_revoked_device_turn_keeps_running_and_streaming(op, monkeypat
             "/api/chat", json={"message": "hi", "confirm_peak": True}, headers=hdr))
         await asyncio.wait_for(started.wait(), 5)
 
-        assert (await op.delete(f"/api/devices/{tok['device_id']}")).status_code == 200
+        r = await op.delete(f"/api/devices/{tok['device_id']}")
+        assert r.status_code == 200 and r.json()["stopped_turns"] == 1
         assert (await dev.get("/api/devices/whoami", headers=hdr)).status_code == 401
 
         release.set()
         r = await asyncio.wait_for(post, 5)
-        assert ran_after_revoke == [True]
-        assert r.status_code == 200 and "done-after-revoke" in r.text
+        assert ran_after_revoke == []
+        assert "done-after-revoke" not in r.text
+        assert chat_mod.INTERRUPTED_MARKER in r.text
     db = await get_db()
     try:
-        async with db.execute("PRAGMA table_info(conversations)") as cur:
-            cols = {row[1] for row in await cur.fetchall()}
+        async with db.execute("SELECT device_id FROM conversations") as cur:
+            assert [row[0] for row in await cur.fetchall()] == [tok["device_id"]]
     finally:
         await db.close()
-    assert not {"device_id", "actor", "started_by"} & cols
+
+
+async def test_POC_revoke_self_stops_own_turns(op, monkeypatch):
+    """`jav3 logout` (DELETE /self) stops the token's own running turn too;
+    the operator's own turns are untouched."""
+    code = await _mint(op)
+    async with _client("10.0.3.9") as dev:
+        tok = (await dev.post(LOGIN, json={"code": code})).json()
+        hdr = {"Authorization": f"Bearer {tok['token']}"}
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def turn(cid, system_prompt, history, tools=None, **kw):
+            started.set()
+            await release.wait()
+            yield {"type": "final", "content": "fin"}
+        monkeypatch.setattr(chat_mod, "guest_turn", turn)
+        mine = asyncio.create_task(dev.post(
+            "/api/chat", json={"message": "a", "confirm_peak": True}, headers=hdr))
+        await asyncio.wait_for(started.wait(), 5)
+        started.clear()
+        ops = asyncio.create_task(op.post(
+            "/api/chat", json={"message": "b", "confirm_peak": True}))
+        await asyncio.wait_for(started.wait(), 5)
+        r = await dev.delete("/api/devices/self", headers=hdr)
+        assert r.json()["stopped_turns"] == 1
+        release.set()
+        assert chat_mod.INTERRUPTED_MARKER in (await asyncio.wait_for(mine, 5)).text
+        assert "fin" in (await asyncio.wait_for(ops, 5)).text
 
 
 async def test_POC_device_token_never_expires(op):
-    """devicetokens.verify checks only `revoked`; a device token has no TTL
-    and no idle timeout (cookie JWTs expire after settings.jwt_ttl_hours).
-    The default login address is plain http on the LAN, so the redeem
-    response and every chat request carry the bearer in clear; one capture
-    replays forever."""
+    """FIXED: a device token dies at expires_at (device_token_ttl_days) or
+    after device_token_idle_days without use; both look like any other
+    unknown token (one 401). last_used_at is touched at most once a minute."""
     code = await _mint(op)
     async with _client("10.0.3.2") as dev:
         tok = (await dev.post(LOGIN, json={"code": code})).json()
-        db = await get_db()
-        try:
-            await db.execute("UPDATE device_tokens SET created_at='2000-01-01 00:00:00', "
-                             "last_seen='2000-01-01 00:00:00'")
-            await db.commit()
-        finally:
-            await db.close()
-        r = await dev.get("/api/devices/whoami",
-                          headers={"Authorization": f"Bearer {tok['token']}"})
-        assert r.status_code == 200
+        hdr = {"Authorization": f"Bearer {tok['token']}"}
+
+        async def sql(q, *a):
+            db = await get_db()
+            try:
+                await db.execute(q, a)
+                await db.commit()
+            finally:
+                await db.close()
+
+        async def row():
+            db = await get_db()
+            try:
+                async with db.execute("SELECT expires_at, last_used_at FROM "
+                                      "device_tokens") as cur:
+                    return tuple(await cur.fetchone())
+            finally:
+                await db.close()
+        assert (await dev.get("/api/devices/whoami", headers=hdr)).status_code == 200
+        exp, used = await row()
+        assert exp and used
+        await sql("UPDATE device_tokens SET last_used_at = datetime('now','-30 seconds')")
+        assert (await dev.get("/api/devices/whoami", headers=hdr)).status_code == 200
+        assert (await row())[1] < used or (await row())[1] != used   # not rewritten
+        listing = (await op.get("/api/devices")).json()["devices"][0]
+        assert {"expires_at", "last_used_at", "idle_expires_at"} <= set(listing)
+        # idle
+        await sql("UPDATE device_tokens SET last_used_at = datetime('now','-31 days')")
+        assert (await dev.get("/api/devices/whoami", headers=hdr)).status_code == 401
+        # absolute expiry, even when used recently
+        await sql("UPDATE device_tokens SET last_used_at = datetime('now'), "
+                  "expires_at = datetime('now','-1 seconds')")
+        assert (await dev.get("/api/devices/whoami", headers=hdr)).status_code == 401
+        assert (await op.get("/api/devices")).json()["devices"] == []
 
 
 async def test_BLOCKED_login_response_replay(op):

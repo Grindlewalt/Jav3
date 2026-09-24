@@ -11,7 +11,9 @@ CREATE TABLE IF NOT EXISTS users (
 );
 -- API tokens minted for a logged-in computer/CLI (`jav3 login`).
 -- Only the sha256 of the token is stored; the raw token is shown once, when
--- the login code is redeemed, and never again. Revocable; last_seen updated on use.
+-- the login code is redeemed, and never again. Revocable; expires at
+-- expires_at or after device_token_idle_days without use (last_used_at); dies
+-- with the user it was minted for (user_id).
 CREATE TABLE IF NOT EXISTS device_tokens (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -19,8 +21,10 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     hostname TEXT,
     platform TEXT,
     paired_by TEXT,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_seen TEXT,
+    expires_at TEXT,
+    last_used_at TEXT,
     revoked INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS projects (
@@ -265,6 +269,29 @@ async def init_db() -> None:
         if "autonomy" not in cols:
             # autonomy dial: read_only|stage|gated|full (NULL == full, unrestricted)
             await db.execute("ALTER TABLE projects ADD COLUMN autonomy TEXT")
+        # device tokens gained a lifetime and an owner (2026-09 login review):
+        # an absolute expiry, an idle clock, and the user id they die with.
+        # Existing rows are backfilled so nothing that was live gets a free
+        # pass: expiry from created_at, last use from the old last_seen, the
+        # owner by the username that minted it — a token whose minting user is
+        # gone gets no owner, and so stops verifying.
+        async with db.execute("PRAGMA table_info(device_tokens)") as cur:
+            dcols = [r["name"] for r in await cur.fetchall()]
+        for col, decl in (("user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+                          ("expires_at", "TEXT"), ("last_used_at", "TEXT")):
+            if col not in dcols:
+                await db.execute(f"ALTER TABLE device_tokens ADD COLUMN {col} {decl}")
+        await db.execute(
+            "UPDATE device_tokens SET expires_at = datetime(created_at, ?) "
+            "WHERE expires_at IS NULL", (f"+{int(settings.device_token_ttl_days)} days",))
+        if "last_used_at" not in dcols and "last_seen" in dcols:
+            await db.execute("UPDATE device_tokens SET last_used_at = last_seen")
+        if "user_id" not in dcols:
+            # once, at migration: re-running it would re-attach an orphaned
+            # token to a NEW account that reused a deleted user's name
+            await db.execute(
+                "UPDATE device_tokens SET user_id = (SELECT id FROM users "
+                "WHERE users.username = device_tokens.paired_by)")
         # run-tree columns on an already-created conversations table
         async with db.execute("PRAGMA table_info(conversations)") as cur:
             ccols = [r["name"] for r in await cur.fetchall()]
@@ -348,7 +375,12 @@ async def init_db() -> None:
                           # incognito refusal holds until the row is actually
                           # gone. It never persists past the turn: an incognito
                           # row is wiped at turn end, and this goes with it.
-                          ("ephemeral", "INTEGER NOT NULL DEFAULT 0")):
+                          ("ephemeral", "INTEGER NOT NULL DEFAULT 0"),
+                          # the device token (device_tokens.id) that opened
+                          # this conversation; NULL = the operator's session
+                          # or an internal run. Attribution, so the operator
+                          # can see which threads a computer started.
+                          ("device_id", "INTEGER")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
@@ -406,7 +438,8 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
                             title: str, kind: str = "chat",
                             parent: int | None = None, job_id: str | None = None,
                             locked: bool = False, agent: str | None = None,
-                            ephemeral: bool = False, commit: bool = True) -> int:
+                            ephemeral: bool = False, device_id: int | None = None,
+                            commit: bool = True) -> int:
     """Create a conversation node and return its id — the one place that resolves
     a project slug to its id and inserts the row.
 
@@ -435,9 +468,10 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
         project_id = row["id"] if row else None
     cur = await db.execute(
         "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, "
-        "job_id, project_locked, agent_slug, ephemeral) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "job_id, project_locked, agent_slug, ephemeral, device_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (project_id, title, kind, parent, job_id, 1 if locked else 0, agent,
-         1 if ephemeral else 0))
+         1 if ephemeral else 0, device_id))
     if commit:
         await db.commit()
     return cur.lastrowid

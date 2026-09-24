@@ -731,6 +731,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # signal end — a subscriber that still sees the flag is guaranteed
         # the job_end is ahead of it in the queue (both happen in this tick)
         _active_turns.pop(conversation_id, None)
+        _turn_actors.pop(conversation_id, None)
         _interrupt_notes.pop(conversation_id, None)   # stale note must not leak
         bus.close_job(chan)
 
@@ -776,15 +777,46 @@ async def stop_chat_turn(conversation_id: int):
     """Cancel an in-flight turn. The turn's CancelledError handler records
     the interruption and publishes a final event, so every attached tail
     (and the transcript) settles on its own — nothing else to clean up here."""
+    return {"stopped": _stop(conversation_id)}
+
+
+def _stop(conversation_id: int) -> bool:
     task = _active_turns.get(conversation_id)
     if task is None or task.done():
-        return {"stopped": False}
+        return False
     task.cancel()
-    return {"stopped": True}
+    return True
+
+
+# Who started each in-flight turn: "device:<token id>" for a `jav3` device
+# token, "session" for the operator's cookie. require_actor runs once, when the
+# POST arrives, and the turn it admits is a detached task — so revoking a device
+# token must also stop what that token already started (devices_api calls
+# stop_actor_turns on every revoke).
+_turn_actors: dict[int, str] = {}
+
+
+def device_actor(token_id: int) -> str:
+    return f"device:{int(token_id)}"
+
+
+def actor_key(actor: dict | None) -> str | None:
+    if not actor:
+        return None
+    return device_actor(actor["device_id"]) if actor.get("is_device") else "session"
+
+
+def stop_actor_turns(key: str) -> int:
+    """Cancel every in-flight turn `key` started, through the same path as
+    /stop. Returns how many were cancelled."""
+    return sum(_stop(cid) for cid, who in list(_turn_actors.items()) if who == key)
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest):
+async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
+    # the router already depends on require_actor; FastAPI caches it per
+    # request, so this is the same resolved actor, not a second token lookup
+    device_id = actor.get("device_id") if actor.get("is_device") else None
     db = await get_db()
     try:
         conversation_id = body.conversation_id
@@ -837,7 +869,9 @@ async def chat(body: ChatRequest):
                 # message to a turn about to be wiped, and it outlives the
                 # broker envelope that carries the same flag. Gone with the row
                 # at turn end.
-                ephemeral=body.ephemeral)
+                ephemeral=body.ephemeral,
+                # which computer opened this thread (NULL = the operator)
+                device_id=device_id)
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:
@@ -869,7 +903,7 @@ async def chat(body: ChatRequest):
     # run the turn as a detached task: it outlives this HTTP connection
     q = bus.subscribe(_chan(conversation_id))
     start_turn(conversation_id, ephemeral=body.ephemeral,
-               user_msg=body.message, tab=body.tab)
+               user_msg=body.message, tab=body.tab, actor=actor_key(actor))
     return _tail(conversation_id, q)
 
 
@@ -878,7 +912,8 @@ def start_turn(conversation_id: int, *, ephemeral: bool = False,
                voice: bool = False, model_name: str | None = None,
                base_url: str | None = None,
                context_exclude: tuple = (),
-               tools_only: tuple = ()) -> asyncio.Task:
+               tools_only: tuple = (),
+               actor: str | None = None) -> asyncio.Task:
     """Launch a chat turn as a detached task. The one shared seam between the
     HTTP endpoint above and the voice orchestrator: the caller has already
     inserted the user message row, run the peak gate, and (if it wants the
@@ -888,4 +923,6 @@ def start_turn(conversation_id: int, *, ephemeral: bool = False,
                        model_name=model_name, base_url=base_url,
                        context_exclude=context_exclude, tools_only=tools_only))
     _active_turns[conversation_id] = task
+    if actor:
+        _turn_actors[conversation_id] = actor
     return task

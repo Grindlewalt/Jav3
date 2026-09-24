@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from backend import auth, devices_api, devicetokens, pastelogin
+from backend import devicetokens, pastelogin
 from backend.auth import COOKIE_NAME, hash_password
 from backend.config import get_jwt_secret, settings
 from backend.db import get_db, init_db
@@ -129,43 +129,48 @@ async def test_BYPASS_leaked_jwt_secret_forges_operator_session(clients):
 # docstring ("individually revocable", operator can "spot a stale one") implies.
 # ---------------------------------------------------------------------------
 
-async def test_REACH_device_token_never_expires(tmp_env):
-    """FINDING (medium): a device token has no expiry. `device_tokens` has no
-    expiry column and `verify()` only checks `revoked = 0`, so a token minted
-    once is valid forever unless the operator manually revokes it. The operator
-    login cookie expires (jwt_ttl_hours) but a stolen device token does not.
-    """
-    await init_db()
-    raw, tid = await devicetokens.mint("cli")
-    # simulate the row being a year old — still verifies
+async def test_REACH_device_token_never_expires(clients):
+    """FIXED: a token a year old is past its expires_at and its idle window;
+    it no longer verifies."""
+    op, dev = clients
+    tok = await _device_token(op, dev)
+    assert await devicetokens.verify(tok) is not None
     db = await get_db()
     try:
         await db.execute(
             "UPDATE device_tokens SET created_at = datetime('now','-400 days'), "
-            "last_seen = datetime('now','-400 days') WHERE id = ?", (tid,))
+            "expires_at = datetime('now','-310 days'), "
+            "last_used_at = datetime('now','-400 days')")
         await db.commit()
     finally:
         await db.close()
-    assert await devicetokens.verify(raw) is not None      # no TTL anywhere
+    assert await devicetokens.verify(tok) is None
 
 
 async def test_REACH_device_token_survives_deletion_of_minting_user(clients):
-    """FINDING (medium): a device token carries no user id (id=-1) and no FK to
-    the user who minted it (`paired_by` is a free-text username string). Deleting
-    that operator account does NOT invalidate the token — it keeps
-    operator-equivalent chat/tool reach with no live account behind it.
-    """
+    """FIXED: a token carries the minting user's id and verify joins `users`,
+    so deleting the account kills its tokens — and a new account that reuses
+    the name does not inherit them."""
     op, dev = clients
     tok = await _device_token(op, dev)
+    h = {"Authorization": f"Bearer {tok}"}
+    assert (await dev.get("/api/devices/whoami", headers=h)).status_code == 200
     db = await get_db()
     try:
         await db.execute("DELETE FROM users WHERE username = 'operator'")
         await db.commit()
     finally:
         await db.close()
-    # the account is gone, yet the token still authenticates as an actor
-    r = await dev.get("/api/devices/whoami", headers={"Authorization": f"Bearer {tok}"})
-    assert r.status_code == 200 and r.json().get("is_device") is True
+    assert (await dev.get("/api/devices/whoami", headers=h)).status_code == 401
+    db = await get_db()
+    try:
+        await db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                         ("operator", hash_password("other")))
+        await db.commit()
+    finally:
+        await db.close()
+    await init_db()                           # the migration must not re-attach it
+    assert (await dev.get("/api/devices/whoami", headers=h)).status_code == 401
 
 
 async def test_REACH_device_token_reads_and_deletes_all_conversations(clients):
