@@ -30,5 +30,6 @@ def tmp_env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(settings, "skills_dir", tmp_path / "skills")
     monkeypatch.setattr(settings, "agents_dir", tmp_path / "agents")
+    monkeypatch.setattr(settings, "vm_dir", tmp_path / "data" / "vm")
     monkeypatch.setattr(settings, "secrets_path", tmp_path / "secrets.json")
     return tmp_path

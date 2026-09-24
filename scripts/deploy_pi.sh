@@ -21,8 +21,9 @@ BUILD=1
 echo "==> guard: in-flight tool calls?"
 ssh "$PI" 'cd ~/jarvis && .venv/bin/python - '"${FORCE:-0}"' <<PY
 import sqlite3, sys
+from backend.config import settings
 force = sys.argv[1] == "1"
-n = sqlite3.connect("data/jarvis.db").execute(
+n = sqlite3.connect(settings.db_path).execute(
     "SELECT COUNT(*) FROM tool_calls "
     "WHERE created_at > datetime(\"now\", \"-60 seconds\")").fetchone()[0]
 print(f"    {n} tool call(s) in the last 60s")

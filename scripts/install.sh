@@ -18,7 +18,7 @@
 # you still owe, without touching the machine.
 #
 # WHAT NEEDS ROOT, AND WHY (the list is deliberately short)
-#   packages          qemu, node, python venv module, rsync
+#   packages          qemu, node, python venv module, rsync, rclone (backups)
 #   kvm modules       the agent loop runs inside a KVM guest; no KVM, no Jarvis
 #   vhost_vsock       the guest's only channel to the host supervisor
 #   kvm group         so rootless qemu can open /dev/kvm
@@ -40,7 +40,7 @@ fi
 
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
-FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST=""
+FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT=""
 # $SUDO_USER is only meaningful when we are actually running under sudo. Taking
 # it unconditionally means a stale value inherited from the environment wins
 # over who we really are — which reported the wrong username inside a sandbox.
@@ -62,7 +62,11 @@ Options
   --root-phase         run ONLY the privileged steps (run this under sudo)
   --user <name>        target user for the root phase (default: $SUDO_USER)
   --from <host:path>   migrate durable state from an existing install first,
-                       e.g. --from grindlewalt@atomostest:jarvis
+                       e.g. --from grindlewalt@atomostest:jarvis. <path> may be
+                       the old checkout (state inside it) or a state dir.
+  --state-dir <dir>    where durable state lives (default ~/.local/share/jarvis,
+                       or JARVIS_STATE_DIR); a non-default one is written to
+                       ~/.config/jarvis/env so the service uses it too
   --no-build           skip the frontend build
   --no-image           skip building the guest golden image (slow, ~10 min)
   --force              overwrite existing local state during --from
@@ -78,6 +82,7 @@ while [ $# -gt 0 ]; do
     --root-phase) DO_ROOT=1; DO_USER=0 ;;
     --user)       TARGET_USER="$2"; shift ;;
     --from)       FROM_HOST="$2"; shift ;;
+    --state-dir)  STATE_DIR_OPT="$2"; shift ;;
     --no-build)   BUILD_FRONTEND=0 ;;
     --no-image)   BUILD_IMAGE=0 ;;
     --force)      FORCE=1 ;;
@@ -131,16 +136,37 @@ fi
 DISTRO="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" )"
 
 case "$PKG" in
-  apt)    PACKAGES=(python3-venv python3-pip nodejs npm git curl rsync
+  apt)    PACKAGES=(python3-venv python3-pip nodejs npm git curl rsync rclone
                     "$QEMU_ARCH_PKG_APT" qemu-utils "$FW_PKG_APT" cloud-image-utils) ;;
-  pacman) PACKAGES=(python nodejs npm git curl rsync "$QEMU_PKG_PAC" qemu-img
+  pacman) PACKAGES=(python nodejs npm git curl rsync rclone "$QEMU_PKG_PAC" qemu-img
                     "$FW_PKG_PAC" libisoburn) ;;
-  dnf)    PACKAGES=(python3 python3-pip nodejs npm git curl rsync
+  dnf)    PACKAGES=(python3 python3-pip nodejs npm git curl rsync rclone
                     qemu-kvm qemu-img edk2-ovmf xorriso) ;;
   *)      PACKAGES=() ;;
 esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Durable state (memory/ projects/ skills/ agents/ data/) lives in ONE dir
+# outside the checkout — backend/config.py's state_dir. Same precedence as the
+# app: --state-dir, then JARVIS_STATE_DIR from the environment or the env file,
+# then the default.
+STATE_DIR="$STATE_DIR_OPT"
+[ -n "$STATE_DIR" ] || STATE_DIR="${JARVIS_STATE_DIR:-}"
+if [ -z "$STATE_DIR" ] && [ -f "$HOME/.config/jarvis/env" ]; then
+  STATE_DIR="$(sed -n 's/^JARVIS_STATE_DIR=//p' "$HOME/.config/jarvis/env" | tail -1 | tr -d "\"'")"
+fi
+STATE_DIR="${STATE_DIR:-$HOME/.local/share/jarvis}"
+STATE_DIR="${STATE_DIR/#\~/$HOME}"
+
+# Where the guest images resolve, exactly as the app resolves them (an existing
+# box may still run from the old in-checkout layout until migrate-state).
+vm_dir() {
+  if [ -n "$REPO_DIR" ] && [ -x "$REPO_DIR/.venv/bin/python" ]; then
+    (cd "$REPO_DIR" && .venv/bin/python -m backend.cli paths vm_dir 2>/dev/null) && return
+  fi
+  echo "$STATE_DIR/data/vm"
+}
 
 # ---------------------------------------------------------------- preflight --
 # Each check appends to MISSING_ROOT (needs the root phase) or MISSING_USER.
@@ -259,6 +285,8 @@ check_packages() {
   if ! have cloud-localds && ! have xorriso && ! have genisoimage && ! have mkisofs; then
     missing+=("cloud-localds/xorriso (cloud-init seed)")
   fi
+  # rclone only powers backups — worth a line, never a blocker
+  have rclone || warn "rclone not installed — backups unavailable until it is (the root phase installs it)"
   if [ ${#missing[@]} -eq 0 ]; then
     ok "system packages present"
   else
@@ -338,9 +366,14 @@ check_user_side() {
   if [ -f "$HOME/.config/systemd/user/jarvis.service" ]; then ok "systemd user unit installed"
   else bad "jarvis.service not installed"; fix "bash $REPO_DIR/scripts/install.sh"; MISSING_USER+=("unit"); fi
 
-  local base="$REPO_DIR/data/vm/base-${JARVIS_VM_IMAGE_VERSION:-v1}.qcow2"
-  if [ -f "$base" ]; then ok "guest golden image present"
-  else bad "no guest golden image"; fix "VM_DIR=$REPO_DIR/data/vm bash $REPO_DIR/vm/build_base.sh"; MISSING_USER+=("image"); fi
+  local vmd; vmd="$(vm_dir)"
+  if ls "$vmd"/base-v*.qcow2 >/dev/null 2>&1; then ok "guest golden image present ($vmd)"
+  else bad "no guest golden image"; fix "VM_DIR=$vmd bash $REPO_DIR/vm/build_base.sh"; MISSING_USER+=("image"); fi
+
+  if [ -f "$REPO_DIR/data/jarvis.db" ] && [ ! -f "$STATE_DIR/data/jarvis.db" ]; then
+    warn "state is still inside the checkout ($REPO_DIR) — it keeps working there"
+    fix "systemctl --user stop jarvis && $REPO_DIR/.venv/bin/python -m backend.cli migrate-state && systemctl --user start jarvis"
+  fi
 }
 
 preflight() {
@@ -402,40 +435,58 @@ root_phase() {
 
 # -------------------------------------------------------- state migration ----
 # Runs BEFORE anything else touches local state. Jarvis's durable data is all
-# gitignored — memory/, projects/, skills/, agents/, tools/ and the SQLite DB —
-# so on a migration it exists in exactly one place and a silent skip here loses
-# it. Hence: unreachable source is a hard failure, never a warning.
+# outside git — memory/, projects/, skills/, agents/ and the SQLite DB — so on a
+# migration it exists in exactly one place and a silent skip here loses it.
+# Hence: unreachable source is a hard failure, never a warning.
+#
+# The source may be either layout: an old install keeps its state inside the
+# checkout (<path>/data/jarvis.db), a new one in its state dir. Either way it
+# lands in THIS box's $STATE_DIR. tools/ is not copied: tools are code and come
+# with the checkout.
 pull_state() {
-  local spec="$1" host path
+  local spec="$1" host path root
   host="${spec%%:*}"
   path="${spec#*:}"
   [ "$host" != "$spec" ] || die "--from wants host:path (e.g. user@host:jarvis)"
   [ -n "$path" ] || path="jarvis"
 
-  step "migrate durable state from $host:$path"
+  step "migrate durable state from $host:$path into $STATE_DIR"
 
   ssh -o ConnectTimeout=10 -o BatchMode=yes "$host" true 2>/dev/null \
     || die "cannot reach $host over ssh.
        Refusing to continue: this phase is the only copy of Jarvis's durable
-       state (memory/, projects/, skills/, agents/, tools/, data/jarvis.db) and
+       state (memory/, projects/, skills/, agents/, data/jarvis.db) and
        skipping it silently would start a fresh install over the top of a
        migration. Fix the source host, then re-run with the same --from."
 
   ssh "$host" "test -d '$path'" \
     || die "$host:$path does not exist or is not a directory"
 
+  # Which layout? A DB directly under <path> means <path> is the state root
+  # (an old checkout, or a state dir named outright). Otherwise ask the source
+  # install where its state dir resolves.
+  if ssh "$host" "test -f '$path/data/jarvis.db'"; then
+    root="$path"
+  else
+    root="$(ssh "$host" "cd '$path' && ./.venv/bin/python -m backend.cli paths state_dir" 2>/dev/null || true)"
+    [ -n "$root" ] || root='.local/share/jarvis'
+    ssh "$host" "test -f '$root/data/jarvis.db'" \
+      || die "no data/jarvis.db under $host:$path or its state dir ($root)"
+  fi
+  ok "source state root: $host:$root"
+
   # Refuse to clobber. On a genuine migration the target is empty; if it is not,
   # the operator gets to decide rather than discovering it afterwards.
   if [ "$FORCE" -ne 1 ]; then
     local d
     for d in memory projects skills agents; do
-      if [ -n "$(ls -A "$REPO_DIR/$d" 2>/dev/null | grep -v '^\.gitkeep$' || true)" ]; then
-        die "$REPO_DIR/$d is not empty — refusing to overwrite existing state.
+      if [ -n "$(ls -A "$STATE_DIR/$d" 2>/dev/null | grep -v '^\.gitkeep$' || true)" ]; then
+        die "$STATE_DIR/$d is not empty — refusing to overwrite existing state.
        Re-run with --force if you really mean to replace it."
       fi
     done
-    if [ -f "$REPO_DIR/data/jarvis.db" ]; then
-      die "$REPO_DIR/data/jarvis.db already exists — refusing to overwrite.
+    if [ -f "$STATE_DIR/data/jarvis.db" ]; then
+      die "$STATE_DIR/data/jarvis.db already exists — refusing to overwrite.
        Re-run with --force if you really mean to replace it."
     fi
   fi
@@ -443,14 +494,12 @@ pull_state() {
   # Snapshot the source DB through SQLite's backup API rather than copying the
   # file. A live database in WAL mode cannot be safely cp'd — you get a torn
   # read or a missing -wal and the copy opens corrupt. .backup is consistent
-  # even against a running Jarvis.
+  # even against a running Jarvis. Plain python3: a state dir has no venv.
   step "  snapshotting the source database"
-  ssh "$host" "cd '$path' && ./.venv/bin/python - <<'PY'
+  ssh "$host" "cd '$root' && python3 - <<'PY'
 import sqlite3, os
 src = 'data/jarvis.db'
 dst = 'data/jarvis.migrate.db'
-if not os.path.exists(src):
-    raise SystemExit('no data/jarvis.db on the source host')
 con = sqlite3.connect(src)
 out = sqlite3.connect(dst)
 with out:
@@ -460,7 +509,7 @@ print('snapshot ok', os.path.getsize(dst), 'bytes')
 PY" || die "could not snapshot the source database"
 
   step "  copying files"
-  mkdir -p "$REPO_DIR/data"
+  mkdir -p "$STATE_DIR/data"
   # One rsync per directory: rsync only accepts a single remote host per
   # invocation, and the multi-source form silently does the wrong thing.
   #
@@ -468,29 +517,35 @@ PY" || die "could not snapshot the source database"
   # the source host's architecture, so copying it to a different box produces an
   # image that boots to nothing. install.sh rebuilds it natively instead.
   local d
-  for d in memory projects skills agents tools; do
-    if ssh "$host" "test -d '$path/$d'"; then
+  for d in memory projects skills agents; do
+    if ssh "$host" "test -d '$root/$d'"; then
       rsync -a --info=stats1 \
         --exclude '__pycache__' --exclude '*.pyc' --exclude '.venv' \
         --exclude 'node_modules' --exclude 'dist' --exclude '.ephemeral-notes' \
-        "$host:$path/$d/" "$REPO_DIR/$d/"
+        "$host:$root/$d/" "$STATE_DIR/$d/"
       ok "  $d"
     else
       warn "  $d not present on the source — skipped"
     fi
   done
-  rsync -a "$host:$path/data/jarvis.migrate.db" "$REPO_DIR/data/jarvis.db"
+  rsync -a "$host:$root/data/jarvis.migrate.db" "$STATE_DIR/data/jarvis.db"
   # The JWT secret comes too, or every existing login token is invalidated.
-  rsync -a "$host:$path/data/jwt_secret" "$REPO_DIR/data/jwt_secret" 2>/dev/null \
+  rsync -a "$host:$root/data/jwt_secret" "$STATE_DIR/data/jwt_secret" 2>/dev/null \
     || warn "no data/jwt_secret on the source (existing sessions will need a re-login)"
   mkdir -p "$HOME/.config/jarvis"
   rsync -a "$host:.config/jarvis/env" "$HOME/.config/jarvis/env" 2>/dev/null \
     || warn "no ~/.config/jarvis/env on the source — you will need to set the API key"
-  chmod 600 "$HOME/.config/jarvis/env" 2>/dev/null || true
-  ssh "$host" "rm -f '$path/data/jarvis.migrate.db'" || true
+  rsync -a "$host:.config/jarvis/secrets.json" "$HOME/.config/jarvis/secrets.json" 2>/dev/null \
+    || true
+  chmod 600 "$HOME/.config/jarvis/env" "$HOME/.config/jarvis/secrets.json" 2>/dev/null || true
+  # The source's env may pin ITS state dir; this box's is $STATE_DIR.
+  if grep -q '^JARVIS_STATE_DIR=' "$HOME/.config/jarvis/env" 2>/dev/null; then
+    sed -i "s#^JARVIS_STATE_DIR=.*#JARVIS_STATE_DIR=$STATE_DIR#" "$HOME/.config/jarvis/env"
+  fi
+  ssh "$host" "rm -f '$root/data/jarvis.migrate.db'" || true
 
   step "  verifying the copy"
-  python3 - "$REPO_DIR/data/jarvis.db" <<'PY'
+  python3 - "$STATE_DIR/data/jarvis.db" <<'PY'
 import sqlite3, sys
 db = sys.argv[1]
 con = sqlite3.connect(db)
@@ -528,6 +583,13 @@ user_phase() {
   mkdir -p "$HOME/.config/jarvis"
   touch "$HOME/.config/jarvis/env"
   chmod 600 "$HOME/.config/jarvis/env"
+  # A non-default state dir must reach the service too, not just this script.
+  if [ "$STATE_DIR" != "$HOME/.local/share/jarvis" ] \
+     && ! grep -qxF "JARVIS_STATE_DIR=$STATE_DIR" "$HOME/.config/jarvis/env"; then
+    sed -i '/^JARVIS_STATE_DIR=/d' "$HOME/.config/jarvis/env"
+    echo "JARVIS_STATE_DIR=$STATE_DIR" >> "$HOME/.config/jarvis/env"
+    ok "state dir $STATE_DIR recorded in ~/.config/jarvis/env"
+  fi
   if grep -q 'JARVIS_DEEPSEEK_API_KEY' "$HOME/.config/jarvis/env" 2>/dev/null; then
     ok "API key present in ~/.config/jarvis/env"
   else
@@ -540,7 +602,8 @@ user_phase() {
   # paths rather than silently installing a unit that points at nothing.
   sed "s#%h/jarvis#$REPO_DIR#g" scripts/jarvis.service \
     > "$HOME/.config/systemd/user/jarvis.service"
-  cp scripts/jarvis-backup.service "$HOME/.config/systemd/user/" 2>/dev/null || true
+  sed "s#%h/jarvis#$REPO_DIR#g" scripts/jarvis-backup.service \
+    > "$HOME/.config/systemd/user/jarvis-backup.service"
   cp scripts/jarvis-backup.timer   "$HOME/.config/systemd/user/" 2>/dev/null || true
   chmod +x scripts/backup.sh 2>/dev/null || true
   systemctl --user daemon-reload
@@ -550,17 +613,16 @@ user_phase() {
 
   if [ "$BUILD_IMAGE" = 1 ]; then
     step "guest golden image"
-    local ver="${JARVIS_VM_IMAGE_VERSION:-v1}"
-    local base="$REPO_DIR/data/vm/base-${ver}.qcow2"
-    if [ -f "$base" ]; then
-      ok "already built ($base)"
+    local vmd; vmd="$(vm_dir)"
+    if ls "$vmd"/base-v*.qcow2 >/dev/null 2>&1; then
+      ok "already built ($vmd)"
     elif [ ! -r /dev/kvm ]; then
       warn "no usable /dev/kvm — skipping the image build"
       warn "run the root phase (and enable virtualization in BIOS if needed), then:"
-      warn "  VM_DIR=$REPO_DIR/data/vm bash vm/build_base.sh"
+      warn "  VM_DIR=$vmd bash vm/build_base.sh"
     else
       echo "  building (downloads a Debian cloud image and boots it once; ~10 min)"
-      VM_DIR="$REPO_DIR/data/vm" bash vm/build_base.sh
+      VM_DIR="$vmd" bash vm/build_base.sh
       ok "golden image built"
     fi
   fi
@@ -658,7 +720,9 @@ fi
 user_phase
 
 printf '\n%sinstalled.%s\n' "$BOLD" "$OFF"
+printf '  state dir:            %s\n' "$(cd "$REPO_DIR" && .venv/bin/python -m backend.cli paths state_dir 2>/dev/null || echo "$STATE_DIR")"
 printf '  create a login user:  %s/.venv/bin/python -m backend.cli create-user <name>\n' "$REPO_DIR"
+printf '  backups (rclone):     set a remote via /api/backup/config, or JARVIS_BACKUP_REMOTE in ~/.config/jarvis/env\n'
 printf '  start:                systemctl --user restart jarvis\n'
 printf '  logs:                 journalctl --user -u jarvis -f\n'
 printf '  re-check:             bash %s/scripts/install.sh --check\n' "$REPO_DIR"

@@ -78,8 +78,17 @@ if the CPU's virtualization extension is off in firmware, `--check` says so and
 stops — the agent loop runs inside a KVM guest and there is no host-side
 fallback, so that is a reboot into BIOS by a human.
 
+**State dir.** Everything durable — `memory/`, `projects/`, `skills/`,
+`agents/` and `data/` (the SQLite DB, JWT secret, guest images) — lives in one
+directory outside the checkout: `~/.local/share/jarvis`, or `JARVIS_STATE_DIR`.
+`python -m backend.cli paths` prints where each piece resolves. A box installed
+before the state dir keeps running from its checkout (with a warning at start)
+until you stop the service and run `python -m backend.cli migrate-state`, which
+copies, verifies and only then removes the old copies.
+
 **Moving hosts.** `--from` migrates the durable state that is *not* in git —
-`memory/`, `projects/`, `skills/`, `agents/`, `tools/` and the SQLite DB:
+`memory/`, `projects/`, `skills/`, `agents/` and the SQLite DB — from either
+layout (an old checkout, or a state dir) into this box's state dir:
 
 ```
 bash scripts/install.sh --from grindlewalt@oldhost:jarvis
@@ -106,3 +115,4 @@ Config via env or `~/.config/jarvis/env`, prefix `JARVIS_` (see
 `backend/config.py`). Notable flags: `JARVIS_VM_EGRESS` (monitored egress, off by
 default → the guest is netless), `JARVIS_PEAK_WINDOWS` (peak-pricing gate),
 `JARVIS_VOICE_ENABLED`.
+

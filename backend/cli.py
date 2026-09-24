@@ -1,6 +1,9 @@
 """Admin CLI:
   python -m backend.cli create-user <username> [password]
   python -m backend.cli guest-shell [project-slug]   # drop into the sandbox guest
+  python -m backend.cli services-check               # probe the companion services
+  python -m backend.cli paths [name]                 # resolved state paths
+  python -m backend.cli migrate-state [--to DIR]     # move checkout state to the state dir
 """
 import asyncio
 import getpass
@@ -144,11 +147,51 @@ def main() -> None:
         guest_shell(sys.argv[2] if len(sys.argv) > 2 else None)
     elif len(sys.argv) >= 2 and sys.argv[1] == "services-check":
         services_check()
+    elif len(sys.argv) >= 2 and sys.argv[1] == "paths":
+        paths(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif len(sys.argv) >= 2 and sys.argv[1] in ("migrate-state",):
+        state_command(sys.argv[1], sys.argv[2:])
     else:
-        print("usage: python -m backend.cli create-user <username> [password]\n"
-              "       python -m backend.cli guest-shell [project-slug]\n"
-              "       python -m backend.cli services-check")
+        print(__doc__.split("\n", 1)[1].rstrip())
         sys.exit(1)
+
+
+_PATHS = ("state_dir", "data_dir", "db_path", "memory_dir", "projects_dir",
+          "skills_dir", "agents_dir", "tools_dir", "vm_dir")
+
+
+def paths(name: str | None) -> None:
+    """One path (for scripts: `VM_DIR=$(python -m backend.cli paths vm_dir)`)
+    or all of them, resolved exactly as the service resolves them."""
+    from .config import settings
+    if name:
+        if name not in _PATHS:
+            print(f"unknown path '{name}' (one of: {', '.join(_PATHS)})", file=sys.stderr)
+            sys.exit(1)
+        print(getattr(settings, name))
+        return
+    for n in _PATHS:
+        print(f"{n:13} {getattr(settings, n)}")
+    if settings.legacy_layout:
+        print("\nnote: running from the legacy in-checkout layout; "
+              "run `python -m backend.cli migrate-state`")
+
+
+def state_command(cmd: str, args: list[str]) -> None:
+    import argparse
+    from pathlib import Path
+    from .statemigrate import MigrateError, migrate_state
+
+    ap = argparse.ArgumentParser(prog=f"python -m backend.cli {cmd}")
+    ap.add_argument("--to", type=Path)
+    a = ap.parse_args(args)
+    try:
+        lines = migrate_state(a.to)
+    except MigrateError as e:
+        print(f"{cmd}: {e}", file=sys.stderr)
+        sys.exit(1)
+    for line in lines:
+        print(line)
 
 
 if __name__ == "__main__":

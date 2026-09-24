@@ -1,11 +1,34 @@
+import logging
 import os
 import secrets
+import shutil
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+log = logging.getLogger(__name__)
+
+# The durable-state dirs a pre-state-dir install kept at the repo root. skills/
+# is left out of the "has content" probe on purpose: the repo ships skills there,
+# so a fresh checkout would always look like a legacy install.
+STATE_DIRS = ("memory", "projects", "skills", "agents", "data")
+_LEGACY_PROBE = ("memory", "projects", "agents")
+
+
+def _has_content(d: Path) -> bool:
+    try:
+        return any(p.name != ".gitkeep" for p in d.iterdir())
+    except OSError:
+        return False
+
+
+def has_state(root: Path) -> bool:
+    """True when `root` holds a real Jarvis state layout (a DB, or any memory/
+    project/agent file) rather than empty scaffolding."""
+    return ((root / "data" / "jarvis.db").exists()
+            or any(_has_content(root / n) for n in _LEGACY_PROBE))
 
 
 class Settings(BaseSettings):
@@ -17,19 +40,28 @@ class Settings(BaseSettings):
     )
 
     base_dir: Path = BASE_DIR
-    data_dir: Path = BASE_DIR / "data"
-    memory_dir: Path = BASE_DIR / "memory"
-    projects_dir: Path = BASE_DIR / "projects"
+    # ONE relocatable root for everything durable (JARVIS_STATE_DIR). The dirs
+    # below are derived from it unless set explicitly (an explicit
+    # JARVIS_<NAME>_DIR always wins). The code checkout holds no state, so it can
+    # be re-cloned or moved freely and a backup is one directory. A box still on
+    # the old in-checkout layout keeps running from it until
+    # `python -m backend.cli migrate-state` moves it (see _resolve_state_dirs).
+    state_dir: Path = Path(os.path.expanduser("~/.local/share/jarvis"))
+    data_dir: Path | None = None
+    memory_dir: Path | None = None
+    projects_dir: Path | None = None
     # Serve each project's git repo read-only over HTTP at /git/<slug>, so the
     # operator can `git clone/pull http://<host>/git/<slug>` over the LAN. Basic
     # auth against the app's own users; pull-only (never receive-pack).
     git_serve_enabled: bool = True
-    skills_dir: Path = BASE_DIR / "skills"
-    agents_dir: Path = BASE_DIR / "agents"
+    skills_dir: Path | None = None
+    agents_dir: Path | None = None
+    # Tools are CODE (handler.py modules shipped in the repo, pushed to the
+    # guest), not state — they stay in the checkout.
     tools_dir: Path = BASE_DIR / "tools"
     frontend_dist: Path = BASE_DIR / "frontend" / "dist"
 
-    db_path: Path = BASE_DIR / "data" / "jarvis.db"
+    db_path: Path | None = None
 
     jwt_secret: str = ""
     jwt_ttl_hours: int = 24 * 7
@@ -246,7 +278,7 @@ class Settings(BaseSettings):
     # The guest has no NIC; its one path off-box is the host model gateway, which
     # listens on vsock port `vm_vsock_port`. base-<version>.qcow2 is the read-only
     # golden image (built by vm/build_base.sh); guests run a qcow2 overlay on it.
-    vm_dir: Path = BASE_DIR / "data" / "vm"
+    vm_dir: Path | None = None           # default <data_dir>/vm
     vm_image_version: str = "v1"
     vm_vsock_port: int = 5555            # host gateway; guest dials CID 2 : this
     vm_shell_port: int = 5557            # guest co-working PTY; host dials CID : this
@@ -473,15 +505,75 @@ class Settings(BaseSettings):
                 + [f"http://{h}:{p}" for p in (11434, 11435, 11436)]))
         return self
 
+    # True when the state dir was empty but the repo checkout still held a
+    # pre-state-dir layout, so the dirs resolved there instead (see below).
+    _legacy_layout: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _resolve_state_dirs(self):
+        explicit = self.model_fields_set
+        root = self.state_dir
+        # A deploy must never strand the running box: if the state dir holds
+        # nothing yet but the checkout does, keep using the checkout (ensure_dirs
+        # warns). Data is only ever moved by the explicit migrate-state command.
+        if (self.state_dir.resolve() != self.base_dir.resolve()
+                and not has_state(self.state_dir) and has_state(self.base_dir)):
+            root = self.base_dir
+            self._legacy_layout = True
+        for name in ("data", "memory", "projects", "skills", "agents"):
+            field = f"{name}_dir"
+            if field not in explicit or getattr(self, field) is None:
+                setattr(self, field, root / name)
+        if "db_path" not in explicit or self.db_path is None:
+            self.db_path = self.data_dir / "jarvis.db"
+        if "vm_dir" not in explicit or self.vm_dir is None:
+            self.vm_dir = self.data_dir / "vm"
+        return self
+
+    @property
+    def legacy_layout(self) -> bool:
+        return self._legacy_layout
 
 settings = Settings()
+_warned_legacy = False
 
 
 def ensure_dirs() -> None:
+    global _warned_legacy
+    if settings.legacy_layout and not _warned_legacy:
+        _warned_legacy = True
+        log.warning(
+            "Jarvis state is still inside the code checkout (%s) and the state "
+            "dir %s is empty — running from the old location. Stop the service "
+            "and run `python -m backend.cli migrate-state` to move it.",
+            settings.base_dir, settings.state_dir)
     for d in (settings.data_dir, settings.memory_dir, settings.memory_dir / "notes",
               settings.projects_dir, settings.skills_dir, settings.agents_dir,
               settings.tools_dir, settings.vm_dir):
         d.mkdir(parents=True, exist_ok=True)
+    _seed_shipped_skills()
+
+
+def _seed_shipped_skills() -> None:
+    """The repo ships a few skills; a skills dir outside the checkout starts
+    with copies of them. Never overwrites — once copied, the skill is the
+    operator's to edit or delete (a deleted one is not resurrected while its
+    marker stays)."""
+    shipped = settings.base_dir / "skills"
+    if not shipped.is_dir() or shipped.resolve() == settings.skills_dir.resolve():
+        return
+    marker = settings.skills_dir / ".seeded"
+    seen = set(marker.read_text().split()) if marker.exists() else set()
+    new = []
+    for src in sorted(shipped.iterdir()):
+        if not (src / "SKILL.md").is_file() or src.name in seen:
+            continue
+        dest = settings.skills_dir / src.name
+        if not dest.exists():
+            shutil.copytree(src, dest)
+        new.append(src.name)
+    if new:
+        marker.write_text("\n".join(sorted(seen | set(new))) + "\n")
 
 
 def get_jwt_secret() -> str:

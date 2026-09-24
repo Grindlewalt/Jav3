@@ -14,7 +14,12 @@ set -euo pipefail
 
 VERSION="${JARVIS_VM_IMAGE_VERSION:-v1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VM_DIR="${VM_DIR:-$HOME/jarvis/data/vm}"
+# Callers pass VM_DIR; by hand, ask the app where the images live (the state
+# dir, or the old in-checkout layout on a not-yet-migrated box).
+if [ -z "${VM_DIR:-}" ]; then
+  VM_DIR="$(cd "$SCRIPT_DIR/.." && .venv/bin/python -m backend.cli paths vm_dir 2>/dev/null)" \
+    || VM_DIR="$HOME/jarvis/data/vm"
+fi
 
 # Arch, firmware paths and the qemu binary are resolved per host — this used to
 # be hardcoded aarch64/AAVMF, which is why the image could only ever be built on

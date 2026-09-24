@@ -221,7 +221,8 @@ class GuestVM:
     async def _run_rebuild(self, version: str) -> None:
         from .. import bus
         chan, script = "vm-rebuild", settings.base_dir / "vm" / "build_base.sh"
-        env = {**os.environ, "JARVIS_VM_IMAGE_VERSION": version}
+        env = {**os.environ, "JARVIS_VM_IMAGE_VERSION": version,
+               "VM_DIR": str(settings.vm_dir)}
         bus.publish(chan, {"type": "rebuild", "phase": "start", "version": version})
         try:
             proc = await asyncio.create_subprocess_exec(
