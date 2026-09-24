@@ -148,7 +148,8 @@ def require_same_origin(request: Request) -> None:
     from urllib.parse import urlsplit
     oh = (urlsplit(origin).hostname or "").lower()
     host = (request.headers.get("host") or "").split(":")[0].lower()
-    allowed = {host, *(h.lower() for h in settings.csrf_allowed_hosts)}
+    from . import lan
+    allowed = {host, *lan.csrf_allowed_hosts()}
     if oh and oh in allowed:
         return
     raise HTTPException(status_code=403, detail="cross-origin request refused")

@@ -9,7 +9,7 @@ import asyncio
 
 from . import (agents_api, agents_run, artifacts_api, auth, chat, devices_api,
                computeruse_api, egress_api,
-               git_api, git_serve_api, gui, guest_shell, logs_api, memory_api,
+               git_api, git_serve_api, gui, guest_shell, lan, logs_api, memory_api,
                notifications_api, projects, reviewer, reviewer_api, runs_api,
                schedules, skills_api, vm_api, voice_api, workspace, secrets)
 from .agent.model import (MODEL_STATE_KEY, get_model_override,
@@ -40,12 +40,16 @@ async def lifespan(app: FastAPI):
         await vm.net_up()          # tap/nft/dnsmasq/pcap up BEFORE the proxy binds
     await egress_proxy.start()     # monitored-egress proxy (no-op unless vm_egress)
     await guest_shell.start_unix_server()   # co-working shell CLI front door
+    # mDNS probing takes seconds; never hold startup for it (non-fatal inside)
+    mdns = asyncio.create_task(lan.start(app.title))
     try:
         yield
     finally:
         task.cancel()
         reaper.cancel()
         triage.cancel()
+        mdns.cancel()
+        await lan.stop()
         await gateway.stop()
         await egress_proxy.stop()
         await guest_shell.stop_unix_server()
@@ -93,6 +97,7 @@ app.include_router(egress_api.router)
 app.include_router(egress_api.security_router)
 app.include_router(reviewer_api.router)
 app.include_router(gui.router)
+app.include_router(lan.router)
 app.include_router(guest_shell.router)
 app.include_router(computeruse_api.router)
 app.include_router(computeruse_api.ws_router)
@@ -149,7 +154,7 @@ async def put_model(body: ModelSelect):
 async def client_config():
     # Non-sensitive client config the SPA needs at boot. media_hosts is the
     # allowlist the render surfaces use to decide which remote media may load.
-    return {"media_hosts": settings.media_hosts,
+    return {"media_hosts": lan.media_hosts(),
             "voice_enabled": settings.voice_enabled}
 
 

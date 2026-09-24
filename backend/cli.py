@@ -125,6 +125,16 @@ def guest_shell(slug: str | None) -> None:
         print("\r\n[detached from guest]")
 
 
+def services_check() -> None:
+    """Which companion services (derived from JARVIS_SERVICES_HOST unless set
+    explicitly) answer a 1s TCP connect from here."""
+    from .config import settings
+    from .lan import probe
+    print(f"services_host: {settings.services_host}")
+    for r in asyncio.run(probe()):
+        print(f"  {'ok  ' if r['reachable'] else 'DOWN'}  {r['service']:<14} {r['url']}")
+
+
 def main() -> None:
     if len(sys.argv) >= 3 and sys.argv[1] == "create-user":
         username = sys.argv[2]
@@ -132,9 +142,12 @@ def main() -> None:
         asyncio.run(create_user(username, password))
     elif len(sys.argv) >= 2 and sys.argv[1] == "guest-shell":
         guest_shell(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif len(sys.argv) >= 2 and sys.argv[1] == "services-check":
+        services_check()
     else:
         print("usage: python -m backend.cli create-user <username> [password]\n"
-              "       python -m backend.cli guest-shell [project-slug]")
+              "       python -m backend.cli guest-shell [project-slug]\n"
+              "       python -m backend.cli services-check")
         sys.exit(1)
 
 

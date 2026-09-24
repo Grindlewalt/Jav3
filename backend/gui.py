@@ -215,7 +215,8 @@ def media_src(source: str, slug: str | None) -> tuple[str | None, str | None]:
         return None, "empty source"
     if s.startswith(("http://", "https://")):
         host = (urlsplit(s).hostname or "").lower()
-        allowed = [h.lower() for h in settings.media_hosts]
+        from . import lan
+        allowed = lan.media_hosts()
         if not any(host == h or host.endswith("." + h) for h in allowed):
             return None, (
                 f"host '{host}' is not on the media allowlist "
