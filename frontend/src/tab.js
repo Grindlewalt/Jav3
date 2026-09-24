@@ -8,8 +8,7 @@
 //   id    unique per tab, kept in sessionStorage so a reload is the same tab
 //         and a second window is a different one
 //   name  what the operator would call this machine, kept in localStorage so
-//         it is per browser rather than per tab, and renameable on the
-//         Computer use tab
+//         it is per browser rather than per tab (setTabName renames it)
 //
 // Neither is a credential: the session cookie is still what authenticates, and
 // every tab belongs to the same logged-in operator. This is addressing, not

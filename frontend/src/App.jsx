@@ -21,7 +21,6 @@ import Schedules from './pages/Schedules.jsx'
 import Logs from './pages/Logs.jsx'
 import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
-import ComputerUse from './pages/ComputerUse.jsx'
 import Pair from './pages/Pair.jsx'
 import Settings from './pages/Settings.jsx'
 import Voice from './pages/Voice.jsx'
@@ -40,8 +39,6 @@ const PRIMARY_LINKS = [
   { to: '/review', label: 'Review' },
 ]
 const MORE_LINKS = [
-  { to: '/artifacts', label: 'Artifacts' },
-  { to: '/computer', label: 'Computer use' },
   { to: '/network', label: 'Network' },
   { to: '/context', label: 'Context' },
   { to: '/logs', label: 'Logs' },
@@ -437,11 +434,9 @@ export default function App() {
   if (user === null && location.pathname !== '/login')
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
 
-  // Voice rides the overflow menu only when the backend says the mode is on
-  // (flag off = the sidecar isn't deployed; a dead link would just confuse)
-  const moreLinks = voiceEnabled
-    ? [{ to: '/voice', label: 'Voice' }, ...MORE_LINKS]
-    : MORE_LINKS
+  // Voice and Artifacts are deliberately absent from the menus: their routes
+  // and pages still work, they are just not advertised.
+  const moreLinks = MORE_LINKS
 
   // the same links either way — only the container and the label's visibility
   // differ, which is what lets the icons fly between the two
@@ -566,7 +561,6 @@ export default function App() {
         <Route path="/artifacts" element={<Artifacts />} />
         <Route path="/review" element={<Review />} />
         <Route path="/network" element={<Network />} />
-        <Route path="/computer" element={<ComputerUse />} />
         <Route path="/voice" element={<Voice />} />
         <Route path="/context" element={<Context />} />
         <Route path="/agents" element={<Agents />} />

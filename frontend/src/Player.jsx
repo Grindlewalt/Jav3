@@ -1,10 +1,8 @@
 // The music player.
 //
-// Why this exists: TARMAC is a SEPARATE Cloudflare Access application from
-// Jarvis, so a browser holding a Jarvis session cannot fetch its /stream/:id —
-// the Access cookie is per-application. The host holds the service token and
-// re-serves the bytes on our own origin (GET /api/computeruse/tarmac/stream/:id,
-// Range forwarded), so this <audio> element can just point at a same-origin URL.
+// Why this exists: the host re-serves TARMAC's /stream/:id on our own origin
+// (GET /api/media/tarmac/stream/:id, Range forwarded), so this <audio> element
+// just points at a same-origin URL and the browser only ever talks to Jarvis.
 //
 // It also fixes the silence. A browser refuses audio.play() in a tab that has
 // had no user gesture; TARMAC's PWA hits that constantly because nobody touches
@@ -132,7 +130,7 @@ export default function Player() {
       error: s.error || '',
       ...over,
     }
-    api('/api/computeruse/tarmac/player/state', {
+    api('/api/media/tarmac/player/state', {
       method: 'POST', body: JSON.stringify(body),
     }).catch(() => { /* the host being briefly unreachable must not stop music */ })
   }, [])
@@ -311,8 +309,8 @@ export default function Player() {
           setPlayToken((t) => t + 1)
           if (ev.output) {
             // resolve the model's words against the outputs THIS browser can
-            // actually see — the same rule the desktop client follows, so a
-            // string from the model never becomes a device id
+            // actually see, so a string from the model never becomes a
+            // device id
             const outs = await loadOutputs()
             const want = String(ev.output).toLowerCase()
             const hit = outs.find((d) => (d.label || '').toLowerCase().includes(want))
