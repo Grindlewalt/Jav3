@@ -21,7 +21,6 @@ import Schedules from './pages/Schedules.jsx'
 import Logs from './pages/Logs.jsx'
 import Network from './pages/Network.jsx'
 import Review from './pages/Review.jsx'
-import Pair from './pages/Pair.jsx'
 import Settings from './pages/Settings.jsx'
 import Voice from './pages/Voice.jsx'
 import Notices, { useNotices } from './Notices.jsx'
@@ -428,9 +427,8 @@ export default function App() {
   }
 
   if (user === undefined) return <div className="center">…</div>
-  // The page being asked for rides along, so logging in lands back on it. A
-  // pairing confirm link opened in a fresh browser is the case that matters:
-  // it used to land on Chat, and the code went unconfirmed.
+  // The page being asked for rides along, so logging in lands back on it
+  // instead of always on Chat.
   if (user === null && location.pathname !== '/login')
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
 
@@ -569,7 +567,6 @@ export default function App() {
         <Route path="/skills" element={<Skills />} />
         <Route path="/tools" element={<Tools />} />
         <Route path="/settings" element={<Settings />} />
-        <Route path="/pair/:code" element={<Pair />} />
       </Routes>
       </ErrorBoundary>
       </NavSlotContext.Provider>

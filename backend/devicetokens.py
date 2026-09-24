@@ -1,7 +1,7 @@
-"""API tokens for enrolled devices/CLIs (the device-authorization flow).
+"""API tokens for logged-in computers/CLIs.
 
-A token is a high-entropy `jvd_<token_urlsafe(32)>` string minted at the end of
-a confirmed pairing and shown to the device exactly once. Only its sha256 is
+A token is a high-entropy `jvd_<token_urlsafe(32)>` string minted when a CLI
+redeems a login code (`backend/pastelogin.py`) and shown to it exactly once. Only its sha256 is
 stored, so the DB never holds anything usable if it leaks; verification hashes
 the presented token and looks the hash up. Tokens are individually revocable and
 carry a `last_seen` so the operator can spot a stale or rogue one.

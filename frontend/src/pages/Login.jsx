@@ -18,7 +18,7 @@ export default function Login({ onLogin }) {
         body: JSON.stringify({ username, password }),
       })
       onLogin({ username: res.username })
-      // back to where the redirect came from (a pairing confirm link, say)
+      // back to where the redirect came from
       const from = location.state?.from
       navigate(from && from !== '/login' ? from : '/')
     } catch (err) {

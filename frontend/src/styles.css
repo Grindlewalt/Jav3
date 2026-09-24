@@ -2261,17 +2261,7 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px 18px;
 }
 
-/* --- pairing (Pair.jsx, and the Confirm step of the set-up wizard) ----------- */
-.pair-page { max-width: 640px; }
-.pair-card p { margin: 0 0 8px; }
-.pair-card .row { margin-top: 12px; }
-.pair-code { font-size: 15px; letter-spacing: 0.08em; padding: 1px 6px; }
-.pair-facts {
-  display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px;
-  margin: 10px 0; font-size: 13px;
-}
-.pair-facts dt { color: var(--dim); }
-.pair-facts dd { margin: 0; }
+/* --- devices (Settings) ------------------------------------------------------ */
 .device-login { margin: 10px 0 4px; }
 .device-login-line { position: relative; }
 .device-login-line code {

@@ -65,9 +65,8 @@ app = FastAPI(title="Jarvis v3", lifespan=lifespan)
 @app.middleware("http")
 async def _security_headers(request, call_next):
     """Refuse to be framed by another origin (SAMEORIGIN still allows Jarvis's
-    own same-origin previews), so a cookie-authed one-click action — the device
-    approve at /pair/<code>, the grant toggles — can't be clickjacked from a
-    sibling site. Cheap, and it hardens the whole SPA at once."""
+    own same-origin previews), so a cookie-authed one-click action — revoking a
+    device, minting a login code — can't be clickjacked from a sibling site. Cheap, and it hardens the whole SPA at once."""
     resp = await call_next(request)
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
