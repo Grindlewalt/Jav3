@@ -9,6 +9,7 @@ import { useAuth } from '../auth.jsx'
 import Page from '../components/Page.jsx'
 import Card from '../components/Card.jsx'
 import Button from '../components/Button.jsx'
+import BackupPanel from '../BackupPanel.jsx'
 
 const mmss = (secs) => {
   const s = Math.max(0, Math.round(secs))
@@ -24,6 +25,7 @@ export default function Settings() {
       {msg && <p className="warn">{msg}</p>}
       <ModelPanel />
       <DevicesPanel say={say} />
+      <BackupPanel />
       <MusicPanel say={say} />
       <SessionPanel />
     </Page>
