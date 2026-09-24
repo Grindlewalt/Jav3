@@ -221,7 +221,7 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
 
         <div className="sbd-foot">
           <span className="dim small">
-            {ev.triage_verdict === 'flag' ? `⚑ triage: ${ev.triage_reason || 'flagged'}` : ''}
+            {ev.triage_verdict === 'flag' ? `⚑ auto review: ${ev.triage_reason || 'flagged'}` : ''}
           </span>
           <span className="grow" />
           <button className="ghost" onClick={onClose}>Close</button>

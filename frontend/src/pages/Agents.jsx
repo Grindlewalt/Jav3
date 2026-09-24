@@ -264,13 +264,13 @@ export default function Agents() {
                             style={{ marginRight: 4 }}
                             title={s.hosts?.length
                               ? `usable in web_read on ${s.hosts.join(', ')}`
-                              : 'unusable — bind web hosts on the Context page to allow web_read'}
+                              : 'unusable — bind web hosts in Review → Secrets to allow web_read'}
                             onClick={() => patch({ prompt:
                               `${agent.prompt.trimEnd()}\n{{secret:${s.name}}}` })}>
                       {`{{secret:${s.name}}}`}
                     </button>
                   ))}
-                  — new keys are added in the Secrets panel on the Context page.
+                  — new keys are added in Review → Secrets.
                 </div>
               )}
             </label>

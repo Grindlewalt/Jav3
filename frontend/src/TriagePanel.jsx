@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { tsShort as ts } from './format.js'
 import { notifyError } from './notify.js'
+import { Button, Toggle } from './components/index.js'
 
-// Control strip for the isolated triage reviewer (backend/reviewer.py), the
-// first section of the Review Center. It does not list the flagged
+// Control strip for Auto review — the isolated triage reviewer
+// (backend/reviewer.py; "triage" stays the internal name) — the first section
+// of the Review Center. It does not list the flagged
 // hosts/alerts itself — those live once, as the ⚑ rows in the queue sections
-// below. What remains: the auto-sweep switch, a run-now button, the last
+// below. What remains: the Auto/Manual switch, a run-now button, the last
 // sweep's tally, and the reviewer's recent autonomous approves/acks with
 // one-click undo.
 //
@@ -16,7 +18,7 @@ import { notifyError } from './notify.js'
 // is deliberately gone: it explained the feature every single visit, which is
 // a one-time need.
 //
-// "Triage now" only exists when something is untriaged — the sweeper keeps
+// "Review now" only exists when something is untriaged — the sweeper keeps
 // that at zero, so a permanently greyed button was the whole card's read.
 //
 // EVERY item string here — hostnames, the reviewer's own reasons (a model
@@ -53,35 +55,37 @@ export default function TriagePanel() {
     setBusy(false)
     window.dispatchEvent(new Event('jarvis-files-changed'))
   }
+  // optimistic: the thumb moves on the click, not a round trip later, and
+  // snaps back if the PUT is refused
   async function toggle(on) {
+    setS((p) => ({ ...p, enabled: on }))
     try { setS(await api('/api/reviewer', {
       method: 'PUT', body: JSON.stringify({ enabled: on }) })) }
-    catch (e) { notifyError(e) }
+    catch (e) { setS((p) => ({ ...p, enabled: !on })); notifyError(e) }
   }
 
   return (
     <section className="sbx-sec triage-card">
       <div className="sbx-sec-head">
-        <h3>Triage reviewer</h3>
+        <h3>Auto review</h3>
         {untriaged > 0
-          ? <span className="sec-count">{untriaged} untriaged</span>
+          ? <span className="sec-count">{untriaged} unreviewed</span>
           : <span className="sec-count clear">clear</span>}
         {flagged > 0 && (
           <span className="tag triage-flag">{flagged} ⚑ below</span>)}
         <div className="sec-actions">
-          <label className="triage-toggle"
-                 title={'when on, the reviewer sweeps untriaged queue items on '
-                        + 'its own every few minutes — never during peak pricing'}>
-            <input type="checkbox" checked={!!s.enabled}
-                   onChange={(e) => toggle(e.target.checked)} />
-            auto
-          </label>
+          <Toggle checked={!!s.enabled} onChange={toggle} label="Auto review"
+                  onText="Auto" offText="Manual"
+                  title={s.enabled
+                    ? 'the reviewer sweeps untriaged queue items on its own every '
+                      + 'few minutes — never during peak pricing'
+                    : 'nothing is swept on its own — use Review now'} />
           {(untriaged > 0 || s.running) && (
-            <button className="ghost" disabled={busy || s.running}
-                    title={`run the reviewer over the ${untriaged} untriaged item(s) now`}
+            <Button variant="ghost" disabled={busy || s.running}
+                    title={`run auto review over the ${untriaged} unreviewed item(s) now`}
                     onClick={() => act('/api/reviewer/run')}>
-              {s.running ? 'running…' : 'Triage now'}
-            </button>
+              {s.running ? 'running…' : 'Review now'}
+            </Button>
           )}
         </div>
       </div>
@@ -113,8 +117,8 @@ export default function TriagePanel() {
                 <div className="small dim ellipsis" title={l.reason}>
                   {ts(l.created_at)} · {l.reason}</div>
               </div>
-              <button className="ghost" title="undo this auto-action" disabled={busy}
-                      onClick={() => act(`/api/reviewer/log/${l.id}/undo`)}>undo</button>
+              <Button variant="ghost" title="undo this auto-action" disabled={busy}
+                      onClick={() => act(`/api/reviewer/log/${l.id}/undo`)}>undo</Button>
             </div>
           ))}
         </>

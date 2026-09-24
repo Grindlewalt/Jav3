@@ -3,7 +3,7 @@ import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { human } from '../format.js'
-import EmptyState from '../components/EmptyState.jsx'
+import { EmptyState, Select } from '../components/index.js'
 
 // The guest's live egress: a scrolling feed of every outbound request the
 // sandbox made, with a verdict chip (allow / deny / cut), an approval queue for
@@ -255,19 +255,18 @@ export default function Network() {
 
   const shown = filter ? feed.filter((e) => e.project === filter) : feed
 
+  // No heading or page padding of its own: this renders as the Network tab of
+  // the Review layout, which owns the title, the tab strip and the insets.
   return (
-    <div className="net-page">
+    <div className="net-view">
       <div className="net-head">
-        <h2>Network</h2>
         <span className="run-dot running" title="live egress stream" />
         <span className="dim small">live egress</span>
         <span className="grow" />
-        <label className="dim small">project&nbsp;
-          <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-            <option value="">all projects</option>
-            {projects.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
-          </select>
-        </label>
+        <Select aria-label="project" value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                options={[{ value: '', label: 'all projects' },
+                  ...projects.map((p) => ({ value: p.slug, label: p.name }))]} />
       </div>
 
       <div className="net-body">

@@ -407,7 +407,7 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
   margin-top: 4px; display: flex; }
 .vm-nuke-row button { flex: 1; font-size: 12px; }
 
-/* ---- triage reviewer card (lives on the Review Center page now) ---- */
+/* ---- Auto review card (the triage reviewer; first section of Review) ---- */
 /* The reviewer is the Review Center's first SECTION, not a card bolted above
    it: same head, same count chip, same row shape as the queues below, so the
    page reads as one list. (It used .notif-item from the old nav-bell dropdown,
@@ -415,11 +415,6 @@ nav a.active, .rail-links > a.active { color: var(--text); background: var(--pan
 .triage-card { margin-bottom: 18px; }
 .sec-count.clear { color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent); }
-/* the auto switch sits with the actions, sized like the buttons beside it */
-.triage-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer;
-  color: var(--dim); font-size: 12.5px; padding: 0 2px; white-space: nowrap; }
-.triage-toggle:hover { color: var(--text); }
-.triage-toggle input { accent-color: var(--accent); }   /* as .check-row does */
 .triage-tally { font-variant-numeric: tabular-nums; padding: 0 2px 2px; }
 .triage-row { align-items: flex-start; border-left-color: var(--border); }
 .triage-row .ghost { flex-shrink: 0; }
@@ -637,6 +632,45 @@ input:focus, textarea:focus { border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 .tabs .nav-count { margin-left: 0; vertical-align: 0; }
+
+/* ---- toggle ----
+   The on/off switch (Toggle.jsx). A <button>, so every base `button` look —
+   accent fill, padding, the hover lift — is reset here; the track carries the
+   state instead. Off is a recessed --panel-2 track with a --dim thumb; on
+   fills the track with --accent and slides the thumb across under the same
+   layout curve every other move in the app uses. Sized so the thumb is a
+   comfortable tap target without the track outgrowing a toolbar row. */
+.toggle {
+  --toggle-w: 38px; --toggle-h: 22px; --toggle-inset: 3px;
+  display: inline-flex; align-items: center; gap: var(--sp-4);
+  background: none; border: 0; padding: var(--sp-1) var(--sp-1);
+  color: var(--dim); font-size: var(--fs-sm); font-weight: 500;
+  border-radius: var(--radius-pill); white-space: nowrap;
+}
+.toggle:hover:not(:disabled) { filter: none; transform: none; color: var(--text); }
+.toggle-track {
+  position: relative; flex: none; width: var(--toggle-w); height: var(--toggle-h);
+  border-radius: var(--radius-pill); background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+  transition: background 0.2s cubic-bezier(.4,0,.2,1),
+              box-shadow 0.2s cubic-bezier(.4,0,.2,1);
+}
+.toggle-thumb {
+  position: absolute; top: var(--toggle-inset); left: var(--toggle-inset);
+  width: calc(var(--toggle-h) - 2 * var(--toggle-inset));
+  height: calc(var(--toggle-h) - 2 * var(--toggle-inset));
+  border-radius: var(--radius-round); background: var(--dim);
+  box-shadow: var(--shadow-thumb);
+  transition: transform 0.2s cubic-bezier(.4,0,.2,1),
+              background 0.2s cubic-bezier(.4,0,.2,1);
+}
+.toggle.on .toggle-track { background: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent); }
+.toggle.on .toggle-thumb { background: var(--accent-ink);
+  transform: translateX(calc(var(--toggle-w) - var(--toggle-h))); }
+.toggle.on .toggle-text { color: var(--accent); }
+.toggle:hover:not(:disabled) .toggle-track { box-shadow: inset 0 0 0 1px var(--accent); }
+.toggle-text { min-width: 0; }
 
 /* ---- login ---- */
 .login {
@@ -1456,8 +1490,26 @@ kbd {
   box-shadow: var(--shadow-pop); }
 
 /* ---- logs transcript viewer ---- */
+/* the Logs tab: view switch on top, then transcripts (list card + detail)
+   or the cost view. The list is a card, not a flush sidebar strip, and its
+   rows wrap — a conversation's summary is how you find it, so it gets two
+   lines instead of an ellipsis. */
+.logs-view { display: flex; flex-direction: column; flex: 1; min-height: 0;
+  gap: var(--sp-6); }
+.logs-view > .tabs { align-self: flex-start; }
+.logs-cost { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.logs-split { gap: var(--sp-7); }
+.logs-split > aside.logs-aside {
+  width: 280px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: var(--sp-3);
+}
+.logs-split > main.editor-pane { padding: 0; }
+.logs-aside .file-list li { white-space: normal; }
+.logs-aside .log-row-top .grow { white-space: normal; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  line-clamp: 2; }
 .log-row { display: block; }
-.log-row-top { display: flex; align-items: center; gap: 6px; }
+.log-row-top { display: flex; align-items: flex-start; gap: 6px; }
 .log-row-meta { font-size: 11.5px; color: var(--dim); margin-top: 2px;
   display: flex; align-items: center; flex-wrap: wrap; }
 .log-heat { color: var(--red); font-weight: 600; }
@@ -1551,10 +1603,10 @@ kbd {
 .vm-stale-badge { background: var(--amber); }
 
 /* ---- Network page (live egress) ---- */
-.net-page { display: flex; flex-direction: column; flex: 1; min-height: 0;
-  padding: 16px 20px; gap: 12px; }
-.net-head { display: flex; align-items: center; gap: 10px; }
-.net-head h2 { margin: 0; font-size: 18px; }
+/* the Network tab's body; the Review layout around it owns the insets */
+.net-view { display: flex; flex-direction: column; flex: 1; min-height: 0;
+  gap: var(--sp-6); }
+.net-head { display: flex; align-items: center; gap: var(--sp-5); }
 .net-head select { padding: 4px 8px; font-size: 13px; }
 .net-body { display: flex; gap: 16px; flex: 1; min-height: 0; }
 .net-feed { flex: 2; min-width: 0; display: flex; flex-direction: column;
@@ -1598,6 +1650,21 @@ kbd {
 .review-queue { display: flex; flex-direction: column; gap: 20px; }
 .review-scrollwrap { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
 .review-queue .sbx-sec { margin-bottom: 0; }
+
+/* Secrets (a Review tab): an add form, then one row per key — the queue's
+   row shape, so the tab reads like its siblings */
+.secrets-lede { margin: 0 0 var(--sp-6); }
+.secrets-form { display: grid; gap: var(--sp-5); margin-bottom: var(--sp-7);
+  padding-bottom: var(--sp-7); border-bottom: 1px solid var(--border); }
+.secrets-form-actions { display: flex; gap: var(--sp-4); }
+.secrets-list { list-style: none; margin: 0; padding: 0; }
+.secrets-row { border-left-color: var(--border); }
+.secrets-row:last-child { margin-bottom: 0; }
+.secrets-main { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+.secrets-name { display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
+.secrets-hosts-edit { display: flex; gap: var(--sp-3); align-items: center;
+  margin-top: var(--sp-2); }
+.secrets-hosts-edit input { flex: 1; min-width: 0; }
 .review-queue .sbx-row { align-items: flex-start; }
 .rev-list { max-height: none; }
 .rev-list li { cursor: default; }
@@ -1780,9 +1847,9 @@ kbd {
     border-right: 0; border-bottom: 1px solid var(--border);
   }
   .split-layout > main { flex: 1 1 auto; min-height: 0; }
+  .logs-split > aside.logs-aside { width: 100%; }
 
   /* ---- network: single column ---- */
-  .net-page { padding: 12px 12px calc(12px + var(--sab)); }
   .net-body { flex-direction: column; }
   .net-side { min-width: 0; max-width: 100%; }
   .net-head { flex-wrap: wrap; }
@@ -1842,7 +1909,7 @@ kbd {
   .sbx-right { flex-wrap: wrap; }
   .tag.triage-flag { max-width: 100%; white-space: normal; }
 
-  /* Context page: the secrets/hosts action buttons overlapped each other */
+  /* rule lines and section heads wrap rather than overlap their buttons */
   .sbx-rule-line { flex-wrap: wrap; row-gap: 6px; }
   .sbx-sec-head { flex-wrap: wrap; row-gap: 2px; }
   .sbx-sec-head h3 { flex: 1 1 100%; }

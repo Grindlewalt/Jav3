@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
 import { human } from '../format.js'
-import EmptyState from '../components/EmptyState.jsx'
+import { EmptyState, Tabs } from '../components/index.js'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
 // message and every tool call with its args and result — plus the numbers that
@@ -250,142 +250,147 @@ export default function Logs() {
 
   const totalCost = calls.reduce((s, c) => s + (c.cost_usd || 0), 0)
 
+  // No heading of its own: this renders as the Logs tab of the Review layout.
+  // The transcripts|cost switch sits above both views, and the conversation
+  // list only exists in the transcripts view — it has nothing to say about
+  // cost. The list is its own card, so it reads as a panel on the page rather
+  // than an edge-to-edge sidebar strip, and its rows wrap instead of clipping.
   return (
-    <div className="split-layout">
-      <aside>
-        <div className="side-title">Logs</div>
-        <div className="row" style={{ gap: 6, marginBottom: 8 }}>
-          <button className={view === 'logs' ? '' : 'ghost'}
-                  onClick={() => setView('logs')}>transcripts</button>
-          <button className={view === 'cost' ? '' : 'ghost'}
-                  onClick={() => setView('cost')}>cost</button>
-        </div>
-        <ul className="file-list">
-          {convos.map((c) => {
-            const heavyTok = (c.input_tokens || 0) > HEAVY_TOKENS
-            const heavyCalls = (c.tool_calls || 0) > HEAVY_CALLS
-            return (
-              <li key={c.id} className={`log-row${selected === c.id ? ' active' : ''}`}
-                  onClick={() => open(c.id)}>
-                <div className="log-row-top">
-                  <span className="grow ellipsis" title={c.summary || `#${c.id}`}>
-                    {c.summary || `#${c.id}`}</span>
-                  <span className="tag">{c.kind}</span>
-                </div>
-                <div className="log-row-meta">
-                  <span className={heavyCalls ? 'log-heat' : ''}>{c.tool_calls || 0} calls</span>
-                  <span className="dim"> · </span>
-                  <span>{human(c.result_bytes)}</span>
-                  {(c.input_tokens || 0) > 0 && (
-                    <>
+    <div className="logs-view">
+      <Tabs label="Logs view" value={view} onChange={setView}
+            items={[{ id: 'logs', label: 'transcripts', panel: 'logs-panel' },
+                    { id: 'cost', label: 'cost', panel: 'logs-panel' }]} />
+      {view === 'cost' ? (
+        <div className="logs-cost" id="logs-panel" role="tabpanel"><CostView /></div>
+      ) : (
+        <div className="split-layout logs-split" id="logs-panel" role="tabpanel">
+          <aside className="logs-aside">
+            <ul className="file-list">
+              {convos.map((c) => {
+                const heavyTok = (c.input_tokens || 0) > HEAVY_TOKENS
+                const heavyCalls = (c.tool_calls || 0) > HEAVY_CALLS
+                return (
+                  <li key={c.id} className={`log-row${selected === c.id ? ' active' : ''}`}
+                      onClick={() => open(c.id)}>
+                    <div className="log-row-top">
+                      <span className="grow ellipsis" title={c.summary || `#${c.id}`}>
+                        {c.summary || `#${c.id}`}</span>
+                      <span className="tag">{c.kind}</span>
+                    </div>
+                    <div className="log-row-meta">
+                      <span className={heavyCalls ? 'log-heat' : ''}>{c.tool_calls || 0} calls</span>
                       <span className="dim"> · </span>
-                      <span className={heavyTok ? 'log-heat' : ''}>{tok(c.input_tokens)} tok</span>
-                    </>
-                  )}
-                  {c.project && <span className="tag">{c.project}</span>}
-                </div>
-              </li>
-            )
-          })}
-          {convos.length === 0 && (
-            <EmptyState as="li">no conversations yet</EmptyState>
-          )}
-        </ul>
-      </aside>
-
-      <main className="editor-pane">
-        {view === 'cost' ? (
-          <CostView />
-        ) : !detail ? (
-          <EmptyState pad>pick a conversation to read its full transcript</EmptyState>
-        ) : (
-          <div className="log-detail">
-            <div className="sbx-card">
-              <div className="sbx-verdict-top">
-                <span className="tag">{detail.kind}</span>
-                <span className="mono ellipsis grow" title={detail.summary || `#${detail.id}`}>
-                  {detail.summary || `#${detail.id}`}</span>
-              </div>
-              <div className="sbx-tiles">
-                <Tile label="input tokens" value={tok(stats.input_tokens)}
-                      bad={(stats.input_tokens || 0) > HEAVY_TOKENS} />
-                <Tile label="output tokens" value={tok(stats.output_tokens)} />
-                <Tile label="tool calls" value={stats.tool_calls || 0}
-                      bad={(stats.tool_calls || 0) > HEAVY_CALLS} />
-                <Tile label="result bytes" value={human(stats.result_bytes)} />
-                <Tile label="model calls" value={stats.turns || 0} />
-                <Tile label="cache hit" value={cachePct == null ? '—' : `${cachePct}%`}
-                      sub={cacheTotal ? `${stats.cache_hit}/${cacheTotal}` : null} />
-                {calls.length > 0 && <Tile label="cost" value={usd(totalCost)}
-                      sub={`${calls.length} calls`} />}
-              </div>
-            </div>
-
-            {calls.length > 0 && (
-              <section className="sbx-sec">
-                <div className="sbx-sec-head">
-                  <h3>Model calls</h3>
-                  <span className="dim small">
-                    the exact context sent per API call — capture toggles on the cost tab</span>
-                </div>
-                <div className="log-timeline">
-                  {calls.map((c, i) => (
-                    <CallItem key={c.id} call={c} index={i}
-                              prevInput={i > 0 ? calls[i - 1].input_tokens : null} />
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {hist.length > 0 && (
-              <section className="sbx-sec">
-                <div className="sbx-sec-head">
-                  <h3>Tool histogram</h3>
-                  <span className="dim small">by total result bytes</span>
-                </div>
-                <div className="log-hist">
-                  {hist.map((h) => (
-                    <div key={h.tool} className="log-hist-row">
-                      <span className="mono log-hist-name ellipsis" title={h.tool}>{h.tool}</span>
-                      <span className="dim small log-hist-count">×{h.count}</span>
-                      <div className="log-hist-track">
-                        <div className="log-hist-bar"
-                             style={{ width: `${((h.bytes || 0) / maxBytes) * 100}%` }} />
-                      </div>
-                      <span className="dim small log-hist-bytes">{human(h.bytes)}</span>
+                      <span>{human(c.result_bytes)}</span>
+                      {(c.input_tokens || 0) > 0 && (
+                        <>
+                          <span className="dim"> · </span>
+                          <span className={heavyTok ? 'log-heat' : ''}>{tok(c.input_tokens)} tok</span>
+                        </>
+                      )}
+                      {c.project && <span className="tag">{c.project}</span>}
                     </div>
-                  ))}
-                </div>
-              </section>
-            )}
+                  </li>
+                )
+              })}
+              {convos.length === 0 && (
+                <EmptyState as="li">no conversations yet</EmptyState>
+              )}
+            </ul>
+          </aside>
 
-            <section className="sbx-sec">
-              <div className="sbx-sec-head">
-                <h3>Transcript</h3>
-                <span className="dim small">{(detail.timeline || []).length} items · in order</span>
-              </div>
-              <div className="log-timeline">
-                {(detail.timeline || []).map((item, i) => (
-                  item.kind === 'tool' ? (
-                    <ToolItem key={i} item={item} />
-                  ) : (
-                    <div key={i} className={`log-msg ${item.role}`}>
-                      <div className="log-msg-head">
-                        <span className="log-role">{item.role}</span>
-                        {item.ts && <span className="dim small">{item.ts}</span>}
-                      </div>
-                      <div className="log-msg-body"><Md text={item.content} /></div>
+          <main className="editor-pane">
+            {!detail ? (
+              <EmptyState pad>pick a conversation to read its full transcript</EmptyState>
+            ) : (
+              <div className="log-detail">
+                <div className="sbx-card">
+                  <div className="sbx-verdict-top">
+                    <span className="tag">{detail.kind}</span>
+                    <span className="mono ellipsis grow" title={detail.summary || `#${detail.id}`}>
+                      {detail.summary || `#${detail.id}`}</span>
+                  </div>
+                  <div className="sbx-tiles">
+                    <Tile label="input tokens" value={tok(stats.input_tokens)}
+                          bad={(stats.input_tokens || 0) > HEAVY_TOKENS} />
+                    <Tile label="output tokens" value={tok(stats.output_tokens)} />
+                    <Tile label="tool calls" value={stats.tool_calls || 0}
+                          bad={(stats.tool_calls || 0) > HEAVY_CALLS} />
+                    <Tile label="result bytes" value={human(stats.result_bytes)} />
+                    <Tile label="model calls" value={stats.turns || 0} />
+                    <Tile label="cache hit" value={cachePct == null ? '—' : `${cachePct}%`}
+                          sub={cacheTotal ? `${stats.cache_hit}/${cacheTotal}` : null} />
+                    {calls.length > 0 && <Tile label="cost" value={usd(totalCost)}
+                          sub={`${calls.length} calls`} />}
+                  </div>
+                </div>
+
+                {calls.length > 0 && (
+                  <section className="sbx-sec">
+                    <div className="sbx-sec-head">
+                      <h3>Model calls</h3>
+                      <span className="dim small">
+                        the exact context sent per API call — capture toggles on the cost tab</span>
                     </div>
-                  )
-                ))}
-                {(detail.timeline || []).length === 0 && (
-                  <EmptyState pad>no transcript</EmptyState>
+                    <div className="log-timeline">
+                      {calls.map((c, i) => (
+                        <CallItem key={c.id} call={c} index={i}
+                                  prevInput={i > 0 ? calls[i - 1].input_tokens : null} />
+                      ))}
+                    </div>
+                  </section>
                 )}
+
+                {hist.length > 0 && (
+                  <section className="sbx-sec">
+                    <div className="sbx-sec-head">
+                      <h3>Tool histogram</h3>
+                      <span className="dim small">by total result bytes</span>
+                    </div>
+                    <div className="log-hist">
+                      {hist.map((h) => (
+                        <div key={h.tool} className="log-hist-row">
+                          <span className="mono log-hist-name ellipsis" title={h.tool}>{h.tool}</span>
+                          <span className="dim small log-hist-count">×{h.count}</span>
+                          <div className="log-hist-track">
+                            <div className="log-hist-bar"
+                                 style={{ width: `${((h.bytes || 0) / maxBytes) * 100}%` }} />
+                          </div>
+                          <span className="dim small log-hist-bytes">{human(h.bytes)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                <section className="sbx-sec">
+                  <div className="sbx-sec-head">
+                    <h3>Transcript</h3>
+                    <span className="dim small">{(detail.timeline || []).length} items · in order</span>
+                  </div>
+                  <div className="log-timeline">
+                    {(detail.timeline || []).map((item, i) => (
+                      item.kind === 'tool' ? (
+                        <ToolItem key={i} item={item} />
+                      ) : (
+                        <div key={i} className={`log-msg ${item.role}`}>
+                          <div className="log-msg-head">
+                            <span className="log-role">{item.role}</span>
+                            {item.ts && <span className="dim small">{item.ts}</span>}
+                          </div>
+                          <div className="log-msg-body"><Md text={item.content} /></div>
+                        </div>
+                      )
+                    ))}
+                    {(detail.timeline || []).length === 0 && (
+                      <EmptyState pad>no transcript</EmptyState>
+                    )}
+                  </div>
+                </section>
               </div>
-            </section>
-          </div>
-        )}
-      </main>
+            )}
+          </main>
+        </div>
+      )}
     </div>
   )
 }

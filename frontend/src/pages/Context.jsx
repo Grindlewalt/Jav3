@@ -16,14 +16,12 @@ export default function Context() {
   const [assembled, setAssembled] = useState(null)
   const [dirty, setDirty] = useState(false)
   const [status, setStatus] = useState('')
-  const [secrets, setSecrets] = useState([])
   const [notes, setNotes] = useState({})   // stem -> {name,source,approved,taint,trusted}
   const ask = useAsk()
 
   async function refresh() {
     const r = await api('/api/memory')
     setFiles(r.files)
-    api('/api/secrets').then((s) => setSecrets(s.secrets)).catch(() => {})
     api('/api/memory/notes').then((r2) => {
       const m = {}; (r2.notes || []).forEach((n) => { m[nkey(n.name)] = n })
       setNotes(m)
@@ -36,47 +34,6 @@ export default function Context() {
       await api(`/api/memory/notes/${encodeURIComponent(name)}/promote`, { method: 'POST' })
       await refresh()
     } catch (err) { notifyError(err) }
-  }
-
-  async function addSecret() {
-    const name = await ask.prompt('Secret name', '',
-                                  { placeholder: 'e.g. TBA_KEY', confirmLabel: 'Next' })
-    if (!name) return
-    const value = await ask.prompt(`Value for ${name.toUpperCase()}`, '',
-      { body: 'Stored host-side; the agent only ever sees the name.',
-        password: true, confirmLabel: 'Next' })
-    if (!value) return
-    const hostsRaw = await ask.prompt(
-      `Web hosts ${name.toUpperCase()} may be sent to`, '',
-      { body: 'Comma-separated (e.g. newsapi.org). Leave empty to keep it '
-              + 'unusable — web_read refuses unbound keys.',
-        confirmLabel: 'Save secret' }) || ''
-    const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
-    try {
-      await api(`/api/secrets/${encodeURIComponent(name)}`, {
-        method: 'PUT', body: JSON.stringify({ value, hosts }) })
-      refresh()
-    } catch (err) { notifyError(err) }
-  }
-
-  async function editHosts(s) {
-    const hostsRaw = await ask.prompt(
-      `Web hosts ${s.name} may be sent to`, (s.hosts || []).join(', '),
-      { body: 'Comma-separated; empty = unusable.', confirmLabel: 'Save' })
-    if (hostsRaw === null) return
-    const hosts = hostsRaw.split(',').map((h) => h.trim()).filter(Boolean)
-    try {
-      await api(`/api/secrets/${encodeURIComponent(s.name)}`, {
-        method: 'PUT', body: JSON.stringify({ value: '', hosts }) })
-      refresh()
-    } catch (err) { notifyError(err) }
-  }
-
-  async function delSecret(name) {
-    if (!await ask.confirm(`Delete secret ${name}?`,
-                           { confirmLabel: 'Delete', danger: true })) return
-    await api(`/api/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
-    refresh()
   }
 
   useEffect(() => {
@@ -142,25 +99,6 @@ export default function Context() {
           })}
         </ul>
         <button className="ghost" onClick={newNote}>+ new note</button>
-        <div className="side-title" style={{ marginTop: 16 }}
-             title="API keys the agent can use via {{secret:NAME}} in web_read (on bound hosts) but never read">
-          Secrets</div>
-        <ul className="file-list">
-          {secrets.length === 0 && <li className="dim">none saved</li>}
-          {secrets.map((s) => (
-            <li key={s.name} title={s.hosts?.length
-                  ? `web: ${s.hosts.join(', ')}` : 'no web hosts bound — unusable'}>
-              <span className="grow">{s.name}
-                {s.hosts?.length > 0 && <span className="tag">web</span>}</span>
-              <span className="dim small">…{s.last4}</span>
-              <button className="win-btn" title="edit web hosts"
-                      onClick={() => editHosts(s)}>✎</button>
-              <button className="win-btn" title="delete"
-                      onClick={() => delSecret(s.name)}>×</button>
-            </li>
-          ))}
-        </ul>
-        <button className="ghost" onClick={addSecret}>+ add secret</button>
       </aside>
       <main className="editor-pane">
         {readOnly ? (

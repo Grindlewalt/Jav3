@@ -173,7 +173,7 @@ async def run(source: str = "manual") -> dict:
     """Triage everything untriaged, bounded by reviewer_max_items and its own
     token budget. Returns the run summary; refuses to overlap itself."""
     if _lock.locked():
-        return {"ok": False, "error": "a triage run is already in progress"}
+        return {"ok": False, "error": "an auto review run is already in progress"}
     async with _lock:
         return await _run_locked(source)
 
@@ -316,7 +316,7 @@ async def undo(db: aiosqlite.Connection, log_id: int) -> dict:
     async with db.execute("SELECT * FROM triage_log WHERE id = ?", (log_id,)) as cur:
         row = await cur.fetchone()
     if row is None:
-        return {"ok": False, "error": "no such triage action"}
+        return {"ok": False, "error": "no such auto review action"}
     row = dict(row)
     if row["undone"]:
         return {"ok": False, "error": "already undone"}
