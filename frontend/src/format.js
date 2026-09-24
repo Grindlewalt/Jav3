@@ -37,3 +37,7 @@ export function ts(s) {
 export function tsShort(s) {
   return s ? String(s).replace('T', ' ').slice(5, 16) : ''
 }
+
+// A live count for a badge. Counts come from real queues and reached 294 in
+// practice, which overflowed the nav's pill and smeared across the icon.
+export const badge = (n) => (n > 99 ? '99+' : String(n))

@@ -19,11 +19,15 @@ import Button from './Button.jsx'
 // question, on purpose ("Enter landing on the destructive choice is how a
 // reflex becomes data loss"). That is ask.jsx's policy, not every dialog's,
 // so it stays there.
+const NOOP = () => {}
+
 export default function Modal({
   open = true, onClose, title, width = 480, children, footer,
   labelledBy, className = '', onSubmit,
 }) {
-  const boxRef = useDismiss(open, onClose || (() => {}))
+  // a stable fallback: a fresh arrow each render would make useDismiss tear
+  // down and re-add its listeners on every render while the dialog is open
+  const boxRef = useDismiss(open, onClose || NOOP)
 
   // The page behind must not scroll while a dialog is up: on iOS the shell is
   // position:fixed already, but a desktop board keeps its scrollbar.

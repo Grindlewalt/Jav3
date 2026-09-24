@@ -208,6 +208,8 @@ button, a, input, select, textarea, label { touch-action: manipulation; }
    second top-level copy was added. One copy, at the top level, for both. */
 @keyframes drop-in { from { opacity: 0; transform: translateY(-6px) scale(0.97); } }
 @keyframes scrim-in { from { opacity: 0; } }
+/* the upward twin of drop-in, for a menu that opens above its trigger */
+@keyframes rise-in { from { opacity: 0; transform: translateY(6px) scale(0.97); } }
 
 .app { display: flex; flex-direction: column; height: 100vh; }
 
@@ -565,6 +567,75 @@ input:focus, textarea:focus { border-color: var(--accent);
   .modal { width: 100%; height: 100%; max-height: none; border-radius: 0;
     border: 0; }
 }
+
+/* ---- menu ----
+   The glass dropdown, written once. .notif-drop (the bell, the VM chip, More),
+   .proj-menu and .model-menu are this recipe under three names, and they keep
+   their classes until their call sites migrate to Menu.jsx. Values are
+   .proj-menu's on the token ladder (its 9px item radius rounds to --radius-lg);
+   `.up` is .model-menu's upward variant. The width is capped to the viewport
+   so a 260px menu never runs off a 390px phone. */
+.menu-wrap { position: relative; }
+.menu {
+  position: absolute; right: 0; top: calc(100% + var(--sp-4)); z-index: 50;
+  width: min(var(--menu-w, 260px), calc(100vw - 2 * var(--sp-8)));
+  max-height: 60vh; overflow-y: auto;
+  background: var(--glass); border: 1px solid var(--border);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border-radius: var(--radius-xl); padding: var(--sp-3); box-shadow: var(--shadow-pop);
+  display: flex; flex-direction: column; gap: 3px;
+  transform-origin: top right;
+  animation: drop-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
+}
+.menu.left { right: auto; left: 0; transform-origin: top left; }
+.menu.up { top: auto; bottom: calc(100% + var(--sp-5)); transform-origin: bottom right;
+  animation-name: rise-in; }
+.menu.up.left { transform-origin: bottom left; }
+.menu-item {
+  display: flex; width: 100%; align-items: center; gap: var(--sp-4); min-width: 0;
+  background: none; border: 0; color: var(--text); padding: var(--pad-row);
+  border-radius: var(--radius-lg); font-weight: 400; font-size: var(--fs-md);
+  text-align: left; text-decoration: none; cursor: pointer;
+}
+.menu-item:hover:not(:disabled) { background: var(--panel-2);
+  filter: none; transform: none; }
+.menu-item.active { color: var(--accent); }
+.menu-item.danger { color: var(--red); }
+.menu-item .m-name { flex: 1; min-width: 0; display: flex; flex-direction: column;
+  gap: 1px; }
+.menu-item .m-sub { font-size: var(--fs-xs); color: var(--dim); }
+.menu-item .m-check { color: var(--accent); font-size: var(--fs-xs); }
+.menu-sep { height: 1px; margin: 5px 8px; background: var(--border); }
+
+/* ---- tabs ----
+   .voice-tier-switch's segmented pill, written once: a glass track with the
+   chosen segment lifted on --panel-2 under an accent ring. Buttons (role=tab,
+   `.on`) and router links (`.active`) get the same rule, so an in-page view
+   switch and a URL-backed sub-page strip look identical. The weight and the
+   hover reset are stated because the base `button` rule is 600 with a lift
+   and an <a> is neither — the two must render alike. Overflows sideways on a
+   narrow screen rather than wrapping into a second row of pills. */
+.tabs {
+  align-self: center; display: inline-flex; max-width: 100%; overflow-x: auto;
+  padding: 3px; gap: 3px;
+  background: var(--glass); border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+.tabs > button, .tabs > a {
+  display: inline-flex; align-items: center; gap: var(--sp-3); flex: none;
+  border: 0; background: none; color: var(--dim); cursor: pointer;
+  font-size: var(--fs-md); font-weight: 600; padding: 5px 16px;
+  border-radius: var(--radius-pill); text-decoration: none; white-space: nowrap;
+  transition: color 0.15s, background 0.15s;
+}
+.tabs > button:hover:not(:disabled), .tabs > a:hover { color: var(--text);
+  filter: none; transform: none; }
+.tabs > button.on, .tabs > a.active {
+  background: var(--panel-2); color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tabs .nav-count { margin-left: 0; vertical-align: 0; }
 
 /* ---- login ---- */
 .login {
@@ -2089,7 +2160,6 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   transform-origin: bottom right;
   animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
 }
-@keyframes rise-in { from { opacity: 0; transform: translateY(6px) scale(0.97); } }
 .model-menu button {
   display: flex; width: 100%; align-items: center; gap: 8px;
   background: none; color: var(--text); padding: 8px 10px; border-radius: 9px;
