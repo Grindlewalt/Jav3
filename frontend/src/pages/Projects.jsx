@@ -10,19 +10,16 @@ import Select from '../components/Select.jsx'
 import Tag from '../components/Tag.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import Menu, { MenuItem, MenuSep } from '../components/Menu.jsx'
+import { AUTONOMY, autonomyHint } from '../autonomy.js'
+import { ts } from '../format.js'
 
 // A project is a card: its name is the way in (the Workspace), the slug and
 // the remote say what it is, the autonomy dial is the one setting worth
 // having on the card, and everything rarer — rename, load/unload, delete —
 // is behind ⋯. The list this replaces put six controls on every row, the
 // same six at the same weight whether you were about to open a project or
-// about to delete it.
-const AUTONOMY = [
-  { value: 'read_only', label: 'read-only' },
-  { value: 'stage', label: 'stage edits' },
-  { value: 'gated', label: 'agents + research' },
-  { value: 'full', label: 'full (commit)' },
-]
+// about to delete it. The dial's levels are autonomy.js's, shared with the
+// Workspace header.
 
 export default function Projects() {
   const [projects, setProjects] = useState([])
@@ -119,10 +116,11 @@ export default function Projects() {
         <Input placeholder={cloning ? 'project name (repo name if empty)' : 'project name'}
                value={name} onChange={(e) => setName(e.target.value)}
                required={!cloning} />
-        <Input placeholder="what are you building? (one line)" value={summary}
+        <Input placeholder="what are you building?" value={summary}
                onChange={(e) => setSummary(e.target.value)} />
         <Input className="gh-url" type="url"
-               placeholder="https://github.com/owner/repo (optional — clone it in)"
+               placeholder="GitHub URL to clone (optional)"
+               title="https://github.com/owner/repo — the project starts as a clone of it"
                value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
         <Button type="submit" disabled={creating}>
           {creating && cloning ? 'cloning…' : cloning ? 'Clone & create' : 'Create'}</Button>
@@ -156,8 +154,10 @@ export default function Projects() {
                 <div className="project-card-head">
                   <span className="project-name">{p.name}</span>
                 </div>
-                <code className="project-slug">{p.slug} · deleted {p.deleted_at?.slice(0, 16)}</code>
+                <code className="project-slug">{p.slug}</code>
+                <span className="dim small project-when">deleted {ts(p.deleted_at)}</span>
                 <div className="project-card-foot">
+                  <span className="grow" />
                   <Button variant="ghost" onClick={() => restore(p.slug)}>Restore</Button>
                   <Button variant="ghost" danger onClick={() => purge(p.slug)}>
                     Delete forever</Button>
@@ -183,7 +183,7 @@ function ProjectCard({
         <Link to={`/projects/${p.slug}`} className="project-name"
               title={`open ${p.name}`}>{p.name}</Link>
         {inContext && <Tag tone="running">in context</Tag>}
-        <Menu open={menuOpen} onClose={close} label={`${p.name} actions`} width={210}
+        <Menu floating open={menuOpen} onClose={close} label={`${p.name} actions`} width={210}
               trigger={(
                 <Button variant="icon" aria-haspopup="menu" aria-expanded={menuOpen}
                         aria-label={`${p.name} actions`} title="more"
@@ -204,7 +204,7 @@ function ProjectCard({
         <label className="project-autonomy dim small">
           autonomy
           <Select className="autonomy-sel" value={p.autonomy || 'full'} options={AUTONOMY}
-                  title="how much the agent may do unattended in this project"
+                  title={`how much the agent may do unattended here — ${autonomyHint(p.autonomy || 'full')}`}
                   onChange={(e) => onAutonomy(e.target.value)} />
         </label>
       </div>

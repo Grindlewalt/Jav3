@@ -5,6 +5,7 @@ import { useAsk } from './ask.jsx'
 import Button from './components/Button.jsx'
 import Menu, { MenuItem, MenuSep } from './components/Menu.jsx'
 import Tag from './components/Tag.jsx'
+import EmptyState from './components/EmptyState.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
 // conversations are filtered to that project and new ones are linked to it.
@@ -202,7 +203,7 @@ export default function ChatBox({ projectSlug }) {
           {whoName}</Tag>
         <span className="grow ellipsis dim">
           {current ? (current.summary || `#${current.id}`) : 'new chat'}</span>
-        <Menu open={newMenu} onClose={() => setNewMenu(false)} width={240} className="cb-new-menu"
+        <Menu floating open={newMenu} onClose={() => setNewMenu(false)} width={260} className="cb-new-menu"
               label="start a new chat as"
               trigger={(
                 <Button variant="ghost" aria-haspopup="menu" aria-expanded={newMenu}
@@ -219,7 +220,7 @@ export default function ChatBox({ projectSlug }) {
       </div>
       {showHistory && (
         <ul className="cb-history">
-          {convos.length === 0 && <li className="dim">no past chats yet</li>}
+          {convos.length === 0 && <EmptyState as="li">no past chats yet</EmptyState>}
           {convos.map((c) => (
             <li key={c.id} className={c.id === cid ? 'active' : ''}
                 onClick={() => pick(c.id)}>
@@ -233,9 +234,9 @@ export default function ChatBox({ projectSlug }) {
       )}
       <div className="messages compact">
         {messages.length === 0 && (
-          <div className="dim center-pad">
+          <EmptyState pad>
             {projectSlug ? `chat with ${whoName} about this project` : 'say hi'}
-          </div>
+          </EmptyState>
         )}
         {messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>

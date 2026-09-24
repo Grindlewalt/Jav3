@@ -134,7 +134,15 @@
      intent is stated once and no rule carries a bare literal. */
   --doc-canvas: #ffffff;      /* .preview-frame — iframe srcDoc + PDF embed */
   --media-letterbox: #000000; /* .media-dock video */
-  --term-bg: #0e1013;         /* the guest co-working terminal */
+  /* the guest co-working terminal: dark in both themes (shell programs assume
+     a dark canvas — a light one turns their yellow and white output invisible),
+     but on the carbon palette, and the cursor is the moss accent rather than
+     xterm's stock blue. xterm paints a canvas, so these are read by JS
+     (Workspace.jsx termTheme) and must stay plain colour literals. */
+  --term-bg: #0e1013;
+  --term-fg: #e9e7e2;          /* = dark --text */
+  --term-cursor: #8caa93;      /* = dark --accent */
+  --term-selection: rgba(140, 170, 147, 0.3);   /* the accent, translucent */
   --danger-ink: #ffffff;      /* text on a --red badge, both themes */
 }
 /* toned warm paper, not white — the first cut (#f5f3ec / #fcfbf7 cards) was
@@ -165,6 +173,9 @@
   --shadow-thumb: 0 1px 3px rgb(var(--shadow-rgb) / 0.32);
   --overlay: rgba(58, 53, 42, 0.4);
   --statusbar-bg: #221f1a;   /* warm near-black; white clock stays legible */
+  /* the terminal stays dark, but warm: carbon's cool black read as a hole
+     punched through the paper */
+  --term-bg: #221f1a;
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
@@ -474,6 +485,9 @@ button.ghost, .ghost-link {
   font-size: 13px; cursor: pointer;
 }
 button.ghost:hover, .ghost-link:hover { border-color: var(--accent); filter: none; }
+/* a destructive ghost says so at rest, not only under the cursor — Button's
+   `danger` used to render identical to a plain ghost until hovered */
+button.ghost.danger { color: var(--red); }
 button.ghost.danger:hover { border-color: var(--red); color: var(--red); }
 input, textarea, select {
   background: var(--bg-soft); color: var(--text); border: 1px solid var(--border);
@@ -653,6 +667,13 @@ input:focus, textarea:focus { border-color: var(--accent);
 .menu.up { top: auto; bottom: calc(100% + var(--sp-5)); transform-origin: bottom right;
   animation-name: rise-in; }
 .menu.up.left { transform-origin: bottom left; }
+/* Menu `floating`: portalled to <body> and placed by Menu.jsx from the
+   trigger's rect (left/top/max-height inline), so no panel's overflow can clip
+   it and it never leaves the viewport. data-side says which way it opened. */
+.menu.floating { position: fixed; right: auto; bottom: auto; z-index: 2000;
+  max-height: none; }
+.menu.floating[data-side='up'] { transform-origin: bottom right;
+  animation-name: rise-in; }
 .menu-item {
   display: flex; width: 100%; align-items: center; gap: var(--sp-4); min-width: 0;
   background: none; border: 0; color: var(--text); padding: var(--pad-row);
@@ -1180,6 +1201,17 @@ input:focus, textarea:focus { border-color: var(--accent);
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 .file-list li:hover, .file-list li.active { background: var(--panel-2); color: var(--text); }
+/* Memory's list: the file name owns the first line and the metadata — trust
+   tags, auto, the token count — gets a line of its own under it. Squeezed
+   onto one nowrap line, the tags clipped to "pe…" and the counts ran into
+   the names ("env.md≈602 tok"). */
+.mem-list li { display: flex; flex-direction: column; gap: 3px; white-space: normal; }
+.mem-list .mem-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-list .mem-meta { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--sp-3); font-size: var(--fs-xs); font-family: inherit; }
+.mem-list .mem-meta .tag { margin-left: 0; }
+.mem-list li.mem-live { white-space: normal; }
+@media (min-width: 769px) { .split-layout > aside.mem-aside { width: 290px; } }
 .editor-pane { display: flex; flex-direction: column; height: 100%; padding: 14px 18px; }
 .pane-head { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
 .pane-head h3 { margin: 0; font-size: 15px; flex: 1;
@@ -1212,8 +1244,12 @@ input:focus, textarea:focus { border-color: var(--accent);
 .project-grid-empty { grid-column: 1 / -1; }
 .project-card { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0;
   transition: border-color 0.15s; }
-.project-card:hover { border-color: var(--accent); }
-.project-card.in-context { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+/* hover is a hint of accent; in-context is the full accent at double weight,
+   so the two never read as the same state (and in-context survives light
+   theme, where a 55% mix into the border sank into the paper) */
+.project-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.project-card.in-context { border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent); }
 .project-card-head { display: flex; align-items: center; gap: var(--sp-4); min-width: 0; }
 .project-name { flex: 1; min-width: 0; font-weight: 600; font-size: var(--fs-lg);
   color: var(--text); text-decoration: none;
@@ -1221,18 +1257,35 @@ input:focus, textarea:focus { border-color: var(--accent);
 a.project-name:hover { color: var(--accent); }
 .project-slug { color: var(--dim); font-size: var(--fs-sm); }
 .project-remote { display: block; }
+/* pinned to the card's bottom: cards in a grid row share a height, so the
+   autonomy dials line up whether or not a card has a remote line */
 .project-card-foot { display: flex; align-items: center; gap: var(--sp-4);
-  margin-top: var(--sp-2); flex-wrap: wrap; }
+  margin-top: auto; padding-top: var(--sp-2); flex-wrap: wrap; }
+.project-when { white-space: nowrap; }
 .project-autonomy { display: flex; align-items: center; gap: var(--sp-3); }
 .project-card.deleted { opacity: 0.65; border-style: dashed; }
 .project-card.deleted:hover { border-color: var(--border); }
+.project-card.deleted .project-card-foot { flex-wrap: nowrap; }
 
 /* ---- workspace control board ---- */
 .workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 /* .ws-head's layout, padding, border, background and title size are the
    shared page-header rules now (`.page-shell > .page-head, .ws-head`) — this
    header was the model for them. Only what is peculiar to it is left. */
-.ws-head .hint { font-size: 12px; margin-left: auto; }
+/* The bar holds a title, the context switch, the autonomy dial and the
+   actions. Nothing in it wraps inside itself: the title ellipsises, every
+   control keeps its one line, and the keyboard hint — help, not a control —
+   is the first thing to go when the row runs short. */
+.ws-head { min-width: 0; }
+.ws-head h1 { min-width: 0; flex: 0 1 auto; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.ws-head > * { flex-shrink: 0; }
+.ws-head > h1 { flex-shrink: 1; }
+.ws-head button, .ws-autonomy { white-space: nowrap; }
+.ws-actions { display: flex; align-items: center; gap: var(--sp-4);
+  margin-left: auto; min-width: 0; }
+.ws-head .hint { font-size: var(--fs-sm); white-space: nowrap; }
+@media (max-width: 1360px) { .ws-head .hint { display: none; } }
 .board {
   position: relative; flex: 1; overflow: auto; min-height: 0;
   background-image: radial-gradient(var(--border) 1px, transparent 1px);
@@ -1243,8 +1296,10 @@ a.project-name:hover { color: var(--accent); }
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 14px; box-shadow: var(--shadow-pop); overflow: hidden;
   min-width: 280px; min-height: 200px;
-  animation: win-in 0.18s ease;
 }
+/* only a panel the operator just opened scales in — a board loading its
+   saved panels must not animate on page load */
+.window.spawned { animation: win-in 0.18s cubic-bezier(.4,0,.2,1); }
 .window.anim { transition: left 0.24s ease, top 0.24s ease,
                width 0.24s ease, height 0.24s ease, opacity 0.2s,
                border-color 0.15s; }
@@ -1269,6 +1324,8 @@ kbd {
 .window-title { flex: 1; font-size: 13px; font-weight: 600; color: var(--dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .win-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  min-width: 24px; height: 24px;
   background: none; border: 0; color: var(--dim); padding: 0 6px;
   font-size: 15px; line-height: 1; border-radius: 6px; cursor: pointer;
 }
@@ -1288,17 +1345,38 @@ kbd {
 .pane-col { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px;
   overflow-y: auto; }
 .pane-col .row { margin: 0; }
+/* A panel that is a plain stack scrolls as ONE column: its lists and status
+   boxes keep their natural height instead of shrinking into little scroll
+   boxes of their own (the Git and Secrets lists ended mid-row over a band of
+   empty panel). Flex children that are meant to fill (.grow, .grow-scroll,
+   .messages, .md-editor…) set their own flex and are unaffected. */
+.pane-col > .staged-list, .pane-col > .ctx-list, .pane-col > .todo-list,
+.pane-col > .board-runs, .pane-col > .git-status, .pane-col > .row,
+.pane-col > .dim { flex-shrink: 0; }
+.pane-col > .staged-list { max-height: none; overflow: visible; }
+.window-body .todo-list { margin: 0; }
+/* the two empty-state shapes read as one voice inside a panel: centred, dim,
+   no box — a bordered "row" that is not a row looked like data */
+.window-body .empty-row { background: none; border: 0; justify-content: center;
+  text-align: center; padding: var(--sp-6) var(--sp-4); font-size: var(--fs-md); }
+.window-body .empty-pad { padding: var(--sp-10) var(--sp-8); font-size: var(--fs-md); }
 .render-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
-/* right-click add menu */
+/* right-click add menu: the glass floating-panel recipe; AddMenu places it
+   inside the viewport and caps its height, and the list scrolls */
 .menu-overlay { position: fixed; inset: 0; z-index: 1500; }
 .rc-menu {
-  position: fixed; z-index: 1501; width: 260px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 12px; box-shadow: var(--shadow-pop); padding: 8px;
+  position: fixed; z-index: 1501; width: min(280px, calc(100vw - 2 * var(--sp-8)));
+  display: flex; flex-direction: column;
+  background: var(--glass); border: 1px solid var(--border);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border-radius: var(--radius-xl); box-shadow: var(--shadow-pop); padding: var(--sp-4);
+  animation: drop-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
 }
-.rc-menu input { width: 100%; margin-bottom: 6px; }
-.rc-menu ul { list-style: none; margin: 0; padding: 0; }
+.rc-menu input { width: 100%; margin-bottom: 6px; flex-shrink: 0; }
+.rc-menu ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; }
+.rc-menu .empty-row { padding: 7px 10px; }
 .rc-menu li {
   display: flex; align-items: center; padding: 7px 10px; border-radius: 7px;
   font-size: 13.5px; cursor: pointer; color: var(--text);
@@ -1317,12 +1395,15 @@ kbd {
 .dir-card.drop-over { border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .dir-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.dir-name { font-weight: 600; font-size: 13.5px;
-  font-family: ui-monospace, Menlo, monospace; }
-.dir-mark { flex: 1; font-size: 12px; color: var(--amber); cursor: pointer;
-  font-style: italic; overflow: hidden; text-overflow: ellipsis;
+.dir-name { font-weight: 600; font-size: var(--fs-md); font-family: var(--font-mono);
   white-space: nowrap; }
-.dir-mark:hover { text-decoration: underline; }
+/* the mark is what Jav3 reads about the folder: plain text once set, a quiet
+   dim prompt while unset (it was amber italic, which read as a warning) */
+.dir-mark { flex: 1; min-width: 0; background: none; border: 0; padding: 0;
+  font-weight: 400; font-size: var(--fs-sm); color: var(--text); text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.dir-mark.unset { color: var(--dim); }
+.dir-mark:hover:not(:disabled) { color: var(--accent); filter: none; transform: none; }
 .file-row {
   display: flex; align-items: center; gap: 6px; padding: 4px 8px;
   border-radius: 6px; font-size: 13px; cursor: grab;
@@ -1410,7 +1491,23 @@ kbd {
 
 /* the roster (and the Skills tab's list): one button per row, so a row is a
    focus stop and Enter opens it — the old <li onClick> rows were mouse-only */
-.agent-new { margin: 0; }
+.agent-new { margin: 0; flex-wrap: nowrap; }
+.agent-new input { min-width: 0; }
+/* the bin folds like Projects' (the shared .deleted-fold summary), but in a
+   250px aside: tighter, and its rows are names, not file paths */
+.split-layout > aside .deleted-fold { margin-top: var(--sp-4); }
+.trash-list { list-style: none; margin: var(--sp-3) 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: var(--sp-1); }
+.trash-list li { display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--pad-row-sm); border-radius: var(--radius-sm);
+  font-size: var(--fs-md); color: var(--dim); }
+.trash-list li:hover { background: var(--panel-2); color: var(--text); }
+.trash-list .grow { min-width: 0; }
+/* an editor's title is a name, not a path — the page's own face, not mono */
+.agent-form .pane-head .toolbar-title, .skill-pane .pane-head .toolbar-title {
+  font-family: inherit; font-weight: 600; }
+.agent-toggles { display: flex; flex-direction: column; gap: var(--sp-3); }
+.agent-toggles .field-hint { margin-left: 46px; }
 .agent-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1;
   display: flex; flex-direction: column; gap: var(--sp-1); }
 .agent-row {
@@ -1447,8 +1544,12 @@ kbd {
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
   font-size: var(--fs-sm); max-height: 220px; overflow: auto; }
 
-.skill-param { margin: 0; }
+.skill-param { margin: 0; flex-wrap: nowrap; }
+/* the argument row's bare inputs matched the base 15px; everything else in
+   the form is the field size */
+.skill-param input, .skill-param select { font-size: var(--fs-md); padding: 6px 9px; }
 .skill-param-name { width: 110px; }
+.skill-param .grow { min-width: 0; }
 
 /* ---- agent outputs ---- */
 .outputs-pane { overflow-y: auto; gap: var(--sp-6); }
@@ -1501,6 +1602,13 @@ kbd {
 .staged-list .tag.new { color: var(--green); border-color: var(--green); }
 .staged-list .tag.modified { color: var(--amber); border-color: var(--amber); }
 .win-btn.ok:hover { color: var(--green); }
+/* a project's key grants: the key's name is what the row is about, so it
+   gets the line and the bound hosts sit dim beneath it — they used to share
+   one line, and the hosts won the width while the names truncated */
+.grant-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.grant-name { display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
+.grant-row .tag { margin-left: 0; }
+.grant-row { cursor: default; }
 
 /* ---- git gate panel ---- */
 .git-status { max-height: 90px; overflow: auto; margin: 0; padding: 8px;
@@ -1564,14 +1672,18 @@ kbd {
   display: flex; flex-direction: column; gap: 5px; }
 .sched-list li.off { opacity: 0.55; }
 .sched-head { display: flex; align-items: center; gap: 6px; }
-.sched-result { margin: 4px 0 0; padding: 7px; background: var(--bg);
-  border: 1px solid var(--border); border-radius: 7px; font-size: 12px;
-  white-space: pre-wrap; max-height: 140px; overflow: auto; }
+.sched-result { margin: 4px 0 0; padding: 7px 10px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 7px; font-size: 13px;
+  max-height: 160px; overflow: auto; }
+.sched-result .md-body > :first-child { margin-top: 0; }
+.sched-result .md-body > :last-child { margin-bottom: 0; }
+.sched-result .md-body p, .sched-result .md-body ul { margin: 4px 0; }
+/* the kind/project tags were --dim on --panel-2, which light theme washes out */
+.sched-head .tag { color: var(--text); }
+/* the list scrolls inside its pane, so the aside's background runs the full
+   height instead of stopping where the page used to start scrolling */
+.sched-pane { overflow-y: auto; }
 
-/* ---- agent trash bin ---- */
-.trash-bin { margin: 6px 0; font-size: 13px; }
-.trash-bin summary { cursor: pointer; color: var(--dim); padding: 4px 0; }
-.file-list li.trashed { opacity: 0.75; }
 
 /* ---- plain labelled checkbox row (network policy etc.) ---- */
 .check-row { display: flex; align-items: center; gap: 7px; padding: 6px 4px;
@@ -2162,6 +2274,12 @@ kbd {
      below the aside's scroll edge, and the element at their spot was the
      pane's .empty-pad. */
   .split-layout > main.split-idle { display: none; }
+  /* Schedules is one scroll on a phone: the new-schedule form is read top to
+     bottom and then the list follows it. Capped at 46vh as its own scroller,
+     the form cut off at "cadence" with the time field and + create hidden. */
+  .sched-page > .split-layout { overflow-y: auto; }
+  .sched-page > .split-layout > aside { max-height: none; overflow: visible; }
+  .sched-page .sched-pane { flex: none; height: auto; overflow: visible; }
   .split-layout:has(> main.split-idle) > aside { flex: 1 1 auto; max-height: none; }
   /* window chrome has to be tall enough for the bigger close/expand buttons */
   .window-head { min-height: var(--tap); padding: 4px 8px; }
@@ -2346,8 +2464,8 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 }
 
 /* guest co-working terminal — deliberately dark in both themes */
-.term-host { flex: 1; min-height: 0; overflow: hidden; border-radius: 8px;
-  background: var(--term-bg); padding: 6px 8px; }
+.term-host { flex: 1; min-height: 0; overflow: hidden; border-radius: var(--radius-md);
+  background: var(--term-bg); padding: 6px 8px; border: 1px solid var(--border); }
 .term-host .xterm { height: 100%; }
 .term-status.connected { color: var(--green); }
 .term-status.disconnected, .term-status.closed { color: var(--red); }
@@ -2818,6 +2936,9 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 
 /* ---- plan panel (the explicit orchestrator's checklist) ------------------ */
 .plan-head { margin: 0; }
+/* three rows, not two: a two-row box scrolled a three-line dump so its first
+   line sat cut against the top edge */
+.plan-dump { resize: vertical; min-height: 0; }
 .plan-list { list-style: none; padding: 0; margin: 0; }
 .plan-item { border-bottom: 1px solid var(--border); }
 .plan-row { display: flex; align-items: center; gap: 7px; padding: 6px 4px; min-width: 0; }

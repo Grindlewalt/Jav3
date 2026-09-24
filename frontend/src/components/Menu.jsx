@@ -1,3 +1,5 @@
+import { useLayoutEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { NavLink } from 'react-router-dom'
 import { useDismiss } from '../useDismiss.js'
 
@@ -19,24 +21,72 @@ import { useDismiss } from '../useDismiss.js'
 // `up` opens above the trigger (the model picker lives in a bar at the bottom
 // of the screen); `align` picks the anchored edge, 'right' like every existing
 // menu. The trigger should carry aria-haspopup="menu" and aria-expanded.
+//
+// `floating` is for a menu whose trigger sits inside something that clips —
+// a Workspace panel (overflow:hidden), a card near the screen edge. The
+// popover is portalled to <body>, fixed-positioned from the trigger's rect and
+// clamped inside the viewport with a 16px gutter, flipping above the trigger
+// when there is more room there. The nav's menus keep the in-place absolute
+// recipe: their rules position them against the bar and the rail.
 const NOOP = () => {}
+const GUTTER = 16
+const OFFSET = 8
+
+function place(wrap, pop, align, up) {
+  const t = wrap.getBoundingClientRect()
+  const vw = document.documentElement.clientWidth
+  const vh = window.innerHeight
+  const w = pop.offsetWidth
+  let left = align === 'left' ? t.left : t.right - w
+  left = Math.max(GUTTER, Math.min(left, vw - GUTTER - w))
+  pop.style.maxHeight = 'none'
+  const h = pop.offsetHeight
+  const below = vh - t.bottom - OFFSET - GUTTER
+  const above = t.top - OFFSET - GUTTER
+  const openUp = up ? (above >= h || above > below) : (below < h && above > below)
+  const room = Math.max(120, openUp ? above : below)
+  const shown = Math.min(h, room)
+  pop.style.left = `${left}px`
+  pop.style.maxHeight = `${room}px`
+  pop.style.top = `${openUp ? t.top - OFFSET - shown : t.bottom + OFFSET}px`
+  pop.dataset.side = openUp ? 'up' : 'down'   // not className: React owns that
+}
 
 export default function Menu({
   open, onClose = NOOP, trigger, align = 'right', up = false, width,
-  label, className = '', wrapClassName = '', children,
+  label, className = '', wrapClassName = '', floating = false, children,
 }) {
-  const ref = useDismiss(open, onClose)
-  const cls = ['menu', up ? 'up' : '', align === 'left' ? 'left' : '', className]
-    .filter(Boolean).join(' ')
+  const popRef = useRef(null)
+  const ref = useDismiss(open, onClose, floating ? popRef : null)
+  const cls = ['menu', up ? 'up' : '', align === 'left' ? 'left' : '',
+               floating ? 'floating' : '', className].filter(Boolean).join(' ')
+
+  // before paint, so the menu never flashes at its unplaced spot; a scroll
+  // anywhere (the board, a panel, the page) or a resize moves the trigger
+  useLayoutEffect(() => {
+    if (!open || !floating) return undefined
+    const run = () => {
+      if (ref.current && popRef.current) place(ref.current, popRef.current, align, up)
+    }
+    run()
+    window.addEventListener('resize', run)
+    window.addEventListener('scroll', run, true)
+    return () => {
+      window.removeEventListener('resize', run)
+      window.removeEventListener('scroll', run, true)
+    }
+  }, [open, floating, align, up, ref])
+
+  const pop = open && (
+    <div ref={popRef} className={cls} role="menu" aria-label={label}
+         style={width ? { '--menu-w': `${width}px` } : undefined}>
+      {children}
+    </div>
+  )
   return (
     <div className={['menu-wrap', wrapClassName].filter(Boolean).join(' ')} ref={ref}>
       {trigger}
-      {open && (
-        <div className={cls} role="menu" aria-label={label}
-             style={width ? { '--menu-w': `${width}px` } : undefined}>
-          {children}
-        </div>
-      )}
+      {floating ? (pop && createPortal(pop, document.body)) : pop}
     </div>
   )
 }

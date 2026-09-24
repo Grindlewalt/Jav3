@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -13,6 +13,11 @@ import { cspMediaSources } from '../mediaHosts.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import PlanPanel from '../PlanPanel.jsx'
+import { AUTONOMY, autonomyHint } from '../autonomy.js'
+import Select from '../components/Select.jsx'
+import Toggle from '../components/Toggle.jsx'
+import EmptyState from '../components/EmptyState.jsx'
+import { SaveButton } from '../components/Button.jsx'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
@@ -38,12 +43,46 @@ const PANEL_TYPES = {
 // Default board: chat + the session spine (board = goal/plan/runs), with git as
 // the review/undo surface (writes are live now — no staging panel) and network
 // for approving the hosts the agent asks to reach.
-const DEFAULT_PANELS = [
-  { id: 'p1', type: 'chat', x: 16, y: 16, w: 460, h: 560, z: 1, state: {} },
-  { id: 'p2', type: 'board', x: 492, y: 16, w: 400, h: 560, z: 2, state: {} },
-  { id: 'p3', type: 'git', x: 908, y: 16, w: 540, h: 300, z: 3, state: {} },
-  { id: 'p4', type: 'network', x: 908, y: 332, w: 540, h: 244, z: 4, state: {} },
+//
+// It is laid out from the board's own size, not a fixed 1448px block: three
+// columns (chat · spine · git over network) when they fit at MIN_W each, else
+// chat and spine side by side with git and network under them. The board
+// scrolls, so the fallback never clips — it just starts below the fold.
+function defaultPanels(boardW, boardH) {
+  const P = 16, G = GAP + 4
+  const inner = Math.max(2 * MIN_W + G, boardW - 2 * P)
+  const h = Math.max(440, Math.min(760, boardH - 2 * P))
+  const at = (id, type, x, y, w, hh, z) =>
+    ({ id, type, x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(hh), z, state: {} })
+  if (inner >= 3 * MIN_W + 2 * G) {
+    const c1 = inner * 0.34, c2 = inner * 0.29, c3 = inner - c1 - c2 - 2 * G
+    const gh = (h - G) * 0.54
+    return [
+      at('p1', 'chat', P, P, c1, h, 1),
+      at('p2', 'board', P + c1 + G, P, c2, h, 2),
+      at('p3', 'git', P + c1 + c2 + 2 * G, P, c3, gh, 3),
+      at('p4', 'network', P + c1 + c2 + 2 * G, P + gh + G, c3, h - gh - G, 4),
+    ]
+  }
+  const c = (inner - G) / 2, y2 = P + h + G
+  return [
+    at('p1', 'chat', P, P, c, h, 1),
+    at('p2', 'board', P + c + G, P, c, h, 2),
+    at('p3', 'git', P, y2, c, 360, 3),
+    at('p4', 'network', P + c + G, y2, c, 360, 4),
+  ]
+}
+
+// The fixed default every board got before it was fitted. A saved layout that
+// is still exactly this was never arranged by anyone — it is the old default
+// persisted by the autosave — so it is refitted like an empty one.
+const LEGACY_DEFAULT = [
+  ['p1', 'chat', 16, 16, 460, 560], ['p2', 'board', 492, 16, 400, 560],
+  ['p3', 'git', 908, 16, 540, 300], ['p4', 'network', 908, 332, 540, 244],
 ]
+const isLegacyDefault = (ps) => ps.length === LEGACY_DEFAULT.length &&
+  LEGACY_DEFAULT.every(([id, type, x, y, w, h]) => ps.some((p) =>
+    p.id === id && p.type === type && p.x === x && p.y === y && p.w === w && p.h === h))
 
 const TEXT_EXT = /\.(md|txt|py|js|jsx|ts|json|html|css|csv|toml|yaml|yml|sh|tex)$/i
 const IMG_EXT = /\.(png|jpg|jpeg|gif|svg|webp)$/i
@@ -192,20 +231,34 @@ export default function Workspace() {
   const mouseRef = useRef({ x: 200, y: 160 })
   const undoRef = useRef([])                       // ctrl+z stack: closes + pre-tidy layouts
   const gestureRef = useRef(null)                  // layout snapshot during a resize
+  const fitRef = useRef(false)                     // lay the default out once the board exists
+  const spawnedRef = useRef(new Set())             // panels opened this visit: only these animate in
 
   const refreshProject = useCallback(
     () => api(`/api/projects/${slug}`).then(setProject), [slug])
 
   const loadLayout = useCallback(() =>
     api(`/api/projects/${slug}/layout`).then((r) => {
-      const saved = r.layout?.panels?.length ? r.layout.panels : DEFAULT_PANELS
       // drop panel types that no longer exist (e.g. the removed 'staging'
       // panel on an old saved board) so they don't render "unknown panel"
-      const p = saved.filter((x) => PANEL_TYPES[x.type])
-      const clean = p.length ? p : DEFAULT_PANELS
-      zRef.current = Math.max(10, ...clean.map((x) => x.z || 0))
-      setPanels(clean)
+      const p = (r.layout?.panels || []).filter((x) => PANEL_TYPES[x.type])
+      if (!p.length || isLegacyDefault(p)) {
+        // the default is sized from the board, which has to exist first:
+        // render it empty and let the layout effect below fill it pre-paint
+        fitRef.current = true
+        setPanels([])
+        return
+      }
+      zRef.current = Math.max(10, ...p.map((x) => x.z || 0))
+      setPanels(p)
     }), [slug])
+
+  useLayoutEffect(() => {
+    const b = boardRef.current
+    if (!fitRef.current || !b || !panels) return
+    fitRef.current = false
+    setPanels(defaultPanels(b.clientWidth, b.clientHeight))
+  }, [panels, project])
 
   useEffect(() => {
     // reset before loading: a stale panels array must never be debounce-saved
@@ -374,19 +427,22 @@ export default function Workspace() {
     const w = snap(spec.w), h = snap(spec.h)
     const want = bx != null ? { x: snap(Math.max(0, bx)), y: snap(Math.max(0, by)) } : null
     const { x, y } = findSpot(w, h, want)
-    setPanels((ps) => [...ps, {
-      id: `p${Date.now()}`, type, x, y, w, h, z: ++zRef.current, state: {},
-    }])
+    const id = `p${Date.now()}`
+    spawnedRef.current.add(id)
+    setPanels((ps) => [...ps, { id, type, x, y, w, h, z: ++zRef.current, state: {} }])
     setMenu(null)
   }
 
-  function openMenuAt(cx, cy) {
+  // x/y is where the menu wants to sit (AddMenu clamps it into the viewport
+  // once it knows its own size); bx/by is the board point a picked panel
+  // should spawn at. `alignRight` hangs the menu from its right edge — the
+  // header button sits at the right of the bar, so the menu grows leftward.
+  function openMenuAt(cx, cy, alignRight = false) {
     const r = boardRef.current.getBoundingClientRect()
     setMenu({
-      x: Math.min(cx, window.innerWidth - 280),
-      y: Math.min(cy, window.innerHeight - 340),
-      bx: cx - r.left + boardRef.current.scrollLeft,
-      by: cy - r.top + boardRef.current.scrollTop,
+      x: cx, y: cy, alignRight,
+      bx: Math.max(0, cx - r.left) + boardRef.current.scrollLeft,
+      by: Math.max(0, cy - r.top) + boardRef.current.scrollTop,
     })
   }
 
@@ -429,36 +485,40 @@ export default function Workspace() {
   return (
     <div className="workspace">
       <header className="ws-head">
-        <h1>{project.name}</h1>
-        {project.loaded
-          ? <button className="ghost" onClick={async () => {
-              await api('/api/projects/unload', { method: 'POST' }); refreshProject() }}>
-              in context ✓ (unload)</button>
-          : <button className="ghost" onClick={async () => {
-              await api(`/api/projects/${slug}/load`, { method: 'POST' }); refreshProject() }}>
-              load into context</button>}
-        <label className="dim small" title="which tools Jav3 is offered here — enforced server-side per turn">
+        <h1 title={project.name}>{project.name}</h1>
+        <Toggle checked={!!project.loaded} label="loaded into Jav3's context"
+                onText="in context" offText="not in context"
+                title={project.loaded
+                  ? 'Jav3 is working in this project — switch off to unload it'
+                  : 'load this project into Jav3\'s context'}
+                onChange={async (on) => {
+                  await api(on ? `/api/projects/${slug}/load` : '/api/projects/unload',
+                            { method: 'POST' })
+                  refreshProject()
+                }} />
+        <label className="ws-autonomy dim small"
+               title={`which tools Jav3 is offered here — enforced server-side per turn. ${autonomyHint(project.autonomy || 'full')}`}>
           autonomy
-          <select className="autonomy-dial" value={project.autonomy || 'full'}
+          <Select className="autonomy-dial" value={project.autonomy || 'full'}
+                  options={AUTONOMY}
                   onChange={async (e) => {
                     await api(`/api/projects/${slug}/autonomy`, {
                       method: 'PUT', body: JSON.stringify({ level: e.target.value }) })
                     refreshProject()
-                  }}>
-            <option value="read_only">read-only — observe</option>
-            <option value="stage">stage — + file writes</option>
-            <option value="gated">gated — + agents & research</option>
-            <option value="full">full — + commit proposals</option>
-          </select>
+                  }} />
         </label>
-        <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close ·
-          <kbd> ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add ·
-          <kbd> esc</kbd> collapse</span>
-        <button className="ghost" onClick={autoArrange}
-                title="auto-arrange the open panels into a tight block (grows ≤2 grid units, shrinks ≤1)">
-          ⌗ tidy</button>
-        <button className="ghost" onClick={(e) => openMenuAt(e.clientX - 120, e.clientY + 14)}>
-          + panel</button>
+        <div className="ws-actions">
+          <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close
+            · <kbd>ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add
+            · <kbd>esc</kbd> collapse</span>
+          <button className="ghost" onClick={autoArrange}
+                  title="auto-arrange the open panels into a tight block (grows ≤2 grid units, shrinks ≤1)">
+            ⌗ tidy</button>
+          <button className="ghost" onClick={(e) => {
+            const b = e.currentTarget.getBoundingClientRect()
+            openMenuAt(b.right, b.bottom + 8, true)
+          }}>+ panel</button>
+        </div>
       </header>
       <div className="board" ref={boardRef} onContextMenu={openMenu}
            onPointerMove={(e) => { mouseRef.current = { x: e.clientX, y: e.clientY } }}>
@@ -467,6 +527,7 @@ export default function Workspace() {
                   expanded={expanded === p.id} expandRect={expandRect}
                   dimmed={expanded !== null && expanded !== p.id}
                   noAnim={resizing}
+                  spawned={spawnedRef.current.has(p.id)}
                   closing={closingIds.includes(p.id)}
                   onPatch={(patch) => patchPanel(p.id, patch)}
                   onDragEnd={(x, y) => dragEnd(p.id, x, y)}
@@ -510,13 +571,13 @@ function PanelBody(props) {
     case 'network': return <NetworkPanel slug={props.slug} />
     case 'secrets': return <SecretsPanel slug={props.slug} />
     case 'terminal': return <TerminalPanel slug={props.slug} />
-    default: return <div className="dim">unknown panel</div>
+    default: return <EmptyState pad>unknown panel</EmptyState>
   }
 }
 
 // ---- window chrome ----------------------------------------------------------
 
-function Window({ panel, expanded, expandRect, dimmed, noAnim, closing,
+function Window({ panel, expanded, expandRect, dimmed, noAnim, spawned, closing,
                   onPatch, onDragEnd, onResizeStart, onResize, onFront,
                   onClose, onHover, onToggleExpand, children }) {
   const [interacting, setInteracting] = useState(false)
@@ -560,7 +621,9 @@ function Window({ panel, expanded, expandRect, dimmed, noAnim, closing,
         zIndex: panel.z || 1 }
 
   return (
-    <section className={`window ${interacting || noAnim ? '' : 'anim'} ${expanded ? 'expanded' : ''} ${dimmed ? 'dimmed' : ''} ${closing ? 'closing' : ''}`}
+    <section className={['window', interacting || noAnim ? '' : 'anim', spawned ? 'spawned' : '',
+                          expanded ? 'expanded' : '', dimmed ? 'dimmed' : '',
+                          closing ? 'closing' : ''].filter(Boolean).join(' ')}
              style={style} onPointerDown={onFront}
              onPointerEnter={() => onHover(true)}
              onPointerLeave={() => onHover(false)}>
@@ -582,8 +645,25 @@ function Window({ panel, expanded, expandRect, dimmed, noAnim, closing,
 function AddMenu({ pos, onPick, onClose }) {
   const [q, setQ] = useState('')
   const [sel, setSel] = useState(0)
+  const boxRef = useRef(null)
   const items = Object.entries(PANEL_TYPES)
     .filter(([k, v]) => (k + ' ' + v.label).toLowerCase().includes(q.toLowerCase()))
+
+  // Clamp into the viewport once the menu knows its own size (a 16px gutter,
+  // like every floating menu): it used to open at click-120px and hang off
+  // the left edge of a phone. What does not fit below scrolls in the list.
+  useLayoutEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    const G = 16
+    const vw = document.documentElement.clientWidth, vh = window.innerHeight
+    const w = el.offsetWidth
+    const x = pos.alignRight ? pos.x - w : pos.x
+    const top = Math.max(G, Math.min(pos.y, vh - G - 240))
+    el.style.left = `${Math.max(G, Math.min(x, vw - G - w))}px`
+    el.style.top = `${top}px`
+    el.style.maxHeight = `${vh - G - top}px`
+  }, [pos])
 
   function onKey(e) {
     if (e.key === 'ArrowDown') { e.preventDefault(); setSel((s) => Math.min(s + 1, items.length - 1)) }
@@ -595,8 +675,9 @@ function AddMenu({ pos, onPick, onClose }) {
   return (
     <>
       <div className="menu-overlay" onMouseDown={onClose} onContextMenu={(e) => { e.preventDefault(); onClose() }} />
-      <div className="rc-menu" style={{ left: pos.x, top: pos.y }}>
+      <div className="rc-menu" ref={boxRef} role="dialog" aria-label="add panel">
         <input autoFocus placeholder="add panel — type to search…" value={q}
+               aria-label="search panels"
                onChange={(e) => { setQ(e.target.value); setSel(0) }} onKeyDown={onKey} />
         <ul>
           {items.map(([key, v], i) => (
@@ -607,7 +688,7 @@ function AddMenu({ pos, onPick, onClose }) {
               {i === sel && <span className="enter-hint">↵</span>}
             </li>
           ))}
-          {items.length === 0 && <li className="dim">no match</li>}
+          {items.length === 0 && <EmptyState as="li">no match</EmptyState>}
         </ul>
       </div>
     </>
@@ -631,7 +712,7 @@ function JournalPanel({ slug, project, refreshProject }) {
                 onChange={(e) => { setMd(e.target.value); setDirty(true) }} />
       <div className="row">
         <span className="dim grow">the journal Jav3 loads with this project</span>
-        <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
+        <SaveButton dirty={dirty} onSave={save} />
       </div>
     </div>
   )
@@ -687,10 +768,10 @@ function EditorPanel({ slug, state, setState }) {
           <button className="ghost" title={preview ? 'edit' : 'rendered preview'}
                   onClick={() => setPreview((v) => !v)}>{preview ? '✎' : '👁'}</button>
         )}
-        <button onClick={save} disabled={!dirty || !path}>{dirty ? 'Save' : 'Saved'}</button>
+        {path && <SaveButton dirty={dirty} onSave={save} />}
       </div>
       {binary
-        ? <div className="dim center-pad">binary file</div>
+        ? <EmptyState pad>binary file</EmptyState>
         : preview && previewable
           ? (/\.md$/i.test(path)
               ? <div className="md-preview grow"><Md text={content} /></div>
@@ -754,8 +835,8 @@ function RendererPanel({ slug, state, setState, onToggleExpand }) {
       </div>
       <div className="render-area" onDoubleClick={onToggleExpand}>
         {!path ? (
-          <div className="dim center-pad">nothing selected — plots, PDFs and pages the
-            run sandbox produces show up in this list</div>
+          <EmptyState pad>nothing selected — plots, PDFs and pages the run sandbox
+            produces show up in this list</EmptyState>
         ) : /\.html?$/i.test(path) ? (
           <iframe className="preview-frame" sandbox="allow-scripts" title="preview" srcDoc={withCsp(html)} />
         ) : path.endsWith('.pdf') ? (
@@ -774,6 +855,7 @@ function OrganizerPanel({ slug }) {
   const [over, setOver] = useState(null)
   const uploadRef = useRef(null)
   const uploadDest = useRef('')
+  const ask = useAsk()
 
   const refresh = useCallback(async () => {
     const [d, f] = await Promise.all([
@@ -869,11 +951,11 @@ function OrganizerPanel({ slug }) {
                onDragLeave={() => setOver(null)}
                onDrop={(e) => drop(e, d.path)}>
             <div className="dir-head">
-              <span className="dir-name">📁 {d.path || 'project root'}</span>
-              <span className="dir-mark" onClick={() => editMark(d)}
-                    title="click to edit the mark Jav3 reads">
-                {d.mark || 'no mark — click to add'}
-              </span>
+              <span className="dir-name">{d.path ? `${d.path}/` : 'project root'}</span>
+              <button type="button" className={d.mark ? 'dir-mark' : 'dir-mark unset'}
+                      onClick={() => editMark(d)} title="edit the mark Jav3 reads">
+                {d.mark || 'add a mark'}
+              </button>
               <button className="win-btn" title="upload here"
                       onClick={() => { uploadDest.current = d.path; uploadRef.current.click() }}>⤒</button>
               {d.path && inDir(d.path).length === 0 &&
@@ -883,8 +965,9 @@ function OrganizerPanel({ slug }) {
             {inDir(d.path).map((p) => (
               <div key={p} className="file-row" draggable
                    onDragStart={(e) => e.dataTransfer.setData('text/plain', p)}>
-                <span className="grow">{p.split('/').pop()}</span>
-                <button className="win-btn" onClick={() => del(p)}>×</button>
+                <span className="grow ellipsis">{p.split('/').pop()}</span>
+                <button className="win-btn" title="delete" aria-label={`delete ${p}`}
+                        onClick={() => del(p)}>×</button>
               </div>
             ))}
           </div>
@@ -1010,7 +1093,7 @@ function ContextPanel({ slug }) {
         <span className="ctx-total">≈{fmt(total)} tokens loaded</span>
       </div>
       <ul className="ctx-list">
-        {files.length === 0 && <li className="dim">no files in this project yet</li>}
+        {files.length === 0 && <EmptyState as="li">no files in this project yet</EmptyState>}
         {files.map((f) => (
           <li key={f.path} className={f.selected ? 'on' : ''}>
             <label>
@@ -1100,8 +1183,8 @@ function AgentPanel({ slug, state, setState }) {
         </select>
       </div>
       <div className="messages compact">
-        {log.length === 0 && <div className="dim center-pad">
-          {agents.length ? 'pick an agent and give it a task' : 'no agents yet — create one in the Agents tab'}</div>}
+        {log.length === 0 && <EmptyState pad>
+          {agents.length ? 'pick an agent and give it a task' : 'no agents yet — create one in the Agents tab'}</EmptyState>}
         {log.map((m, i) => (
           <div key={i} className={`msg ${m.role === 'task' ? 'user' : m.role === 'err' ? 'error' : 'assistant'}`}>
             {m.role === 'out'
@@ -1201,8 +1284,8 @@ function ResearchPanel({ slug, state, setState }) {
         <button type="submit" disabled={busy || !topic.trim()}>{busy ? '…' : 'Research'}</button>
       </form>
       <div className="run-tree">
-        {order.length === 0 && <div className="dim center-pad">
-          give a topic and watch the bots divide it up</div>}
+        {order.length === 0 && <EmptyState pad>
+          give a topic and watch the bots divide it up</EmptyState>}
         {order.map((id) => {
           const n = nodes[id]; if (!n) return null
           return (
@@ -1366,7 +1449,7 @@ function GitPanel({ slug }) {
       <div className="dim small">commit requests — approving commits (and pushes, when a
         remote is set) on the host</div>
       <ul className="staged-list">
-        {pending.length === 0 && <li className="dim">nothing waiting on you</li>}
+        {pending.length === 0 && <EmptyState as="li">nothing waiting on you</EmptyState>}
         {pending.map((r) => (
           <li key={r.id}>
             <span className="tag new">#{r.id}</span>
@@ -1432,17 +1515,21 @@ function SecretsPanel({ slug }) {
         sends {'{{secret:NAME}}'} through the egress proxy — the agent never sees the
         value. Add or edit the keys themselves in Review → Secrets.</div>
       <ul className="staged-list">
-        {secrets.length === 0 && <li className="dim">no keys saved yet — add them in Review → Secrets</li>}
+        {secrets.length === 0 && <EmptyState as="li">no keys saved yet — add them in Review → Secrets</EmptyState>}
         {secrets.map((s) => {
           const granted = grants[s.name] === 'granted'
           return (
-            <li key={s.name}>
+            <li key={s.name} className="grant-row">
               <span className={`tag ${granted ? 'done' : ''}`}>{granted ? 'granted' : 'off'}</span>
-              <span className="grow mono ellipsis">{s.name}</span>
-              <span className="dim small">…{s.last4}</span>
-              {s.hosts?.length > 0 &&
-                <span className="dim small ellipsis" title={`web: ${s.hosts.join(', ')}`}>
-                  {s.hosts.join(', ')}</span>}
+              <span className="grow grant-main">
+                <span className="grant-name">
+                  <span className="mono ellipsis" title={s.name}>{s.name}</span>
+                  <span className="dim small mono">…{s.last4}</span>
+                </span>
+                {s.hosts?.length > 0 &&
+                  <span className="dim small ellipsis" title={`web: ${s.hosts.join(', ')}`}>
+                    {s.hosts.join(', ')}</span>}
+              </span>
               <button className={granted ? 'win-btn' : 'win-btn ok'} disabled={busy}
                       onClick={() => setGrant(s.name, granted ? 'revoked' : 'granted')}>
                 {granted ? 'revoke' : 'grant'}
@@ -1460,6 +1547,14 @@ function SecretsPanel({ slug }) {
 // broker pins the guest for the session and primes this project's files so the
 // shell lands where the agent's tools operate. Reconnects on the Reconnect
 // button, not automatically (a dead socket usually means the guest is off).
+function termTheme() {
+  const css = getComputedStyle(document.documentElement)
+  const v = (name) => css.getPropertyValue(name).trim()
+  const bg = v('--term-bg')
+  return { background: bg, foreground: v('--term-fg'), cursor: v('--term-cursor'),
+           cursorAccent: bg, selectionBackground: v('--term-selection') }
+}
+
 function TerminalPanel({ slug }) {
   const hostRef = useRef(null)
   const [status, setStatus] = useState('connecting')
@@ -1469,8 +1564,13 @@ function TerminalPanel({ slug }) {
     const term = new Terminal({
       fontSize: 13, cursorBlink: true, convertEol: false,
       fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
-      theme: { background: '#0e1013', foreground: '#e2e6ec', cursor: '#5b9cf5' },
+      theme: termTheme(),
     })
+    // xterm paints to a canvas, so CSS can't restyle it: follow the theme
+    // toggle (index.html / the nav stamp data-theme on <html>) by hand
+    const themeWatch = new MutationObserver(() => { term.options.theme = termTheme() })
+    themeWatch.observe(document.documentElement,
+                       { attributes: true, attributeFilter: ['data-theme'] })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(hostRef.current)
@@ -1516,7 +1616,7 @@ function TerminalPanel({ slug }) {
     ro.observe(hostRef.current)
 
     return () => {
-      ro.disconnect(); onData.dispose()
+      ro.disconnect(); themeWatch.disconnect(); onData.dispose()
       try { ws.close() } catch { /* ignore */ }
       term.dispose()
     }
@@ -1584,7 +1684,7 @@ function TaskBoardPanel({ slug, state, setState }) {
             <button className="win-btn" onClick={() => act({ action: 'delete', index: i })}>×</button>
           </li>
         ))}
-        {todos.length === 0 && <li className="dim">no plan yet — Jav3 writes one with todo_update</li>}
+        {todos.length === 0 && <EmptyState as="li">no plan yet — Jav3 writes one with todo_update</EmptyState>}
       </ul>
       <form className="row" onSubmit={(e) => {
         e.preventDefault()
@@ -1597,7 +1697,7 @@ function TaskBoardPanel({ slug, state, setState }) {
       <div className="dim small">runs</div>
       <ul className="board-runs">
         {running.length === 0 && recent.length === 0 &&
-          <li className="dim">nothing running</li>}
+          <EmptyState as="li">nothing running</EmptyState>}
         {running.map((j) => (
           <li key={j.id}>
             <span className="run-dot running" />
@@ -1652,7 +1752,7 @@ function TodoPanel({ slug }) {
             <button className="win-btn" onClick={() => act({ action: 'delete', index: i })}>×</button>
           </li>
         ))}
-        {todos.length === 0 && <li className="dim">nothing yet</li>}
+        {todos.length === 0 && <EmptyState as="li">nothing yet</EmptyState>}
       </ul>
     </div>
   )

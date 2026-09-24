@@ -67,7 +67,7 @@ export default function PlanPanel({ slug, state, setState }) {
   return (
     <div className="pane-col">
       <form className="row" onSubmit={(e) => { e.preventDefault(); if (dump.trim()) makePlan() }}>
-        <Input textarea className="grow" rows={2} value={dump}
+        <Input textarea className="grow plan-dump" rows={3} value={dump}
                aria-label="dump" placeholder="dump the ask here — a spec, notes, a list…"
                onChange={(e) => setState({ dump: e.target.value })} />
         <Button type="submit" disabled={busy || running || !dump.trim()}>Plan</Button>
@@ -148,7 +148,7 @@ function PlanItem({ it, index, count, agents, busy, onPatch, onDelete }) {
         {it.assignee && <span className="dim small">@{it.assignee}</span>}
         {it.depends_on.length > 0 && <span className="dim small">after {it.depends_on.join(', ')}</span>}
         {it.attempts > 1 && <span className="dim small" title="attempts">×{it.attempts}</span>}
-        <Menu open={menu} onClose={() => setMenu(false)} label={`item ${it.id} actions`}
+        <Menu floating open={menu} onClose={() => setMenu(false)} label={`item ${it.id} actions`}
               trigger={
                 <Button variant="icon" className="win-btn" aria-haspopup="menu" aria-expanded={menu}
                         disabled={busy} onClick={() => setMenu((m) => !m)}>⋯</Button>
