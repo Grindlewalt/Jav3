@@ -86,14 +86,10 @@ def _clear(key: str) -> None:
 
 
 def _peer(request: Request) -> str:
-    """For the alert text only — never for a throttling decision. These headers
-    are trivially forged by anything that can reach the app directly, so they
-    are a hint about who, not an input to the control."""
-    for h in ("cf-connecting-ip", "x-forwarded-for"):
-        v = request.headers.get(h)
-        if v:
-            return v.split(",")[0].strip()[:64]
-    return getattr(request.client, "host", "?")
+    """The TCP peer, for the alert text only. Forwarding headers are not read:
+    with no trusted proxy in front of a LAN server they are whatever the caller
+    chose to send."""
+    return (getattr(request.client, "host", None) or "?")[:64]
 
 
 def hash_password(password: str) -> str:
@@ -189,9 +185,8 @@ async def _alert(key: str, count: int, peer: str) -> None:
                 summary=f"{count} failed logins for '{key}' (from {peer})",
                 detail={"username": key, "attempts": count, "peer": peer,
                         "note": "each further attempt is delayed up to 8s. The "
-                                "peer is taken from CF-Connecting-IP/"
-                                "X-Forwarded-For where present and is a hint "
-                                "only — it is not used for throttling."})
+                                "peer is the TCP peer and is not used for "
+                                "throttling."})
         finally:
             await db.close()
     except Exception:

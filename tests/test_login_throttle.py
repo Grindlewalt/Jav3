@@ -108,18 +108,17 @@ async def test_an_alert_failure_never_blocks_logging_in(monkeypatch):
     await auth._alert("alice", 9, "?")        # must not raise
 
 
-def test_peer_is_reporting_only_and_prefers_the_proxy_header():
+def test_peer_is_the_tcp_peer_not_a_forwarded_header():
     class Req:
         def __init__(self, headers, host):
             self.headers = headers
             self.client = type("C", (), {"host": host})()
 
-    assert auth._peer(Req({"cf-connecting-ip": "1.2.3.4"}, "127.0.0.1")) == "1.2.3.4"
-    # a comma list is what X-Forwarded-For looks like through several hops
-    assert auth._peer(Req({"x-forwarded-for": "9.9.9.9, 10.0.0.1"}, "127.0.0.1")) == "9.9.9.9"
-    assert auth._peer(Req({}, "10.0.0.5")) == "10.0.0.5"
+    # no trusted proxy in front of a LAN server: forwarding headers are ignored
+    assert auth._peer(Req({"cf-connecting-ip": "1.2.3.4"}, "127.0.0.1")) == "127.0.0.1"
+    assert auth._peer(Req({"x-forwarded-for": "9.9.9.9"}, "10.0.0.5")) == "10.0.0.5"
     # and it is bounded, since it lands in an alert summary
-    assert len(auth._peer(Req({"cf-connecting-ip": "x" * 500}, "?"))) <= 64
+    assert len(auth._peer(Req({}, "x" * 500))) <= 64
 
 
 @pytest.mark.asyncio
