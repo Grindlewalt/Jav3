@@ -23,7 +23,7 @@ from .agent.loop import db_tool_sink
 from .vm.turn import run_agent_turn
 from .agent.model import complete_text, confirm_peak
 from .config import settings
-from .db import get_db, open_conversation
+from .db import get_db, launcher, open_conversation
 from .memory import assemble_system_prompt
 from .writes import apply_write
 
@@ -153,7 +153,9 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
         else:
             # DIRECT / subagent — do the work through the shared loop.
             # Build the node via the Agent seam: narrowed context + this layer's
-            # brief. spawn() is what a parent used to mint this child's context.
+            # brief. Agent is a 3-field dataclass whose only method is
+            # system_prompt(); the old Agent.spawn() is gone — _node_context is
+            # what narrows a child's context now.
             bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "running"})
             context = await _node_context(kind, project, parent_summary)
             node = Agent(context=context, tools=leaf_tools or [], brief=brief)
@@ -206,9 +208,14 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     try:
         db = await get_db()
         try:
+            # parent = the turn that deployed us (durable chat-to-job link, see
+            # db.launcher); owner = the agent that turn works for, which labels
+            # the events. Nodes are NOT stamped with it: they run the funnel's
+            # own prompts, not that agent's definition.
+            launched_by, owner = await launcher(db)
             root_id = await open_conversation(
                 db, project=project, title=f"[head] {(title or brief)[:60]}",
-                kind="head", job_id=job_id)
+                kind="head", job_id=job_id, parent=launched_by)
         finally:
             await db.close()
     except Exception as e:
@@ -222,10 +229,12 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
 
     if peak:
         confirm_peak(root_id)
-    bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": root_id})
+    bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": root_id,
+                         "agent_slug": owner})
     bus.publish(job_id, {
         "type": "node_spawned", "node_id": root_id, "parent_id": None,
-        "kind": "head", "title": title or brief[:60], "depth": 0})
+        "kind": "head", "title": title or brief[:60], "depth": 0,
+        "agent_slug": owner})
     bus.announce_job(job_id, root_id, title or brief[:60])
 
     # one token budget across every node of this job (contextvar propagates into

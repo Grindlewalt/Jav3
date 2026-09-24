@@ -2,8 +2,9 @@
 
 The exclusion model is deliberate: an agent gets EVERYTHING (context files,
 tools, skills) by default and lists what to remove, so necessary pieces
-can't be forgotten — only knowingly taken away. These defs are authoring
-only for now; the spawn tool that runs them lands with the tool layer.
+can't be forgotten — only knowingly taken away. Running them lives in
+agents_run.py (one-shot runs, spawn_agent, schedules) and chat.py (an agent
+chat thread: `conversations.agent_slug`).
 """
 import re
 
@@ -50,13 +51,27 @@ FIELD_DEFAULTS = {
     "description": "",
     "model": "",          # "" = inherit the main model (deepseek-flash)
     "base_url": "",       # "" = default DeepSeek endpoint; e.g. ollama: http://localhost:11434/v1
-    "own_memory": False,  # experimental: agent keeps its own notes instead of sharing
+    # memory_read/memory_write use agents/<slug>/memory/ instead of the shared
+    # memory/notes/ whenever a turn runs as this agent (memory.notes_dir via
+    # runtime.agent_memory). The shared standing notes still lead its prompt —
+    # the operator's rules are not optional — this only redirects its OWN notes.
+    "own_memory": False,
+    # subtractive model: everything by default. The GUI no longer edits these,
+    # but they stay honoured server-side (the funnel and hand-edited AGENT.md
+    # files may set them). skills_exclude unions with tools_exclude at run time
+    # (agents_run.agent_exclusions) — skills compile into the same registry.
     "context_exclude": [],
     "tools_exclude": [],
     "skills_exclude": [],
-    # headless runs (spawn_agent, schedules) get the tight subagent iteration
-    # cap by default; set this to grant a specific agent more rounds. 0 = default.
+    # rounds of the ReAct loop this agent may take. 0 = the path's default: the
+    # tight subagent cap for headless runs (spawn_agent, schedules), the full
+    # chat cap for a run or thread the operator started and is watching.
     "max_iterations": 0,
+    # the project this agent lives in ("" = none: follow the caller). Run-time
+    # precedence is request `project` > this > the caller's pin/global active
+    # (agents_run.resolve_run_project) — for headless, interactive, spawned
+    # runs and agent chat threads alike.
+    "project": "",
 }
 
 
@@ -173,6 +188,7 @@ class SaveAgent(BaseModel):
     tools_exclude: list[str] = []
     skills_exclude: list[str] = []
     max_iterations: int = 0
+    project: str = ""
     prompt: str = ""
 
 
@@ -199,7 +215,10 @@ def _read(slug: str) -> dict:
     path = _agent_path(slug)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="no such agent")
-    meta = _parse_md(path)
+    # relaxed requirements: an AGENT.md with no `description:` is odd but
+    # usable, and 500ing on it made an agent the roster happily lists
+    # un-openable — and un-runnable as a chat identity too
+    meta = _parse_md(path, required=())
     if meta is None:
         raise HTTPException(status_code=500, detail="unparseable AGENT.md")
     out = {"slug": slug, "name": meta.get("name", slug), "prompt": meta.get("body", "")}
@@ -214,12 +233,13 @@ def _list_dir(base):
         for md in sorted(base.glob("*/AGENT.md")):
             if md.parent.name.startswith("."):
                 continue  # skip the .trash bin
-            meta = _parse_md(md) or {}
+            meta = _parse_md(md, required=()) or {}
             agents.append({
                 "slug": md.parent.name,
                 "name": meta.get("name", md.parent.name),
                 "description": meta.get("description", ""),
                 "model": meta.get("model", ""),
+                "project": meta.get("project") or "",
             })
     return agents
 
@@ -248,10 +268,31 @@ async def read_agent(slug: str):
     return _read(slug)
 
 
+async def _check_project(slug: str) -> None:
+    """A definition's project must be a live project (or empty). Checked at save
+    so a typo is a 400 in the editor, not a failed run at 06:45; a project
+    deleted AFTER the save is caught again at run time."""
+    if not slug:
+        return
+    from .db import get_db
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL",
+            (slug,)) as cur:
+            ok = await cur.fetchone() is not None
+    finally:
+        await db.close()
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"no such project: {slug}")
+
+
 @router.put("/{slug}")
 async def save_agent(slug: str, body: SaveAgent):
     if not _agent_path(slug).is_file():
         raise HTTPException(status_code=404, detail="no such agent")
+    body.project = body.project.strip()
+    await _check_project(body.project)
     _write(slug, body)
     return {"ok": True}
 

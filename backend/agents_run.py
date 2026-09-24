@@ -22,8 +22,11 @@ from .vm.turn import run_agent_turn
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .agents_api import _read
 from .auth import require_user
+# one marker for "the operator stopped this", shared with the chat path so a
+# stopped run and a stopped turn read identically in a transcript
+from .chat import INTERRUPTED_MARKER
 from .config import settings
-from .db import get_db, open_conversation
+from .db import get_db, launcher, open_conversation
 from .memory import assemble_system_prompt, get_active_project
 
 router = APIRouter(prefix="/api/agents", tags=["agents"],
@@ -72,9 +75,28 @@ def _agent_overrides(agent: dict) -> tuple[str | None, str | None]:
     return (agent.get("model") or None, agent.get("base_url") or None)
 
 
+def agent_exclusions(agent: dict) -> set[str]:
+    """Registry entry names this definition removes.
+
+    Skills compile into the SAME registry as tools (registry.py:_sources), so
+    there is one namespace to exclude from — `skills_exclude` was declared and
+    stored for a long time while biting nothing. Every path that trims an
+    agent's tools (runs, spawned children, chat threads) goes through here."""
+    return (set(agent.get("tools_exclude") or [])
+            | set(agent.get("skills_exclude") or []))
+
+
+def memory_slug(agent: dict) -> str | None:
+    """The slug whose private notes dir this agent's memory tools use, or None
+    for the shared notes. Only a real definition (it has a slug) can own one —
+    a temp agent's notes are the whole point of it surviving, so they stay
+    shared where the operator and Jarvis will see them."""
+    return agent.get("slug") if agent.get("own_memory") and agent.get("slug") else None
+
+
 def _agent_tools(agent: dict, autonomy_level: str | None = None) -> list[dict]:
     from . import autonomy, runtime
-    own_exclude = set(agent.get("tools_exclude") or [])
+    own_exclude = agent_exclusions(agent)
     excluded = set(own_exclude)
     # a subagent never launches teams or mints persistent infrastructure —
     # but the spawn tools themselves nest up to MAX_SPAWN_DEPTH (fork-bomb
@@ -122,12 +144,54 @@ async def _validate_project(db, slug: str) -> None:
             raise HTTPException(status_code=404, detail=f"no such project: {slug}")
 
 
-async def _agent_system_prompt(db, agent: dict, active=_USE_DB) -> str:
+async def bound_project(db, agent: dict) -> str | None:
+    """The definition's own `project`, checked live — or None if it has none.
+    A bound project deleted since the definition was saved is a 404, not a
+    silent fallback: running a project's agent somewhere else is the wrong
+    work in the wrong tree."""
+    slug = (agent.get("project") or "").strip()
+    if not slug:
+        return None
+    async with db.execute(
+        "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL",
+        (slug,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(
+                status_code=404,
+                detail=f"agent '{agent.get('name')}' is bound to project "
+                       f"'{slug}', which no longer exists — edit the agent")
+    return slug
+
+
+async def resolve_run_project(db, agent: dict, requested=_USE_DB) -> str | None:
+    """Where an agent run happens: the request's `project` > the definition's
+    `project` > the caller's pin (a project-bound chat that spawned us) > the
+    GUI's global active project.
+
+    `requested` is _USE_DB or None when the caller named nothing (None is how a
+    schedule without a project_slug says it); a slug is validated here."""
+    if requested is not _USE_DB and requested is not None:
+        await _validate_project(db, requested)
+        return requested
+    bound = await bound_project(db, agent)
+    if bound:
+        return bound
+    # a schedule's "no project" stays no project; only an unset caller inherits
+    return None if requested is None else await _inherited_or_global(db)
+
+
+async def _agent_system_prompt(db, agent: dict, active=_USE_DB,
+                               extra_exclude: set[str] | None = None) -> str:
     """The agent's prompt, then the shared project context minus excluded
     sections. The agent's context_exclude tokens (soul.md, user.md, env.md,
     all-projects.md, active-project, ...) are assemble_system_prompt's block
-    labels, so exclusion happens at assembly instead of post-hoc splitting."""
-    exclude = set(agent.get("context_exclude") or [])
+    labels, so exclusion happens at assembly instead of post-hoc splitting.
+
+    `extra_exclude` is the CALLER's own trimming, unioned with the agent's: the
+    chat path uses it for the voice local tier's slim sandwich. This is the one
+    place the "agent prompt + trimmed context" shape is built, so an agent chat
+    thread and a one-shot run assemble their prompt identically."""
+    exclude = set(agent.get("context_exclude") or []) | set(extra_exclude or ())
     base = (await assemble_system_prompt(db, exclude=exclude) if active is _USE_DB
             else await assemble_system_prompt(db, active=active, exclude=exclude))
     return f"{agent['prompt']}\n\n---\n\n{base}"
@@ -138,11 +202,18 @@ async def _open_run(db, agent: dict, task: str,
     """Create the conversation for an agent run and record the task. Returns
     (conversation_id, resolved project slug) — the caller needs the resolved
     slug (not the _USE_DB sentinel) for the autonomy lookup."""
-    if active is _USE_DB:
-        active = await _inherited_or_global(db)
+    active = await resolve_run_project(db, agent, active)
     title = f"[{agent['name']}] " + " ".join(task.split())[:40]
+    # parent: the turn that dispatched spawn_agent/spawn_temp_agent (the broker
+    # restores runtime.conversation_id for a guest turn), so the run tree stays
+    # connected exactly where Jarvis delegates. None for a schedule, which
+    # really has no parent conversation.
+    parent, _ = await launcher(db)
     conversation_id = await open_conversation(
-        db, project=active, title=title, kind="agent", commit=False)
+        db, project=active, title=title, kind="agent", commit=False,
+        parent=parent,
+        # WHO this run is. A temp agent has no roster entry and gets None.
+        agent=agent.get("slug"))
     await db.execute(
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
@@ -184,6 +255,7 @@ def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
         "description": "", "model": "", "base_url": "", "own_memory": False,
         "context_exclude": [] if duplicate else list(TEMP_LEAN_EXCLUDE),
         "tools_exclude": [], "skills_exclude": [], "max_iterations": 0,
+        "project": "",
     }
 
 
@@ -233,6 +305,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB) -> dict:
                                               tools=tools, model_name=mdl,
                                               base_url=burl, max_iterations=cap,
                                               active_project=active,
+                                              memory_slug=memory_slug(agent),
                                               on_tool_call=db_tool_sink(db, conversation_id)):
                 if event["type"] == "final":
                     final_content = event["content"]
@@ -287,14 +360,11 @@ async def run_agent(slug: str, body: RunAgent):
     agent = _read(slug)  # 404s if missing
     db = await get_db()
     try:
-        if body.project:
-            await _validate_project(db, body.project)
-            active = body.project
-        else:
-            active = await get_active_project(db)
+        # request > definition > the GUI's global (no caller pin over HTTP)
+        active = await resolve_run_project(db, agent, body.project or _USE_DB)
         title = f"[{agent['name']}] " + " ".join(body.task.split())[:40]
         conversation_id = await open_conversation(
-            db, project=active, title=title, kind="agent")
+            db, project=active, title=title, kind="agent", agent=slug)
 
         if body.confirm_peak:
             confirm_peak(conversation_id)
@@ -340,14 +410,20 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
     try:
         db = await get_db()
         bus.publish(chan, {"type": "start", "conversation_id": conversation_id,
-                           "agent": agent["name"]})
+                           "agent": agent["name"], "agent_slug": agent.get("slug")})
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent, await _project_autonomy(db, active))
         mdl, burl = _agent_overrides(agent)
+        # max_iterations used to be honoured headless and ignored here, so one
+        # definition ran two caps depending on who started it. An interactive
+        # run is operator-started and watched, so its DEFAULT is the full chat
+        # cap (None), not the subagent fence for unattended nesting.
+        cap = agent.get("max_iterations") or None
         history = [{"role": "user", "content": task}]
         async for event in run_agent_turn(conversation_id, system_prompt, history,
                                           tools=tools, model_name=mdl, base_url=burl,
-                                          active_project=active,
+                                          max_iterations=cap, active_project=active,
+                                          memory_slug=memory_slug(agent),
                                           on_tool_call=db_tool_sink(db, conversation_id)):
             if event["type"] == "final":
                 final_content = event["content"]
@@ -359,8 +435,22 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
         await db.commit()
         bus.publish(chan, {"type": "final", "content": final_content})
     except asyncio.CancelledError:
+        # the operator hit stop. Same contract as chat.py's stop: leave the
+        # interruption in the transcript so a reopened run doesn't look like it
+        # silently produced nothing, publish a final so every attached tail
+        # settles, then re-raise so the task ends properly cancelled.
         error = "run cancelled"
-        bus.publish(chan, {"type": "error", "message": error})
+        final_content = INTERRUPTED_MARKER
+        if db is not None:
+            try:
+                await db.execute(
+                    "INSERT INTO messages (conversation_id, role, content) "
+                    "VALUES (?, 'assistant', ?)",
+                    (conversation_id, INTERRUPTED_MARKER))
+                await db.commit()
+            except Exception:  # noqa: BLE001 — the marker is best-effort
+                pass
+        bus.publish(chan, {"type": "final", "content": INTERRUPTED_MARKER})
         raise
     except Exception as e:  # noqa: BLE001 — surface to the GUI, don't 500 mid-stream
         error = str(e)
@@ -378,8 +468,12 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
                 "summary": " ".join((final_content or "").split())[:180]})
         except Exception:                        # noqa: BLE001 — never break the run
             pass
-        bus.publish(chan, bus.JOB_END)
+        # drop the running flag, THEN signal end (chat.py's order):
+        # resume_run_stream subscribes and then checks the flag, so with the end
+        # published first a re-attach landing between the two waited forever
+        # on a channel whose terminal event had already gone out to nobody
         _active_runs.pop(conversation_id, None)
+        bus.publish(chan, bus.JOB_END)
         if db is not None:
             await db.close()
         runtime.web_session.reset(wtoken)
@@ -419,6 +513,90 @@ async def resume_run_stream(conversation_id: int):
 
         return StreamingResponse(idle(), media_type="text/event-stream")
     return _tail(conversation_id, q)
+
+
+@router.post("/runs/{conversation_id}/stop")
+async def stop_run(conversation_id: int):
+    """Cancel an in-flight agent run (mirror of POST /api/chat/{cid}/stop).
+    The run's CancelledError handler records the interruption, publishes a
+    final event and fires the completion notice, so every attached tail (and
+    the transcript) settles on its own."""
+    task = _active_runs.get(conversation_id)
+    if task is None or task.done():
+        return {"stopped": False}
+    task.cancel()
+    return {"stopped": True}
+
+
+# Everything an agent produced: conversations that run AS the slug, plus every
+# node descended from one (spawned children, temp agents, funnel/research jobs
+# it launched). UNION, not UNION ALL, so a malformed parent cycle terminates.
+_OUTPUTS_SQL = """
+WITH RECURSIVE tree(id) AS (
+    SELECT id FROM conversations WHERE agent_slug = ?
+    UNION
+    SELECT c.id FROM conversations c JOIN tree t ON c.parent_conversation_id = t.id
+)
+SELECT c.id, c.kind, c.summary AS title, c.agent_slug,
+       c.parent_conversation_id AS parent_id, c.job_id, c.rollup, c.started_at,
+       p.slug AS project,
+       (SELECT m.content FROM messages m WHERE m.conversation_id = c.id
+         ORDER BY m.id DESC LIMIT 1) AS last_message,
+       (SELECT MAX(m.created_at) FROM messages m
+         WHERE m.conversation_id = c.id) AS last_at
+FROM conversations c JOIN tree t ON t.id = c.id
+LEFT JOIN projects p ON p.id = c.project_id
+ORDER BY c.started_at DESC, c.id DESC
+LIMIT ?
+"""
+
+
+def _runs_files(project: str | None, job_id: str | None) -> list[str]:
+    """The job's rollup files (orchestrator/research write runs/<job>/*.md into
+    the project), as project-relative paths; empty when there are none."""
+    if not (project and job_id):
+        return []
+    d = settings.projects_dir / project / "runs" / job_id
+    if not d.is_dir():
+        return []
+    return sorted(f"runs/{job_id}/{p.name}" for p in d.iterdir() if p.is_file())
+
+
+@router.get("/{slug}/outputs")
+async def agent_outputs(slug: str, limit: int = 50):
+    """The Agent Outputs view's data: newest first, any kind. Deliberately not
+    a 404 for an unknown slug — a deleted agent's past work is still its past
+    work. The live tail is the existing streams (agent runs' `start` event and
+    job `job_start`/`node_spawned` events carry `agent_slug`)."""
+    from .chat import _active_turns
+    db = await get_db()
+    try:
+        async with db.execute(_OUTPUTS_SQL, (slug, max(1, min(limit, 200)))) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+    for r in rows:
+        last = " ".join((r.pop("last_message") or "").split())
+        r["snippet"] = last[:240]
+        r["running"] = r["id"] in _active_runs or r["id"] in _active_turns
+        r["runs_files"] = _runs_files(r["project"], r["job_id"])
+    return {"slug": slug, "outputs": rows}
+
+
+@router.get("/{slug}/memory")
+async def agent_memory_notes(slug: str):
+    """An own_memory agent's private notes (agents/<slug>/memory/), so the
+    operator can see what it keeps — a silo nobody can read would be worse than
+    no silo. Empty for an agent that uses the shared notes."""
+    from .memory import note_description, parse_note
+    _read(slug)  # 404s if missing
+    d = settings.agents_dir / slug / "memory"
+    notes = []
+    for p in sorted(d.glob("*.md")) if d.is_dir() else []:
+        meta, body = parse_note(p.read_text())
+        notes.append({"name": p.stem, "description": note_description(meta, body),
+                      "body": body})
+    return {"slug": slug, "notes": notes}
 
 
 @router.get("/notices/stream")

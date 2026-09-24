@@ -88,6 +88,12 @@ async def test_resume_stream_attaches_to_running_turn(client, monkeypatch):
     r = await asyncio.wait_for(tail, 5)
     assert '"final"' in r.text and "the full reply" in r.text
     await asyncio.wait_for(post, 5)
+    # `final` goes out before the turn's finally closes its DB handle; ending
+    # the test in that window strands an aiosqlite thread on a closed loop
+    from backend import chat as chat_mod
+    task = chat_mod._active_turns.get(cid)
+    if task:
+        await task
 
 
 async def test_resume_stream_idle_when_no_turn(client):

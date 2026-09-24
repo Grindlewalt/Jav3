@@ -29,6 +29,9 @@ class TurnEnvelope:
     web_session: str | None = None
     ephemeral: bool = False
     event_chan: str | None = None
+    # agents/<slug>/memory is this turn's notes dir (own_memory agents only);
+    # host-derived from the definition, restored into runtime.agent_memory
+    memory_slug: str | None = None
 
 
 _envelopes: dict[str, TurnEnvelope] = {}
@@ -100,9 +103,10 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
         return {"result": f"error: broker has no turn context for op_id {op_id!r}",
                 "taint": "trusted"}
     vars_ = (runtime.web_session, runtime.ephemeral, runtime.artifact_slug,
-             runtime.event_chan, runtime.active_project, runtime.conversation_id)
+             runtime.event_chan, runtime.active_project, runtime.conversation_id,
+             runtime.agent_memory)
     vals = (env.web_session, env.ephemeral, env.artifact_slug, env.event_chan,
-            env.active_project, env.conversation_id)
+            env.active_project, env.conversation_id, env.memory_slug)
     tokens = [v.set(val) for v, val in zip(vars_, vals)]
     # also restore the operation's budget id: a tool that itself runs a turn
     # (spawn_agent, deploy_agents) must resolve THIS operation's Budget so the

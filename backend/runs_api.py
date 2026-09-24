@@ -17,7 +17,7 @@ from .agent.model import in_peak_window
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .auth import require_user
 from .autonomy import NON_DELEGABLE
-from .db import get_db
+from .db import get_db, owning_agent
 from .memory import get_active_project
 
 router = APIRouter(prefix="/api/runs", tags=["runs"], dependencies=[Depends(require_user)])
@@ -37,7 +37,7 @@ async def list_jobs(kind: str | None = None):
                             detail=f"kind must be one of {', '.join(JOB_KINDS)}")
     # done: research heads set a rollup when finished; agent/scheduled runs
     # never set one — their completion mark is the final assistant message.
-    q = ("SELECT c.id, c.kind, c.summary, c.started_at, c.job_id, "
+    q = ("SELECT c.id, c.kind, c.summary, c.started_at, c.job_id, c.agent_slug, "
          "p.slug AS project, "
          "(c.rollup IS NOT NULL OR EXISTS (SELECT 1 FROM messages m "
          "  WHERE m.conversation_id = c.id AND m.role = 'assistant')) AS done "
@@ -228,20 +228,28 @@ async def run_stream(cid: int):
             "SELECT id, kind, summary, rollup, parent_conversation_id "
             "FROM conversations WHERE job_id = ? ORDER BY id", (job_id,)) as cur:
             nodes = [dict(r) for r in await cur.fetchall()]
+        # the agent this job works for (the head's launcher lineage), so a
+        # client can filter job streams by agent the same way live events allow
+        owner = await owning_agent(db, cid)
     finally:
         await db.close()
 
     done_at_start = head["rollup"] is not None
     depths = _depths(nodes)
+    in_job = {n["id"] for n in nodes}
     queue = bus.subscribe(job_id)  # subscribe before emitting snapshot: no gap
 
     async def event_stream():
         try:
             for n in nodes:  # snapshot of what already happened
                 title = (n["summary"] or "").split("] ", 1)[-1]
+                # the head's parent is the chat that launched the job — outside
+                # this tree, so the tree sees it as a root (live events agree)
+                parent = n["parent_conversation_id"]
                 yield sse({"type": "node_spawned", "node_id": n["id"],
-                           "parent_id": n["parent_conversation_id"], "kind": n["kind"],
-                           "title": title, "depth": depths.get(n["id"], 0)})
+                           "parent_id": parent if parent in in_job else None,
+                           "kind": n["kind"], "title": title,
+                           "depth": depths.get(n["id"], 0), "agent_slug": owner})
                 if n["rollup"] is not None:
                     yield sse({"type": "node_done", "node_id": n["id"], "rollup": n["rollup"]})
             if done_at_start:

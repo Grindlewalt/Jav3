@@ -13,7 +13,7 @@ async def run(agent: str, task: str) -> str:
     try:
         result = await agents_run.run_agent_headless(agent, task)
     except HTTPException as e:
-        if e.status_code == 404:
+        if e.status_code == 404 and e.detail == "no such agent":
             return (f"error: no agent named '{agent}'. Check the agent list — "
                     "agents are created in the Agents tab.")
         return f"error: {e.detail}"

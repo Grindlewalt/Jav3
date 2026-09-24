@@ -17,10 +17,18 @@ def notes_dir():
     """Where memory notes are written/read. In ephemeral mode this is a
     throwaway dir, so test turns never pollute real memory. Context assembly
     (memory_block/notes) always uses the REAL dir, so ephemeral writes never
-    leak upward."""
+    leak upward.
+
+    An agent run with `own_memory` gets its own notes dir under its definition
+    (agents/<slug>/memory/): still a plain file tree the operator can read, and
+    it moves to the trash with the agent. Ephemeral wins over it — incognito
+    means nothing persists, whoever is answering."""
     from . import runtime
     if runtime.ephemeral.get():
         return settings.memory_dir / ".ephemeral-notes"
+    own = runtime.agent_memory.get()
+    if own:
+        return settings.agents_dir / own / "memory"
     return settings.memory_dir / "notes"
 
 

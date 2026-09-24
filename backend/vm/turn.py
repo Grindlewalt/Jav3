@@ -21,7 +21,7 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
                          read_only=None, model_name=None, base_url=None,
                          self_check=True, max_iterations=None, on_tool_call=None,
                          active_project=None, rewrite_rules=True,
-                         inject_rules=True):
+                         inject_rules=True, memory_slug=None):
     from .. import runtime
     from ..agent import budget as budget_mod
     from ..agent.tools.registry import openai_tool_specs, read_only_names
@@ -39,7 +39,10 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
         op_id=op_id, conversation_id=conversation_id, active_project=active_project,
         artifact_slug=runtime.artifact_slug.get(),
         web_session=runtime.web_session.get(),
-        ephemeral=runtime.ephemeral.get(), event_chan=runtime.event_chan.get())
+        ephemeral=runtime.ephemeral.get(), event_chan=runtime.event_chan.get(),
+        # explicit, not ambient: a funnel leaf or temp agent launched from an
+        # own_memory agent's turn must not write into that agent's notes
+        memory_slug=memory_slug)
 
     pending: dict = {}
     async for ev in guest_turn(

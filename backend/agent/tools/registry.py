@@ -65,13 +65,21 @@ def _load_dynamic(name: str) -> Callable[..., Awaitable[str]] | None:
     return fn
 
 
-def _parse_md(path: Path) -> dict | None:
+def _parse_md(path: Path,
+              required: tuple[str, ...] = ("name", "description")) -> dict | None:
+    """Frontmatter + body, or None if this isn't a well-formed definition.
+
+    `required` is the fields a caller cannot work without. A TOOL.md missing
+    name or description can't be offered to the model at all, so the registry
+    keeps both; an AGENT.md only needs its prompt — the slug names it and the
+    description is cosmetic — so agents_api relaxes this rather than 500ing on
+    a definition the roster happily lists."""
     text = path.read_text()
     m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
     if not m:
         return None
     meta = yaml.safe_load(m.group(1)) or {}
-    if "name" not in meta or "description" not in meta:
+    if any(k not in meta for k in required):
         return None
     meta["body"] = m.group(2).strip()
     meta["source"] = str(path)

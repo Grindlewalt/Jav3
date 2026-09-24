@@ -304,13 +304,24 @@ async def init_db() -> None:
                           # 1: project_id is the answer verbatim — including
                           # NULL, which means deliberately no project, so the
                           # turn falls back to the chat's artifact store.
-                          ("project_locked", "INTEGER NOT NULL DEFAULT 0")):
+                          ("project_locked", "INTEGER NOT NULL DEFAULT 0"),
+                          # which agent definition this conversation runs AS.
+                          # NULL is central Jarvis (every chat before this
+                          # column, funnel nodes, temp agents). A slug means the
+                          # turn's system prompt IS agents/<slug>/AGENT.md —
+                          # never "on behalf of": the comms inbox claims mail by
+                          # this column, so a funnel leaf stamped with its
+                          # launcher's slug would steal that agent's messages.
+                          # Provenance is parent_conversation_id instead.
+                          ("agent_slug", "TEXT")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_conv_parent ON conversations(parent_conversation_id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_conv_job ON conversations(job_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_agent ON conversations(agent_slug)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_calls_conv ON model_calls(conversation_id)")
         await db.execute(
@@ -351,7 +362,8 @@ async def set_state(db: aiosqlite.Connection, key: str, value: str | None) -> No
 async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
                             title: str, kind: str = "chat",
                             parent: int | None = None, job_id: str | None = None,
-                            locked: bool = False, commit: bool = True) -> int:
+                            locked: bool = False, agent: str | None = None,
+                            commit: bool = True) -> int:
     """Create a conversation node and return its id — the one place that resolves
     a project slug to its id and inserts the row.
 
@@ -362,7 +374,11 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
     opening user message) are the caller's, using the returned id.
 
     `locked` pins the binding: the turn uses this project (or no project at all,
-    if `project` is None) instead of following whatever is loaded globally."""
+    if `project` is None) instead of following whatever is loaded globally.
+
+    `agent` is the definition slug this conversation runs AS (None = central
+    Jarvis). Set once, at creation: an identity that could change mid-thread
+    would leave a transcript nobody can attribute."""
     project_id = None
     if project:
         async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
@@ -370,8 +386,52 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
         project_id = row["id"] if row else None
     cur = await db.execute(
         "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, "
-        "job_id, project_locked) VALUES (?, ?, ?, ?, ?, ?)",
-        (project_id, title, kind, parent, job_id, 1 if locked else 0))
+        "job_id, project_locked, agent_slug) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (project_id, title, kind, parent, job_id, 1 if locked else 0, agent))
     if commit:
         await db.commit()
     return cur.lastrowid
+
+
+async def launcher(db: aiosqlite.Connection) -> tuple[int | None, str | None]:
+    """(conversation that launched the current work, agent it works for).
+
+    The first is the running turn's conversation (runtime.conversation_id — the
+    broker restores it for a brokered tool), so spawned agents and funnel/
+    research heads record it as their `parent` and the run tree stays connected
+    where Jarvis delegates. None outside a turn (an HTTP-launched job, a
+    schedule), and None if that row is already gone — a dangling parent would
+    fail the foreign key.
+
+    The second is the nearest ancestor's `agent_slug`: a funnel launched by a
+    temp agent that `builder` spawned still belongs to builder. It is for
+    labelling events and outputs, NEVER for stamping a child's own agent_slug
+    (see the column's comment in init_db)."""
+    from . import runtime
+    cid = runtime.conversation_id.get()
+    if cid is None:
+        return None, None
+    lineage = await _lineage_slugs(db, cid)
+    if lineage is None:
+        return None, None
+    return cid, next((s for s in lineage if s), None)
+
+
+async def owning_agent(db: aiosqlite.Connection, cid: int | None) -> str | None:
+    """The nearest `agent_slug` on this conversation or its ancestors."""
+    lineage = await _lineage_slugs(db, cid) if cid is not None else None
+    return next((s for s in lineage or () if s), None)
+
+
+async def _lineage_slugs(db: aiosqlite.Connection, cid: int) -> list | None:
+    """agent_slug of the row and each ancestor, nearest first (None: no row).
+    Depth-capped so a malformed parent cycle cannot spin."""
+    async with db.execute(
+        "WITH RECURSIVE up(id, parent, slug, d) AS ("
+        "  SELECT id, parent_conversation_id, agent_slug, 0 FROM conversations "
+        "  WHERE id = ? "
+        "  UNION ALL SELECT c.id, c.parent_conversation_id, c.agent_slug, up.d + 1 "
+        "  FROM conversations c JOIN up ON c.id = up.parent WHERE up.d < 32) "
+        "SELECT slug FROM up ORDER BY d", (cid,)) as cur:
+        rows = await cur.fetchall()
+    return [r["slug"] for r in rows] if rows else None

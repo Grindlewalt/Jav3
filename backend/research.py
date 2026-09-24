@@ -25,7 +25,7 @@ from .agent import budget as budget_mod
 from .agent.loop import _enforce_rules
 from .agent.model import complete_text
 from .config import settings
-from .db import get_db, open_conversation
+from .db import get_db, launcher, open_conversation
 from .memory import standing_rules_tail
 from .writes import apply_write
 
@@ -207,11 +207,21 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         budget_mod.register(job_id, b)
         optok = budget_mod.active_op_id.set(job_id)
     try:
-        head = await _node(project, None, job_id, "head", f"Research: {topic}")
-        bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": head})
+        # parent = the turn that asked for this research (durable chat-to-job
+        # link); owner = the agent it works for, labelling the events only —
+        # scout/reader nodes are not that agent and are not stamped as it
+        db = await get_db()
+        try:
+            launched_by, owner = await launcher(db)
+        finally:
+            await db.close()
+        head = await _node(project, launched_by, job_id, "head", f"Research: {topic}")
+        bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": head,
+                             "agent_slug": owner})
         bus.announce_job(job_id, head, f"Research: {topic}")
         bus.publish(job_id, {"type": "node_spawned", "node_id": head, "parent_id": None,
-                             "kind": "head", "title": f"Research: {topic}", "depth": 0})
+                             "kind": "head", "title": f"Research: {topic}", "depth": 0,
+                             "agent_slug": owner})
 
         # phase 1: scout
         scout = await _node(project, head, job_id, "scout", "search & filter")

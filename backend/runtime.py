@@ -64,3 +64,11 @@ spawn_depth = contextvars.ContextVar("jarvis_spawn_depth", default=0)
 # the persisted half of the broker's runtime taint ledger — the tag survives on
 # the file instead of only annotating the in-turn result.
 write_taint = contextvars.ContextVar("jarvis_write_taint", default=None)
+
+# The agent whose PRIVATE notes dir the memory tools use for this operation:
+# set only when the turn runs as an agent definition with `own_memory: true`,
+# and then memory_read/memory_write target agents/<slug>/memory/ instead of the
+# shared memory/notes/ (memory.notes_dir). Carried host-side on the broker's
+# TurnEnvelope, never by the guest, and deliberately NOT inherited by a
+# child: each run sets its own (a spawned worker is not its parent).
+agent_memory = contextvars.ContextVar("jarvis_agent_memory", default=None)

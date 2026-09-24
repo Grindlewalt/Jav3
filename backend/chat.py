@@ -40,6 +40,12 @@ class ChatRequest(BaseModel):
     # same tri-state as AssignProject.mode. Omitted it keeps the old shape: a
     # slug pins, no slug follows the globally-loaded project.
     project_mode: Literal["follow", "none", "pin"] | None = None
+    # run this NEW conversation as an agent (agents/<slug>/AGENT.md) instead of
+    # as central Jarvis. Like `project`, it binds at creation and is ignored for
+    # an existing conversation: a thread's identity is what its transcript is
+    # attributable to, so it must not shift mid-conversation. With no
+    # project/project_mode given, the definition's own `project` pins the thread.
+    agent: str | None = None
     # which browser tab is asking. The SPA sends the id it registered on
     # /api/gui/stream, so anything this turn plays comes out of the machine the
     # operator is sitting at instead of every open tab at once.
@@ -113,6 +119,19 @@ async def list_conversations(project: str | None = None):
                               for r in rows]}
 
 
+async def _drop_references(db, conversation_id: int) -> None:
+    """Clear every foreign key pointing AT this conversation, so deleting it
+    doesn't hit `FOREIGN KEY constraint failed` (get_db sets foreign_keys=ON).
+
+    Spawned agents and the funnel/research jobs a chat launches record it as
+    their parent, so a chat that delegated has child rows. The children keep
+    their own transcripts and rollups and simply become roots: the run
+    happened, the conversation that asked for it is gone."""
+    await db.execute(
+        "UPDATE conversations SET parent_conversation_id = NULL "
+        "WHERE parent_conversation_id = ?", (conversation_id,))
+
+
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: int):
     db = await get_db()
@@ -122,6 +141,7 @@ async def delete_conversation(conversation_id: int):
         ) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="no such conversation")
+        await _drop_references(db, conversation_id)
         await db.execute("DELETE FROM tool_calls WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
@@ -184,6 +204,22 @@ async def get_messages(conversation_id: int):
             "WHERE conversation_id = ? ORDER BY id", (conversation_id,)
         ) as cur:
             calls = [dict(r) for r in await cur.fetchall()]
+        # the funnel/research jobs this conversation launched. The bus's `job`
+        # announcement is live-only; the head's parent link is the durable
+        # copy, so a reloaded chat can re-mount its JobTrees (created_at places
+        # each one in the transcript; running = no rollup yet)
+        async with db.execute(
+            "SELECT id AS root_id, job_id, summary AS title, started_at AS created_at, "
+            "rollup IS NULL AS running FROM conversations "
+            "WHERE parent_conversation_id = ? AND kind = 'head' ORDER BY id",
+            (conversation_id,)) as cur:
+            jobs = [{**dict(r), "running": bool(r["running"])}
+                    for r in await cur.fetchall()]
+        async with db.execute(
+            "SELECT agent_slug FROM conversations WHERE id = ?",
+            (conversation_id,)) as cur:
+            row = await cur.fetchone()
+        agent_slug = row["agent_slug"] if row else None
     finally:
         await db.close()
     # attach each turn's tool calls to the assistant message that closed the
@@ -215,7 +251,8 @@ async def get_messages(conversation_id: int):
     # even though half its work is already persisted
     running = conversation_id in _active_turns
     pending = [_act(c) for c in calls[ci:]] if running else []
-    return {"messages": rows, "running": running, "pending_activity": pending}
+    return {"messages": rows, "running": running, "pending_activity": pending,
+            "agent_slug": agent_slug, "jobs": jobs}
 
 
 # In-flight turns, keyed by conversation. The dict entry is both the "is a
@@ -305,6 +342,22 @@ async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
         await registry.dispatch("journal_update", {"entry": f"(auto) {line[:200]}"})
 
 
+def _agent_def(slug: str | None) -> dict | None:
+    """The AGENT.md behind a conversation's identity, or None for Jarvis.
+
+    A missing or unparseable definition is an ERROR, not a silent fallback:
+    running a thread the operator opened as `scout` under Jarvis's own prompt
+    would be the wrong agent answering under the right name. The exception
+    surfaces on the turn's bus channel like any other turn failure."""
+    if not slug:
+        return None
+    from .agents_api import _read as read_agent_def
+    try:
+        return read_agent_def(slug)
+    except HTTPException as exc:
+        raise RuntimeError(f"agent '{slug}': {exc.detail}") from None
+
+
 async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                          user_msg: str = "", tab: str | None = None,
                          voice: bool = False, model_name: str | None = None,
@@ -342,7 +395,6 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # _active_turns and close the bus channel or the conversation bricks
         # (every later POST 409s turn_in_progress) and its SSE tails hang
         db = await get_db()
-        bus.publish(chan, {"type": "start", "conversation_id": conversation_id})
         # the conversation's OWN project binding wins; pinning here (not the
         # global) is what lets chats in different projects run at the same time.
         # An unpinned chat follows the GUI's global active project — but a chat
@@ -352,10 +404,14 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # indistinguishable from "not chosen yet" and inherited the last
         # project loaded.
         async with db.execute(
-            "SELECT c.project_locked AS locked, p.slug AS slug FROM conversations c "
+            "SELECT c.project_locked AS locked, c.agent_slug AS agent_slug, "
+            "p.slug AS slug FROM conversations c "
             "LEFT JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL "
             "WHERE c.id = ?", (conversation_id,)) as cur:
             row = await cur.fetchone()
+        agent_slug = row["agent_slug"] if row else None
+        bus.publish(chan, {"type": "start", "conversation_id": conversation_id,
+                           "agent_slug": agent_slug})
         if row and row["slug"]:
             active = row["slug"]
         elif row and row["locked"]:
@@ -365,10 +421,28 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # tools deep in the loop (and spawn_agent children) resolve this pin
         # instead of the DB global — see toolctx.active_slug
         ptoken = runtime.active_project.set(active)
+        # IDENTITY. A conversation bound to an agent slug runs AS that agent:
+        # its AGENT.md prompt leads the sandwich and its exclusions bite.
+        # Nothing else about the turn changes — multi-turn history, tier-2
+        # compaction, the project pin, detach/re-attach and stop are all the
+        # chat machinery, unmodified. A general agent is a chat with a name,
+        # not a second runtime.
+        agent_def = _agent_def(agent_slug)
         # context_exclude: the voice local tier runs an 8B with a small ctx
         # window — it gets a slim sandwich (operator rules are never droppable)
-        system_prompt = await assemble_system_prompt(
-            db, active=active, exclude=set(context_exclude) or None)
+        if agent_def is not None:
+            from .agents_run import (_agent_overrides, _agent_system_prompt,
+                                     memory_slug as _memory_slug)
+            system_prompt = await _agent_system_prompt(
+                db, agent_def, active=active,
+                extra_exclude=set(context_exclude) or None)
+            # the definition's model override, unless the caller already routed
+            # this turn (voice picks its tier per utterance and must win)
+            if not voice and model_name is None and base_url is None:
+                model_name, base_url = _agent_overrides(agent_def)
+        else:
+            system_prompt = await assemble_system_prompt(
+                db, active=active, exclude=set(context_exclude) or None)
         if voice:
             # spoken turns: narrate-before-acting + speakable-output rules.
             # Appended after everything (incl. the operator-rules tail) so it
@@ -408,6 +482,15 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # the voice local tier: a 4B gets a hand-picked conversational
             # toolset, not thirty schemas — everything else is escalation's job
             entries = [e for e in entries if e["name"] in tools_only]
+        if agent_def is not None:
+            # the definition's exclusions, applied LAST: an agent thread may
+            # narrow what the project already allows, never widen it. NOT
+            # agents_run._agent_tools — that also strips the delegation tools,
+            # which is SUBAGENT policy; a thread the operator opened is
+            # top-level and keeps whatever the project's autonomy dial grants.
+            from .agents_run import agent_exclusions
+            excluded = agent_exclusions(agent_def)
+            entries = [e for e in entries if e["name"] not in excluded]
         # ...and a shortened Notes body. NOT zero: the first line of a body is
         # where the load-bearing operating instruction lives ("Do not call
         # music_search first"), and dropping it entirely broke tool use on the local
@@ -445,7 +528,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             op_id=op_id, conversation_id=conversation_id, active_project=active,
             artifact_slug=(f"chat-{conversation_id}" if atoken is not None else None),
             web_session=runtime.web_session.get(), ephemeral=ephemeral,
-            event_chan=chan)
+            event_chan=chan,
+            memory_slug=_memory_slug(agent_def) if agent_def else None)
         source = guest_turn(conversation_id, system_prompt, history,
                             rules=standing_rules_tail(), tool_specs=tools,
                             read_only=list(read_only_names(entries)),
@@ -459,6 +543,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             # that text instead of obeying it. Escalated voice
                             # turns (DeepSeek, base_url unset) keep it.
                             inject_rules=not (voice and base_url),
+                            # an agent definition may cap its own rounds; None
+                            # keeps the normal chat cap
+                            max_iterations=(agent_def or {}).get("max_iterations") or None,
                             # voice local tier: run on the operator's ollama.
                             # The guest never dials it — the host gateway makes
                             # the call, so base_url is honoured host-side.
@@ -574,6 +661,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             fh.write(f"**{m['role']}**:\n\n{m['content']}\n\n")
             except Exception:  # noqa: BLE001 — recovery dump is best-effort
                 pass
+            # an incognito turn can still spawn an agent or launch a job, whose
+            # row points back here; without this the DELETE below raises a FK
+            # error inside this finally, skipping the contextvar resets, the
+            # _active_turns eviction and bus.close_job — bricking the chat
+            await _drop_references(db, conversation_id)
             for tbl in ("tool_calls", "messages", "conversations"):
                 col = "id" if tbl == "conversations" else "conversation_id"
                 await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
@@ -674,7 +766,22 @@ async def chat(body: ChatRequest):
             if in_peak_window() and not body.confirm_peak:
                 raise HTTPException(status_code=409,
                                     detail="peak_confirmation_required")
+            # identity is validated here, not in the detached turn: a typo'd
+            # slug is a 404 on the POST the operator can see, not an error
+            # event on a conversation that already exists
+            agent_def = None
+            if body.agent:
+                from .agents_api import _read as read_agent_def
+                agent_def = read_agent_def(body.agent)     # 404s on an unknown slug
             mode = body.project_mode or ("pin" if body.project else "follow")
+            if (agent_def is not None and body.project_mode is None
+                    and not body.project):
+                # precedence: request > the definition's `project` > follow.
+                # An agent that lives in a project opens its threads there.
+                from .agents_run import bound_project
+                bound = await bound_project(db, agent_def)
+                if bound:
+                    mode, body.project = "pin", bound
             if mode == "pin" and body.project:
                 async with db.execute(
                     "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NULL",
@@ -691,7 +798,8 @@ async def chat(body: ChatRequest):
             # naming pass upgrades it after the first exchange (best effort)
             title = " ".join(body.message.split())[:48] or "(empty)"
             conversation_id = await open_conversation(
-                db, project=active, title=title, locked=mode != "follow")
+                db, project=active, title=title, locked=mode != "follow",
+                agent=body.agent or None)
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:
