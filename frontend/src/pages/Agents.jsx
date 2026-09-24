@@ -3,11 +3,12 @@ import { Link, Outlet } from 'react-router-dom'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
-import { useModel } from '../modelInfo.js'
+import { modelOption, useModel } from '../modelInfo.js'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
 import Button, { SaveButton } from '../components/Button.jsx'
-import Input, { Checkbox } from '../components/Input.jsx'
+import Input from '../components/Input.jsx'
+import Toggle from '../components/Toggle.jsx'
 import Select from '../components/Select.jsx'
 import Tag from '../components/Tag.jsx'
 import Toolbar from '../components/Toolbar.jsx'
@@ -44,8 +45,11 @@ export function AgentDefinitions() {
   const [agent, setAgent] = useState(null)
   const ask = useAsk()
   // an agent with no model resolves pin > runtime override > default, so it
-  // inherits `active`, not `default`
-  const inheritedModel = useModel()?.active
+  // inherits `active`, not `default` — shown by its configured label, the
+  // way every other model picker names it, never the raw id
+  const modelInfo = useModel()
+  const inheritedModel = modelInfo?.active
+    ? modelOption(modelInfo, modelInfo.active).label : ''
   const [dirty, setDirty] = useState(false)
   const [skillItems, setSkillItems] = useState([])
   const [projects, setProjects] = useState([])
@@ -53,6 +57,7 @@ export function AgentDefinitions() {
   const [genBusy, setGenBusy] = useState(false)
   const [secrets, setSecrets] = useState([])
   const nameRef = useRef(null)
+  const editorRef = useRef(null)
 
   const refresh = () => {
     api('/api/agents').then((r) => setAgents(r.agents))
@@ -70,6 +75,13 @@ export function AgentDefinitions() {
     if (!selected) { setAgent(null); return }
     api(`/api/agents/${selected}`).then((a) => { setAgent(a); setDirty(false) })
   }, [selected])
+
+  // On a phone the editor stacks under the roster, below the fold: picking an
+  // agent there has to bring its editor up, or the tap looks like it did nothing
+  useEffect(() => {
+    if (!agent || !window.matchMedia('(max-width: 768px)').matches) return
+    editorRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }, [agent?.slug]) // eslint-disable-line
 
   // n = new agent, when not typing
   useEffect(() => {
@@ -217,11 +229,14 @@ export function AgentDefinitions() {
           {agents.length === 0 && <EmptyState as="li">none yet — press n</EmptyState>}
         </ul>
         {trash.length > 0 && (
-          <details className="trash-bin">
-            <summary>Recently deleted ({trash.length})</summary>
-            <ul className="file-list">
+          <details className="deleted-fold trash-bin">
+            <summary>
+              Recently deleted ({trash.length})
+              <span className="chev" aria-hidden="true">›</span>
+            </summary>
+            <ul className="trash-list">
               {trash.map((a) => (
-                <li key={a.slug} className="trashed">
+                <li key={a.slug}>
                   <span className="grow ellipsis">{a.name}</span>
                   <button className="win-btn" title="restore" aria-label={`restore ${a.name}`}
                           onClick={() => restore(a.slug)}>↺</button>
@@ -237,7 +252,7 @@ export function AgentDefinitions() {
           give it a one-off task in the Run an agent panel, put it on a schedule, or
           have Jav3 summon one in chat.</p>
       </aside>
-      <main className={agent ? 'editor-pane' : 'editor-pane split-idle'}>
+      <main ref={editorRef} className={agent ? 'editor-pane' : 'editor-pane split-idle'}>
         {!agent ? (
           <EmptyState pad>select an agent, or press <kbd>n</kbd> to create one</EmptyState>
         ) : (
@@ -391,9 +406,12 @@ function OwnMemory({ slug, on, onChange }) {
   }
   return (
     <div className="agent-section">
-      <Checkbox checked={on} onChange={(e) => onChange(e.target.checked)}
-                label="own memory — keeps its notes to itself instead of writing to
-                  the shared notes (the operator's standing notes still lead its prompt)" />
+      <div className="agent-toggles">
+        <Toggle checked={on} onChange={onChange} label="own memory"
+                onText="own memory" offText="own memory" />
+        <span className="field-hint">keeps its notes to itself instead of writing to
+          the shared notes — the operator's standing notes still lead its prompt</span>
+      </div>
       <details className="agent-notes" onToggle={load}>
         <summary>its private notes</summary>
         {notes === null ? <span className="dim small">loading…</span>

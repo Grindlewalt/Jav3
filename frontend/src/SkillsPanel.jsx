@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import Button, { SaveButton } from './components/Button.jsx'
 import Input, { Checkbox } from './components/Input.jsx'
+import Toggle from './components/Toggle.jsx'
 import Select from './components/Select.jsx'
 import Tag, { Badge } from './components/Tag.jsx'
 import Toolbar from './components/Toolbar.jsx'
@@ -102,12 +103,13 @@ export default function SkillsPanel() {
           it invokes the skill. Agents get every granted skill unless their
           definition takes one away.</p>
       </aside>
-      <main className={selected ? 'editor-pane' : 'editor-pane split-idle'}>
+      <main className={selected ? 'editor-pane skill-pane' : 'editor-pane split-idle'}>
         {!selected ? (
           <EmptyState pad>select or create a skill</EmptyState>
         ) : (
           <>
-            <Toolbar variant="pane" title={selected}>
+            <Toolbar variant="pane"
+                     title={skills.find((x) => x.slug === selected)?.name || selected}>
               <Button variant="ghost" onClick={() => setRaw((v) => !v)}>
                 {raw ? 'Form editor' : 'Edit raw'}</Button>
               <SaveButton dirty={dirty} onSave={save} />
@@ -124,8 +126,10 @@ export default function SkillsPanel() {
                 <Input label="use when… (how Jav3 decides to pick it)"
                        value={fields.when_to_use}
                        onChange={(e) => set({ when_to_use: e.target.value })} />
-                <Checkbox checked={fields.enabled} label="granted to Jav3 and agents"
-                          onChange={(e) => set({ enabled: e.target.checked })} />
+                <Toggle checked={!!fields.enabled} label="granted to Jav3 and agents"
+                        onText="granted to Jav3 and agents"
+                        offText="not granted — Jav3 and agents can't use it"
+                        onChange={(v) => set({ enabled: v })} />
                 <Input textarea rows={12} className="md-editor" spellCheck={false}
                        label="instructions (loaded when the skill is invoked)"
                        value={fields.body}

@@ -4,6 +4,7 @@ import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import Page from '../components/Page.jsx'
 import EmptyState from '../components/EmptyState.jsx'
+import Md from '../Md.jsx'
 
 // Heartbeats: "run X every day at 8am" / "every 6 hours". A schedule runs
 // either a defined agent or a plain Jav3 prompt, headless, in an optional
@@ -102,11 +103,11 @@ export default function Schedules() {
     : `every ${s.interval_minutes} min`
 
   return (
-    <Page variant="split" title="Schedules">
+    <Page variant="split" title="Schedules" className="sched-page">
       <aside>
         <div className="side-title">{editing ? `Edit schedule #${editing}` : 'New schedule'}</div>
         <form className="sched-form" onSubmit={save}>
-          <input placeholder="name (e.g. morning briefing)" value={form.name}
+          <input placeholder="schedule name" aria-label="schedule name" value={form.name}
                  onChange={(e) => set({ name: e.target.value })} />
           <label className="mini">what runs
             <select value={form.kind} onChange={(e) => set({ kind: e.target.value })}>
@@ -144,7 +145,7 @@ export default function Schedules() {
           {editing && <button type="button" className="ghost" onClick={cancelEdit}>cancel</button>}
         </form>
       </aside>
-      <main className="editor-pane">
+      <main className="editor-pane sched-pane">
         {schedules.length === 0 && (
           <EmptyState>none yet — set one up on the left</EmptyState>)}
         <ul className="sched-list">
@@ -166,7 +167,7 @@ export default function Schedules() {
               <div className="dim small">{s.task}</div>
               <div className="dim small">{cadence(s)} · next {s.next_run?.replace('T', ' ')}
                 {s.last_run && ` · last ${s.last_run.replace('T', ' ')}`}</div>
-              {s.last_result && <pre className="sched-result">{s.last_result}</pre>}
+              {s.last_result && <div className="sched-result"><Md text={s.last_result} /></div>}
             </li>
           ))}
         </ul>

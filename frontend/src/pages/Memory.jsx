@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import Page from '../components/Page.jsx'
+import Tag from '../components/Tag.jsx'
 
 const ASSEMBLED = '::assembled'
 
@@ -76,24 +77,31 @@ export default function Memory() {
 
   return (
     <Page variant="split" title="Memory">
-      <aside>
-        <ul className="file-list">
-          <li className={selected === ASSEMBLED ? 'active' : ''}
+      <aside className="mem-aside">
+        <ul className="file-list mem-list">
+          <li className={selected === ASSEMBLED ? 'active mem-live' : 'mem-live'}
               onClick={() => setSelected(ASSEMBLED)}>
-            ⚡ assembled context (live)
+            <span className="mem-name">assembled context</span>
+            <span className="mem-meta dim">live — what rides every turn</span>
           </li>
           {files.map((f) => {
             const nm = notes[nkey(f.path)]
+            const untrusted = nm?.taint === 'untrusted'
+            const pending = nm && nm.source === 'agent' && !nm.approved
             return (
               <li key={f.path} className={selected === f.path ? 'active' : ''}
-                  onClick={() => setSelected(f.path)}>
-                <span className="grow">{f.path}</span>
-                {nm?.taint === 'untrusted' && (
-                  <span className="tag untrusted" title="from web/research — untrusted">untrusted</span>)}
-                {nm && nm.source === 'agent' && !nm.approved && (
-                  <span className="tag pending" title="agent-created — pending approval">pending</span>)}
-                {f.auto_generated && <span className="tag">auto</span>}
-                {f.tokens != null && <span className="dim small">≈{f.tokens.toLocaleString()} tok</span>}
+                  title={f.path} onClick={() => setSelected(f.path)}>
+                <span className="mem-name">{f.path}</span>
+                {(untrusted || pending || f.auto_generated || f.tokens != null) && (
+                  <span className="mem-meta">
+                    {untrusted && (
+                      <Tag tone="untrusted" title="from web/research — untrusted">untrusted</Tag>)}
+                    {pending && (
+                      <Tag tone="pending" title="agent-created — pending approval">pending</Tag>)}
+                    {f.auto_generated && <Tag>auto</Tag>}
+                    {f.tokens != null && <span className="dim">≈{f.tokens.toLocaleString()} tok</span>}
+                  </span>
+                )}
               </li>
             )
           })}

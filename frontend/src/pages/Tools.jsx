@@ -9,9 +9,8 @@ export default function Tools() {
 
   return (
     <Page title="Tools"
-          lede={<>what Jav3 is allowed to do. Everything goes through the
-            registry + one calling convention; granting = flipping
-            <code> enabled</code> in the def once a handler exists.</>}>
+          lede="Everything Jav3 and its agents can call. Granted tools are offered
+            on every turn; the rest stay switched off.">
       <div className="tool-grid">
         {tools.map((t) => (
           <div key={t.name} className="tool-card">
