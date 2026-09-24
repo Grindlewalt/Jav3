@@ -204,13 +204,18 @@ async def _agent_system_prompt(db, agent: dict, active=_USE_DB,
     return f"{agent['prompt']}\n\n---\n\n{base}"
 
 
-async def _open_run(db, agent: dict, task: str,
-                    active=_USE_DB) -> tuple[int, str | None]:
+async def _open_run(db, agent: dict, task: str, active=_USE_DB, *,
+                    job_id: str | None = None,
+                    title: str | None = None) -> tuple[int, str | None]:
     """Create the conversation for an agent run and record the task. Returns
     (conversation_id, resolved project slug) — the caller needs the resolved
-    slug (not the _USE_DB sentinel) for the autonomy lookup."""
+    slug (not the _USE_DB sentinel) for the autonomy lookup.
+
+    `job_id` files the run under a job so the run tree (runs_api) shows it as
+    that job's node; `title` overrides the default `[name] task…` summary —
+    the plan runner titles items `[item i3] …` so the peer roster names them."""
     active = await resolve_run_project(db, agent, active)
-    title = f"[{agent['name']}] " + " ".join(task.split())[:40]
+    title = title or f"[{agent['name']}] " + " ".join(task.split())[:40]
     # parent: the turn that dispatched spawn_agent/spawn_temp_agent (the broker
     # restores runtime.conversation_id for a guest turn), so the run tree stays
     # connected exactly where Jarvis delegates. None for a schedule, which
@@ -218,7 +223,7 @@ async def _open_run(db, agent: dict, task: str,
     parent, _ = await launcher(db)
     conversation_id = await open_conversation(
         db, project=active, title=title, kind="agent", commit=False,
-        parent=parent,
+        parent=parent, job_id=job_id,
         # WHO this run is. A temp agent has no roster entry and gets None.
         agent=agent.get("slug"))
     await db.execute(
@@ -228,11 +233,11 @@ async def _open_run(db, agent: dict, task: str,
     return conversation_id, active
 
 
-async def run_agent_headless(slug: str, task: str, active=_USE_DB) -> dict:
+async def run_agent_headless(slug: str, task: str, active=_USE_DB, **hooks) -> dict:
     """Run a defined agent to completion, no streaming — for scheduled runs and
-    the spawn_agent tool."""
+    the spawn_agent tool. `hooks` are _run_headless's keyword hooks."""
     agent = _read(slug)  # 404s if missing
-    return await _run_headless(agent, task, active)
+    return await _run_headless(agent, task, active, **hooks)
 
 
 # blocks a lean temp agent drops: Jarvis's identity, standing memory, the user
@@ -268,16 +273,28 @@ def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
 
 async def run_temp_agent_headless(prompt: str, task: str, *,
                                   duplicate: bool = False, label: str = "",
-                                  active=_USE_DB) -> dict:
+                                  active=_USE_DB, **hooks) -> dict:
     """A disposable agent: no AGENT.md, no roster entry — a role prompt layered
     on Jarvis's own context (full when duplicate, lean otherwise), run once and
     gone. What survives is the run's conversation row (Jobs view) and any
     memory note the agent writes."""
     return await _run_headless(_temp_agent_def(prompt, duplicate, label),
-                               task, active)
+                               task, active, **hooks)
 
 
-async def _run_headless(agent: dict, task: str, active=_USE_DB) -> dict:
+def _internal_specs(names: tuple[str, ...]) -> list[dict]:
+    """Specs for registry entries that are `enabled: false` — tools meant for
+    one kind of turn only (plan_report for a plan item), granted explicitly by
+    the caller that runs that kind of turn rather than to every turn."""
+    wanted = set(names)
+    return openai_tool_specs([{**e, "enabled": True} for e in load_registry()
+                              if e["name"] in wanted])
+
+
+async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
+                        job_id: str | None = None, title: str | None = None,
+                        on_open=None, on_event=None,
+                        extra_tools: tuple[str, ...] = ()) -> dict:
     """Shared engine for named and temp headless runs. Peak is auto-confirmed:
     the caller (a schedule or Jarvis itself) already intended this, there's no
     human to prompt. `active` pins the project context without disturbing the
@@ -286,13 +303,23 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB) -> dict:
     Headless runs are subagents of something (a parent turn or a schedule), so
     they get the tight subagent iteration cap unless the agent's definition
     grants more via max_iterations — the full 40-round chat cap is what let a
-    subagent read dozens of pages and snowball its context."""
+    subagent read dozens of pages and snowball its context.
+
+    The keyword hooks exist for a supervisor that runs MANY of these and needs
+    to watch them (plan.py): `on_open(cid)` is awaited as soon as the run's
+    conversation exists (so it can be addressed and monitored before the first
+    model call), `on_event(ev)` sees every loop event (activity for stall
+    detection, tool events for the live tree), `job_id`/`title` file the run
+    under a job, and `extra_tools` grants internal (`enabled: false`) tools."""
     from . import runtime
     db = await get_db()
     try:
         # take the RESOLVED slug back: _project_autonomy below binds `active`
         # as an SQL parameter, and the raw _USE_DB object() crashes aiosqlite
-        conversation_id, active = await _open_run(db, agent, task, active=active)
+        conversation_id, active = await _open_run(db, agent, task, active=active,
+                                                  job_id=job_id, title=title)
+        if on_open is not None:
+            await on_open(conversation_id)
         # own fetch-ledger scope: the agent hasn't seen its parent's reads, so
         # it must be able to re-fetch them — and a scheduled run must never be
         # starved by yesterday's claims (the 06:45 news-agent post-mortem)
@@ -303,6 +330,8 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB) -> dict:
         confirm_peak(conversation_id)
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent, await _project_autonomy(db, active))
+        if extra_tools:
+            tools = tools + _internal_specs(extra_tools)
         mdl, burl = _agent_overrides(agent)
         cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
@@ -314,6 +343,8 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB) -> dict:
                                               active_project=active,
                                               memory_slug=memory_slug(agent),
                                               on_tool_call=db_tool_sink(db, conversation_id)):
+                if on_event is not None:
+                    on_event(event)
                 if event["type"] == "final":
                     final_content = event["content"]
         finally:

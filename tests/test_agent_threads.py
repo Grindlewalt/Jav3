@@ -595,7 +595,8 @@ async def test_ephemeral_chat_is_not_offered_send_message(client, monkeypatch):
     seen: list[dict] = []
     monkeypatch.setattr(chat_mod, "guest_turn", _capturing_turn(seen))
 
-    r = await client.post("/api/chat", json={"message": "hi", "ephemeral": True})
+    r = await client.post("/api/chat", json={"message": "hi", "ephemeral": True,
+                                             "confirm_peak": True})
     assert r.status_code == 200
     await _settle()
     assert len(seen) == 1
@@ -605,7 +606,7 @@ async def test_ephemeral_chat_is_not_offered_send_message(client, monkeypatch):
         "refuses — a tool that can only error should not be offered")
     # a persistent chat still gets it, so the filter is scoped to incognito
     seen.clear()
-    r = await client.post("/api/chat", json={"message": "hi"})
+    r = await client.post("/api/chat", json={"message": "hi", "confirm_peak": True})
     assert r.status_code == 200
     await _settle()
     names = {t["function"]["name"] for t in seen[0]["tool_specs"]}

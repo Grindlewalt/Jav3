@@ -15,6 +15,7 @@ Live progress streams through the in-process bus (backend/bus.py): every node
 lifecycle + tool/token event is published under the job id for the SSE view.
 """
 import asyncio
+import contextlib
 
 from . import bus
 from .agent import budget as budget_mod
@@ -201,6 +202,45 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
         return {"cid": cid, "kind": kind, "output": "", "rollup": f"error: {e}"}
 
 
+@contextlib.asynccontextmanager
+async def job_workspace(project: str | None, *, top_level: bool):
+    """Hold the project's guest workspace for a whole job.
+
+    The leaves of a job are NESTED turns (the job's Budget is in scope), so
+    run_agent_turn never pushes a workspace for them — somebody has to. A
+    top-level job pins the guest, primes one copy every concurrent leaf reuses,
+    and reconciles the shared write buffer at the end; a nested job (under a
+    guest chat that already pushed and will pack) does neither. Best-effort: a
+    guest hiccup must not sink the job — the leaves surface guest errors
+    themselves. Shared by the funnel and the explicit plan runner (plan.py)."""
+    acquired = False
+    if top_level and project:
+        from .vm.guest_turn import acquire_workspace, prime_workspace
+        from .vm.lifecycle import vm as guest_vm
+        try:
+            await guest_vm.acquire()        # pin the guest for the whole job
+            acquired = True
+            # only prime when first in on this slug — a concurrent chat turn on
+            # the same project may already own the guest copy (re-priming would
+            # wipe its in-flight edits); we then reuse it like a nested turn.
+            if acquire_workspace(project):
+                await prime_workspace(project)
+        except Exception:  # noqa: BLE001 — fall through; leaves surface guest errors
+            pass
+    try:
+        yield
+    finally:
+        if acquired:
+            from .vm.guest_turn import pull_writes, release_workspace
+            from .vm.lifecycle import vm as guest_vm
+            if release_workspace(project):     # last out sweeps the shared buffer
+                try:
+                    await pull_writes(project)
+                except Exception:  # noqa: BLE001 — reconcile is best-effort
+                    pass
+            guest_vm.release()
+
+
 async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
                   leaf_tools=None, title: str = "") -> dict:
     """Open the head node, run the tree, publish job lifecycle events. Returns
@@ -256,41 +296,15 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
     wtoken = runtime.web_session.set(f"job:{job_id}")
 
     # guest workspace: a TOP-LEVEL job (we created the budget) owns the workspace
-    # lifecycle — prime one copy the concurrent leaves reuse, reconcile it at the
-    # end. A NESTED job (under a guest chat that already pushed + will pack) skips
-    # both. Best-effort: a guest hiccup must not sink the whole job.
-    prime_guest = (optok is not None and bool(project))
-    acquired = False
-    owns_ws = False
-    if prime_guest:
-        from .vm.guest_turn import acquire_workspace, prime_workspace
-        from .vm.lifecycle import vm as guest_vm
-        try:
-            await guest_vm.acquire()        # pin the guest for the whole job
-            acquired = True
-            # only prime when first in on this slug — a concurrent chat turn on
-            # the same project may already own the guest copy (re-priming would
-            # wipe its in-flight edits); we then reuse it like a nested turn.
-            owns_ws = acquire_workspace(project)
-            if owns_ws:
-                await prime_workspace(project)
-        except Exception:  # noqa: BLE001 — fall through; leaves surface guest errors
-            pass
+    # lifecycle; a NESTED job (under a guest chat that already pushed + will
+    # pack) reuses its parent's copy.
     try:
-        result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
-                                project=project, depth=0, budget=ncap,
-                                leaf_tools=leaf_tools, peak=peak)
+        async with job_workspace(project, top_level=optok is not None):
+            result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
+                                    project=project, depth=0, budget=ncap,
+                                    leaf_tools=leaf_tools, peak=peak)
     finally:
         runtime.web_session.reset(wtoken)
-        if acquired:
-            from .vm.guest_turn import pull_writes, release_workspace
-            from .vm.lifecycle import vm as guest_vm
-            if release_workspace(project):     # last out sweeps the shared buffer
-                try:
-                    await pull_writes(project)
-                except Exception:  # noqa: BLE001 — reconcile is best-effort
-                    pass
-            guest_vm.release()
         if optok is not None:
             budget_mod.active_op_id.reset(optok)
             budget_mod.release(job_id)

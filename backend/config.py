@@ -183,6 +183,16 @@ class Settings(BaseSettings):
     subagent_max_iterations: int = 12
     recent_message_limit: int = 40
 
+    # The explicit orchestrator (backend/plan.py): how many checklist items run
+    # at once (clamped to the funnel's fan-out cap), how many times a failed
+    # item is re-spawned, and how long an item may go without a tool call or a
+    # message before the runner nudges it (and, one window later, re-spawns it
+    # once). The tick is how often the runner reconciles operator edits.
+    plan_max_concurrent: int = 3
+    plan_attempts_max: int = 2
+    plan_stall_seconds: int = 300
+    plan_tick_seconds: float = 5.0
+
     # Delegation pressure: a long turn gets steered mid-flight. At
     # `delegate_nudge_round` a note pushes the model to hand remaining
     # gathering to research/spawn_agent and to work a todo plan; at 2/3 of
