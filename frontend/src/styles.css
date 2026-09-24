@@ -1135,13 +1135,17 @@ input:focus, textarea:focus { border-color: var(--accent);
 /* markdown body inside chat bubbles */
 .md-body > :first-child { margin-top: 0; }
 .md-body > :last-child { margin-bottom: 0; }
+/* white-space restated: `.msg pre` (pre-wrap, for the user's bubble) also
+   matches a code block inside an assistant bubble, so code wrapped mid-line
+   on a phone instead of scrolling sideways in its box */
 .md-body pre {
   background: var(--bg) !important; border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 12px; overflow-x: auto;
+  white-space: pre; word-wrap: normal;
   font: 13px/1.5 ui-monospace, "Cascadia Code", Menlo, monospace;
 }
 .md-body code {
-  background: var(--bg); border-radius: 5px; padding: 1px 5px;
+  background: var(--bg); border-radius: 5px; padding: 1px 4px;
   font: 0.9em ui-monospace, Menlo, monospace;
 }
 .md-body pre code { background: none; padding: 0; }
@@ -2423,10 +2427,12 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
    A clear, glassy flash/pro picker at the send end of the bar. It only exists
    while the draft is empty — the moment there's text it folds away and the
    bar is just the message and the send button. */
+/* it stays while the draft grows; past one line it rides the bottom edge
+   beside the send button instead of floating mid-box */
 .composer-model { position: relative; flex-shrink: 0; align-self: center;
-  max-width: 160px; transition: opacity 0.18s ease, max-width 0.22s ease; }
-.composer-model.gone { opacity: 0; max-width: 0; pointer-events: none;
-  overflow: hidden; }
+  max-width: 160px; }
+.composer-inner.multi .composer-model { align-self: flex-end; margin-bottom: 2px; }
+.model-chip.static { cursor: default; }
 .model-chip {
   display: inline-flex; align-items: center; gap: 6px; background: transparent;
   color: var(--dim); border: 1px solid transparent; border-radius: 999px;

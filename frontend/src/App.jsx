@@ -160,8 +160,10 @@ function VmStatus() {
   // newer backends carry image freshness metadata; older ones omit it entirely
   const hasImageMeta = s.image_stale !== undefined || s.image_built_at !== undefined
     || s.image_age_days !== undefined
+  // whole days: "56.9d" read as a measurement, not an age
   const imageAge = s.image_age_days != null
-    ? `${s.image_age_days}d old` : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
+    ? `${Math.round(s.image_age_days)}d old`
+    : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
   return (
     <div className="notif-wrap vm-wrap" ref={wrapRef}>
       <button className={`nav-chip${s.image_stale ? ' has-badge' : ''}`}
@@ -188,7 +190,7 @@ function VmStatus() {
           <div className="notif-item"><span className="grow">image</span>
             <span className={s.image_stale ? 'warn' : 'dim'}
                   title={s.image_built_at ? `built ${s.image_built_at}` : undefined}>
-              {s.image_version}{s.image_stale && imageAge ? ` · ${imageAge}` : ''}</span></div>
+              {s.image_version}</span></div>
           {s.image_stale && (
             <div className="notif-item"><span className="grow warn">stale image</span>
               <span className="warn small">{imageAge || 'rebuild suggested'}</span></div>)}

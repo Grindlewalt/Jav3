@@ -101,24 +101,44 @@ function pickGreeting() {
   return list[Math.floor(Math.random() * list.length)]
 }
 
+// A chat's line in the sidebar. Untitled chats are summarised from the first
+// prompt, so a pasted brief arrives as "# AGENT BRIEF…" or "[startup — …":
+// the markdown heading mark and the bracket are noise in a list, and they
+// are stripped here only — the toolbar and the tooltip keep the real title.
+function listTitle(c) {
+  if (!c.summary) return `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`
+  return c.summary.replace(/^[#[\s]+/, '') || c.summary
+}
+
 // The glassy model picker at the send end of the composer. It changes the
 // same server-side setting as the nav switch (they sync over the
-// jarvis-model-changed window event, via modelInfo.js) and only shows while
-// the draft is empty — the menu opens upward, since the bar lives at the
-// bottom of the screen. Names and blurbs come from GET /api/model.
-function ComposerModel({ visible }) {
+// jarvis-model-changed window event, via modelInfo.js). It stays put while
+// the operator types — folding it away on the first keystroke made the model
+// vanish exactly when it was about to be used. The menu opens upward, since
+// the bar lives at the bottom of the screen. Names and blurbs come from
+// GET /api/model. With one choice there is nothing to pick, so the chip is a
+// plain label with no chevron and no menu.
+function ComposerModel() {
   const m = useModel()
   const [open, setOpen] = useState(false)
   const close = useCallback(() => setOpen(false), [])
   const ref = useDismiss(open, close)
   if (!m) return null
+  if (m.choices.length < 2) {
+    return (
+      <div className="composer-model">
+        <span className="model-chip static" title="model for new turns">
+          {modelOption(m, m.active).label}</span>
+      </div>
+    )
+  }
   async function pick(model) {
     setOpen(false)
     if (model === m.active) return
     try { await setModel(model) } catch (err) { notifyError(err) }
   }
   return (
-    <div className={`composer-model${visible ? '' : ' gone'}`} ref={ref}>
+    <div className="composer-model" ref={ref}>
       <button type="button" className="model-chip" aria-haspopup="menu"
               aria-expanded={open} title="model for new turns"
               onClick={() => setOpen((o) => !o)}>
@@ -583,8 +603,15 @@ export default function Chat() {
                   slug can never crush the title into two letters */}
               <div className="convo-main">
                 <span className="convo-title ellipsis" title={c.summary || `#${c.id}`}>
-                  {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
-                {c.project_slug && <span className="convo-proj ellipsis">{c.project_slug}</span>}
+                  {listTitle(c)}</span>
+                {/* an agent's thread is still a chat and still belongs in
+                    this list — it just isn't Jav3 speaking, so say so */}
+                {(c.agent_slug || c.project_slug) && (
+                  <span className="convo-proj ellipsis">
+                    {c.agent_slug && <span className="convo-agent">{c.agent_slug}</span>}
+                    {c.project_slug}
+                  </span>
+                )}
               </div>
               {/* overlaid on hover rather than reserving their width: hidden
                   but in flow, they cut every title ~55px short */}
@@ -683,7 +710,7 @@ export default function Chat() {
                 : 'Message Jav3…'}
               rows={1}
             />
-            <ComposerModel visible={!input.trim()} />
+            <ComposerModel />
             {busy
               ? <button type="button" className="send-btn stop" title="stop this turn"
                         onClick={stop}>◼</button>
