@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     # Models the nav switcher may select at runtime (persisted in session_state,
     # no restart). Agents with an explicit model pin are unaffected by the switch.
     model_choices: list[str] = ["deepseek-flash"]
+    # Human label + one-line blurb per model id, served by GET /api/model so
+    # the GUI never hardcodes model names or versions. A choice missing here
+    # falls back to its raw id. Keep blurbs free of versions/dates — the id
+    # is a rolling alias, so anything dated here goes stale on their release.
+    model_labels: dict[str, dict[str, str]] = {
+        "deepseek-flash": {"label": "flash",
+                           "blurb": "DeepSeek's current Flash model"},
+    }
     # Flash caps output at 384K (verified accepted by the API on v4, and the
     # v4.1 limit is the same). The old 4096 was a v3-era default: large
     # tool-call payloads (whole-file writes) hit it mid-arguments and

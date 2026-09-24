@@ -108,9 +108,19 @@ class ModelSelect(BaseModel):
     model: str
 
 
+def _model_option(model_id: str) -> dict:
+    meta = settings.model_labels.get(model_id) or {}
+    return {"id": model_id, "label": meta.get("label") or model_id,
+            "blurb": meta.get("blurb") or ""}
+
+
 def _model_state() -> dict:
+    # `options` carries the display copy (label/blurb from config) so the GUI
+    # renders names from here instead of hardcoding versions in JSX.
+    ids = list(dict.fromkeys([*settings.model_choices, settings.model_name]))
     return {"active": get_model_override() or settings.model_name,
-            "default": settings.model_name, "choices": settings.model_choices}
+            "default": settings.model_name, "choices": settings.model_choices,
+            "options": [_model_option(i) for i in ids]}
 
 
 @app.get("/api/model", dependencies=[Depends(require_user)])

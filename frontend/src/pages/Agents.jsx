@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { useModel } from '../modelInfo.js'
 
 // Everything is INCLUDED by default; checkboxes remove. That way an agent
 // can't silently miss something necessary — you only take away what it
@@ -12,6 +13,7 @@ export default function Agents() {
   const [selected, setSelected] = useState(null)
   const [agent, setAgent] = useState(null)
   const ask = useAsk()
+  const defaultModel = useModel()?.default
   const [dirty, setDirty] = useState(false)
   const [contextItems, setContextItems] = useState([])
   const [toolItems, setToolItems] = useState([])
@@ -233,12 +235,12 @@ export default function Agents() {
             </div>
             <div className="field-row">
               <label>model
-                <input value={agent.model} placeholder="inherit (deepseek-flash)"
+                <input value={agent.model} placeholder={`inherit (${defaultModel || 'default'})`}
                        onChange={(e) => patch({ model: e.target.value })} />
               </label>
               <label>base url
                 <input value={agent.base_url}
-                       placeholder="default DeepSeek · ollama: http://localhost:11434/v1"
+                       placeholder="default endpoint · ollama: http://<host>:11434/v1"
                        onChange={(e) => patch({ base_url: e.target.value })} />
               </label>
             </div>

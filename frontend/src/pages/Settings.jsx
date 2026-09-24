@@ -16,6 +16,8 @@ import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
 import { Block } from '../copy.jsx'
 import { useDismiss } from '../useDismiss.js'
+import { modelOption, setModel, useModel } from '../modelInfo.js'
+import { notifyError } from '../notify.js'
 
 // Cloudflare's dashboard shows a service token as whole header lines, so that is
 // what gets pasted. Strip the header name, quotes and whitespace rather than
@@ -54,36 +56,26 @@ export default function Settings() {
 // --- model ------------------------------------------------------------------------
 
 function ModelPanel() {
-  const [m, setM] = useState(null)
-  useEffect(() => {
-    api('/api/model').then(setM).catch(() => {})
-    const h = (e) => setM(e.detail)
-    window.addEventListener('jarvis-model-changed', h)
-    return () => window.removeEventListener('jarvis-model-changed', h)
-  }, [])
-  async function pick(model) {
-    const next = await api('/api/model', { method: 'PUT', body: JSON.stringify({ model }) })
-    setM(next)
-    window.dispatchEvent(new CustomEvent('jarvis-model-changed', { detail: next }))
-  }
+  const m = useModel()
+  const active = modelOption(m, m?.active)
   return (
     <section className="panel">
       <h2>Model</h2>
       {!m ? <p className="dim">loading…</p> : (
         <>
           <div className="row">
-            <select value={m.active} onChange={(e) => pick(e.target.value)}
+            <select value={m.active}
+                    onChange={(e) => setModel(e.target.value).catch(notifyError)}
                     disabled={m.choices.length < 2}>
-              {m.choices.map((c) => <option key={c} value={c}>{c}</option>)}
+              {m.choices.map((c) => (
+                <option key={c} value={c}>{modelOption(m, c).label}</option>
+              ))}
             </select>
             {m.active !== m.default && <span className="tag">override</span>}
           </div>
           <p className="dim small">
-            <code>deepseek-flash</code> is DeepSeek's name for the current
-            Flash — V4.1 Flash since 10 Sep 2026 — so it follows their
-            releases without a change here. Pro is not offered: the API routes
-            it to Flash at Flash price until a V4.1 Pro exists. Agents with a
-            model pin of their own are unaffected.
+            <code>{active.id}</code>{active.blurb && <> — {active.blurb}</>}.
+            Agents with a model pin of their own are unaffected.
           </p>
         </>
       )}
@@ -285,7 +277,7 @@ function MusicPanel({ say }) {
     <section className="panel">
       <h2>Music server</h2>
       <form className="row" onSubmit={save}>
-        <input className="grow" placeholder="https://music.atomos.network"
+        <input className="grow" placeholder="http://<host>:<port>"
                value={tm.url} onChange={(e) => setTm({ ...tm, url: e.target.value })} />
         <button type="submit">Save</button>
         <button type="button" className="ghost" onClick={probe} disabled={!tm.url}>

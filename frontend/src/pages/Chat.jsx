@@ -7,6 +7,7 @@ import { useDismiss } from '../useDismiss.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { modelOption, setModel, useModel } from '../modelInfo.js'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
 // day — a handful per period nod to it (capped at 5) so it doesn't read as a
@@ -99,47 +100,28 @@ function pickGreeting() {
   return list[Math.floor(Math.random() * list.length)]
 }
 
-// The glassy flash/pro picker at the send end of the composer. It changes the
+// The glassy model picker at the send end of the composer. It changes the
 // same server-side setting as the nav switch (they sync over the
-// jarvis-model-changed window event) and only shows while the draft is empty —
-// the menu opens upward, since the bar lives at the bottom of the screen.
-// "deepseek-flash" is the API's rolling name for the current Flash (V4.1
-// since 2026-09-10). Pro left the menu the same day: the API routes it to
-// Flash at Flash price, so it would have been a name and not a model.
-const MODEL_SUB = {
-  flash: 'V4.1 Flash · the model',
-  pro: 'deeper reasoning · when V4.1 Pro ships',
-}
-
+// jarvis-model-changed window event, via modelInfo.js) and only shows while
+// the draft is empty — the menu opens upward, since the bar lives at the
+// bottom of the screen. Names and blurbs come from GET /api/model.
 function ComposerModel({ visible }) {
-  const [m, setM] = useState(null)
+  const m = useModel()
   const [open, setOpen] = useState(false)
-  useEffect(() => {
-    api('/api/model').then(setM).catch(() => {})
-    const h = (e) => setM(e.detail)
-    window.addEventListener('jarvis-model-changed', h)
-    return () => window.removeEventListener('jarvis-model-changed', h)
-  }, [])
   const close = useCallback(() => setOpen(false), [])
   const ref = useDismiss(open, close)
   if (!m) return null
-  const short = (id) => id.replace(/^deepseek-(v4(\.\d+)?-)?/, '')
   async function pick(model) {
     setOpen(false)
     if (model === m.active) return
-    try {
-      const next = await api('/api/model', {
-        method: 'PUT', body: JSON.stringify({ model }) })
-      setM(next)
-      window.dispatchEvent(new CustomEvent('jarvis-model-changed', { detail: next }))
-    } catch (err) { notifyError(err) }
+    try { await setModel(model) } catch (err) { notifyError(err) }
   }
   return (
     <div className={`composer-model${visible ? '' : ' gone'}`} ref={ref}>
       <button type="button" className="model-chip" aria-haspopup="menu"
               aria-expanded={open} title="model for new turns"
               onClick={() => setOpen((o) => !o)}>
-        {short(m.active)}
+        {modelOption(m, m.active).label}
         <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
       </button>
       {open && (
@@ -147,8 +129,8 @@ function ComposerModel({ visible }) {
           {m.choices.map((c) => (
             <button key={c} type="button" role="menuitemradio"
                     aria-checked={c === m.active} onClick={() => pick(c)}>
-              <span className="m-name">{short(c)}
-                <span className="m-sub">{MODEL_SUB[short(c)] || c}</span></span>
+              <span className="m-name">{modelOption(m, c).label}
+                <span className="m-sub">{modelOption(m, c).blurb || c}</span></span>
               {c === m.active && <span className="m-check" aria-hidden="true">●</span>}
             </button>
           ))}

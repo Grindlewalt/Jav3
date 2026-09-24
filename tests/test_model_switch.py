@@ -35,9 +35,10 @@ async def client(tmp_env):
 
 async def test_switch_api_and_persistence(client, monkeypatch):
     r = await client.get("/api/model")
-    assert r.json() == {"active": "deepseek-flash",
-                        "default": "deepseek-flash",
-                        "choices": ["deepseek-flash"]}
+    body = r.json()
+    assert {k: body[k] for k in ("active", "default", "choices")} == {
+        "active": "deepseek-flash", "default": "deepseek-flash",
+        "choices": ["deepseek-flash"]}
 
     r = await client.put("/api/model", json={"model": "gpt-9"})
     assert r.status_code == 400
@@ -113,3 +114,21 @@ async def test_costs_priced_per_model(client):
     assert w["by_model"]["deepseek-v4-flash"]["cost_usd"] == pytest.approx(0.42)
     assert w["by_model"]["deepseek-v4-pro"]["cost_usd"] == pytest.approx(1.305)
     assert w["cost_usd"] == pytest.approx(2.475)
+
+
+async def test_model_options_carry_labels(client, monkeypatch):
+    """Every choice comes back with a label (the GUI renders these instead of
+    hardcoding model names); an id with no configured label falls back to
+    the raw id rather than disappearing."""
+    monkeypatch.setattr(settings, "model_choices",
+                        ["deepseek-flash", "some-unlabelled-model"])
+    body = (await client.get("/api/model")).json()
+    opts = {o["id"]: o for o in body["options"]}
+    for c in body["choices"]:
+        assert opts[c]["label"]
+        assert "blurb" in opts[c]
+    assert opts["deepseek-flash"]["label"] == \
+        settings.model_labels["deepseek-flash"]["label"]
+    assert opts["some-unlabelled-model"] == {
+        "id": "some-unlabelled-model", "label": "some-unlabelled-model",
+        "blurb": ""}
