@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import asyncio
+from pathlib import Path
 
 from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, devices_api,
                egress_api,
@@ -160,6 +161,27 @@ async def client_config():
 
 
 # Built SPA. In dev (no dist yet) the API still runs; the GUI just isn't served.
+def dist_file(full_path: str) -> Path | None:
+    """The built file the SPA route may serve for `full_path`, or None.
+
+    Starlette does not collapse `..` and `Path(dist) / "/abs"` discards the
+    base, so a bare `dist / full_path` served `/../data/jwt_secret` and
+    `//etc/hostname` to anyone on the network (found by the 2026-09 device-
+    login review). Anything that resolves outside dist is simply not a dist
+    file — the shell is returned instead, same as any unknown route.
+    """
+    if not full_path:
+        return None
+    base = settings.frontend_dist.resolve()
+    try:
+        candidate = (base / full_path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    if candidate == base or not candidate.is_relative_to(base):
+        return None
+    return candidate if candidate.is_file() else None
+
+
 if (settings.frontend_dist / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=settings.frontend_dist / "assets"),
               name="assets")
@@ -175,8 +197,8 @@ if (settings.frontend_dist / "index.html").exists():
     async def spa(full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
-        candidate = settings.frontend_dist / full_path
-        if full_path and candidate.is_file():
+        candidate = dist_file(full_path)
+        if candidate is not None:
             headers = _shell_headers if candidate.suffix == ".html" else None
             return FileResponse(candidate, headers=headers)
         return FileResponse(settings.frontend_dist / "index.html",
