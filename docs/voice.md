@@ -335,19 +335,19 @@ Note this is only safe *because* the endpointing was fixed: on a truncated
 fragment the bias dominates and substitutes a library title for what was
 actually said, which is the wrong-song failure mode.
 
-Off by default; the /voice nav link only renders when `/api/config` reports
-`voice_enabled`. Sidecar setup: `voicebox/README.md` (Docker or venv;
+Off by default, and not in the nav menus: open `/voice` directly, or use the
+corner button, which renders only when `/api/config` reports `voice_enabled`. Sidecar setup: `voicebox/README.md` (Docker or venv;
 `VOICEBOX_TOKEN=$(openssl rand -hex 32) docker compose up -d --build`).
 
 ## Ops notes
 
 - **Keepalives:** both WS legs ping every 20 s (uvicorn's default browser-
-  side, explicit on the sidecar link) — Cloudflare kills idle sockets at
-  ~100 s.
+  side, explicit on the sidecar link) — a reverse proxy in front may kill idle
+  sockets (Cloudflare's limit is ~100 s).
 - **Sidecar down:** the page shows "voicebox offline"; the link retries with
   backoff (1→30 s); typed chat is unaffected. `GET /api/voice/status` shows
   session/link state.
-- **Mic requires a secure context** — the Cloudflare hostname or localhost;
+- **Mic requires a secure context** — an HTTPS hostname or localhost;
   plain `http://<pi>:8000` will not get `getUserMedia`.
 - **Reconnect:** a new /voice tab supersedes the old session (one operator,
   one voice channel). Worker watchers survive the tab: results still land in

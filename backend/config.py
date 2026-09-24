@@ -34,15 +34,19 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_ttl_hours: int = 24 * 7
     # Add `Secure` to the session cookie so it never rides plaintext HTTP. OFF
-    # by default because the test box is reached over plain http on the LAN
-    # (a Secure cookie would silently never be sent there); set true in prod,
-    # where the app is only reached over HTTPS (the Cloudflare tunnel).
+    # by default because a LAN deployment is reached over plain http (a Secure
+    # cookie would silently never be sent there); set true only when every
+    # client reaches Jarvis over HTTPS, e.g. behind a TLS reverse proxy.
     cookie_secure: bool = False
     # Extra hostnames allowed as the Origin of a cookie-authed state-changing
     # request, on top of the request's own Host. The CSRF-origin check refuses a
     # request whose Origin is any OTHER host — SameSite=Lax does not stop a
-    # same-site sibling subdomain (this deploy shares a domain with other apps).
+    # same-site sibling (another app served under the same parent domain).
+    # Add a name here only for a page on another host that legitimately posts
+    # to Jarvis.
     csrf_allowed_hosts: list[str] = []
+    # The committer email on every commit Jarvis makes in a project repo.
+    git_author_email: str = "jarvis@localhost"
 
     # Operator API keys the agent uses by {{secret:NAME}} placeholder but
     # never sees (backend/secrets.py). Lives next to the env file.

@@ -12,13 +12,10 @@ either impossible or forced into a workaround.
 
 ## How Jarvis talks to TARMAC now, so nothing here surprises you
 
-- All calls carry `CF-Access-Client-Id` / `CF-Access-Client-Secret`. TARMAC is a
-  **separate Cloudflare Access application** from Jarvis (`aud` `3cf396d2…` vs
-  `0548b1f3…`), so a browser holding a Jarvis session gets nothing from the music
-  host. That is not a bug on your side, it is how Access works.
-- Because of that, **Jarvis proxies the audio**: the host fetches
-  `GET /stream/:id` with the service token and re-serves it on Jarvis's own
-  origin, forwarding `Range` and passing the `206` straight back. Your README
+- Calls go host-to-host over the LAN, to the URL the operator configured in
+  Jarvis's Settings.
+- **Jarvis proxies the audio**, so the browser only ever talks to Jarvis: the
+  host fetches `GET /stream/:id` and re-serves it on Jarvis's own origin, forwarding `Range` and passing the `206` straight back. Your README
   already blesses this ("agents can still stream the audio themselves via
   `/stream/:id`"). `res.sendFile` (server.js:196) gives us working Range for
   free — please keep it, or keep whatever replaces it Range-capable. Seeking and
@@ -125,16 +122,12 @@ queue per request and throws it away.
   (`backend/musicpick.py`) and does not need this changed — flagging it only so
   you know why we over-fetch (`limit=60`) and re-rank locally rather than
   trusting the order you return.
-- **Nothing to report here on auth.** The service-token flow works once the music
-  application has its own Service Auth policy. When it does not, the 302 to
-  `cloudflareaccess.com` is the signature, and `service_token_status: false` in
-  the redirect's meta JWT means the token was not evaluated at all.
 
 ## What we are NOT asking for
 
 - Volume or output-device control in your API. Those belong to whatever is
   actually rendering audio; for the Jarvis player that is an `<audio>` element we
-  control, and for a desktop file it is mpv on the operator's machine.
+  control.
 - CORS headers. Jarvis proxies server-side, so the browser never talks to you
   directly and cross-origin never enters into it.
 - Any change to `/stream/:id` beyond keeping Range working.

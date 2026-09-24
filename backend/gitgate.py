@@ -62,7 +62,8 @@ async def ensure_repo(slug: str) -> None:
         if not (d / ".git").exists():
             await run_git(slug, "init", "-q", check=True)
             await run_git(slug, "config", "user.name", "Jarvis", check=True)
-            await run_git(slug, "config", "user.email", "jarvis@atomos.local", check=True)
+            await run_git(slug, "config", "user.email", settings.git_author_email,
+                          check=True)
         gitignore = d / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text(GITIGNORE)
@@ -362,7 +363,7 @@ async def approve_request(rid: int) -> dict:
             await run_git(slug, "add", "-A", check=True)
         try:
             await run_git(slug, "-c", "user.name=Jarvis",
-                          "-c", "user.email=jarvis@atomos.local",
+                          "-c", f"user.email={settings.git_author_email}",
                           "commit", "-m", message, check=True)
         except RuntimeError as e:
             # leave the request pending (retryable) but record what went wrong

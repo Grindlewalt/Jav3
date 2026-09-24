@@ -126,7 +126,8 @@ async def import_project(body: ImportProject):
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=f"clone failed: {e}")
         await gitgate.run_git(slug, "config", "user.name", "Jarvis")
-        await gitgate.run_git(slug, "config", "user.email", "jarvis@atomos.local")
+        await gitgate.run_git(slug, "config", "user.email",
+                              settings.git_author_email)
         md = project_md_path(slug)
         if not md.exists():
             md.write_text(PROJECT_TEMPLATE.format(

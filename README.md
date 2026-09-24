@@ -47,8 +47,6 @@ Roughly 21k lines of Python and 8k of JS across ~80 test modules and 43 tools.
 - `projects/<slug>/` — project.md journal + code/ (a git repo from creation)
 - `vm/` — golden-image builder, guest bootstrap, nftables egress rules
 - `voicebox/` — the STT/wake-word/TTS sidecar (dockerised, runs off-Pi on a GPU box)
-- `clients/computeruse/` — the native client the operator runs on a desktop Jarvis
-  drives (typed verbs only, never a command line)
 - `docs/SELF.md` — the agent's own technical manual, served by the `self_docs` tool
 - `scripts/` — Pi setup, systemd units, backup + image-rebuild timers, E2E smoke
 
