@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import Page from '../components/Page.jsx'
 
 const ASSEMBLED = '::assembled'
 
@@ -9,7 +10,7 @@ const ASSEMBLED = '::assembled'
 // spelling, so key both by the bare stem to line trust metadata up with files.
 const nkey = (p) => String(p || '').replace(/^notes\//, '').replace(/\.md$/, '')
 
-export default function Context() {
+export default function Memory() {
   const [files, setFiles] = useState([])
   const [selected, setSelected] = useState('soul.md')
   const [content, setContent] = useState('')
@@ -74,9 +75,8 @@ export default function Context() {
   }
 
   return (
-    <div className="split-layout">
+    <Page variant="split" title="Memory">
       <aside>
-        <div className="side-title">Jarvis's memory</div>
         <ul className="file-list">
           <li className={selected === ASSEMBLED ? 'active' : ''}
               onClick={() => setSelected(ASSEMBLED)}>
@@ -137,6 +137,6 @@ export default function Context() {
           </>
         )}
       </main>
-    </div>
+    </Page>
   )
 }

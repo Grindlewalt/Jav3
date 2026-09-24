@@ -37,9 +37,7 @@ const Network = lazy(() => import('./pages/Network.jsx'))
 const Logs = lazy(() => import('./pages/Logs.jsx'))
 const SecretsPanel = lazy(() => import('./SecretsPanel.jsx'))
 
-// /memory renders the Context page until it is renamed in place; the nav link
-// works today and the page catches up.
-const Context = lazy(() => import('./pages/Context.jsx'))
+const Memory = lazy(() => import('./pages/Memory.jsx'))
 const Schedules = lazy(() => import('./pages/Schedules.jsx'))
 
 // reachable, not advertised
@@ -52,7 +50,7 @@ const PREFETCH = [
   () => import('./pages/Agents.jsx'), () => import('./pages/Review.jsx'),
   () => import('./pages/Tools.jsx'), () => import('./pages/Settings.jsx'),
   () => import('./pages/Network.jsx'), () => import('./pages/Logs.jsx'),
-  () => import('./SecretsPanel.jsx'), () => import('./pages/Context.jsx'),
+  () => import('./SecretsPanel.jsx'), () => import('./pages/Memory.jsx'),
   () => import('./pages/Schedules.jsx'), () => import('./pages/Skills.jsx'),
   () => import('./pages/Voice.jsx'), () => import('./pages/Artifacts.jsx'),
 ]
@@ -97,7 +95,7 @@ export default function AppRoutes({ onLogin, authed }) {
         <Route path="/settings" element={<Settings />} />
 
         {/* the ⋯ menu */}
-        <Route path="/memory" element={<Context />} />
+        <Route path="/memory" element={<Memory />} />
         <Route path="/schedules" element={<Schedules />} />
 
         {/* the old addresses keep working: bookmarks, toasts, muscle memory */}

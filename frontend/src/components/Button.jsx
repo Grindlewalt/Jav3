@@ -21,7 +21,7 @@ export default function Button({
   return <button type={type} className={cls || undefined} {...rest} />
 }
 
-// The save button, copy-pasted verbatim in Skills, Context, Artifacts, Agents
+// The save button, copy-pasted verbatim in Skills, Memory, Artifacts, Agents
 // and twice in Workspace's editor panels:
 //   <button onClick={save} disabled={!dirty}>{dirty ? 'Save' : 'Saved'}</button>
 // The label IS the state — there is no separate "saved ✓" affordance anywhere

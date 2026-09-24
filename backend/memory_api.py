@@ -50,7 +50,7 @@ async def save_memory(body: SaveFile):
 
 @router.get("/notes")
 async def list_notes():
-    """Notes with their trust/taint metadata — the Context page uses this to
+    """Notes with their trust/taint metadata — the Memory page uses this to
     badge agent-written and web/research-tainted notes and offer 'Promote'."""
     nd = notes_dir()
     out = []

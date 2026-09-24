@@ -1653,7 +1653,7 @@ kbd {
 .quiz-opt:hover { color: var(--fg); }
 .skill-form { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
 
-/* ---- taint / trust tags (Context notes) ---- */
+/* ---- taint / trust tags (Memory notes) ---- */
 .tag.untrusted { color: var(--amber); border-color: var(--amber); }
 .vm-stale-badge { background: var(--amber); }
 
