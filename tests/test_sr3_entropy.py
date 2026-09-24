@@ -228,7 +228,7 @@ async def test_no_store_on_both_secret_bearing_responses(clients):
 
 
 async def test_poc_device_ids_are_sequential(clients):
-    """INFO: device ids are INTEGER PRIMARY KEY, returned to the device in the
+    """INFO, ACCEPTED RESIDUAL (SECURITY-RESIDUAL-RISK.md): device ids are INTEGER PRIMARY KEY, returned to the device in the
     redeem body and whoami. A device learns how many computers were ever
     enrolled; the id itself grants nothing (revoke is cookie-only / self-only)."""
     op, dev = clients

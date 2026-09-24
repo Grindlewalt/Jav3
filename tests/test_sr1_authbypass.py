@@ -174,12 +174,11 @@ async def test_REACH_device_token_survives_deletion_of_minting_user(clients):
 
 
 async def test_REACH_device_token_reads_and_deletes_all_conversations(clients):
-    """FINDING (medium/info, by design but under-appreciated): a device bearer on
-    the require_actor router can enumerate, read the full transcript of, and
-    DELETE any conversation — not just its own. `require_actor` returns a fixed
-    id=-1 device actor and none of the /api/conversations handlers scope by
-    actor. A stolen CLI token is thus a read/destroy primitive over all chats.
-    """
+    """ACCEPTED RESIDUAL (operator-equivalent by design; recorded in
+    SECURITY-RESIDUAL-RISK.md): a device bearer can enumerate, read and DELETE
+    any conversation. Still pinned so a change of that scope is deliberate.
+    What the fix added is attribution: conversations a device opens carry its
+    device_id (see test_sr2_race), and its tokens now expire."""
     op, dev = clients
     tok = await _device_token(op, dev)
     h = {"Authorization": f"Bearer {tok}"}

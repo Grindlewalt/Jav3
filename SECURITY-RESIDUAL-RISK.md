@@ -149,10 +149,58 @@ a watched, policy-gated, cuttable pipe to the internet.
     "desktop reach via grants" residual this entry used to carry no longer
     exists. Jarvis is LAN-first: there is no Cloudflare service token to leak,
     rotate or push, and the music server is reached host-to-host on the LAN.
-    What that shifts: the unauthenticated device-pairing routes are now
+    What that shifts: the unauthenticated device-login route is now
     reachable by anything that can reach Jarvis on the network, with no Access
-    policy in front — the throttles and the operator's confirm are the whole
-    control, as the register row below says.
+    policy in front — see entry 13 and the paste-code row below.
+
+13. **Paste-code login, the CLI, the installers and the web origin (2026-09-23
+    adversarial review, five reviewers; fixes by one fixer).** Closed: agent-
+    written HTML/SVG served as a same-origin page (`/raw` now serves inert:
+    `CSP: sandbox`, nosniff, active types as downloads); CSRF on ~80 cookie
+    routes and both WebSockets (one global same-origin gate comparing scheme,
+    host and port); valid login codes locked out by other people's misses (a
+    valid code now always redeems; only misses are throttled); uvicorn
+    trusting X-Forwarded-For from loopback (`--no-proxy-headers`); device
+    tokens that never expired, outlived their user, or kept a running turn
+    alive after revocation; git Basic auth as an unmetered password oracle;
+    an unvalidated `rclone` setting that named any program to execute; and
+    restored `.git/hooks` running on the host. What deliberately remains:
+    - **Plain-http LAN transport.** Without TLS in front (`cookie_secure`),
+      the login code, the device token it buys and every CLI request cross
+      the LAN in cleartext; the session cookie is not `Secure` and, like all
+      cookies, ignores the port. A passive LAN observer can take a device
+      token and use it until it expires (90 days / 30 idle) or is revoked.
+      Settings and `jav3 login` both warn. TLS is a deployment choice.
+    - **The CLI and its installer are served by the server itself** over the
+      same transport (`curl <server>/cli/install.sh | sh`), and the server
+      bootstrap is `curl | sh` from a git host with an unpinned default
+      branch. Whoever controls the path controls what runs. Python
+      requirements are unhashed and loosely pinned (npm uses `npm ci` once a
+      lockfile exists).
+    - **Single process is a requirement, not an option.** Login codes, the
+      miss throttle, live turns and the event bus are in memory; the unit
+      pins `--workers 1` and the app refuses `WEB_CONCURRENCY` > 1.
+    - **Device tokens are operator-equivalent on the chat surface.** A token
+      can list, read and delete every conversation and drive every chat
+      tool; the control plane (secrets, VM, egress, backups, devices) stays
+      cookie-only. Conversations a device opens carry its `device_id`.
+    - **Backups carry the user table.** The DB snapshot uploaded to the
+      rclone remote includes the bcrypt password hashes in the clear; the
+      secrets toggle encrypts only env / secrets.json / the JWT secret. A
+      remote is only as private as its rclone backend. Changing where
+      backups go raises a `backup_config_changed` event.
+    - **The host-side project runner stays.** `POST /api/projects/{slug}/run`
+      executes Python on the HOST, outside the guest. It is now behind the
+      global same-origin gate and every run is a `host_run` security event,
+      but whether it should exist at all is the operator's call.
+    - **Small leftovers.** Device ids are sequential (a device learns how
+      many were ever enrolled; the id grants nothing). An already-open
+      stream a device attached to a turn it did NOT start keeps receiving
+      until that turn ends. `/cli/install.sh` reflects any well-formed Host
+      (a rebinding page cannot read it cross-origin and gets no cookie).
+      The JWT signing secret on any box that ran the SPA-traversal build
+      should be treated as possibly exposed; rotating it (logging everyone
+      out) is the operator's call.
 
 ## Residual-risk register (Certiv artifact)
 
@@ -169,7 +217,13 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
 | Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
 | Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
-| Device pairing routes (unauthenticated by design) | High | Low | A device gets a revocable API token by pairing — a 15-minute single-use code, a device secret issued at claim, and a logged-in operator confirming the device by name — instead of a key in a pasted command. The claim/poll routes are reachable by anything that can reach Jarvis: 32^8 code space, 60 wrong guesses per 15 min host-wide, contested claims surfaced to the operator, the token released once. Residual = an operator confirming a device they did not set up; the confirm page names the claimant to make that a choice rather than a reflex. |
+| Paste-code device login (unauthenticated redeem route) | High | Low | A logged-in session mints a 256-bit, single-use, 10-minute code (stored hashed; cancellable from Settings); the redeem route is reachable by anything on the LAN. Valid codes always redeem; misses are throttled per peer and globally on the TCP peer (no proxy headers). Tokens are hashed, revocable, expire (90 days / 30 idle) and die with their user; revoking stops the token's running turns. Residual = a code or token captured in transit on plain http. |
+| Plain-http LAN transport | High | **Medium** | Code, device token and session cookie travel in cleartext unless TLS is put in front (`cookie_secure`). Warned in Settings and the CLI; token lifetime bounds a capture. |
+| CLI / installer delivery (`curl \| sh`) | High | Medium | Served by the server over its own transport, bootstrap from an unpinned branch; truncation-safe scripts, pinned httpx, `npm ci` with a lockfile. Unhashed Python requirements remain. |
+| Web origin (CSRF / agent HTML) | Critical | Low | One global scheme+host+port same-origin gate for every cookie state change and WebSocket; agent files served sandboxed/inert. Residual = a missing-Origin non-browser client holding the cookie. |
+| Host-side project runner | Critical | Medium | Executes on the host by design; same-origin gated and audited per run. Existence is the operator's decision. |
+| Backup contents and destination | High | Medium | DB snapshot (incl. bcrypt hashes) uploaded unencrypted; secrets only through rclone crypt; destination changes raise a security event; rclone binary constrained; git hooks never restored. |
+| Single-process assumption | Medium | Low | In-memory codes/throttle/turns; `--workers 1` + startup refusal of WEB_CONCURRENCY > 1. |
 
 **Closing frame:** the netless design made the room have no phone; this design
 gives the room a **monitored, policy-gated, cuttable phone with no address book of
