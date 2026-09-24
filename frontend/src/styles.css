@@ -66,7 +66,7 @@
   --sp-7: 14px;
   --sp-8: 16px;
   --sp-9: 20px;
-  --sp-10: 26px;   /* .page padding, .section-h margin, .cu-empty */
+  --sp-10: 26px;   /* .page padding, .section-h margin */
   --sp-11: 40px;   /* .center-pad — the one big empty-state inset */
 
   /* Control padding. The survey's "nine near-identical row paddings" are
@@ -204,8 +204,8 @@ button, a, input, select, textarea, label { touch-action: manipulation; }
    Both of these used to be declared twice. `drop-in` was byte-identical in two
    places; `scrim-in` had one copy stranded inside the ≤1024px nav media query
    (keyframes inside a media query only exist while it matches), so the
-   .cu-scrim / .sbd-scrim fades silently did nothing on a desktop until a
-   second top-level copy was added. One copy, at the top level, for both. */
+   .sbd-scrim fade silently did nothing on a desktop until a second
+   top-level copy was added. One copy, at the top level, for both. */
 @keyframes drop-in { from { opacity: 0; transform: translateY(-6px) scale(0.97); } }
 @keyframes scrim-in { from { opacity: 0; } }
 /* the upward twin of drop-in, for a menu that opens above its trigger */
@@ -482,19 +482,20 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 
 /* ---- shared surfaces (components/) ----
-   `.panel` had no base style at all, so ComputerUse's seven <section
-   className="panel"> "cards" rendered as bare divs on the page background —
-   the comment above .cu-page has always described them as cards. `.card` is
-   that style, written once; `.panel` is its alias so the existing call sites
-   become what they were already labelled. Values are .tool-card's, verbatim. */
+   `.panel` had no base style at all, so Settings' and Pair's <section
+   className="panel"> "cards" rendered as bare divs on the page background
+   (Settings' old danger zone even set a border-color on one, to no effect).
+   `.card` is that style, written once; `.panel` is its alias so the existing
+   call sites become what they were already labelled. Values are
+   .tool-card's, verbatim. */
 .card, .panel {
   background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--radius); padding: var(--pad-card);
 }
 .card.flush, .panel.flush { padding: 0; overflow: hidden; }
 
-/* page header: <h2> + optional lede + right-aligned actions. Matches .cu-head,
-   which is the one page that already did this properly. */
+/* page header: <h2> + optional lede + right-aligned actions — the shape the
+   Workspace header already has. */
 .page-head { display: flex; align-items: center; gap: var(--sp-7);
   margin-bottom: var(--sp-2); }
 .page-head > :first-child { margin: 0; flex: 1; min-width: 0; }
@@ -529,9 +530,9 @@ input:focus, textarea:focus { border-color: var(--accent);
 .empty-hint { margin-top: var(--sp-3); }
 
 /* ---- modal ----
-   The scrim/glass-box/head-body-foot recipe that .ask-modal, .cu-modal and
-   .sbd-modal each spell out separately. Values are theirs; the three keep
-   their own classes until WP2 migrates them. */
+   The scrim/glass-box/head-body-foot recipe that .ask-modal and .sbd-modal
+   each spell out separately. Values are theirs; the two keep their own
+   classes until their call sites migrate. */
 .modal-scrim {
   position: fixed; inset: 0; z-index: 4000; background: var(--overlay);
   display: flex; align-items: center; justify-content: center;

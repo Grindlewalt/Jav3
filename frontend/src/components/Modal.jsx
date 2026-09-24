@@ -2,11 +2,11 @@ import { useEffect } from 'react'
 import { useDismiss } from '../useDismiss.js'
 import Button from './Button.jsx'
 
-// The scrim + glass box + head/body/foot recipe that ask.jsx, ComputerUse's
-// Setup dialog and SecurityBoard each spell out for themselves. Same values,
-// one implementation, and the two behaviours those three had to get right
+// The scrim + glass box + head/body/foot recipe that ask.jsx and
+// SecurityBoard each spell out for themselves. Same values, one
+// implementation, and the two behaviours those two had to get right
 // individually — Escape and click-away — come from the existing useDismiss
-// hook rather than a fourth hand-rolled listener.
+// hook rather than a third hand-rolled listener.
 //
 // Deliberately kept from the existing dialogs:
 //  - the scrim sits at z-index 4000, above .notices (3000). A toast must never
