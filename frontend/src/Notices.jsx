@@ -165,20 +165,29 @@ export default function Notices({ toasts, dismiss, clear }) {
                 onAnimationEnd={() => dismiss(t.id)} />
         </div>
       ) : (
-        <button key={t.id} type="button" className={`notice ${t.sev}`}
+        // a real <button> can't nest another button (dismiss), so this one is
+        // a div playing the role — same click target, same keyboard behaviour
+        <div key={t.id} className={`notice ${t.sev}`} role="button" tabIndex={0}
                 title={t.project ? `open the ${t.project} board`
                   : t.eventId ? 'open the evidence for this alert'
                     : 'open the Review Center'}
-                onClick={() => open(t)}>
+                onClick={() => open(t)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== ' ') return
+                  e.preventDefault()
+                  open(t)
+                }}>
           <span className="notice-head">
             <span className="notice-dot" aria-hidden="true" />
             <span className="notice-title ellipsis">{t.title}</span>
+            <button type="button" className="notice-x" aria-label="dismiss"
+                    onClick={(e) => { e.stopPropagation(); dismiss(t.id) }}>✕</button>
           </span>
           {t.body && <span className="notice-body">{t.body}</span>}
           <span className="notice-bar"
                 style={t.life ? { '--n-life': `${t.life}s` } : undefined}
                 onAnimationEnd={() => dismiss(t.id)} />
-        </button>
+        </div>
       )))}
       {extra > 0 && (
         <button type="button" className="notice-more"
