@@ -220,3 +220,20 @@ async def test_second_run_skips_triaged_items(db, monkeypatch):
     await reviewer.run()
     res = await reviewer.run()
     assert res["examined"] == 0 and len(fake.calls) == 1
+
+
+def test_clip_cuts_on_a_word_with_an_ellipsis():
+    assert reviewer.clip("short reason", 200) == "short reason"
+    long = "operator should confirm this enrollment " * 10
+    out = reviewer.clip(long, 60)
+    assert len(out) <= 60 and out.endswith("…")
+    assert out[:-1].split()[-1] in long.split()     # no half word before the ellipsis
+    # one unbroken token still fits the limit
+    assert reviewer.clip("x" * 300, 50) == "x" * 49 + "…"
+
+
+def test_parsed_reason_is_clipped_not_sliced():
+    reason = "word " * 100
+    got = reviewer._parse_verdicts(json.dumps(
+        [{"id": "h1", "verdict": "flag", "reason": reason}]))
+    assert got["h1"]["reason"].endswith("…") and len(got["h1"]["reason"]) <= 200

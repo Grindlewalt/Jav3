@@ -492,7 +492,8 @@ button.ghost, .ghost-link {
 button.ghost:hover, .ghost-link:hover { border-color: var(--accent); filter: none; }
 /* a destructive ghost says so at rest, not only under the cursor — Button's
    `danger` used to render identical to a plain ghost until hovered */
-button.ghost.danger { color: var(--red); }
+button.ghost.danger { color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border)); }
 button.ghost.danger:hover { border-color: var(--red); color: var(--red); }
 input, textarea, select {
   background: var(--bg-soft); color: var(--text); border: 1px solid var(--border);
@@ -1982,7 +1983,9 @@ kbd {
   padding-bottom: var(--sp-7); border-bottom: 1px solid var(--border); }
 .secrets-form-actions { display: flex; gap: var(--sp-4); }
 .secrets-list { list-style: none; margin: 0; padding: 0; }
-.secrets-row { border-left-color: var(--border); }
+/* a key has no severity, so no severity edge: the 3px left border in plain
+   --border read as a doubled line on a phone */
+.secrets-row { border-left-width: 1px; }
 .secrets-row:last-child { margin-bottom: 0; }
 .secrets-main { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
 .secrets-name { display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
@@ -2004,6 +2007,8 @@ kbd {
 .rev-flag .grow { min-width: 0; word-break: break-word; }
 .rev-diff { display: flex; height: 300px; margin: 6px 0 2px; }
 .rev-alert-summary { font-size: 13px; word-break: break-word; }
+.rev-alert-main { min-width: 0; }
+.rev-alert-top { margin-bottom: var(--sp-1); }
 .rev-alert-detail { margin: 6px 0 0; max-height: 220px; overflow: auto; }
 .sbx-row.sev-info { border-left-color: var(--accent); }
 .tag.sev-info-tag { color: var(--accent); border-color: var(--accent); }
@@ -2100,6 +2105,11 @@ kbd {
     padding: var(--sp-4) max(var(--sp-8), env(safe-area-inset-right))
              var(--sp-4) max(var(--sp-8), env(safe-area-inset-left)); }
   .page-shell > .page-lede { padding: var(--sp-3) var(--sp-8) 0; }
+  /* dropped under the title, a page's tab strip spans the bar edge to edge
+     instead of stopping short of it */
+  .page-shell > .page-head > .tabs { flex: 1 1 100%; }
+  .page-shell > .page-head > .tabs > a,
+  .page-shell > .page-head > .tabs > button { flex: 1 1 auto; justify-content: center; }
   .review-body { padding: var(--page-gap) max(var(--sp-8), env(safe-area-inset-right))
     calc(var(--sp-6) + var(--sab)) max(var(--sp-8), env(safe-area-inset-left)); }
 
@@ -2272,8 +2282,10 @@ kbd {
 
   /* rule lines and section heads wrap rather than overlap their buttons */
   .sbx-rule-line { flex-wrap: wrap; row-gap: 6px; }
-  .sbx-sec-head { flex-wrap: wrap; row-gap: 2px; }
-  .sbx-sec-head h3 { flex: 1 1 100%; }
+  /* the heading keeps its count chip and its switch beside it (they fit);
+     only the right-hand actions wrap, and they go as a group */
+  .sbx-sec-head { flex-wrap: wrap; row-gap: var(--sp-3); }
+  .sbx-sec-head h3 { flex: 0 1 auto; min-width: 0; }
 
   /* long unbroken strings (hosts, paths, results) stay inside their box */
   .sched-result, .log-pre, .console, .git-status, .git-diff {

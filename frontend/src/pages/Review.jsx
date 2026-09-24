@@ -278,11 +278,14 @@ function subjectOf(d) {
 
 function AlertRow({ a, onAck, onOpen }) {
   const sev = sevClass(a.severity)
-  const subject = subjectOf(a.detail)
+  // a summary that already names its subject ("… (from 10.0.0.82)") does not
+  // need the subject again on the line under it
+  const subj = subjectOf(a.detail)
+  const subject = subj && !String(a.summary || '').includes(subj) ? subj : null
   return (
     <div className={`sbx-row sev-${sev}`}>
-      <div className="grow" style={{ minWidth: 0 }}>
-        <div className="sbx-verdict-top" style={{ marginBottom: 2 }}>
+      <div className="grow rev-alert-main">
+        <div className="sbx-verdict-top rev-alert-top">
           <span className={`tag sev-${sev}-tag`}>{a.severity}</span>
           <span className="mono small">{a.kind}</span>
           {a.project_slug && <span className="tag">{a.project_slug}</span>}

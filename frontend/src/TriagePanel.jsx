@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
-import { tsShort as ts } from './format.js'
+import { ts } from './format.js'
 import { notifyError } from './notify.js'
 import { Button, Toggle } from './components/index.js'
 
@@ -77,17 +77,20 @@ export default function TriagePanel() {
                   ? 'sweeps unreviewed queue items on its own every few '
                     + 'minutes — never during peak pricing'
                   : 'nothing is swept on its own — use Review now'} />
-        {untriaged > 0
-          ? <span className="sec-count">{untriaged} unreviewed</span>
-          : <span className="sec-count clear">clear</span>}
+        {/* "clear" only when nothing is waiting on anyone: an item the
+            reviewer flagged is reviewed, but it is not clear — it is waiting
+            on the operator, so the flag count stands in for the chip */}
+        {untriaged > 0 && <span className="sec-count">{untriaged} unreviewed</span>}
         {flagged > 0 && (
-          <span className="tag triage-flag">{flagged} ⚑ below</span>)}
+          <span className="tag triage-flag">{flagged} flagged below</span>)}
+        {untriaged === 0 && flagged === 0 && (
+          <span className="sec-count clear">clear</span>)}
         {(untriaged > 0 || s.running) && (
           <div className="sec-actions">
             <Button variant="ghost" disabled={busy || s.running}
                     title={`run auto review over the ${untriaged} unreviewed item(s) now`}
                     onClick={() => act('/api/reviewer/run')}>
-              {s.running ? 'running…' : 'Review now'}
+              {s.running ? 'Running…' : 'Review now'}
             </Button>
           </div>
         )}
@@ -95,7 +98,7 @@ export default function TriagePanel() {
 
       {last && (
         <div className="dim small triage-tally">
-          last sweep {ts(last.finished_at || last.started_at)}
+          Last sweep {ts(last.finished_at || last.started_at)}
           {' · '}{last.examined} seen{' · '}{last.allowed} allowed
           {' · '}{last.acked} acked{' · '}{last.flagged} flagged
           {last.error && ' · stopped early'}
@@ -107,7 +110,7 @@ export default function TriagePanel() {
           <button className="triage-log-toggle" type="button"
                   onClick={() => setLogOpen((o) => !o)}>
             <span className={logOpen ? 'chev open' : 'chev'} aria-hidden="true">›</span>
-            auto-handled recently ({s.recent_auto.length}) — undoable
+            Auto-handled recently ({s.recent_auto.length}) — undoable
           </button>
           {logOpen && s.recent_auto.map((l) => (
             <div key={`l${l.id}`} className="sbx-row triage-row">
@@ -121,7 +124,7 @@ export default function TriagePanel() {
                   {ts(l.created_at)} · {l.reason}</div>
               </div>
               <Button variant="ghost" title="undo this auto-action" disabled={busy}
-                      onClick={() => act(`/api/reviewer/log/${l.id}/undo`)}>undo</Button>
+                      onClick={() => act(`/api/reviewer/log/${l.id}/undo`)}>Undo</Button>
             </div>
           ))}
         </>

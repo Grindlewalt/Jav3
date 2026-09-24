@@ -80,7 +80,7 @@ export default function SecretsPanel() {
           A key with no web hosts bound is unusable — web_read refuses it.
         </p>
         {!adding && (
-          <Button variant="ghost" onClick={() => setAdding(true)}>+ add secret</Button>)}
+          <Button variant="ghost" onClick={() => setAdding(true)}>Add secret</Button>)}
       </div>
 
       {adding && (
@@ -138,8 +138,8 @@ export default function SecretsPanel() {
               </div>
               {editing !== s.name && (
                 <div className="sbx-actions">
-                  <Button variant="ghost" onClick={() => openHosts(s)}>hosts</Button>
-                  <Button variant="ghost" danger onClick={() => del(s.name)}>delete</Button>
+                  <Button variant="ghost" onClick={() => openHosts(s)}>Edit hosts</Button>
+                  <Button variant="ghost" danger onClick={() => del(s.name)}>Delete</Button>
                 </div>
               )}
             </li>

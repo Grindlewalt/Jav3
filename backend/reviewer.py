@@ -118,6 +118,21 @@ def _alert_guard(row: dict) -> str | None:
     return None
 
 
+def clip(text: str, limit: int) -> str:
+    """`text` cut to at most `limit` characters on a word boundary, with an
+    ellipsis when anything was dropped. A reason sliced mid-word ("should
+    confirm thi") reads as a rendering bug on the Review page; a trailing "…"
+    reads as "there was more"."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1]
+    space = cut.rfind(" ")
+    if space > limit // 2:          # never throw away half the text for a word
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.-—") + "…"
+
+
 # --- the model call ----------------------------------------------------------
 
 def _parse_verdicts(out: str) -> dict[str, dict]:
@@ -135,7 +150,7 @@ def _parse_verdicts(out: str) -> dict[str, dict]:
         if (isinstance(x, dict) and isinstance(x.get("id"), str)
                 and x.get("verdict") in ("allow", "ack", "flag")):
             got[x["id"]] = {"verdict": x["verdict"],
-                            "reason": str(x.get("reason") or "")[:200]}
+                            "reason": clip(x.get("reason"), 200)}
     return got
 
 
@@ -165,7 +180,8 @@ async def _log(db, run_id: int, item_kind: str, item_id: int, slug: str | None,
     await db.execute(
         "INSERT INTO triage_log(run_id, item_kind, item_id, project_slug, subject, "
         "verdict, reason, action, detail) VALUES (?,?,?,?,?,?,?,?,?)",
-        (run_id, item_kind, item_id, slug, subject[:160], verdict, reason[:200],
+        (run_id, item_kind, item_id, slug, clip(subject, 160), verdict,
+         clip(reason, 200),
          action, json.dumps(detail) if detail else None))
 
 
