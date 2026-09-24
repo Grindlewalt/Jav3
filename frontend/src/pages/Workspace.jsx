@@ -12,6 +12,7 @@ import { NetworkPanel } from './Network.jsx'
 import { cspMediaSources } from '../mediaHosts.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import PlanPanel from '../PlanPanel.jsx'
 
 // ---- panel registry: add a capability = one component + one entry here ----
 const PANEL_TYPES = {
@@ -27,6 +28,7 @@ const PANEL_TYPES = {
   context: { label: 'Context files — load into Jarvis', w: 440, h: 460 },
   agent: { label: 'Run an agent', w: 460, h: 520 },
   research: { label: 'Research bots — live', w: 620, h: 560 },
+  plan: { label: 'Plan — dump, checklist, agents', w: 560, h: 560 },
   review: { label: 'Review — approvals & alerts', w: 480, h: 540 },
   network: { label: 'Network — egress & host approvals', w: 480, h: 560 },
   secrets: { label: 'Secrets — key grants for this project', w: 460, h: 380 },
@@ -503,6 +505,7 @@ function PanelBody(props) {
     case 'context': return <ContextPanel {...props} />
     case 'agent': return <AgentPanel {...props} />
     case 'research': return <ResearchPanel {...props} />
+    case 'plan': return <PlanPanel {...props} />
     case 'review': return <ReviewPanel {...props} />
     case 'network': return <NetworkPanel slug={props.slug} />
     case 'secrets': return <SecretsPanel slug={props.slug} />

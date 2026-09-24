@@ -2758,3 +2758,15 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .settings-page .panel > h2 { margin: 0 0 var(--sp-5); font-size: var(--fs-lg);
   font-weight: 600; }
 .settings-page select { min-width: 220px; }
+
+/* ---- plan panel (the explicit orchestrator's checklist) ------------------ */
+.plan-head { margin: 0; }
+.plan-list { list-style: none; padding: 0; margin: 0; }
+.plan-item { border-bottom: 1px solid var(--border); }
+.plan-row { display: flex; align-items: center; gap: 7px; padding: 6px 4px; min-width: 0; }
+.plan-title { flex: 1; min-width: 0; cursor: pointer; }
+.plan-item.done .plan-title, .plan-item.skipped .plan-title {
+  color: var(--dim); text-decoration: line-through; }
+.plan-detail { display: flex; flex-direction: column; gap: var(--sp-3);
+  padding: 0 4px var(--sp-5) 28px; }
+.plan-detail .row { margin: 0; }
