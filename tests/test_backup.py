@@ -177,7 +177,8 @@ def test_restore_mirrors(rc, tmp_path, monkeypatch):
     to = tmp_path / "restored"
     lines = backup.restore("r:bk", to)
     argvs = _argvs(rc)
-    assert ["/usr/bin/rclone", "copy", "r:bk/memory", str(to / "memory")] in argvs
+    assert ["/usr/bin/rclone", "copy", "r:bk/memory", str(to / "memory"),
+            "--exclude", backup.GIT_HOOKS] in argvs
     assert (to / "data" / "jarvis.db").exists()
     assert any("integrity ok" in line for line in lines)
     # refuses to land on existing state without force
@@ -210,3 +211,42 @@ async def test_backup_api(client, tmp_env, monkeypatch):  # noqa: F811
 
     r = await client.post("/api/backup/run")
     assert r.status_code == 400 and "not installed" in r.json()["detail"]
+
+    # the rclone setting names a program the server runs: only rclone itself
+    for bad in ("sh", "python3", "/tmp/x/evil", "rclone --config=/x",
+                "/opt/../bin/rclone", "./rclone"):
+        r = await client.put("/api/backup/config", json={"rclone": bad})
+        assert r.status_code == 400, bad
+    for bad in ("r:bk --dry-run", "r:bk\nx", "r:x--config=/y", " -r:bk"):
+        r = await client.put("/api/backup/config", json={"remote": bad})
+        assert r.status_code == 400, bad
+    r = await client.put("/api/backup/config", json={"rclone": "/usr/local/bin/rclone"})
+    assert r.status_code == 200
+
+    # a destination change is never silent
+    r = await client.put("/api/backup/config", json={"remote": "other:bk",
+                                                     "crypt_password": "pw2"})
+    assert r.status_code == 200
+    r = await client.get("/api/security/events")
+    ev = [e for e in r.json()["events"] if e["kind"] == "backup_config_changed"]
+    assert ev and ev[0]["severity"] == "warn"
+    assert "other:bk" in str(ev[0]["detail"]) and "pw2" not in str(ev)
+
+
+def test_rclone_setting_is_validated_at_use(rc, monkeypatch):
+    """A bad rclone value from env/backup.json (not just the API) is refused
+    before anything is executed."""
+    monkeypatch.setattr(backup, "load_config",
+                        lambda: {**{k: getattr(backup.settings, f"backup_{k}")
+                                    for k in backup._CONFIG_KEYS},
+                                 "remote": "r:bk", "rclone": "sh"})
+    with pytest.raises(backup.BackupError, match="rclone setting"):
+        backup.run_backup()
+    assert rc.calls == []
+
+
+def test_git_hooks_never_backed_up(rc, tmp_env):
+    backup.run_backup()
+    for argv in _argvs(rc):
+        if argv[1] == "sync" and not argv[3].startswith(backup.CRYPT_NAME.lower()):
+            assert backup.GIT_HOOKS in argv

@@ -24,7 +24,9 @@ import asyncio
 import contextlib
 import fcntl
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -47,6 +49,15 @@ CRYPT_NAME = "JAV3CRYPT"          # the on-the-fly crypt remote's config name
 # One line, surfaced by /status for the GUI's empty state and by the refusals.
 # A pointer rather than a distro command: the install differs per system.
 INSTALL_HINT = "see https://rclone.org/install/"
+# Restoring must never plant executable git hooks: a restored project's
+# .git/hooks would run on the HOST the next time Jarvis commits there, so a
+# tampered remote would be code execution. Hooks are never backed up either.
+GIT_HOOKS = "**/.git/hooks/**"
+# The rclone setting names a program the server will EXECUTE. Only rclone
+# itself: a bare name (looked up on PATH) or an absolute path, whose file
+# name starts with "rclone" — never `sh`, `python3` or an agent-written script.
+_RCLONE_NAME = re.compile(r"rclone[A-Za-z0-9._-]*")
+log = logging.getLogger(__name__)
 _CONFIG_KEYS = ("remote", "rclone", "include_secrets", "crypt_remote",
                 "crypt_password", "crypt_password2")
 
@@ -100,9 +111,21 @@ def crypt_configured(cfg: dict) -> bool:
 
 
 def valid_remote(value: str) -> bool:
-    """An rclone remote path goes on rclone's argv: a leading '-' would be read
-    as a flag, and control characters have no business in it."""
-    return bool(value) and not value.startswith("-") and value.isprintable()
+    """An rclone remote path goes on rclone's argv (list form, never a shell):
+    a leading '-' or an embedded '--' could be read as a flag, and whitespace
+    or control characters have no business in it."""
+    return (bool(value) and value.isprintable() and not value.startswith("-")
+            and "--" not in value and not any(c.isspace() for c in value))
+
+
+def valid_rclone(value: str) -> bool:
+    """See _RCLONE_NAME: a bare `rclone*` name or an absolute path to one."""
+    if not value or not value.isprintable() or any(c.isspace() for c in value):
+        return False
+    if value.startswith("/"):
+        parts = value.split("/")
+        return ".." not in parts and bool(_RCLONE_NAME.fullmatch(parts[-1]))
+    return bool(_RCLONE_NAME.fullmatch(value))
 
 
 def _join(remote: str, sub: str) -> str:
@@ -111,7 +134,10 @@ def _join(remote: str, sub: str) -> str:
 
 
 def rclone_path(cfg: dict | None = None) -> str | None:
-    return shutil.which((cfg or load_config())["rclone"] or "rclone")
+    """The rclone binary to run, or None — also None for a setting that is not
+    a plausible rclone (valid_rclone), whichever source it came from."""
+    name = (cfg or load_config())["rclone"] or "rclone"
+    return shutil.which(name) if valid_rclone(name) else None
 
 
 # ------------------------------------------------------------------ rclone ---
@@ -166,6 +192,9 @@ def _secret_files() -> dict[str, Path]:
 def _preflight(cfg: dict) -> str:
     if not valid_remote(cfg["remote"]):
         raise BackupError("no backup remote configured (e.g. myremote:jav3-backup)")
+    if not valid_rclone(cfg["rclone"] or "rclone"):
+        raise BackupError("the rclone setting must be `rclone` or an absolute "
+                          "path to an rclone binary")
     rclone = rclone_path(cfg)
     if not rclone:
         raise BackupError(f"rclone is not installed ('{cfg['rclone']}' not on PATH) "
@@ -240,7 +269,7 @@ def run_backup() -> dict:
                 if not src.is_dir():
                     continue
                 args = ["sync", str(src), _join(cfg["remote"], name)]
-                for pat in EXCLUDES:
+                for pat in (*EXCLUDES, GIT_HOOKS):
                     args += ["--exclude", pat]
                 _rclone(rclone, args)
                 n += _tree_bytes(src)
@@ -325,6 +354,9 @@ def restore(from_remote: str | None = None, to_dir: Path | None = None,
     remote = from_remote or cfg["remote"]
     if not valid_remote(remote):
         raise BackupError("no remote to restore from")
+    if not valid_rclone(cfg["rclone"] or "rclone"):
+        raise BackupError("the rclone setting must be `rclone` or an absolute "
+                          "path to an rclone binary")
     rclone = rclone_path(cfg)
     if not rclone:
         raise BackupError(f"rclone is not installed — {INSTALL_HINT}")
@@ -340,7 +372,8 @@ def restore(from_remote: str | None = None, to_dir: Path | None = None,
     with _run_lock():
         for name in DIRS:
             # exit 3 = directory not found: that dir was empty/absent at backup time
-            if _rclone(rclone, ["copy", _join(remote, name), str(to / name)],
+            if _rclone(rclone, ["copy", _join(remote, name), str(to / name),
+                                "--exclude", GIT_HOOKS],
                        ok_codes=(0, 3)) == 0:
                 log.append(f"restored {name}/")
         data = to / "data"
@@ -405,17 +438,52 @@ async def get_config():
 @router.put("/config")
 async def put_config(body: BackupConfig):
     cfg = load_config()
+    before = dict(cfg)
     for k, v in body.model_dump(exclude_none=True).items():
         cfg[k] = v.strip() if isinstance(v, str) else v
     for k in ("remote", "crypt_remote"):
         if cfg[k] and not valid_remote(cfg[k]):
             raise HTTPException(status_code=400, detail=f"invalid {k}")
+    if cfg["rclone"] and not valid_rclone(cfg["rclone"]):
+        raise HTTPException(status_code=400, detail=(
+            "rclone must be `rclone` or an absolute path to an rclone binary"))
     if cfg["include_secrets"] and not crypt_configured(cfg):
         raise HTTPException(status_code=400, detail=(
             "including secrets needs an rclone crypt layer — set a crypt "
             "password or a crypt remote first"))
     save_config(cfg)
+    await _audit_config_change(before, cfg)
     return public_config(cfg)
+
+
+async def _audit_config_change(before: dict, after: dict) -> None:
+    """Where the backups go is where the whole state (every conversation, the
+    user table) ends up, so a change is never silent: logged, and a security
+    event in the Review Center. Passwords are reported as changed, never
+    shown."""
+    changed = [k for k in _CONFIG_KEYS if before.get(k) != after.get(k)]
+    if not changed:
+        return
+    shown = {k: {"from": before.get(k), "to": after.get(k)}
+             for k in changed if not k.startswith("crypt_password")}
+    shown.update({k: "changed" for k in changed if k.startswith("crypt_password")})
+    where = {"remote", "crypt_remote", "rclone", "include_secrets"} & set(changed)
+    log.warning("backup config changed: %s", ", ".join(changed))
+    from . import security
+    from .db import get_db
+    db = None
+    try:
+        db = await get_db()
+        await security.raise_event(
+            db, kind="backup_config_changed", severity="warn" if where else "info",
+            summary=("backup destination changed: " if where else
+                     "backup settings changed: ") + ", ".join(changed),
+            detail=shown)
+    except Exception:  # noqa: BLE001 — the log line above still records it
+        pass
+    finally:
+        if db is not None:
+            await db.close()
 
 
 @router.post("/run")
