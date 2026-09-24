@@ -10,18 +10,19 @@
 # violation, a bad prop or an undefined variable. It catches the class of
 # mistake that blanks the app for a stupid reason.
 #
-# Usage:  scripts/jsxcheck.sh frontend/src/App.jsx frontend/src/pages/*.jsx
+# Usage:  scripts/jsxcheck.sh frontend/src/App.jsx frontend/src/pages/*.jsx frontend/src/styles.css
 set -uo pipefail
 HOST="${JSXCHECK_HOST:-grindlewalt@atomostest}"
 ESB="~/jarvis/frontend/node_modules/.bin/esbuild"
 rc=0
 for f in "$@"; do
   [ -f "$f" ] || { echo "MISSING  $f"; rc=1; continue; }
-  # CSS is skipped on purpose: esbuild's standalone CSS parser reports
-  # syntax errors on this stylesheet that vite's own pipeline builds without
-  # complaint (styles.css:1926 today), so it is a false-positive generator.
+  # CSS goes through esbuild's own CSS parser. It used to be skipped because
+  # four orphaned rule fragments in styles.css made it a false-positive
+  # generator; those are gone, and a stylesheet that fails here is one vite
+  # would silently build with a dropped rule.
   case "$f" in
-    *.css) echo "skip     $f (esbuild's css parser disagrees with vite's)"; continue ;;
+    *.css) loader=css ;;
     *.jsx) loader=jsx ;;
     *) loader=js ;;
   esac
