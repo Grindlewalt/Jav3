@@ -341,6 +341,10 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE tool_calls ADD COLUMN message_id INTEGER")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tool_calls_msg ON tool_calls(message_id)")
+        # the Logs list and every transcript read tool_calls by conversation;
+        # without this each of those was a full scan of the table
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_conv ON tool_calls(conversation_id)")
         for col, decl in (("parent_conversation_id", "INTEGER"),
                           ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
                           ("rollup", "TEXT"), ("job_id", "TEXT"),

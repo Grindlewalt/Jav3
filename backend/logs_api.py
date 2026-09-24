@@ -6,6 +6,7 @@ the numbers that explain a token blow-up — tool-call counts, result bytes, and
 the real token usage recorded per turn. Read-only.
 """
 import json
+import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -141,24 +142,45 @@ async def call_context(call_id: int):
             "cache_hit": row["cache_hit"], "cache_miss": row["cache_miss"]}
 
 
+# octet_length() (SQLite 3.43+) reads a TEXT column's byte count from the
+# record header; LENGTH() counts characters, so it pulls every overflow page of
+# every tool result off disk — on the Pi that alone made this list take seconds.
+_BYTELEN = "octet_length" if sqlite3.sqlite_version_info >= (3, 43) else "LENGTH"
+
+LIST_LIMIT = 200
+
+
 @router.get("/conversations")
 async def conversations(kind: str | None = None):
+    """The newest LIST_LIMIT conversations with their tool/token totals.
+
+    The page is chosen first (a PK walk), then each ledger is aggregated once,
+    grouped, over only those ids via its conversation_id index — not four
+    correlated subqueries per row, which scanned tool_calls end to end for
+    every conversation in the page."""
+    where = "WHERE kind = ? " if kind else ""
+    args: tuple = (kind, LIST_LIMIT) if kind else (LIST_LIMIT,)
+    q = (
+        f"WITH page AS (SELECT id FROM conversations {where}"
+        "  ORDER BY id DESC LIMIT ?) "
+        "SELECT c.id, c.kind, c.summary, c.started_at, p.slug AS project, "
+        "  COALESCE(t.n, 0) AS tool_calls, COALESCE(t.b, 0) AS result_bytes, "
+        "  COALESCE(m.i, 0) AS input_tokens, COALESCE(m.o, 0) AS output_tokens "
+        "FROM page JOIN conversations c ON c.id = page.id "
+        "LEFT JOIN projects p ON p.id = c.project_id "
+        "LEFT JOIN (SELECT conversation_id AS cid, COUNT(*) AS n, "
+        f"    SUM({_BYTELEN}(result)) AS b FROM tool_calls "
+        "  WHERE conversation_id IN (SELECT id FROM page) "
+        "  GROUP BY conversation_id) t ON t.cid = c.id "
+        # model_calls, not usage_log: the ledger covers every call (agents,
+        # schedules, research, funnel nodes) — usage_log only sees chat turns
+        "LEFT JOIN (SELECT conversation_id AS cid, SUM(input_tokens) AS i, "
+        "    SUM(output_tokens) AS o FROM model_calls "
+        "  WHERE conversation_id IN (SELECT id FROM page) "
+        "  GROUP BY conversation_id) m ON m.cid = c.id "
+        "ORDER BY c.id DESC")
     db = await get_db()
     try:
-        q = (
-            "SELECT c.id, c.kind, c.summary, c.started_at, p.slug AS project, "
-            "  (SELECT COUNT(*) FROM tool_calls t WHERE t.conversation_id=c.id) AS tool_calls, "
-            "  (SELECT COALESCE(SUM(LENGTH(t.result)),0) FROM tool_calls t WHERE t.conversation_id=c.id) AS result_bytes, "
-            # model_calls, not usage_log: the ledger covers every call (agents,
-            # schedules, research, funnel nodes) — usage_log only sees chat turns
-            "  (SELECT COALESCE(SUM(m.input_tokens),0) FROM model_calls m WHERE m.conversation_id=c.id) AS input_tokens, "
-            "  (SELECT COALESCE(SUM(m.output_tokens),0) FROM model_calls m WHERE m.conversation_id=c.id) AS output_tokens "
-            "FROM conversations c LEFT JOIN projects p ON p.id=c.project_id ")
-        args: tuple = ()
-        if kind:
-            q += "WHERE c.kind = ? "
-            args = (kind,)
-        q += "ORDER BY c.id DESC LIMIT 200"
         cur = await db.execute(q, args)
         return {"conversations": [dict(r) for r in await cur.fetchall()]}
     finally:

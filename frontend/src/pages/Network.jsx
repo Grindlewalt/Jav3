@@ -3,7 +3,7 @@ import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { human } from '../format.js'
-import { EmptyState, Select } from '../components/index.js'
+import { Button, EmptyState, Input, Select, Toggle } from '../components/index.js'
 
 // The guest's live egress: a scrolling feed of every outbound request the
 // sandbox made, with a verdict chip (allow / deny / cut), an approval queue for
@@ -18,16 +18,21 @@ const FEED_CAP = 300
 // allow -> green, cut -> red, everything else (deny / anomaly) -> amber
 const verdictClass = (v) => (v === 'allow' ? 'allow' : v === 'cut' ? 'cut' : 'deny')
 
+// One line on a desktop. On a phone, two: what was reached and how much
+// (verdict, host, bytes), then the particulars (project, request, reason) —
+// .egr-meta is `display: contents` until then, so it costs nothing wide.
 function FeedRow({ e }) {
   const cls = verdictClass(e.verdict)
   return (
     <div className={`egr-row ${cls === 'allow' ? '' : cls}`}>
       <span className={`egr-chip ${cls}`}>{e.verdict}</span>
       <span className="egr-host" title={e.host}>{e.host}</span>
-      {e.project && <span className="tag">{e.project}</span>}
-      <span className="egr-path" title={`${e.method || ''} ${e.path || ''}`}>
-        {e.method ? `${e.method} ` : ''}{e.path}</span>
-      {e.reason && <span className="egr-reason" title={e.reason}>{e.reason}</span>}
+      <span className="egr-meta">
+        {e.project && <span className="tag">{e.project}</span>}
+        <span className="egr-path" title={`${e.method || ''} ${e.path || ''}`}>
+          {e.method ? `${e.method} ` : ''}{e.path}</span>
+        {e.reason && <span className="egr-reason" title={e.reason}>{e.reason}</span>}
+      </span>
       <span className="egr-bytes" title="out / in">
         ↑{human(e.bytes_out)} ↓{human(e.bytes_in)}</span>
     </div>
@@ -63,29 +68,28 @@ function PolicyEditor({ slug }) {
   if (!pol) return null
   return (
     <div className="sbx-card">
-      <div className="sbx-sec-head"><h3>Policy · {slug}</h3><span className="dim small">{status}</span></div>
+      {/* the project is named by the picker above (or is the panel's own) —
+          repeated here in the uppercase head it hyphen-broke across lines */}
+      <div className="sbx-sec-head"><h3>Egress policy</h3>
+        <span className="dim small">{status}</span></div>
       <div className="net-policy">
-        <label className="mini">mode
-          <select value={pol.mode || 'allowlist'}
-                  onChange={(e) => setPol({ ...pol, mode: e.target.value })}>
-            <option value="allowlist">allowlist — only listed hosts</option>
-            <option value="denylist">denylist — all but listed hosts</option>
-            <option value="denyall">deny all — no egress</option>
-          </select>
-        </label>
-        <label className="check-row">
-          <input type="checkbox" checked={!!pol.inherit_general}
-                 onChange={(e) => setPol({ ...pol, inherit_general: e.target.checked })} />
-          inherit the general allowlist
-        </label>
-        <label className="mini">hosts (one per line)
-          <textarea className="md-editor" rows={4} spellCheck={false} value={hostsText}
-                    onChange={(e) => setHostsText(e.target.value)} />
-        </label>
+        <Select label="Mode" value={pol.mode || 'allowlist'}
+                onChange={(e) => setPol({ ...pol, mode: e.target.value })}
+                options={[
+                  { value: 'allowlist', label: 'Allowlist — only listed hosts' },
+                  { value: 'denylist', label: 'Denylist — all but listed hosts' },
+                  { value: 'denyall', label: 'Deny all — no egress' }]} />
+        <Toggle checked={!!pol.inherit_general} label="Inherit the general allowlist"
+                onText="Inherit the general allowlist"
+                offText="Inherit the general allowlist"
+                onChange={(on) => setPol({ ...pol, inherit_general: on })} />
+        <Input textarea label="Hosts (one per line)" className="md-editor" rows={4}
+               spellCheck={false} value={hostsText}
+               onChange={(e) => setHostsText(e.target.value)} />
         <div className="row">
           <span className="dim small grow">
             effective: {pol.mode}{pol.source ? ` · source: ${pol.source}` : ''}</span>
-          <button disabled={saving} onClick={save}>{saving ? '…' : 'Save policy'}</button>
+          <Button disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save policy'}</Button>
         </div>
         {Array.isArray(pol.effective) && pol.effective.length > 0 && (
           <div className="dim small">effective hosts: {pol.effective.join(', ')}</div>
@@ -120,8 +124,8 @@ function Grants({ slug }) {
 
   return (
     <div className="sbx-card">
-      <div className="sbx-sec-head"><h3>Secret grants · {slug}</h3>
-        <button className="ghost" onClick={add}>+ grant</button></div>
+      <div className="sbx-sec-head"><h3>Secret grants</h3>
+        <Button variant="ghost" onClick={add}>Grant secret</Button></div>
       <ul className="staged-list rev-list">
         {grants.length === 0 && <EmptyState as="li">none granted</EmptyState>}
         {grants.map((g) => {
@@ -130,9 +134,9 @@ function Grants({ slug }) {
             <li key={g.secret_name}>
               <span className={`tag ${granted ? 'done' : ''}`}>{g.status}</span>
               <span className="grow ellipsis mono">{g.secret_name}</span>
-              <button className="ghost"
+              <Button variant="ghost" danger={granted}
                       onClick={() => set(g.secret_name, granted ? 'revoked' : 'granted')}>
-                {granted ? 'revoke' : 'grant'}</button>
+                {granted ? 'Revoke' : 'Grant'}</Button>
             </li>
           )
         })}

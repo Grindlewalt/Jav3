@@ -1,9 +1,9 @@
 import { createContext, useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { isWatched } from './agentWatch.js'
 import { api, subscribeSse } from './api.js'
 
-// Top-right notices — the successor to the nav bell and shield. Anything that
+// Bottom-right notices — the successor to the nav bell and shield. Anything that
 // needs operator eyes arrives as a desktop-style alert (red = critical
 // security, amber = the rest) and clicks through to the Review Center, which
 // is the actual ledger; the count badge on the Review nav link means a missed
@@ -128,8 +128,21 @@ export function useNotices(enabled) {
   return { toasts, count, dismiss, clear }
 }
 
+// A queue card (not the app's own message, not an agent run's result) exists
+// to say "go to Review". On Review it says nothing the page is not already
+// showing, and at the top of the screen it sat on the page's own tab strip.
+const isQueueCard = (t) => !t.local && !t.project
+const onReview = (path) => path === '/review' || path.startsWith('/review/')
+
 export default function Notices({ toasts, dismiss, clear }) {
   const navigate = useNavigate()
+  const here = onReview(useLocation().pathname)
+  // arriving on Review retires the queue cards rather than hiding them: a
+  // hidden card's drain never runs, so it would pop back up on the way out
+  useEffect(() => {
+    if (here) toasts.filter(isQueueCard).forEach((t) => dismiss(t.id))
+  }, [here, toasts, dismiss])
+  if (here) toasts = toasts.filter((t) => !isQueueCard(t))
   if (toasts.length === 0) return null
   // Which three survive. Straight `slice(-3)` meant a burst of "save failed"
   // could push a critical security card off the screen — a UI convenience

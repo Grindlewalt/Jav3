@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
-import { human } from '../format.js'
-import { EmptyState, Tabs } from '../components/index.js'
+import { human, ts } from '../format.js'
+import { EmptyState, Tabs, Toggle } from '../components/index.js'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
 // message and every tool call with its args and result — plus the numbers that
@@ -13,6 +13,10 @@ import { EmptyState, Tabs } from '../components/index.js'
 const RESULT_HOT = 4000       // a single result this big is re-sent every iteration
 const HEAVY_TOKENS = 500000   // runaway-conversation flags in the left rail
 const HEAVY_CALLS = 30
+// The list is a snapshot of the ledger, not a live feed: a slow answer must
+// never be asked again before it lands (the 5 s poll used to stack requests
+// behind a query that took longer than the interval).
+const POLL_MS = 15000
 
 // token counts -> K / M
 function tok(n) {
@@ -75,13 +79,13 @@ function CallItem({ call, index, prevInput }) {
         </span>
         <span className="grow" />
         <span className="mono small">{usd(call.cost_usd)}</span>
-        <span className="dim small">{call.created_at}</span>
+        <span className="dim small">{ts(call.created_at)}</span>
       </div>
       {open && (
         <div className="log-tool-body">
           {!call.has_context && (
-            <div className="dim small">no raw context stored for this call —
-              flip “capture raw context” on the Cost tab before the run</div>
+            <div className="dim small">No raw context stored for this call —
+              turn on “Capture raw context” on the Cost tab before the run.</div>
           )}
           {err && <div className="dim small">{err}</div>}
           {ctx && (
@@ -121,25 +125,26 @@ function CostView() {
   const [data, setData] = useState(null)
   const load = () => api('/api/logs/costs').then(setData).catch(() => {})
   useEffect(() => { load() }, [])
-  if (!data) return <div className="dim center-pad">…</div>
+  if (!data) return <EmptyState pad>loading…</EmptyState>
   const p = data.prices_per_m
   const order = ['24h', '7d', '30d', 'all']
   return (
     <div className="log-detail">
       <div className="sbx-card">
-        <div className="sbx-verdict-top">
-          <span className="tag">cost</span>
-          <span className="grow" />
-          <label className="dim small" style={{ cursor: 'pointer' }}>
-            <input type="checkbox" checked={data.capture_context}
-                   onChange={async (e) => {
-                     await api('/api/logs/capture-context', {
-                       method: 'POST',
-                       body: JSON.stringify({ enabled: e.target.checked }) })
-                     load()
-                   }} />
-            {' '}capture raw context per model call (heavy; kept a few days)
-          </label>
+        {/* the tab strip already says "cost"; this row is the one setting */}
+        <div className="logs-capture">
+          <Toggle checked={!!data.capture_context} label="Capture raw context"
+                  onText="Capture raw context" offText="Capture raw context"
+                  onChange={async (on) => {
+                    setData((d) => ({ ...d, capture_context: on }))
+                    try {
+                      await api('/api/logs/capture-context', {
+                        method: 'POST', body: JSON.stringify({ enabled: on }) })
+                    } catch { /* load() below restores the real state */ }
+                    load()
+                  }} />
+          <span className="dim small">every model call's exact context —
+            heavy, kept a few days</span>
         </div>
         <div className="sbx-tiles">
           {order.map((w) => (
@@ -200,7 +205,7 @@ function ToolItem({ item }) {
         <span className="mono log-tool-name">{item.tool}</span>
         <span className={`log-size${hot ? ' hot' : ''}`}>{human(item.result_bytes)}</span>
         <span className="grow" />
-        <span className="dim small">{item.ts}</span>
+        <span className="dim small">{ts(item.ts)}</span>
       </div>
       {open && (
         <div className="log-tool-body">
@@ -215,21 +220,32 @@ function ToolItem({ item }) {
 }
 
 export default function Logs() {
-  const [convos, setConvos] = useState([])
+  const [convos, setConvos] = useState(null)   // null = first load in flight
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [calls, setCalls] = useState([])
   const [view, setView] = useState('logs')   // 'logs' | 'cost'
   const selectedRef = useRef(null)
+  const inFlight = useRef(false)
 
-  const refresh = () =>
-    api('/api/logs/conversations').then((r) => setConvos(r.conversations)).catch(() => {})
+  // one request at a time: a tick that finds the last one still out skips,
+  // and a hidden tab does not ask at all
+  const refresh = () => {
+    if (inFlight.current || document.hidden) return
+    inFlight.current = true
+    api('/api/logs/conversations')
+      .then((r) => setConvos(r.conversations || []))
+      .catch(() => setConvos((c) => c ?? []))
+      .finally(() => { inFlight.current = false })
+  }
 
+  // only the transcripts view shows the list, so only it polls
   useEffect(() => {
+    if (view !== 'logs') return undefined
     refresh()
-    const t = setInterval(refresh, 5000)
+    const t = setInterval(refresh, POLL_MS)
     return () => clearInterval(t)
-  }, [])
+  }, [view]) // eslint-disable-line
 
   function open(id) {
     selectedRef.current = id
@@ -258,15 +274,15 @@ export default function Logs() {
   return (
     <div className="logs-view">
       <Tabs label="Logs view" value={view} onChange={setView}
-            items={[{ id: 'logs', label: 'transcripts', panel: 'logs-panel' },
-                    { id: 'cost', label: 'cost', panel: 'logs-panel' }]} />
+            items={[{ id: 'logs', label: 'Transcripts', panel: 'logs-panel' },
+                    { id: 'cost', label: 'Cost', panel: 'logs-panel' }]} />
       {view === 'cost' ? (
         <div className="logs-cost" id="logs-panel" role="tabpanel"><CostView /></div>
       ) : (
         <div className="split-layout logs-split" id="logs-panel" role="tabpanel">
           <aside className="logs-aside">
             <ul className="file-list">
-              {convos.map((c) => {
+              {(convos || []).map((c) => {
                 const heavyTok = (c.input_tokens || 0) > HEAVY_TOKENS
                 const heavyCalls = (c.tool_calls || 0) > HEAVY_CALLS
                 return (
@@ -292,7 +308,8 @@ export default function Logs() {
                   </li>
                 )
               })}
-              {convos.length === 0 && (
+              {convos === null && <EmptyState as="li">loading…</EmptyState>}
+              {convos?.length === 0 && (
                 <EmptyState as="li">no conversations yet</EmptyState>
               )}
             </ul>
@@ -329,7 +346,7 @@ export default function Logs() {
                     <div className="sbx-sec-head">
                       <h3>Model calls</h3>
                       <span className="dim small">
-                        the exact context sent per API call — capture toggles on the cost tab</span>
+                        the exact context sent per API call — capture is set on the Cost tab</span>
                     </div>
                     <div className="log-timeline">
                       {calls.map((c, i) => (
@@ -375,7 +392,7 @@ export default function Logs() {
                         <div key={i} className={`log-msg ${item.role}`}>
                           <div className="log-msg-head">
                             <span className="log-role">{item.role}</span>
-                            {item.ts && <span className="dim small">{item.ts}</span>}
+                            {item.ts && <span className="dim small">{ts(item.ts)}</span>}
                           </div>
                           <div className="log-msg-body"><Md text={item.content} /></div>
                         </div>

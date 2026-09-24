@@ -57,3 +57,18 @@ async def test_transcript_timeline_and_histogram(client):
 
 async def test_transcript_404(client):
     assert (await client.get("/api/logs/conversations/999")).status_code == 404
+
+
+async def test_conversations_list_kind_filter_and_empty_totals(client):
+    db = await get_db()
+    try:
+        await db.execute("INSERT INTO conversations (id, kind, summary) VALUES (2, 'reader', 'Quiet')")
+        await db.commit()
+    finally:
+        await db.close()
+    rows = (await client.get("/api/logs/conversations?kind=reader")).json()["conversations"]
+    assert [r["id"] for r in rows] == [2]
+    assert rows[0]["tool_calls"] == 0 and rows[0]["result_bytes"] == 0
+    assert rows[0]["input_tokens"] == 0 and rows[0]["output_tokens"] == 0
+    both = (await client.get("/api/logs/conversations")).json()["conversations"]
+    assert [r["id"] for r in both] == [2, 1]   # newest first

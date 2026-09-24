@@ -1728,7 +1728,8 @@ kbd {
 .sbx-cmd { font-size: 14px; word-break: break-all; }
 .sbx-headline-lg { margin: 8px 0 0; font-size: 13.5px; color: var(--text); }
 .sbx-tiles { display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  /* 160, not 130: "last 30d · 1032 calls" broke onto a second line at 130 */
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 8px; margin-top: 12px; }
 .sbx-tile { background: var(--panel-2); border: 1px solid var(--border);
   border-radius: 8px; padding: 7px 10px; }
@@ -1783,6 +1784,15 @@ kbd {
   border-radius: var(--radius); padding: var(--sp-3);
 }
 .logs-split > main.editor-pane { padding: 0; }
+/* the cost card's one setting: the switch, then what it costs to leave on */
+.logs-capture { display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-6); }
+/* a list's empty/loading line is prose, not a row: the list's monospace and
+   its row box (the bordered .staged-list li) made "nothing waiting" look like
+   a hostname someone had queued */
+.file-list li.empty-row, .staged-list li.empty-row {
+  font-family: inherit; background: none; border: 0; cursor: default; }
+.file-list li.empty-row:hover { background: none; color: var(--dim); }
 .logs-aside .file-list li { white-space: normal; }
 .logs-aside .log-row-top .grow { white-space: normal; overflow-wrap: anywhere;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
@@ -1890,7 +1900,6 @@ kbd {
 .net-view { display: flex; flex-direction: column; flex: 1; min-height: 0;
   gap: var(--sp-6); }
 .net-head { display: flex; align-items: center; gap: var(--sp-5); }
-.net-head select { padding: 4px 8px; font-size: 13px; }
 .net-body { display: flex; gap: 16px; flex: 1; min-height: 0; }
 .net-feed { flex: 2; min-width: 0; display: flex; flex-direction: column;
   min-height: 0; gap: 6px; }
@@ -1899,10 +1908,13 @@ kbd {
   display: flex; flex-direction: column; gap: 14px; }
 .net-hint { padding: 8px 2px; }
 .net-side .sbx-card { margin-bottom: 0; }
-.net-policy { display: flex; flex-direction: column; gap: 8px; }
-.net-policy label.mini { display: flex; flex-direction: column; gap: 3px;
-  font-size: 12px; color: var(--dim); }
-.net-policy label.mini select, .net-policy label.mini textarea { width: 100%; }
+/* a side card's head: the title yields (ellipsis) before its button wraps */
+.net-side .sbx-sec-head h3, .net-panel .sbx-sec-head h3 { flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net-side .sbx-sec-head > button, .net-panel .sbx-sec-head > button {
+  flex-shrink: 0; white-space: nowrap; }
+.net-policy { display: flex; flex-direction: column; gap: var(--sp-5); }
+.net-policy .toggle { align-self: flex-start; }
 .net-policy .row { margin: 0; }
 
 .egr-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
@@ -1921,6 +1933,8 @@ kbd {
   background: color-mix(in srgb, var(--red) 12%, transparent); }
 .egr-host { font-family: ui-monospace, Menlo, monospace; font-weight: 600;
   white-space: nowrap; }
+/* the particulars group: invisible to the layout on a desktop row */
+.egr-meta { display: contents; }
 .egr-path { flex: 1; min-width: 0; color: var(--dim);
   font-family: ui-monospace, Menlo, monospace; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
@@ -2216,14 +2230,22 @@ kbd {
      at x=339..400) and flex squeezed the identifying text to zero width, so
      egress rows offered approve/reject for a host you could not read. */
   .sched-head, .staged-list li, .rev-staged-row,
-  .egr-row, .sbx-row, .create-project {
+  .sbx-row, .create-project {
     flex-wrap: wrap; row-gap: 8px;
   }
   /* the thing the row is about gets its own full-width line and stays legible */
-  .sched-head > .grow, .staged-list li > .grow,
-  .egr-host, .sbx-row > .grow {
+  .sched-head > .grow, .staged-list li > .grow, .sbx-row > .grow {
     flex: 1 1 100%; min-width: 0; font-size: 15px;
   }
+  /* an egress event is two compact lines, not a 150px card per request:
+     verdict · host · bytes, then project · request · reason. The feed is
+     hundreds of these, and at one field per line three fitted a screen. */
+  .egr-row { flex-wrap: wrap; row-gap: var(--sp-2); padding: 6px 10px; }
+  .egr-host { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .egr-meta { display: flex; align-items: center; gap: var(--sp-4);
+    flex: 1 1 100%; min-width: 0; order: 1; font-size: var(--fs-xs); }
+  .egr-meta .tag { margin-left: 0; flex-shrink: 0; }
+  .egr-meta .egr-reason { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   /* the create fields stack: full-width each, not one narrow name field
      above two stretched ones */
   .create-project input { flex: 1 1 100%; }
@@ -2232,8 +2254,6 @@ kbd {
   /* actions group on their own line, right-aligned, never off-screen */
   .sched-head { align-items: center; }
   .sched-head button { flex: 1 1 auto; }
-  .egr-row { align-items: flex-start; }
-  .egr-path { flex: 1 1 100%; }
   .sbx-right { flex-wrap: wrap; }
   .tag.triage-flag { max-width: 100%; white-space: normal; }
 
@@ -2246,7 +2266,6 @@ kbd {
   .sched-result, .log-pre, .console, .git-status, .git-diff {
     overflow-x: auto; max-width: 100%;
   }
-  .egr-host, .egr-path { overflow-wrap: anywhere; white-space: normal; }
 
   /* touch targets: the bar controls measured 32x24 to 65x24 before this */
   .win-btn { min-width: 38px; min-height: 38px; font-size: 16px; }
@@ -2478,20 +2497,25 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- top-right notices ----
+/* ---- bottom-right notices ----
    The bell and the shield are gone; anything that needs operator eyes lands
    here as a desktop-style alert instead. Severity colours the edge (red =
    critical, amber = the rest), the bar underneath drains while it waits and
    pauses on hover, and a click lands in the Review Center. At most three
-   cards show; the backlog folds into a "+N" chip. */
+   cards show; the backlog folds into a "+N" chip.
+   Bottom, not top: every page puts its heading, its tab strip and its main
+   actions at the top right, and a card there covered Review's tabs, Agents'
+   tabs and the Workspace's "+ panel" for its whole lifetime. The newest card
+   sits nearest the corner; older ones stack above it. */
 .notices {
-  position: fixed; top: calc(var(--nav-h) + var(--sat) + 12px);
-  right: 16px; z-index: 3000;
-  /* railed, there is no bar to clear */
+  position: fixed; bottom: calc(var(--sab) + 16px);
+  right: max(16px, env(safe-area-inset-right)); z-index: 3000;
   display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
-  width: min(360px, 92vw);
+  width: min(360px, calc(100vw - 32px));
 }
-.app.railed .notices { top: calc(var(--sat) + 12px); }
+/* Chat's composer owns the bottom edge (its send button sits under the
+   corner), so there the stack rides above it */
+.app:has(form.composer) .notices { bottom: calc(var(--sab) + 104px); }
 .notice {
   position: relative; overflow: hidden; display: block; width: 100%;
   text-align: left; background: var(--glass); color: var(--text);
