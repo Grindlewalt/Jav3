@@ -832,7 +832,6 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 /* the phone-only strip that reopens the off-canvas conversation list */
 .chat-title { font-weight: 600; color: var(--text); }
-.project-list li.deleted { opacity: 0.65; border-style: dashed; }
 .convo-list li:hover, .convo-list li.active { background: var(--panel-2); color: var(--text); }
 
 /* ---- project picker (chat toolbar) ----
@@ -1155,23 +1154,36 @@ input:focus, textarea:focus { border-color: var(--accent);
 .md-editor.grow { flex: 1; resize: none; }
 .md-editor.code { resize: vertical; }
 
-/* ---- projects list ---- */
+/* ---- projects ---- */
 .page { padding: 26px; max-width: 960px; width: 100%; margin: 0 auto; overflow-y: auto; }
 .autonomy-sel { padding: 3px 7px; font-size: 12px; }
+/* the create form is a card of its own above the grid */
 .create-project { display: flex; gap: 8px; margin-bottom: 18px;
   align-items: center; flex-wrap: wrap; }
 .create-project input:nth-child(2) { flex: 1 1 200px; }
 .create-project .gh-url { flex: 1 1 240px; }
-.project-list { list-style: none; padding: 0; }
-.project-list li {
-  display: flex; gap: 14px; align-items: center; padding: 14px 16px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius); margin-bottom: 10px; transition: border-color 0.15s;
-}
-.project-list li:hover { border-color: var(--accent); }
-.project-list a { color: var(--text); font-weight: 600; text-decoration: none; }
-.project-list a:hover { color: var(--accent); }
-.project-list code { color: var(--dim); font-size: 12px; flex: 1; }
+/* one card per project (Projects.jsx ProjectCard): the name is the link in,
+   ⋯ holds the rare actions, the autonomy dial sits in the foot. The old
+   .project-list rows carried six controls each at one weight. */
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--sp-6); }
+.project-grid-empty { grid-column: 1 / -1; }
+.project-card { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0;
+  transition: border-color 0.15s; }
+.project-card:hover { border-color: var(--accent); }
+.project-card.in-context { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.project-card-head { display: flex; align-items: center; gap: var(--sp-4); min-width: 0; }
+.project-name { flex: 1; min-width: 0; font-weight: 600; font-size: var(--fs-lg);
+  color: var(--text); text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.project-name:hover { color: var(--accent); }
+.project-slug { color: var(--dim); font-size: var(--fs-sm); }
+.project-remote { display: block; }
+.project-card-foot { display: flex; align-items: center; gap: var(--sp-4);
+  margin-top: var(--sp-2); flex-wrap: wrap; }
+.project-autonomy { display: flex; align-items: center; gap: var(--sp-3); }
+.project-card.deleted { opacity: 0.65; border-style: dashed; }
+.project-card.deleted:hover { border-color: var(--border); }
 
 /* ---- workspace control board ---- */
 .workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; }
@@ -1317,7 +1329,7 @@ kbd {
 .deleted-fold summary:hover { color: var(--text); }
 .deleted-fold summary::-webkit-details-marker { display: none; }
 .deleted-fold[open] summary .chev { transform: rotate(90deg); }
-.deleted-fold .project-list { margin-top: 12px; }
+.deleted-fold .project-grid { margin-top: 12px; }
 .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 12px; }
 .tool-card {
@@ -1951,24 +1963,20 @@ kbd {
      screen the last controls slid past the right edge (Schedules' delete sat
      at x=339..400) and flex squeezed the identifying text to zero width, so
      egress rows offered approve/reject for a host you could not read. */
-  .project-list li, .sched-head, .staged-list li, .rev-staged-row,
+  .sched-head, .staged-list li, .rev-staged-row,
   .egr-row, .sbx-row, .create-project {
     flex-wrap: wrap; row-gap: 8px;
   }
   /* the thing the row is about gets its own full-width line and stays legible */
-  .project-list li > a, .sched-head > .grow, .staged-list li > .grow,
+  .sched-head > .grow, .staged-list li > .grow,
   .egr-host, .sbx-row > .grow {
     flex: 1 1 100%; min-width: 0; font-size: 15px;
   }
   /* the create fields stack: full-width each, not one narrow name field
      above two stretched ones */
   .create-project input { flex: 1 1 100%; }
-  .project-list li { padding: 12px 14px; gap: 8px; }
-  .project-list code { flex: 1 1 auto; }
-  .project-list li button, .sched-head button, .sbx-actions button {
-    min-height: 38px;
-  }
-  .project-list li .autonomy-sel, .sched-form select { min-height: 38px; }
+  .sched-head button, .sbx-actions button { min-height: 38px; }
+  .autonomy-sel, .sched-form select { min-height: 38px; }
   /* actions group on their own line, right-aligned, never off-screen */
   .sched-head { align-items: center; }
   .sched-head button { flex: 1 1 auto; }
@@ -2325,8 +2333,6 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .chat-title.rename-title:hover:not(:disabled) {
   color: var(--accent); background: none; filter: none; transform: none;
 }
-.project-list li .win-btn { visibility: hidden; }
-.project-list li:hover .win-btn { visibility: visible; }
 
 /* ===== Security evidence board (SecurityBoard.jsx) =========================
    A security alert used to be a summary plus a JSON dump. This is the board

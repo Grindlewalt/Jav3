@@ -3,6 +3,26 @@ import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
 import Page from '../components/Page.jsx'
+import Card from '../components/Card.jsx'
+import Button from '../components/Button.jsx'
+import Input from '../components/Input.jsx'
+import Select from '../components/Select.jsx'
+import Tag from '../components/Tag.jsx'
+import EmptyState from '../components/EmptyState.jsx'
+import Menu, { MenuItem, MenuSep } from '../components/Menu.jsx'
+
+// A project is a card: its name is the way in (the Workspace), the slug and
+// the remote say what it is, the autonomy dial is the one setting worth
+// having on the card, and everything rarer — rename, load/unload, delete —
+// is behind ⋯. The list this replaces put six controls on every row, the
+// same six at the same weight whether you were about to open a project or
+// about to delete it.
+const AUTONOMY = [
+  { value: 'read_only', label: 'read-only' },
+  { value: 'stage', label: 'stage edits' },
+  { value: 'gated', label: 'agents + research' },
+  { value: 'full', label: 'full (commit)' },
+]
 
 export default function Projects() {
   const [projects, setProjects] = useState([])
@@ -13,6 +33,7 @@ export default function Projects() {
   const [error, setError] = useState(null)
   const [repoUrl, setRepoUrl] = useState('')
   const [creating, setCreating] = useState(false)
+  const [menuFor, setMenuFor] = useState(null)   // slug whose ⋯ menu is open
   const ask = useAsk()
 
   async function refresh() {
@@ -50,6 +71,15 @@ export default function Projects() {
     setCreating(false)
   }
 
+  async function rename(p) {
+    const next = await ask.prompt('Rename project', p.name, { confirmLabel: 'Rename' })
+    if (next === null || !next.trim()) return
+    try {
+      await api(`/api/projects/${p.slug}/name`, {
+        method: 'PUT', body: JSON.stringify({ name: next.trim() }) })
+      refresh()
+    } catch (err) { setError(err.detail || String(err)) }
+  }
   async function load(slug) {
     await api(`/api/projects/${slug}/load`, { method: 'POST' })
     refresh()
@@ -81,58 +111,38 @@ export default function Projects() {
     })
     refresh()
   }
+
+  const cloning = !!repoUrl.trim()
   return (
     <Page title="Projects">
-      <form className="create-project" onSubmit={create}>
-        <input placeholder={repoUrl.trim()
-                 ? 'project name (repo name if empty)' : 'project name'}
+      <Card as="form" className="create-project" onSubmit={create}>
+        <Input placeholder={cloning ? 'project name (repo name if empty)' : 'project name'}
                value={name} onChange={(e) => setName(e.target.value)}
-               required={!repoUrl.trim()} />
-        <input placeholder="what are you building? (one line)" value={summary}
+               required={!cloning} />
+        <Input placeholder="what are you building? (one line)" value={summary}
                onChange={(e) => setSummary(e.target.value)} />
-        <input className="gh-url" type="url"
+        <Input className="gh-url" type="url"
                placeholder="https://github.com/owner/repo (optional — clone it in)"
                value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
-        <button type="submit" disabled={creating}>
-          {creating && repoUrl.trim() ? 'cloning…'
-            : repoUrl.trim() ? 'Clone & create' : 'Create'}</button>
+        <Button type="submit" disabled={creating}>
+          {creating && cloning ? 'cloning…' : cloning ? 'Clone & create' : 'Create'}</Button>
         {error && <span className="error">{error}</span>}
-      </form>
-      <ul className="project-list">
+      </Card>
+
+      <div className="project-grid">
         {projects.map((p) => (
-          <li key={p.slug}>
-            <Link to={`/projects/${p.slug}`}>{p.name}</Link>
-            <button className="win-btn" title="rename project"
-                    onClick={async (e) => {
-                      e.preventDefault()
-                      const next = await ask.prompt('Rename project', p.name,
-                                                    { confirmLabel: 'Rename' })
-                      if (next === null || !next.trim()) return
-                      try {
-                        await api(`/api/projects/${p.slug}/name`, {
-                          method: 'PUT',
-                          body: JSON.stringify({ name: next.trim() }) })
-                        refresh()
-                      } catch (err) { setError(err.detail || String(err)) }
-                    }}>✎</button>
-            <code>{p.slug}</code>
-            {active === p.slug
-              ? <button onClick={unload}>Unload from context</button>
-              : <button onClick={() => load(p.slug)}>Load into context</button>}
-            {active === p.slug && <span className="badge">in context</span>}
-            <select className="autonomy-sel" value={p.autonomy || 'full'}
-                    title="how much the agent may do unattended in this project"
-                    onChange={(e) => setAutonomy(p.slug, e.target.value)}>
-              <option value="read_only">read-only</option>
-              <option value="stage">stage edits</option>
-              <option value="gated">agents + research</option>
-              <option value="full">full (commit)</option>
-            </select>
-            <button className="ghost danger" onClick={() => softDelete(p.slug)}>delete</button>
-          </li>
+          <ProjectCard key={p.slug} p={p} inContext={active === p.slug}
+                       menuOpen={menuFor === p.slug}
+                       setMenuOpen={(open) => setMenuFor(open ? p.slug : null)}
+                       onRename={() => rename(p)}
+                       onToggleContext={() => (active === p.slug ? unload() : load(p.slug))}
+                       onDelete={() => softDelete(p.slug)}
+                       onAutonomy={(level) => setAutonomy(p.slug, level)} />
         ))}
-        {projects.length === 0 && <li className="dim">no projects yet</li>}
-      </ul>
+        {projects.length === 0 && (
+          <EmptyState pad className="project-grid-empty">
+            no projects yet — create one above</EmptyState>)}
+      </div>
 
       {deleted.length > 0 && (
         <details className="deleted-fold">
@@ -140,18 +150,64 @@ export default function Projects() {
             Recently deleted ({deleted.length})
             <span className="chev" aria-hidden="true">›</span>
           </summary>
-          <ul className="project-list">
+          <div className="project-grid">
             {deleted.map((p) => (
-              <li key={p.slug} className="deleted">
-                <span>{p.name}</span>
-                <code>{p.slug} · deleted {p.deleted_at?.slice(0, 16)}</code>
-                <button className="ghost" onClick={() => restore(p.slug)}>restore</button>
-                <button className="ghost danger" onClick={() => purge(p.slug)}>delete forever</button>
-              </li>
+              <Card as="article" key={p.slug} className="project-card deleted">
+                <div className="project-card-head">
+                  <span className="project-name">{p.name}</span>
+                </div>
+                <code className="project-slug">{p.slug} · deleted {p.deleted_at?.slice(0, 16)}</code>
+                <div className="project-card-foot">
+                  <Button variant="ghost" onClick={() => restore(p.slug)}>Restore</Button>
+                  <Button variant="ghost" danger onClick={() => purge(p.slug)}>
+                    Delete forever</Button>
+                </div>
+              </Card>
             ))}
-          </ul>
+          </div>
         </details>
       )}
     </Page>
+  )
+}
+
+function ProjectCard({
+  p, inContext, menuOpen, setMenuOpen, onRename, onToggleContext, onDelete, onAutonomy,
+}) {
+  const close = () => setMenuOpen(false)
+  const pick = (fn) => () => { close(); fn() }
+  return (
+    <Card as="article" className={inContext ? 'project-card in-context' : 'project-card'}>
+      <div className="project-card-head">
+        {/* the name is the way in — the Workspace is the project */}
+        <Link to={`/projects/${p.slug}`} className="project-name"
+              title={`open ${p.name}`}>{p.name}</Link>
+        {inContext && <Tag tone="running">in context</Tag>}
+        <Menu open={menuOpen} onClose={close} label={`${p.name} actions`} width={210}
+              trigger={(
+                <Button variant="icon" aria-haspopup="menu" aria-expanded={menuOpen}
+                        aria-label={`${p.name} actions`} title="more"
+                        onClick={() => setMenuOpen(!menuOpen)}>⋯</Button>
+              )}>
+          <MenuItem onClick={pick(onRename)}>Rename</MenuItem>
+          <MenuItem onClick={pick(onToggleContext)}>
+            {inContext ? 'Unload from context' : 'Load into context'}</MenuItem>
+          <MenuSep />
+          <MenuItem danger onClick={pick(onDelete)}>Delete</MenuItem>
+        </Menu>
+      </div>
+      <code className="project-slug">{p.slug}</code>
+      {p.github_remote && (
+        <span className="dim small ellipsis project-remote" title={p.github_remote}>
+          {p.github_remote}</span>)}
+      <div className="project-card-foot">
+        <label className="project-autonomy dim small">
+          autonomy
+          <Select className="autonomy-sel" value={p.autonomy || 'full'} options={AUTONOMY}
+                  title="how much the agent may do unattended in this project"
+                  onChange={(e) => onAutonomy(e.target.value)} />
+        </label>
+      </div>
+    </Card>
   )
 }
