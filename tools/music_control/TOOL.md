@@ -1,7 +1,7 @@
 ---
 name: music_control
 description: Pause, resume, skip, go back, set the volume, or stop the operator's music.
-when_to_use: When they say pause, resume, skip, go back, louder/quieter or stop AND the music is coming from their own library. If it could be anything playing on a computer — Spotify, a browser tab — use computer_playback instead, which drives whatever has the system's attention.
+when_to_use: When they say pause, resume, skip, go back, louder/quieter or stop AND the music is coming from their own library.
 enabled: true
 parameters:
   type: object

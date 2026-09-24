@@ -15,8 +15,6 @@ English framing plus the live evidence around the event.
                     request cadence, current policy and cut state
   login_failed      whether the tried username is a real account, the peer, and
                     the history of bursts
-  computeruse_auth  the rejected peer against the list of computers legitimately
-                    connected right now
   anything else     the detail flattened into labelled facts, never a raw dump
 
 Everything is read fresh at request time, so a board is honest about drift: it
@@ -197,12 +195,6 @@ _BRIEF = {
                "an unknown one is background noise.",
         "checks": ["Was this you, with a stale saved password?",
                    "Does the peer look like your LAN?"],
-    },
-    "computeruse_auth": {
-        "title": "Rejected computer-use pairing attempts",
-        "why": "That socket is the seam between Jarvis and your actual machines.",
-        "checks": ["Is one of your own clients running an old token?",
-                   "If it isn't yours, rotate the pairing token."],
     },
 }
 
@@ -776,50 +768,6 @@ async def _login_board(db, ev, detail, add) -> dict:
     return brief
 
 
-# --- computeruse_auth --------------------------------------------------------
-
-async def _cu_board(db, ev, detail, add) -> dict:
-    brief = _brief("computeruse_auth", "Rejected pairing attempts")
-    peer = str(detail.get("peer") or "")
-    event_ts = _ts(ev.get("created_at"))
-
-    async def facts():
-        private = peer.startswith(("10.", "192.168.", "172.16.", "172.17.",
-                                   "172.18.", "127.", "::1"))
-        return _facts("The attempts", [
-            ["From", peer],
-            ["Looks like", "your LAN — likely your own client with a stale token"
-                           if private else "outside your LAN — treat as a probe"],
-            ["Rejected attempts", detail.get("attempts"), "per 5 minute window"],
-            ["Detected", f"{_iso(event_ts) or ev.get('created_at')} ({_ago(event_ts)})"],
-            ["Authenticates with", "a pairing token, not a session cookie"],
-        ])
-
-    async def clients():
-        from . import computeruse as cu
-        rows = [[c.name, c.platform, c.id[:12],
-                 _iso(c.connected_at), _ago(c.connected_at)]
-                for c in cu.clients()]
-        return _table("Computers connected right now",
-                      ["Name", "Platform", "Client id", "Since", "Age"], rows,
-                      note="one missing around the alert = probably it reconnecting",
-                      empty="nothing connected — none of these attempts succeeded")
-
-    async def history():
-        async with db.execute(
-                "SELECT summary, created_at, acknowledged FROM security_events "
-                "WHERE kind='computeruse_auth' ORDER BY id DESC LIMIT 12") as cur:
-            rows = [[_iso(_ts(r["created_at"])), r["summary"],
-                     "seen" if r["acknowledged"] else "waiting"]
-                    for r in await cur.fetchall()]
-        return _table("Earlier pairing bursts", ["When", "Summary", "State"], rows)
-
-    await add(facts)
-    await add(clients)
-    await add(history)
-    return brief
-
-
 # --- fallback ----------------------------------------------------------------
 
 async def _generic_board(db, ev, detail, add) -> dict:
@@ -850,7 +798,7 @@ async def _generic_board(db, ev, detail, add) -> dict:
 
 
 _BOARDS = {"write_flag": _write_board, "egress_anomaly": _egress_board,
-           "login_failed": _login_board, "computeruse_auth": _cu_board}
+           "login_failed": _login_board}
 
 
 async def build_board(db: aiosqlite.Connection, ev: dict) -> dict:

@@ -410,8 +410,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             entries = [e for e in entries if e["name"] in tools_only]
         # ...and a shortened Notes body. NOT zero: the first line of a body is
         # where the load-bearing operating instruction lives ("Do not call
-        # music_search first", "use computer_library rather than guessing at
-        # filenames"), and dropping it entirely broke tool use on the local
+        # music_search first"), and dropping it entirely broke tool use on the local
         # tier. 240 chars keeps that line and still sheds ~60% of the block.
         from .voice_text import LOCAL_NOTES_MAX
         tools = openai_tool_specs(entries,

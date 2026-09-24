@@ -8,7 +8,7 @@ carry a `last_seen` so the operator can spot a stale or rogue one.
 
 This is a bearer credential with (currently) operator-equivalent reach on the
 routes that opt into `auth.require_actor`; it is deliberately NOT accepted on the
-sensitive control-plane routers (secrets, computer-use, vm, egress, …), which
+sensitive control-plane routers (secrets, vm, egress, …), which
 stay cookie-only.
 """
 import hashlib

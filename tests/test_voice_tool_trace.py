@@ -65,8 +65,8 @@ async def test_tool_trace_replays_the_call_and_its_result(conv):
     await _exchange(db, cid, "play something fast", 'Playing "Song 2" now.',
                     [("music_play", {"tag": "fast"}, "playing Song 2 — Blur.")])
     await _exchange(db, cid, "turn it down", "Lowering it.",
-                    [("computer_volume", {"action": "set", "percent": 30},
-                      "macbook volume set to 30%.")])
+                    [("music_control", {"action": "quieter"},
+                      "volume set to 30%.")])
 
     history = await compaction.assemble(db, cid, "sys", tool_trace=200)
 

@@ -27,5 +27,5 @@ to songs the operator wants at any hour. Removing the last song disables the
 gesture entirely until something is added back — say so if that happens.
 
 Adds are checked against the music library as a courtesy: an unmatched title
-is still added (files in granted folders play too), but the result will say
+is still added (the library may just be unreachable), but the result will say
 the library could not confirm it — pass that warning on.

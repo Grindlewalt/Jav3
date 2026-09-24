@@ -108,7 +108,7 @@ async def set_force_tier(db, tier: str) -> None:
 # standing-memory notes are dropped. The operator-rules tail survives any
 # exclude by design (memory.assemble_system_prompt).
 LOCAL_CONTEXT_EXCLUDE = ("standing-memory", "all-projects.md", "agents-index",
-                         "secrets-index", "computers-index",
+                         "secrets-index",
                          # `behavior` is 9.9k chars of agentic doctrine (blast
                          # radius, git, project discipline, memory rules) that
                          # a tier which can only play media and search cannot
@@ -126,9 +126,7 @@ LOCAL_CONTEXT_EXCLUDE = ("standing-memory", "all-projects.md", "agents-index",
 # library launcher), NOT play_music (project audio files) — shipping the
 # wrong twin left the first live session unable to start a song.
 LOCAL_TOOLS = ("music_play", "music_control", "music_search", "music_status",
-               "clap_tracks", "play_movie", "computer_play",
-               "computer_playback", "computer_status", "computer_volume",
-               "computer_open_link", "web_search", "web_read")
+               "clap_tracks", "play_movie", "web_search", "web_read")
 
 # How much evidence a barge-in needs. speech_ratio is silero's — the fraction
 # of 32 ms frames in the clip it scored as speech. See the module docstring for
@@ -265,8 +263,8 @@ async def clone_conversation(db, old_cid: int, *, task: str, spoken: str) -> int
 
 
 class SidecarLink:
-    """One persistent WS to the voicebox, with the computeruse client's
-    reconnect discipline (exponential backoff, 20 s pings)."""
+    """One persistent WS to the voicebox: exponential-backoff reconnect and
+    20 s pings."""
 
     def __init__(self, on_json, on_bytes) -> None:
         self._on_json = on_json

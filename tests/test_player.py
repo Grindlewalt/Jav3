@@ -1,8 +1,7 @@
 """The in-page music player: the stream proxy, the report channel, the routing.
 
-The player exists because TARMAC is a SEPARATE Cloudflare Access application
-from Jarvis, so the browser's Jarvis session cannot fetch its /stream/:id. The
-host proxies instead. Two things in here are load-bearing and easy to break
+The host proxies TARMAC's /stream/:id onto Jarvis's own origin, so the browser
+only ever talks to Jarvis. Two things in here are load-bearing and easy to break
 without noticing:
 
   * Range must survive both directions. Without Content-Range an <audio> element
@@ -17,13 +16,13 @@ import asyncio
 import httpx
 import pytest
 
-from backend import computeruse_api, gui, tarmac
+from backend import gui, media_api, tarmac
 
 
 @pytest.fixture
 def configured(monkeypatch):
     async def cfg():
-        return "https://music.example", "id.access", "secret"
+        return "https://music.example"
     monkeypatch.setattr(tarmac, "get_config", cfg)
 
 
@@ -53,8 +52,6 @@ async def test_range_is_forwarded_and_the_206_passed_back(configured, monkeypatc
     def handler(request):
         seen["path"] = request.url.path
         seen["range"] = request.headers.get("range")
-        # the Access headers are ours to attach, on the audio path too
-        seen["cf"] = request.headers.get("CF-Access-Client-Id")
         return httpx.Response(206, content=b"PARTIAL", headers={
             "content-type": "audio/mpeg", "content-range": "bytes 10-16/999",
             "accept-ranges": "bytes", "content-length": "7",
@@ -65,7 +62,6 @@ async def test_range_is_forwarded_and_the_206_passed_back(configured, monkeypatc
 
     assert seen["path"] == "/stream/42"
     assert seen["range"] == "bytes=10-16"
-    assert seen["cf"] == "id.access"
     assert handle.status == 206
     assert handle.headers["content-range"] == "bytes 10-16/999"
     assert handle.headers["accept-ranges"] == "bytes"
@@ -98,14 +94,12 @@ async def test_consuming_the_stream_closes_the_client(configured, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_cloudflare_redirect_on_audio_names_the_separate_application(
-        configured, monkeypatch):
+async def test_a_redirect_on_audio_names_the_interception(configured, monkeypatch):
     _mock(lambda r: httpx.Response(302, headers={
-        "location": "https://x.cloudflareaccess.com/cdn-cgi/access/login"}),
-        monkeypatch)
+        "location": "https://sso.example/login"}), monkeypatch)
     with pytest.raises(tarmac.TarmacError) as e:
         await tarmac.open_stream(42)
-    assert "SEPARATE Access application" in str(e.value)
+    assert "intercepting" in str(e.value)
 
 
 @pytest.mark.asyncio
@@ -133,7 +127,7 @@ async def test_the_route_passes_status_and_headers_through(monkeypatch):
 
     monkeypatch.setattr(tarmac, "open_stream", fake_open)
     req = httpx.Request("GET", "http://t/x", headers={"range": "bytes=0-3"})
-    resp = await computeruse_api.tarmac_stream(5, req)
+    resp = await media_api.tarmac_stream(5, req)
 
     assert resp.status_code == 206
     assert resp.headers["content-range"] == "bytes 0-3/9"
@@ -148,7 +142,7 @@ async def test_an_unreachable_music_server_is_a_502_not_a_traceback(monkeypatch)
 
     monkeypatch.setattr(tarmac, "open_stream", boom)
     with pytest.raises(HTTPException) as e:
-        await computeruse_api.tarmac_stream(1, httpx.Request("GET", "http://t/x"))
+        await media_api.tarmac_stream(1, httpx.Request("GET", "http://t/x"))
     assert e.value.status_code == 502
 
 
@@ -198,7 +192,7 @@ def test_a_new_play_clears_the_previous_verdict(monkeypatch):
 
 
 def test_the_stream_url_is_same_origin():
-    assert gui.stream_url(42) == "/api/computeruse/tarmac/stream/42"
+    assert gui.stream_url(42) == "/api/media/tarmac/stream/42"
 
 
 # --- destination routing ------------------------------------------------------
@@ -292,7 +286,7 @@ async def test_the_queue_carries_stream_urls_and_durations(configured, monkeypat
 
     rows = await _queue_rows([3, 4])
     assert [r["src"] for r in rows] == [
-        "/api/computeruse/tarmac/stream/3", "/api/computeruse/tarmac/stream/4"]
+        "/api/media/tarmac/stream/3", "/api/media/tarmac/stream/4"]
     assert rows[0]["duration"] == 200
 
 

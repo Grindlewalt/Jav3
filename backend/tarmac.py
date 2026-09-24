@@ -2,43 +2,32 @@
 
     https://github.com/the-shadow-walker/MyTube-Music
 
-A separate service, not a computer-use client. It has its own library, its own
-players (the PWA, open on a phone or a desktop), and a documented agent API, so
-Jarvis drives it over HTTP from here rather than through the desktop client.
+A separate service with its own library, its own players (the PWA, open on a
+phone or a desktop), and a documented agent API, so Jarvis drives it over HTTP.
 
 Playback goes one of two ways.
 
 **TARMAC's own players**, via POST /api/remote — the PWA on a phone or desktop.
-Not through the desktop client's mpv: /stream/:id sits behind Cloudflare Access,
-so feeding it to mpv would mean putting the Access secret into mpv's argv on the
-operator's machine, visible in `ps`, for no benefit.
 
-**Jarvis's own in-page player**, via `open_stream` below. TARMAC is a SEPARATE
-Cloudflare Access application from Jarvis (different `aud`), so a browser holding
-a Jarvis session cannot fetch music.atomos.network/stream/:id itself — the Access
-cookie is per-application. The host holds the service token, so it fetches and
-re-serves the bytes on Jarvis's own origin. TARMAC's README blesses exactly this:
-"agents can still stream the audio themselves via /stream/:id". This is the path
-that fixes the autoplay silence, because the Jarvis tab is the one the operator
-is already touching.
-
-Credentials live here and are never returned by any API or tool: the tab learns
-only whether a token is set, exactly like the Jellyfin key.
+**Jarvis's own in-page player**, via `open_stream` below. The host fetches
+/stream/:id and re-serves the bytes on Jarvis's own origin, so the browser only
+ever talks to Jarvis — one session, one origin, no mixed content. TARMAC's README
+blesses exactly this: "agents can still stream the audio themselves via
+/stream/:id". This is the path that fixes the autoplay silence, because the
+Jarvis tab is the one the operator is already touching.
 
 Deliberately NOT behind the SSRF guard in websec.py. That guard refuses
 non-public hosts, which is right for a URL the agent chose and wrong here — this
-one is typed in by the operator and is usually a LAN address
-(http://10.0.0.58:8788) or a Cloudflare hostname.
+one is typed in by the operator and is normally a LAN address.
 """
 from __future__ import annotations
 
 import time
 from urllib.parse import urlsplit
 
-from . import cfaccess
 from .db import get_db, get_state, set_state
 
-# TARMAC's own vocabulary. Not the same as computer_playback's: it has no "stop",
+# TARMAC's own vocabulary: it has no "stop",
 # and "prev" rather than "previous". Using its words avoids a translation layer
 # that would silently drop an action.
 # "shuffle" was missing here while the server has always accepted it
@@ -54,64 +43,24 @@ _STREAM_HEADERS = ("content-type", "content-length", "content-range",
                    "accept-ranges", "etag", "last-modified")
 
 _URL_KEY = "tarmac_url"
-_ID_KEY = "tarmac_cf_id"
-_SECRET_KEY = "tarmac_cf_secret"
 
 
 class TarmacError(RuntimeError):
     """Something went wrong reaching or using TARMAC."""
 
 
-async def get_config() -> tuple[str, str, str]:
-    """(url, cf client id, cf secret).
-
-    The URL is TARMAC's own; the service token is NOT — it is the one Cloudflare
-    Access pair, shared with Jarvis's own hostname and owned by `cfaccess`. It
-    used to live in the two rows below, which is how a rotation could break
-    music while leaving every other copy looking fine. Those rows are still read
-    once, to migrate them, and then cleared.
-    """
+async def get_config() -> str:
+    """The music server's base URL, or "" when it was never configured."""
     db = await get_db()
     try:
-        url = await get_state(db, _URL_KEY) or ""
-        legacy_id = await get_state(db, _ID_KEY) or ""
-        legacy_secret = await get_state(db, _SECRET_KEY) or ""
+        return await get_state(db, _URL_KEY) or ""
     except Exception:
-        return "", "", ""
-    finally:
-        await db.close()
-
-    cid, sec = cfaccess.get()
-    if not (cid and sec) and legacy_id and legacy_secret:
-        # one-time move into the 0600 store, bound to the host it was for
-        try:
-            cfaccess.set_token(legacy_id, legacy_secret,
-                               [h for h in (cfaccess.bind_host_from_url(url),) if h])
-            cid, sec = cfaccess.get()
-        except cfaccess.CFAccessError:
-            cid, sec = legacy_id, legacy_secret
-    await _forget_legacy(bool(cid and sec))
-    return url, cid, sec
-
-
-async def _forget_legacy(migrated: bool) -> None:
-    """Drop the plaintext database copies once the store has them. Leaving them
-    behind would recreate the exact bug: two copies, one of them stale."""
-    if not migrated:
-        return
-    db = await get_db()
-    try:
-        if await get_state(db, _ID_KEY) or await get_state(db, _SECRET_KEY):
-            await set_state(db, _ID_KEY, None)
-            await set_state(db, _SECRET_KEY, None)
-            await db.commit()
-    except Exception:
-        pass
+        return ""
     finally:
         await db.close()
 
 
-async def set_config(url: str, cf_id: str = "", cf_secret: str = "") -> None:
+async def set_config(url: str) -> None:
     url = (url or "").strip().rstrip("/")
     if url:
         u = urlsplit(url)
@@ -122,61 +71,43 @@ async def set_config(url: str, cf_id: str = "", cf_secret: str = "") -> None:
         await set_state(db, _URL_KEY, url or None)
     finally:
         await db.close()
-    # The token goes to the one store, bound to this host as well as whatever
-    # it was already bound to — Jarvis's own hostname is normally in that list.
-    if cf_id or cf_secret:
-        host = cfaccess.bind_host_from_url(url)
-        bound = sorted(set(cfaccess.hosts()) | ({host} if host else set()))
-        try:
-            cfaccess.set_token(cf_id or cfaccess.get()[0], cf_secret, bound)
-        except cfaccess.CFAccessError as e:
-            raise TarmacError(str(e))
 
 
 def _check_redirect(status: int, location: str) -> None:
-    """A 302 to a Cloudflare login page is the signature of a service token that
-    is missing, expired, or has no Service Auth policy on THAT application.
-    Access policies are per-application, so a token that works for Jarvis is not
-    automatically accepted by the music host. Shared by the JSON calls and the
-    audio stream so both name the same real cause."""
+    """A redirect from an API or stream route means something in front of the
+    music server (an auth proxy, a login page) answered instead of TARMAC.
+    Shared by the JSON calls and the audio stream so both name the same cause."""
     if status not in (301, 302, 303, 307, 308):
         return
-    if "cloudflareaccess.com" in location or "/cdn-cgi/access" in location:
-        raise TarmacError(
-            "Cloudflare Access refused the request — the music server is a "
-            "SEPARATE Access application from Jarvis, so it needs its own "
-            "Service Auth policy naming the service token, and the token "
-            "has to be current. The operator can check both in Zero Trust.")
-    raise TarmacError(f"unexpected redirect to {location[:80]}")
+    raise TarmacError(
+        f"the music server redirected to {location[:80]} instead of answering — "
+        f"something in front of it (a login page or auth proxy) is intercepting "
+        f"Jarvis's requests. Point the TARMAC URL at the server directly.")
 
 
-async def _auth_headers() -> tuple[str, dict]:
-    """(base url, Access headers). Raises if TARMAC was never configured."""
-    base, cf_id, cf_secret = await get_config()
+async def _base() -> str:
+    """The base url. Raises if TARMAC was never configured."""
+    base = await get_config()
     if not base:
         raise TarmacError(
-            "the music server is not configured — the operator adds its URL on "
-            "the Computer use tab")
-    headers = {}
-    if cf_id and cf_secret:
-        headers["CF-Access-Client-Id"] = cf_id
-        headers["CF-Access-Client-Secret"] = cf_secret
-    return base, headers
+            "the music server is not configured — the operator adds its URL in "
+            "Settings")
+    return base
 
 
 async def _call(method: str, path: str, *, json_body: dict | None = None,
                 params: dict | None = None, timeout: float = 20.0):
-    """One request to TARMAC, with the Access headers attached here.
+    """One request to TARMAC.
 
     Every error is turned into a sentence the model can act on, because "500"
     reaching a chat window helps nobody.
     """
     import httpx
-    base, headers = await _auth_headers()
+    base = await _base()
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
             r = await c.request(method, f"{base}{path}", json=json_body,
-                                params=params, headers=headers)
+                                params=params)
     except Exception as e:
         raise TarmacError(f"could not reach the music server: {e}")
 
@@ -344,15 +275,14 @@ class StreamHandle:
 
 
 async def open_stream(track_id: int, range_header: str | None = None) -> StreamHandle:
-    """Open GET /stream/:id with the Access headers attached, Range forwarded.
+    """Open GET /stream/:id with Range forwarded.
 
     Streamed, never buffered — a Pi with 3.7 GB should not hold a whole track in
     memory per listener. The caller owns the handle and must consume or close it.
     """
     import httpx
-    base, headers = await _auth_headers()
-    if range_header:
-        headers["Range"] = range_header
+    base = await _base()
+    headers = {"Range": range_header} if range_header else {}
     # No overall timeout: a long track is a long read by definition. The read
     # timeout is per-chunk, so a genuinely stalled connection still fails.
     client = httpx.AsyncClient(

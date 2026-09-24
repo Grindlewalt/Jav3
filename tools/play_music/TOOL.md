@@ -1,7 +1,7 @@
 ---
 name: play_music
 description: Play an audio file that is INSIDE A JARVIS PROJECT in a small floating player in the Jarvis browser tab. Not for the operator's music library.
-when_to_use: Only for an audio file that lives in the active project's files, or a direct http(s) audio URL on the media allowlist — a recording you produced or were given. When the operator asks for music, use music_play instead: it searches their library and the folders granted on their computers. For streaming sites (YouTube, Spotify...) use computer_open_link.
+when_to_use: Only for an audio file that lives in the active project's files, or a direct http(s) audio URL on the media allowlist — a recording you produced or were given. When the operator asks for music, use music_play instead: it searches their library.
 enabled: true
 parameters:
   type: object

@@ -5,7 +5,7 @@ reads it fresh on every clap, so an edit here is live immediately — no
 restart. Removal matching is forgiving (case and spacing dropped — the
 musicpick lesson: "kick start my heart" must hit "Kickstart My Heart"). Adds
 are verified against the library as an advisory, never a refusal, because
-files in granted folders play too.
+the library can be unreachable at the moment of the edit.
 """
 from backend import tarmac
 from backend.db import get_db
@@ -78,8 +78,7 @@ async def run(add: list | None = None, remove: list | None = None) -> str:
     if missing:
         lines.append("heads up — the library couldn't confirm: "
                      + ", ".join(missing)
-                     + " (still added; a granted-folder file would play, "
-                     "but a typo won't)")
+                     + " (still added, but a typo won't play)")
     if tracks:
         lines.append("the double-clap list is now: " + "; ".join(tracks))
     else:

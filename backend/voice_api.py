@@ -9,8 +9,8 @@ Two ways in, because there are two kinds of client:
   WebSocket cannot use Depends(require_user) (same pattern as guest_shell.py).
 - **the headless desktop client** (`clients/voicedesk/`) — a bearer token. It
   runs as a background service on the operator's machine with no browser and no
-  login session, so a cookie is not available to it. Same discipline as the
-  computeruse pairing token: compare_digest, and a penalty delay on failure so
+  login session, so a cookie is not available to it. Checked with
+  compare_digest, and a penalty delay on failure so
   the socket is not a fast oracle for guessing.
 
 Both land in the same VoiceSession — one protocol, two transports. Nothing in

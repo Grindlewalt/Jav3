@@ -30,11 +30,6 @@ FAKE_RESULTS = {
                      "Coldplay at 1:02 of 4:29 at 80% volume\nmusic app: "
                      "nothing actually playing (no player open)"),
     "music_control": "paused in the Jarvis player on Mac · Chrome.",
-    "computer_play": "playing Harry Potter DH Prt 1.",
-    "computer_status": "2 machines connected: linux, macbook. macbook: volume 45%.",
-    "computer_volume": "macbook volume set to 25%.",
-    "computer_playback": "paused on macbook.",
-    "computer_open_link": "opened on macbook.",
     "web_search": ("1. Mars weather — NASA: dust storm season begins...\n"
                    "2. Perseverance MEDA readings..."),
     "web_read": "Mars: -60C average, 6 mbar pressure, dust storms rising.",
@@ -46,8 +41,6 @@ SCENARIOS = [
     ("play music",    "Could you play some driving music for me?"),
     ("pause",         "Pause the music please."),
     ("queue",         "Queue up something by Zach Bryan next."),
-    ("movie",         "Put on Harry Potter on the MacBook."),
-    ("volume",        "Turn the MacBook volume down to 25 percent."),
     ("escalate-heavy","Research the best NAS setup for my house and write it up."),
     ("escalate-code", "Refactor the egress proxy to add per-host rate limits."),
     ("ambiguous",     "That's too loud."),

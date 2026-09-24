@@ -17,6 +17,3 @@ Two players report here and they cannot see each other:
 
 If a track is loaded but no sound was confirmed, say exactly that rather than
 "it's playing" — it is the difference the operator hit as silence.
-
-This is a different thing from computer_play, which runs a file through the
-player on a computer you have a client on.

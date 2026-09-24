@@ -245,7 +245,7 @@ async def test_egress_beacon_board_shows_the_cadence(db):
     assert "Interval" in _text(board)
 
 
-# --- login / computer-use / unknown kinds ------------------------------------
+# --- login / unknown kinds ------------------------------------
 
 async def test_login_board_says_whether_the_account_is_real(db):
     await db.execute("INSERT INTO users(username, password_hash) VALUES ('grant', 'x')")
@@ -264,16 +264,6 @@ async def test_login_board_says_whether_the_account_is_real(db):
                                        "peer": "10.0.0.9"})
     ev = (await security.list_events(db))[0]
     assert "no such user" in _text(await secctx.build_board(db, ev))
-
-
-async def test_computeruse_board_lists_connected_clients(db):
-    await security.raise_event(db, kind="computeruse_auth", severity="warn",
-                               summary="3 rejected computer-use pairing attempts",
-                               detail={"peer": "192.168.1.40", "attempts": 3})
-    ev = (await security.list_events(db))[0]
-    board = await secctx.build_board(db, ev)
-    assert "Computers connected right now" in _text(board)
-    assert "your LAN" in _text(board)        # a private peer is framed as probably yours
 
 
 async def test_unknown_kind_still_gets_a_readable_board(db):

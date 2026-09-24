@@ -2,11 +2,6 @@
 
 Shapes here are taken from MyTube-Music's server.js, not from its README: the
 README summarises, and a summary is where an integration quietly diverges.
-
-The Cloudflare 302 case has its own test because it is the failure the operator
-will actually hit — the music host is a SEPARATE Access application from Jarvis,
-so a token that works for one is not accepted by the other until that
-application has its own Service Auth policy.
 """
 import json
 
@@ -19,7 +14,7 @@ from backend import tarmac
 @pytest.fixture
 def configured(monkeypatch):
     async def cfg():
-        return "https://music.example", "id.access", "secret"
+        return "https://music.example"
     monkeypatch.setattr(tarmac, "get_config", cfg)
 
 
@@ -42,9 +37,6 @@ def _mock(handler, monkeypatch):
 async def test_status_reports_library_players_and_now_playing(configured, monkeypatch):
     def handler(request):
         assert request.url.path == "/api/status"
-        # the Access headers must be attached by us, on every request
-        assert request.headers["CF-Access-Client-Id"] == "id.access"
-        assert request.headers["CF-Access-Client-Secret"] == "secret"
         return httpx.Response(200, json={
             "ok": True, "tracks": 412, "players_connected": 1,
             "now_playing": {"id": 42, "title": "Nightcall", "artist": "Kavinsky",
@@ -145,19 +137,18 @@ async def test_an_ambiguous_query_lists_instead_of_guessing(configured, monkeypa
 # --- the failures the operator will actually hit ------------------------------
 
 @pytest.mark.asyncio
-async def test_a_cloudflare_redirect_explains_the_separate_application(
+async def test_a_redirect_names_what_is_in_front_of_the_server(
         configured, monkeypatch):
-    """The exact symptom seen live: 302 to cloudflareaccess.com. Reporting
-    "unexpected redirect" would send the operator hunting in the wrong place."""
+    """A login page answering instead of TARMAC. Reporting a bare "unexpected
+    redirect" would send the operator hunting in the wrong place."""
     def handler(request):
-        return httpx.Response(302, headers={
-            "location": "https://x.cloudflareaccess.com/cdn-cgi/access/login/music"})
+        return httpx.Response(302, headers={"location": "https://sso.example/login"})
     _mock(handler, monkeypatch)
 
     from tools.music_status.handler import run
     out = await run()
-    assert "SEPARATE Access application" in out
-    assert "Service Auth" in out
+    assert "intercepting" in out
+    assert "sso.example" in out
 
 
 @pytest.mark.asyncio
@@ -178,11 +169,11 @@ async def test_no_open_player_says_so_rather_than_claiming_success(
 @pytest.mark.asyncio
 async def test_unconfigured_points_at_the_tab(monkeypatch):
     async def cfg():
-        return "", "", ""
+        return ""
     monkeypatch.setattr(tarmac, "get_config", cfg)
     from tools.music_status.handler import run
     out = await run()
-    assert "not configured" in out and "Computer use tab" in out
+    assert "not configured" in out and "Settings" in out
 
 
 @pytest.mark.asyncio
@@ -233,19 +224,6 @@ async def test_a_bad_tag_is_refused_before_the_request(configured, monkeypatch):
     out = await run(query="x", tag="jazz")
     assert out.startswith("error:") and "drive" in out
     assert not called, "should not have hit the server"
-
-
-@pytest.mark.asyncio
-async def test_the_access_secret_never_appears_in_a_tool_result(
-        configured, monkeypatch):
-    """It is a host-side credential. A tool result goes into the transcript."""
-    def handler(request):
-        return httpx.Response(500, text="secret leaked? no")
-    _mock(handler, monkeypatch)
-    from tools.music_status.handler import run
-    out = await run()
-    assert "secret" not in out or "CF-Access" not in out
-    assert "id.access" not in out
 
 
 def test_config_url_must_be_http(monkeypatch):

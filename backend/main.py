@@ -8,8 +8,9 @@ from pydantic import BaseModel
 import asyncio
 
 from . import (agents_api, agents_run, artifacts_api, auth, chat, devices_api,
-               computeruse_api, egress_api,
-               git_api, git_serve_api, gui, guest_shell, lan, logs_api, memory_api,
+               egress_api,
+               git_api, git_serve_api, gui, guest_shell, lan, logs_api,
+               media_api, memory_api,
                notifications_api, projects, reviewer, reviewer_api, runs_api,
                schedules, skills_api, vm_api, voice_api, workspace, secrets)
 from .agent.model import (MODEL_STATE_KEY, get_model_override,
@@ -99,8 +100,7 @@ app.include_router(reviewer_api.router)
 app.include_router(gui.router)
 app.include_router(lan.router)
 app.include_router(guest_shell.router)
-app.include_router(computeruse_api.router)
-app.include_router(computeruse_api.ws_router)
+app.include_router(media_api.router)
 app.include_router(voice_api.router)
 
 

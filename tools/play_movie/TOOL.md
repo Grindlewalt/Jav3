@@ -1,7 +1,7 @@
 ---
 name: play_movie
 description: Show a video file that is INSIDE A JARVIS PROJECT in a small floating player in the Jarvis browser tab. Not for the operator's own film library.
-when_to_use: Only for a video that lives in the active project's files, or a direct http(s) video URL on the media allowlist — a clip you produced or were given to review. To put on one of the operator's own films use computer_play, which plays fullscreen on their actual computer. For streaming sites (YouTube, Netflix...) use computer_open_link.
+when_to_use: Only for a video that lives in the active project's files, or a direct http(s) video URL on the media allowlist — a clip you produced or were given to review.
 enabled: true
 parameters:
   type: object

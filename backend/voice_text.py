@@ -52,7 +52,7 @@ LOCAL_NOTES_MAX = 240
 VOICE_CAPABILITIES = """\
 # What Jarvis can do (you are his fast tier, not all of him)
 You handle directly: conversation, music and video playback, volume and
-playback control on his computers, opening a link, and quick web lookups.
+playback control in the music player, and quick web lookups.
 The wider system — which the smart model drives, so ESCALATE rather than
 saying it can't be done — also has: reading and writing files in projects,
 running code in a sandbox VM, driving the operator's GUI (arranging the
@@ -78,7 +78,7 @@ lacks a capability it has."""
 LIBRARY_RULES = (
     "When they name something on this list, pass its id to music_play as "
     "`ids` instead of guessing a query. Anything not on this list: call "
-    "music_play with `query` anyway — it also searches their computers. "
+    "music_play with `query` anyway — it matches spelling the list can't. "
     "Never say you are playing a title you made up.")
 
 

@@ -6,7 +6,7 @@ this plays the winner straight away. When it genuinely cannot tell, it hands bac
 a shortlist — or the whole library if nothing matched at all — so the worst case
 is one more turn, not a conversation.
 
-Three destinations, and they are not interchangeable:
+Two destinations, and they are not interchangeable:
 
   jarvis  the player inside the Jarvis tab. The host proxies the audio, so this
           is the one that reliably makes sound — the operator is already
@@ -14,14 +14,12 @@ Three destinations, and they are not interchangeable:
           will start audio. Volume and output selection are real here.
   app     TARMAC's own PWA players. What the operator listens on when Jarvis is
           not open, but silent in a tab nobody has touched.
-  local   a file in a granted folder, through the desktop client's mpv. The only
-          destination with true system audio-device selection.
 """
 import asyncio
 import random
 import re
 
-from backend import computeruse as cu, gui, musicpick, runtime, tarmac
+from backend import gui, musicpick, runtime, tarmac
 
 SHOWN = 12
 FULL_LIST = 60
@@ -72,24 +70,6 @@ async def _tarmac_candidates(query: str, tag: str) -> list:
         source="tarmac", ref=str(t.get("id")), title=t.get("title") or "",
         artist=t.get("artist") or "", album=t.get("album") or "",
         extra={"tag": t.get("tag")}) for t in rows if t.get("id") is not None]
-
-
-async def _local_candidates(query: str, client: str) -> list:
-    """Granted folders on a connected computer. Skipped silently when none is
-    connected — this tool should still work with only the library."""
-    if not cu.clients():
-        return []
-    try:
-        r = await cu.dispatch("find", {"query": query, "kind": "audio",
-                                       "limit": 60}, client or None, timeout=25)
-    except cu.VerbError:
-        return []
-    hits = (r.get("result") or {}).get("hits", []) if r.get("ok") else []
-    out = []
-    for path in hits:
-        stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        out.append(musicpick.Candidate(source="local", ref=path, title=stem))
-    return out
 
 
 async def _library_listing() -> str:
@@ -211,8 +191,8 @@ async def _play_in_page(ids: list[int], what: str, device: str,
     if volume is not None:
         fields["volume"] = max(0, min(int(volume), 100))
     if device:
-        # the tab resolves this against its OWN enumerated outputs, exactly as
-        # the desktop client does — a name from the model never becomes an id
+        # the tab resolves this against its OWN enumerated outputs — a name
+        # from the model never becomes an id
         fields["output"] = device
     n = gui.player_push("play", tab=target, **fields)
     if not n:
@@ -254,7 +234,7 @@ async def _play_ids(ids: list[int], where: str, what: str, device: str,
 
 async def run(query: str = "", ids: list | None = None, tag: str = "",
               device: str = "", volume: int | None = None,
-              client: str = "", where: str = "auto", tab: str = "",
+              where: str = "auto", tab: str = "",
               queue: bool = False) -> str:
     dest = _resolve_where(where)
 
@@ -286,10 +266,7 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
         return await _play_ids([int(t["id"])], dest, what, device, volume,
                                tab, append=queue)
 
-    cands = []
-    for group in await asyncio.gather(_tarmac_candidates(query, tag),
-                                      _local_candidates(query, client)):
-        cands.extend(group)
+    cands = await _tarmac_candidates(query, tag)
 
     if not cands and not query:
         return "nothing in the library carries that tag."
@@ -302,30 +279,13 @@ async def run(query: str = "", ids: list | None = None, tag: str = "",
             # thirty titles out loud and then claimed to play one. A genuine
             # miss is one short line — the voice tier already carries the
             # library in its prompt, and chat can call music_search.
-            return (f"'{query}' is not in the library or the granted folders. "
+            return (f"'{query}' is not in the library. "
                     f"Say so plainly — do not read the library out, and do not "
                     f"substitute something else without asking.")
         lines = "\n".join(f"  {musicpick.describe(c)}"
                           + (f"  id={c.ref}" if c.source == "tarmac" else "")
                           for c in shortlist[:SHOWN])
         return (f"{why} for '{query}' — pick one:\n{lines}")
-
-    # a local file goes through the computer, where a real audio device exists
-    if win.source == "local":
-        params = {"kind": "audio", "path": win.ref, "title": win.title[:300]}
-        if device:
-            params["device"] = device
-        if volume is not None:
-            params["volume"] = volume
-        try:
-            r = await cu.dispatch("play", params, client or None, timeout=25)
-        except cu.VerbError as e:
-            return f"error: {e}"
-        if not r.get("ok"):
-            return f"error: {r.get('error')}"
-        extra = "".join([f" on {device}" if device else "",
-                         f" at {volume}%" if volume is not None else ""])
-        return f"playing {win.title} from disk{extra}."
 
     try:
         track_id = int(win.ref)

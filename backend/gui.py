@@ -198,9 +198,9 @@ def player_push(action: str, tab: str | None = None, **fields) -> int:
 
 
 def stream_url(track_id) -> str:
-    """Where the browser fetches a library track — Jarvis's own origin, because
-    TARMAC's Cloudflare Access application is a different one."""
-    return f"/api/computeruse/tarmac/stream/{int(track_id)}"
+    """Where the browser fetches a library track — Jarvis's own origin, which
+    proxies the bytes (media_api.tarmac_stream)."""
+    return f"/api/media/tarmac/stream/{int(track_id)}"
 
 
 # --- media source resolution --------------------------------------------------
@@ -360,5 +360,5 @@ async def gui_stream(tab: str = "", name: str = ""):
 
 @router.get("/tabs")
 async def gui_tabs():
-    """Which Jarvis tabs are open, for the Computer use tab to show and rename."""
+    """Which Jarvis tabs are open, to show and rename."""
     return {"tabs": tab_list()}
