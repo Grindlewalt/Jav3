@@ -2172,11 +2172,6 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .model-menu .m-sub { font-size: 11px; color: var(--dim); }
 .model-menu .m-check { color: var(--accent); font-size: 11px; }
 
-  filter: none; transform: none; }
-  margin: 12px 0 4px; }
-  font-size: 13px; }
-  font-size: 13px; cursor: pointer; }
-
 /* a copy button that copies the STRING it is given, not the rendering */
 .copy-btn {
   position: absolute; top: 15px; right: 8px; z-index: 1;
