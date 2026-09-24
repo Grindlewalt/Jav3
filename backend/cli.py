@@ -4,6 +4,8 @@
   python -m backend.cli services-check               # probe the companion services
   python -m backend.cli paths [name]                 # resolved state paths
   python -m backend.cli migrate-state [--to DIR]     # move checkout state to the state dir
+  python -m backend.cli backup [--if-configured]     # rclone the state to the remote
+  python -m backend.cli restore [REMOTE] [--to DIR] [--secrets|--no-secrets] [--force]
 """
 import asyncio
 import getpass
@@ -149,7 +151,7 @@ def main() -> None:
         services_check()
     elif len(sys.argv) >= 2 and sys.argv[1] == "paths":
         paths(sys.argv[2] if len(sys.argv) > 2 else None)
-    elif len(sys.argv) >= 2 and sys.argv[1] in ("migrate-state",):
+    elif len(sys.argv) >= 2 and sys.argv[1] in ("migrate-state", "backup", "restore"):
         state_command(sys.argv[1], sys.argv[2:])
     else:
         print(__doc__.split("\n", 1)[1].rstrip())
@@ -180,14 +182,35 @@ def paths(name: str | None) -> None:
 def state_command(cmd: str, args: list[str]) -> None:
     import argparse
     from pathlib import Path
+    from . import backup
     from .statemigrate import MigrateError, migrate_state
 
     ap = argparse.ArgumentParser(prog=f"python -m backend.cli {cmd}")
-    ap.add_argument("--to", type=Path)
+    if cmd == "migrate-state":
+        ap.add_argument("--to", type=Path)
+    elif cmd == "backup":
+        ap.add_argument("--if-configured", action="store_true",
+                        help="exit 0 quietly when no remote is set (the timer)")
+    else:
+        ap.add_argument("remote", nargs="?")
+        ap.add_argument("--to", type=Path)
+        ap.add_argument("--secrets", action=argparse.BooleanOptionalAction,
+                        default=None)
+        ap.add_argument("--force", action="store_true")
     a = ap.parse_args(args)
     try:
-        lines = migrate_state(a.to)
-    except MigrateError as e:
+        if cmd == "migrate-state":
+            lines = migrate_state(a.to)
+        elif cmd == "backup":
+            if a.if_configured and not backup.valid_remote(backup.load_config()["remote"]):
+                print("backups not configured (no remote) — skipping")
+                return
+            st = backup.run_backup()
+            lines = [f"backed up {st['bytes']:,} bytes to {st['remote']} "
+                     f"in {st['seconds']}s"]
+        else:
+            lines = backup.restore(a.remote, a.to, a.secrets, a.force)
+    except (MigrateError, backup.BackupError) as e:
         print(f"{cmd}: {e}", file=sys.stderr)
         sys.exit(1)
     for line in lines:

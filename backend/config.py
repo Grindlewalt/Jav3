@@ -485,6 +485,22 @@ class Settings(BaseSettings):
     # monthly systemd timer rebuilds a fresh versioned base (never in place).
     vm_image_max_age_days: int = 35
 
+    # --- Backups (backend/backup.py, rclone) ------------------------------
+    # `rclone sync` of the durable state to `backup_remote` (an rclone remote
+    # path, e.g. "myremote:jav3-backup"; the rclone config itself is the
+    # user's, at rclone's default path). Empty = backups off. These are the
+    # defaults; PUT /api/backup/config overlays them (backend/backup.py).
+    backup_remote: str = ""
+    backup_rclone: str = "rclone"
+    # Also back up the env file, secrets.json and the JWT secret — ONLY ever
+    # through an rclone crypt layer: either a crypt remote the user defined
+    # (`backup_crypt_remote`) or one built on the fly over
+    # <backup_remote>/secrets from these passwords. Neither set = refuse.
+    backup_include_secrets: bool = False
+    backup_crypt_remote: str = ""
+    backup_crypt_password: str = ""
+    backup_crypt_password2: str = ""
+
     @model_validator(mode="after")
     def _derive_service_urls(self):
         """Fill every service URL left unset from services_host. Emptiness (not
@@ -533,6 +549,7 @@ class Settings(BaseSettings):
     @property
     def legacy_layout(self) -> bool:
         return self._legacy_layout
+
 
 settings = Settings()
 _warned_legacy = False

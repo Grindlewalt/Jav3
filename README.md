@@ -86,6 +86,15 @@ before the state dir keeps running from its checkout (with a warning at start)
 until you stop the service and run `python -m backend.cli migrate-state`, which
 copies, verifies and only then removes the old copies.
 
+**Backups.** `python -m backend.cli backup` (and the hourly `jarvis-backup.timer`)
+runs `rclone sync` of the state to `JARVIS_BACKUP_REMOTE` (any rclone remote,
+e.g. `myremote:jav3-backup`; set it up with `rclone config`), with a consistent
+DB snapshot. Secrets (env file, `secrets.json`) are included only when
+`JARVIS_BACKUP_INCLUDE_SECRETS` is on, and only through an rclone crypt layer
+(`JARVIS_BACKUP_CRYPT_PASSWORD`, or your own crypt remote in
+`JARVIS_BACKUP_CRYPT_REMOTE`). `python -m backend.cli restore` pulls it back.
+The same settings are editable at `/api/backup/config`.
+
 **Moving hosts.** `--from` migrates the durable state that is *not* in git —
 `memory/`, `projects/`, `skills/`, `agents/` and the SQLite DB — from either
 layout (an old checkout, or a state dir) into this box's state dir:
@@ -116,3 +125,7 @@ Config via env or `~/.config/jarvis/env`, prefix `JARVIS_` (see
 default → the guest is netless), `JARVIS_PEAK_WINDOWS` (peak-pricing gate),
 `JARVIS_VOICE_ENABLED`.
 
+## Third-party
+
+Backups use [rclone](https://rclone.org) (MIT licence), run as a separate
+program — see `NOTICE`.

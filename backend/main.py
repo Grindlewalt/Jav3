@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 import asyncio
 
-from . import (agents_api, agents_run, artifacts_api, auth, chat, devices_api,
+from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, devices_api,
                egress_api,
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
@@ -92,6 +92,7 @@ app.include_router(git_serve_api.router)
 app.include_router(notifications_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)
+app.include_router(backup.router)
 app.include_router(artifacts_api.router)
 app.include_router(vm_api.router)
 app.include_router(egress_api.router)

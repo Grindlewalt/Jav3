@@ -1,5 +1,5 @@
 [Unit]
-Description=Jarvis durable-state backup to Gitea
+Description=Jarvis durable-state backup (rclone)
 After=network-online.target
 
 [Service]
