@@ -2,7 +2,7 @@ import {
   useCallback, useEffect, useLayoutEffect, useRef, useState,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { NavLink, Navigate, useLocation } from 'react-router-dom'
+import { NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { api } from './api.js'
 import { streamUrl } from './tab.js'
 import { useDismiss } from './useDismiss.js'
@@ -10,7 +10,8 @@ import { setMediaHosts } from './mediaHosts.js'
 import Player from './Player.jsx'
 import AppRoutes from './routes.jsx'
 import {
-  MoreIcon, NAV_ITEMS, NavItem, NavList, NavSlotContext, OVERFLOW_ITEMS, PRIMARY_ITEMS,
+  MoreIcon, NAV_ITEMS, NavIcon, NavItem, NavList, NavSlotContext, OVERFLOW_ITEMS,
+  PRIMARY_ITEMS,
 } from './nav.jsx'
 import { AuthContext } from './auth.jsx'
 import Menu from './components/Menu.jsx'
@@ -284,6 +285,7 @@ export default function App() {
   const [moreOpen, setMoreOpen] = useState(false) // desktop overflow menu
   const [theme, toggleTheme] = useTheme()
   const location = useLocation()
+  const navigate = useNavigate()
   // the Chat page publishes a mount point when its sidebar is collapsed; while
   // one exists the nav renders into it as a rail instead of onto the top bar
   const [navSlot, setNavSlot] = useState(null)
@@ -383,6 +385,19 @@ export default function App() {
 
   const counts = { review: notices.count }
 
+  // The phone drawer's way into chat history. On a phone the Chat sidebar is
+  // an off-canvas sheet, and an edge swipe was the only way to open it — an
+  // invisible gesture is not an affordance. The stored side state covers
+  // arriving from another page (Chat mounts reading it); the event covers
+  // already being on Chat.
+  const openChats = () => {
+    try { localStorage.setItem('jarvis.chat.side', 'open') } catch { /* private mode */ }
+    setMenuOpen(false)
+    if (location.pathname !== '/') navigate('/')
+    window.dispatchEvent(new Event('jarvis-open-chats'))
+  }
+  const chatItem = NAV_ITEMS.find((i) => i.to === '/')
+
   // The bar and the rail render the SAME markup — only the container's class
   // and the label's visibility differ, which is what lets the icons fly
   // between the two placements. The ⋯ menu is the glass Menu primitive with
@@ -460,7 +475,17 @@ export default function App() {
           )}
           <div className={menuOpen ? 'nav-drawer open' : 'nav-drawer'}
                aria-hidden={!menuOpen}>
-            <NavList items={NAV_ITEMS} counts={counts} tabIndex={menuOpen ? 0 : -1} />
+            <NavList items={[chatItem]} counts={counts} tabIndex={menuOpen ? 0 : -1} />
+            <button type="button" className="drawer-row" tabIndex={menuOpen ? 0 : -1}
+                    onClick={openChats}>
+              <NavIcon name="history" />
+              <span className="nav-label">Chat history</span>
+            </button>
+            <NavList items={NAV_ITEMS.filter((i) => i !== chatItem)} counts={counts}
+                     tabIndex={menuOpen ? 0 : -1} />
+            {/* the drawer's one theme control — a row like the rest, not a
+                centred white slab; the bar's own toggle hides while the
+                drawer is the navigation */}
             <div className="drawer-foot">
               <button className="ghost" tabIndex={menuOpen ? 0 : -1}
                       onClick={toggleTheme}>

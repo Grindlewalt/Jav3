@@ -822,16 +822,32 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .convo-list li:hover::after, .convo-list li.active::after,
 .convo-list li:hover + li::after, .convo-list li.active + li::after { opacity: 0; }
-.convo-list li .win-btn { visibility: hidden; }
-.convo-list li:hover .win-btn { visibility: visible; }
+/* rename / delete float over the row's right end on hover instead of
+   holding their width while invisible, which cut every title ~55px short.
+   The pad is the row's own hover wash, so the title fades under it. */
+.convo-actions {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  display: flex; gap: 2px; padding-left: 6px; border-radius: 8px;
+  background: var(--panel-2); opacity: 0; pointer-events: none;
+  transition: opacity 0.15s;
+}
+.convo-list li:hover .convo-actions,
+.convo-list li:focus-within .convo-actions { opacity: 1; pointer-events: auto; }
+/* an agent's thread: the agent's name leads the caption line */
+.convo-agent { color: var(--accent); margin-right: 6px; }
 /* transparent + borderless: the toolbar, the thread and the composer are one
    surface, so the chat reads as sidebar + centre rather than three strips */
 .chat-toolbar {
   display: flex; align-items: center; gap: 10px; padding: 9px 28px;
   background: transparent; font-size: 13px; flex-shrink: 0;
 }
-/* the phone-only strip that reopens the off-canvas conversation list */
-.chat-title { font-weight: 600; color: var(--text); }
+/* the title is what gives way: a zero basis hands the number and the
+   project chip their natural width first, and the title ellipses in the rest */
+.chat-title { font-weight: 600; color: var(--text); flex: 1 1 0; min-width: 0; }
+.chat-meta { display: flex; align-items: center; gap: 6px; min-width: 0;
+  flex: 0 1 auto; }
+.chat-meta .tag { margin-left: 0; flex-shrink: 0; }
+.chat-meta .proj-pick { min-width: 0; flex-shrink: 1; }
 .convo-list li:hover, .convo-list li.active { background: var(--panel-2); color: var(--text); }
 
 /* ---- project picker (chat toolbar) ----
@@ -841,7 +857,7 @@ input:focus, textarea:focus { border-color: var(--accent);
    globally-loaded one. */
 .proj-pick { position: relative; flex-shrink: 0; }
 .proj-chip {
-  display: inline-flex; align-items: center; gap: 7px; max-width: 240px;
+  display: inline-flex; align-items: center; gap: 7px; max-width: min(240px, 100%);
   background: transparent; color: var(--dim); border: 1px solid transparent;
   border-radius: 999px; padding: 6px 12px; font-size: 12.5px; font-weight: 500;
   white-space: nowrap;
@@ -849,6 +865,7 @@ input:focus, textarea:focus { border-color: var(--accent);
 .proj-chip:hover:not(:disabled) { color: var(--text); border-color: var(--border);
   background: color-mix(in srgb, var(--panel-2) 60%, transparent);
   filter: none; transform: none; }
+.proj-chip .ellipsis { min-width: 0; }
 .proj-chip .chev { transform: rotate(90deg); }
 .proj-chip .chev.open { transform: rotate(-90deg); }
 .proj-dot {
@@ -917,10 +934,6 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .temp-switch.on .temp-knob { transform: translateX(13px);
   background: var(--accent-ink); }
-/* an already-saved chat can't retroactively not exist */
-.temp-switch.fixed { opacity: 0.35; cursor: default; }
-.temp-switch.fixed:hover { color: var(--dim); background: none;
-  border-color: transparent; }
 /* the switch already says it; the word is the label, not a state readout */
 .temp-word { line-height: 1; }
 /* position: relative — the composer floats over the thread inside this box.
@@ -1855,13 +1868,20 @@ kbd {
   .nav-drawer.open { transform: none; visibility: visible; }
   /* the drawer is a sibling of <nav>, so the `nav a` rules above never reach
      it — without these the links render as default underlined browser links */
-  .nav-drawer a {
+  /* .drawer-row is a button dressed as one of these links: Chat history and
+     the theme switch are actions, not destinations, but they sit in the same
+     list and must read as rows of it */
+  .nav-drawer a, .nav-drawer .drawer-row {
     color: var(--dim); text-decoration: none;
     padding: 13px 14px; font-size: 15px; border-radius: 10px;
     min-height: var(--tap); display: flex; align-items: center; gap: var(--sp-6);
     transition: color 0.15s, background 0.15s;
   }
-  .nav-drawer a:hover { color: var(--text); background: var(--panel); }
+  .nav-drawer .drawer-row { width: 100%; background: none; border: 0;
+    font-weight: 400; text-align: left; font-family: inherit; }
+  .nav-drawer a:hover, .nav-drawer .drawer-row:hover:not(:disabled) {
+    color: var(--text); filter: none; transform: none;
+    background: color-mix(in srgb, var(--panel-2) 50%, transparent); }
   .nav-drawer a.active { color: var(--text); background: var(--panel-2); }
   /* the drawer carries the same glyphs as the bar now — it was text-only, the
      one placement where a destination looked like a different thing */
@@ -1954,8 +1974,10 @@ kbd {
     position: absolute; inset: 0; z-index: 19; background: var(--overlay);
     animation: scrim-in 0.18s ease both;
   }
-  .chat-toolbar { padding: 8px 12px; flex-wrap: nowrap; gap: 8px; }
-  .chat-toolbar .chat-title { min-width: 0; }
+  .chat-toolbar { padding: 8px 16px; flex-wrap: nowrap; gap: 8px; }
+  /* the chip may take at most ~half the bar, so the title always keeps a
+     readable share of it */
+  .chat-meta .proj-chip { max-width: 44vw; }
   /* the empty-state project menu: its chip sits mid-screen, so a downward
      dropdown ran off the bottom and under the composer. Anchored to the
      screen instead — a sheet rising from just above the composer. */

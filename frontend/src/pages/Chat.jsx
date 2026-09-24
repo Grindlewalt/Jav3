@@ -294,6 +294,13 @@ export default function Chat() {
     localStorage.setItem('jarvis.chat.side', sideOpen ? 'open' : 'closed')
   }, [sideOpen])
 
+  // the phone drawer's "Chat history" row (App.jsx) when Chat is already open
+  useEffect(() => {
+    const open = () => setSideOpen(true)
+    window.addEventListener('jarvis-open-chats', open)
+    return () => window.removeEventListener('jarvis-open-chats', open)
+  }, [])
+
   // Starting a chat doesn't replace the orb, it moves it: the big one is the
   // same object as the little one beside Jav3's first reply. send() measures
   // it on the way out and this flies the avatar in from there, shrinking as it
@@ -511,8 +518,8 @@ export default function Chat() {
     setBusy(false)
   }
 
-  // Swipe in from the left edge to open the chat list on a phone — the old
-  // mobile bar (☰ / title / ＋) is gone; this gesture is its replacement. The
+  // Swipe in from the left edge to open the chat list on a phone — the quick
+  // path; the visible one is the drawer's "Chat history" row. The
   // start must be at the screen's edge so horizontal scrolls inside code
   // blocks and tables never trigger it.
   const edgeTouch = useRef(null)
@@ -546,13 +553,9 @@ export default function Chat() {
       }} />
   )
   const tempSwitch = (
-    <label className={`temp-switch${temporary ? ' on' : ''}`
-                      + (conversationId ? ' fixed' : '')}
-           title={conversationId
-             ? 'this chat is already saved — start a new one to make it temporary'
-             : 'temporary chat: nothing is written to disk, and it is gone '
-               + 'once you leave'}>
-      <input type="checkbox" checked={temporary} disabled={!!conversationId}
+    <label className={`temp-switch${temporary ? ' on' : ''}`}
+           title="temporary chat: nothing is written to disk, and it is gone once you leave">
+      <input type="checkbox" checked={temporary}
              onChange={(e) => setTemporary(e.target.checked)} />
       <span className="temp-track"><span className="temp-knob" /></span>
       <span className="temp-word">Temporary chat</span>
@@ -583,13 +586,17 @@ export default function Chat() {
                   {c.summary || `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`}</span>
                 {c.project_slug && <span className="convo-proj ellipsis">{c.project_slug}</span>}
               </div>
-              <button className="win-btn" title="rename chat"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        renameConversation(c.id, c.summary)
-                      }}>✎</button>
-              <button className="win-btn" title="delete chat"
-                      onClick={(e) => { e.stopPropagation(); deleteConversation(c.id) }}>×</button>
+              {/* overlaid on hover rather than reserving their width: hidden
+                  but in flow, they cut every title ~55px short */}
+              <span className="convo-actions">
+                <button className="win-btn" title="rename chat"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          renameConversation(c.id, c.summary)
+                        }}>✎</button>
+                <button className="win-btn" title="delete chat"
+                        onClick={(e) => { e.stopPropagation(); deleteConversation(c.id) }}>×</button>
+              </span>
             </li>
           ))}
         </ul>
@@ -603,19 +610,22 @@ export default function Chat() {
             would just be an empty strip */}
         {(!phone || !fresh) && (
           <div className="chat-toolbar">
-            {conversationId && <>
-              <span className="chat-title ellipsis">
-                {conversations.find((c) => c.id === conversationId)?.summary
-                  || `Chat #${conversationId}`}
-              </span>
-              <span className="tag">#{conversationId}</span>
-            </>}
-            <span className="grow" />
-            {projectPicker}
-            {/* sits beside the project control: both answer "where does this
-                turn's work go". A switch, not a chip — it is a mode you leave
-                set, and the track shows which way at a glance. */}
-            {tempSwitch}
+            {conversationId
+              ? <span className="chat-title ellipsis">
+                  {openConvo?.summary || `Chat #${conversationId}`}</span>
+              : <span className="grow" />}
+            {/* the number and the project travel as one compact group, so the
+                title is what gives way on a narrow screen */}
+            <div className="chat-meta">
+              {conversationId && <span className="tag">#{conversationId}</span>}
+              {projectPicker}
+              {/* beside the project control: both answer "where does this
+                  turn's work go". A switch, not a chip — it is a mode you
+                  leave set. Only offered while it can still apply: a saved
+                  chat can't retroactively not exist, and a disabled switch
+                  read as broken while crowding the phone toolbar. */}
+              {!conversationId && tempSwitch}
+            </div>
           </div>
         )}
         <div className="messages" ref={scrollRef}>
@@ -666,8 +676,11 @@ export default function Chat() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
-              placeholder={temporary ? 'Message Jav3 (temporary chat)…'
-                                     : 'Message Jav3…'}
+              // a phone's bar is ~230px of text: the long form wrapped onto a
+              // second line the one-row box then clipped
+              placeholder={temporary
+                ? (phone ? 'Temporary chat…' : 'Message Jav3 (temporary chat)…')
+                : 'Message Jav3…'}
               rows={1}
             />
             <ComposerModel visible={!input.trim()} />

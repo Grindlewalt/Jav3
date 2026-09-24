@@ -48,6 +48,9 @@ const PATHS = {
   // a calendar with one marked day
   schedules: <><rect x="3.5" y="5.2" width="17" height="15.3" rx="2.2" />
                <path d="M3.5 10h17M8 3.5v3.4M16 3.5v3.4M8.4 14.3h3" /></>,
+  // a clock turning back: the chat history sheet (the drawer's way into the
+  // Chat sidebar on a phone, where the sidebar is off-canvas)
+  history: <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v3.2h3.2M12 8v4l2.8 1.8" />,
 }
 
 export function NavIcon({ name, innerRef }) {
