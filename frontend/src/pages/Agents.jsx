@@ -237,7 +237,7 @@ export function AgentDefinitions() {
           give it a one-off task in the Run an agent panel, put it on a schedule, or
           have Jarvis summon one in chat.</p>
       </aside>
-      <main className="editor-pane">
+      <main className={agent ? 'editor-pane' : 'editor-pane split-idle'}>
         {!agent ? (
           <EmptyState pad>select an agent, or press <kbd>n</kbd> to create one</EmptyState>
         ) : (

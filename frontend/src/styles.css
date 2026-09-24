@@ -2099,6 +2099,13 @@ kbd {
   .split-layout > aside .skill-form {
     flex: 0 0 auto; overflow: visible; max-height: none;
   }
+  /* Nothing picked yet (Agents, Skills): the pane below only says "select
+     one", so it goes and the list gets the whole screen. Capped at 46vh over
+     an empty pane, the recently-deleted fold's restore / delete-forever sat
+     below the aside's scroll edge, and the element at their spot was the
+     pane's .empty-pad. */
+  .split-layout > main.split-idle { display: none; }
+  .split-layout:has(> main.split-idle) > aside { flex: 1 1 auto; max-height: none; }
   /* window chrome has to be tall enough for the bigger close/expand buttons */
   .window-head { min-height: var(--tap); padding: 4px 8px; }
 }

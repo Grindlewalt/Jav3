@@ -102,7 +102,7 @@ export default function SkillsPanel() {
           it invokes the skill. Agents get every granted skill unless their
           definition takes one away.</p>
       </aside>
-      <main className="editor-pane">
+      <main className={selected ? 'editor-pane' : 'editor-pane split-idle'}>
         {!selected ? (
           <EmptyState pad>select or create a skill</EmptyState>
         ) : (
