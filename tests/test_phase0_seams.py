@@ -207,7 +207,7 @@ def test_summarize_reexports_the_one_complete_text():
 def test_non_delegable_is_the_single_source(tmp_env):
     assert autonomy.NON_DELEGABLE == frozenset(
         {"spawn_agent", "spawn_temp_agent", "deploy_agents", "create_agent",
-         "schedule_update"})
+         "schedule_update", "orchestrate"})
     # the subagent tool build references it: infra tools never reach a
     # delegate; the spawn tools alone are handed back below MAX_SPAWN_DEPTH
     # (depth-capped nesting, 2026-07-23) and drop out at the cap

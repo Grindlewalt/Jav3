@@ -79,12 +79,19 @@ async def test_layout_roundtrip(client):
 
 
 async def test_skills_and_tools(client):
+    # the repo ships skills/organize-project and ensure_dirs seeds it into a
+    # fresh skills dir (state-dir work, 2026-09), so creating THAT name is a
+    # 409 now; the slugify + default-grant checks use a name of their own
     r = await client.post("/api/skills",
-                          json={"name": "Organize Project", "description": "test dup guard"})
+                          json={"name": "Organize Project", "description": "dup"})
+    assert r.status_code == 409
+    r = await client.post("/api/skills",
+                          json={"name": "Tidy Workspace", "description": "test slugify"})
     slug = r.json()["slug"]
-    assert slug == "organize-project"
+    assert slug == "tidy-workspace"
     r = await client.get("/api/skills")
     skills = {s["slug"]: s for s in r.json()["skills"]}
+    assert "organize-project" in skills          # the shipped one was seeded
     assert skills[slug]["enabled"] is True   # granted by default (operator, 2026-07-09)
 
     r = await client.get(f"/api/skills/{slug}")
