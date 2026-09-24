@@ -6,8 +6,8 @@
  * so on the phone those actions appear to do nothing at all.
  *
  * A window event rather than a prop chain or a context: this app already uses
- * five of them (`jarvis-files-changed`, `jarvis-player`, `jarvis-layout-changed`,
- * `jarvis-model-changed`, `jarvis-tab-renamed`), and a toast needs no reply, so
+ * four of them (`jarvis-files-changed`, `jarvis-player`, `jarvis-layout-changed`,
+ * `jarvis-model-changed`), and a toast needs no reply, so
  * the one-way channel is the honest shape. `useNotices` listens and renders
  * these next to the security and queue cards.
  *

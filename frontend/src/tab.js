@@ -8,7 +8,7 @@
 //   id    unique per tab, kept in sessionStorage so a reload is the same tab
 //         and a second window is a different one
 //   name  what the operator would call this machine, kept in localStorage so
-//         it is per browser rather than per tab (setTabName renames it)
+//         it is per browser rather than per tab
 //
 // Neither is a credential: the session cookie is still what authenticates, and
 // every tab belongs to the same logged-in operator. This is addressing, not
@@ -64,15 +64,6 @@ function guess() {
 
 export function tabName() {
   return read(localStorage, NAME_KEY) || guess()
-}
-
-export function setTabName(name) {
-  const clean = String(name || '').trim().slice(0, 60)
-  write(localStorage, NAME_KEY, clean)
-  // the name travels on the SSE subscription, so it only takes effect when
-  // that reconnects — say so rather than leaving the old name showing
-  window.dispatchEvent(new CustomEvent('jarvis-tab-renamed', { detail: clean }))
-  return clean || guess()
 }
 
 export function streamUrl() {
