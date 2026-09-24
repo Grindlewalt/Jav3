@@ -42,13 +42,16 @@ writes the spec once and then only reads. So the recipient's ReAct loop asks,
 between iterations, over the connection it already has. A push would need a new
 host->guest channel; that is a much larger change than this work package.
 
-Addressing is by agent slug or by conversation id. A slug is what an agent can
-actually name (its roster is in its context and `conversations.agent_slug` binds
-a thread to it, WP4); a conversation id is what makes a REPLY unambiguous when
-two threads run the same agent, and every delivered message carries the sender's.
-Project is deliberately not an address: "everyone in project X" is a broadcast,
-and a broadcast that lands in N context windows is N times the tokens for a
-message nobody was waiting for.
+Addressing is by agent slug, by conversation id, or by plan item. A slug is
+what an agent can actually name (its roster is in its context and
+`conversations.agent_slug` binds a thread to it, WP4); a conversation id is
+what makes a REPLY unambiguous when two threads run the same agent, and every
+delivered message carries the sender's; `item:<id>` names a running checklist
+item of the explicit orchestrator (plan.py) so a sibling never has to know its
+conversation id — and a message to an item that has not started yet is kept as
+a note for its brief. Project is deliberately not an address: "everyone in
+project X" is a broadcast, and a broadcast that lands in N context windows is N
+times the tokens for a message nobody was waiting for.
 """
 from . import runtime
 from .config import settings
@@ -103,14 +106,19 @@ async def live_peers(db, *, exclude_cid: int | None = None) -> list[dict]:
             if env.conversation_id not in cids:
                 cids.append(env.conversation_id)
     rows = await _describe(db, cids)
+    from . import plan as plan_mod
     out = []
     for cid in cids:
         r = rows.get(cid) or {}
+        item = plan_mod.live_item(cid)
         out.append({"conversation_id": cid,
                     "agent": r.get("agent_slug") or "jarvis",
                     "kind": r.get("kind") or "chat",
                     "project": r.get("project"),
-                    "title": (r.get("summary") or "")[:60]})
+                    # a plan item is addressed by its stable item id, so the
+                    # roster names it that way and the title is the item's own
+                    "item": item["item_id"] if item else None,
+                    "title": (item["title"] if item else (r.get("summary") or ""))[:60]})
     return out
 
 
@@ -144,20 +152,34 @@ async def _is_incognito(db, cid: int) -> bool:
 def format_peers(peers: list[dict]) -> str:
     if not peers:
         return "(no other agent turns are running right now)"
-    return "\n".join(
-        f"  {p['agent']} — conversation {p['conversation_id']}"
-        f"{' · project ' + p['project'] if p['project'] else ''}"
-        f"{' · ' + p['title'] if p['title'] else ''}"
-        for p in peers)
+    lines = []
+    for p in peers:
+        if p.get("item"):
+            lines.append(f"  item:{p['item']} — {p['title']} (conversation "
+                         f"{p['conversation_id']}, {p['agent']}"
+                         f"{', project ' + p['project'] if p['project'] else ''})")
+        else:
+            lines.append(f"  {p['agent']} — conversation {p['conversation_id']}"
+                         f"{' · project ' + p['project'] if p['project'] else ''}"
+                         f"{' · ' + p['title'] if p['title'] else ''}")
+    return "\n".join(lines)
 
 
 async def _sender(db, cid: int) -> dict:
     rows = await _describe(db, [cid])
     r = rows.get(cid) or {}
-    return {"conversation_id": cid,
-            "label": r.get("agent_slug") or ("jarvis" if r.get("kind", "chat") == "chat"
-                                             else (r.get("kind") or "agent")),
-            "project": r.get("project")}
+    kind = r.get("kind") or "chat"
+    from . import plan as plan_mod
+    item = plan_mod.live_item(cid)
+    if item:
+        # a plan item is known to its siblings by its item id; the agent it
+        # runs as, if any, is the second thing they want to know
+        label = f"item {item['item_id']}" + (f" ({r['agent_slug']})" if r.get("agent_slug") else "")
+    else:
+        # a plan head has no agent identity; what it sends (a nudge) comes
+        # from "the orchestrator", which is what its recipient should read
+        label = r.get("agent_slug") or {"chat": "jarvis", "head": "orchestrator"}.get(kind, kind)
+    return {"conversation_id": cid, "label": label, "project": r.get("project")}
 
 
 async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
@@ -178,6 +200,24 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
                          "reach right now:\n" + format_peers(peers)}
 
     to_cid, to_slug = None, None
+    if addr.startswith("item:"):
+        # a checklist item of the explicit orchestrator: running -> its
+        # conversation; not started -> a note in its brief; settled -> refused
+        from . import plan as plan_mod
+        item_id = addr[5:].strip()
+        me = await _sender(db, sender_cid)
+        to_cid = plan_mod.resolve_item(me["project"], item_id)
+        if to_cid is None:
+            why = await plan_mod.leave_note(me["project"], item_id, sender=me["label"],
+                                            body=body)
+            if why:
+                return {"error": f"cannot reach item {item_id!r}: {why}. Running turns "
+                                 f"you can reach right now:\n" + format_peers(peers)}
+            return {"id": None, "to_cid": None, "to_slug": None, "running": [],
+                    "note_for": item_id}
+        if to_cid == sender_cid:
+            return {"error": "that item is this turn — you cannot message yourself."}
+        addr = str(to_cid)
     if addr.isdigit():
         to_cid = int(addr)
         if to_cid == sender_cid:
@@ -339,6 +379,10 @@ async def send_tool(to: str, message: str) -> str:
         await db.close()
     if out.get("error"):
         return "error: " + out["error"]
+    if out.get("note_for"):
+        return (f"kept as a note for item {out['note_for']} — it has not started yet, "
+                "so it will read this in its brief when it does. Do not wait for a "
+                "reply this turn.")
     if out["to_cid"] is not None:
         target = f"conversation {out['to_cid']}"
     else:

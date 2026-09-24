@@ -25,6 +25,10 @@ _READ = {
     "git_diff", "git_status", "list_files", "read_file", "memory_read",
     "read_and_summarize", "web_read", "web_search", "search_codebase",
     "load_project",
+    # a plan item's completion report writes only the item's own status line
+    # in .plan.json; withholding it would leave the runner unable to check the
+    # item off, so it is offered at every level (backend/plan.py)
+    "plan_report",
 }
 _STAGE = {
     "write_file", "edit_file", "dashboard", "crawl_codebase", "journal_update",
@@ -37,7 +41,7 @@ _STAGE = {
     "send_message",
 }
 _GATED = {
-    "research", "spawn_agent", "spawn_temp_agent", "deploy_agents",
+    "research", "spawn_agent", "spawn_temp_agent", "deploy_agents", "orchestrate",
     # code execution: contained in the no-key/no-net guest, but running code
     # is still more than file edits — gated tier
     "run_code",
@@ -53,6 +57,9 @@ _COMMIT = {"git_commit_request", "git_remote_request"}
 NON_DELEGABLE = frozenset({
     "spawn_agent", "spawn_temp_agent", "deploy_agents", "create_agent",
     "schedule_update",
+    # a plan run is a team; only the operator or central Jarvis starts one — a
+    # plan item that could launch a plan is the fork bomb with extra steps
+    "orchestrate",
 })
 
 # the spawn tools alone nest, capped (2026-07-23 operator ask): an agent at

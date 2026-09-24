@@ -12,7 +12,7 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, device
                egress_api,
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
-               notifications_api, projects, reviewer, reviewer_api, runs_api,
+               notifications_api, plan_api, projects, reviewer, reviewer_api, runs_api,
                schedules, skills_api, vm_api, voice_api, workspace, secrets)
 from .agent.model import (MODEL_STATE_KEY, get_model_override,
                           load_model_override, set_model_override)
@@ -86,6 +86,7 @@ app.include_router(skills_api.router)
 app.include_router(agents_api.router)
 app.include_router(agents_run.router)
 app.include_router(agents_run.messages_router)
+app.include_router(plan_api.router)
 app.include_router(schedules.router)
 app.include_router(runs_api.router)
 app.include_router(runs_api.jobs_router)
