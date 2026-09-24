@@ -112,14 +112,19 @@
   --font-mono: ui-monospace, Menlo, monospace;
 
   /* Breakpoints. CSS custom properties are NOT usable inside @media, so these
-     cannot drive the queries below — they are the single written source of
-     the four widths this app actually uses, readable from JS via
-     getComputedStyle. WP3 collapses the queries and Chat.jsx's hardcoded 768
-     onto them. */
-  --bp-wide: 1024px;    /* nav collapses to the drawer */
-  --bp-tablet: 768px;   /* the phone/desktop split, also hardcoded in Chat.jsx */
-  --bp-phone: 640px;
-  --bp-narrow: 400px;
+     cannot drive the queries below — they are the written source of the
+     widths this app uses, readable from JS via getComputedStyle. The queries
+     repeat the numbers literally and `src/breakpoints.js` is what JS reads;
+     the three agree, and every @media below is one of them.
+
+     There were four. 640 held exactly two rules — the modal going full-bleed
+     and the music player going edge-to-edge — both "this is a phone"
+     decisions the rest of the app already spells 768 (the SecurityBoard modal
+     went full-bleed at 768 while the generic modal did it at 640, so the app
+     had two widths for one idea). 640 is gone. */
+  --bp-wide: 1024px;    /* the bar can't hold the links; they move to the drawer */
+  --bp-phone: 768px;    /* one column, 16px controls, safe-area gutters */
+  --bp-narrow: 400px;   /* the last squeeze: smaller wordmark, tighter padding */
 
   /* ---- surfaces that are deliberately theme-independent ----
      Not theme bugs, despite looking like hardcoded colours: an untrusted HTML
@@ -557,7 +562,10 @@ input:focus, textarea:focus { border-color: var(--accent);
   gap: var(--sp-4); padding: var(--sp-6) var(--sp-8);
   border-top: 1px solid var(--border); }
 .modal-foot .grow { flex: 1; }
-@media (max-width: 640px) {
+/* --bp-phone. Was 640, alone in the file: .sbd-modal makes the identical
+   full-bleed move at 768, so between 641 and 768 one modal filled the screen
+   and the other sat in a scrim. */
+@media (max-width: 768px) {
   /* full-bleed on a phone: a padded scrim wastes a quarter of the screen */
   .modal-scrim { padding: 0; }
   .modal { width: 100%; height: 100%; max-height: none; border-radius: 0;
@@ -2112,8 +2120,9 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .jp-retry:hover { background: var(--panel-2); }
 
 /* :not(.floating) throughout — the detached window is ~404px wide, so it
-   matches this query while being anything but a phone */
-@media (max-width: 640px) {
+   matches this query while being anything but a phone. --bp-phone; was 640,
+   the only other rule at that width. */
+@media (max-width: 768px) {
   .jplayer:not(.floating) { left: 12px; right: 12px; width: auto; }
   /* 16px stops iOS zooming the page when a control takes focus */
   .jplayer:not(.floating) input[type='range'] { font-size: 16px; }

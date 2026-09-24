@@ -4,6 +4,7 @@ import {
 import { api, chatStream, tailStream } from '../api.js'
 import { NavSlotContext } from '../App.jsx'
 import { useDismiss } from '../useDismiss.js'
+import { isPhone, useIsPhone } from '../breakpoints.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
@@ -233,20 +234,13 @@ export default function Chat() {
   const [sideOpen, setSideOpen] = useState(() => {
     const saved = localStorage.getItem('jarvis.chat.side')
     if (saved) return saved !== 'closed'
-    return !window.matchMedia('(max-width: 768px)').matches
+    return !isPhone()
   })
   // Collapsed on a desktop, the sidebar stops being a chat list and becomes the
   // app's nav rail: it publishes a mount point and App portals the destinations
   // into it. On a phone the sidebar is off-canvas, so it can't hold the nav —
   // no slot there, and the top bar stays.
-  const [phone, setPhone] = useState(
-    () => window.matchMedia('(max-width: 768px)').matches)
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 768px)')
-    const h = (e) => setPhone(e.matches)
-    mq.addEventListener('change', h)
-    return () => mq.removeEventListener('change', h)
-  }, [])
+  const phone = useIsPhone()
   const setNavSlot = useContext(NavSlotContext)
   const slotRef = useCallback((el) => setNavSlot(el), [setNavSlot])
   // Hand the slot back when leaving Chat, or the bar never comes home. This is
@@ -389,7 +383,7 @@ export default function Chat() {
 
   // the phone list overlays the thread, so picking a chat should reveal it
   const closeSideOnPhone = () => {
-    if (window.matchMedia('(max-width: 768px)').matches) setSideOpen(false)
+    if (isPhone()) setSideOpen(false)
   }
 
   async function openConversation(id) {
