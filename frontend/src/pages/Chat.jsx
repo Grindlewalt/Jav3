@@ -9,6 +9,7 @@ import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { modelOption, setModel, useModel } from '../modelInfo.js'
+import ChatGroups from '../ChatGroups.jsx'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
 // day — a handful per period nod to it (capped at 5) so it doesn't read as a
@@ -99,15 +100,6 @@ function pickGreeting() {
   const period = h < 5 ? 'night' : h < 12 ? 'morning' : h < 18 ? 'midday' : 'night'
   const list = GREETINGS[period]
   return list[Math.floor(Math.random() * list.length)]
-}
-
-// A chat's line in the sidebar. Untitled chats are summarised from the first
-// prompt, so a pasted brief arrives as "# AGENT BRIEF…" or "[startup — …":
-// the markdown heading mark and the bracket are noise in a list, and they
-// are stripped here only — the toolbar and the tooltip keep the real title.
-function listTitle(c) {
-  if (!c.summary) return `#${c.id} · ${c.started_at?.slice(5, 16) || ''}`
-  return c.summary.replace(/^[#[\s]+/, '') || c.summary
 }
 
 // The glassy model picker at the send end of the composer. It changes the
@@ -595,38 +587,11 @@ export default function Chat() {
                   onClick={newConversation}>＋</button>
         </div>
         {!sideOpen && !phone && <div className="side-nav" ref={slotRef} />}
-        <ul className="convo-list">
-          {conversations.map((c) => (
-            <li key={c.id} className={c.id === conversationId ? 'active' : ''}
-                onClick={() => openConversation(c.id)}>
-              {/* title owns the row; the project slug sits under it so a long
-                  slug can never crush the title into two letters */}
-              <div className="convo-main">
-                <span className="convo-title ellipsis" title={c.summary || `#${c.id}`}>
-                  {listTitle(c)}</span>
-                {/* an agent's thread is still a chat and still belongs in
-                    this list — it just isn't Jav3 speaking, so say so */}
-                {(c.agent_slug || c.project_slug) && (
-                  <span className="convo-proj ellipsis">
-                    {c.agent_slug && <span className="convo-agent">{c.agent_slug}</span>}
-                    {c.project_slug}
-                  </span>
-                )}
-              </div>
-              {/* overlaid on hover rather than reserving their width: hidden
-                  but in flow, they cut every title ~55px short */}
-              <span className="convo-actions">
-                <button className="win-btn" title="rename chat"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          renameConversation(c.id, c.summary)
-                        }}>✎</button>
-                <button className="win-btn" title="delete chat"
-                        onClick={(e) => { e.stopPropagation(); deleteConversation(c.id) }}>×</button>
-              </span>
-            </li>
-          ))}
-        </ul>
+        <ChatGroups conversations={conversations} activeId={conversationId}
+                    projects={projects} onOpen={openConversation}
+                    onRename={(c) => renameConversation(c.id, c.summary)}
+                    onDelete={(c) => deleteConversation(c.id)}
+                    onChanged={refreshConvos} />
       </aside>
       {sideOpen && (
         <div className="chat-scrim" onClick={() => setSideOpen(false)} />

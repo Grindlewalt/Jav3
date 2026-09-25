@@ -939,6 +939,55 @@ input:focus, textarea:focus { border-color: var(--accent);
 .convo-list li:focus-within .convo-actions { opacity: 1; pointer-events: auto; }
 /* an agent's thread: the agent's name leads the caption line */
 .convo-agent { color: var(--accent); margin-right: 6px; }
+/* ---- chat list groups (ChatGroups.jsx): Projects, Starred, each folder,
+   Recent. .convo-list is the one scroller (the rail collapse fades it as a
+   whole); each group is a head plus its own list of the usual rows. */
+.convo-group { display: flex; flex-direction: column; gap: var(--sp-2);
+  flex-shrink: 0; }
+.convo-group + .convo-group { margin-top: var(--sp-4); }
+.convo-rows { list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 5px; }
+.convo-group-head { display: flex; align-items: center; gap: var(--sp-2);
+  min-height: 28px; }
+.convo-group-toggle {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--sp-3);
+  background: none; border: 0; padding: var(--sp-2) var(--sp-6);
+  border-radius: var(--radius-sm); color: var(--dim); cursor: pointer;
+  font-size: var(--fs-xs); font-weight: 500; letter-spacing: 0.08em;
+  text-transform: uppercase; text-align: left;
+}
+.convo-group-toggle:hover:not(:disabled) { color: var(--text);
+  filter: none; transform: none; }
+.convo-group-toggle .chev { flex-shrink: 0; }
+.convo-group-count { margin-left: auto; letter-spacing: 0; opacity: 0.7;
+  font-variant-numeric: tabular-nums; }
+.convo-group-menu { opacity: 0; transition: opacity 0.15s; }
+.convo-group-head:hover .convo-group-menu,
+.convo-group-head:focus-within .convo-group-menu { opacity: 1; }
+.convo-group-empty { margin: 0; padding: var(--sp-2) var(--sp-6);
+  font-size: var(--fs-xs); color: var(--dim); }
+/* a row whose menu is open keeps its ⋯ showing after the pointer leaves */
+.convo-list li.menu-open .convo-actions { opacity: 1; pointer-events: auto; }
+/* project rows are links to the workspace: one line, the picker's dot */
+.convo-list .proj-rows li { padding: 0; }
+.proj-rows a { display: flex; align-items: center; gap: var(--sp-4);
+  flex: 1; min-width: 0; padding: 7px 12px; color: inherit;
+  text-decoration: none; font-size: var(--fs-md); }
+.convo-new-folder { align-self: flex-start; margin: var(--sp-2) 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-5); font-size: var(--fs-sm); }
+.convo-new-folder-form { margin-top: var(--sp-2); }
+.convo-new-folder-form input { width: 100%; padding: 6px 10px;
+  font-size: var(--fs-md); }
+/* a small label over a run of menu items (the chat menu's folder list) */
+.menu-caption { padding: var(--sp-2) var(--sp-6) 0; font-size: var(--fs-xs);
+  color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }
+/* no hover on touch: the ⋯ controls would never appear, so they take their
+   place in the row instead of overlaying it */
+@media (hover: none) {
+  .convo-actions { position: static; transform: none; opacity: 1;
+    pointer-events: auto; background: none; padding-left: 0; }
+  .convo-group-menu { opacity: 1; }
+}
 /* transparent + borderless: the toolbar, the thread and the composer are one
    surface, so the chat reads as sidebar + centre rather than three strips */
 .chat-toolbar {
