@@ -353,6 +353,80 @@ def test_origin_exemption_is_path_exact():
         assert must(scope(p)) is True, p
 
 
+# ------------------------------------------------------- model choice ---
+# Against the real registry: the wizard used to default to the provider's FIRST
+# catalogue model — DeepSeek's deprecated one, Anthropic's priciest.
+
+def _default_elsewhere():
+    """Move the global default off deepseek, so deepseek gets a catalogue pick."""
+    from backend import providers
+    providers.update_provider("openai", enabled=True)
+    providers.update_model("openai", "gpt-4.1", default=True)
+
+
+def test_recommended_keeps_the_global_default_on_its_provider(tmp_env):
+    from backend import providers
+    dp, dm = providers.split_id(providers.default_model())
+    assert dp == "deepseek"
+    assert providers.recommended_model("deepseek") == dm
+
+
+def test_recommended_skips_deprecated_and_toolless(tmp_env):
+    from backend import providers
+    _default_elsewhere()
+    rec = providers.recommended_model("deepseek")
+    m = providers.model_info("deepseek", rec)
+    assert providers.pickable(m) and not providers.is_deprecated(m)
+    assert providers.is_deprecated(providers.model_info("deepseek", "deepseek-v4-flash"))
+    assert rec != "deepseek-v4-flash"
+    with pytest.raises(providers.ProviderError):
+        providers.recommended_model("nope")
+
+
+async def test_setup_providers_by_id_lists_pickable_models(client):
+    from backend import providers
+    body = (await client.get("/api/setup/providers", params={"id": "deepseek"})).json()
+    assert body["recommended"] == providers.recommended_model("deepseek")
+    ids = [m["id"] for m in body["models"]]
+    assert body["recommended"] in ids and "deepseek-v4-flash" not in ids
+    assert all(not m["label"].lower().endswith("(deprecated)") for m in body["models"])
+    assert {"label", "price_in", "price_out", "ctx"} <= set(body["models"][0])
+    assert (await client.get("/api/setup/providers",
+                             params={"id": "nope"})).status_code == 400
+    await client.post("/api/setup", json=GOOD)
+    assert (await client.get("/api/setup/providers",
+                             params={"id": "deepseek"})).status_code == 409
+
+
+async def test_setup_without_model_keeps_the_global_default(client):
+    from backend import providers
+    before = providers.default_model()
+    r = await client.post("/api/setup", json={**GOOD, "provider": "deepseek",
+                                              "api_key": "sk-test-123456"})
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"]["default"] == before == providers.default_model()
+
+
+async def test_setup_honours_an_explicit_model(client):
+    from backend import providers
+    r = await client.post("/api/setup", json={**GOOD, "provider": "deepseek",
+                                              "api_key": "sk-test-123456",
+                                              "model": "deepseek-v4-pro"})
+    assert r.status_code == 200, r.text
+    assert providers.default_model() == "deepseek/deepseek-v4-pro"
+    assert "deepseek/deepseek-v4-pro" in {m["id"] for m in providers.enabled_models()}
+
+
+async def test_setup_unknown_model_is_refused_before_the_user_exists(client):
+    r = await client.post("/api/setup", json={**GOOD, "provider": "deepseek",
+                                              "api_key": "sk-test-123456",
+                                              "model": "no-such-model"})
+    assert r.status_code == 400 and "unknown model" in r.json()["detail"]
+    r = await client.post("/api/setup", json={**GOOD, "model": "deepseek-v4-pro"})
+    assert r.status_code == 400
+    assert await _count_users() == 0
+
+
 # ------------------------------------------------------------------- CLI ---
 
 def _run_cli(monkeypatch, argv, stdin_text, tty=False):
@@ -426,6 +500,41 @@ def test_cli_setup_interactive_skip_provider(tmp_env, monkeypatch, no_providers)
     assert code == 0, out
     assert not settings.secrets_path.exists()
 
+
+def test_cli_setup_model_flag(tmp_env, monkeypatch):
+    from backend import providers
+    code, out = _run_cli(monkeypatch, [
+        "setup", "--username", "op", "--password-stdin", "--provider", "deepseek",
+        "--api-key-stdin", "--no-test", "--model", "deepseek-v4-pro"],
+        "password123\nsk-cli-999999\n")
+    assert code == 0, out
+    assert providers.default_model() == "deepseek/deepseek-v4-pro"
+
+
+def test_cli_setup_unknown_model_flag_creates_nothing(tmp_env, monkeypatch):
+    code, _ = _run_cli(monkeypatch, [
+        "setup", "--username", "op", "--password-stdin", "--provider", "deepseek",
+        "--api-key-stdin", "--no-test", "--model", "no-such-model"],
+        "password123\nsk-cli-999999\n")
+    assert code != 0
+    assert asyncio.run(_count_users()) == 0
+
+
+def test_cli_setup_interactive_model_menu(tmp_env, monkeypatch):
+    """Recommended first; Enter takes it; the list stays short."""
+    from backend import cli, providers
+    _default_elsewhere()
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "password123")
+    cat = setup_api.catalogue()
+    n = next(i for i, p in enumerate(cat, 1) if p["id"] == "anthropic")
+    rec = providers.recommended_model("anthropic")
+    code, out = _run_cli(monkeypatch, ["setup"], f"op\n{n}\n\nn\n\n\n\n", tty=True)
+    assert code == 0, out
+    menu = [ln for ln in out.splitlines() if ln.startswith("   ") and ") " in ln
+            and "per Mtok" in ln]
+    assert 2 <= len(menu) <= cli.MODEL_MENU_MAX
+    assert menu[0].startswith("   1) ") and "(recommended)" in menu[0]
+    assert providers.default_model() == f"anthropic/{rec}"
 
 
 # ------------------------------------------------------- the profile step ---

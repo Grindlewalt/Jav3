@@ -3,7 +3,7 @@
                              [--username U --password-stdin]
                              [--network ask|allow|off] [--placement shared|vm|container]
                              [--services] [--packages] [--change-profile] [--yes]
-                             [--provider ID [--api-key-stdin] [--base-url URL]] [--no-test]
+                             [--provider ID [--api-key-stdin] [--base-url URL] [--model M]] [--no-test]
                                                      # first-run setup (login, provider, default profile)
   python -m backend.cli create-user <username> [password]  # omit it: hidden prompt
   python -m backend.cli guest-shell [project-slug]   # drop into the sandbox guest
@@ -237,6 +237,43 @@ def _stdin_line(what: str) -> str:
     return line.rstrip("\r\n")
 
 
+MODEL_MENU_MAX = 15
+
+
+def _price(m: dict) -> str:
+    pi, po = m.get("price_in"), m.get("price_out")
+    if pi is None and po is None:
+        return ""
+    if not pi and not po:
+        return "free"
+    # modelInfo.js's usd(): two places, three under a dime
+    usd = lambda p: f"${p:.3f}".rstrip("0") if 0 < p < 0.1 else f"${p:.2f}"  # noqa: E731
+    return f"{usd(pi or 0)} / {usd(po or 0)} per Mtok"
+
+
+def _pick_model(setup_api, pid: str) -> str:
+    """The numbered model menu: recommended first, Enter takes it. "" = let
+    store_provider use the recommended one (or the provider has no models)."""
+    try:
+        ch = setup_api.model_choices(pid)
+    except setup_api.SetupError:
+        return ""
+    rec = ch.get("recommended")
+    models = sorted(ch["models"], key=lambda m: m["id"] != rec)[:MODEL_MENU_MAX]
+    if len(models) < 2:
+        return ""
+    print("   model (the default for new chats; change it any time in Settings)")
+    for i, m in enumerate(models, 1):
+        price = _price(m)
+        tag = "  (recommended)" if m["id"] == rec else ""
+        print(f"   {i}) {m['label']}" + (f"  · {price}" if price else "") + tag)
+    while True:
+        pick = _ask("   choose a number [1]: ", "1")
+        if pick.isdigit() and 1 <= int(pick) <= len(models):
+            return models[int(pick) - 1]["id"]
+        print("   not on the list")
+
+
 def _pick(prompt: str, options: list[tuple[str, str]], default: str) -> str:
     """Numbered choice; Enter takes `default`. options = [(value, label)]."""
     for i, (v, label) in enumerate(options, 1):
@@ -305,12 +342,14 @@ def _apply_profile(prof: dict | None) -> None:
     print(f"default profile {r['action']}: {r['summary']}")
 
 
-def _provider_step(a, tty: bool, scripted: bool, offer_menu: bool) -> tuple[str, str, str]:
-    """(provider id, key, base URL) from the flags or the terminal; ("", "", "")
-    = none. Checks the entry and runs the test call; exits on a refusal."""
+def _provider_step(a, tty: bool, scripted: bool,
+                   offer_menu: bool) -> tuple[str, str, str, str]:
+    """(provider id, key, base URL, model) from the flags or the terminal;
+    ("", "", "", "") = none; model "" = the recommended one. Checks the entry
+    and runs the test call; exits on a refusal."""
     from . import setup_api
     from .setup_api import SetupError
-    pid = key = base = ""
+    pid = key = base = model = ""
     if a.provider:
         pid = "" if a.provider.lower() == "none" else a.provider.strip().lower()
     elif tty and not scripted and offer_menu:
@@ -340,8 +379,11 @@ def _provider_step(a, tty: bool, scripted: bool, offer_menu: bool) -> tuple[str,
             base = _ask(f"   base URL (like {entry['base_url']}): ")
         elif not base and not entry["needs_key"] and tty and not scripted:
             base = _ask(f"   base URL [{entry['base_url']}]: ")
+        model = (a.model or "").strip()
+        if not model and tty and not scripted and not a.yes:
+            model = _pick_model(setup_api, pid)
         try:
-            setup_api.check_provider(pid, key, base)
+            setup_api.check_provider(pid, key, base, model)
         except SetupError as e:
             sys.exit(f"setup: {e.detail}")
         print("   the key is stored on this server, never in the sandbox VM")
@@ -357,7 +399,7 @@ def _provider_step(a, tty: bool, scripted: bool, offer_menu: bool) -> tuple[str,
                     sys.exit("setup: provider test failed (nothing was created; "
                              "--no-test skips the check)")
 
-    return pid, key, base
+    return pid, key, base, model
 
 
 def setup_command(args: list[str]) -> None:
@@ -374,6 +416,8 @@ def setup_command(args: list[str]) -> None:
     ap.add_argument("--provider", help="provider id, or 'none' to skip")
     ap.add_argument("--api-key-stdin", action="store_true")
     ap.add_argument("--base-url")
+    ap.add_argument("--model", help="the provider's own model id to make the "
+                    "default (default: the recommended one)")
     ap.add_argument("--no-test", action="store_true", help="skip the test call")
     ap.add_argument("--add-user", action="store_true",
                     help="add another login even though setup is done")
@@ -423,11 +467,11 @@ def setup_command(args: list[str]) -> None:
     if a.provider_only:
         if not a.provider and not tty:
             sys.exit("setup: no terminal — pass --provider ID (and --api-key-stdin)")
-        pid, key, base = _provider_step(a, tty, scripted, offer_menu=True)
+        pid, key, base, model = _provider_step(a, tty, scripted, offer_menu=True)
         if not pid:
             return
         try:
-            r = setup_api.store_provider(pid, key, base)
+            r = setup_api.store_provider(pid, key, base, model)
         except SetupError as e:
             sys.exit(f"setup: {e.detail}")
         print(f"provider {pid} saved" + (f" · default model {r['default']}"
@@ -457,7 +501,8 @@ def setup_command(args: list[str]) -> None:
         sys.exit(f"setup: {e.detail}")
 
     # 2. the provider (skipped by --add-user unless one is named)
-    pid, key, base = _provider_step(a, tty, scripted, offer_menu=not a.add_user)
+    pid, key, base, model = _provider_step(a, tty, scripted,
+                                           offer_menu=not a.add_user)
 
     # 3. the default security profile (skipped by --add-user)
     prof = None if a.add_user else _profile_step(
@@ -475,7 +520,7 @@ def setup_command(args: list[str]) -> None:
     print(f"\nlogin '{username}' created")
     if pid:
         try:
-            r = setup_api.store_provider(pid, key, base)
+            r = setup_api.store_provider(pid, key, base, model)
             print(f"provider {pid} saved" + (f" · default model {r['default']}"
                                              if r.get("default") else ""))
         except SetupError as e:

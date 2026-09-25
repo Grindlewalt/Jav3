@@ -231,18 +231,54 @@ def _entry(pid: str) -> dict:
     raise SetupError(400, f"unknown provider '{pid}'")
 
 
-def _first_model(mod, pid: str) -> str | None:
-    """The chosen provider's first model id (bare, as get_provider lists it)."""
-    get = getattr(mod, "get_provider", None)
+def _catalogue_models(mod, pid: str) -> list[dict]:
+    """The provider's models as get_provider lists them (bare ids)."""
+    get = getattr(mod, "get_provider", None) if mod is not None else None
     try:
         prov = get(pid) if callable(get) else None
     except Exception:                      # noqa: BLE001
-        return None
-    models = (prov or {}).get("models") or []
-    return models[0].get("id") if models and isinstance(models[0], dict) else None
+        return []
+    return [m for m in (prov or {}).get("models") or []
+            if isinstance(m, dict) and m.get("id")]
 
 
-def check_provider(pid: str, api_key: str = "", base_url: str = "") -> tuple:
+def _recommended(mod, pid: str) -> str | None:
+    """backend.providers' pick (the global default when it lives on this
+    provider, else its first current tool-capable model); a registry without
+    one gets the provider's first model."""
+    rec = getattr(mod, "recommended_model", None) if mod is not None else None
+    if callable(rec):
+        try:
+            return rec(pid)
+        except ValueError:
+            return None
+    models = _catalogue_models(mod, pid)
+    return models[0]["id"] if models else None
+
+
+def model_choices(pid: str) -> dict:
+    """{provider, models, recommended} for the setup Model picker: the
+    provider's current tool-capable models (label, ctx, $/Mtok), the
+    recommended one first-class even if the filter would drop it."""
+    pid = (pid or "").strip().lower()
+    if not _ID_RE.match(pid):
+        raise SetupError(400, "bad provider id")
+    entry = _entry(pid)
+    mod = _providers_mod()
+    ok = getattr(mod, "pickable", None) if mod is not None else None
+    allm = _catalogue_models(mod, pid)
+    models = [m for m in allm if ok(m)] if callable(ok) else allm
+    rec = _recommended(mod, pid)
+    if rec and all(m["id"] != rec for m in models):
+        models = [m for m in allm if m["id"] == rec] + models
+    return {"provider": entry, "recommended": rec,
+            "models": [{"id": m["id"], "label": m.get("label") or m["id"],
+                        "ctx": m.get("ctx"), "price_in": m.get("price_in"),
+                        "price_out": m.get("price_out")} for m in models]}
+
+
+def check_provider(pid: str, api_key: str = "", base_url: str = "",
+                   model: str = "") -> tuple:
     """Normalise + validate a provider choice -> (id, key, base_url)."""
     pid = (pid or "").strip().lower()
     if not _ID_RE.match(pid):
@@ -256,14 +292,21 @@ def check_provider(pid: str, api_key: str = "", base_url: str = "") -> tuple:
         raise SetupError(400, "base URL must start with http:// or https://")
     if entry["needs_base_url"] and not base_url:
         raise SetupError(400, f"{entry['label']} needs a base URL")
+    model = (model or "").strip()
+    mod = _providers_mod()
+    if model and mod is not None and \
+            all(m["id"] != model for m in _catalogue_models(mod, pid)):
+        raise SetupError(400, f"unknown model '{model}' for {entry['label']}")
     return pid, api_key, base_url
 
 
-def store_provider(pid: str, api_key: str = "", base_url: str = "") -> dict:
-    """Store the key (and base URL), enable the provider and make its first
-    model the default. Returns {stored_as, default}. With backend.providers
-    absent, only the key is stored (PROVIDER_<ID>_API_KEY in secrets.json)."""
-    pid, api_key, base_url = check_provider(pid, api_key, base_url)
+def store_provider(pid: str, api_key: str = "", base_url: str = "",
+                   model: str = "") -> dict:
+    """Store the key (and base URL), enable the provider and make `model` (or
+    the recommended one) the default. Returns {stored_as, default}. With
+    backend.providers absent, only the key is stored (PROVIDER_<ID>_API_KEY in
+    secrets.json)."""
+    pid, api_key, base_url = check_provider(pid, api_key, base_url, model)
     mod = _providers_mod()
     if mod is None or not callable(getattr(mod, "set_key", None)):
         if api_key:
@@ -280,7 +323,7 @@ def store_provider(pid: str, api_key: str = "", base_url: str = "") -> dict:
             # set_key enables on its own; a keyless local provider needs it said
             update(pid, base_url=base_url or None, enabled=True)
         default = None
-        model = _first_model(mod, pid)
+        model = (model or "").strip() or _recommended(mod, pid)
         set_model = getattr(mod, "update_model", None)
         if model and callable(set_model):
             # models are off by default: without enabled=True the default
@@ -476,6 +519,9 @@ class SetupRequest(BaseModel):
     provider: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    # the provider's own model id to make the default; left out = the
+    # recommended one (providers.recommended_model)
+    model: str | None = None
     # the default security profile; left out = the safe default (or the
     # existing default, kept). change_profile re-applies it to an existing one.
     profile: ProfileChoices | None = None
@@ -496,10 +542,16 @@ async def status():
 
 
 @router.get("/providers")
-async def providers():
+async def providers(id: str | None = None):
+    """The provider list; with ?id=, that one provider's model choices."""
     if await users_exist():
         raise HTTPException(status_code=409, detail="setup is already done")
-    return {"providers": catalogue()}
+    if id is None:
+        return {"providers": catalogue()}
+    try:
+        return model_choices(id)
+    except SetupError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
 
 
 @router.get("/profile")
@@ -538,7 +590,10 @@ async def setup(body: SetupRequest, request: Request, response: Response):
         # choice never leaves a half-done setup the page can no longer retry
         username = validate_credentials(body.username, body.password)
         if body.provider:
-            check_provider(body.provider, body.api_key or "", body.base_url or "")
+            check_provider(body.provider, body.api_key or "", body.base_url or "",
+                           body.model or "")
+        elif body.model:
+            raise SetupError(400, "a model needs a provider")
         choices = await check_profile_choices(
             body.profile.model_dump() if body.profile else None)
         user_id = await create_first_user(username, body.password)
@@ -554,7 +609,7 @@ async def setup(body: SetupRequest, request: Request, response: Response):
     if body.provider:
         try:
             provider = store_provider(body.provider, body.api_key or "",
-                                      body.base_url or "")
+                                      body.base_url or "", body.model or "")
         except SetupError as e:
             # the login exists now; the key can be added from Settings
             provider = {"error": e.detail}

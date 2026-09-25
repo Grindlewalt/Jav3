@@ -335,6 +335,30 @@ def price_for(model_id: str | None) -> tuple[bool, dict | None]:
     return False, None
 
 
+def is_deprecated(m: dict) -> bool:
+    """The catalogue keeps a deprecated model only when Jav3 must still resolve
+    it (scripts/refresh_providers.py), and marks it in the label."""
+    return bool(m.get("deprecated")) or \
+        "(deprecated)" in (m.get("label") or "").lower()
+
+
+def pickable(m: dict) -> bool:
+    """A model worth offering someone choosing one: current, and able to call
+    tools (the agent loop is useless without them)."""
+    return bool(m.get("tools")) and not is_deprecated(m)
+
+
+def recommended_model(pid: str) -> str | None:
+    """The bare model id to preselect when this provider is being set up: the
+    global default when it already lives here (never swap a working default
+    for a catalogue guess), else the provider's first pickable model."""
+    p = provider(pid)
+    dpid, dmid = split_id(default_model())
+    if dpid == p["id"]:
+        return dmid
+    return next((m["id"] for m in p.get("models") or [] if pickable(m)), None)
+
+
 def _model_enabled(st: dict, pid: str, mid: str, dflt: str) -> bool:
     en = (_pstate(st, pid).get("models") or {}).get(mid, {}).get("enabled")
     # models are opt-in (OpenRouter alone lists hundreds); the default model is

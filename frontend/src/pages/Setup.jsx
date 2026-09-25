@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
 import { Button, Checkbox, Input, Select } from '../components/index.js'
+import { modelCaption } from '../modelInfo.js'
 
 // First run: the one page a fresh server shows before anyone can log in.
 // App.jsx routes here while GET /api/setup/status says `needed` and away once
@@ -9,11 +10,13 @@ import { Button, Checkbox, Input, Select } from '../components/index.js'
 // exists, so this page is a door that closes behind the operator.
 //
 // Four steps on one sheet, no wizard chrome: the login, an optional model
-// provider (tested before anything is saved), the default security profile
-// (the one new projects use; /api/setup/profile says where projects can run
-// here and whether a default already exists), finish. The provider list comes
-// from /api/setup/providers, which serves PR1's catalogue when it exists; the
-// seed below is only for a server too old to answer at all.
+// provider (tested before anything is saved) and its default model, the
+// default security profile (the one new projects use; /api/setup/profile says
+// where projects can run here and whether a default already exists), finish.
+// The provider list comes from /api/setup/providers, which serves PR1's
+// catalogue when it exists; the seed below is only for a server too old to
+// answer at all. ?id=<provider> lists that provider's current tool-capable
+// models and the one the server recommends, which the Model select preselects.
 
 const SEED = [
   { id: 'deepseek', label: 'DeepSeek', needs_key: true },
@@ -67,6 +70,9 @@ export default function Setup({ onDone }) {
   const [provider, setProvider] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
+  const [models, setModels] = useState(null)   // [{id, label, price_in, price_out}]
+  const [model, setModel] = useState('')
+  const picked = useRef('')
   const [test, setTest] = useState(null)    // {busy} | {ok, text}
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -102,6 +108,17 @@ export default function Setup({ onDone }) {
     setApiKey('')
     setBaseUrl('')
     setTest(null)
+    setModels(null)
+    setModel('')
+    picked.current = id
+    if (!id) return
+    api(`/api/setup/providers?id=${encodeURIComponent(id)}`)
+      .then((r) => {
+        if (picked.current !== id) return      // a later pick won
+        setModels(r.models || [])
+        setModel(r.recommended || r.models?.[0]?.id || '')
+      })
+      .catch(() => { if (picked.current === id) setModels([]) })
   }
 
   async function runTest() {
@@ -129,6 +146,7 @@ export default function Setup({ onDone }) {
     try {
       const body = { username, password, token }
       if (provider) Object.assign(body, { provider, api_key: apiKey, base_url: baseUrl })
+      if (provider && model) body.model = model
       if (editingProf) Object.assign(body, { profile: prof, change_profile: changeProf })
       const r = await api('/api/setup', { method: 'POST', body: JSON.stringify(body) })
       onDone({ username: r.username })
@@ -189,13 +207,22 @@ export default function Setup({ onDone }) {
                    autoComplete="off" spellCheck={false} inputMode="url"
                    onChange={(e) => { setBaseUrl(e.target.value); setTest(null) }} />
           )}
+          {models?.length > 0 && (
+            <Select label="Model" value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    options={models.map((x) => {
+                      const cap = modelCaption(x)
+                      return { value: x.id, label: cap ? `${x.label} · ${cap}` : x.label }
+                    })} />
+          )}
           {entry && (
             <div className="setup-test">
               <Button variant="ghost" onClick={runTest}
                       disabled={test?.busy || needsKey || needsBase}>
                 {test?.busy ? 'Testing…' : 'Test'}</Button>
               {test && !test.busy && (
-                <span className={test.ok ? 'setup-ok' : 'error'} role="status">{test.text}</span>
+                <span className={`setup-result ${test.ok ? 'setup-ok' : 'error'}`}
+                      role="status">{test.text}</span>
               )}
             </div>
           )}
