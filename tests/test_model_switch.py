@@ -1,14 +1,18 @@
-"""Runtime model switch: API allowlist + persistence, gateway resolution
-(explicit pin > override > default), and per-model cost pricing. Offline."""
+"""Runtime model switch: /api/model over the provider registry (enabled-list
+validation, persistence), gateway resolution (explicit pin > default), and
+per-model cost pricing from the catalogue. Offline."""
 import httpx
 import pytest
 
+from backend import providers
 from backend.agent import model as model_mod
 from backend.auth import hash_password
 from backend.config import settings
-from backend.db import get_db, init_db
+from backend.db import get_db, init_db, set_state
 from backend.main import app
 from backend.memory import ensure_memory_seeds
+
+FLASH = f"deepseek/{settings.model_name}"
 
 
 @pytest.fixture
@@ -23,51 +27,59 @@ async def client(tmp_env):
         await db.commit()
     finally:
         await db.close()
-    model_mod.set_model_override(None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.post("/api/auth/login",
                          json={"username": "operator", "password": "hunter2"})
         assert r.status_code == 200
         yield c
-    model_mod.set_model_override(None)
 
 
-async def test_switch_api_and_persistence(client, monkeypatch):
+async def test_switch_api_and_persistence(client):
     r = await client.get("/api/model")
     body = r.json()
     assert {k: body[k] for k in ("active", "default", "choices")} == {
-        "active": "deepseek-flash", "default": "deepseek-flash",
-        "choices": ["deepseek-flash"]}
+        "active": FLASH, "default": FLASH, "choices": [FLASH]}
 
     r = await client.put("/api/model", json={"model": "gpt-9"})
     assert r.status_code == 400
-    # Pro is gone from the switcher: the API routes it to Flash at Flash
-    # price anyway, so offering it would be offering a name
+    # a catalogued but not-enabled model is refused too: the switcher offers
+    # only what the operator switched on
     r = await client.put("/api/model", json={"model": "deepseek-v4-pro"})
     assert r.status_code == 400
 
-    # a second choice, when there is one, is switched to and persisted
-    monkeypatch.setattr(settings, "model_choices", ["deepseek-flash", "deepseek-v4.1-pro"])
-    r = await client.put("/api/model", json={"model": "deepseek-v4.1-pro"})
+    # enable a second model, then switch to it by its bare id
+    providers.update_model("deepseek", "deepseek-v4-pro", enabled=True)
+    r = await client.put("/api/model", json={"model": "deepseek-v4-pro"})
     assert r.status_code == 200
-    assert r.json()["active"] == "deepseek-v4.1-pro"
-    assert model_mod.get_model_override() == "deepseek-v4.1-pro"
+    assert r.json()["active"] == "deepseek/deepseek-v4-pro"
+    # persisted on disk: the registry reads it back fresh
+    assert providers.default_model() == "deepseek/deepseek-v4-pro"
+    # the old default stays in the picker instead of vanishing with the switch
+    assert FLASH in r.json()["choices"]
 
-    # persisted: a fresh load (as at app startup) restores it
-    model_mod.set_model_override(None)
-    await model_mod.load_model_override()
-    assert model_mod.get_model_override() == "deepseek-v4.1-pro"
-
-    # selecting the default clears the override entirely
-    r = await client.put("/api/model", json={"model": "deepseek-flash"})
-    assert r.json()["active"] == "deepseek-flash"
-    assert model_mod.get_model_override() is None
-    await model_mod.load_model_override()
-    assert model_mod.get_model_override() is None
+    r = await client.put("/api/model", json={"model": FLASH})
+    assert r.json()["active"] == FLASH
 
 
-async def test_gateway_resolves_override(tmp_env, monkeypatch):
+async def test_legacy_override_adopted_once(client):
+    db = await get_db()
+    try:
+        await set_state(db, "model_override", "deepseek-v4-pro")
+        await db.commit()
+    finally:
+        await db.close()
+    await providers.migrate_legacy_override()
+    assert providers.default_model() == "deepseek/deepseek-v4-pro"
+    db = await get_db()
+    try:
+        from backend.db import get_state
+        assert await get_state(db, "model_override") is None
+    finally:
+        await db.close()
+
+
+async def test_gateway_resolves_default(tmp_env, monkeypatch):
     seen = {}
 
     async def fake_complete(self, messages, tools=None, temperature=None,
@@ -84,13 +96,12 @@ async def test_gateway_resolves_override(tmp_env, monkeypatch):
             pass
         return seen["model"]
 
-    model_mod.set_model_override(None)
     assert await run() == settings.model_name
-    model_mod.set_model_override("deepseek-v4.1-pro")
-    assert await run() == "deepseek-v4.1-pro"
-    # an explicit per-call pin (agent model) beats the override
+    providers.update_model("deepseek", "deepseek-v4-pro", default=True)
+    assert await run() == "deepseek-v4-pro"
+    # an explicit per-call pin (agent model) beats the default
     assert await run(model_name="llama3:8b") == "llama3:8b"
-    model_mod.set_model_override(None)
+    assert await run(model_name="deepseek/deepseek-flash") == "deepseek-flash"
 
 
 async def test_costs_priced_per_model(client):
@@ -108,27 +119,45 @@ async def test_costs_priced_per_model(client):
         await db.close()
     r = await client.get("/api/logs/costs")
     w = r.json()["windows"]["all"]
-    # v4.1 flash: 0.15 + 0.60. The old names keep the prices their rows were
-    # billed at: v4 flash 0.14 + 0.28, v4 pro 0.435 + 0.87.
+    # priced from the catalogue: flash 0.15 + 0.60, v4 flash (deprecated
+    # alias, same price) 0.15 + 0.60, v4 pro 0.435 + 0.87
     assert w["by_model"]["deepseek-flash"]["cost_usd"] == pytest.approx(0.75)
-    assert w["by_model"]["deepseek-v4-flash"]["cost_usd"] == pytest.approx(0.42)
+    assert w["by_model"]["deepseek-v4-flash"]["cost_usd"] == pytest.approx(0.75)
     assert w["by_model"]["deepseek-v4-pro"]["cost_usd"] == pytest.approx(1.305)
-    assert w["cost_usd"] == pytest.approx(2.475)
+    assert w["cost_usd"] == pytest.approx(2.805)
 
 
-async def test_model_options_carry_labels(client, monkeypatch):
-    """Every choice comes back with a label (the GUI renders these instead of
-    hardcoding model names); an id with no configured label falls back to
-    the raw id rather than disappearing."""
-    monkeypatch.setattr(settings, "model_choices",
-                        ["deepseek-flash", "some-unlabelled-model"])
+async def test_model_options_carry_labels(client):
+    """Every choice comes back with a catalogue label and its provider as the
+    blurb — the GUI renders these instead of hardcoding model names."""
+    providers.update_model("deepseek", "deepseek-v4-pro", enabled=True)
     body = (await client.get("/api/model")).json()
     opts = {o["id"]: o for o in body["options"]}
+    assert set(opts) == set(body["choices"])
     for c in body["choices"]:
-        assert opts[c]["label"]
-        assert "blurb" in opts[c]
-    assert opts["deepseek-flash"]["label"] == \
-        settings.model_labels["deepseek-flash"]["label"]
-    assert opts["some-unlabelled-model"] == {
-        "id": "some-unlabelled-model", "label": "some-unlabelled-model",
-        "blurb": ""}
+        assert opts[c]["label"] and opts[c]["blurb"] == "DeepSeek"
+    assert opts[FLASH]["label"] == providers.model_info(
+        "deepseek", settings.model_name)["label"]
+
+
+async def test_costs_by_provider_id_and_unpriced(client):
+    """Rows ledgered as provider/model price from that provider; a catalogued
+    model without prices costs 0 and says so instead of borrowing DeepSeek's."""
+    unpriced = next((p["id"], m["id"]) for p in
+                    providers.catalog()["providers"].values()
+                    for m in p["models"] if m.get("price_in") is None)
+    db = await get_db()
+    try:
+        for m in ("anthropic/claude-sonnet-5", "/".join(unpriced)):
+            await db.execute(
+                "INSERT INTO model_calls (conversation_id, model, input_tokens, "
+                "output_tokens, cache_hit, cache_miss) VALUES (NULL, ?, ?, ?, ?, ?)",
+                (m, 1_000_000, 1_000_000, 0, 1_000_000))
+        await db.commit()
+    finally:
+        await db.close()
+    w = (await client.get("/api/logs/costs")).json()["windows"]["all"]["by_model"]
+    son = providers.model_info("anthropic", "claude-sonnet-5")
+    assert w["anthropic/claude-sonnet-5"]["cost_usd"] == pytest.approx(
+        son["price_in"] + son["price_out"])
+    assert w["/".join(unpriced)] == {"calls": 1, "cost_usd": 0.0, "priced": False}

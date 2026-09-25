@@ -569,6 +569,9 @@ class Route:
     model_id: str              # what we report/ledger: provider/model
     key: str = field(repr=False, default="local")
     info: dict = field(default_factory=dict)   # the catalogue model entry
+    # set when the provider needs a key and has none: the gateway raises it
+    # AFTER its peak/budget gates, so those still answer first
+    key_error: str | None = None
 
     @property
     def is_deepseek(self) -> bool:
@@ -627,14 +630,14 @@ def resolve(model_name: str | None, base_url: str | None = None,
     if needs_base_url(base):
         raise ProviderError(f"provider {pid} needs its base_url set (Settings → Providers)")
     key = key_for(p)
+    missing = None
     if needs_key(p) and not key:
-        if pid == "deepseek":
-            raise ProviderError(
-                "DEEPSEEK_API_KEY is not set (Settings → Providers, or "
-                "~/.config/jarvis/env JARVIS_DEEPSEEK_API_KEY=...)")
-        raise ProviderError(f"no API key for provider {pid} (Settings → Providers)")
+        missing = ("DEEPSEEK_API_KEY is not set (Settings → Providers, or "
+                   "~/.config/jarvis/env JARVIS_DEEPSEEK_API_KEY=...)"
+                   if pid == "deepseek" else
+                   f"no API key for provider {pid} (Settings → Providers)")
     return Route(pid, p["kind"], base, mid, f"{pid}/{mid}", key or "local",
-                 (p.get("_models") or {}).get(mid) or {})
+                 (p.get("_models") or {}).get(mid) or {}, missing)
 
 
 def provider_for_base(base_url: str) -> dict | None:

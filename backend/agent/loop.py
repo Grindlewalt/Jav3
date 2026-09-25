@@ -378,11 +378,16 @@ async def run_turn(
                 yield ev
             return
 
-        messages.append({
+        turn = {
             "role": "assistant",
             "content": final["content"] or None,
             "tool_calls": final["tool_calls"],
-        })
+        }
+        # a provider's opaque replay state (Anthropic thinking signatures,
+        # Gemini thought signatures) must come back verbatim next iteration
+        if final.get("provider_blocks"):
+            turn["provider_blocks"] = final["provider_blocks"]
+        messages.append(turn)
         parsed = []
         for tc in final["tool_calls"]:
             name = tc["function"]["name"]

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from .agent.model import CAPTURE_STATE_KEY
 from .auth import require_user
+from . import providers
 from .config import settings
 from .db import get_db, get_state, set_state
 
@@ -20,16 +21,25 @@ router = APIRouter(prefix="/api/logs", tags=["logs"],
                    dependencies=[Depends(require_user)])
 
 
-def _prices(model: str | None) -> dict:
-    return settings.model_prices.get(model or "", {
-        "cache_hit": settings.price_cache_hit_per_m,
-        "cache_miss": settings.price_cache_miss_per_m,
-        "output": settings.price_output_per_m})
+def _prices(model: str | None) -> dict | None:
+    """$/Mtok for a ledgered model id, from the provider catalogue. A model
+    the catalogue lists without prices is None (costed 0, flagged unpriced);
+    one it doesn't list at all keeps the flat configured fallback."""
+    known, p = providers.price_for(model)
+    if p is not None:
+        return {"cache_hit": p["cache"], "cache_miss": p["in"], "output": p["out"]}
+    if known:
+        return None
+    return {"cache_hit": settings.price_cache_hit_per_m,
+            "cache_miss": settings.price_cache_miss_per_m,
+            "output": settings.price_output_per_m}
 
 
 def _cost_usd(cache_hit: int, cache_miss: int, output: int,
               model: str | None = None) -> float:
     p = _prices(model)
+    if p is None:
+        return 0.0
     return (cache_hit * p["cache_hit"] + cache_miss * p["cache_miss"]
             + output * p["output"]) / 1_000_000
 
@@ -70,7 +80,8 @@ async def costs():
                 agg["output"] += r["o"]
                 agg["cost_usd"] += cost
                 by_model[r["model"] or "?"] = {
-                    "calls": r["n"], "cost_usd": round(cost, 4)}
+                    "calls": r["n"], "cost_usd": round(cost, 4),
+                    "priced": _prices(r["model"]) is not None}
             agg["cost_usd"] = round(agg["cost_usd"], 4)
             out[label] = {**agg, "by_model": by_model}
         capture = await get_state(db, CAPTURE_STATE_KEY) == "1"
@@ -115,7 +126,8 @@ async def model_calls(cid: int):
         await db.close()
     for r in rows:
         r["cost_usd"] = round(
-            _cost_usd(r["cache_hit"], r["cache_miss"], r["output_tokens"]), 6)
+            _cost_usd(r["cache_hit"], r["cache_miss"], r["output_tokens"],
+                      r["model"]), 6)
         r["has_context"] = bool(r.pop("context_bytes"))
     return {"calls": rows}
 

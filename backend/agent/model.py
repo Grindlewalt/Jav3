@@ -1,36 +1,22 @@
 """The single model choke point: every LLM call goes through Model.complete,
-and the peak-cost gate lives in front of it. The router drops in here later."""
-import asyncio
+and the peak-cost gate lives in front of it. `providers.resolve` routes each
+call — `provider/model` -> endpoint, key, wire kind — and the non-OpenAI
+wire formats live in adapters.py."""
 import json
 import re
 import time
 from datetime import datetime, time as dtime
 from typing import AsyncIterator
 
-import httpx
-
-from urllib.parse import urlsplit
-
 from ..config import settings
-from . import budget as budget_mod
-
-
-def _endpoint(url: str) -> tuple:
-    p = urlsplit(url if "://" in url else "http://" + url)
-    return (p.scheme, (p.hostname or "").lower(), p.port)
-
-
-def base_url_allowed(url: str) -> bool:
-    """A guest-supplied model base_url is honoured only if it matches the
-    configured DeepSeek endpoint or one on model_base_url_allowlist. The host
-    attaches the API key to the request, so an unchecked base_url lets a
-    compromised guest harvest the key by naming an attacker endpoint."""
-    t = _endpoint(url)
-    return any(_endpoint(a) == t
-               for a in [settings.deepseek_base_url, *settings.model_base_url_allowlist])
+from .. import providers
+from ..providers import base_url_allowed, endpoint as _endpoint  # noqa: F401 (re-export)
+from . import adapters, budget as budget_mod
+from .adapters import ModelError, retrying
 
 
 def _is_deepseek_endpoint(url: str) -> bool:
+    """DeepSeek's quirks (DSML recovery) apply to calls going to its host."""
     return _endpoint(url)[1] == _endpoint(settings.deepseek_base_url)[1]
 
 
@@ -79,12 +65,6 @@ class PeakPricingConfirmationRequired(Exception):
     hasn't confirmed they want to pay 2x for this conversation recently."""
 
 
-class ModelError(Exception):
-    def __init__(self, message: str, status: int | None = None):
-        super().__init__(message)
-        self.status = status
-
-
 def _parse_window(spec: str) -> tuple[dtime, dtime]:
     start_s, end_s = spec.split("-")
     h1, m1 = (int(x) for x in start_s.split(":"))
@@ -125,31 +105,6 @@ def check_peak_gate(conversation_id: int) -> None:
 
 
 CAPTURE_STATE_KEY = "capture_context"
-MODEL_STATE_KEY = "model_override"
-
-# Runtime model switch (nav dropdown): one host-side slot consulted by the
-# gateway, so chat, agents, and guest turns all follow it. An explicit
-# per-call model_name (agent pin) always wins. Persisted in session_state and
-# reloaded at app startup.
-_model_override: str | None = None
-
-
-def get_model_override() -> str | None:
-    return _model_override
-
-
-def set_model_override(name: str | None) -> None:
-    global _model_override
-    _model_override = name or None
-
-
-async def load_model_override() -> None:
-    from ..db import get_db, get_state
-    db = await get_db()
-    try:
-        set_model_override(await get_state(db, MODEL_STATE_KEY))
-    finally:
-        await db.close()
 
 
 def _redact_images(messages: list[dict]) -> list[dict]:
@@ -213,12 +168,23 @@ async def record_model_call(conversation_id: int | None, model_name: str,
         await db.close()
 
 
+def _openai_messages(messages: list[dict]) -> list[dict]:
+    """Drop the opaque per-provider replay state (adapters.py) — an
+    OpenAI-compatible endpoint may reject unknown message fields."""
+    if not any("provider_blocks" in m for m in messages):
+        return messages
+    return [{k: v for k, v in m.items() if k != "provider_blocks"} for m in messages]
+
+
 class ModelClient:
-    """Pure transport to the OpenAI-compatible chat-completions endpoint: it
-    builds the request, streams it (with retry + DSML recovery), and yields
+    """Pure transport to an OpenAI-compatible chat-completions endpoint (every
+    provider of kind openai/ollama — DeepSeek, OpenAI, OpenRouter, Groq, ...):
+    it builds the request, streams it (with retry + DSML recovery), and yields
     events. It holds NO key policy, budget, peak gate, or ledger — those are the
     host nucleus (ModelGateway). The auth key is passed in per call, so this
-    layer can run keyless when a gateway drives it (the VM-inversion seam)."""
+    layer can run keyless when a gateway drives it (the VM-inversion seam).
+    Per-provider request shape (output cap, sampling) comes from the read-only
+    catalogue entry of whatever provider lives at the base_url."""
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or settings.deepseek_api_key
@@ -244,7 +210,7 @@ class ModelClient:
 
         payload: dict = {
             "model": name,
-            "messages": messages,
+            "messages": _openai_messages(messages),
             "max_tokens": settings.model_max_tokens,
             "temperature": settings.model_temperature if temperature is None else temperature,
             "stream": True,
@@ -253,6 +219,7 @@ class ModelClient:
         }
         if tools:
             payload["tools"] = tools
+        _shape_for_provider(payload, base, name)
         if _is_voice_local(name, base):
             # A 4B answering out loud needs a few dozen tokens, not 384k (which
             # is also nonsense against a 16k window), and it will happily loop
@@ -265,33 +232,20 @@ class ModelClient:
                 payload["presence_penalty"] = settings.voice_local_presence_penalty
 
         # Transient failures (connect errors, 5xx) retry with backoff — but only
-        # while nothing has streamed to the caller yet: once a token is out, a
-        # retry would duplicate visible output, so the error propagates instead.
+        # while nothing has streamed to the caller yet (adapters.retrying).
         raw: dict | None = None
-        yielded = False
-        for attempt in range(settings.model_retries + 1):
-            try:
-                async for ev in self._stream_once(base, key, payload):
-                    if ev["type"] == "token":
-                        yielded = True
-                        yield ev
-                    else:
-                        raw = ev
-                break
-            except (httpx.TransportError, ModelError) as e:
-                status = getattr(e, "status", None)
-                retryable = isinstance(e, httpx.TransportError) or (
-                    status is not None and status >= 500)
-                if yielded or not retryable or attempt == settings.model_retries:
-                    raise
-                await asyncio.sleep(
-                    settings.model_retry_backoff_seconds * (2 ** attempt))
+        async for ev in retrying(lambda: self._stream_once(base, key, payload)):
+            if ev["type"] == "token":
+                yield ev
+            else:
+                raw = ev
 
         assert raw is not None
         content = raw["content"]
         tcs = raw["tool_calls"]
-        # recover native-markup tool calls the serving layer failed to parse
-        if not tcs and _DSML_MARK in content:
+        # recover native-markup tool calls the serving layer failed to parse —
+        # DeepSeek's quirk only; another provider's text is left alone
+        if not tcs and _DSML_MARK in content and _is_deepseek_endpoint(base):
             recovered = parse_dsml_tool_calls(content)
             if recovered:
                 tcs = recovered
@@ -306,10 +260,11 @@ class ModelClient:
         tool_calls: dict[int, dict] = {}
         usage: dict | None = None
         dsml = False   # once the native tool-call markup starts, stop streaming it
+        watch_dsml = _is_deepseek_endpoint(base)
         tail = ""      # rolling window for mark detection across chunk splits —
                        # re-joining content_parts per delta was O(n²) per response
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
+        async with adapters.client() as client:
             async with client.stream(
                 "POST",
                 f"{base}/chat/completions",
@@ -335,7 +290,7 @@ class ModelClient:
                     delta = choices[0].get("delta", {})
                     if delta.get("content"):
                         content_parts.append(delta["content"])
-                        if not dsml:
+                        if not dsml and watch_dsml:
                             probe = tail + delta["content"]
                             if _DSML_MARK in probe:
                                 dsml = True   # a tool call in disguise, not prose
@@ -360,21 +315,69 @@ class ModelClient:
                "usage": usage}
 
 
+def _shape_for_provider(payload: dict, base: str, name: str) -> None:
+    """Fit the OpenAI-shaped request to the provider at `base` (catalogue
+    data only — no keys here). DeepSeek and unknown endpoints keep today's
+    shape; everyone else gets the model's own output cap instead of DeepSeek's
+    384k, no temperature where the model rejects sampling, OpenAI's newer
+    max_completion_tokens, and no stream_options where it isn't accepted."""
+    p = providers.provider_for_base(base)
+    if p is None or p["id"] == "deepseek":
+        return
+    info = (p.get("_models") or {}).get(name) or {}
+    cap = info.get("max_output")
+    payload.pop("max_tokens")
+    if cap:
+        payload["max_completion_tokens" if p["id"] == "openai" else "max_tokens"] = \
+            min(cap, settings.model_max_tokens)
+    if info.get("temperature") is False:
+        payload.pop("temperature", None)
+    if p["id"] == "mistral":
+        payload.pop("stream_options", None)   # reports usage on the last chunk anyway
+
+
 # Back-compat alias: tests construct Model(api_key=...) and patch Model._stream_once.
 Model = ModelClient
 
 
+def _normalise_usage(usage: dict | None) -> dict | None:
+    """OpenAI-style providers report cached input as
+    prompt_tokens_details.cached_tokens; the Budget and ledger read DeepSeek's
+    prompt_cache_hit/miss_tokens. Fill those in when only the former exists."""
+    if not usage or "prompt_cache_hit_tokens" in usage:
+        return usage
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    if cached is None:
+        return usage
+    prompt = usage.get("prompt_tokens") or 0
+    return {**usage, "prompt_cache_hit_tokens": cached,
+            "prompt_cache_miss_tokens": max(prompt - cached, 0)}
+
+
+def _cache_weight(route) -> float | None:
+    """What a cached input token costs relative to a fresh one, for this
+    model — the Budget's spend proxy. None = the Budget's default."""
+    info = route.info or {}
+    pin, pc = info.get("price_in"), info.get("price_cache")
+    if pin and pc is not None:
+        return pc / pin
+    return None
+
+
 class ModelGateway:
     """The host nucleus in front of the transport: the one place that holds the
-    API-key policy, enforces the peak-pricing gate, meters the shared token
-    Budget, and writes the model_calls ledger. `complete(...)` keeps the exact
-    public contract every caller relies on (token events, then one message
-    event). Wrapping the transport this way is the seam the VM inversion splits
-    along — the transport can move guest-side while this stays on the host."""
+    API-key policy, routes a call to its provider, enforces the peak-pricing
+    gate, meters the shared token Budget, and writes the model_calls ledger.
+    `complete(...)` keeps the exact public contract every caller relies on
+    (token events, then one message event). Wrapping the transport this way is
+    the seam the VM inversion splits along — the transport can move guest-side
+    while this stays on the host."""
 
     def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or settings.deepseek_api_key
-        self.transport = ModelClient(api_key=self.api_key)
+        # None = resolve the deepseek key per call (secrets store, then the
+        # env); a string (tests, "" = none) pins it
+        self.api_key = api_key
+        self.transport = ModelClient(api_key=api_key)
 
     async def complete(
         self,
@@ -387,56 +390,69 @@ class ModelGateway:
         op_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events: {"type": "token", "text": str} per delta, then one
-        {"type": "message", "content", "tool_calls", "usage"}. Raises
-        PeakPricingConfirmationRequired / BudgetExceeded before any network I/O.
+        {"type": "message", "content", "tool_calls", "usage"} (+ an opaque
+        `provider_blocks` for adapters that need replay state). Raises
+        PeakPricingConfirmationRequired / BudgetExceeded / ModelError before any
+        network I/O.
+
+        model_name is `provider/model` (a bare id runs on the default model's
+        provider); None = the default model. base_url pins an allowlisted
+        endpoint (an agent on a local ollama, the voice tier) — the key sent is
+        that endpoint's own provider's, else "local" (providers.resolve).
 
         The token budget is resolved by op_id (an explicit id, else the operation
         in scope via the active_op_id contextvar) so enforcement is keyed, not
-        ambient — the seam Phase 3 uses to meter host-side across the VM boundary.
-
-        model_name/base_url override the defaults so an agent can run on a
-        different model or a local endpoint (e.g. ollama). A custom endpoint
-        usually needs no key, so the DeepSeek-key requirement is relaxed there."""
-        # the peak gate prices DEEPSEEK hours — a local endpoint (ollama) costs
-        # nothing at any hour, so only metered calls are gated
-        if conversation_id is not None and (
-                not base_url or _is_deepseek_endpoint(base_url)):
+        ambient — the seam Phase 3 uses to meter host-side across the VM boundary."""
+        try:
+            route = providers.resolve(model_name, base_url, deepseek_key=self.api_key)
+        except providers.ProviderError as e:
+            raise ModelError(str(e)) from None
+        # the peak gate prices DEEPSEEK hours — other providers (and a local
+        # ollama) cost the same at any hour, so only DeepSeek calls are gated
+        if conversation_id is not None and route.is_deepseek:
             check_peak_gate(conversation_id)
         budget = budget_mod.get(op_id) if op_id else budget_mod.current()
         if budget is not None and budget.over():
             raise budget_mod.BudgetExceeded(
                 f"token budget spent ({budget.summary()})")
-        # key policy: a custom endpoint (ollama etc.) may need no real key. The
-        # HOST attaches the key, so a guest-supplied base_url is a key-exfil seam
-        # — reject anything off the allowlist, and send the real key ONLY to the
-        # configured DeepSeek endpoint (a local ollama is sent "local", not the key).
-        if base_url:
-            if not base_url_allowed(base_url):
-                raise ModelError(
-                    f"refused model base_url {base_url!r}: not on the endpoint "
-                    "allowlist (deepseek_base_url + JARVIS_MODEL_BASE_URL_ALLOWLIST)")
-            key = self.api_key if _is_deepseek_endpoint(base_url) else "local"
-        elif not self.api_key:
-            raise ModelError("DEEPSEEK_API_KEY is not set (~/.config/jarvis/env, JARVIS_DEEPSEEK_API_KEY=...)")
+        if route.key_error:
+            raise ModelError(route.key_error)
+
+        if route.kind == "anthropic":
+            stream = adapters.anthropic_complete(route, messages, tools, temperature)
+        elif route.kind == "google":
+            stream = adapters.google_complete(route, messages, tools, temperature)
         else:
-            key = self.api_key
-        name = model_name or _model_override or self.transport.name
+            base = route.base_url
+            if route.kind == "ollama" and not base.endswith("/v1"):
+                base += "/v1"          # ollama's OpenAI-compatible surface
+            stream = self.transport.complete(
+                messages, tools=tools, temperature=temperature,
+                model_name=route.model, base_url=base, key=route.key)
 
         final: dict | None = None
-        async for ev in self.transport.complete(
-                messages, tools=tools, temperature=temperature,
-                model_name=name, base_url=base_url, key=key):
-            if ev["type"] == "token":
-                yield ev
-            else:
-                final = ev
+        try:
+            async for ev in stream:
+                if ev["type"] == "token":
+                    yield ev
+                else:
+                    final = ev
+        except ModelError as e:
+            # an error body that echoes the request must not carry the key
+            # into the transcript, the logs or the guest
+            if route.key and len(route.key) >= 6 and route.key in str(e):
+                raise ModelError(str(e).replace(route.key, "***"),
+                                 status=e.status) from None
+            raise
 
         assert final is not None
-        usage = final["usage"]
+        usage = _normalise_usage(final["usage"])
+        final = {**final, "usage": usage}
         if budget is not None:
-            budget.add(usage or {})
+            budget.add(usage or {}, cache_weight=_cache_weight(route))
         try:
-            await record_model_call(conversation_id, name, usage, messages, tools)
+            await record_model_call(conversation_id, route.model_id, usage,
+                                    messages, tools)
         except Exception:  # noqa: BLE001 — the ledger must never fail a call
             pass
         yield final

@@ -47,9 +47,12 @@ class Budget:
     cache_miss: int = 0
     charged_input: float = 0.0   # discounted input the cap is compared against
 
-    def add(self, usage: dict) -> None:
+    def add(self, usage: dict, cache_weight: float | None = None) -> None:
+        """`cache_weight` is this model's cached/fresh input price ratio (from
+        the provider catalogue); None keeps CACHE_HIT_WEIGHT."""
         if not usage:
             return
+        weight = CACHE_HIT_WEIGHT if cache_weight is None else cache_weight
         prompt = usage.get("prompt_tokens", 0)
         self.input_tokens += prompt
         self.output_tokens += usage.get("completion_tokens", 0)
@@ -61,7 +64,7 @@ class Budget:
         # (prompt - hit) rather than the reported miss makes the no-accounting
         # case (hit == 0) fall back to charging the whole prompt at full weight.
         fresh = max(prompt - hit, 0)
-        self.charged_input += fresh + hit * CACHE_HIT_WEIGHT
+        self.charged_input += fresh + hit * weight
 
     def over(self) -> bool:
         return self.charged_input >= self.max_input or self.output_tokens >= self.max_output

@@ -100,29 +100,17 @@ class Settings(BaseSettings):
     # ollama), but the HOST attaches the real key to that request — so an
     # unchecked guest-supplied base_url is a key-exfil seam (point the host at
     # an attacker endpoint, harvest the Bearer key). Only these hosts are
-    # honored; anything else is refused and the call falls back to the default.
-    # deepseek_base_url is always allowed on top of this list.
+    # honored; anything else is refused. deepseek_base_url and every enabled
+    # provider's base_url (backend/providers.py) are allowed on top of this list.
     # Empty = derived (see _derive_service_urls): localhost ollama plus the
     # services_host's ollama (:11434), its GPU-pinned voice instance (:11435)
     # and llama.cpp voice tier (:11436). An explicit list replaces all of it.
     model_base_url_allowlist: list[str] = []
-    # "deepseek-flash" is the API's name for the current Flash — V4.1 Flash
-    # since 2026-09-10. The old "deepseek-v4-flash" still resolves to it, and
-    # "deepseek-v4-pro" is routed to it (at Flash price) from 2026-09-14 until
-    # a V4.1 Pro exists, so Pro is not offered: the name would buy a costlier
-    # copy of the same model.
+    # The out-of-the-box default model on the deepseek provider, until the
+    # operator picks a default in Settings (backend/providers.py keeps that,
+    # plus which providers/models are enabled). "deepseek-flash" is the API's
+    # rolling name for the current Flash.
     model_name: str = "deepseek-flash"
-    # Models the nav switcher may select at runtime (persisted in session_state,
-    # no restart). Agents with an explicit model pin are unaffected by the switch.
-    model_choices: list[str] = ["deepseek-flash"]
-    # Human label + one-line blurb per model id, served by GET /api/model so
-    # the GUI never hardcodes model names or versions. A choice missing here
-    # falls back to its raw id. Keep blurbs free of versions/dates — the id
-    # is a rolling alias, so anything dated here goes stale on their release.
-    model_labels: dict[str, dict[str, str]] = {
-        "deepseek-flash": {"label": "flash",
-                           "blurb": "DeepSeek's current Flash model"},
-    }
     # Flash caps output at 384K (verified accepted by the API on v4, and the
     # v4.1 limit is the same). The old 4096 was a v3-era default: large
     # tool-call payloads (whole-file writes) hit it mid-arguments and
@@ -133,26 +121,14 @@ class Settings(BaseSettings):
     # the main turn doesn't need to run cold. Tunable via JARVIS_MODEL_TEMPERATURE.
     model_temperature: float = 0.7
 
-    # DeepSeek pricing per 1M tokens (USD), for the Logs cost tab. Input is
-    # split by the API into cache hit/miss; output is flat. Override via
-    # JARVIS_PRICE_* when the provider reprices. The flat price_* fields are
-    # the fallback for models not in model_prices (and stay = flash).
-    #
-    # Off-peak list price (DeepSeek's peak — 01:00-04:00 and 06:00-10:00 UTC,
-    # Mon-Fri — is double; the peak gate in agent/model.py is what asks before
-    # spending in it). The old names keep the prices they were billed at, so
-    # rows recorded under them still cost what they cost.
+    # Per-model prices come from the provider catalogue (providers_catalog
+    # .json, or ~/.config/jarvis/providers.json to override one). These flat
+    # per-1M USD rates only price a ledger row whose model the catalogue has
+    # never heard of. DeepSeek's peak hours are double; the peak gate in
+    # agent/model.py asks before spending in them.
     price_cache_hit_per_m: float = 0.003
     price_cache_miss_per_m: float = 0.15
     price_output_per_m: float = 0.60
-    model_prices: dict[str, dict[str, float]] = {
-        "deepseek-flash": {"cache_hit": 0.003, "cache_miss": 0.15,
-                           "output": 0.60},
-        "deepseek-v4-flash": {"cache_hit": 0.0028, "cache_miss": 0.14,
-                              "output": 0.28},
-        "deepseek-v4-pro": {"cache_hit": 0.003625, "cache_miss": 0.435,
-                            "output": 0.87},
-    }
     # Raw-context capture (the exact message array sent per model call) is
     # opt-in and heavy; captured blobs older than this are nulled out.
     context_capture_keep_days: int = 7
