@@ -1792,9 +1792,7 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
 
 /* ---- logs transcript viewer ---- */
 /* the Logs tab: view switch on top, then transcripts (list card + detail)
-   or the cost view. The list is a card, not a flush sidebar strip, and its
-   rows wrap — a conversation's summary is how you find it, so it gets two
-   lines instead of an ellipsis. */
+   or the cost view. The list is a card, not a flush sidebar strip. */
 .logs-view { display: flex; flex-direction: column; flex: 1; min-height: 0;
   gap: var(--sp-6); }
 .logs-view > .tabs { align-self: flex-start; }
@@ -1814,15 +1812,19 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
 .file-list li.empty-row, .staged-list li.empty-row {
   font-family: inherit; background: none; border: 0; cursor: default; }
 .file-list li.empty-row:hover { background: none; color: var(--dim); }
-.logs-aside .file-list li { white-space: normal; }
-.logs-aside .log-row-top .grow { white-space: normal; overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
-  line-clamp: 2; }
+.logs-aside .file-list li { font-family: inherit; }
+/* one title line and one dim caption line: the words, then where and when.
+   Counts live in the opened transcript's header, not on every row. */
 .log-row { display: block; }
-.log-row-top { display: flex; align-items: flex-start; gap: 6px; }
-.log-row-meta { font-size: 11.5px; color: var(--dim); margin-top: 2px;
-  display: flex; align-items: center; flex-wrap: wrap; }
-.log-heat { color: var(--red); font-weight: 600; }
+.log-row-top { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.log-title { flex: 1; min-width: 0; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-caption { font-size: var(--fs-xs); color: var(--dim); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-heat-dot { flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--red); }
+.log-head-title { margin: 0; font-size: var(--fs-lg); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-detail { display: flex; flex-direction: column; overflow-y: auto;
   min-height: 0; padding-right: 4px; }
 .log-hist { display: flex; flex-direction: column; gap: 6px; }

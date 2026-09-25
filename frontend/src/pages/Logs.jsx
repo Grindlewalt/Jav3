@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
-import { human, ts } from '../format.js'
+import { ago, human, ts } from '../format.js'
 import { EmptyState, Tabs, Toggle } from '../components/index.js'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
@@ -17,6 +17,24 @@ const HEAVY_CALLS = 30
 // never be asked again before it lands (the 5 s poll used to stack requests
 // behind a query that took longer than the interval).
 const POLL_MS = 15000
+
+// A conversation's summary is often the first line of a prompt: a markdown
+// heading ("# AGENT BRIEF: …"), an agent run's "[agent-name] …" prefix, runs
+// of whitespace. The title is the words; a leading [tag] moves to the caption.
+function cleanTitle(summary, id) {
+  let t = String(summary || '').replace(/\s+/g, ' ').trim()
+  let tag = null
+  const m = t.match(/^\[([^\]]{1,48})\]\s*/)
+  if (m) { tag = m[1].trim(); t = t.slice(m[0].length) }
+  t = t.replace(/^[#[\s]+/, '').trim()
+  return { title: t || `conversation ${id}`, tag }
+}
+
+// The one dim line under a title: tag · project · when
+function Caption({ tag, project, when }) {
+  const parts = [tag, project, ago(when)].filter(Boolean)
+  return <div className="log-caption" title={ts(when)}>{parts.join(' · ')}</div>
+}
 
 // token counts -> K / M
 function tok(n) {
@@ -265,6 +283,9 @@ export default function Logs() {
   const cachePct = cacheTotal ? Math.round((stats.cache_hit / cacheTotal) * 100) : null
 
   const totalCost = calls.reduce((s, c) => s + (c.cost_usd || 0), 0)
+  // the list row carries the project and start time the transcript omits
+  const row = (convos || []).find((c) => c.id === detail?.id)
+  const head = detail ? cleanTitle(detail.summary, detail.id) : null
 
   // No heading of its own: this renders as the Logs tab of the Review layout.
   // The transcripts|cost switch sits above both views, and the conversation
@@ -283,28 +304,21 @@ export default function Logs() {
           <aside className="logs-aside">
             <ul className="file-list">
               {(convos || []).map((c) => {
-                const heavyTok = (c.input_tokens || 0) > HEAVY_TOKENS
-                const heavyCalls = (c.tool_calls || 0) > HEAVY_CALLS
+                const { title, tag } = cleanTitle(c.summary, c.id)
+                // a runaway conversation keeps a mark in the list; the
+                // numbers behind it are in the opened transcript's header
+                const heavy = (c.input_tokens || 0) > HEAVY_TOKENS
+                  || (c.tool_calls || 0) > HEAVY_CALLS
                 return (
                   <li key={c.id} className={`log-row${selected === c.id ? ' active' : ''}`}
                       onClick={() => open(c.id)}>
                     <div className="log-row-top">
-                      <span className="grow ellipsis" title={c.summary || `#${c.id}`}>
-                        {c.summary || `#${c.id}`}</span>
-                      <span className="tag">{c.kind}</span>
+                      <span className="log-title" title={title}>{title}</span>
+                      {heavy && <span className="log-heat-dot"
+                                      title={`${c.tool_calls || 0} tool calls · ${tok(c.input_tokens)} input tokens`}
+                                      aria-label="heavy conversation" />}
                     </div>
-                    <div className="log-row-meta">
-                      <span className={heavyCalls ? 'log-heat' : ''}>{c.tool_calls || 0} calls</span>
-                      <span className="dim"> · </span>
-                      <span>{human(c.result_bytes)}</span>
-                      {(c.input_tokens || 0) > 0 && (
-                        <>
-                          <span className="dim"> · </span>
-                          <span className={heavyTok ? 'log-heat' : ''}>{tok(c.input_tokens)} tok</span>
-                        </>
-                      )}
-                      {c.project && <span className="tag">{c.project}</span>}
-                    </div>
+                    <Caption tag={tag} project={c.project} when={c.started_at} />
                   </li>
                 )
               })}
@@ -321,11 +335,9 @@ export default function Logs() {
             ) : (
               <div className="log-detail">
                 <div className="sbx-card">
-                  <div className="sbx-verdict-top">
-                    <span className="tag">{detail.kind}</span>
-                    <span className="mono ellipsis grow" title={detail.summary || `#${detail.id}`}>
-                      {detail.summary || `#${detail.id}`}</span>
-                  </div>
+                  <h2 className="log-head-title" title={detail.summary || head.title}>
+                    {head.title}</h2>
+                  <Caption tag={head.tag} project={row?.project} when={row?.started_at} />
                   <div className="sbx-tiles">
                     <Tile label="input tokens" value={tok(stats.input_tokens)}
                           bad={(stats.input_tokens || 0) > HEAVY_TOKENS} />
