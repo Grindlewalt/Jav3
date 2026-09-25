@@ -6,6 +6,7 @@
   python -m backend.cli migrate-state [--to DIR]     # move checkout state to the state dir
   python -m backend.cli backup [--if-configured]     # rclone the state to the remote
   python -m backend.cli restore [REMOTE] [--to DIR] [--secrets|--no-secrets] [--force]
+  python -m backend.cli import-skill <folder|https-git-url[#subdir]|clawhub:slug> [--name N] [--replace]
 """
 import asyncio
 import getpass
@@ -162,6 +163,8 @@ def main() -> None:
         services_check()
     elif len(sys.argv) >= 2 and sys.argv[1] == "paths":
         paths(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif len(sys.argv) >= 2 and sys.argv[1] == "import-skill":
+        import_skill_command(sys.argv[2:])
     elif len(sys.argv) >= 2 and sys.argv[1] in ("migrate-state", "backup", "restore"):
         state_command(sys.argv[1], sys.argv[2:])
     else:
@@ -226,6 +229,37 @@ def state_command(cmd: str, args: list[str]) -> None:
         sys.exit(1)
     for line in lines:
         print(line)
+
+
+def import_skill_command(args: list[str]) -> None:
+    """Vendor an OpenClaw skill into skills/oc-<name>/, pinned and NOT
+    granted — grant it on the Tools page after reading it."""
+    import argparse
+    from .skillimport import SkillImportError, import_skill
+
+    ap = argparse.ArgumentParser(prog="python -m backend.cli import-skill")
+    ap.add_argument("source")
+    ap.add_argument("--name", help="register under this tool name instead")
+    ap.add_argument("--replace", action="store_true",
+                    help="re-import over an existing copy (re-pins, revokes the grant)")
+    a = ap.parse_args(args)
+    asyncio.run(init_db())
+    try:
+        r = import_skill(a.source, name=a.name, replace=a.replace)
+    except SkillImportError as e:
+        print(f"import-skill: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"imported {r['name']} -> skills/{r['slug']} ({r['files']} files, "
+          f"ref {r['ref'] or '-'}) — not granted")
+    for f in r["flags"]:
+        print(f"  flag  {f['trigger']:<14} {f['file']}")
+    for q in r["requirements"]:
+        print(f"  {'ok  ' if q['met'] else 'NEED'}  {q['kind']:<11} {q['name']}"
+              + (f"  ({q['reason']})" if q["reason"] else ""))
+    for h in r["install_hints"]:
+        print(f"  hint  {h}  (not run)")
+    if r["blocked"]:
+        print(f"  blocked: {r['blocked']}")
 
 
 if __name__ == "__main__":

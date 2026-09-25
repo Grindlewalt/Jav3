@@ -6,6 +6,7 @@ the frontmatter is serialized server-side (always-valid YAML); raw-content
 editing stays available as the advanced path. New skills are granted by
 default (operator decision 2026-07-09) — untick to catalogue without granting.
 """
+import asyncio
 import re
 
 import yaml
@@ -27,6 +28,12 @@ class CreateSkill(BaseModel):
 
 class SaveSkill(BaseModel):
     content: str
+
+
+class ImportSkill(BaseModel):
+    source: str
+    name: str | None = None
+    replace: bool = False
 
 
 class Grant(BaseModel):
@@ -119,6 +126,19 @@ async def create_skill(body: CreateSkill):
         body="(instructions the model follows when it invokes this skill)")))
     compile_registry()
     return {"slug": slug}
+
+
+@router.post("/skills/import")
+async def import_skill(body: ImportSkill):
+    """Vendor an OpenClaw skill (folder / https git URL / clawhub:slug) as a
+    pinned, ungranted snapshot. Operator cookie only — the guest has no path
+    here, and the fetch runs host-side behind the SSRF guard."""
+    from .skillimport import SkillImportError, import_skill as do_import
+    try:
+        return await asyncio.to_thread(do_import, body.source, body.name or None,
+                                       body.replace)
+    except SkillImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/skills/{slug}")

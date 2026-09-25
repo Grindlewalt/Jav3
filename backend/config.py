@@ -444,6 +444,15 @@ class Settings(BaseSettings):
     # safe to turn this on.
     mcp_alert_unpinned: bool = False
 
+    # OpenClaw skill import (backend/skillimport.py). Git URLs must resolve to
+    # a public host unless the host is named here (comma-separated) — e.g. the
+    # operator's own git server holding a curated, vetted skill set; http:// is
+    # accepted only for these. ClawHub, the public registry that shipped
+    # hundreds of malicious skills, is OFF unless explicitly switched on.
+    skill_import_allow_hosts: str = ""
+    skill_import_clawhub: bool = False
+    skill_import_clawhub_url: str = "https://clawhub.ai"
+
     # --- Monitored egress (Layer 3) ---------------------------------------
     # OFF by default: the guest stays netless (`-nic none`) until this is flipped
     # on and soaked, exactly like the use_guest_loop cutover. When true the guest
