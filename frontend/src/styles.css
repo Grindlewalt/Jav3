@@ -71,6 +71,12 @@
   /* page head -> first content, on every page variant: a doc page's heading
      margin and a full-height shell's body inset are the same distance */
   --page-gap: var(--sp-8);
+  /* the page geometry, one rule per variant (components/Page.jsx): every doc
+     page is one column of this width, so Projects, Tools, Settings and the 404
+     share a left edge; every full-height shell's heading bar is this tall,
+     tab strip or not, so Review, Agents, Memory and Schedules share a band */
+  --page-w: 960px;
+  --page-band-h: 60px;
 
   /* Control padding. The survey's "nine near-identical row paddings" are
      8px 10px (9), 7px 10px (7), 6px 9px (5), 6px 10px (5), 8px 12px (5),
@@ -125,7 +131,7 @@
      decisions the rest of the app already spells 768 (the SecurityBoard modal
      went full-bleed at 768 while the generic modal did it at 640, so the app
      had two widths for one idea). 640 is gone. */
-  --bp-wide: 1024px;    /* the bar can't hold the links; they move to the drawer */
+  --bp-wide: 992px;    /* the bar can't hold the links; they move to the drawer */
   --bp-phone: 768px;    /* one column, 16px controls, safe-area gutters */
   --bp-narrow: 400px;   /* the last squeeze: smaller wordmark, tighter padding */
 
@@ -576,13 +582,17 @@ input:focus, textarea:focus { border-color: var(--accent);
    is a bar across the top, which is what .ws-head already was. */
 .page-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .page-shell > .page-head, .ws-head {
-  flex-shrink: 0; margin: 0; gap: var(--sp-7);
+  flex-shrink: 0; margin: 0; gap: var(--sp-7); min-height: var(--page-band-h);
   padding: var(--sp-5) var(--sp-9);
   border-bottom: 1px solid var(--border); background: var(--bg-soft);
 }
 .page-shell > .page-lede { flex-shrink: 0; margin: 0;
   padding: var(--sp-4) var(--sp-9) 0; }
 .page-shell > .split-layout { flex: 1; min-height: 0; }
+/* band -> first content is --page-gap here too, the same distance a doc
+   page keeps under its <h1> and .review-body keeps under Review's bar */
+.page-shell > .split-layout > aside,
+.page-shell > .split-layout > .editor-pane { padding-top: var(--page-gap); }
 
 /* toolbar: the .row shape without .row's vertical margin, for use as a
    header strip inside a card or pane. `.pane-head` is the same thing and
@@ -710,9 +720,15 @@ input:focus, textarea:focus { border-color: var(--accent);
    hover reset are stated because the base `button` rule is 600 with a lift
    and an <a> is neither — the two must render alike. Overflows sideways on a
    narrow screen rather than wrapping into a second row of pills. */
+/* A URL-backed strip renders a <nav>, and the app bar's bare `nav` rule used
+   to reach it: the strip inherited the bar's 56px height, which is what made
+   every tabbed page's heading band 32px taller than an untabbed one. `height`
+   and `transition` are reset for that reason. The track's inset is --sp-2 on
+   every side, so the lifted segment never touches the rim. */
 .tabs {
   align-self: center; display: inline-flex; max-width: 100%; overflow-x: auto;
-  padding: 3px; gap: 3px;
+  height: auto; transition: none;
+  padding: var(--sp-2); gap: var(--sp-2);
   background: var(--glass); border: 1px solid var(--border);
   border-radius: var(--radius-pill);
 }
@@ -724,7 +740,7 @@ input:focus, textarea:focus { border-color: var(--accent);
   transition: color 0.15s, background 0.15s;
 }
 .tabs > button:hover:not(:disabled), .tabs > a:hover { color: var(--text);
-  filter: none; transform: none; }
+  background: none; filter: none; transform: none; }
 .tabs > button.on, .tabs > a.active {
   background: var(--panel-2); color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
@@ -789,10 +805,12 @@ input:focus, textarea:focus { border-color: var(--accent);
 
 /* ---- chat ---- */
 .chat-layout { display: flex; flex: 1; min-height: 0; }
-/* the trailing padding is the VM chip's corner — the list must not scroll
-   underneath it */
+/* The list runs to the bottom edge. It used to stop 54px short, a gap kept
+   for a floating VM chip that lives in the nav bar now, so the last row was
+   cut mid-text above an empty band; the list's own bottom padding lets the
+   final row scroll clear of the edge instead. */
 .chat-layout aside {
-  width: 260px; padding: 12px 12px 54px; border-right: 1px solid var(--border);
+  width: 260px; padding: 12px 12px 0; border-right: 1px solid var(--border);
   display: flex; flex-direction: column; gap: 10px; background: var(--bg-soft);
   /* same curve and duration as the nav's fold — the two run together when the
      rail takes over, and at 0.28s ease the sidebar finished visibly ahead of
@@ -841,7 +859,8 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .icon-btn:hover { color: var(--text); background: var(--panel-2);
   transform: none; filter: none; }
-.convo-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1;
+.convo-list { list-style: none; margin: 0; padding: 0 0 var(--sp-6);
+  overflow-y: auto; flex: 1;
   display: flex; flex-direction: column; gap: 5px;
   /* the delay lets the sidebar start narrowing before the list fades */
   transition: opacity 0.24s ease 0.06s; }
@@ -1243,7 +1262,7 @@ input:focus, textarea:focus { border-color: var(--accent);
 .md-editor.code { resize: vertical; }
 
 /* ---- projects ---- */
-.page { padding: 26px; max-width: 960px; width: 100%; margin: 0 auto; overflow-y: auto; }
+.page { padding: 26px; max-width: var(--page-w); width: 100%; margin: 0 auto; overflow-y: auto; }
 .autonomy-sel { padding: 3px 7px; font-size: 12px; }
 /* the create form is a card of its own above the grid */
 .create-project { display: flex; gap: 8px; margin-bottom: 18px;
@@ -2016,11 +2035,11 @@ kbd {
 .tag.sev-crit-tag { color: var(--red); border-color: var(--red); }
 
 /* ============================================================
-   Collapsed nav (≤1024px, --bp-wide). The bar holds brand + 6 links + ⋯ +
+   Collapsed nav (≤992px, --bp-wide). The bar holds brand + 6 links + ⋯ +
    the status cluster down to about this width; below it everything
    navigational moves into the drawer.
    ============================================================ */
-@media (max-width: 1024px) {
+@media (max-width: 992px) {
   .nav-links { display: none; }
   .nav-toggle { display: inline-flex; }
   nav .brand { margin-right: 8px; }
@@ -2991,7 +3010,7 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
    page (Model and Music were bare controls at the body's 15px beside
    Backup's fields). Cards are a stack with one rhythm: the card head, then
    --sp-5 between everything inside it. */
-.settings-page { max-width: 760px; --ctl-h: 36px; }
+.settings-page { --ctl-h: 36px; }
 .settings-page .card { margin-bottom: var(--sp-7); }
 .settings-page .card > .card-head { margin-bottom: var(--sp-5); }
 .settings-page .card > .stack, .settings-page .card .stack { gap: var(--sp-5); }

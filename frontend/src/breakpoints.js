@@ -9,7 +9,7 @@ import { useEffect, useState } from 'react'
 // the app had two different widths for the same idea). 640 is gone; three
 // remain, and each one means something you can say in a sentence:
 //
-//   wide   1024  the top bar can no longer hold the links; they move to the drawer
+//   wide    992  the top bar can no longer hold the links; they move to the drawer
 //   phone   768  one-column layouts, 16px controls, safe-area gutters
 //   narrow  400  the last squeeze: smaller wordmark, tighter page padding
 //
@@ -18,7 +18,11 @@ import { useEffect, useState } from 'react'
 // of them is one of these three. This module is the source for JS; `--bp-*`
 // in :root is the source a devtools inspection can read.
 export const BP = {
-  wide: 1024,
+  // measured, not a device width: brand + six links (Review wearing its
+  // count) + ⋯ + the VM/voice/theme cluster need ~966px; 992 keeps a gutter
+  // of spare room. It was 1024, which sent a bar with ~170px to spare at
+  // 1100 into the drawer.
+  wide: 992,
   phone: 768,
   narrow: 400,
 }

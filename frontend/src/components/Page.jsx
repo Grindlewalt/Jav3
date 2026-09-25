@@ -9,8 +9,9 @@ import PageHeader from './PageHeader.jsx'
 //     heading lives elsewhere (Chat's greeting, the Workspace header) simply
 //     does not pass `title` and owns its <h1> itself.
 //   - `variant` is the page's HEIGHT MODEL, a layout fact rather than taste:
-//       doc    the element itself scrolls; 960px, centred (.page).
-//              Projects, Tools, Settings, NotFound.
+//       doc    the element itself scrolls; one --page-w column, centred
+//              (.page). Projects, Tools, Settings, NotFound — no doc page
+//              narrows it, so every doc <h1> sits on the same left edge.
 //       split  full-height flex; an <aside> and a <main> own their own
 //              scrolling (.page-shell > .split-layout). Schedules; the
 //              file-editor pages (Memory, Agents, Skills) once they migrate.
@@ -18,6 +19,11 @@ import PageHeader from './PageHeader.jsx'
 //     `doc` keeps its heading inside the column. `split` and `fill` fill the
 //     viewport, so their heading becomes a bar across the top — the shape the
 //     Workspace header already had (`.page-shell > .page-head, .ws-head`).
+//   - THE GEOMETRY, one rule per variant, all tokens in styles.css :root:
+//       doc         h1 at the column's edge; --page-gap to the first content.
+//       split/fill  a --page-band-h bar, the same height with or without a
+//                   tab strip in it; --page-gap from the bar to the first
+//                   content (aside, editor pane, .review-body).
 //   - `actions` go to the right of the heading (a Tabs strip, a select, a
 //     button). `lede` is one dim line under it.
 //   - Nothing here paints a background: the shell is layout only.
