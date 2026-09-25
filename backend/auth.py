@@ -135,8 +135,9 @@ def require_user(request: Request) -> dict:
 # port and the scheme: any other service on this box's name/IP (another port,
 # a companion app, anything a local process binds) is same-site and gets the
 # cookie on a form POST or a WebSocket handshake. So every cookie-carrying
-# state change is checked against the full origin — scheme, host AND port —
-# not just the hostname.
+# state change is checked against the full origin — host AND port, not just the
+# hostname; the scheme is relaxed only for an https page reaching us over http
+# (a TLS-terminating reverse proxy in front, see _matches_host).
 
 _DEFAULT_PORT = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
@@ -161,20 +162,51 @@ def _split_origin(value: str) -> tuple[str, str, int] | None:
     return u.scheme, u.hostname.lower(), port or _DEFAULT_PORT[u.scheme]
 
 
-def _own_origins(host_header: str, scheme: str) -> set[tuple[str, str, int]]:
-    """Every origin this request may legitimately come from: the Host it was
-    sent to (under the transport scheme, and https too when cookie_secure says
-    TLS terminates in front), the operator's explicit csrf_allowed_hosts, and
-    the server's own LAN names — the latter ONLY on the server's own port."""
+def _host_port(host_header: str) -> tuple[str, int | None] | None:
+    """'host[:port]' -> (host, port or None), IPv6-safe; None if malformed."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit("//" + host_header)
+        port = u.port
+    except ValueError:
+        return None
+    if not u.hostname or u.username or u.password or u.path:
+        return None
+    return u.hostname.lower(), port
+
+
+def _matches_host(o: tuple[str, str, int], host_header: str, scheme: str) -> bool:
+    """The Origin names the host:port this request was sent to. Host and port
+    must both match — a sibling service on another port of the same name is
+    refused (SR4 F3) — with a Host header lacking a port defaulting per the
+    Origin's scheme (443 for https, 80 for http).
+
+    The scheme may differ in ONE direction only: an https Origin on an http
+    request is a TLS-terminating reverse proxy in front of us (the browser
+    speaks https to the proxy, the proxy http to us, Host forwarded). The
+    reverse — an http page posting to an https request — is never ours.
+    X-Forwarded-* is deliberately not consulted (uvicorn runs
+    --no-proxy-headers); the Host header alone carries the identity."""
+    req = "https" if scheme in ("https", "wss") else "http"
+    if o[0] != req and not (o[0] == "https" and req == "http"):
+        return False
+    hp = _host_port(host_header) if host_header else None
+    if hp is None:
+        return False
+    host, port = hp
+    return o[1] == host and o[2] == (port or _DEFAULT_PORT[o[0]])
+
+
+def _own_lan_origins(scheme: str) -> set[tuple[str, str, int]]:
+    """The server's own LAN names — ONLY on the server's own port, under the
+    transport scheme (and https too when cookie_secure says TLS terminates in
+    front)."""
     from . import lan
     schemes = {"https" if scheme in ("https", "wss") else "http"}
     if settings.cookie_secure:
         schemes.add("https")
     out: set[tuple[str, str, int]] = set()
     for s in schemes:
-        me = _split_origin(f"{s}://{host_header}") if host_header else None
-        if me:
-            out.add(me)
         for h in lan.own_hosts():
             hh = f"[{h}]" if ":" in h else h
             o = _split_origin(f"{s}://{hh}:{settings.lan_port}")
@@ -185,8 +217,9 @@ def _own_origins(host_header: str, scheme: str) -> set[tuple[str, str, int]]:
 
 def _explicit_allowed(o: tuple[str, str, int]) -> bool:
     """settings.csrf_allowed_hosts: the operator's own list (a reverse proxy's
-    name, say). An entry is a bare host (any port — the operator said so) or
-    host:port."""
+    public name, say). Matched by hostname under any scheme — the operator's
+    explicit trust. A bare entry allows any port; an entry that names a port
+    (host:port or scheme://host:port) is held to that port."""
     from urllib.parse import urlsplit
     for entry in settings.csrf_allowed_hosts:
         e = entry.strip().lower()
@@ -197,8 +230,7 @@ def _explicit_allowed(o: tuple[str, str, int]) -> bool:
             port = u.port
         except ValueError:
             continue
-        if (u.hostname == o[1] and (port is None or port == o[2])
-                and (not u.scheme or u.scheme == o[0])):
+        if u.hostname == o[1] and (port is None or port == o[2]):
             return True
     return False
 
@@ -226,7 +258,8 @@ def origin_allowed(headers, scheme: str) -> bool:
     o = _split_origin(origin)
     if o is None:
         return False
-    return o in _own_origins(host, scheme) or _explicit_allowed(o)
+    return (_matches_host(o, host, scheme) or o in _own_lan_origins(scheme)
+            or _explicit_allowed(o))
 
 
 def require_same_origin(request: Request) -> None:

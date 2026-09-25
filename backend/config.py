@@ -81,8 +81,11 @@ class Settings(BaseSettings):
     # same-site sibling (another app served under the same parent domain).
     # Add a name here only for a page on another host that legitimately posts
     # to Jav3.
-    # Each entry is a bare host (any port) or host:port. The server's own LAN
-    # names are allowed without listing them, but only on lan_port.
+    # Each entry matches by hostname under any scheme: a bare host allows any
+    # port, host:port only that port. The server's own LAN names are allowed
+    # without listing them, but only on lan_port. A reverse proxy that
+    # forwards the public Host needs nothing here; list its public name if it
+    # rewrites Host (JARVIS_CSRF_ALLOWED_HOSTS='["<public-host>"]').
     csrf_allowed_hosts: list[str] = []
     # The committer email on every commit Jav3 makes in a project repo.
     git_author_email: str = "jav3@localhost"

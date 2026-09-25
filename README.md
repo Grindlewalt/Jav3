@@ -110,6 +110,18 @@ unreachable it fails hard rather than quietly starting a fresh install over the
 top of a migration. `data/vm/` is deliberately not copied: the golden image is
 built for the source host's architecture and is rebuilt natively instead.
 
+**Behind a reverse proxy.** Every cookie-carrying state change must come from
+Jav3's own origin. A TLS-terminating proxy that forwards the public `Host`
+header (Caddy does by default; nginx with `proxy_set_header Host $host`) needs
+no config: an `https://<public-host>` page reaching Jav3 over plain http is
+accepted when host and port match. `X-Forwarded-*` is never trusted. If your
+proxy rewrites `Host` (saves fail with "cross-origin request refused"), list
+the public name — matched by hostname under any scheme and port:
+
+```
+JARVIS_CSRF_ALLOWED_HOSTS='["<public-host>"]'
+```
+
 Update loop: `git pull -q && (cd frontend && npm run build) && systemctl --user
 restart jarvis` — check for in-flight agent work first, or use
 `scripts/deploy_pi.sh`, which does that guarding for you.

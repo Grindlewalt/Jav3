@@ -215,14 +215,72 @@ async def test_poc_multipart_upload_accepts_a_foreign_origin(op):
 # =============================================================================
 
 async def test_poc_origin_check_ignores_port(op):
-    """FIXED: scheme + host + port are all compared."""
+    """FIXED: host + port are both compared (the scheme is relaxed only for an
+    https page over http transport, i.e. a TLS proxy — see below)."""
     c, _ = op
-    for o in ["http://jav3.lan:1", "https://jav3.lan:65535", "https://jav3.lan:8000",
+    for o in ["http://jav3.lan:1", "https://jav3.lan:65535", "https://jav3.lan",
               "http://jav3.lan"]:
         r = await c.post(MINT, json={}, headers={"Origin": o})
         assert r.status_code == 403, o
-    r = await c.post(MINT, json={}, headers={"Origin": "http://jav3.lan:8000"})
-    assert r.status_code == 200
+    for o in ["http://jav3.lan:8000", "https://jav3.lan:8000"]:
+        r = await c.post(MINT, json={}, headers={"Origin": o})
+        assert r.status_code == 200, o
+
+
+# --- v2.1: the operator reaches the GUI through a TLS-terminating reverse
+# proxy. The browser's Origin is https://<public-host> (443 implied); the Pi
+# sees plain http with the public Host forwarded. --------------------------
+
+PUB = "jav3.example.org"
+
+
+def _ok(origin, host, scheme="http"):
+    return auth.origin_allowed({"origin": origin, "host": host}, scheme)
+
+
+async def test_tls_proxy_https_origin_with_forwarded_host_is_allowed(op):
+    c, _ = op
+    hdr = {"Origin": f"https://{PUB}", "Host": PUB}
+    r = await c.post(MINT, json={}, headers=hdr)
+    assert r.status_code == 200, r.text
+    # the operator's chat delete: DELETE is gated too (404 = past the gate)
+    r = await c.delete("/api/conversations/999999", headers=hdr)
+    assert r.status_code != 403, r.text
+    r = await c.delete("/api/conversations/999999",
+                       headers={"Origin": "https://evil.example", "Host": PUB})
+    assert r.status_code == 403
+    assert _ok(f"https://{PUB}:443", PUB)
+    assert _ok(f"https://{PUB}:8443", f"{PUB}:8443")
+    assert _ok(f"http://{PUB}", PUB)                  # plain http proxy, :80
+
+
+def test_tls_proxy_relaxation_keeps_host_and_port_strict(fake_lan):
+    # same host, different port: a sibling service (SR4 F3) — still refused
+    assert not _ok(f"https://{PUB}:8443", PUB)
+    assert not _ok(f"https://{PUB}", f"{PUB}:8000")
+    assert not _ok(f"http://{PUB}:8080", PUB)
+    # foreign host, whatever the scheme
+    assert not _ok("https://evil.example", PUB)
+    assert not _ok(f"https://{PUB}.evil.example", PUB)
+    assert not _ok(f"https://{PUB}", "evil.example")
+    # the reverse direction — an http page posting to an https request — never
+    assert not _ok(f"http://{PUB}", PUB, scheme="https")
+    assert not _ok(f"http://{PUB}:443", PUB, scheme="https")
+    assert _ok(f"https://{PUB}", PUB, scheme="https")
+    # a missing or malformed Host matches nothing
+    assert not _ok(f"https://{PUB}", "")
+    assert not _ok(f"https://{PUB}", f"user@{PUB}")
+
+
+def test_allowlisted_hostname_matches_any_scheme_and_port(fake_lan, monkeypatch):
+    monkeypatch.setattr(settings, "csrf_allowed_hosts",
+                        [PUB, "https://pinned.example:9443"])
+    for o in (f"https://{PUB}", f"http://{PUB}", f"https://{PUB}:8443", f"http://{PUB}:1"):
+        assert _ok(o, "10.0.0.82:8000"), o
+    # an entry that names a port is held to it, under any scheme
+    assert _ok("http://pinned.example:9443", "10.0.0.82:8000")
+    assert not _ok("https://pinned.example:9444", "10.0.0.82:8000")
+    assert not _ok("https://evil.example", "10.0.0.82:8000")
 
 
 async def test_poc_auto_allowed_lan_names_pass_on_any_port(op, fake_lan):
