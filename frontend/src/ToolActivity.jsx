@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import JobTree from './JobTree.jsx'
 import Md from './Md.jsx'
-import { useModel } from './modelInfo.js'
+import { isKnownModel, useModel } from './modelInfo.js'
 import { PATHS } from './nav.jsx'
 
 // Live tool-activity rendering shared by Chat and ChatBox: humanized one-line
@@ -181,7 +181,7 @@ function Typing() {
 // actually did this work" is not something you can tell from the prose.
 export function ModelTag({ model }) {
   const m = useModel()
-  if (!model || !m || model === m.default || m.choices.includes(model)) return null
+  if (!model || !m || isKnownModel(m, model)) return null
   return <span className="msg-model" title={`answered by ${model}`}>{model}</span>
 }
 

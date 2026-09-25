@@ -8,13 +8,13 @@ import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
 import { Copy } from '../copy.jsx'
 import { ts } from '../format.js'
-import { modelOption, setModel, useModel } from '../modelInfo.js'
 import { notifyError } from '../notify.js'
 import { useAuth } from '../auth.jsx'
-import { Button, Card, EmptyState, Input, Select, Tag } from '../components/index.js'
+import { Button, Card, EmptyState, Input, Tag } from '../components/index.js'
 import Page from '../components/Page.jsx'
 import BackupPanel from '../BackupPanel.jsx'
 import DeskPanel from '../DeskPanel.jsx'
+import ProvidersPanel from '../ProvidersPanel.jsx'
 
 const mmss = (secs) => {
   const s = Math.max(0, Math.round(secs))
@@ -24,37 +24,13 @@ const mmss = (secs) => {
 export default function Settings() {
   return (
     <Page title="Settings" className="settings-page">
-      <ModelPanel />
+      <ProvidersPanel />
       <DevicesPanel />
       <DeskPanel />
       <BackupPanel />
       <MusicPanel />
       <SessionPanel />
     </Page>
-  )
-}
-
-// --- model ------------------------------------------------------------------------
-
-function ModelPanel() {
-  const m = useModel()
-  const active = modelOption(m, m?.active)
-  return (
-    <Card title="Model" headingLevel={2}
-          actions={m && m.active !== m.default ? <Tag>override</Tag> : null}>
-      {!m ? <p className="dim small">loading…</p> : (
-        <div className="stack">
-          <Select aria-label="Model" value={m.active}
-                  onChange={(e) => setModel(e.target.value).catch(notifyError)}
-                  disabled={m.choices.length < 2}
-                  options={m.choices.map((c) => ({ value: c, label: modelOption(m, c).label }))} />
-          <p className="dim small settings-note">
-            <code>{active.id}</code>{active.blurb && <> — {active.blurb}</>}.
-            Agents with a model pin of their own are unaffected.
-          </p>
-        </div>
-      )}
-    </Card>
   )
 }
 

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Menu, { MenuItem, MenuSep } from '../components/Menu.jsx'
 import Toggle from '../components/Toggle.jsx'
-import { modelOption, setModel, useModel } from '../modelInfo.js'
-import { notifyError } from '../notify.js'
+import ModelPicker from '../ModelPicker.jsx'
 import { isPhone } from '../breakpoints.js'
 
 // The shell's prompt: one box pinned under the transcript.
@@ -11,8 +10,8 @@ import { isPhone } from '../breakpoints.js'
 //              conversation is created as (POST /api/chat {agent}); on an
 //              existing thread identity is fixed at creation, so the menu
 //              offers "new chat as …" instead.
-//   model ▾    the runtime model switch (GET/PUT /api/model via modelInfo) —
-//              the same setting the Chat page's chip changes.
+//   model ▾    the runtime model switch (ModelPicker: enabled models grouped
+//              by provider) — the same setting the Chat page's chip changes.
 //   Temporary  fresh chats only: nothing is kept once you leave.
 //
 // Enter sends, Shift+Enter is a newline, ↑ in an empty box recalls the last
@@ -44,37 +43,6 @@ function AgentPicker({ fresh, agents, agentSlug, agentName, onPick, onNewAs }) {
         <MenuItem key={a.slug} checked={fresh ? agentSlug === a.slug : undefined}
                   sub={a.description || undefined} onClick={() => choose(a.slug)}>
           <span className="ellipsis">{a.name}</span></MenuItem>
-      ))}
-    </Menu>
-  )
-}
-
-function ModelPicker() {
-  const m = useModel()
-  const [open, setOpen] = useState(false)
-  const close = useCallback(() => setOpen(false), [])
-  if (!m) return null
-  const label = modelOption(m, m.active).label
-  if (m.choices.length < 2) {
-    return <span className="sh-chip static" title="model for new turns">{label}</span>
-  }
-  async function pick(id) {
-    setOpen(false)
-    if (id === m.active) return
-    try { await setModel(id) } catch (err) { notifyError(err) }
-  }
-  return (
-    <Menu open={open} onClose={close} up floating width={240} label="model"
-          trigger={(
-            <button type="button" className="sh-chip" aria-haspopup="menu" aria-expanded={open}
-                    title="model for new turns" onClick={() => setOpen((o) => !o)}>
-              <span className="ellipsis">{label}</span>
-              <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
-            </button>
-          )}>
-      {m.choices.map((c) => (
-        <MenuItem key={c} checked={c === m.active} sub={modelOption(m, c).blurb || c}
-                  onClick={() => pick(c)}>{modelOption(m, c).label}</MenuItem>
       ))}
     </Menu>
   )
@@ -136,7 +104,7 @@ export default function Composer({
         <div className="sh-bar">
           <AgentPicker fresh={fresh} agents={agents} agentSlug={agentSlug}
                        agentName={agentName} onPick={onPickAgent} onNewAs={onNewAs} />
-          <ModelPicker />
+          <ModelPicker chip="sh-chip" floating />
           {fresh && (
             <Toggle checked={temporary} onChange={onTemporary} label="temporary chat"
                     onText="Temporary" offText="Temporary" className="sh-temp"

@@ -6,9 +6,8 @@ import { NavSlotContext } from '../nav.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { isPhone, useIsPhone } from '../breakpoints.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
-import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
-import { modelOption, setModel, useModel } from '../modelInfo.js'
+import ModelPicker from '../ModelPicker.jsx'
 import ChatGroups from '../ChatGroups.jsx'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
@@ -100,57 +99,6 @@ function pickGreeting() {
   const period = h < 5 ? 'night' : h < 12 ? 'morning' : h < 18 ? 'midday' : 'night'
   const list = GREETINGS[period]
   return list[Math.floor(Math.random() * list.length)]
-}
-
-// The glassy model picker at the send end of the composer. It changes the
-// same server-side setting as the nav switch (they sync over the
-// jarvis-model-changed window event, via modelInfo.js). It stays put while
-// the operator types — folding it away on the first keystroke made the model
-// vanish exactly when it was about to be used. The menu opens upward, since
-// the bar lives at the bottom of the screen. Names and blurbs come from
-// GET /api/model. With one choice there is nothing to pick, so the chip is a
-// plain label with no chevron and no menu.
-function ComposerModel() {
-  const m = useModel()
-  const [open, setOpen] = useState(false)
-  const close = useCallback(() => setOpen(false), [])
-  const ref = useDismiss(open, close)
-  if (!m) return null
-  if (m.choices.length < 2) {
-    return (
-      <div className="composer-model">
-        <span className="model-chip static" title="model for new turns">
-          {modelOption(m, m.active).label}</span>
-      </div>
-    )
-  }
-  async function pick(model) {
-    setOpen(false)
-    if (model === m.active) return
-    try { await setModel(model) } catch (err) { notifyError(err) }
-  }
-  return (
-    <div className="composer-model" ref={ref}>
-      <button type="button" className="model-chip" aria-haspopup="menu"
-              aria-expanded={open} title="model for new turns"
-              onClick={() => setOpen((o) => !o)}>
-        {modelOption(m, m.active).label}
-        <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
-      </button>
-      {open && (
-        <div className="model-menu" role="menu">
-          {m.choices.map((c) => (
-            <button key={c} type="button" role="menuitemradio"
-                    aria-checked={c === m.active} onClick={() => pick(c)}>
-              <span className="m-name">{modelOption(m, c).label}
-                <span className="m-sub">{modelOption(m, c).blurb || c}</span></span>
-              {c === m.active && <span className="m-check" aria-hidden="true">●</span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
 }
 
 // The project control for the open chat, in the same glassy idiom as the model
@@ -678,7 +626,7 @@ export default function Chat() {
                 : 'Message Jav3…'}
               rows={1}
             />
-            <ComposerModel />
+            <ModelPicker chip="model-chip" wrap="composer-model" />
             {busy
               ? <button type="button" className="send-btn stop" title="stop this turn"
                         onClick={stop}>◼</button>

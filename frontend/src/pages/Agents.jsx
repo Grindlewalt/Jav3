@@ -4,7 +4,7 @@ import { api, chatStream } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { ago } from '../format.js'
-import { modelOption, useModel } from '../modelInfo.js'
+import { modelGroups, resolveId, useModel } from '../modelInfo.js'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
 import Button, { SaveButton } from '../components/Button.jsx'
@@ -42,6 +42,30 @@ export default function Agents() {
 // *_exclude lists) round-trip untouched.
 const NEW_ID = 'agent-new-name'
 
+// The agent's model pin: "inherit" or one of the enabled models, written as
+// its `provider/model` id, grouped by provider like the composer's picker. A
+// pin the catalogue no longer offers (a disabled model, a hand-edited
+// AGENT.md) stays selectable under its raw id rather than silently reading as
+// something else. Base URLs belong to providers now, so there is no field.
+function AgentModel({ models, value, onChange }) {
+  const current = resolveId(models, value)
+  const groups = modelGroups(models)
+  const offered = groups.some((g) => g.models.some((x) => x.id === current))
+  return (
+    <Select label="Model" value={current} onChange={(e) => onChange(e.target.value)}
+            options={[{ value: '', label: 'inherit (default)' },
+                      ...(value && !offered ? [{ value: current, label: `${value} (not enabled)` }] : [])]}>
+      {groups.map((g) => (g.provider
+        ? (
+          <optgroup key={g.provider} label={g.label}>
+            {g.models.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+          </optgroup>
+        )
+        : g.models.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)))}
+    </Select>
+  )
+}
+
 export function AgentDefinitions() {
   const [agents, setAgents] = useState([])
   const [trash, setTrash] = useState([])
@@ -57,7 +81,6 @@ export function AgentDefinitions() {
   const [drafting, setDrafting] = useState(false)
   const ask = useAsk()
   const modelInfo = useModel()
-  const inherited = modelInfo ? modelOption(modelInfo, modelInfo.active).label : ''
 
   const refresh = () => {
     api('/api/agents').then((r) => setAgents(r.agents))
@@ -317,8 +340,8 @@ export function AgentDefinitions() {
               <div className="agent-grid">
                 <Select label="Works in" value={agent.project || ''} options={projectOptions}
                         onChange={(e) => patch({ project: e.target.value })} />
-                <Input label="Model" value={agent.model || ''} placeholder={inherited}
-                       onChange={(e) => patch({ model: e.target.value })} />
+                <AgentModel models={modelInfo} value={agent.model || ''}
+                            onChange={(model) => patch({ model })} />
                 <Input label="Max rounds" type="number" min={0} max={200}
                        value={agent.max_iterations || ''} placeholder="default"
                        onChange={(e) => patch({

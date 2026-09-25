@@ -739,10 +739,10 @@ input:focus, textarea:focus { border-color: var(--accent);
 
 /* ---- menu ----
    The glass dropdown, written once. .notif-drop (the VM chip), .proj-menu
-   and .model-menu are this recipe under three names, and they keep
-   their classes until their call sites migrate to Menu.jsx. Values are
+   were this recipe under their own names; .model-menu has migrated to
+   Menu.jsx (ModelPicker), the others keep their classes until theirs do. Values are
    .proj-menu's on the token ladder (its 9px item radius rounds to --radius-lg);
-   `.up` is .model-menu's upward variant. The width is capped to the viewport
+   `.up` is the old .model-menu's upward variant. The width is capped to the viewport
    so a 260px menu never runs off a 390px phone. */
 .menu-wrap { position: relative; }
 .menu {
@@ -2875,25 +2875,13 @@ body.nav-locked .notice-pill { display: none; }
   filter: none; transform: none; }
 .model-chip .chev { transform: rotate(-90deg); }
 .model-chip .chev.open { transform: rotate(90deg); }
-.model-menu {
-  position: absolute; right: 0; bottom: calc(100% + 10px); width: 240px;
-  background: var(--glass); border: 1px solid var(--border);
-  backdrop-filter: blur(16px) saturate(1.15);
-  -webkit-backdrop-filter: blur(16px) saturate(1.15);
-  border-radius: 14px; padding: 6px; box-shadow: var(--shadow-pop); z-index: 5;
-  transform-origin: bottom right;
-  animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
-}
-.model-menu button {
-  display: flex; width: 100%; align-items: center; gap: 8px;
-  background: none; color: var(--text); padding: 8px 10px; border-radius: 9px;
-  font-weight: 400; font-size: 13px; text-align: left;
-}
-.model-menu button:hover:not(:disabled) { background: var(--panel-2);
-  filter: none; transform: none; }
-.model-menu .m-name { flex: 1; display: flex; flex-direction: column; gap: 1px; }
-.model-menu .m-sub { font-size: 11px; color: var(--dim); }
-.model-menu .m-check { color: var(--accent); font-size: 11px; }
+/* the chip carries the label in an .ellipsis span, so a long model name
+   truncates inside the 160px column instead of pushing the send button */
+.model-chip { max-width: 100%; }
+.model-chip .ellipsis, .sh-chip .ellipsis { min-width: 0; }
+/* ModelPicker's provider groups: a group is only a labelled run of items, so
+   it lays out as if its children sat in the menu directly */
+.model-group { display: contents; }
 
 /* a copy button that copies the STRING it is given, not the rendering */
 .copy-btn {
@@ -3275,6 +3263,65 @@ body.nav-locked .notice-pill { display: none; }
   gap: var(--sp-1); }
 .desk-cmd { font: var(--fs-md)/1.5 var(--font-mono); overflow-wrap: anywhere;
   white-space: pre-wrap; }
+
+/* --- API providers (Settings, ProvidersPanel.jsx) --------------------------
+   Groups of provider rows under small uppercase heads; a row is its head line
+   (open chevron + name, the facts, the on switch) and, opened, a body of
+   fields and the model list. On a phone the facts drop under the name. */
+.prov-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+.prov-group-head { margin: 0; font-size: var(--fs-xs); font-weight: 500; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.08em; }
+.prov-list { list-style: none; margin: 0; padding: 0; }
+.prov-row { border-top: 1px solid var(--border); }
+.prov-head { display: flex; align-items: center; gap: var(--sp-4); min-width: 0;
+  padding: var(--sp-3) 0; }
+.prov-toggle { display: inline-flex; align-items: center; gap: var(--sp-3); min-width: 0;
+  flex: 0 1 auto; background: none; border: 0; padding: 0; color: var(--text);
+  font-weight: 400; text-align: left; cursor: pointer; }
+.prov-toggle:hover:not(:disabled) { filter: none; transform: none; color: var(--accent); }
+.prov-toggle .chev, .prov-all .chev { color: var(--dim);
+  transition: transform 0.16s cubic-bezier(0.4, 0, 0.2, 1); }
+.prov-toggle .chev.open, .prov-all .chev.open { transform: rotate(90deg); }
+.prov-facts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4);
+  min-width: 0; flex: 1 1 auto; }
+.prov-facts .tag { margin-left: 0; }
+.prov-key { color: var(--dim); white-space: nowrap; }
+.prov-key.ok { color: var(--green); }
+.prov-key.warn { color: var(--amber); }
+.prov-docs { color: var(--dim); text-decoration: none; line-height: 1; }
+.settings-page .prov-docs { color: var(--dim); }
+.prov-docs:hover, .settings-page .prov-docs:hover { color: var(--accent); }
+.prov-head > .toggle { flex-shrink: 0; margin-left: auto; }
+.prov-all { display: inline-flex; align-items: center; gap: var(--sp-3); align-self: flex-start;
+  background: none; border: 0; padding: 0; color: var(--dim); font-weight: 500;
+  font-size: var(--fs-sm); cursor: pointer; }
+.prov-all:hover:not(:disabled) { color: var(--text); filter: none; transform: none; }
+.prov-body { display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: 0 0 var(--sp-5) var(--sp-7); }
+.prov-result.ok { color: var(--green); }
+.prov-result.bad { color: var(--red); overflow-wrap: anywhere; }
+.prov-models-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-4); }
+.prov-models-tools > input { flex: 1 1 220px; min-width: 0; }
+.prov-models { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto;
+  border-radius: var(--radius-lg); background: var(--bg-soft); }
+.prov-model { display: flex; align-items: center; gap: var(--sp-5); min-width: 0;
+  padding: var(--sp-3) var(--sp-5); }
+.prov-model + .prov-model { border-top: 1px solid var(--border); }
+.prov-model-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.prov-default { display: inline-flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-sm); color: var(--dim); cursor: pointer; white-space: nowrap; }
+.prov-default.off { opacity: 0.45; cursor: default; }
+.settings-page .prov-default input { height: auto; accent-color: var(--accent); margin: 0; }
+.prov-models .empty-row { padding: var(--sp-3) var(--sp-5); margin: 0; }
+@media (max-width: 768px) {
+  .prov-head { flex-wrap: wrap; row-gap: var(--sp-2); }
+  .prov-toggle { flex: 1 1 60%; }
+  .prov-facts { order: 3; flex-basis: 100%; padding-left: var(--sp-7); }
+  .prov-body { padding-left: 0; }
+  .prov-model { flex-wrap: wrap; row-gap: var(--sp-2); }
+  .prov-model-main { flex-basis: 100%; }
+  .prov-model .toggle { margin-left: auto; }
+}
 
 /* --- Settings --------------------------------------------------------------------
    One control height and one text size for every field and button on the
