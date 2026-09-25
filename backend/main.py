@@ -8,8 +8,8 @@ from pydantic import BaseModel
 import asyncio
 from pathlib import Path
 
-from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, devices_api,
-               egress_api,
+from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, desk_api,
+               devices_api, egress_api,
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
                notifications_api, plan_api, projects, reviewer, reviewer_api, runs_api,
@@ -99,6 +99,8 @@ app.include_router(auth.router)
 app.include_router(devices_api.router)
 app.include_router(devices_api.pair_router)
 app.include_router(devices_api.cli_router)
+app.include_router(desk_api.ws_router)
+app.include_router(desk_api.router)
 app.include_router(projects.router)
 app.include_router(chat.router)
 app.include_router(sidebar_api.router)

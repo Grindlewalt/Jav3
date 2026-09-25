@@ -179,6 +179,12 @@ def _requirements_met(entry: dict) -> bool:
     is still catalogued on the Tools tab, so it is discoverable rather than
     invisible — it just is not granted.
     """
+    if entry.get("requires_desk") is True:
+        # the computer-use tools (tools/desk_*): offered only while some
+        # computer is connected (backend/desk.py), same reasoning as below
+        from ... import desk
+        if not desk.offered():
+            return False
     required = entry.get("requires_settings")
     if not required:
         return True

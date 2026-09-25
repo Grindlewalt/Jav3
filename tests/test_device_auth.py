@@ -178,6 +178,36 @@ async def test_code_is_single_use_and_token_works_on_chat_only(clients):
         assert (await dev.get(path, headers=hdr)).status_code == 401, path
 
 
+async def test_scope_is_chosen_at_login_and_fixed(clients):
+    """`jav3-desk login` asks for a desk token; it reaches whoami/self-revoke
+    but not chat, and the scope is visible in Settings. A CLI token is still
+    the default. An unknown scope is the same fixed 422 as any bad body."""
+    op, dev = clients
+    r = await _redeem(dev, (await _mint(op))["code"], scope="desk")
+    assert r.status_code == 200 and r.json()["scope"] == "desk"
+    hdr = {"Authorization": f"Bearer {r.json()['token']}"}
+    who = (await dev.get("/api/devices/whoami", headers=hdr)).json()
+    assert who["scope"] == "desk"
+    assert (await dev.get("/api/conversations", headers=hdr)).status_code == 403
+    assert (await dev.post("/api/chat", json={"message": "x"},
+                           headers=hdr)).status_code == 403
+    cli = (await _redeem(dev, (await _mint(op))["code"])).json()
+    assert cli["scope"] == "cli"
+    scopes = {d["id"]: d["scope"] for d in (await op.get("/api/devices")).json()["devices"]}
+    assert scopes == {r.json()["device_id"]: "desk", cli["device_id"]: "cli"}
+    bad = await _redeem(dev, (await _mint(op))["code"], scope="admin")
+    assert bad.status_code == 422 and bad.json()["detail"] == devices_api._BAD_BODY
+    # a desk token revokes itself like any other
+    assert (await dev.delete("/api/devices/self", headers=hdr)).status_code == 200
+    assert (await dev.get("/api/devices/whoami", headers=hdr)).status_code == 401
+
+
+async def test_mint_rejects_unknown_scope(tmp_env):
+    await init_db()
+    with pytest.raises(ValueError):
+        await devicetokens.mint("x", by="operator", scope="root")
+
+
 async def test_concurrent_redeems_mint_exactly_one_token(clients):
     op, dev = clients
     code = (await _mint(op))["code"]

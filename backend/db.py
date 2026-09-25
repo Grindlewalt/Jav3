@@ -25,7 +25,10 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     expires_at TEXT,
     last_used_at TEXT,
-    revoked INTEGER NOT NULL DEFAULT 0
+    revoked INTEGER NOT NULL DEFAULT 0,
+    -- what the token may reach: 'cli' (chat, via auth.require_actor) or
+    -- 'desk' (only /api/desk/ws, backend/desk.py). Neither reaches the other.
+    scope TEXT NOT NULL DEFAULT 'cli'
 );
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY,
@@ -262,6 +265,47 @@ CREATE TABLE IF NOT EXISTS agent_messages (
     delivered_at TEXT,                   -- NULL = still in the inbox
     delivered_to INTEGER REFERENCES conversations(id)
 );
+-- Computer use (backend/desk.py). Grants are per desk token and set ONLY from
+-- Settings (cookie routes); a desk client never writes them. shell is
+-- off|ask|trusted; trusted lapses at trusted_until. allowlist is a JSON list
+-- of argv patterns that run without an approval.
+CREATE TABLE IF NOT EXISTS desk_grants (
+    device_id INTEGER PRIMARY KEY REFERENCES device_tokens(id) ON DELETE CASCADE,
+    screen INTEGER NOT NULL DEFAULT 0,
+    input INTEGER NOT NULL DEFAULT 0,
+    shell TEXT NOT NULL DEFAULT 'off',
+    trusted_until TEXT,
+    allowlist TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- one row per desk action (the model's side is in tool_calls). Typed text is
+-- stored as its length + sha256, never the text.
+CREATE TABLE IF NOT EXISTS desk_actions (
+    id INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL,
+    verb TEXT NOT NULL,
+    params TEXT,
+    conversation_id INTEGER,
+    op_id TEXT,
+    ok INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    approver TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_desk_actions_device ON desk_actions(device_id, id);
+-- shell commands waiting on the operator (allow once / always / deny)
+CREATE TABLE IF NOT EXISTS desk_shell_pending (
+    id INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL,
+    command TEXT NOT NULL,
+    cwd TEXT,
+    conversation_id INTEGER,
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending|allowed|denied|expired
+    decided_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at TEXT
+);
 """
 
 
@@ -311,7 +355,9 @@ async def init_db() -> None:
         async with db.execute("PRAGMA table_info(device_tokens)") as cur:
             dcols = [r["name"] for r in await cur.fetchall()]
         for col, decl in (("user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
-                          ("expires_at", "TEXT"), ("last_used_at", "TEXT")):
+                          ("expires_at", "TEXT"), ("last_used_at", "TEXT"),
+                          # every token minted before scopes was a CLI's
+                          ("scope", "TEXT NOT NULL DEFAULT 'cli'")):
             if col not in dcols:
                 await db.execute(f"ALTER TABLE device_tokens ADD COLUMN {col} {decl}")
         await db.execute(

@@ -77,8 +77,10 @@ async def _handle_tool_broker_call(loop, conn, req: dict) -> None:
                                  "message": f"op_id {op_id!r} is not this caller's turn"})
         return
     res = await broker.broker_dispatch(op_id, req.get("name") or "", req.get("args") or {})
-    await _send(loop, conn, {"type": "broker_result",
-                             "result": res["result"], "taint": res["taint"]})
+    out = {"type": "broker_result", "result": res["result"], "taint": res["taint"]}
+    if res.get("image"):
+        out["image"] = res["image"]
+    await _send(loop, conn, out)
 
 
 async def handle_conn(loop, conn) -> None:

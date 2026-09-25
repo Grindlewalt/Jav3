@@ -424,12 +424,12 @@ async def run_turn(
 
         # DB writes + message appends stay sequential and ordered — the single
         # aiosqlite connection must never be used concurrently
-        pending_images: list[str] = []   # PNG paths a tool rendered this round
+        pending_images: list = []   # imageresult.Image per image a tool returned
         for (tc, name, args), result in zip(parsed, results):
             # peel any screenshot off the result BEFORE persisting/capping, so
             # the ledger and the tool message stay text-only (bytes ride a
             # following user message instead)
-            result, img_path = imageresult.split(result)
+            result, img = imageresult.split(result)
             if on_tool_call is not None:
                 await on_tool_call(name, args, result)
             failed = (not result.strip() or result.startswith(
@@ -440,8 +440,8 @@ async def run_turn(
             messages.append({"role": "tool", "tool_call_id": tc["id"],
                              "content": content})
             tool_msgs.append({"idx": len(messages) - 1, "round": i, "name": name})
-            if img_path and not failed:
-                pending_images.append(img_path)
+            if img is not None and not failed:
+                pending_images.append(img)
             # the GUI renders live activity rows from this: pair to the tool
             # event by id, mark ok/err, carry the result for click-to-expand
             yield {"type": "tool_result", "id": tc["id"], "name": name,
@@ -456,8 +456,8 @@ async def run_turn(
                 web_calls += 1
         # attach screenshots so the model can SEE them — DeepSeek accepts image
         # content only in a user message, never a tool one, so each rides its own
-        for img_path in pending_images:
-            msg = _image_message(img_path)
+        for img in pending_images:
+            msg = _image_message(img)
             if msg is not None:
                 messages.append(msg)
                 image_msgs.append({"idx": len(messages) - 1, "round": i})
@@ -492,25 +492,31 @@ def _cap_result(name: str, result: str) -> str:
             f"Re-call {name} with a narrower target if you need the rest.)")
 
 
-_IMG_CAP = 4_500_000     # ~4.5MB PNG ceiling; DeepSeek rejects oversized images
+_IMG_CAP = 4_500_000     # ~4.5MB ceiling; DeepSeek rejects oversized images
+
+_DEFAULT_CAPTION = ("[screenshot — act on what you SEE here; coordinates are "
+                    "pixels from the top-left of this image]")
 
 
-def _image_message(path: str) -> dict | None:
-    """A user message carrying a screenshot as an image block. Returns None on a
-    missing/unreadable/oversized file so a bad render never breaks the turn."""
-    try:
-        with open(path, "rb") as f:
-            data = f.read(_IMG_CAP + 1)
-    except OSError:
-        return None
-    if not data or len(data) > _IMG_CAP:
+def _image_message(img) -> dict | None:
+    """A user message carrying a tool's image as an image block. `img` is an
+    imageresult.Image (or a bare path). Returns None on a missing, unreadable,
+    oversized or non-image payload so a bad render never breaks the turn. The
+    mime comes from the bytes, not from whoever labelled them, and the caption
+    is the tool's own when it gave one — a desk screenshot is not "the current
+    page"."""
+    if isinstance(img, str):
+        img = imageresult.Image(path=img)
+    data = img.data(_IMG_CAP)
+    mime = imageresult.sniff(data) if data else None
+    if mime is None:
         return None
     b64 = base64.b64encode(data).decode()
+    caption = img.caption.strip() if img.caption and img.caption.strip() else None
     return {"role": "user", "content": [
-        {"type": "text", "text": "[screenshot of the current page — act on what "
-         "you SEE here; coordinates are pixels from the top-left]"},
+        {"type": "text", "text": f"[{caption}]" if caption else _DEFAULT_CAPTION},
         {"type": "image_url",
-         "image_url": {"url": f"data:image/png;base64,{b64}"}}]}
+         "image_url": {"url": f"data:{mime};base64,{b64}"}}]}
 
 
 def _evict_stale_images(messages: list[dict], image_msgs: list[dict]) -> None:
@@ -524,8 +530,8 @@ def _evict_stale_images(messages: list[dict], image_msgs: list[dict]) -> None:
     for m in stale:
         messages[m["idx"]] = {"role": "user", "content":
                               "[an earlier screenshot was dropped to keep "
-                              "context small; take another with the browser "
-                              "tool if you need to see that view again]"}
+                              "context small; take another screenshot if you "
+                              "need to see that view again]"}
         m["evicted"] = True
 
 

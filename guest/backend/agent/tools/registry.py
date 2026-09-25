@@ -15,6 +15,7 @@ import traceback
 
 from ... import turnctx
 from ...config import settings
+from .. import imageresult
 
 HOST_CID = socket.VMADDR_CID_HOST          # 2
 
@@ -112,7 +113,17 @@ async def _broker_dispatch(name: str, args: dict) -> str:
             buf += chunk
         ev = json.loads(buf.split(b"\n", 1)[0])
         if ev.get("type") == "broker_result":
-            return ev.get("result", "")
+            result = ev.get("result", "")
+            img = ev.get("image")
+            # a host tool's image rides the reply inline (a host path is
+            # meaningless here); hand it to the loop the way an in-guest tool
+            # would. The loop sniffs and caps it before the model sees it.
+            if isinstance(img, dict) and isinstance(img.get("b64"), str):
+                cap = img.get("caption")
+                return imageresult.with_inline(
+                    result, b64=img["b64"], mime=img.get("mime"),
+                    caption=cap if isinstance(cap, str) else None)
+            return result
         if ev.get("type") == "error":
             return f"error: broker {ev.get('error')}: {ev.get('message', '')}"
         return f"error: unexpected broker reply {ev.get('type')!r}"

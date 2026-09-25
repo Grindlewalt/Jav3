@@ -4,6 +4,7 @@ live behind their own page (or, for git, behind no page at all):
 
   - git push requests awaiting approval   (git_requests table)
   - schedules Jav3 proposed             (schedules with pending_approval = 1)
+  - shell commands a computer-use turn is waiting on (backend/desk.py)
 
 Read-only aggregation — it never approves anything, just surfaces a count + list
 so the nav can show a badge. Each source is wrapped so one failing store does not
@@ -74,6 +75,17 @@ async def _security_pending() -> dict:
     return out
 
 
+async def _desk_pending() -> list[dict]:
+    """Shell commands a turn is blocked on right now (answered in Settings →
+    Computer use). Only the ones something is still waiting for."""
+    try:
+        from . import desk
+        return [{"id": p["id"], "name": p["name"], "command": p["command"][:200]}
+                for p in await desk.list_pending()]
+    except Exception:                           # noqa: BLE001
+        return []
+
+
 @router.get("")
 async def notifications():
     try:
@@ -84,9 +96,10 @@ async def notifications():
     git = await _git_pending(slugs)
     sched = await _schedules_pending()
     sec = await _security_pending()
+    shell = await _desk_pending()
     return {
-        "count": (len(git) + len(sched)
+        "count": (len(git) + len(sched) + len(shell)
                   + sec["alerts"] + sec["egress_pending"]),
-        "git": git, "schedules": sched,
+        "git": git, "schedules": sched, "desk_shell": shell,
         "alerts": sec["alerts"], "egress_pending": sec["egress_pending"],
     }

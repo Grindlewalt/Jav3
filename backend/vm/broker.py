@@ -17,7 +17,12 @@ from dataclasses import dataclass
 
 from .. import runtime
 from ..agent import budget as budget_mod
+from ..agent import imageresult
 from ..agent.tools import registry
+
+# an image a host tool returns rides the broker reply inline; same ceiling the
+# loop applies before showing it to the model
+_IMG_WIRE_CAP = 4_500_000
 
 
 @dataclass
@@ -131,7 +136,15 @@ def live_turns() -> list[TurnEnvelope]:
 # result, a research report is content an attacker may have authored. Anything
 # derived from it is suspect until a human vets it.
 _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
-                              "research"})
+                              "research",
+                              # a computer's screen and its shell output are
+                              # whatever is on that machine — a web page, a
+                              # chat window, a file somebody sent. Every desk
+                              # result is untrusted, input verbs included (they
+                              # return the post-action screenshot).
+                              "desk_screenshot", "desk_click", "desk_move",
+                              "desk_scroll", "desk_type", "desk_key",
+                              "desk_open", "desk_shell"})
 
 # Tools that promote content INTO a trusted store the agent later relies on.
 # memory_write is the one such store the guest can reach through the broker
@@ -178,7 +191,10 @@ def mark_tainted(op_id: str) -> None:
 
 async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
     """Restore the turn's ambient context and run one host tool. Returns a
-    structured {result, taint} so metadata can grow without a protocol change."""
+    structured {result, taint[, image]} so metadata can grow without a protocol
+    change. `image` ({b64, mime, caption}) is present when the tool returned
+    one: a host path means nothing to the guest, so the bytes travel inline
+    and the guest registry re-attaches them (imageresult.with_inline)."""
     env = _envelopes.get(op_id)
     if env is None:
         return {"result": f"error: broker has no turn context for op_id {op_id!r}",
@@ -204,6 +220,7 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
         # tier-4 hook (pre-dispatch): policy / deterministic diff-gate on
         # (name, args, env) — halt-for-human or reject goes here.
         result = await registry.dispatch(name, args)
+        result, img = imageresult.split(result)
         # tier-4 (post-dispatch): stamp taint into the ledger, and mark a
         # laundering promotion on the result the model sees.
         if classify_taint(name) == "untrusted":
@@ -217,7 +234,11 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
             await persist.on_taint(env.active_project)
         if launder and not result.startswith("error:"):
             result += _PROMOTION_QUARANTINE_NOTE
-        return {"result": result, "taint": classify_taint(name)}
+        out = {"result": result, "taint": classify_taint(name)}
+        wire = img.wire(_IMG_WIRE_CAP) if img is not None else None
+        if wire is not None:
+            out["image"] = wire
+        return out
     finally:
         budget_mod.active_op_id.reset(optok)
         if taint_tok is not None:

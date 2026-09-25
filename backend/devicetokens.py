@@ -12,10 +12,15 @@ A token is not forever. It stops verifying when any of these holds:
 - the user it was minted for no longer exists (`user_id` joins `users`).
 All four look the same to the caller: no row, one 401.
 
-This is a bearer credential with (currently) operator-equivalent reach on the
-routes that opt into `auth.require_actor`; it is deliberately NOT accepted on the
-sensitive control-plane routers (secrets, vm, egress, …), which
-stay cookie-only.
+Every token has a SCOPE, fixed at minting:
+- `cli`  operator-equivalent reach on the routes that opt into
+         `auth.require_actor` (chat); refused on /api/desk/ws.
+- `desk` the computer-use client (`clients/jav3-desk`): accepted ONLY on
+         /api/desk/ws, refused by `require_actor`. A leaked CLI token must not
+         be able to pose as a desk and feed forged screenshots into a turn,
+         and a desk token must not be able to drive chat.
+Neither is accepted on the sensitive control-plane routers (secrets, vm,
+egress, desk grants, …), which stay cookie-only.
 """
 import hashlib
 import secrets as _secrets
@@ -24,6 +29,7 @@ from .config import settings
 from .db import get_db
 
 PREFIX = "jvd_"
+SCOPES = ("cli", "desk")
 # last_used_at is written at most this often: verify runs on every CLI
 # request, and the idle clock only needs minute resolution.
 TOUCH_EVERY_SECONDS = 60
@@ -34,23 +40,25 @@ def _hash(raw: str) -> str:
 
 
 async def mint(name: str, *, hostname: str = "", platform: str = "",
-               by: str = "") -> tuple[str, int]:
+               by: str = "", scope: str = "cli") -> tuple[str, int]:
     """Create a token; return (raw_token, id). The raw token is returned ONCE
     and never stored — only its hash lands in the DB. `by` is the username of
     the session that minted the login code; the token belongs to that user's
-    id and dies with the account."""
+    id and dies with the account. `scope` is one of SCOPES and never changes."""
+    if scope not in SCOPES:
+        raise ValueError(f"unknown token scope {scope!r}")
     raw = PREFIX + _secrets.token_urlsafe(32)
     by = (by or "").strip()[:64]
     db = await get_db()
     try:
         cur = await db.execute(
             "INSERT INTO device_tokens (name, token_hash, hostname, platform, "
-            "paired_by, user_id, expires_at) VALUES (?,?,?,?,?,"
-            "(SELECT id FROM users WHERE username = ?), datetime('now', ?))",
+            "paired_by, user_id, expires_at, scope) VALUES (?,?,?,?,?,"
+            "(SELECT id FROM users WHERE username = ?), datetime('now', ?), ?)",
             ((name or "").strip()[:64] or "device", _hash(raw),
              (hostname or "").strip()[:128] or None,
              (platform or "").strip()[:32] or None,
-             by or None, by, f"+{int(settings.device_token_ttl_days)} days"))
+             by or None, by, f"+{int(settings.device_token_ttl_days)} days", scope))
         await db.commit()
         return raw, cur.lastrowid
     finally:
@@ -58,7 +66,7 @@ async def mint(name: str, *, hostname: str = "", platform: str = "",
 
 
 async def verify(raw: str | None) -> dict | None:
-    """A presented bearer token -> {'device_id', 'name'} if live, else None.
+    """A presented bearer token -> {'device_id', 'name', 'scope'} if live, else None.
     A malformed/short token is rejected before any DB work; the lookup is an
     exact match on the token's sha256, and revoked / expired / idle / orphaned
     are all the same miss. Touches last_used_at at most once a minute."""
@@ -67,7 +75,7 @@ async def verify(raw: str | None) -> dict | None:
     db = await get_db()
     try:
         async with db.execute(
-                "SELECT t.id, t.name FROM device_tokens t "
+                "SELECT t.id, t.name, t.scope FROM device_tokens t "
                 "JOIN users u ON u.id = t.user_id "
                 "WHERE t.token_hash = ? AND t.revoked = 0 "
                 "AND t.expires_at > datetime('now') "
@@ -82,7 +90,8 @@ async def verify(raw: str | None) -> dict | None:
             (row["id"], f"-{TOUCH_EVERY_SECONDS} seconds"))
         if cur.rowcount:
             await db.commit()
-        return {"device_id": row["id"], "name": row["name"]}
+        return {"device_id": row["id"], "name": row["name"],
+                "scope": row["scope"] or "cli"}
     finally:
         await db.close()
 
@@ -94,7 +103,7 @@ async def list_tokens() -> list[dict]:
     db = await get_db()
     try:
         async with db.execute(
-                "SELECT t.id, t.name, t.hostname, t.platform, t.paired_by, "
+                "SELECT t.id, t.name, t.hostname, t.platform, t.paired_by, t.scope, "
                 "t.created_at, t.expires_at, t.last_used_at, "
                 "datetime(COALESCE(t.last_used_at, t.created_at), ?) AS idle_expires_at "
                 "FROM device_tokens t JOIN users u ON u.id = t.user_id "

@@ -24,7 +24,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from . import devicetokens, lan, pastelogin, security
-from .auth import require_actor, require_user
+from .auth import require_any_actor, require_user
 from .config import settings
 from .db import get_db
 
@@ -167,19 +167,22 @@ async def list_devices():
 
 @router.delete("/{token_id:int}")
 async def revoke_device(token_id: int):
-    stopped = _stop_device_turns(token_id)
+    stopped = await _stop_device_turns(token_id)
     if not await devicetokens.revoke(token_id):
         raise HTTPException(status_code=404, detail="no such device token")
     return {"ok": True, "stopped_turns": stopped}
 
 
-def _stop_device_turns(token_id: int) -> int:
+async def _stop_device_turns(token_id: int) -> int:
     """require_actor runs once, at request start, and the turn it admitted is
     a detached task — so revoking the credential has to end what it started
     as well, or a revoked computer's turn keeps calling tools. Cancelling
-    first is harmless if the id turns out not to exist (it started nothing)."""
-    from . import chat
-    return chat.stop_actor_turns(chat.device_actor(token_id))
+    first is harmless if the id turns out not to exist (it started nothing).
+    A desk token started no turns but may hold a live socket: that is dropped
+    too, and the turns driving it are stopped (desk.disconnect)."""
+    from . import chat, desk
+    n = chat.stop_actor_turns(chat.device_actor(token_id))
+    return n + await desk.disconnect(token_id, reason="token revoked")
 
 
 # --- device side ----------------------------------------------------------------
@@ -189,6 +192,11 @@ class RedeemBody(BaseModel):
     name: str = Field("", max_length=256)
     hostname: str = Field("", max_length=256)
     platform: str = Field("", max_length=256)
+    # what the token will be for: `jav3` asks for cli (the default), `jav3-desk`
+    # for desk. Letting the client choose is safe because neither widens the
+    # other: a desk token reaches nothing but its socket, and a desk does
+    # nothing until the operator grants it in Settings.
+    scope: str = Field("cli", pattern="^(cli|desk)$")
 
 
 MAX_LOGIN_BODY = 4096
@@ -238,7 +246,8 @@ async def redeem_login_code(request: Request, response: Response,
         raise HTTPException(status_code=401, detail=_BAD_CODE)
     name = t.name or body.name.strip()[:64] or body.hostname.strip()[:64] or "cli"
     raw, tid = await devicetokens.mint(name, hostname=body.hostname,
-                                       platform=body.platform, by=t.by)
+                                       platform=body.platform, by=t.by,
+                                       scope=body.scope)
     db = None
     try:
         # opening the DB is inside the try too: SQLITE_BUSY here, after the
@@ -250,6 +259,7 @@ async def redeem_login_code(request: Request, response: Response,
                     f"{t.by or '?'} (from {peer})",
             detail={"device_id": tid, "name": name,
                     "hostname": body.hostname[:128], "platform": body.platform[:32],
+                    "scope": body.scope,
                     "peer": peer, "minted_by": t.by,
                     # the ticket clock is monotonic; report wall time
                     "minted_at": time.time() - (time.monotonic() - t.created),
@@ -260,24 +270,25 @@ async def redeem_login_code(request: Request, response: Response,
         if db is not None:
             await db.close()
     response.headers.update(_NO_STORE)
-    return {"ok": True, "token": raw, "device_id": tid, "name": name}
+    return {"ok": True, "token": raw, "device_id": tid, "name": name,
+            "scope": body.scope}
 
 
 @pair_router.get("/whoami")
-async def whoami(actor: dict = Depends(require_actor)):
+async def whoami(actor: dict = Depends(require_any_actor)):
     """Echo the authenticated actor — the operator cookie or a device token."""
     return actor
 
 
 @pair_router.delete("/self")
-async def revoke_self(actor: dict = Depends(require_actor)):
+async def revoke_self(actor: dict = Depends(require_any_actor)):
     """`jav3 logout`: a device revokes its own token. Only ever the presenting
     token — there is no id parameter to point at another one."""
     if not actor.get("is_device"):
         raise HTTPException(status_code=400, detail="only a device token can "
                             "revoke itself; use Settings → Devices")
     await devicetokens.revoke(actor["device_id"])
-    return {"ok": True, "stopped_turns": _stop_device_turns(actor["device_id"])}
+    return {"ok": True, "stopped_turns": await _stop_device_turns(actor["device_id"])}
 
 
 # --- the CLI, as static files ------------------------------------------------------

@@ -305,15 +305,14 @@ class SameOriginMiddleware:
         return scope["type"] == "websocket" or scope.get("method") in _UNSAFE
 
 
-async def require_actor(request: Request) -> dict:
-    """Operator cookie session OR an enrolled device's Bearer token.
+async def require_any_actor(request: Request) -> dict:
+    """Operator cookie session OR a live device Bearer token of ANY scope.
 
-    For the routers a device/CLI is allowed to reach. The cookie path is checked
-    first and stays sync + DB-free, so a browser request pays nothing extra; only
-    a cookieless request touches the token store. A device actor is marked
-    `is_device` and carries no real user id (id=-1) — the sensitive control-plane
-    routers keep `require_user` (cookie only) and never see a device token.
-    """
+    Only for the routes every device needs about itself (whoami, revoke-self).
+    The cookie path is checked first and stays sync + DB-free, so a browser
+    request pays nothing extra; only a cookieless request touches the token
+    store. A device actor is marked `is_device`, carries no real user id
+    (id=-1) and says its `scope` (devicetokens.SCOPES)."""
     user = user_from_token(request.cookies.get(COOKIE_NAME))
     if user is not None:
         return user
@@ -323,8 +322,24 @@ async def require_actor(request: Request) -> dict:
         dev = await devicetokens.verify(header[7:].strip())
         if dev is not None:
             return {"id": -1, "username": f"device:{dev['name']}",
-                    "is_device": True, "device_id": dev["device_id"]}
+                    "is_device": True, "device_id": dev["device_id"],
+                    "scope": dev["scope"]}
     raise HTTPException(status_code=401, detail="not authenticated")
+
+
+async def require_actor(request: Request) -> dict:
+    """Operator cookie session OR a `cli`-scoped device token.
+
+    For the routers a CLI is allowed to reach (chat). A `desk` token — the
+    computer-use client — is refused here: its only door is /api/desk/ws, so a
+    desk that is compromised or stolen cannot start turns. The sensitive
+    control-plane routers keep `require_user` (cookie only) and never see a
+    device token of either scope."""
+    actor = await require_any_actor(request)
+    if actor.get("is_device") and actor.get("scope") != "cli":
+        raise HTTPException(status_code=403,
+                            detail="this token is scoped to computer use, not chat")
+    return actor
 
 
 async def _alert(key: str, count: int, peer: str, via: str = "login") -> None:
