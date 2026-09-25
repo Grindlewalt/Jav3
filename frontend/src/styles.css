@@ -828,6 +828,8 @@ input:focus, textarea:focus { border-color: var(--accent);
 .setup-strength.warn { color: var(--amber); }
 .setup-test { display: flex; align-items: center; gap: var(--sp-6); flex-wrap: wrap;
   font-size: var(--fs-md); }
+/* a provider's error can be one long unbroken token: wrap it inside the card */
+.setup-result { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; }
 .setup-where { margin: 0; }
 @media (max-width: 480px) {
   .login.setup { padding: var(--sp-9) var(--sp-8); }
@@ -3240,8 +3242,9 @@ body.nav-locked .notice-pill { display: none; }
 .prov-all:hover:not(:disabled) { color: var(--text); filter: none; transform: none; }
 .prov-body { display: flex; flex-direction: column; gap: var(--sp-4);
   padding: 0 0 var(--sp-5) var(--sp-7); }
+.prov-result { flex: 1 1 12em; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .prov-result.ok { color: var(--green); }
-.prov-result.bad { color: var(--red); overflow-wrap: anywhere; }
+.prov-result.bad { color: var(--red); }
 .prov-models-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-4); }
 .prov-models-tools > input { flex: 1 1 220px; min-width: 0; }
 .prov-models { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto;

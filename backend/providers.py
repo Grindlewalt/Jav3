@@ -720,11 +720,49 @@ def _cheapest_model(p: dict) -> str | None:
     return pick["id"] if pick else None
 
 
+DETAIL_CAP = 140
+_STATUS_MEANING = {400: "Bad request", 401: "Key rejected", 402: "Payment required",
+                   403: "Access denied", 404: "Not found", 429: "Rate limited"}
+_REQUEST_ID = re.compile(
+    r"[\s,;]*[(\[]?\b(?:x-)?(?:request|req|trace|correlation)[ _-]?id\b"
+    r"[\s:=\"']*[\w.-]+[)\]]?", re.I)
+
+
+def _error_message(resp) -> str:
+    """The human sentence in an error body: error.message / message / detail
+    (the shapes OpenAI, Anthropic, Gemini, DeepSeek and FastAPI-style servers
+    use), else a plain-text body. HTML error pages say nothing useful."""
+    try:
+        body = resp.json()
+    except ValueError:
+        text = resp.text.strip()
+        return "" if text.startswith("<") else text
+    if isinstance(body, list) and body:
+        body = body[0]
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    for v in ((err.get("message") if isinstance(err, dict) else err),
+              body.get("message"), body.get("detail")):
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""
+
+
 def _short(resp, key: str | None) -> str:
-    body = resp.text[:200].replace("\n", " ")
+    """One readable line for a failed HTTP call: what the status means, then
+    the provider's own message with request ids stripped, capped — never the
+    raw JSON, and never the key."""
+    code = resp.status_code
+    head = f"{_STATUS_MEANING[code]} ({code})" if code in _STATUS_MEANING else \
+        f"Server error ({code})" if code >= 500 else f"HTTP {code}"
+    msg = _error_message(resp)
     if key and len(key) >= 4:
-        body = body.replace(key, "***")
-    return f"HTTP {resp.status_code}: {body}".strip()
+        msg = msg.replace(key, "***")
+    msg = " ".join(_REQUEST_ID.sub("", msg).split()).rstrip(" .,;:")
+    if len(msg) > DETAIL_CAP:
+        msg = msg[:DETAIL_CAP - 1].rstrip() + "…"
+    return f"{head}: {msg}" if msg else head
 
 
 async def _one_token(client, p: dict, base: str, key: str | None) -> dict:
@@ -804,11 +842,11 @@ async def test_provider(pid: str, api_key: str | None = None,
                                      transport=HTTP_TRANSPORT) as client:
             res = await _probe(client, p, target, key)
     except httpx.TimeoutException:
-        return {"ok": False, "detail": f"timed out after {TEST_TIMEOUT:.0f}s",
-                "models_found": []}
+        return {"ok": False, "detail": f"Can't reach {urlsplit(target).hostname} "
+                f"(timed out after {TEST_TIMEOUT:.0f}s)", "models_found": []}
     except httpx.HTTPError as e:
-        return {"ok": False, "detail": f"could not reach {urlsplit(target).hostname}: "
-                f"{type(e).__name__}", "models_found": []}
+        return {"ok": False, "detail": f"Can't reach {urlsplit(target).hostname} "
+                f"({type(e).__name__})", "models_found": []}
     except (ValueError, KeyError, TypeError, AttributeError):
         return {"ok": False, "detail": "unexpected response shape", "models_found": []}
     if res["ok"] and res["models_found"] and target == configured:

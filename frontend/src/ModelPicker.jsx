@@ -1,6 +1,8 @@
 import { useCallback, useState } from 'react'
 import Menu, { MenuItem, MenuSep } from './components/Menu.jsx'
-import { modelCaption, modelGroups, modelOption, setModel, useModel } from './modelInfo.js'
+import {
+  modelCaption, modelGroups, modelOption, providerLabel, setModel, useModel,
+} from './modelInfo.js'
 import { notifyError } from './notify.js'
 
 // The model chip both composers carry (the Chat page's and the shell's): the
@@ -13,6 +15,16 @@ import { notifyError } from './notify.js'
 // `chip` is the trigger's class (each composer styles its own chip), `wrap`
 // the wrapper's; `floating` portals the menu for a composer inside something
 // that clips.
+//
+// The chip is narrow, so it drops a leading provider name ("DeepSeek V4.1
+// Flash" -> "V4.1 Flash"); the full label is its tooltip, and the menu rows,
+// grouped under the provider anyway, keep it.
+function chipLabel(m, x, label) {
+  const p = providerLabel(m, x.provider)
+  if (!p || !label.toLowerCase().startsWith(p.toLowerCase() + ' ')) return label
+  return label.slice(p.length + 1).trim() || label
+}
+
 export default function ModelPicker({ chip, wrap = '', floating = false, width = 280 }) {
   const m = useModel()
   const [open, setOpen] = useState(false)
@@ -20,10 +32,11 @@ export default function ModelPicker({ chip, wrap = '', floating = false, width =
   if (!m) return null
   const current = modelOption(m, m.active)
   const label = current.label || 'no model'
+  const short = chipLabel(m, current, label)
   if (m.models.length < 2) {
     return (
       <span className={wrap || undefined}>
-        <span className={`${chip} static`} title="model for new turns">{label}</span>
+        <span className={`${chip} static`} title={label}>{short}</span>
       </span>
     )
   }
@@ -39,8 +52,8 @@ export default function ModelPicker({ chip, wrap = '', floating = false, width =
           label="model" wrapClassName={wrap}
           trigger={(
             <button type="button" className={chip} aria-haspopup="menu" aria-expanded={open}
-                    title="model for new turns" onClick={() => setOpen((o) => !o)}>
-              <span className="ellipsis">{label}</span>
+                    title={label} onClick={() => setOpen((o) => !o)}>
+              <span className="ellipsis">{short}</span>
               <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
             </button>
           )}>

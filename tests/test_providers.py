@@ -385,7 +385,35 @@ async def test_probe_unreachable(client, monkeypatch):
         raise httpx.ConnectError("refused")
     monkeypatch.setattr(providers, "HTTP_TRANSPORT", httpx.MockTransport(boom))
     res = (await client.post("/api/providers/ollama/test")).json()
-    assert res["ok"] is False and "could not reach localhost" in res["detail"]
+    assert res["ok"] is False and "Can't reach localhost" in res["detail"]
+
+
+async def test_probe_failure_detail_is_one_readable_line(client, stub_http):
+    """The raw error JSON rendered as an overflowing dump on the setup card:
+    the detail is the status meaning plus the provider's own sentence, with
+    request ids stripped, capped, and the key still masked."""
+    _, routes = stub_http
+    url = "https://api.openai.com/v1/models"
+    await client.put("/api/providers/openai", json={"api_key": OPENAI_KEY})
+    routes[("GET", url)] = httpx.Response(401, json={"error": {
+        "message": f"Authentication Fails, Your api key: {OPENAI_KEY} is invalid "
+                   "(request_id: b71b5111-8674-4a0e-9615-d2fd259adc11)",
+        "type": "authentication_error", "param": None, "code": "invalid_request_error"}})
+    d = (await client.post("/api/providers/openai/test")).json()["detail"]
+    assert d == "Key rejected (401): Authentication Fails, Your api key: *** is invalid"
+
+    routes[("GET", url)] = httpx.Response(429, json={"message": "slow down " * 40})
+    d = (await client.post("/api/providers/openai/test")).json()["detail"]
+    assert d.startswith("Rate limited (429): slow down") and d.endswith("…")
+    assert len(d) <= len("Rate limited (429): ") + providers.DETAIL_CAP
+
+    routes[("GET", url)] = httpx.Response(503, text="<html><body>oops</body></html>")
+    d = (await client.post("/api/providers/openai/test")).json()["detail"]
+    assert d == "Server error (503)"
+
+    routes[("GET", url)] = httpx.Response(403, json={"detail": "forbidden"})
+    d = (await client.post("/api/providers/openai/test")).json()["detail"]
+    assert d == "Access denied (403): forbidden"
 
 
 # --- ids through chat / schedules --------------------------------------------
