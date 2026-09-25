@@ -16,7 +16,7 @@ import socket
 import tarfile
 
 from . import config as guest_config
-from . import turnctx
+from . import persist, turnctx
 from .agent.loop import run_turn
 
 PORT = 5556                                 # guest run-turn server (host dials this)
@@ -68,6 +68,17 @@ async def _handle(loop, conn) -> None:
                 _unpack_workspace(slug, spec["workspace_tar_b64"])
             await send({"type": "primed"})
             return
+        # approved persistence: the host has just hot-plugged (or is about to
+        # unplug) the project's /persist disk; mount/unmount it here. Blocking
+        # tools (mkfs, mount) run in a thread so other turns keep streaming.
+        if mode == "persist_mount":
+            await send(await asyncio.to_thread(
+                persist.mount, bool(spec.get("persist_ro")),
+                bool(spec.get("persist_fresh"))))
+            return
+        if mode == "persist_unmount":
+            await send(await asyncio.to_thread(persist.unmount))
+            return
         if mode == "pull":
             slug = spec.get("active_slug")
             await send({"type": "staged", "slug": slug,
@@ -93,7 +104,8 @@ async def _handle(loop, conn) -> None:
         try:
             async for ev in run_turn(
                     spec.get("conversation_id") or 0,
-                    spec["system_prompt"],
+                    # the host sets `persist` only when it mounted the disk
+                    spec["system_prompt"] + persist.note(spec.get("persist")),
                     spec.get("history") or [],
                     tools=spec.get("tool_specs"),
                     model_name=spec.get("model_name"),

@@ -59,7 +59,11 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
             # a peer can name. Research's scouts and readers never come through
             # here — they call model.complete directly, no ReAct loop — so the
             # short-lived internal nodes stay out of the address space for free.
-            inbox=inbox):
+            inbox=inbox,
+            # a top-level agent/scheduled run of an approved project gets its
+            # /persist; a nested one shares its parent's guest, and an
+            # incognito operation never gets one
+            persist=(not nested and not runtime.ephemeral.get())):
         if on_tool_call is not None:
             if ev["type"] == "tool":
                 pending[ev.get("id")] = (ev.get("name"), ev.get("args") or {})

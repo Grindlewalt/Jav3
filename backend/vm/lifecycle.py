@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..config import settings
 from .gateway_server import gateway
+from .persist import status as persist_status
 
 
 class VMError(Exception):
@@ -103,6 +104,7 @@ class GuestVM:
                 "idle_scrub_seconds": settings.vm_idle_scrub_seconds,
                 "egress": settings.vm_egress,
                 "rebuilding": self._rebuilding,
+                "persist": persist_status(),
                 **_image_meta()}
 
     async def _build_overlay(self) -> None:
@@ -198,7 +200,10 @@ class GuestVM:
         self._proc = None
         self._booted_at = None
         await self._kill_orphans()
-        for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log"):
+        # QEMU is gone, so any /persist disk it had attached is closed
+        from . import persist
+        persist.forget()
+        for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log", "qmp.sock"):
             (settings.vm_dir / name).unlink(missing_ok=True)
 
     async def nuke(self) -> None:

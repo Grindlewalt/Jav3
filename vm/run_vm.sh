@@ -4,6 +4,13 @@
 # guest's only path off-box is vsock to the host gateway (CID 2). All guest writes
 # land in the throwaway overlay; the golden base is never touched.
 #
+# Approved persistence (backend/vm/persist.py) needs two things booted in, both
+# inert until used: a QMP monitor socket (host-only, in VM_DIR) to hot-plug a
+# project's /persist disk, and ONE spare PCIe root port to plug it into (the
+# root bus itself is not hotpluggable on virt/q35). The root port is the LAST
+# device so its auto-assigned slot comes after everything else and no existing
+# device (the NIC's enp0sN name, vda) moves. No disk is attached at boot.
+#
 # This is the proven aarch64/KVM invocation from the old sandbox layer with the
 # tap NIC removed and `-device vhost-vsock-pci` added. Normally launched by
 # backend/vm/lifecycle.py (app-owned subprocess); runnable by hand for a boot test.
@@ -63,4 +70,6 @@ exec "$QEMU_BIN" \
   -drive file=overlay.qcow2,if=virtio,format=qcow2 \
   -device vhost-vsock-pci,guest-cid="$CID" \
   -device virtio-rng-pci \
+  -qmp unix:qmp.sock,server=on,wait=off \
+  -device pcie-root-port,id=jpersist_rp,chassis=9 \
   -display none -serial file:console.log

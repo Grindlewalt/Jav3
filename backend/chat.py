@@ -728,6 +728,10 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             # sender's row marked delivered against a transcript
                             # the finally block is about to erase.
                             inbox=not ephemeral,
+                            # approved /persist (if the operator approved this
+                            # project) — never for incognito, which leaves no
+                            # trace anywhere, a surviving disk included
+                            persist=not ephemeral,
                             # voice local tier: run on the operator's ollama.
                             # The guest never dials it — the host gateway makes
                             # the call, so base_url is honoured host-side.

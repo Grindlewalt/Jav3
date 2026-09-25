@@ -294,6 +294,14 @@ async def init_db() -> None:
         if "autonomy" not in cols:
             # autonomy dial: read_only|stage|gated|full (NULL == full, unrestricted)
             await db.execute("ALTER TABLE projects ADD COLUMN autonomy TEXT")
+        if "persist_approved" not in cols:
+            # approved persistence inside the guest VM: the operator's opt-in
+            # (GUI only) for a project's /persist disk. In the DB, not
+            # .workspace.json — the agent writes that file (workspace_panel),
+            # and an approval the agent can grant itself is no approval.
+            await db.execute("ALTER TABLE projects ADD COLUMN "
+                             "persist_approved INTEGER NOT NULL DEFAULT 0")
+            await db.execute("ALTER TABLE projects ADD COLUMN persist_approved_at TEXT")
         # device tokens gained a lifetime and an owner (2026-09 login review):
         # an absolute expiry, an idle clock, and the user id they die with.
         # Existing rows are backfilled so nothing that was live gets a free

@@ -196,6 +196,7 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
     # a promotion is "laundering" only if untrusted content was consumed BEFORE
     # it — evaluate against the ledger as it stood on entry
     launder = name in _PROMOTION_TOOLS and op_id in _tainted
+    was_tainted = op_id in _tainted
     # persist the taint onto the written note (not just the in-turn result): the
     # handler reads this contextvar and stamps `taint: untrusted` into frontmatter.
     taint_tok = runtime.write_taint.set("untrusted") if launder else None
@@ -207,6 +208,13 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
         # laundering promotion on the result the model sees.
         if classify_taint(name) == "untrusted":
             _tainted.add(op_id)
+        if op_id in _tainted and not was_tainted:
+            # this call is what tainted the turn (a web read, or a peer message
+            # via mark_tainted). Its project's /persist goes read-only at the
+            # QEMU block layer NOW, before the untrusted text reaches the guest
+            # — so nothing written after reading it can survive the session.
+            from . import persist
+            await persist.on_taint(env.active_project)
         if launder and not result.startswith("error:"):
             result += _PROMOTION_QUARANTINE_NOTE
         return {"result": result, "taint": classify_taint(name)}

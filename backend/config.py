@@ -327,6 +327,14 @@ class Settings(BaseSettings):
     # guest then persists across operations until a manual /api/vm/nuke.
     vm_idle_scrub_seconds: int = 0
     vm_reaper_interval_seconds: int = 30
+    # Approved persistence (v2.1): a per-project data disk at
+    # <vm_dir>/persist/<slug>.qcow2, hot-attached to the guest and mounted at
+    # /persist ONLY for turns of a project the operator approved (GUI, never the
+    # agent). Everything else about the guest stays disposable. The disk is
+    # sparse; this is its hard virtual size. `vm_persist_enabled` is the global
+    # kill switch — off, no disk is ever attached whatever a project says.
+    vm_persist_enabled: bool = True
+    vm_persist_max_mb: int = 2048
 
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,
