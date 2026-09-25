@@ -284,7 +284,10 @@ export default function Chat() {
       // which looks exactly like a new chat but is bound to a conversation the
       // backend 404s on the first send.
       const id = resumeId.current
-      if (id && r.conversations.some((c) => c.id === id)) openConversation(id)
+      // A resume is not a pick: the phone sheet may be open because the
+      // drawer's "Chat history" row just asked for it, and closing it here
+      // shut the list the operator had opened a frame earlier.
+      if (id && r.conversations.some((c) => c.id === id)) openConversation(id, { resume: true })
       else localStorage.removeItem('jarvis.chat.last')
     }).catch(() => {})
     api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
@@ -405,11 +408,11 @@ export default function Chat() {
     if (isPhone()) setSideOpen(false)
   }
 
-  async function openConversation(id) {
+  async function openConversation(id, { resume = false } = {}) {
     tailAbort.current?.abort()
     setTemporary(false)   // saved chats always persist
     setPeakAsk(null)
-    closeSideOnPhone()
+    if (!resume) closeSideOnPhone()
     setConversationId(id)
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)

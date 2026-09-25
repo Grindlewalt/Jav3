@@ -2796,6 +2796,29 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 }
 .notice-more:hover:not(:disabled) { color: var(--text); filter: none;
   transform: none; border-color: var(--dim); }
+/* phone: routine queue cards fold into one pill in the top bar's empty
+   middle (Notices.jsx QueuePill) instead of a card over the page's bottom */
+.notice-pill {
+  position: fixed; z-index: 3000; left: 50%;
+  top: calc(var(--sat) + (var(--nav-h) - 32px) / 2);
+  transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 32px; max-width: calc(100vw - 220px); padding: 0 10px 0 12px;
+  overflow: hidden; background: var(--glass); color: var(--text);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-pop); font-size: 12.5px; font-weight: 500;
+  --n-c: var(--amber);
+  animation: pill-in 0.24s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.notice-pill:hover:not(:disabled) { filter: none; transform: translateX(-50%);
+  border-color: color-mix(in srgb, var(--n-c) 45%, var(--border)); }
+.notice-pill .notice-bar { height: 2px; }
+.notice-pill .chev { color: var(--dim); }
+@keyframes pill-in { from { opacity: 0; transform: translate(-50%, -6px); } }
+/* the drawer covers the bar; the pill must not float over it */
+body.nav-locked .notice-pill { display: none; }
 
 /* ---- composer model chip ----
    A clear, glassy flash/pro picker at the send end of the bar. It only exists

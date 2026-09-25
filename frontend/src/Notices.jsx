@@ -2,6 +2,7 @@ import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { isWatched } from './agentWatch.js'
 import { api, subscribeSse } from './api.js'
+import { useIsPhone } from './breakpoints.js'
 
 // Bottom-right notices — the successor to the nav bell and shield. Anything that
 // needs operator eyes arrives as a desktop-style alert (red = critical
@@ -58,7 +59,7 @@ export function useNotices(enabled) {
       if (!p) {
         // first snapshot: one quiet summary instead of a card per backlog item
         if (d.count > 0) push({
-          title: `${d.count} item${d.count === 1 ? '' : 's'} waiting in review`,
+          title: `${d.count} item${d.count === 1 ? '' : 's'} waiting in Security`,
           body: 'security alerts, approvals and requests', life: 10,
         })
         return
@@ -147,9 +148,35 @@ const onReview = (path) => path === '/security' || path.startsWith('/security/')
 const onShell = (path) => path === '/shell' || path.startsWith('/shell/')
 const shellQuiet = (t) => isQueueCard(t) && t.sev !== 'crit'
 
-export default function Notices({ toasts, dismiss, clear }) {
+// On a phone a routine queue card is a full-width block over the bottom of
+// the page — the composer, a list's last Restore/Delete row, Backup's install
+// link. There they fold into one pill in the top bar's empty middle (between
+// the wordmark and the VM chip), which covers nothing. A critical security
+// card, the app's own messages and agent results still come up as cards.
+const pillable = (t) => isQueueCard(t) && t.sev !== 'crit'
+
+function QueuePill({ cards, count, onOpen, onDone }) {
+  const n = count || cards.length
+  const life = Math.max(...cards.map((t) => t.life || 8))
+  return (
+    <button type="button" className="notice-pill warn"
+            aria-label={`${n} item${n === 1 ? '' : 's'} waiting in Security — open Security`}
+            title={cards.map((t) => t.title).join('\n')} onClick={onOpen}>
+      <span className="notice-dot" aria-hidden="true" />
+      {/* short on purpose: it has to clear the VM chip on a 360px screen */}
+      <span className="ellipsis" aria-hidden="true">{n} waiting</span>
+      <span className="chev" aria-hidden="true">›</span>
+      {/* keyed on the newest card: another arrival restarts the drain */}
+      <span key={cards[cards.length - 1].id} className="notice-bar"
+            style={{ '--n-life': `${life}s` }} onAnimationEnd={onDone} />
+    </button>
+  )
+}
+
+export default function Notices({ toasts, dismiss, clear, count = 0 }) {
   const navigate = useNavigate()
   const path = useLocation().pathname
+  const phone = useIsPhone()
   const here = onReview(path)
   const shell = onShell(path)
   // arriving on Review (or the shell) retires the queue cards rather than
@@ -161,7 +188,14 @@ export default function Notices({ toasts, dismiss, clear }) {
   }, [here, shell, toasts, dismiss])
   if (here) toasts = toasts.filter((t) => !isQueueCard(t))
   else if (shell) toasts = toasts.filter((t) => !shellQuiet(t))
-  if (toasts.length === 0) return null
+  const pilled = phone ? toasts.filter(pillable) : []
+  if (pilled.length) toasts = toasts.filter((t) => !pillable(t))
+  const pill = pilled.length > 0 && (
+    <QueuePill cards={pilled} count={count}
+               onOpen={() => { pilled.forEach((t) => dismiss(t.id)); navigate('/security') }}
+               onDone={() => pilled.forEach((t) => dismiss(t.id))} />
+  )
+  if (toasts.length === 0) return pill || null
   // Which three survive. Straight `slice(-3)` meant a burst of "save failed"
   // could push a critical security card off the screen — a UI convenience
   // degrading the security notification path. Evict by rank first, recency
@@ -183,6 +217,8 @@ export default function Notices({ toasts, dismiss, clear }) {
     else navigate('/security', t.eventId ? { state: { openEvent: t.eventId } } : undefined)
   }
   return (
+    <>
+    {pill}
     <div className="notices" role="status" aria-live="polite">
       {shown.map((t) => (t.local ? (
         // the app talking about what just happened, not a queue item: there is
@@ -237,5 +273,6 @@ export default function Notices({ toasts, dismiss, clear }) {
         </button>
       )}
     </div>
+    </>
   )
 }

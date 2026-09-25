@@ -493,7 +493,7 @@ export default function App() {
       {/* the music player renders nothing until something is queued into it */}
       {user && <Player />}
       {user && <Notices toasts={notices.toasts} dismiss={notices.dismiss}
-                        clear={notices.clear} />}
+                        clear={notices.clear} count={notices.count} />}
       <NavSlotContext.Provider value={setNavSlot}>
       {/* Inside the provider and around the routes only: the nav, the player
           and the toasts stay mounted through a page's failure, so there is
