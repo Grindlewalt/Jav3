@@ -180,6 +180,98 @@ async def set_autonomy(slug: str, body: SetAutonomy):
     return {"ok": True, "autonomy": value or "full"}
 
 
+class SetPersist(BaseModel):
+    approved: bool
+    # approving must be deliberate: the GUI shows what persistence means and
+    # sends this only from that dialog's confirm button
+    acknowledge: bool = False
+    # revoke only: also delete the disk (and everything on it)
+    delete_disk: bool = False
+
+
+async def _persist_view(slug: str) -> dict:
+    from .vm import persist
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT persist_approved, persist_approved_at FROM projects "
+                "WHERE slug = ? AND deleted_at IS NULL", (slug,)) as cur:
+            row = await cur.fetchone()
+    finally:
+        await db.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such project")
+    try:
+        disk = persist.disk_info(slug)
+    except persist.PersistError:
+        raise HTTPException(status_code=400, detail="bad slug") from None
+    held = persist.holder() == slug
+    return {"slug": slug, "approved": bool(row["persist_approved"]),
+            "approved_at": row["persist_approved_at"],
+            "enabled": settings.vm_persist_enabled, "mount": persist.MOUNT,
+            "disk": disk, "attached": held,
+            "read_only": held and persist.status()["read_only"]}
+
+
+@router.get("/projects/{slug}/persist")
+async def get_persist(slug: str):
+    """Whether this project's /persist disk inside the guest VM is approved,
+    and what is on disk. Cookie session only (router-level require_user)."""
+    return await _persist_view(slug)
+
+
+@router.put("/projects/{slug}/persist")
+async def set_persist(slug: str, body: SetPersist, user: dict = Depends(require_user)):
+    """Approve or revoke a project's persistent /persist disk in the guest VM.
+
+    The ONLY way approval changes: the router is cookie-only (no device token,
+    no agent tool), SameOriginMiddleware refuses cross-site, and approving
+    needs `acknowledge` from the GUI's explanation dialog. Both directions
+    leave a security event. Revoking takes effect for the next turn; a turn
+    already holding the disk keeps it until it ends, so `delete_disk` then
+    reports it could not delete rather than yanking a mounted filesystem."""
+    from . import security
+    from .vm import persist
+    await _persist_view(slug)                       # 404 / slug validation
+    if body.approved and not body.acknowledge:
+        raise HTTPException(status_code=400,
+                            detail="approving persistence requires acknowledge=true")
+    deleted, delete_error = False, None
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE projects SET persist_approved = ?, persist_approved_at = "
+            "CASE WHEN ? THEN datetime('now') ELSE NULL END WHERE slug = ?",
+            (1 if body.approved else 0, 1 if body.approved else 0, slug))
+        await db.commit()
+        if not body.approved and body.delete_disk:
+            try:
+                deleted = persist.delete_disk(slug)
+            except persist.PersistError as e:
+                delete_error = (f"{e}; the revoke took effect, delete the disk "
+                                "once that turn ends")
+        who = user.get("username") or "operator"
+        if body.approved:
+            await security.raise_event(
+                db, kind="persist_approved", severity="warn", project=slug,
+                summary=f"{who} approved a persistent /persist disk in the guest "
+                        f"VM for '{slug}'",
+                detail={"by": who, "cap_bytes": persist.cap_bytes()})
+        else:
+            await security.raise_event(
+                db, kind="persist_revoked", severity="info", project=slug,
+                summary=f"{who} revoked /persist for '{slug}'"
+                        + (" and deleted its disk" if deleted else ""),
+                detail={"by": who, "deleted": deleted, "delete_error": delete_error})
+    finally:
+        await db.close()
+    view = await _persist_view(slug)
+    view["deleted"] = deleted
+    if delete_error:
+        view["delete_error"] = delete_error
+    return view
+
+
 class RenameProject(BaseModel):
     name: str
 
@@ -302,6 +394,13 @@ async def purge_project(slug: str):
         await refresh_all_projects(db)
     finally:
         await db.close()
+    # its /persist disk goes with it: a purge is permanent, and a leftover
+    # disk would reattach to a future project that reuses the slug
+    from .vm import persist
+    try:
+        persist.delete_disk(slug)
+    except persist.PersistError:
+        pass
     project_path = settings.projects_dir / slug
     if project_path.exists():
         # a big project tree on the Pi's SD card takes a while — don't stall

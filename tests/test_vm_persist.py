@@ -61,6 +61,82 @@ async def _events(kind: str) -> list[dict]:
         await db.close()
 
 
+# --- approval API -----------------------------------------------------------------
+
+async def test_default_off_and_approve_needs_acknowledge(client):
+    r = await client.get("/api/projects/demo/persist")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["approved"] is False and body["mount"] == "/persist"
+    assert body["disk"]["exists"] is False
+    assert body["disk"]["cap_bytes"] == settings.vm_persist_max_mb * 1024 * 1024
+
+    r = await client.put("/api/projects/demo/persist", json={"approved": True})
+    assert r.status_code == 400
+    assert not await persist.approved("demo")
+
+    r = await client.put("/api/projects/demo/persist",
+                         json={"approved": True, "acknowledge": True})
+    assert r.status_code == 200 and r.json()["approved"] is True
+    assert r.json()["approved_at"]
+    assert await persist.approved("demo")
+    ev = await _events("persist_approved")
+    assert len(ev) == 1 and ev[0]["project_slug"] == "demo"
+
+
+async def test_revoke_deletes_disk_and_raises_event(client):
+    await client.put("/api/projects/demo/persist",
+                     json={"approved": True, "acknowledge": True})
+    persist.disk_dir().mkdir(parents=True, exist_ok=True)
+    persist.disk_path("demo").write_bytes(b"x")
+    persist._ready_marker("demo").touch()
+
+    r = await client.put("/api/projects/demo/persist",
+                         json={"approved": False, "delete_disk": True})
+    assert r.status_code == 200
+    assert r.json()["approved"] is False and r.json()["deleted"] is True
+    assert not persist.disk_path("demo").exists()
+    assert not persist._ready_marker("demo").exists()
+    assert not await persist.approved("demo")
+    ev = await _events("persist_revoked")
+    assert len(ev) == 1 and json.loads(ev[0]["detail"])["deleted"] is True
+
+
+async def test_revoke_while_attached_keeps_the_disk(client):
+    await client.put("/api/projects/demo/persist",
+                     json={"approved": True, "acknowledge": True})
+    persist.disk_dir().mkdir(parents=True, exist_ok=True)
+    persist.disk_path("demo").write_bytes(b"x")
+    persist._state.holder = "demo"            # a live turn holds it
+    r = await client.put("/api/projects/demo/persist",
+                         json={"approved": False, "delete_disk": True})
+    assert r.status_code == 200
+    assert r.json()["approved"] is False and r.json()["deleted"] is False
+    assert "delete_error" in r.json()
+    assert persist.disk_path("demo").exists()
+
+
+async def test_unknown_project_and_no_cookie(client, tmp_env):
+    assert (await client.get("/api/projects/nope/persist")).status_code == 404
+    assert (await client.put("/api/projects/nope/persist",
+                             json={"approved": False})).status_code == 404
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as anon:
+        r = await anon.put("/api/projects/demo/persist",
+                           json={"approved": True, "acknowledge": True},
+                           headers={"Authorization": "Bearer whatever"})
+        assert r.status_code == 401
+    assert not await persist.approved("demo")
+
+
+async def test_kill_switch_overrides_approval(client, monkeypatch):
+    await client.put("/api/projects/demo/persist",
+                     json={"approved": True, "acknowledge": True})
+    monkeypatch.setattr(settings, "vm_persist_enabled", False)
+    assert not await persist.approved("demo")
+    assert await persist.attach_for_turn("demo") is None
+
+
 # --- the disk ----------------------------------------------------------------------
 
 def test_disk_path_refuses_odd_slugs(tmp_env):

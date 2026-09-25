@@ -53,6 +53,8 @@ a watched, policy-gated, cuttable pipe to the internet.
   base_url off the allowlist and sends the real key only to the DeepSeek endpoint.
 - **Persistence.** Idle-scrub reboots the single guest from the read-only golden
   image; a monthly timer rebuilds a patched image (highest version auto-activates).
+  The one sanctioned exception is an operator-approved per-project `/persist`
+  disk — residual #14.
 
 ## What it does NOT cover — the residual risks
 
@@ -202,6 +204,48 @@ a watched, policy-gated, cuttable pipe to the internet.
       should be treated as possibly exposed; rotating it (logging everyone
       out) is the operator's call.
 
+14. **Approved persistence inside the guest (`/persist`, 2026-09-24).** A
+    project the operator approves (GUI only: `PUT /api/projects/{slug}/persist`,
+    cookie session, explicit acknowledge, a `persist_approved` security event)
+    gets a sparse qcow2 at `<vm_dir>/persist/<slug>.qcow2`, hot-plugged into the
+    guest over QMP and mounted at `/persist` only while one of that project's
+    top-level, non-incognito turns is live. It is a deliberate hole in "nothing
+    survives the guest": **a place for an implant to wait for the next
+    session.** Controls: per-project scope (one disk per slug, one project
+    attached at a time, never for incognito or nested turns); a hard virtual-
+    size cap (`vm_persist_max_mb`, oversize or backing-file images refused);
+    `noexec,nodev,nosuid`; the host never reads the disk into any prompt or
+    executes anything from it; the moment a turn is tainted (web read, peer
+    message) the disk is unplugged and re-plugged **read-only at the QEMU block
+    layer** before the tainted result reaches the guest, so nothing written after
+    reading attacker-authorable text lands; a guest that will not release the
+    device is torn down (`persist_unplug_failed` event); revoke stops the next
+    attach and can delete the disk, and a project purge deletes it. What remains:
+    - **`noexec` is a speed bump.** It stops `./implant`, not
+      `python3 /persist/implant.py`, and guest root can remount. The real
+      boundary is that nothing auto-runs from `/persist` — an implant needs a
+      later turn to choose to run it, which is the same prompt-injection
+      problem as residual #5/#6, now with memory across sessions.
+    - **Writes before taint are trusted.** A turn that has not yet read the web
+      writes freely; a malicious *project file* (pushed into the guest every
+      turn, attacker-reachable via git or a prior tainted write that landed)
+      is not taint, so content derived from it can persist. With
+      `JARVIS_VM_EGRESS` on, in-guest network reads by `run_code` go through
+      the egress proxy, not the broker, and **do not taint** — `/persist`
+      stays writable after them.
+    - **Guest-global while mounted.** A mount is visible to every process in
+      the guest. A concurrent incognito turn, or another project's turn
+      running code in the same guest, can read (and, before taint, write) the
+      holder's `/persist` — the same property the pushed workspaces already
+      have. Scoping is by attach time, not by process.
+    - **The guest kernel parses a filesystem the guest wrote.** A crafted ext4
+      image could attack the guest's ext4 driver on the next mount — but the
+      writer was already guest root. The host only ever handles the qcow2
+      container (QEMU's parser, as for the overlay) and never mounts the disk.
+    - **Taint is shared.** The read-only switch covers the hold, so one tainted
+      turn makes `/persist` read-only for every concurrent turn of that
+      project until the last one ends (fail-safe direction).
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -215,6 +259,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. |
 | Hypervisor / kernel escape | Critical | Low | No passthrough, minimal devices, monthly patched image; unpatched-CVE window only. |
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
+| Approved `/persist` disk (implant survives sessions) | High | **Low–Medium** | Opt-in per project by the operator only (cookie GUI + acknowledge + security event); one project attached at a time, never incognito/nested; size-capped; `noexec,nodev,nosuid`; never read into context; taint re-plugs it read-only at the block layer; a guest that won't release it is torn down; revoke/purge delete it. Residual = interpreters ignore noexec, writes before taint (and `run_code` egress reads) are trusted, and a mount is visible guest-wide. |
 | Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
 | Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
 | Paste-code device login (unauthenticated redeem route) | High | Low | A logged-in session mints a 256-bit, single-use, 10-minute code (stored hashed; cancellable from Settings); the redeem route is reachable by anything on the LAN. Valid codes always redeem; misses are throttled per peer and globally on the TCP peer (no proxy headers). Tokens are hashed, revocable, expire (90 days / 30 idle) and die with their user; revoking stops the token's running turns. Residual = a code or token captured in transit on plain http. |
