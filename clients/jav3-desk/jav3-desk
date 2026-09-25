@@ -1,0 +1,1401 @@
+#!/usr/bin/env python3
+"""jav3-desk — lets a Jav3 server see and drive this computer, when allowed.
+
+    jav3-desk login          paste the line from Settings → Add computer
+    jav3-desk run            connect and serve (what the service runs)
+    jav3-desk install        write a systemd --user unit / launchd agent
+    jav3-desk uninstall      remove it
+    jav3-desk allow-shell    let the server run shell commands here (asks first
+    jav3-desk deny-shell       in Settings unless allowlisted); off by default
+    jav3-desk panic          stop everything now; needs `resume` to come back
+    jav3-desk resume
+    jav3-desk status
+
+It dials OUT (one WebSocket to <server>/api/desk/ws) and waits for requests.
+Nothing listens on this machine. What the server may do is decided twice:
+Settings → Computer use on the server (screen / input / shell), and the local
+ceiling here, which the server cannot lift — shell stays off until someone at
+this keyboard runs `jav3-desk allow-shell`.
+
+Every request is a verb from a closed list with typed, bounded parameters,
+re-validated here (ACTIONS / validate). Every program is run with an argv list
+and shell=False, from a binary resolved once at startup — except `shell`, the
+one deliberate exception, which needs the local flag AND the server's grant.
+
+Backends (auto-detected, or --backend):
+  hyprland  grim (JPEG) · wtype · hyprctl + wlroots virtual pointer
+  sway      grim · wtype · wlroots virtual pointer
+  x11       import/maim/scrot · xdotool (also the headless test backend, Xvfb)
+  macos     screencapture + sips · Quartz (ctypes) · needs the Accessibility
+            and Screen Recording grants (see `jav3-desk status`)
+  uinput    TODO(M2): stub — /dev/uinput for GNOME/KDE Wayland
+Accessibility-tree clicking (AT-SPI / AX) is TODO(M4).
+
+Files, in $XDG_CONFIG_HOME/jav3 (default ~/.config/jav3), dir 0700:
+  desk.json          {"address", "token"} 0600
+  desk-shell         present = shell allowed at this computer
+  desk.paused        present = panic; `resume` removes it
+  desk-apps.json     optional {"name": ["argv", ...]} for desk_open app=
+Needs Python 3.11+ and websockets; nothing else.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import base64
+import getpass
+import json
+import os
+import platform
+import plistlib
+import re
+import secrets
+import shutil
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+
+USER_AGENT = "jav3-desk/1"
+PROTOCOL_V = 1
+PROMPT = "Paste the line from Settings → Add computer: "
+LONG_EDGE = 1280          # screenshots are downscaled to this long edge
+SETTLE_S = 0.6            # after an input action, before the auto-screenshot
+TEXT_CAP = 2000
+OUTPUT_CAP = 16_000
+PING_S = 20
+UNIT_NAME = "jav3-desk.service"
+LABEL = "local.jav3.desk"
+
+
+class DeskError(Exception):
+    """A message for the user (CLI) or the server (a refused request)."""
+
+
+# --- config files -------------------------------------------------------------------
+
+def config_dir() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "jav3"
+
+
+def _path(name: str) -> Path:
+    return config_dir() / name
+
+
+def _ensure_dir() -> int:
+    """The config dir as an fd, created 0700; a symlink or foreign dir is
+    refused (same rules as the jav3 CLI's credential store)."""
+    d = config_dir()
+    d.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(d, 0o700)
+    except FileExistsError:
+        pass
+    try:
+        dfd = os.open(d, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                      | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as e:
+        raise DeskError(f"{d} is not a plain directory ({e.strerror})")
+    st = os.fstat(dfd)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        os.close(dfd)
+        raise DeskError(f"{d} is not a directory you own")
+    os.fchmod(dfd, 0o700)
+    return dfd
+
+
+def _write_private(name: str, data: bytes) -> Path:
+    """Atomic 0600 write inside the config dir (O_EXCL temp + rename)."""
+    dfd = _ensure_dir()
+    tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dfd)
+        try:
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(dfd)
+    return _path(name)
+
+
+def load_credentials() -> dict | None:
+    try:
+        data = json.loads(_path("desk.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("token") or not data.get("address"):
+        return None
+    return data
+
+
+def shell_allowed() -> bool:
+    return _path("desk-shell").is_file()
+
+
+def paused() -> bool:
+    return _path("desk.paused").exists()
+
+
+def ceiling() -> dict:
+    """What this computer allows, whatever the server says. Screen and input
+    follow the server's grants; shell needs the local flag too."""
+    return {"screen": True, "input": True, "shell": shell_allowed()}
+
+
+# --- login -----------------------------------------------------------------------------
+
+def parse_login_line(line: str) -> tuple[str, str]:
+    fields: dict[str, str] = {}
+    for part in (line or "").strip().strip("'\"`").split():
+        k, sep, v = part.partition("=")
+        if sep and k in ("address", "code") and v:
+            fields[k] = v.strip("'\"`")
+    if "address" not in fields or "code" not in fields:
+        raise DeskError("that doesn't look like the login line — expected "
+                        "'address=<host:port> code=<code>' from Settings → Add computer")
+    return fields["address"], fields["code"]
+
+
+def base_url(address: str) -> str:
+    a = address.strip().rstrip("/")
+    if not a:
+        raise DeskError("empty server address")
+    if "://" in a:
+        if not a.startswith(("http://", "https://")):
+            raise DeskError(f"unsupported scheme in {address!r}")
+        return a
+    return "http://" + a
+
+
+def ws_url(address: str) -> str:
+    b = base_url(address)
+    return ("wss://" + b[8:] if b.startswith("https://") else "ws://" + b[7:]) + "/api/desk/ws"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):     # a bearer token never follows a 3xx
+        return None
+
+
+def _http(method: str, url: str, body: dict | None = None, token: str | None = None):
+    req = urllib.request.Request(url, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=20) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {}
+    except (urllib.error.URLError, OSError) as e:
+        raise DeskError(f"could not reach {url}: {e}")
+
+
+def cmd_login(args, read=None) -> int:
+    read = read or (lambda: getpass.getpass(PROMPT) if sys.stdin.isatty()
+                    else sys.stdin.readline())
+    address, code = parse_login_line(read())
+    base = base_url(args.server or address)
+    if base.startswith("http://"):
+        print(f"warning: {base} is plain http — the code and the token cross the "
+              "network unencrypted. Only use it on a network you trust.", file=sys.stderr)
+    host = socket.gethostname()
+    status, body = _http("POST", base + "/api/devices/login",
+                         {"code": code, "name": host, "hostname": host,
+                          "platform": platform.system().lower(), "scope": "desk"})
+    if status != 200 or not body.get("token"):
+        raise DeskError(body.get("detail") or f"login failed ({status})")
+    try:
+        p = _write_private("desk.json", json.dumps(
+            {"address": args.server or address, "token": body["token"]}).encode())
+    except (OSError, DeskError) as e:
+        _http("DELETE", base + "/api/devices/self", token=body["token"])
+        raise DeskError(f"could not save credentials: {e}. The new token was revoked.")
+    print(f"logged in to {base} as computer '{body.get('name')}' — {p}")
+    print("next: turn on Screen / Input for it in Settings → Computer use, then "
+          "`jav3-desk run` (or `jav3-desk install`).")
+    return 0
+
+
+# --- geometry ------------------------------------------------------------------------------
+
+@dataclass
+class Monitor:
+    name: str
+    x: int            # in the INPUT coordinate space of the backend
+    y: int
+    w: int
+    h: int
+    scale: float = 1.0
+
+
+@dataclass
+class Frame:
+    """The last screenshot: which monitor rect it shows and how big the image
+    is. The model's coordinates are pixels of that image."""
+    monitor: Monitor
+    iw: int
+    ih: int
+
+    def to_screen(self, px: int, py: int) -> tuple[int, int]:
+        m = self.monitor
+        x = m.x + round(px * m.w / self.iw)
+        y = m.y + round(py * m.h / self.ih)
+        return (min(max(x, m.x), m.x + m.w - 1), min(max(y, m.y), m.y + m.h - 1))
+
+
+def fit(w: int, h: int, long_edge: int = LONG_EDGE) -> float:
+    """The downscale factor that brings the long edge to `long_edge` (≤ 1)."""
+    return min(1.0, long_edge / max(w, h, 1))
+
+
+def image_size(data: bytes) -> tuple[int, int] | None:
+    """(w, h) of a PNG or JPEG from its header; None for anything else."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        return struct.unpack(">II", data[16:24])
+    if data[:3] == b"\xff\xd8\xff":
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            seg = struct.unpack(">H", data[i + 2:i + 4])[0]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9,
+                          0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                return w, h
+            i += 2 + seg
+    return None
+
+
+# --- the closed action list -----------------------------------------------------------------
+
+BUTTONS = ("left", "right", "middle")
+MODIFIERS = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift", "alt": "alt",
+             "super": "super", "logo": "super", "win": "super", "meta": "super",
+             "cmd": "super", "altgr": "altgr"}
+# keysym names allowed as the final key: letters, digits, F-keys and a named set
+_NAMED_KEYS = {"Return", "Enter", "Tab", "Escape", "BackSpace", "Delete", "Insert",
+               "Home", "End", "Page_Up", "Page_Down", "Prior", "Next", "Left",
+               "Right", "Up", "Down", "space", "minus", "equal", "comma", "period",
+               "slash", "backslash", "semicolon", "apostrophe", "grave",
+               "bracketleft", "bracketright", "Print", "Menu"}
+# combos that end the session or hand the machine elsewhere; the backend adds
+# whatever its compositor binds to exit (hyprctl binds)
+DENY_KEYS = {"ctrl+alt+Delete", "ctrl+alt+BackSpace", "super+shift+e", "super+m",
+             "super+shift+q", "super+ctrl+q", "super+alt+Escape"} | {
+             f"ctrl+alt+F{i}" for i in range(1, 13)}
+# typed text that would reach this client's own controls
+_SELF_WORDS = ("jav3-desk", ".config/jav3", "desk-shell", "desk.paused")
+_URL_RE = re.compile(r"^https?://[^\s]{1,2000}$")
+
+
+def normalize_combo(combo: str) -> str:
+    """'Ctrl+Shift+t' -> 'ctrl+shift+t'; modifiers canonical and ordered,
+    the final key as given. Raises DeskError on anything else."""
+    if not isinstance(combo, str) or not re.fullmatch(
+            r"[A-Za-z0-9_]{1,32}(\+[A-Za-z0-9_]{1,32}){0,4}", combo.strip()):
+        raise DeskError("bad key combo")
+    parts = combo.strip().split("+")
+    mods, key = parts[:-1], parts[-1]
+    out = []
+    for m in mods:
+        c = MODIFIERS.get(m.lower())
+        if c is None:
+            raise DeskError(f"unknown modifier {m!r}")
+        if c not in out:
+            out.append(c)
+    order = ["ctrl", "alt", "altgr", "shift", "super"]
+    out.sort(key=order.index)
+    if not (len(key) == 1 and key.isalnum()) and key not in _NAMED_KEYS \
+            and not re.fullmatch(r"F([1-9]|1[0-9]|2[0-4])", key):
+        raise DeskError(f"unknown key {key!r}")
+    return "+".join([*out, key])
+
+
+def _deny_set(extra) -> set[str]:
+    """DENY_KEYS + a backend's own, normalized; an entry that is not a combo
+    this grammar can express (a mouse bind) is skipped, not fatal."""
+    out = set()
+    for d in set(extra) | DENY_KEYS:
+        try:
+            out.add(normalize_combo(d).lower())
+        except DeskError:
+            continue
+    return out
+
+
+def _num(p: dict, k: str, lo: int, hi: int, default=None) -> int:
+    v = p.get(k, default)
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise DeskError(f"{k} must be an integer")
+    if not lo <= v <= hi:
+        raise DeskError(f"{k} out of range")
+    return v
+
+
+def validate(verb: str, p: dict, frame: Frame | None, apps: dict,
+             deny: set[str] = frozenset()) -> dict:
+    """Re-check a request from the server. The server already validated it;
+    this side does not assume the server is honest."""
+    if not isinstance(p, dict):
+        raise DeskError("params must be an object")
+    out: dict = {}
+    if verb == "screenshot":
+        if p.get("monitor") is not None:
+            out["monitor"] = str(p["monitor"])[:32]
+        return out
+    if verb in ("move", "click") or (verb == "scroll" and "x" in p):
+        if frame is None:
+            raise DeskError("no screenshot yet; coordinates have nothing to refer to")
+        out["x"] = _num(p, "x", 0, frame.iw - 1)
+        out["y"] = _num(p, "y", 0, frame.ih - 1)
+    if verb in ("move", "click", "scroll", "type", "key", "open"):
+        out["screenshot_after"] = p.get("screenshot_after", True) is not False
+    if verb == "move":
+        return out
+    if verb == "click":
+        if p.get("button", "left") not in BUTTONS:
+            raise DeskError("bad button")
+        out["button"] = p.get("button", "left")
+        out["count"] = _num(p, "count", 1, 3, 1)
+        return out
+    if verb == "scroll":
+        out["dx"] = _num(p, "dx", -20, 20, 0)
+        out["dy"] = _num(p, "dy", -20, 20, 0)
+        return out
+    if verb == "type":
+        t = p.get("text")
+        if not isinstance(t, str) or not t or len(t) > TEXT_CAP or "\x00" in t:
+            raise DeskError("bad text")
+        if any(w in t for w in _SELF_WORDS):
+            raise DeskError("refused: that text would reach jav3-desk's own controls")
+        out["text"] = t
+        return out
+    if verb == "key":
+        c = normalize_combo(p.get("combo"))
+        if c.lower() in _deny_set(deny):
+            raise DeskError(f"refused: {c} is on this computer's denylist")
+        out["combo"] = c
+        return out
+    if verb == "open":
+        url, app = p.get("url"), p.get("app")
+        if isinstance(url, str) and url:
+            if not _URL_RE.match(url):
+                raise DeskError("only http(s) URLs")
+            out["url"] = url
+        elif isinstance(app, str) and app in apps:
+            out["app"] = app
+        else:
+            raise DeskError("open needs an http(s) url or one of this computer's apps")
+        return out
+    if verb == "shell":
+        cmd = p.get("cmd")
+        if not isinstance(cmd, str) or not cmd.strip() or len(cmd) > 4000:
+            raise DeskError("bad cmd")
+        mode = p.get("mode")
+        if mode not in ("argv", "shell"):
+            raise DeskError("bad shell mode")
+        out.update(cmd=cmd, mode=mode, timeout=_num(p, "timeout", 1, 120, 60))
+        if mode == "argv":
+            argv = p.get("argv")
+            if not (isinstance(argv, list) and argv and len(argv) <= 256
+                    and all(isinstance(a, str) and "\x00" not in a for a in argv)):
+                raise DeskError("bad argv")
+            out["argv"] = argv
+        cwd = p.get("cwd")
+        if cwd is not None:
+            if not isinstance(cwd, str) or "\x00" in cwd or len(cwd) > 512:
+                raise DeskError("bad cwd")
+            out["cwd"] = cwd
+        return out
+    raise DeskError(f"unknown verb {verb!r}")
+
+
+# --- running programs --------------------------------------------------------------------------
+
+EXTRA_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+                  "/usr/sbin", "/sbin", "/snap/bin")
+
+
+def find_bin(name: str) -> str | None:
+    """Resolved ONCE per backend at startup, then frozen: nothing is looked up
+    on PATH later, so PATH cannot be moved under a running client. A service
+    inherits a thin PATH, hence the extra dirs."""
+    path = os.environ.get("PATH", "") + os.pathsep + os.pathsep.join(EXTRA_BIN_DIRS)
+    return shutil.which(name, path=path)
+
+
+def run_argv(argv: list[str], *, data: bytes | None = None, timeout: float = 15,
+             check: bool = True) -> bytes:
+    r = subprocess.run(argv, input=data, capture_output=True, timeout=timeout,
+                       shell=False)
+    if check and r.returncode != 0:
+        raise DeskError(f"{Path(argv[0]).name} failed: "
+                        f"{r.stderr.decode(errors='replace').strip()[:300]}")
+    return r.stdout
+
+
+# --- backends --------------------------------------------------------------------------------------
+
+class Backend:
+    name = "?"
+    session = "?"
+    needs: tuple[str, ...] = ()
+
+    def __init__(self):
+        self.bin = {n: find_bin(n) for n in self.needs + self.optional()}
+        missing = [n for n in self.needs if not self.bin.get(n)]
+        if missing:
+            raise DeskError(f"the {self.name} backend needs: {', '.join(missing)}")
+
+    def optional(self) -> tuple[str, ...]:
+        return ()
+
+    def monitors(self) -> list[Monitor]:
+        raise NotImplementedError
+
+    def screenshot(self, mon: Monitor) -> bytes:
+        raise NotImplementedError
+
+    def move(self, x: int, y: int) -> None:
+        raise NotImplementedError
+
+    def click(self, button: str, count: int) -> None:
+        raise NotImplementedError
+
+    def scroll(self, dx: int, dy: int) -> None:
+        raise NotImplementedError
+
+    def type_text(self, text: str) -> None:
+        raise NotImplementedError
+
+    def key(self, combo: str) -> None:
+        raise NotImplementedError
+
+    def open_url(self, url: str) -> None:
+        opener = find_bin("open" if sys.platform == "darwin" else "xdg-open")
+        if not opener:
+            raise DeskError("no opener (xdg-open) installed")
+        subprocess.Popen([opener, url], shell=False, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def deny_keys(self) -> set[str]:
+        return set()
+
+    def notify(self, text: str) -> None:
+        n = find_bin("notify-send")
+        if n:
+            subprocess.Popen([n, "-a", "jav3-desk", "jav3-desk", text], shell=False,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _grim_shot(b: Backend, mon: Monitor) -> bytes:
+    """grim's -s is the output image scale relative to LOGICAL size (its
+    default is the output's own scale, i.e. physical pixels), so this both
+    downsizes and undoes HiDPI in one go. JPEG: ~65 ms vs ~800 ms for PNG."""
+    s = fit(mon.w, mon.h)
+    return run_argv([b.bin["grim"], "-o", mon.name, "-t", "jpeg", "-q", "80",
+                     "-s", f"{s:.4f}", "-"])
+
+
+class WaylandPointer:
+    """A minimal zwlr_virtual_pointer_v1 client, speaking the Wayland wire
+    protocol directly (no pywayland). Pointer events without root, uinput or a
+    portal — the compositor trusts local Wayland clients, which is also why
+    only wlroots-family compositors (Hyprland, Sway) offer it."""
+
+    BTN = {"left": 0x110, "right": 0x111, "middle": 0x112}
+
+    def __init__(self, path: str | None = None):
+        disp = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+        path = path or (disp if disp.startswith("/") else
+                        os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d"
+                                                    % os.getuid()), disp))
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(path)
+        self.next_id = 2
+        self.globals: dict[str, tuple[int, int]] = {}
+        self.buf = b""
+        reg = self._new()
+        self._send(1, 1, self.u32(reg))                  # wl_display.get_registry
+        self.registry = reg
+        self.roundtrip()
+        if "zwlr_virtual_pointer_manager_v1" not in self.globals:
+            raise DeskError("this compositor has no zwlr_virtual_pointer_manager_v1")
+        name, ver = self.globals["zwlr_virtual_pointer_manager_v1"]
+        self.mgr = self._new()
+        self._send(reg, 0, self.u32(name) + self.string("zwlr_virtual_pointer_manager_v1")
+                   + self.u32(min(ver, 1)) + self.u32(self.mgr))      # wl_registry.bind
+        self.ptr = self._new()
+        self._send(self.mgr, 0, self.u32(0) + self.u32(self.ptr))   # create(seat=null)
+        self.roundtrip()
+
+    # wire encoding
+    @staticmethod
+    def u32(v: int) -> bytes:
+        return struct.pack("=I", v & 0xFFFFFFFF)
+
+    @staticmethod
+    def i32(v: int) -> bytes:
+        return struct.pack("=i", v)
+
+    @staticmethod
+    def fixed(v: float) -> bytes:
+        return struct.pack("=i", int(round(v * 256)))
+
+    @staticmethod
+    def string(s: str) -> bytes:
+        b = s.encode() + b"\0"
+        return struct.pack("=I", len(b)) + b + b"\0" * (-len(b) % 4)
+
+    def _new(self) -> int:
+        i = self.next_id
+        self.next_id += 1
+        return i
+
+    def _send(self, obj: int, opcode: int, payload: bytes = b"") -> None:
+        self.sock.sendall(struct.pack("=II", obj, ((8 + len(payload)) << 16) | opcode)
+                          + payload)
+
+    def roundtrip(self) -> None:
+        cb = self._new()
+        self._send(1, 0, self.u32(cb))                       # wl_display.sync
+        self.sock.settimeout(5)
+        while True:
+            while len(self.buf) < 8:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise DeskError("the compositor closed the connection")
+                self.buf += chunk
+            obj, word = struct.unpack("=II", self.buf[:8])
+            size, op = word >> 16, word & 0xFFFF
+            while len(self.buf) < size:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise DeskError("the compositor closed the connection")
+                self.buf += chunk
+            body, self.buf = self.buf[8:size], self.buf[size:]
+            if obj == 1 and op == 0:                         # wl_display.error
+                n = struct.unpack("=I", body[8:12])[0]
+                raise DeskError("wayland error: " + body[12:12 + n - 1].decode(errors="replace"))
+            if obj == self.registry and op == 0:             # wl_registry.global
+                name, n = struct.unpack("=II", body[:8])
+                iface = body[8:8 + n - 1].decode()
+                ver = struct.unpack("=I", body[8 + n + (-n % 4):12 + n + (-n % 4)])[0]
+                self.globals[iface] = (name, ver)
+            if obj == cb and op == 0:                        # wl_callback.done
+                return
+
+    @staticmethod
+    def _t() -> int:
+        return int(time.monotonic() * 1000) & 0xFFFFFFFF
+
+    def motion_absolute(self, x: int, y: int, ext_w: int, ext_h: int) -> None:
+        self._send(self.ptr, 1, self.u32(self._t()) + self.u32(x) + self.u32(y)
+                   + self.u32(ext_w) + self.u32(ext_h))
+        self._send(self.ptr, 4)                              # frame
+        self.roundtrip()
+
+    def click(self, button: str, count: int) -> None:
+        for _ in range(count):
+            for state in (1, 0):
+                self._send(self.ptr, 2, self.u32(self._t()) + self.u32(self.BTN[button])
+                           + self.u32(state))
+                self._send(self.ptr, 4)
+            time.sleep(0.03)
+        self.roundtrip()
+
+    def scroll(self, dx: int, dy: int) -> None:
+        for axis, n in ((0, dy), (1, dx)):
+            if n:
+                self._send(self.ptr, 5, self.u32(0))         # axis_source: wheel
+                self._send(self.ptr, 7, self.u32(self._t()) + self.u32(axis)
+                           + self.fixed(15.0 * n) + self.i32(n))   # axis_discrete
+                self._send(self.ptr, 4)
+        self.roundtrip()
+
+
+class WlrootsBackend(Backend):
+    needs = ("grim", "wtype")
+    _wtype_mod = {"ctrl": "ctrl", "alt": "alt", "shift": "shift", "super": "logo",
+                  "altgr": "altgr"}
+
+    def __init__(self):
+        super().__init__()
+        self._ptr = None
+
+    def pointer(self) -> WaylandPointer:
+        if self._ptr is None:
+            self._ptr = WaylandPointer()
+        return self._ptr
+
+    def layout(self) -> tuple[int, int, int, int]:
+        ms = self.monitors()
+        x0, y0 = min(m.x for m in ms), min(m.y for m in ms)
+        return x0, y0, max(m.x + m.w for m in ms) - x0, max(m.y + m.h for m in ms) - y0
+
+    def screenshot(self, mon: Monitor) -> bytes:
+        return _grim_shot(self, mon)
+
+    def move(self, x: int, y: int) -> None:
+        x0, y0, w, h = self.layout()
+        self.pointer().motion_absolute(x - x0, y - y0, w, h)
+
+    def click(self, button: str, count: int) -> None:
+        self.pointer().click(button, count)
+
+    def scroll(self, dx: int, dy: int) -> None:
+        self.pointer().scroll(dx, dy)
+
+    def type_text(self, text: str) -> None:
+        run_argv([self.bin["wtype"], "-d", "8", "--", text], timeout=60)
+
+    def key(self, combo: str) -> None:
+        *mods, k = combo.split("+")
+        argv = [self.bin["wtype"]]
+        for m in mods:
+            argv += ["-M", self._wtype_mod[m]]
+        argv += ["-k", "Return" if k == "Enter" else k]
+        for m in reversed(mods):
+            argv += ["-m", self._wtype_mod[m]]
+        run_argv(argv)
+
+
+class HyprlandBackend(WlrootsBackend):
+    name, session = "hyprland", "hyprland"
+    needs = ("grim", "wtype", "hyprctl")
+
+    def _j(self, *what: str):
+        return json.loads(run_argv([self.bin["hyprctl"], *what, "-j"]))
+
+    def monitors(self) -> list[Monitor]:
+        """Logical rects (hyprctl reports the physical mode + scale), focused
+        monitor first — that is the one a bare desk_screenshot shows."""
+        raw = self._j("monitors")
+        out = []
+        for m in raw:
+            s = float(m.get("scale") or 1) or 1.0
+            w, h = int(m["width"]), int(m["height"])
+            if int(m.get("transform", 0)) % 2:
+                w, h = h, w
+            out.append(Monitor(name=m["name"], x=int(m["x"]), y=int(m["y"]),
+                               w=round(w / s), h=round(h / s), scale=s))
+        return sorted(out, key=lambda m: not raw[out.index(m)].get("focused"))
+
+    def _version(self) -> tuple[int, ...]:
+        try:
+            tag = self._j("version").get("tag", "")
+            return tuple(int(p) for p in re.findall(r"\d+", tag)[:3])
+        except (DeskError, ValueError, OSError):
+            return (0,)
+
+    def move(self, x: int, y: int) -> None:
+        """Hyprland moves its own cursor (multi-monitor safe, per hypruse);
+        0.56 replaced string dispatchers with Lua. Read back via cursorpos, and
+        fall back to the virtual pointer if the dispatch did not land."""
+        if self._version() >= (0, 56):
+            argv = [self.bin["hyprctl"], "dispatch", f"hl.dsp.cursor.move({{x={x},y={y}}})"]
+        else:
+            argv = [self.bin["hyprctl"], "dispatch", "movecursor", f"{x} {y}"]
+        run_argv(argv, check=False)
+        try:
+            got = run_argv([self.bin["hyprctl"], "cursorpos"]).decode()
+            cx, cy = (int(float(v)) for v in got.split(","))
+            if abs(cx - x) <= 2 and abs(cy - y) <= 2:
+                return
+        except (DeskError, ValueError, OSError):
+            pass
+        super().move(x, y)
+
+    def deny_keys(self) -> set[str]:
+        """Whatever this compositor binds to `exit` (default super+M)."""
+        out = set()
+        try:
+            for b in self._j("binds"):
+                if b.get("dispatcher") == "exit" and b.get("key"):
+                    mask = int(b.get("modmask", 0))
+                    mods = [n for bit, n in ((4, "ctrl"), (8, "alt"), (1, "shift"),
+                                             (64, "super")) if mask & bit]
+                    out.add("+".join([*mods, b["key"]]))
+        except (DeskError, ValueError, OSError, TypeError, KeyError):
+            pass
+        return out
+
+
+class SwayBackend(WlrootsBackend):
+    name, session = "sway", "sway"
+    needs = ("grim", "wtype", "swaymsg")
+
+    def monitors(self) -> list[Monitor]:
+        outs = json.loads(run_argv([self.bin["swaymsg"], "-t", "get_outputs", "-r"]))
+        ms = [Monitor(name=o["name"], x=o["rect"]["x"], y=o["rect"]["y"],
+                      w=o["rect"]["width"], h=o["rect"]["height"],
+                      scale=float(o.get("scale") or 1)) for o in outs if o.get("active")]
+        focused = [m for m, o in zip(ms, [o for o in outs if o.get("active")])
+                   if o.get("focused")]
+        return focused + [m for m in ms if m not in focused]
+
+
+class X11Backend(Backend):
+    """xdotool against $DISPLAY. The laptop's DISPLAY is only Xwayland (it
+    cannot see native Wayland windows), so this is chosen only when there is
+    no Wayland session — and it is the headless test backend under Xvfb."""
+    name, session = "x11", "x11"
+    needs = ("xdotool",)
+
+    def optional(self):
+        return ("import", "maim", "scrot")
+
+    def monitors(self) -> list[Monitor]:
+        w, h = (int(v) for v in run_argv([self.bin["xdotool"], "getdisplaygeometry"])
+                .split())
+        return [Monitor(name="0", x=0, y=0, w=w, h=h)]
+
+    def screenshot(self, mon: Monitor) -> bytes:
+        s = fit(mon.w, mon.h)
+        tw, th = max(1, round(mon.w * s)), max(1, round(mon.h * s))
+        if self.bin.get("import"):
+            return run_argv([self.bin["import"], "-window", "root", "-crop",
+                             f"{mon.w}x{mon.h}+{mon.x}+{mon.y}", "-resize",
+                             f"{tw}x{th}!", "-quality", "80", "jpeg:-"])
+        if self.bin.get("maim"):
+            return run_argv([self.bin["maim"], "-f", "jpg", "-g",
+                             f"{mon.w}x{mon.h}+{mon.x}+{mon.y}"])
+        if self.bin.get("scrot"):
+            with tempfile.TemporaryDirectory() as d:
+                f = os.path.join(d, "s.jpg")
+                run_argv([self.bin["scrot"], "-o", f])
+                return Path(f).read_bytes()
+        raise DeskError("install ImageMagick (import), maim or scrot for screenshots")
+
+    def move(self, x, y):
+        run_argv([self.bin["xdotool"], "mousemove", "--sync", str(x), str(y)])
+
+    def click(self, button, count):
+        run_argv([self.bin["xdotool"], "click", "--repeat", str(count), "--delay", "80",
+                  {"left": "1", "middle": "2", "right": "3"}[button]])
+
+    def scroll(self, dx, dy):
+        for n, neg, pos in ((dy, "4", "5"), (dx, "6", "7")):
+            if n:
+                run_argv([self.bin["xdotool"], "click", "--repeat", str(abs(n)),
+                          neg if n < 0 else pos])
+
+    def type_text(self, text):
+        run_argv([self.bin["xdotool"], "type", "--delay", "12", "--", text], timeout=60)
+
+    def key(self, combo):
+        run_argv([self.bin["xdotool"], "key", "--clearmodifiers",
+                  combo.replace("Enter", "Return")])
+
+
+class MacBackend(Backend):
+    """macOS. Screenshots need Screen Recording and input needs Accessibility,
+    both granted in System Settings → Privacy & Security to the python binary
+    that runs this (for the launchd agent, the one `status` prints). A grant
+    only takes effect after restarting the process, and Sequoia re-asks for
+    Screen Recording monthly. "Nothing happens" on click = Accessibility."""
+    name, session = "macos", "aqua"
+    needs = ("screencapture", "sips")
+    _KEYCODES = {**{c: k for c, k in zip("asdfhgzxcv", (0, 1, 2, 3, 4, 5, 6, 7, 8, 9))},
+                 "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+                 "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26,
+                 "8": 28, "0": 29, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38,
+                 "k": 40, "n": 45, "m": 46, "Return": 36, "Enter": 36, "Tab": 48,
+                 "space": 49, "BackSpace": 51, "Escape": 53, "Delete": 117,
+                 "Left": 123, "Right": 124, "Down": 125, "Up": 126, "Home": 115,
+                 "End": 119, "Page_Up": 116, "Page_Down": 121, "period": 47,
+                 "comma": 43, "slash": 44, "minus": 27, "equal": 24}
+    _FLAGS = {"shift": 1 << 17, "ctrl": 1 << 18, "alt": 1 << 19, "super": 1 << 20}
+
+    def __init__(self):
+        super().__init__()
+        import ctypes
+        import ctypes.util
+        self.ct = ctypes
+        self.cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics")
+                                          or "/System/Library/Frameworks/"
+                                          "CoreGraphics.framework/CoreGraphics")
+
+        class Pt(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+        class Rect(ctypes.Structure):
+            _fields_ = [("origin", Pt), ("size", Pt)]
+        self.Pt = Pt
+        self.cg.CGMainDisplayID.restype = ctypes.c_uint32
+        self.cg.CGDisplayBounds.restype = Rect
+        self.cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+        self.cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+        self.cg.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                    Pt, ctypes.c_uint32]
+        self.cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+        self.cg.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16,
+                                                       ctypes.c_bool]
+        self.cg.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
+        self.cg.CGEventCreateScrollWheelEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                          ctypes.c_uint32, ctypes.c_int32,
+                                                          ctypes.c_int32]
+        self.cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        self.cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        self.cg.CGEventSetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                        ctypes.c_int64]
+        self.cg.CGEventKeyboardSetUnicodeString.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p]
+        self.cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+        self.cf.CFRelease.argtypes = [ctypes.c_void_p]
+        self.pos = (0, 0)
+
+    def _post(self, ev) -> None:
+        self.cg.CGEventPost(0, ev)          # kCGHIDEventTap
+        self.cf.CFRelease(ev)
+
+    def monitors(self):
+        r = self.cg.CGDisplayBounds(self.cg.CGMainDisplayID())
+        return [Monitor(name="main", x=int(r.origin.x), y=int(r.origin.y),
+                        w=int(r.size.x), h=int(r.size.y))]
+
+    def screenshot(self, mon):
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.jpg")
+            run_argv([self.bin["screencapture"], "-x", "-m", "-t", "jpg", f])
+            run_argv([self.bin["sips"], "-Z", str(LONG_EDGE), f])
+            return Path(f).read_bytes()
+
+    def move(self, x, y):
+        self.pos = (x, y)
+        self._post(self.cg.CGEventCreateMouseEvent(None, 5, self.Pt(x, y), 0))
+
+    def click(self, button, count):
+        down, up, btn = {"left": (1, 2, 0), "right": (3, 4, 1), "middle": (25, 26, 2)}[button]
+        for i in range(1, count + 1):
+            for kind in (down, up):
+                ev = self.cg.CGEventCreateMouseEvent(None, kind, self.Pt(*self.pos), btn)
+                self.cg.CGEventSetIntegerValueField(ev, 1, i)    # click state
+                self._post(ev)
+
+    def scroll(self, dx, dy):
+        self._post(self.cg.CGEventCreateScrollWheelEvent(None, 1, 2, -dy, -dx))
+
+    def type_text(self, text):
+        for ch in text:
+            for down in (True, False):
+                ev = self.cg.CGEventCreateKeyboardEvent(None, 0, down)
+                self.cg.CGEventKeyboardSetUnicodeString(ev, 1, ch)
+                self._post(ev)
+            time.sleep(0.008)
+
+    def key(self, combo):
+        *mods, k = combo.split("+")
+        code = self._KEYCODES.get(k if len(k) > 1 else k.lower())
+        if code is None:
+            raise DeskError(f"no macOS key code for {k!r}")
+        flags = 0
+        for m in mods:
+            flags |= self._FLAGS.get(m, 0)
+        for down in (True, False):
+            ev = self.cg.CGEventCreateKeyboardEvent(None, code, down)
+            self.cg.CGEventSetFlags(ev, flags)
+            self._post(ev)
+
+    def notify(self, text):
+        n = find_bin("terminal-notifier")      # never osascript: AppleScript can shell
+        if n:
+            subprocess.Popen([n, "-title", "jav3-desk", "-message", text], shell=False,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class UinputBackend(Backend):
+    """TODO(M2): GNOME/KDE Wayland — the xdg-desktop-portal RemoteDesktop +
+    Screenshot portals, with /dev/uinput (dotool/ydotool) as the fallback.
+    Needs a udev rule the operator installs; deliberately not in this
+    milestone, which stays rootless."""
+    name, session = "uinput", "wayland"
+
+    def __init__(self):
+        raise DeskError("the uinput / portal backend is not built yet (M2); on "
+                        "Hyprland, Sway or X11 leave --backend unset")
+
+
+BACKENDS = {"hyprland": HyprlandBackend, "sway": SwayBackend, "x11": X11Backend,
+            "macos": MacBackend, "uinput": UinputBackend}
+
+
+def detect_backend(env=os.environ, plat=sys.platform) -> str:
+    if plat == "darwin":
+        return "macos"
+    if env.get("WAYLAND_DISPLAY"):
+        if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            return "hyprland"
+        if env.get("SWAYSOCK"):
+            return "sway"
+        raise DeskError("this Wayland session is not Hyprland or Sway; GNOME/KDE "
+                        "need the portal backend (not built yet, M2)")
+    if env.get("DISPLAY"):
+        return "x11"
+    raise DeskError("no graphical session found (no WAYLAND_DISPLAY or DISPLAY); "
+                    "for the service run: systemctl --user import-environment "
+                    "WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE SWAYSOCK")
+
+
+def local_apps(plat=sys.platform) -> dict[str, list[str]]:
+    """name -> argv for desk_open app=. From desk-apps.json if present, else
+    the browsers/editors found here. A terminal is deliberately not offered
+    by default: opening one and typing into it would be shell by other means."""
+    try:
+        raw = json.loads(_path("desk-apps.json").read_text())
+        return {k: v for k, v in raw.items()
+                if isinstance(k, str) and re.fullmatch(r"[A-Za-z0-9 ._+-]{1,64}", k)
+                and isinstance(v, list) and v and all(isinstance(a, str) for a in v)}
+    except (OSError, ValueError, AttributeError):
+        pass
+    if plat == "darwin":
+        return {n: ["/usr/bin/open", "-a", n] for n in ("Safari", "Finder", "Notes")}
+    apps = {}
+    for n in ("firefox", "chromium", "google-chrome", "code", "nautilus", "thunar"):
+        p = find_bin(n)
+        if p:
+            apps[n] = [p]
+    return apps
+
+
+# --- the connection ------------------------------------------------------------------------------
+
+class Session:
+    def __init__(self, backend: Backend, address: str, token: str):
+        self.b = backend
+        self.address, self.token = address, token
+        self.frame: Frame | None = None
+        self.grants = {"screen": False, "input": False, "shell": "off"}
+        self.apps = local_apps()
+        self.deny = backend.deny_keys()
+        self.input_lock = asyncio.Lock()
+        self.shell_busy = False
+        self.last_action = 0.0
+        self.sent_ceiling = ceiling()
+        self.inflight: set[asyncio.Task] = set()
+
+    def hello(self) -> dict:
+        try:
+            mons = [m.__dict__ for m in self.b.monitors()]
+        except Exception:  # noqa: BLE001 — hello must not die on a probe
+            mons = []
+        return {"type": "hello", "v": PROTOCOL_V, "host": socket.gethostname(),
+                "platform": sys.platform, "session": self.b.session,
+                "backend": self.b.name, "monitors": mons,
+                "apps": sorted(self.apps), "ceiling": ceiling()}
+
+    def allowed(self, verb: str) -> str | None:
+        cap = {"screenshot": "screen", "shell": "shell"}.get(verb, "input")
+        c = ceiling()
+        g = self.grants.get(cap)
+        if cap == "shell":
+            if not c["shell"]:
+                return "shell is off at this computer (jav3-desk allow-shell)"
+            if g not in ("ask", "trusted"):
+                return "shell is not granted"
+        elif not g:
+            return f"{cap} is not granted"
+        return None
+
+    def _shot(self, monitor: str | None = None) -> dict:
+        ms = self.b.monitors()
+        mon = ms[0]
+        if monitor is not None:
+            pick = [m for i, m in enumerate(ms) if m.name == monitor or str(i) == monitor]
+            if not pick:
+                raise DeskError(f"no monitor {monitor!r} (have: "
+                                f"{', '.join(m.name for m in ms)})")
+            mon = pick[0]
+        data = self.b.screenshot(mon)
+        size = image_size(data)
+        if size is None:
+            raise DeskError("the screenshot tool returned something that is not an image")
+        self.frame = Frame(mon, *size)
+        mime = "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
+        return {"mime": mime, "w": size[0], "h": size[1],
+                "b64": base64.b64encode(data).decode()}
+
+    def execute(self, verb: str, p: dict) -> dict:
+        """Blocking: runs in a worker thread."""
+        if verb == "screenshot":
+            img = self._shot(p.get("monitor"))
+            return {"ok": True, "text": f"screenshot {img['w']}x{img['h']}", "image": img}
+        f = self.frame
+        if verb in ("move", "click") or (verb == "scroll" and "x" in p):
+            self.b.move(*f.to_screen(p["x"], p["y"]))
+        if verb == "click":
+            self.b.click(p["button"], p["count"])
+        elif verb == "scroll":
+            self.b.scroll(p["dx"], p["dy"])
+        elif verb == "type":
+            self.b.type_text(p["text"])
+        elif verb == "key":
+            self.b.key(p["combo"])
+        elif verb == "open":
+            if "url" in p:
+                self.b.open_url(p["url"])
+            else:
+                subprocess.Popen(self.apps[p["app"]], shell=False, start_new_session=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        out = {"ok": True, "text": f"{verb} done"}
+        if p.get("screenshot_after"):
+            time.sleep(SETTLE_S * (3 if verb == "open" else 1))
+            out["image"] = self._shot(self.frame.monitor.name if self.frame else None)
+        return out
+
+    async def shell(self, p: dict) -> dict:
+        if p["mode"] == "argv":
+            exe = find_bin(p["argv"][0]) if "/" not in p["argv"][0] else p["argv"][0]
+            if not exe:
+                return {"ok": False, "err": f"{p['argv'][0]}: command not found"}
+            argv = [exe, *p["argv"][1:]]
+        else:
+            argv = [os.environ.get("SHELL") or "/bin/sh", "-c", p["cmd"]]
+        self.b.notify(f"running: {p['cmd'][:120]}")
+        cwd = os.path.expanduser(p.get("cwd") or "~")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:
+            return {"ok": False, "err": str(e)}
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), p["timeout"])
+        except asyncio.TimeoutError:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            await proc.wait()
+            return {"ok": False, "err": f"timed out after {p['timeout']} s"}
+        text = out.decode(errors="replace")
+        if len(text) > OUTPUT_CAP:
+            text = text[:OUTPUT_CAP] + "\n…(cut)"
+        return {"ok": proc.returncode == 0,
+                "text": f"{text}\n[exit {proc.returncode}]",
+                "err": None if proc.returncode == 0 else f"exit {proc.returncode}"}
+
+    async def handle(self, ws, m: dict) -> None:
+        rid, verb = m.get("id"), m.get("verb")
+        try:
+            if paused():
+                raise DeskError("paused at the computer (jav3-desk resume)")
+            why = self.allowed(verb)
+            if why:
+                raise DeskError(why)
+            p = validate(verb, m.get("params") or {}, self.frame, self.apps, self.deny)
+            if time.time() - self.last_action > 300:
+                self.b.notify("Jav3 is using this computer")
+            self.last_action = time.time()
+            if verb == "shell":
+                if self.shell_busy:
+                    raise DeskError("a command is already running")
+                self.shell_busy = True
+                try:
+                    res = await self.shell(p)
+                finally:
+                    self.shell_busy = False
+            elif verb == "screenshot":
+                res = await asyncio.to_thread(self.execute, verb, p)
+            else:
+                async with self.input_lock:
+                    res = await asyncio.to_thread(self.execute, verb, p)
+        except DeskError as e:
+            res = {"ok": False, "err": str(e)}
+        except Exception as e:  # noqa: BLE001 — report, never die
+            res = {"ok": False, "err": f"{type(e).__name__}: {e}"[:500]}
+        await ws.send(json.dumps({"type": "res", "id": rid, **res}))
+
+    async def serve(self) -> str:
+        import inspect
+
+        import websockets
+        # the token rides the upgrade's Authorization header, never the URL
+        hdr = {"Authorization": f"Bearer {self.token}"}
+        # websockets >= 14 renamed extra_headers; support both
+        key = ("additional_headers" if "additional_headers"
+               in inspect.signature(websockets.connect).parameters else "extra_headers")
+        conn = websockets.connect(ws_url(self.address), max_size=1 << 20,
+                                  ping_interval=None, user_agent_header=USER_AGENT,
+                                  **{key: hdr})
+        async with conn as ws:
+            await ws.send(json.dumps(self.hello()))
+            pinger = asyncio.create_task(self._ping(ws))
+            try:
+                async for raw in ws:
+                    try:
+                        m = json.loads(raw)
+                    except ValueError:
+                        continue
+                    t = m.get("type") if isinstance(m, dict) else None
+                    if t == "grants":
+                        self.grants = {k: m.get(k) for k in ("screen", "input", "shell")}
+                    elif t == "req":
+                        task = asyncio.create_task(self.handle(ws, m))
+                        self.inflight.add(task)
+                        task.add_done_callback(self.inflight.discard)
+                    elif t == "kill":
+                        for task in list(self.inflight):
+                            task.cancel()
+                        self.grants = {"screen": False, "input": False, "shell": "off"}
+                        return "killed: " + str(m.get("reason") or "")
+            finally:
+                pinger.cancel()
+        return "closed"
+
+    async def _ping(self, ws) -> None:
+        while True:
+            await asyncio.sleep(PING_S)
+            if paused():
+                await ws.close()
+                return
+            c = ceiling()
+            if c != self.sent_ceiling:
+                self.sent_ceiling = c
+                await ws.send(json.dumps({"type": "ceiling", "ceiling": c}))
+            await ws.send(json.dumps({"type": "ping"}))
+
+
+def cmd_run(args) -> int:
+    try:
+        import websockets  # noqa: F401
+    except ImportError:
+        raise DeskError("jav3-desk needs websockets: install python-websockets "
+                        "(Arch) / python3-websockets (Debian) or pip install websockets")
+    creds = load_credentials()
+    if not creds:
+        raise DeskError("not logged in — run: jav3-desk login")
+    b = BACKENDS[args.backend or detect_backend()]()
+    _write_private("desk.pid", str(os.getpid()).encode())
+    print(f"jav3-desk: {b.name} backend, server {base_url(args.server or creds['address'])}",
+          flush=True)
+
+    async def loop():
+        delay = 2
+        while True:
+            if paused():
+                await asyncio.sleep(5)
+                continue
+            s = Session(b, args.server or creds["address"], creds["token"])
+            try:
+                why = await s.serve()
+                delay = 2
+            except Exception as e:  # noqa: BLE001 — reconnect forever, loudly
+                why = f"{type(e).__name__}: {e}"
+                if "HTTP 403" in why:
+                    # refused before the upgrade: revoked, expired, or not a
+                    # desk token. Keep trying, slowly — a new login fixes it.
+                    why += " — the token was refused; run jav3-desk login"
+                    delay = 300
+            print(f"jav3-desk: connection ended ({why}); retrying in {delay} s", flush=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+    try:
+        return asyncio.run(loop()) or 0
+    except KeyboardInterrupt:
+        return 130
+
+
+# --- local switches ----------------------------------------------------------------------------------
+
+def cmd_allow_shell(args) -> int:
+    _write_private("desk-shell", b"allowed at the keyboard\n")
+    print("shell allowed at this computer. The server still needs Shell turned on "
+          "in Settings, and asks you there for anything off the allowlist.")
+    return 0
+
+
+def cmd_deny_shell(args) -> int:
+    try:
+        _path("desk-shell").unlink()
+    except FileNotFoundError:
+        pass
+    print("shell is off at this computer.")
+    return 0
+
+
+def cmd_panic(args) -> int:
+    """Stop now: flag paused (a restarted service stays idle), stop the
+    service, kill a foreground `run`. Needs `jav3-desk resume` to undo."""
+    _write_private("desk.paused", b"panic\n")
+    if sys.platform == "darwin":
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
+                       capture_output=True, shell=False)
+    elif find_bin("systemctl"):
+        subprocess.run([find_bin("systemctl"), "--user", "stop", UNIT_NAME],
+                       capture_output=True, shell=False)
+    try:
+        pid = int(_path("desk.pid").read_text().strip())
+        if pid != os.getpid():
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+    print("jav3-desk stopped and paused. `jav3-desk resume` to allow it again.")
+    return 0
+
+
+def cmd_resume(args) -> int:
+    try:
+        _path("desk.paused").unlink()
+    except FileNotFoundError:
+        pass
+    print("resumed. Start it again with `jav3-desk run` or your service manager.")
+    return 0
+
+
+def cmd_status(args) -> int:
+    creds = load_credentials()
+    print(f"server:  {base_url(creds['address']) if creds else '(not logged in)'}")
+    try:
+        print(f"backend: {args.backend or detect_backend()}")
+    except DeskError as e:
+        print(f"backend: {e}")
+    print(f"shell:   {'allowed' if shell_allowed() else 'off'} at this computer")
+    print(f"paused:  {'yes' if paused() else 'no'}")
+    if sys.platform == "darwin":
+        print(f"grant Accessibility + Screen Recording to: {sys.executable}")
+    return 0
+
+
+# --- service definitions ------------------------------------------------------------------------------
+
+def systemd_unit(script: Path) -> str:
+    return f"""\
+[Unit]
+Description=jav3-desk (Jav3 computer use)
+After=graphical-session.target network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# no secrets here: a unit file is world-readable; the token is in
+# ~/.config/jav3/desk.json (0600)
+ExecStart={sys.executable} {script} run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
+"""
+
+
+def launchd_plist(script: Path) -> bytes:
+    logs = Path.home() / "Library" / "Logs"
+    return plistlib.dumps({
+        "Label": LABEL, "ProgramArguments": [sys.executable, str(script), "run"],
+        "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 5,
+        "ProcessType": "Interactive",
+        "StandardOutPath": str(logs / "jav3-desk.log"),
+        "StandardErrorPath": str(logs / "jav3-desk.err.log")})
+
+
+def service_path(plat=sys.platform) -> Path:
+    if plat == "darwin":
+        return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    return (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+            / "systemd" / "user" / UNIT_NAME)
+
+
+def cmd_install(args) -> int:
+    script = Path(__file__).resolve()
+    target = service_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        target.write_bytes(launchd_plist(script))
+        steps = [f"launchctl bootstrap gui/{os.getuid()} {target}",
+                 f"# then grant Accessibility + Screen Recording to {sys.executable}",
+                 "# (System Settings → Privacy & Security) and restart the agent:",
+                 f"launchctl kickstart -k gui/{os.getuid()}/{LABEL}"]
+    else:
+        target.write_text(systemd_unit(script))
+        steps = ["systemctl --user import-environment WAYLAND_DISPLAY DISPLAY "
+                 "XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE SWAYSOCK",
+                 "systemctl --user daemon-reload",
+                 f"systemctl --user enable --now {UNIT_NAME}",
+                 f"# logs: journalctl --user -u {UNIT_NAME} -f",
+                 "# panic key, e.g. Hyprland: bind = SUPER SHIFT, Escape, exec, "
+                 f"{script} panic"]
+    print(f"wrote {target}\nnext:\n  " + "\n  ".join(steps))
+    return 0
+
+
+def cmd_uninstall(args) -> int:
+    target = service_path()
+    if target.exists():
+        target.unlink()
+        print(f"removed {target}")
+    print("stop it with: " + (f"launchctl bootout gui/{os.getuid()}/{LABEL}"
+                              if sys.platform == "darwin"
+                              else f"systemctl --user disable --now {UNIT_NAME}"))
+    return 0
+
+
+# --- main ------------------------------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jav3-desk",
+                                description="Let a Jav3 server use this computer.")
+    p.add_argument("--server", help="server address, overriding the saved one")
+    p.add_argument("--backend", choices=sorted(BACKENDS))
+    sub = p.add_subparsers(dest="cmd", required=True)
+    for name, help_ in (("login", "log in with the line from Settings → Add computer"),
+                        ("run", "connect and serve"),
+                        ("install", "write the systemd --user unit / launchd agent"),
+                        ("uninstall", "remove it"),
+                        ("allow-shell", "allow shell commands at this computer"),
+                        ("deny-shell", "turn shell off at this computer"),
+                        ("panic", "stop now and stay stopped until resume"),
+                        ("resume", "undo panic"),
+                        ("status", "show what this computer allows")):
+        sub.add_parser(name, help=help_)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    cmds = {"login": cmd_login, "run": cmd_run, "install": cmd_install,
+            "uninstall": cmd_uninstall, "allow-shell": cmd_allow_shell,
+            "deny-shell": cmd_deny_shell, "panic": cmd_panic, "resume": cmd_resume,
+            "status": cmd_status}
+    try:
+        return cmds[args.cmd](args)
+    except DeskError as e:
+        print(f"jav3-desk: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

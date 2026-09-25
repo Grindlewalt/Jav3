@@ -276,5 +276,7 @@ async def test_cli_files_are_served(clients):
     assert 'BASE="http://jav3.lan:8000"' in r.text and "@@BASE@@" not in r.text
     r = await dev.get("/cli/jav3")
     assert r.status_code == 200 and "def main(" in r.text
+    r = await dev.get("/cli/jav3-desk")
+    assert r.status_code == 200 and '"scope": "desk"' in r.text
     assert (await dev.get("/cli/install.sh",
                           headers={"Host": "a;rm -rf ~"})).status_code == 400

@@ -34,6 +34,7 @@ pair_router = APIRouter(prefix="/api/devices", tags=["devices"])
 cli_router = APIRouter(prefix="/cli", tags=["devices"])
 
 CLI_DIR = Path(__file__).resolve().parent.parent / "clients" / "jav3cli"
+DESK_CLIENT = Path(__file__).resolve().parent.parent / "clients" / "jav3-desk" / "jav3-desk"
 _NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 _BAD_CODE = ("invalid or expired login code — generate a new one in "
              "Settings → Add computer")
@@ -297,6 +298,12 @@ async def revoke_self(actor: dict = Depends(require_any_actor)):
 async def cli_file():
     return PlainTextResponse((CLI_DIR / "jav3").read_text(),
                              media_type="text/x-python")
+
+
+@cli_router.get("/jav3-desk")
+async def desk_client_file():
+    """The computer-use client, one file (clients/jav3-desk)."""
+    return PlainTextResponse(DESK_CLIENT.read_text(), media_type="text/x-python")
 
 
 @cli_router.get("/install.sh")
