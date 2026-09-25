@@ -1,5 +1,5 @@
 """Admin CLI:
-  python -m backend.cli setup [--add-user] [--username U --password-stdin]
+  python -m backend.cli setup [--status | --add-user] [--username U --password-stdin]
                              [--provider ID [--api-key-stdin] [--base-url URL]] [--no-test]
                                                      # first-run setup (login + model provider)
   python -m backend.cli create-user <username> [password]  # omit it: hidden prompt
@@ -234,12 +234,19 @@ def setup_command(args: list[str]) -> None:
     ap.add_argument("--no-test", action="store_true", help="skip the test call")
     ap.add_argument("--add-user", action="store_true",
                     help="add another login even though setup is done")
+    ap.add_argument("--status", action="store_true",
+                    help="print needed/done and the URLs; exit 0 iff needed")
     a = ap.parse_args(args)
     tty = sys.stdin.isatty()
     scripted = a.password_stdin or a.api_key_stdin
 
     asyncio.run(init_db())
     exists = asyncio.run(setup_api.users_exist())
+    if a.status:
+        print("done" if exists else "needed")
+        for url in server_urls():
+            print(url)
+        sys.exit(1 if exists else 0)
     if exists and not a.add_user:
         print("setup is already done (a login exists). To add another login: "
               "python -m backend.cli setup --add-user", file=sys.stderr)

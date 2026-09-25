@@ -613,8 +613,6 @@ user_phase() {
   fi
   if grep -q 'JARVIS_DEEPSEEK_API_KEY' "$HOME/.config/jarvis/env" 2>/dev/null; then
     ok "API key present in ~/.config/jarvis/env"
-  else
-    warn "no JARVIS_DEEPSEEK_API_KEY in ~/.config/jarvis/env — add it before starting"
   fi
 
   step "systemd user units"
@@ -647,6 +645,31 @@ user_phase() {
       ok "golden image built"
     fi
   fi
+
+  first_run_setup
+}
+
+# The first login + model provider. Interactive on a terminal; otherwise (or
+# with --yes) the same steps wait in the browser at /setup, which the GUI
+# opens on by itself until a login exists.
+first_run_setup() {
+  step "first-run setup"
+  local st rc=0
+  st="$(.venv/bin/python -m backend.cli setup --status 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    ok "a login already exists"
+    return 0
+  elif [ "$rc" -ne 0 ]; then
+    warn "could not read the setup state — run: $REPO_DIR/.venv/bin/python -m backend.cli setup"
+    return 0
+  fi
+  local url; url="$(printf '%s\n' "$st" | sed -n 2p)"
+  if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+    ok "no login yet — finish setup in a browser once the service is up: ${url:-/setup}"
+    return 0
+  fi
+  .venv/bin/python -m backend.cli setup \
+    || warn "setup did not finish — re-run: $REPO_DIR/.venv/bin/python -m backend.cli setup (or use ${url:-the web page})"
 }
 
 # ------------------------------------------------------------------ verify ---
@@ -742,7 +765,7 @@ user_phase
 
 printf '\n%sinstalled.%s\n' "$BOLD" "$OFF"
 printf '  state dir:            %s\n' "$(cd "$REPO_DIR" && .venv/bin/python -m backend.cli paths state_dir 2>/dev/null || echo "$STATE_DIR")"
-printf '  create a login user:  %s/.venv/bin/python -m backend.cli create-user <name>   (prompts for the password)\n' "$REPO_DIR"
+printf '  first-run setup:      %s/.venv/bin/python -m backend.cli setup   (or open the GUI; add logins with --add-user)\n' "$REPO_DIR"
 printf '  backups (rclone):     set a remote via /api/backup/config, or JARVIS_BACKUP_REMOTE in ~/.config/jarvis/env\n'
 printf '  start:                systemctl --user restart jarvis\n'
 printf '  logs:                 journalctl --user -u jarvis -f\n'

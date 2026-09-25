@@ -338,6 +338,15 @@ def test_cli_setup_non_interactive(tmp_env, monkeypatch, no_providers):
     assert asyncio.run(_count_users()) == 1
 
 
+def test_cli_setup_status(tmp_env, monkeypatch, no_providers):
+    code, out = _run_cli(monkeypatch, ["setup", "--status"], "")
+    assert code == 0 and out.splitlines()[0] == "needed"
+    assert out.splitlines()[1].startswith("http://")
+    asyncio.run(setup_api.create_first_user("op", "password123"))
+    code, out = _run_cli(monkeypatch, ["setup", "--status"], "")
+    assert code == 1 and out.splitlines()[0] == "done"
+
+
 def test_cli_setup_add_user(tmp_env, monkeypatch, no_providers):
     asyncio.run(init_db())
     asyncio.run(setup_api.create_first_user("op", "password123"))
