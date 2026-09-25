@@ -14,6 +14,7 @@ import { useAuth } from '../auth.jsx'
 import { Button, Card, EmptyState, Input, Select, Tag } from '../components/index.js'
 import Page from '../components/Page.jsx'
 import BackupPanel from '../BackupPanel.jsx'
+import DeskPanel from '../DeskPanel.jsx'
 
 const mmss = (secs) => {
   const s = Math.max(0, Math.round(secs))
@@ -25,6 +26,7 @@ export default function Settings() {
     <Page title="Settings" className="settings-page">
       <ModelPanel />
       <DevicesPanel />
+      <DeskPanel />
       <BackupPanel />
       <MusicPanel />
       <SessionPanel />
@@ -127,9 +129,11 @@ function DevicesPanel() {
   return (
     <Card title="Devices" headingLevel={2}>
       <p className="dim small settings-note">
-        Log a computer’s <code>jav3</code> command-line client in to this server.
-        Each computer gets its own revocable token. A token can chat with the agent
-        using the same tools you have; it cannot reach secrets, the VM or other
+        Log a computer’s <code>jav3</code> command-line client, or its
+        {' '}<code>jav3-desk</code> computer-use client, in to this server. Each
+        gets its own revocable token. A <code>jav3</code> token can chat with the
+        agent using the same tools you have; a <code>jav3-desk</code> token can
+        only connect for computer use. Neither reaches secrets, the VM or other
         control panels.
       </p>
       {login ? (
@@ -170,6 +174,7 @@ function DevicesPanel() {
                 <div className="device-main">
                   <div className="device-name">
                     <strong className="ellipsis" title={d.name}>{d.name}</strong>
+                    {d.scope === 'desk' && <Tag>computer use</Tag>}
                     {/* the CLI names a computer after its hostname by default,
                         so the two are usually the same word printed twice */}
                     {d.hostname && d.hostname !== d.name && (

@@ -3189,6 +3189,27 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .device-meta > span { white-space: nowrap; }
 .device-row > button { flex-shrink: 0; }
 
+/* --- computer use (Settings, DeskPanel.jsx) ---------------------------------- */
+.desk-row { display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: var(--sp-5) 0; border-top: 1px solid var(--border); }
+.desk-head { display: flex; align-items: center; gap: var(--sp-4); min-width: 0; }
+.desk-head .tag { margin-left: 0; }
+.desk-head > button { margin-left: auto; flex-shrink: 0; }
+.desk-last { white-space: nowrap; }
+.desk-dot { width: 8px; height: 8px; border-radius: var(--radius-round); flex: none;
+  background: var(--dim); }
+.desk-dot.on { background: var(--green); }
+.desk-grants, .desk-allow { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--sp-4) var(--sp-6); }
+.settings-page .desk-grants select { min-width: 0; }
+.desk-pattern { display: inline-flex; align-items: center; gap: var(--sp-2); margin-left: 0; }
+.desk-pattern code { font-size: var(--fs-xs); }
+.desk-pattern-x { background: none; border: 0; padding: 0 var(--sp-1); color: var(--dim);
+  font-size: var(--fs-md); line-height: 1; cursor: pointer; }
+.desk-pattern-x:hover { color: var(--text); filter: none; transform: none; }
+.settings-page .card .desk-pattern-x { min-height: 0; }
+.desk-allow-add { flex: 1 1 260px; }
+
 /* --- Settings --------------------------------------------------------------------
    One control height and one text size for every field and button on the
    page (Model and Music were bare controls at the body's 15px beside
