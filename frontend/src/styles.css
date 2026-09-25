@@ -2015,52 +2015,85 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
 /* ---- taint / trust tags (Memory notes) ---- */
 .tag.untrusted { color: var(--amber); border-color: var(--amber); }
 
-/* ---- Network page (live egress) ---- */
-/* the Network tab's body; the Review layout around it owns the insets */
-.net-view { display: flex; flex-direction: column; flex: 1; min-height: 0;
-  gap: var(--sp-6); }
-.net-head { display: flex; align-items: center; gap: var(--sp-5); }
-.net-body { display: flex; gap: 16px; flex: 1; min-height: 0; }
-.net-feed { flex: 2; min-width: 0; display: flex; flex-direction: column;
-  min-height: 0; gap: 6px; }
-.net-feed-list { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
-.net-side { flex: 1; min-width: 300px; max-width: 400px; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 14px; }
-.net-hint { padding: 8px 2px; }
-.net-side .sbx-card { margin-bottom: 0; }
-/* a side card's head: the title yields (ellipsis) before its button wraps */
-.net-side .sbx-sec-head h3, .net-panel .sbx-sec-head h3 { flex: 1; min-width: 0;
+/* ---- Network page (Security → Network) ----
+   A flowing column read top to bottom like a log: the strip (project · Auto ·
+   counts), Waiting for you, Recent decisions, Allowlist. The Security layout
+   around it owns the insets and is the scroller. */
+.net-view { display: flex; flex-direction: column; gap: var(--sp-8); }
+.net-top { display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--sp-5) var(--sp-8); }
+.net-auto { display: flex; align-items: center; gap: var(--sp-4); min-width: 0;
+  flex-wrap: wrap; }
+.net-auto .toggle-text { white-space: normal; }
+.net-counts { display: flex; gap: var(--sp-7); margin-left: auto;
+  font-size: var(--fs-md); color: var(--dim); font-variant-numeric: tabular-nums; }
+.net-counts b { color: var(--text); font-weight: 600; }
+.net-counts .net-count-waiting b { color: var(--amber); }
+.net-sec { min-width: 0; }
+.net-sec .sbx-sec-head h3 { flex: 0 1 auto; min-width: 0; }
+.net-list { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-direction: column; gap: var(--sp-2); }
+.net-host { font-weight: 600; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.net-actions { display: flex; gap: var(--sp-3); flex-shrink: 0; }
+.net-actions button { padding: 4px 12px; font-size: var(--fs-md); }
+.tag.net-verdict { margin-left: 0; white-space: nowrap; }
+/* an auto decision: its manual twin's colour, outlined dashed */
+.tag.net-verdict.auto { border-style: dashed; border-width: 1px; }
+.tag.done.net-verdict, .tag.pending.net-verdict, .tag.error.net-verdict {
+  border-width: 1px; border-style: solid; }
+.tag.done.net-verdict.auto, .tag.pending.net-verdict.auto { border-style: dashed; }
+
+/* waiting + allowlist rows: host · particulars · actions, one line wide */
+.net-wait, .net-allow { display: flex; align-items: center; gap: var(--sp-5);
+  padding: var(--sp-3) var(--sp-5); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--panel);
+  font-size: var(--fs-md); min-width: 0; }
+.net-wait .net-host, .net-allow .net-host { flex: 0 1 auto; }
+.net-wait-meta, .net-allow-meta { display: flex; align-items: center;
+  gap: var(--sp-4); flex: 1; min-width: 0; }
+.net-wait-meta .tag, .net-allow-meta .tag { margin-left: 0; flex-shrink: 0; }
+.net-tried { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: var(--fs-sm); }
+
+/* recent decisions: a table of buttons (tap one for the reason) */
+.net-dec { border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--panel); min-width: 0; }
+.net-dec.open { border-color: var(--accent); }
+.net-dec-row { display: grid; width: 100%; align-items: center;
+  grid-template-columns: 84px 104px minmax(0, 1fr) minmax(0, 150px) 150px;
+  gap: var(--sp-5); padding: var(--sp-3) var(--sp-5); background: none;
+  color: var(--text); border: 0; border-radius: var(--radius-sm);
+  font-size: var(--fs-md); font-weight: 400; text-align: left; }
+.net-dec-row:hover:not(:disabled) { filter: none; transform: none;
+  background: var(--panel-2); }
+.net-dec-time, .net-dec-bytes { font-size: var(--fs-sm); white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.net-dec-bytes { text-align: right; }
+.net-dec-proj { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: var(--fs-sm); }
+.net-dec-n { font-weight: 400; }
+.net-dec-detail { display: flex; flex-direction: column; gap: var(--sp-2);
+  padding: 0 var(--sp-5) var(--sp-4); font-size: var(--fs-sm);
+  overflow-wrap: anywhere; }
+
+.net-group { margin-bottom: var(--sp-6); }
+.net-group-head { font-size: var(--fs-sm); font-weight: 600; margin: 0 0 var(--sp-3); }
+.net-more > summary { cursor: pointer; color: var(--dim); font-size: var(--fs-md);
+  margin-bottom: var(--sp-5); }
+.net-more .sbx-card { margin-bottom: var(--sp-6); }
+
+/* the Workspace panel: same sections, its own scroller */
+.net-panel { overflow-y: auto; gap: var(--sp-7); }
+.net-panel .net-counts { margin-left: 0; }
+.net-panel .net-dec-row { grid-template-columns: 104px minmax(0, 1fr) 120px; }
+.net-panel .net-dec-time, .net-panel .net-dec-proj { display: none; }
+.net-panel .sbx-sec-head h3 { flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.net-side .sbx-sec-head > button, .net-panel .sbx-sec-head > button {
-  flex-shrink: 0; white-space: nowrap; }
+.net-panel .sbx-sec-head > button { flex-shrink: 0; white-space: nowrap; }
 .net-policy { display: flex; flex-direction: column; gap: var(--sp-5); }
 .net-policy .toggle { align-self: flex-start; }
 .net-policy .row { margin: 0; }
-
-.egr-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
-  border: 1px solid var(--border); border-left: 3px solid var(--border);
-  border-radius: 8px; margin-bottom: 5px; font-size: 12.5px; }
-.egr-row.deny { border-left-color: var(--amber); }
-.egr-row.cut { border-left-color: var(--red);
-  background: color-mix(in srgb, var(--red) 8%, transparent); }
-.egr-chip { border: 1px solid; border-radius: 8px; padding: 1px 8px; font-size: 10.5px;
-  font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
-.egr-chip.allow { color: var(--green); border-color: var(--green);
-  background: color-mix(in srgb, var(--green) 12%, transparent); }
-.egr-chip.deny { color: var(--amber); border-color: var(--amber);
-  background: color-mix(in srgb, var(--amber) 12%, transparent); }
-.egr-chip.cut { color: var(--red); border-color: var(--red);
-  background: color-mix(in srgb, var(--red) 12%, transparent); }
-.egr-host { font-family: ui-monospace, Menlo, monospace; font-weight: 600;
-  white-space: nowrap; }
-/* the particulars group: invisible to the layout on a desktop row */
-.egr-meta { display: contents; }
-.egr-path { flex: 1; min-width: 0; color: var(--dim);
-  font-family: ui-monospace, Menlo, monospace; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
-.egr-reason { color: var(--amber); font-size: 11.5px; white-space: nowrap; }
-.egr-bytes { color: var(--dim); font-size: 11.5px; white-space: nowrap;
-  font-variant-numeric: tabular-nums; }
 
 /* ---- Security page ----
    A layout route: the shell's header bar carries the <h1> and the tab strip;
@@ -2319,18 +2352,13 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
      already short screen into two or three thumb-sized scroll boxes (Network's
      feed got 2/3 of the leftover height and its approvals 1/3). The long lists
      keep a cap so the panes below them stay reachable. */
-  .logs-view, .logs-split, .logs-split > main, .logs-cost,
-  .net-view, .net-body, .net-feed, .net-side { flex: none; }
+  .logs-view, .logs-split, .logs-split > main, .logs-cost { flex: none; }
   .logs-split > aside.logs-aside { width: 100%; }
   .logs-split > main.editor-pane { height: auto; }
   .logs-view .log-detail { overflow: visible; }
-  .net-feed-list { flex: none; max-height: 55vh; }
-  .net-side { overflow: visible; }
 
-  /* ---- network: single column ---- */
-  .net-body { flex-direction: column; }
-  .net-side { min-width: 0; max-width: 100%; }
-  .net-head { flex-wrap: wrap; }
+  /* ---- network: the strip wraps, counts start their own line ---- */
+  .net-counts { margin-left: 0; }
 
   /* ---- workspace board: collapse the free-floating panels into a
      scrollable vertical stack. The inline left/top/width/height set by the
@@ -2369,15 +2397,19 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
   .sched-head > .grow, .staged-list li > .grow, .sbx-row > .grow {
     flex: 1 1 100%; min-width: 0; font-size: 15px;
   }
-  /* an egress event is two compact lines, not a 150px card per request:
-     verdict · host · bytes, then project · request · reason. The feed is
-     hundreds of these, and at one field per line three fitted a screen. */
-  .egr-row { flex-wrap: wrap; row-gap: var(--sp-2); padding: 6px 10px; }
-  .egr-host { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .egr-meta { display: flex; align-items: center; gap: var(--sp-4);
-    flex: 1 1 100%; min-width: 0; order: 1; font-size: var(--fs-xs); }
-  .egr-meta .tag { margin-left: 0; flex-shrink: 0; }
-  .egr-meta .egr-reason { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  /* an egress row is two compact lines, not a card per field: what (verdict,
+     host, bytes), then the particulars (time, project) — hundreds of these
+     scroll past, and at one field per line three fitted a screen. */
+  .net-dec-row { grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "verdict host bytes" "time proj proj"; row-gap: var(--sp-1); }
+  .net-dec-verdict { grid-area: verdict; }
+  .net-dec-row .net-host { grid-area: host; }
+  .net-dec-bytes { grid-area: bytes; }
+  .net-dec-time { grid-area: time; }
+  .net-dec-proj { grid-area: proj; }
+  .net-wait, .net-allow { flex-wrap: wrap; row-gap: var(--sp-3); }
+  .net-wait .net-host, .net-allow .net-host { flex: 1 1 100%; }
+  .net-actions button { min-height: 38px; }
   /* the create fields stack: full-width each, not one narrow name field
      above two stretched ones */
   .create-project input { flex: 1 1 100%; }

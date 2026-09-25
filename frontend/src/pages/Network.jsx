@@ -1,41 +1,340 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
-import { human } from '../format.js'
-import { Button, EmptyState, Input, Select, Toggle } from '../components/index.js'
+import { human, tsShort } from '../format.js'
+import { Button, EmptyState, Input, Select, Tag, Toggle } from '../components/index.js'
 
-// The guest's live egress: a scrolling feed of every outbound request the
-// sandbox made, with a verdict chip (allow / deny / cut), an approval queue for
-// hosts the guest keeps trying to reach ("training the allowlist up"), and a
-// per-project policy + secret-grant editor.
+// The guest's network, read like a log: what is waiting on you, what was
+// decided (and by whom — you, the allowlist, or the auto guesser), and what
+// is standing on the allowlist, each entry revocable where it sits.
 //
 // Every string here — host, path, project, reason — is UNTRUSTED (it is guest
-// traffic). It is only ever rendered as plain text nodes, never markup.
+// traffic, or a model's one-line guess about it). It is only ever rendered as
+// plain text nodes, never markup.
 
 const FEED_CAP = 300
+const GENERAL = '__general__'
 
-// allow -> green, cut -> red, everything else (deny / anomaly) -> amber
-const verdictClass = (v) => (v === 'allow' ? 'allow' : v === 'cut' ? 'cut' : 'deny')
+// The operator's wording, verbatim — this is the whole disclaimer.
+const AUTO_LABEL = 'Auto (test only — can make mistakes; you can leave it on)'
 
-// One line on a desktop. On a phone, two: what was reached and how much
-// (verdict, host, bytes), then the particulars (project, request, reason) —
-// .egr-meta is `display: contents` until then, so it costs nothing wide.
-function FeedRow({ e }) {
-  const cls = verdictClass(e.verdict)
+// egress_events.verdict -> what the row says, and the Tag that says it.
+// Auto decisions share their manual twin's colour and add a dashed outline,
+// so "who decided" reads without a legend.
+const VERDICTS = {
+  allow: { text: 'allowed', tone: 'done' },
+  deny: { text: 'denied', tone: 'pending' },
+  auto_allow: { text: 'auto-allowed', tone: 'done', auto: true },
+  auto_deny: { text: 'auto-denied', tone: 'pending', auto: true },
+  cut: { text: 'cut', tone: 'error' },
+}
+const verdictOf = (v) => VERDICTS[v] || { text: v || '?', tone: 'pending' }
+
+function VerdictTag({ verdict }) {
+  const v = verdictOf(verdict)
+  return <Tag tone={v.tone} className={`net-verdict${v.auto ? ' auto' : ''}`}>{v.text}</Tag>
+}
+
+// allowlist entry source -> Tag
+const SOURCES = {
+  seed: { text: 'built-in', tone: undefined },
+  operator: { text: 'you', tone: 'done' },
+  reviewer: { text: 'reviewer', tone: 'running' },
+  auto: { text: 'auto', tone: 'pending' },
+}
+
+const projLabel = (slug, names) =>
+  !slug || slug === GENERAL ? 'shared' : (names[slug] || slug)
+
+// ---- data hooks -----------------------------------------------------------------
+
+// The live egress feed. Seed from REST, then follow the stream. `project`
+// scopes it: the panel wants only its own project's rows, so it filters at the
+// source; the page holds everything and filters at render time, so switching
+// its project picker never drops the socket.
+function useEgressFeed(project, onEvent) {
+  const [feed, setFeed] = useState([])
+  const keyRef = useRef(0)
+  const cb = useRef(onEvent)
+  cb.current = onEvent
+  useEffect(() => {
+    let live = true
+    api('/api/egress/events?limit=200').then((r) => {
+      const evs = (Array.isArray(r) ? r : r.events) || []
+      // REST rows carry project_slug; the live stream carries project
+      const rows = evs.map((e) => ({ ...e, project: e.project ?? e.project_slug }))
+      const kept = project ? rows.filter((e) => e.project === project) : rows
+      if (live) setFeed(kept.map((e) => ({ ...e, _k: ++keyRef.current })))
+    }).catch(() => {})
+    const stop = subscribeSse('/api/egress/stream', (ev) => {
+      if (ev.type !== 'egress') return
+      if (project && ev.project !== project) return
+      // stamped on arrival (UTC, like the DB's) so the row has a time at all
+      const row = { ...ev, created_at: new Date().toISOString(), _k: ++keyRef.current }
+      setFeed((f) => [row, ...f].slice(0, FEED_CAP))
+      cb.current?.(ev)
+    })
+    return () => { live = false; stop() }
+  }, [project])
+  return feed
+}
+
+// Poll a GET every 10s (and on demand). Returns [data, reload].
+function usePoll(path, pick) {
+  const [data, setData] = useState(null)
+  const reload = useCallback(() => {
+    if (!path) return
+    api(path).then((r) => setData(pick(r))).catch(() => {})
+  }, [path]) // eslint-disable-line
+  useEffect(() => {
+    setData(null)
+    reload()
+    const t = setInterval(reload, 10000)
+    return () => clearInterval(t)
+  }, [reload])
+  return [data, reload]
+}
+
+const q = (project) => (project ? `?project=${encodeURIComponent(project)}` : '')
+
+// ---- the top strip: project · Auto · counts -------------------------------------
+
+function AutoToggle({ project, onChange }) {
+  const [mode, reload] = usePoll(`/api/egress/auto${q(project)}`, (r) => r)
+  async function flip(on) {
+    try {
+      await api('/api/egress/auto', {
+        method: 'PUT',
+        body: JSON.stringify({ project: project || null, mode: on ? 'on' : 'off' }) })
+      reload(); onChange?.()
+    } catch (err) { notifyError(err) }
+  }
+  const scope = !project ? 'default for every project'
+    : mode && mode.project === null ? `following the default (${mode.global})`
+      : 'this project only'
   return (
-    <div className={`egr-row ${cls === 'allow' ? '' : cls}`}>
-      <span className={`egr-chip ${cls}`}>{e.verdict}</span>
-      <span className="egr-host" title={e.host}>{e.host}</span>
-      <span className="egr-meta">
-        {e.project && <span className="tag">{e.project}</span>}
-        <span className="egr-path" title={`${e.method || ''} ${e.path || ''}`}>
-          {e.method ? `${e.method} ` : ''}{e.path}</span>
-        {e.reason && <span className="egr-reason" title={e.reason}>{e.reason}</span>}
-      </span>
-      <span className="egr-bytes" title="out / in">
-        ↑{human(e.bytes_out)} ↓{human(e.bytes_in)}</span>
+    <div className="net-auto">
+      <Toggle checked={!!mode?.effective} disabled={!mode} label={AUTO_LABEL}
+              onText={AUTO_LABEL} offText={AUTO_LABEL} onChange={flip} />
+      <span className="dim small">{scope}</span>
     </div>
+  )
+}
+
+function Counts({ project, tick }) {
+  const [c, reload] = usePoll(`/api/egress/summary${q(project)}`, (r) => r)
+  useEffect(() => { reload() }, [tick]) // eslint-disable-line
+  const n = (k) => (c ? c[k] : '–')
+  return (
+    <div className="net-counts" title="distinct hosts in the last 24 hours; waiting is now">
+      <span><b>{n('allowed')}</b> allowed</span>
+      <span><b>{n('denied')}</b> denied</span>
+      <span className={c?.waiting ? 'net-count-waiting' : ''}><b>{n('waiting')}</b> waiting</span>
+    </div>
+  )
+}
+
+// ---- waiting for you --------------------------------------------------------------
+
+// Hosts the guest's code tried to reach that nobody has decided on. Allow
+// trains the allowlist up (the project's own list, or the shared one for a
+// project without its own); Deny keeps it out.
+function Waiting({ project, names, showProject, lastTry, tick, onDecided }) {
+  const [pending, reload] = usePoll(`/api/egress/pending${q(project)}`, (r) => r.pending || [])
+  useEffect(() => { reload() }, [tick]) // eslint-disable-line
+  async function decide(id, verb) {
+    try {
+      await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' })
+      reload(); onDecided?.()
+    } catch (err) { notifyError(err) }
+  }
+  const rows = pending || []
+  return (
+    <section className="net-sec">
+      <div className="sbx-sec-head"><h3>Waiting for you</h3>
+        <span className="sec-count">{rows.length}</span></div>
+      {rows.length === 0 && <EmptyState>nothing waiting</EmptyState>}
+      <ul className="net-list">
+        {rows.map((p) => {
+          const last = lastTry(p.project_slug, p.host)
+          const tried = last?.method
+            ? `${last.method}${last.path ? ` ${last.path}` : ''}` : 'connect'
+          return (
+            <li key={p.id} className="net-wait">
+              <span className="net-host mono" title={p.host}>{p.host}</span>
+              <span className="net-wait-meta">
+                {showProject && <Tag>{projLabel(p.project_slug, names)}</Tag>}
+                <span className="net-tried dim" title={tried}>
+                  {p.hit_count}× · {tried}</span>
+                {p.auto_verdict === 'unsure' && (
+                  <Tag tone="pending" className="net-verdict auto"
+                       title={p.auto_reason || ''}>auto: unsure</Tag>)}
+                {p.triage_verdict === 'flag' && (
+                  <Tag className="triage-flag" title={p.triage_reason || ''}>
+                    ⚑ {p.triage_reason}</Tag>)}
+              </span>
+              <span className="net-actions">
+                <Button onClick={() => decide(p.id, 'approve')}>Allow</Button>
+                <Button variant="ghost" onClick={() => decide(p.id, 'reject')}>Deny</Button>
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
+// ---- recent decisions ---------------------------------------------------------------
+
+// A burst of identical requests (pip opening eight connections to one host)
+// is ONE decision: consecutive rows with the same host, verdict and project
+// fold into one line with a count and summed bytes.
+function fold(feed) {
+  const out = []
+  for (const e of feed) {
+    const prev = out[out.length - 1]
+    if (prev && prev.host === e.host && prev.verdict === e.verdict
+        && prev.project === e.project) {
+      prev.n += 1
+      prev.bytes_out += Number(e.bytes_out) || 0
+      prev.bytes_in += Number(e.bytes_in) || 0
+      continue
+    }
+    out.push({ ...e, n: 1, bytes_out: Number(e.bytes_out) || 0,
+               bytes_in: Number(e.bytes_in) || 0 })
+  }
+  return out
+}
+
+function DecisionRow({ d, names, onAllow }) {
+  const [open, setOpen] = useState(false)
+  const req = d.method ? `${d.method}${d.path ? ` ${d.path}` : ''}` : ''
+  return (
+    <li className={`net-dec${open ? ' open' : ''}`}>
+      <button type="button" className="net-dec-row" aria-expanded={open}
+              title={d.reason || ''} onClick={() => setOpen(!open)}>
+        <span className="net-dec-time dim">{tsShort(d.created_at) || 'now'}</span>
+        <span className="net-dec-verdict"><VerdictTag verdict={d.verdict} /></span>
+        <span className="net-host mono">{d.host}{d.n > 1 && (
+          <span className="dim net-dec-n"> ×{d.n}</span>)}</span>
+        <span className="net-dec-proj dim">{projLabel(d.project, names)}</span>
+        <span className="net-dec-bytes dim" title="sent / received">
+          ↑{human(d.bytes_out)} ↓{human(d.bytes_in)}</span>
+      </button>
+      {open && (
+        <div className="net-dec-detail">
+          {d.reason && <div>{d.reason}</div>}
+          {req && <div className="mono dim ellipsis" title={req}>{req}</div>}
+          {d.verdict === 'auto_deny' && (
+            <div><Button variant="ghost" onClick={() => onAllow(d)}>
+              Allow it anyway</Button></div>
+          )}
+        </div>
+      )}
+    </li>
+  )
+}
+
+function Decisions({ feed, names, onChanged }) {
+  const rows = useMemo(() => fold(feed), [feed])
+  async function allowAnyway(d) {
+    try {
+      await api('/api/egress/allow', { method: 'POST',
+        body: JSON.stringify({ project: d.project || '', host: d.host }) })
+      onChanged?.()
+    } catch (err) { notifyError(err) }
+  }
+  return (
+    <section className="net-sec">
+      <div className="sbx-sec-head"><h3>Recent decisions</h3>
+        <span className="dim small">newest first · tap a row for why</span></div>
+      {rows.length === 0 && (
+        <EmptyState>no traffic yet — the guest&#39;s outbound requests
+          appear here as they happen</EmptyState>
+      )}
+      {rows.length > 0 && (
+        <ul className="net-list net-dec-list">
+          {rows.map((d) => <DecisionRow key={d._k} d={d} names={names}
+                                        onAllow={allowAnyway} />)}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+// ---- allowlist --------------------------------------------------------------------
+
+function Allowlist({ project, names, tick, onChanged }) {
+  const ask = useAsk()
+  const [groups, reload] = usePoll('/api/egress/allowlist', (r) => r.groups || [])
+  useEffect(() => { reload() }, [tick]) // eslint-disable-line
+  // a picked project shows its own list and the shared one it inherits
+  const shown = (groups || []).filter((g) =>
+    !project || g.project === project || g.project === GENERAL)
+
+  async function revoke(g, e) {
+    const where = g.project === GENERAL ? 'the shared list (every project)'
+      : projLabel(g.project, names)
+    const ok = await ask.confirm(`Revoke ${e.host}?`, {
+      body: `It comes off ${where}; the next attempt waits for you again.`,
+      confirmLabel: 'Revoke', danger: true })
+    if (!ok) return
+    try {
+      await api('/api/egress/allowlist/revoke', { method: 'POST',
+        body: JSON.stringify(e.source === 'auto'
+          ? { id: e.id } : { project: g.project, host: e.host }) })
+      reload(); onChanged?.()
+    } catch (err) { notifyError(err) }
+  }
+  async function keep(e) {
+    try {
+      await api(`/api/egress/auto/${e.id}/promote`, { method: 'POST' })
+      reload(); onChanged?.()
+    } catch (err) { notifyError(err) }
+  }
+
+  return (
+    <section className="net-sec">
+      <div className="sbx-sec-head"><h3>Allowlist</h3></div>
+      {shown.length === 0 && <EmptyState>nothing allowed yet</EmptyState>}
+      {shown.map((g) => (
+        <div key={g.project} className="net-group">
+          <div className="net-group-head">
+            {g.project === GENERAL ? 'Shared — every project without its own list'
+              : projLabel(g.project, names)}
+            <span className="dim small"> · {g.entries.length}</span>
+          </div>
+          {g.entries.length === 0 && <EmptyState>empty</EmptyState>}
+          <ul className="net-list">
+            {g.entries.map((e) => {
+              const src = SOURCES[e.source] || { text: e.source }
+              return (
+                <li key={`${e.source}:${e.id ?? e.host}`} className="net-allow">
+                  <span className="net-host mono" title={e.host}>{e.host}</span>
+                  <span className="net-allow-meta">
+                    <Tag tone={src.tone}
+                         className={e.source === 'auto' ? 'net-verdict auto' : ''}
+                         title={e.reason || ''}>{src.text}</Tag>
+                    {e.source === 'auto' && (
+                      <span className="dim small" title={e.reason || ''}>
+                        until {tsShort(e.expires_at)}</span>)}
+                  </span>
+                  <span className="net-actions">
+                    {e.source === 'auto' && (
+                      <Button variant="ghost" title="keep it: move it onto the allowlist"
+                              onClick={() => keep(e)}>Keep</Button>)}
+                    <Button variant="ghost" danger onClick={() => revoke(g, e)}>
+                      Revoke</Button>
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      ))}
+    </section>
   )
 }
 
@@ -145,102 +444,54 @@ function Grants({ slug }) {
   )
 }
 
-// ---- the live egress feed ----------------------------------------------------
-// Seed from REST, then follow the stream. `project` scopes it: the panel wants
-// only its own project's rows, so it filters at the source; the page holds
-// everything and filters at render time, so switching its project picker never
-// drops the socket.
-function useEgressFeed(project) {
-  const [feed, setFeed] = useState([])
-  const keyRef = useRef(0)
-  useEffect(() => {
-    let live = true
-    api('/api/egress/events?limit=200').then((r) => {
-      const evs = (Array.isArray(r) ? r : r.events) || []
-      // REST rows carry project_slug; the live stream carries project
-      const rows = evs.map((e) => ({ ...e, project: e.project ?? e.project_slug }))
-      const kept = project ? rows.filter((e) => e.project === project) : rows
-      if (live) setFeed(kept.map((e) => ({ ...e, _k: ++keyRef.current })))
-    }).catch(() => {})
-    const stop = subscribeSse('/api/egress/stream', (ev) => {
-      if (ev.type !== 'egress') return
-      if (project && ev.project !== project) return
-      setFeed((f) => [{ ...ev, _k: ++keyRef.current }, ...f].slice(0, FEED_CAP))
-    })
-    return () => { live = false; stop() }
-  }, [project])
-  return feed
+
+// latest feed row per (project, host) — what the guest was doing when it asked
+function useLastTry(feed) {
+  const idx = useMemo(() => {
+    const m = new Map()
+    for (const e of feed) {
+      const k = `${e.project || GENERAL}|${e.host}`
+      if (!m.has(k) && e.method) m.set(k, e)
+    }
+    return m
+  }, [feed])
+  return useCallback((project, host) => idx.get(`${project || GENERAL}|${host}`), [idx])
 }
 
-// ---- host approvals ----------------------------------------------------------
-// The hosts the guest's code tried to reach and could not, with approve (which
-// trains the allowlist up) and reject. This card was written out TWICE in this
-// file — once in the panel, once on the page — each with its own poll effect and
-// its own `decide`, 110 lines apart. One component, two mounts.
-//
-// `project` scopes the queue ('' = every project). The blurb differs between the
-// two mounts and stays a prop rather than being picked for them, and only the
-// unscoped page has anything to say with the project tag.
-function HostApprovals({ project = '', showProject = false, children }) {
-  const [pending, setPending] = useState([])
-  const reload = () =>
-    api(`/api/egress/pending${project ? `?project=${encodeURIComponent(project)}` : ''}`)
-      .then((r) => setPending(r.pending || [])).catch(() => {})
-  useEffect(() => {
-    reload()
-    const t = setInterval(reload, 10000)
-    return () => clearInterval(t)
-  }, [project]) // eslint-disable-line
-  async function decide(id, verb) {
-    try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); reload() }
-    catch (err) { notifyError(err) }
-  }
-  return (
-    <div className="sbx-card">
-      <div className="sbx-sec-head"><h3>Host approvals</h3>
-        <span className="dim small">{pending.length} waiting</span></div>
-      <div className="dim small">{children}</div>
-      <ul className="staged-list rev-list">
-        {pending.length === 0 && <EmptyState as="li">nothing waiting</EmptyState>}
-        {pending.map((p) => (
-          <li key={p.id}>
-            <span className="tag pending">{p.hit_count}×</span>
-            <span className="grow ellipsis mono" title={p.host}>{p.host}</span>
-            {p.triage_verdict === 'flag' && (
-              <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
-            {showProject && p.project_slug && <span className="tag">{p.project_slug}</span>}
-            <button className="win-btn ok" title="approve" onClick={() => decide(p.id, 'approve')}>✓</button>
-            <button className="win-btn" title="reject" onClick={() => decide(p.id, 'reject')}>✕</button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
+// A tick that bumps on every decision the live feed reports (or one made here),
+// so the counts, the queue and the allowlist refresh at once instead of on
+// their next 10s poll.
+// Coalesced: a guest retrying a denied host fires a burst, and each bump is
+// three fetches.
+function useTick() {
+  const [tick, setTick] = useState(0)
+  const timer = useRef(null)
+  const bump = useCallback(() => {
+    if (timer.current) return
+    timer.current = setTimeout(() => { timer.current = null; setTick((t) => t + 1) }, 800)
+  }, [])
+  useEffect(() => () => clearTimeout(timer.current), [])
+  return [tick, bump]
 }
+const decisive = (ev) => ev.verdict !== 'allow'
 
-// Compact, project-scoped egress view for a Workspace panel: the live feed
-// filtered to this project, its host-approval queue, policy + grants. Same data
-// and endpoints as the full Network page, no project picker.
+// Compact, project-scoped egress view for a Workspace panel: the same three
+// sections as the page, for this one project, plus its policy and grants.
 export function NetworkPanel({ slug }) {
-  const feed = useEgressFeed(slug)
-
+  const [tick, bump] = useTick()
+  const feed = useEgressFeed(slug, (ev) => decisive(ev) && bump())
+  const lastTry = useLastTry(feed)
   return (
     <div className="pane-col net-panel">
-      <HostApprovals project={slug}>
-        hosts the agent&#39;s code tried to reach — approve to
-        let it through (trains the allowlist), reject to keep it out
-      </HostApprovals>
+      <div className="net-top">
+        <AutoToggle project={slug} onChange={bump} />
+        <Counts project={slug} tick={tick} />
+      </div>
+      <Waiting project={slug} names={{}} lastTry={lastTry} tick={tick} onDecided={bump} />
+      <Decisions feed={feed.slice(0, 60)} names={{}} onChanged={bump} />
+      <Allowlist project={slug} names={{}} tick={tick} onChanged={bump} />
       <PolicyEditor slug={slug} />
       <Grants slug={slug} />
-      <div className="dim small" style={{ marginTop: 8 }}>live egress ·
-        {' '}{feed.length} event{feed.length !== 1 && 's'}</div>
-      <div className="net-feed-list grow-scroll">
-        {feed.length === 0 && (
-          <EmptyState pad>no egress yet — outbound requests the
-            agent&#39;s code makes stream in here</EmptyState>
-        )}
-        {feed.map((e) => <FeedRow key={e._k} e={e} />)}
-      </div>
     </div>
   )
 }
@@ -249,60 +500,48 @@ export function NetworkPanel({ slug }) {
 export default function Network() {
   const [projects, setProjects] = useState([])
   const [filter, setFilter] = useState('')      // '' = all projects
+  const [tick, bump] = useTick()
   // the page holds every project's events and narrows at render, so changing
   // the filter never tears down the stream
-  const feed = useEgressFeed('')
+  const feed = useEgressFeed('', (ev) => decisive(ev) && bump())
+  const lastTry = useLastTry(feed)
 
   useEffect(() => {
     api('/api/projects').then((r) => setProjects(r.projects || [])).catch(() => {})
   }, [])
+  const names = useMemo(
+    () => Object.fromEntries(projects.map((p) => [p.slug, p.name])), [projects])
 
   const shown = filter ? feed.filter((e) => e.project === filter) : feed
 
   // No heading or page padding of its own: this renders as the Network tab of
-  // the Review layout, which owns the title, the tab strip and the insets.
+  // the Security layout, which owns the title, the tab strip and the insets.
   return (
     <div className="net-view">
-      <div className="net-head">
-        <span className="run-dot running" title="live egress stream" />
-        <span className="dim small">live egress</span>
-        <span className="grow" />
+      <div className="net-top">
         <Select aria-label="project" value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                options={[{ value: '', label: 'all projects' },
+                options={[{ value: '', label: 'All projects' },
                   ...projects.map((p) => ({ value: p.slug, label: p.name }))]} />
+        <AutoToggle project={filter} onChange={bump} />
+        <Counts project={filter} tick={tick} />
       </div>
 
-      <div className="net-body">
-        <div className="net-feed">
-          <div className="dim small">{shown.length} event{shown.length !== 1 && 's'}
-            {' '}· newest first · capped at {FEED_CAP}</div>
-          <div className="net-feed-list">
-            {shown.length === 0 && (
-              <EmptyState pad>no egress yet — the guest&#39;s outbound
-                requests stream in here as they happen</EmptyState>
-            )}
-            {shown.map((e) => <FeedRow key={e._k} e={e} />)}
-          </div>
-        </div>
+      <Waiting project={filter} names={names} showProject={!filter}
+               lastTry={lastTry} tick={tick} onDecided={bump} />
+      <Decisions feed={shown} names={names} onChanged={bump} />
+      <Allowlist project={filter} names={names} tick={tick} onChanged={bump} />
 
-        <div className="net-side">
-          <HostApprovals project={filter} showProject={!filter}>
-            hosts the guest keeps reaching for — approve to
-            train the allowlist up, reject to keep it out
-          </HostApprovals>
-
-          {filter ? (
-            <>
-              <PolicyEditor slug={filter} />
-              <Grants slug={filter} />
-            </>
-          ) : (
-            <div className="dim small net-hint">pick a project above to edit its egress
-              policy and secret grants</div>
-          )}
-        </div>
-      </div>
+      {filter ? (
+        <details className="net-sec net-more">
+          <summary>Policy and secret grants for {names[filter] || filter}</summary>
+          <PolicyEditor slug={filter} />
+          <Grants slug={filter} />
+        </details>
+      ) : (
+        <div className="dim small">pick a project above to edit its egress
+          policy and secret grants</div>
+      )}
     </div>
   )
 }
