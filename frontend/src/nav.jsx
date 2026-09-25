@@ -9,8 +9,9 @@
 //
 // The bar carries six primaries — the surfaces work starts from, Review (the
 // one link that asks the operator for something, so it wears the pending
-// count), and Settings. Two more sit behind ⋯: Memory (what Jav3 reads
-// before every turn) and Schedules. Voice and Artifacts are deliberately
+// count), and Settings. Three more sit behind ⋯: Memory (what Jav3 reads
+// before every turn), Schedules, and Shell (the terminal-style chat on trial
+// beside the classic one). Voice and Artifacts are deliberately
 // absent — their routes still work, they are just not advertised — and
 // Network and Logs are Review's sub-tabs now, not destinations of their own.
 import { createContext } from 'react'
@@ -51,6 +52,9 @@ export const PATHS = {
                <path d="M3.5 10h17M8 3.5v3.4M16 3.5v3.4M8.4 14.3h3" /></>,
   // a clock turning back: the chat history sheet (the drawer's way into the
   // Chat sidebar on a phone, where the sidebar is off-canvas)
+  // a terminal prompt in a window: the /shell trial
+  shell: <><rect x="3" y="4.5" width="18" height="15" rx="2.2" />
+           <path d="m7.5 10 3 2.5-3 2.5M12.5 15.5h4" /></>,
   history: <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v3.2h3.2M12 8v4l2.8 1.8" />,
 }
 
@@ -91,6 +95,7 @@ export const NAV_ITEMS = [
   { to: '/settings', label: 'Settings', icon: 'settings', primary: true },
   { to: '/memory', label: 'Memory', icon: 'memory' },
   { to: '/schedules', label: 'Schedules', icon: 'schedules' },
+  { to: '/shell', label: 'Shell', icon: 'shell' },
 ]
 
 // What earns a slot on the bar itself, and what the ⋯ menu holds. The drawer

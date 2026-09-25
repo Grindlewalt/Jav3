@@ -44,6 +44,10 @@ const Logs = lazy(() => import('./pages/Logs.jsx'))
 const SecretsPanel = lazy(() => import('./SecretsPanel.jsx'))
 
 const Memory = lazy(() => import('./pages/Memory.jsx'))
+// the terminal-style shell, on trial beside the classic UI: /shell, a chat at
+// /shell/c/:id, a project's home at /shell/p/:slug — one route, parsed inside,
+// so moving between them never remounts it mid-stream
+const Shell = lazy(() => import('./shell/Shell.jsx'))
 const Schedules = lazy(() => import('./pages/Schedules.jsx'))
 
 // reachable, not advertised
@@ -57,7 +61,7 @@ const PREFETCH = [
   () => import('./pages/Network.jsx'), () => import('./pages/Logs.jsx'),
   () => import('./SecretsPanel.jsx'), () => import('./pages/Memory.jsx'),
   () => import('./pages/Schedules.jsx'), () => import('./SkillsPanel.jsx'),
-  () => import('./AgentOutputs.jsx'),
+  () => import('./AgentOutputs.jsx'), () => import('./shell/Shell.jsx'),
   () => import('./pages/Voice.jsx'), () => import('./pages/Artifacts.jsx'),
 ]
 
@@ -108,6 +112,7 @@ export default function AppRoutes({ onLogin, authed }) {
         {/* the ⋯ menu */}
         <Route path="/memory" element={<Memory />} />
         <Route path="/schedules" element={<Schedules />} />
+        <Route path="/shell/*" element={<Shell />} />
 
         {/* the old addresses keep working: bookmarks, toasts, muscle memory */}
         <Route path="/review/*" element={<ReviewMoved />} />

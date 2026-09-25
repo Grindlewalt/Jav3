@@ -3243,3 +3243,210 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .plan-detail { display: flex; flex-direction: column; gap: var(--sp-3);
   padding: 0 4px var(--sp-5) 28px; }
 .plan-detail .row { margin: 0; }
+
+/* ============================================================
+   The shell (/shell — shell/*.jsx): sidebar · transcript · dock.
+   A terminal feel from the rows and the prompt glyph, not from forcing
+   prose into mono: only the operator's prompt lines, the input and tool
+   payloads are monospace. Tokens only; nothing animates on load (the
+   shared .tool-row entrance is switched off here — a reopened transcript
+   would otherwise ripple in row by row); layout moves on --shell-ease.
+   ============================================================ */
+.shell {
+  --side-w: 264px;
+  --measure: 76ch;
+  --shell-ease: cubic-bezier(.4, 0, .2, 1);
+  display: flex; flex: 1; min-height: 0; position: relative;
+}
+.shell .tool-row { animation: none; }
+
+/* ---- sidebar ---- */
+.shell-side {
+  width: var(--side-w); flex-shrink: 0; display: flex; flex-direction: column;
+  background: var(--bg-soft); border-right: 1px solid var(--border); min-height: 0;
+}
+.sh-side-head { display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-6) var(--sp-6) var(--sp-4); flex-shrink: 0; }
+.sh-side-title { flex: 1; font-size: var(--fs-md); font-weight: 600; }
+.sh-side-close { display: none; }
+.sh-side-scroll { flex: 1; min-height: 0; overflow-y: auto;
+  padding: 0 var(--sp-6) var(--sp-6); display: flex; flex-direction: column;
+  gap: var(--sp-4); }
+/* one scroller for the whole column: the grouped list stops scrolling itself */
+.shell-side .convo-list { overflow: visible; flex: none; padding-bottom: 0; }
+.sh-side-foot { flex-shrink: 0; border-top: 1px solid var(--border);
+  padding: var(--sp-3) var(--sp-4) calc(var(--sp-3) + var(--sab)); }
+
+/* Needs you / Working: live rows above the groups */
+.sh-live { display: flex; flex-direction: column; gap: var(--sp-2); }
+.sh-live-h { padding: var(--sp-2) var(--sp-6); font-size: var(--fs-xs);
+  font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--dim); }
+.sh-live-rows { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-direction: column; gap: var(--sp-1); }
+.sh-live-rows li { position: relative; display: flex; align-items: center;
+  border-radius: var(--radius-lg); }
+.sh-live-rows li:hover, .sh-live-rows li.active { background: var(--panel-2); }
+.sh-live-rows li > button:first-child {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--sp-4);
+  background: none; border: 0; color: var(--text); font-weight: 400;
+  font-size: var(--fs-md); text-align: left; padding: var(--pad-row);
+}
+.sh-live-rows li > button:first-child:hover:not(:disabled) { filter: none; transform: none; }
+.sh-live-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sh-live-sub { font-size: var(--fs-xs); color: var(--dim); }
+.sh-stop { color: var(--dim); margin-right: var(--sp-2); opacity: 0;
+  transition: opacity 0.15s; }
+.sh-live-rows li:hover .sh-stop, .sh-stop:focus-visible { opacity: 1; }
+.sh-stop:hover:not(:disabled) { color: var(--red); }
+@media (hover: none) { .sh-stop { opacity: 1; } }
+
+/* status dots: flat, no pulse — a dot that throbs on load is the page
+   "doing a thing" nobody asked for */
+.sh-dot { width: 8px; height: 8px; border-radius: var(--radius-round);
+  flex-shrink: 0; background: var(--dim); }
+.sh-dot.ok { background: var(--green); }
+.sh-dot.live { background: var(--accent); }
+.sh-dot.amber { background: var(--amber); }
+
+/* the sandbox line */
+.sh-sandbox-wrap { display: block; }
+.sh-sandbox {
+  display: flex; align-items: center; gap: var(--sp-4); width: 100%; min-width: 0;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  padding: var(--pad-row-sm); color: var(--dim); font-weight: 400;
+  font-size: var(--fs-xs); text-align: left;
+}
+.sh-sandbox:hover:not(:disabled) { color: var(--text); background: var(--panel-2);
+  filter: none; transform: none; }
+.sh-sandbox-about { padding: var(--sp-3) var(--sp-5); font-size: var(--fs-md);
+  line-height: var(--lh-base); }
+.sh-sandbox-about p { margin: 0 0 var(--sp-4); }
+.sh-sandbox-about p:last-child { margin-bottom: 0; }
+
+/* ---- the transcript column ---- */
+.shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
+  min-height: 0; background: var(--bg); }
+.sh-head {
+  display: flex; align-items: center; gap: var(--sp-5); flex-shrink: 0;
+  min-height: 48px; padding: var(--sp-3) var(--sp-9);
+  border-bottom: 1px solid var(--border);
+}
+.sh-title { flex: 1 1 0; min-width: 0; font-weight: 600; font-size: var(--fs-base); }
+.sh-head-meta { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.sh-agent { font: var(--fs-sm)/1 var(--font-mono); color: var(--accent);
+  white-space: nowrap; }
+.sh-scope, .sh-chip, .sh-toggle {
+  display: inline-flex; align-items: center; gap: var(--sp-3); min-width: 0;
+  max-width: 220px; background: transparent; color: var(--dim);
+  border: 1px solid transparent; border-radius: var(--radius-pill);
+  padding: var(--pad-row-sm); font-size: var(--fs-sm); font-weight: 500;
+  white-space: nowrap;
+}
+.sh-scope:hover:not(:disabled), .sh-chip:hover:not(:disabled),
+.sh-toggle:hover:not(:disabled), .sh-toggle[aria-pressed='true'] {
+  color: var(--text); border-color: var(--border);
+  background: color-mix(in srgb, var(--panel-2) 60%, transparent);
+  filter: none; transform: none;
+}
+.sh-chip.static { cursor: default; }
+.sh-scope .chev, .sh-chip .chev { transition: transform 0.18s var(--shell-ease); }
+/* the scope menu drops down, the composer's chips open upward */
+.sh-scope .chev { transform: rotate(90deg); }
+.sh-scope .chev.open { transform: rotate(-90deg); }
+.sh-chip .chev { transform: rotate(-90deg); }
+.sh-chip .chev.open { transform: rotate(90deg); }
+.sh-scope.pinned { color: var(--text); }
+
+.sh-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.sh-thread { max-width: var(--measure); margin: 0 auto;
+  padding: var(--sp-9) var(--sp-9) var(--sp-11); display: flex;
+  flex-direction: column; gap: var(--sp-6); }
+.sh-caret { color: var(--accent); font-family: var(--font-mono);
+  flex-shrink: 0; user-select: none; }
+.sh-prompt { display: flex; gap: var(--sp-4); align-items: baseline;
+  margin-top: var(--sp-4); padding: var(--sp-4) var(--sp-6);
+  border-left: 2px solid var(--accent); background: var(--bg-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.sh-prompt pre { margin: 0; min-width: 0; flex: 1; white-space: pre-wrap;
+  word-break: break-word; font: var(--fs-base)/var(--lh-base) var(--font-mono);
+  color: var(--text); background: none; border: 0; padding: 0; }
+.sh-thread > .sh-prompt:first-child { margin-top: 0; }
+.sh-reply { font-size: var(--fs-lg); line-height: var(--lh-base); min-width: 0; }
+.sh-reply .activity-group { margin-bottom: var(--sp-4); }
+.sh-error { padding: var(--pad-row); border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--red) 45%, var(--border));
+  color: var(--red); font-size: var(--fs-md); }
+
+/* an empty transcript: a new chat, or a project's home */
+.sh-home { padding-top: var(--sp-10); }
+.sh-home h1 { margin: 0 0 var(--sp-4); font-size: var(--fs-xl); font-weight: 600; }
+.sh-lede { margin: 0 0 var(--sp-6); color: var(--dim); }
+.sh-home-meta { display: flex; align-items: center; gap: var(--sp-8);
+  font-size: var(--fs-md); color: var(--dim); }
+.sh-home-meta a { color: var(--accent); }
+.sh-home-h { margin: var(--sp-10) 0 var(--sp-3); font-size: var(--fs-xs);
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+.sh-home-chats { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-direction: column; gap: var(--sp-1); }
+.sh-home-chats button {
+  display: flex; width: 100%; align-items: center; gap: var(--sp-6);
+  background: none; border: 0; border-radius: var(--radius-sm);
+  padding: var(--pad-row); color: var(--text); font-weight: 400;
+  font-size: var(--fs-md); text-align: left;
+}
+.sh-home-chats button .ellipsis { flex: 1; min-width: 0; }
+.sh-home-chats button .dim { font-size: var(--fs-xs); flex-shrink: 0; }
+.sh-home-chats button:hover:not(:disabled) { background: var(--panel-2);
+  filter: none; transform: none; }
+
+/* ---- composer ---- */
+.sh-composer { flex-shrink: 0; padding: 0 var(--sp-9) calc(var(--sp-8) + var(--sab)); }
+.sh-composer .peak-ask { max-width: var(--measure); }
+.sh-box {
+  max-width: var(--measure); margin: 0 auto; background: var(--panel);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  transition: border-color 0.15s var(--shell-ease), box-shadow 0.2s var(--shell-ease);
+}
+.sh-box:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.sh-input { display: flex; gap: var(--sp-4); align-items: baseline;
+  padding: var(--sp-5) var(--sp-7) 0; }
+.sh-input .sh-caret { font-size: var(--fs-base); }
+.sh-input textarea {
+  flex: 1; min-width: 0; resize: none; border: 0; background: none; padding: 0;
+  max-height: 240px; font: var(--fs-base)/var(--lh-base) var(--font-mono);
+  color: var(--text); border-radius: 0;
+}
+.sh-input textarea:focus, .sh-input textarea:focus-visible { outline: none;
+  box-shadow: none; border-color: transparent; }
+.sh-bar { display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4); }
+.sh-bar .send-btn { width: 34px; height: 34px; font-size: var(--fs-lg); }
+.sh-temp { margin-left: var(--sp-2); }
+
+/* ---- phone: the transcript is the screen ----
+   The sidebar becomes a sheet sliding in from the left over a scrim (☰ in
+   the header, ✕ or the scrim to close). */
+@media (max-width: 768px) {
+  .shell-side {
+    position: absolute; top: 0; bottom: 0; left: 0; z-index: 40;
+    width: min(320px, 88vw); box-shadow: var(--shadow-win);
+    transform: translateX(-100%); visibility: hidden;
+    transition: transform 0.24s var(--shell-ease), visibility 0s linear 0.24s;
+  }
+  .shell.drawer-open .shell-side { transform: none; visibility: visible;
+    transition: transform 0.24s var(--shell-ease), visibility 0s; }
+  .sh-side-close { display: flex; }
+  .shell-scrim { position: absolute; inset: 0; z-index: 39;
+    background: var(--overlay); }
+  .sh-head { padding: var(--sp-2) var(--sp-4); gap: var(--sp-3); }
+  .sh-head-meta .sh-toggle { display: none; }
+  .sh-scope { max-width: 38vw; }
+  .sh-thread { padding: var(--sp-7) var(--sp-8) var(--sp-10); }
+  .sh-composer { padding: 0 var(--sp-4) calc(var(--sp-4) + var(--sab)); }
+  .sh-input textarea { font-size: 16px; }   /* iOS zooms a focused field under 16px */
+  .sh-live-rows li > button:first-child, .sh-stop { min-height: var(--tap); }
+}
