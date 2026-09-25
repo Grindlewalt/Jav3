@@ -1533,22 +1533,6 @@ kbd {
   padding: 8px 12px; font-size: 14px; }
 
 /* ---- agents ---- */
-.agent-form { display: flex; flex-direction: column; gap: 14px;
-  overflow-y: auto; padding-right: 6px; }
-/* wraps rather than squeezing two fields into a phone's width */
-.field-row { display: flex; gap: var(--sp-6); flex-wrap: wrap; }
-.field-row > label, .prompt-label {
-  display: flex; flex-direction: column; gap: var(--sp-2); flex: 1 1 220px;
-  min-width: 0; font-size: var(--fs-sm); color: var(--dim);
-}
-.prompt-head { margin: 0; }
-.secret-refs { margin-top: var(--sp-2); }
-.secret-refs button { margin-right: var(--sp-2); }
-.agent-num { max-width: 120px; }
-.agent-section { display: flex; flex-direction: column; gap: var(--sp-4); }
-.agent-outputs-link { font-size: var(--fs-md); color: var(--dim); }
-.agent-outputs-link:hover { color: var(--accent); }
-
 /* the roster (and the Skills tab's list): one button per row, so a row is a
    focus stop and Enter opens it — the old <li onClick> rows were mouse-only */
 .agent-new { margin: 0; flex-wrap: nowrap; }
@@ -1564,10 +1548,8 @@ kbd {
 .trash-list li:hover { background: var(--panel-2); color: var(--text); }
 .trash-list .grow { min-width: 0; }
 /* an editor's title is a name, not a path — the page's own face, not mono */
-.agent-form .pane-head .toolbar-title, .skill-pane .pane-head .toolbar-title {
+.skill-pane .pane-head .toolbar-title {
   font-family: inherit; font-weight: 600; }
-.agent-toggles { display: flex; flex-direction: column; gap: var(--sp-3); }
-.agent-toggles .field-hint { margin-left: 46px; }
 .agent-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1;
   display: flex; flex-direction: column; gap: var(--sp-1); }
 .agent-row {
@@ -1583,33 +1565,6 @@ kbd {
   white-space: nowrap; }
 .agent-row-sub { display: flex; flex-wrap: wrap; gap: var(--sp-2); max-width: 100%; }
 .agent-row-sub .tag, .agent-row-sub .badge { margin-left: 0; }
-
-/* skills an agent keeps (pressed) or has had taken away (struck through) */
-.skill-chips { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
-.skill-chip {
-  background: var(--panel); color: var(--text); border: 1px solid var(--border);
-  padding: var(--pad-row-sm); border-radius: var(--radius-sm);
-  font: 400 var(--fs-md) var(--font-mono);
-}
-.skill-chip:hover:not(:disabled) { border-color: var(--accent); filter: none;
-  transform: none; }
-.skill-chip.off { color: var(--dim); opacity: 0.55; text-decoration: line-through; }
-
-/* own-memory notes: agent-written, so plain text only */
-/* the app's disclosure is the › chevron, turned down when open (as on the
-   deleted folds), not the UA's ▶ triangle */
-.agent-notes summary, .agent-notes-list summary { cursor: pointer; color: var(--dim);
-  font-size: var(--fs-md); list-style: none; }
-.agent-notes summary::-webkit-details-marker,
-.agent-notes-list summary::-webkit-details-marker { display: none; }
-.agent-notes summary .chev, .agent-notes-list summary .chev { margin-right: var(--sp-3); }
-.agent-notes[open] > summary .chev,
-.agent-notes-list details[open] > summary .chev { transform: rotate(90deg); }
-.agent-notes-list { list-style: none; margin: var(--sp-3) 0 0; padding: 0;
-  display: flex; flex-direction: column; gap: var(--sp-2); }
-.agent-note-body { margin: var(--sp-2) 0 0; padding: var(--sp-3); white-space: pre-wrap;
-  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  font-size: var(--fs-sm); max-height: 220px; overflow: auto; }
 
 .skill-param { margin: 0; flex-wrap: nowrap; }
 /* the argument row's bare inputs matched the base 15px; everything else in
@@ -1956,13 +1911,6 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
 .artifact-group { margin-bottom: 14px; }
 .artifact-group .row { gap: 6px; margin-top: 4px; }
 
-.quiz { border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--panel); padding: 10px 14px; margin: 8px 0;
-  display: flex; flex-direction: column; gap: 10px; }
-.quiz-q { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.quiz-opt { display: flex; gap: 6px; align-items: center; color: var(--dim);
-  cursor: pointer; }
-.quiz-opt:hover { color: var(--fg); }
 .skill-form { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
 
 /* ---- taint / trust tags (Memory notes) ---- */
@@ -2378,7 +2326,6 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
   .split-layout > aside .file-list,
   .split-layout > aside .agent-list,
   .split-layout > aside .sched-form,
-  .split-layout > aside .agent-form,
   .split-layout > aside .skill-form {
     flex: 0 0 auto; overflow: visible; max-height: none;
   }
