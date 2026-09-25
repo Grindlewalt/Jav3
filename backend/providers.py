@@ -222,6 +222,11 @@ def key_name(pid: str) -> str:
     return "PROVIDER_" + re.sub(r"[^A-Z0-9]", "_", _norm_id(pid).upper()) + "_API_KEY"
 
 
+def is_provider_key(name: str) -> bool:
+    """A secrets-store name that is some provider's API key."""
+    return bool(re.fullmatch(r"PROVIDER_[A-Z0-9_]+_API_KEY", name or ""))
+
+
 def _store() -> dict:
     from . import secrets as secrets_store
     return secrets_store.load()

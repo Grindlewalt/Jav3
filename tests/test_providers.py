@@ -123,6 +123,14 @@ def test_keys_live_in_the_secrets_store_unbound(tmp_env):
         providers.set_key("openai", "two words")
 
 
+def test_provider_keys_are_hidden_from_the_agents_secret_index(tmp_env):
+    from backend.memory import secrets_index
+    providers.set_key("openai", OPENAI_KEY)
+    secrets.save({**secrets._load_raw(), "WEATHER_KEY": "w-123456"})
+    idx = secrets_index()
+    assert "WEATHER_KEY" in idx and "PROVIDER_OPENAI_API_KEY" not in idx
+
+
 def test_first_key_respects_an_explicit_off(tmp_env):
     providers.update_provider("groq", enabled=False)
     providers.set_key("groq", "gsk-test-123456")

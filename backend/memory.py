@@ -327,7 +327,10 @@ def secrets_index() -> str:
     """Names (never values) of the operator's saved API keys, so the model
     knows what {{secret:NAME}} placeholders it can use."""
     from . import secrets as secrets_mod
-    names = secrets_mod.names()
+    from .providers import is_provider_key
+    # LLM provider keys belong to the host's model gateway, not to tools: the
+    # agent is never told they exist, so it can't ask for one to be granted
+    names = [n for n in secrets_mod.names() if not is_provider_key(n)]
     if not names:
         return ""
     lines = []
