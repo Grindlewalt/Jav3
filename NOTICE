@@ -10,3 +10,14 @@ rclone — https://rclone.org
   Copyright (C) 2012 by Nick Craig-Wood http://www.craig-wood.com/nick/
   Licensed under the MIT License:
   https://github.com/rclone/rclone/blob/master/COPYING
+
+Third-party data
+================
+
+models.dev — https://models.dev
+  backend/providers_catalog.json (the LLM provider + model catalogue: base
+  URLs, context windows, prices) is derived from the models.dev api.json by
+  scripts/refresh_providers.py. Prices are community-maintained.
+  Copyright (c) 2025 models.dev
+  Licensed under the MIT License:
+  https://github.com/sst/models.dev/blob/dev/LICENSE

@@ -141,3 +141,7 @@ default → the guest is netless), `JARVIS_PEAK_WINDOWS` (peak-pricing gate),
 
 Backups use [rclone](https://rclone.org) (MIT licence), run as a separate
 program — see `NOTICE`.
+
+The LLM provider catalogue (`backend/providers_catalog.json`) is data from
+[models.dev](https://models.dev) (MIT licence), refreshed with
+`scripts/refresh_providers.py` — see `NOTICE`.

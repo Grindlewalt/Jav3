@@ -12,14 +12,13 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, desk_a
                devices_api, egress_api,
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
-               notifications_api, plan_api, projects, reviewer, reviewer_api, runs_api,
-               schedules, sidebar_api, skills_api, vm_api, voice_api, workspace, secrets)
-from .agent.model import (MODEL_STATE_KEY, get_model_override,
-                          load_model_override, set_model_override)
+               notifications_api, plan_api, projects, providers, reviewer,
+               reviewer_api, runs_api, schedules, sidebar_api, skills_api, vm_api,
+               voice_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .auth import require_user
 from .config import settings, ensure_dirs
-from .db import get_db, init_db, set_state
+from .db import init_db
 from .memory import ensure_memory_seeds
 from .vm.egress_proxy import proxy as egress_proxy
 from .vm.gateway_server import gateway
@@ -48,7 +47,7 @@ async def lifespan(app: FastAPI):
     ensure_dirs()
     await init_db()
     ensure_memory_seeds()
-    await load_model_override()    # nav model switch survives restarts
+    await providers.migrate_legacy_override()   # the old nav switch slot -> default
     await schedules.ensure_default_schedules()
     compile_registry()
     task = asyncio.create_task(schedules.scheduler_loop())
@@ -119,6 +118,7 @@ app.include_router(git_serve_api.router)
 app.include_router(notifications_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)
+app.include_router(providers.router)
 app.include_router(backup.router)
 app.include_router(artifacts_api.router)
 app.include_router(vm_api.router)
@@ -141,19 +141,18 @@ class ModelSelect(BaseModel):
     model: str
 
 
-def _model_option(model_id: str) -> dict:
-    meta = settings.model_labels.get(model_id) or {}
-    return {"id": model_id, "label": meta.get("label") or model_id,
-            "blurb": meta.get("blurb") or ""}
-
-
 def _model_state() -> dict:
-    # `options` carries the display copy (label/blurb from config) so the GUI
-    # renders names from here instead of hardcoding versions in JSX.
-    ids = list(dict.fromkeys([*settings.model_choices, settings.model_name]))
-    return {"active": get_model_override() or settings.model_name,
-            "default": settings.model_name, "choices": settings.model_choices,
-            "options": [_model_option(i) for i in ids]}
+    # The nav switcher's compatibility shape over the provider registry: ids
+    # are provider/model, `active` is the default (one slot, persisted in
+    # providers_state.json), `options` carries display copy so the GUI never
+    # hardcodes model names.
+    enabled = providers.enabled_models()
+    dflt = providers.default_model()
+    return {"active": dflt, "default": dflt,
+            "choices": [m["id"] for m in enabled],
+            "options": [{"id": m["id"], "label": m["label"],
+                         "blurb": m.get("provider_label") or m["provider"]}
+                        for m in enabled]}
 
 
 @app.get("/api/model", dependencies=[Depends(require_user)])
@@ -163,18 +162,13 @@ async def get_model():
 
 @app.put("/api/model", dependencies=[Depends(require_user)])
 async def put_model(body: ModelSelect):
-    """Switch the runtime model (nav dropdown). Takes effect on the next model
-    call — no restart. Agents with an explicit model pin are unaffected."""
-    if body.model not in settings.model_choices:
-        raise HTTPException(status_code=400,
-                            detail=f"model must be one of {settings.model_choices}")
-    override = None if body.model == settings.model_name else body.model
-    set_model_override(override)
-    db = await get_db()
+    """Switch the default model (nav dropdown). Takes effect on the next model
+    call — no restart. `provider/model`, or a bare id on the default provider;
+    must be an enabled model. Agents with an explicit model pin are unaffected."""
     try:
-        await set_state(db, MODEL_STATE_KEY, override or "")
-    finally:
-        await db.close()
+        providers.set_default(body.model)
+    except providers.ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
     return _model_state()
 
 

@@ -759,3 +759,88 @@ async def test_provider(pid: str, api_key: str | None = None,
 
 
 _stored_or_env_key = api_key     # test_provider's `api_key` arg shadows the function
+
+
+# --- HTTP API (control plane: operator cookie only, never a device token) -----
+
+from fastapi import APIRouter, Depends, HTTPException  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
+from .auth import require_user  # noqa: E402
+
+router = APIRouter(prefix="/api", tags=["providers"],
+                   dependencies=[Depends(require_user)])
+
+
+def _http(e: ProviderError) -> HTTPException:
+    status = 404 if str(e).startswith("unknown provider") else 400
+    return HTTPException(status_code=status, detail=str(e))
+
+
+class ProviderUpdate(BaseModel):
+    api_key: str | None = None      # "" clears the stored key
+    base_url: str | None = None     # null (sent) resets to the catalogue default
+    enabled: bool | None = None
+
+
+class ProviderTest(BaseModel):
+    api_key: str | None = None
+    base_url: str | None = None
+
+
+class ModelUpdate(BaseModel):
+    enabled: bool | None = None
+    default: bool | None = None
+
+
+@router.get("/providers")
+async def http_list_providers(models: bool = True):
+    """?models=0 drops the per-provider model lists (the full catalogue is
+    ~1.5 MB); GET /api/providers/{id} then fetches one provider's."""
+    return {"catalog_source": catalog()["source"], "default": default_model(),
+            "providers": list_providers(include_models=models)}
+
+
+@router.get("/providers/{pid}")
+async def http_get_provider(pid: str):
+    try:
+        return get_provider(pid)
+    except ProviderError as e:
+        raise _http(e) from None
+
+
+@router.put("/providers/{pid}")
+async def http_update_provider(pid: str, body: ProviderUpdate):
+    try:
+        provider(pid)
+        if body.api_key is not None:
+            set_key(pid, body.api_key)
+        base = None
+        if "base_url" in body.model_fields_set:
+            base = body.base_url or ""          # null/"" -> back to the default
+        return update_provider(pid, base_url=base, enabled=body.enabled)
+    except ProviderError as e:
+        raise _http(e) from None
+
+
+@router.post("/providers/{pid}/test")
+async def http_test_provider(pid: str, body: ProviderTest | None = None):
+    body = body or ProviderTest()
+    try:
+        return await test_provider(pid, api_key=body.api_key, base_url=body.base_url)
+    except ProviderError as e:
+        raise _http(e) from None
+
+
+@router.put("/providers/{pid}/models/{model:path}")
+async def http_update_model(pid: str, model: str, body: ModelUpdate):
+    try:
+        view = update_model(pid, model, enabled=body.enabled, default=body.default)
+    except ProviderError as e:
+        raise _http(e) from None
+    return {"model": view, "default": default_model()}
+
+
+@router.get("/models")
+async def http_models():
+    return models_payload()
