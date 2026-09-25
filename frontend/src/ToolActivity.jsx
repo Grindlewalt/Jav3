@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import JobTree from './JobTree.jsx'
 import Md from './Md.jsx'
 import { useModel } from './modelInfo.js'
@@ -123,8 +123,11 @@ export function ToolRow({ part }) {
 }
 
 // Finished turns collapse their activity into one header above the reply.
-export function ActivityGroup({ parts }) {
-  const [open, setOpen] = useState(false)
+// `expanded` lets a transcript-wide "expand all" drive every group at once;
+// each still toggles on its own afterwards.
+export function ActivityGroup({ parts, expanded }) {
+  const [open, setOpen] = useState(!!expanded)
+  useEffect(() => { if (expanded !== undefined) setOpen(expanded) }, [expanded])
   if (!parts?.length) return null
   return (
     <div className="activity-group">
@@ -176,7 +179,7 @@ function Typing() {
 // Which brain wrote this. Only rendered when it was NOT one of the switcher's
 // models (per /api/model) — voice runs a small model locally, and "who
 // actually did this work" is not something you can tell from the prose.
-function ModelTag({ model }) {
+export function ModelTag({ model }) {
   const m = useModel()
   if (!model || !m || model === m.default || m.choices.includes(model)) return null
   return <span className="msg-model" title={`answered by ${model}`}>{model}</span>

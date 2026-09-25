@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from './api.js'
 import { useAsk } from './ask.jsx'
@@ -17,6 +17,11 @@ import Button from './components/Button.jsx'
 // different chat shell can mount it as-is: the caller owns the conversation
 // list and how a chat opens, renames and deletes; this owns folders, stars and
 // which groups are folded.
+//
+// Two optional seams for the shell (/shell): `folders` hands in a folder list
+// the caller already fetched (its one-round-trip GET /api/sidebar), after which
+// every folder change is reported through `onChanged` instead of refetched
+// here; `projectHref` points the Projects rows somewhere other than the board.
 
 const GROUPS_KEY = 'jarvis.chat.groups'
 
@@ -47,20 +52,31 @@ function GroupHead({ id, label, count, folded, onToggle, children }) {
   )
 }
 
+const boardHref = (p) => `/projects/${encodeURIComponent(p.slug)}`
+
 export default function ChatGroups({
   conversations, activeId, projects = [], onOpen, onRename, onDelete, onChanged,
+  folders: givenFolders, projectHref = boardHref,
 }) {
   const ask = useAsk()
-  const [folders, setFolders] = useState([])
+  const [ownFolders, setFolders] = useState([])
+  const controlled = givenFolders !== undefined
+  const folders = controlled ? givenFolders : ownFolders
   const [folded, setFolded] = useState(readFolded)
   const [menu, setMenu] = useState(null)        // 'c:<id>' | 'f:<id>' | null
   const [draft, setDraft] = useState(null)      // new-folder name while typing
   const closeMenu = useCallback(() => setMenu(null), [])
 
+  // through a ref: callers pass a fresh onChanged each render, and as a
+  // dependency it would refetch the folders on every one of them
+  const changedRef = useRef(onChanged)
+  changedRef.current = onChanged
   const loadFolders = useCallback(
-    () => api('/api/chat/folders').then((r) => setFolders(r.folders)).catch(() => {}),
-    [])
-  useEffect(() => { loadFolders() }, [loadFolders])
+    () => (controlled
+      ? Promise.resolve(changedRef.current?.())
+      : api('/api/chat/folders').then((r) => setFolders(r.folders)).catch(() => {})),
+    [controlled])
+  useEffect(() => { if (!controlled) loadFolders() }, [controlled, loadFolders])
 
   useEffect(() => {
     try { localStorage.setItem(GROUPS_KEY, JSON.stringify(folded)) } catch { /* private mode */ }
@@ -73,7 +89,7 @@ export default function ChatGroups({
       await api(`/api/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
     } catch (err) { notifyError(err) }
     onChanged?.()
-    loadFolders()
+    if (!controlled) loadFolders()
   }
 
   async function createFolder(name, thenFile = null) {
@@ -110,7 +126,7 @@ export default function ChatGroups({
       await api(`/api/chat/folders/${f.id}`, { method: 'DELETE' })
     } catch (err) { notifyError(err) }
     loadFolders()
-    onChanged?.()
+    if (!controlled) onChanged?.()
   }
 
   async function moveToNewFolder(c) {
@@ -201,7 +217,7 @@ export default function ChatGroups({
             <ul id="convo-group-projects" className="convo-rows proj-rows">
               {projects.map((p) => (
                 <li key={p.slug}>
-                  <Link to={`/projects/${encodeURIComponent(p.slug)}`} title={p.slug}>
+                  <Link to={projectHref(p)} title={p.slug}>
                     <span className="proj-dot" aria-hidden="true" />
                     <span className="convo-title ellipsis">{p.name}</span>
                   </Link>
