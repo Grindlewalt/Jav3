@@ -27,7 +27,10 @@ export default function SkillsPanel() {
   const [desc, setDesc] = useState('')
   const [error, setError] = useState(null)
 
-  const refresh = () => api('/api/skills').then((r) => setSkills(r.skills))
+  // imported (OpenClaw) skills are pinned — read and granted on the Tools page,
+  // never edited here (the server refuses the save anyway)
+  const refresh = () => api('/api/skills')
+    .then((r) => setSkills(r.skills.filter((s) => !s.imported)))
   useEffect(() => { refresh() }, [])
 
   useEffect(() => {

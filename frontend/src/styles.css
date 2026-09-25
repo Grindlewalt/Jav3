@@ -1567,6 +1567,32 @@ kbd {
 }
 .tool-card p { margin: 6px 0 0; font-size: 13.5px; color: var(--text); }
 .tool-card code { font-size: 13px; color: var(--accent); }
+/* Tools page: a card head is name · tags · (switch); the built-in fold lists
+   names only, reusing Projects' fold summary (.deleted-fold). */
+.tools-first { margin-top: 0; }
+.tool-card-head { display: flex; align-items: center; gap: var(--sp-4); min-width: 0; }
+.tool-card-head code { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.tool-reqs { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-4); }
+.tool-meta { margin-top: var(--sp-3); font-size: var(--fs-sm); color: var(--dim);
+  overflow-wrap: anywhere; }
+.tool-lock { color: var(--red); }
+.tool-text { margin-top: var(--sp-4); }
+.tool-text pre {
+  margin: 0; max-height: 320px; overflow: auto; white-space: pre-wrap;
+  overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-sm);
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: var(--pad-row);
+}
+.tool-import { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-4);
+  margin-bottom: var(--page-gap); }
+.tool-import input { flex: 1 1 240px; min-width: 0; }
+.tool-import-ask { font-size: var(--fs-md); overflow-wrap: anywhere; min-width: 0; }
+.builtin-list { list-style: none; margin: var(--sp-6) 0 0; padding: 0; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--sp-2) var(--sp-6); }
+.builtin-list li { display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-4); padding: var(--pad-row-sm); font-size: var(--fs-md);
+  border-bottom: 1px solid var(--border); min-width: 0; }
+.builtin-list code { color: var(--text); overflow-wrap: anywhere; min-width: 0; }
 
 /* ---- chatbox panel ---- */
 .chatbox { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; }
