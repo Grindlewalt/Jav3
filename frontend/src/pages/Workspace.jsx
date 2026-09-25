@@ -32,7 +32,7 @@ const PANEL_TYPES = {
   agent: { label: 'Run an agent', w: 460, h: 520 },
   research: { label: 'Research bots — live', w: 620, h: 560 },
   plan: { label: 'Plan — dump, checklist, agents', w: 560, h: 560 },
-  review: { label: 'Review — approvals & alerts', w: 480, h: 540 },
+  review: { label: 'Security — approvals & alerts', w: 480, h: 540 },
   network: { label: 'Network — egress & host approvals', w: 480, h: 560 },
   secrets: { label: 'Secrets — key grants for this project', w: 460, h: 380 },
   terminal: { label: 'Terminal — shell in the guest VM', w: 560, h: 360 },
@@ -1304,9 +1304,9 @@ function upLast(list, fn) {
   return copy
 }
 
-// The unified Review Center, scoped to this one project: the same commit
+// The unified Security queue, scoped to this one project: the same commit
 // requests, egress host approvals and security alerts (incl. advisory write
-// flags) the global /review page shows, filtered to this slug.
+// flags) the global /security page shows, filtered to this slug.
 function ReviewPanel({ slug }) {
   return (
     <div className="pane-col">
@@ -1472,7 +1472,7 @@ function GitPanel({ slug }) {
 // Per-project secret grants: which of the operator's saved keys the egress
 // proxy may inject into THIS project's outbound requests ({{secret:X}} swapped
 // on the wire — the agent never holds the value). Keys themselves are added in
-// Review → Secrets; this panel only flips the grant.
+// Security → Secrets; this panel only flips the grant.
 function SecretsPanel({ slug }) {
   const [secrets, setSecrets] = useState([])
   const [grants, setGrants] = useState({})   // name -> status
@@ -1504,9 +1504,9 @@ function SecretsPanel({ slug }) {
       </div>
       <div className="dim small">a granted key is injected wherever this project's code
         sends {'{{secret:NAME}}'} through the egress proxy — the agent never sees the
-        value. Add or edit the keys themselves in Review → Secrets.</div>
+        value. Add or edit the keys themselves in Security → Secrets.</div>
       <ul className="staged-list">
-        {secrets.length === 0 && <EmptyState as="li">no keys saved yet — add them in Review → Secrets</EmptyState>}
+        {secrets.length === 0 && <EmptyState as="li">no keys saved yet — add them in Security → Secrets</EmptyState>}
         {secrets.map((s) => {
           const granted = grants[s.name] === 'granted'
           return (

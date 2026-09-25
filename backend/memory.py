@@ -162,7 +162,7 @@ STATIC_BEHAVIOR = """# Behavior — how you work
   not installed into the live VM.
 - The VM's internet is OFF by default and, when on, runs through a MONITORED
   EGRESS PROXY: only hosts on the project's allowlist are reachable; a new host
-  is denied and QUEUED for the operator to approve (Review Center / Network tab),
+  is denied and QUEUED for the operator to approve (Security page / Network tab),
   which trains the allowlist. So when a fetch, `pip install`, `git clone`, or
   `curl` fails with a network/DNS error, that is USUALLY the egress gate, not a
   dead end. Do this: name the exact hosts you need (e.g. github.com, pypi.org,

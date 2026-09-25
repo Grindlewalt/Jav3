@@ -14,7 +14,7 @@ import Tabs from '../components/Tabs.jsx'
 // One cross-project queue of everything awaiting the operator: git commit
 // requests, egress host approvals, and security alerts (which now include the
 // advisory write flags — file writes apply live, the diff gate alerts instead
-// of blocking). Rendered whole on the global /review page and, with a `slug`,
+// of blocking). Rendered whole on the global /security page and, with a `slug`,
 // filtered to a single project inside a Workspace panel.
 //
 // EVERY string in here — flag triggers/details, commit messages, egress hosts,
@@ -311,9 +311,10 @@ function AlertRow({ a, onAck, onOpen }) {
 }
 
 // ---- the shell ----
-// Review is a layout route (routes.jsx): this is the <h1> and the tab strip,
-// and the tabs are real URLs — /review, /review/network, /review/logs,
-// /review/secrets — so each is linkable and NavLink lights the current one.
+// Security (the page once called Review) is a layout route (routes.jsx): this
+// is the <h1> and the tab strip, and the tabs are real URLs — /security,
+// /security/network, /security/logs, /security/secrets — so each is linkable
+// and NavLink lights the current one. The old /review* addresses redirect.
 // Network and Logs used to be top-level pages; they are the guest's traffic
 // and the agent's transcripts, which is to say evidence, and evidence belongs
 // beside the queue that cites it. The old /network and /logs redirect here.
@@ -327,13 +328,13 @@ function AlertRow({ a, onAck, onOpen }) {
 export default function Review() {
   const count = useContext(PendingCountContext)
   return (
-    <Page variant="fill" title="Review" className="review-shell"
+    <Page variant="fill" title="Security" className="review-shell"
           actions={(
-            <Tabs label="Review sections" items={[
-              { to: '/review', end: true, label: 'Queue', count },
-              { to: '/review/network', label: 'Network' },
-              { to: '/review/logs', label: 'Logs' },
-              { to: '/review/secrets', label: 'Secrets' },
+            <Tabs label="Security sections" items={[
+              { to: '/security', end: true, label: 'Queue', count },
+              { to: '/security/network', label: 'Network' },
+              { to: '/security/logs', label: 'Logs' },
+              { to: '/security/secrets', label: 'Secrets' },
             ]} />
           )}>
       <div className="review-body"><Outlet /></div>

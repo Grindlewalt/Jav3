@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Login from './pages/Login.jsx'
 import Chat from './pages/Chat.jsx'
 import NotFound from './pages/NotFound.jsx'
@@ -96,7 +96,7 @@ export default function AppRoutes({ onLogin, authed }) {
           <Route path="outputs" element={<AgentOutputs />} />
           <Route path="outputs/:slug" element={<AgentOutputs />} />
         </Route>
-        <Route path="/review" element={<Review />}>
+        <Route path="/security" element={<Review />}>
           <Route index element={<ReviewHome />} />
           <Route path="network" element={<Network />} />
           <Route path="logs" element={<Logs />} />
@@ -110,8 +110,9 @@ export default function AppRoutes({ onLogin, authed }) {
         <Route path="/schedules" element={<Schedules />} />
 
         {/* the old addresses keep working: bookmarks, toasts, muscle memory */}
-        <Route path="/network" element={<Navigate to="/review/network" replace />} />
-        <Route path="/logs" element={<Navigate to="/review/logs" replace />} />
+        <Route path="/review/*" element={<ReviewMoved />} />
+        <Route path="/network" element={<Navigate to="/security/network" replace />} />
+        <Route path="/logs" element={<Navigate to="/security/logs" replace />} />
         <Route path="/context" element={<Navigate to="/memory" replace />} />
         <Route path="/skills" element={<Navigate to="/agents/skills" replace />} />
 
@@ -123,4 +124,13 @@ export default function AppRoutes({ onLogin, authed }) {
       </Routes>
     </Suspense>
   )
+}
+
+// Review was renamed Security. /review and every /review/<tab> land on the
+// same tab under /security, and the navigation state rides along — a toast's
+// `openEvent` deep link still opens its evidence board after the redirect.
+function ReviewMoved() {
+  const loc = useLocation()
+  const to = loc.pathname.replace(/^\/review/, '/security') + loc.search + loc.hash
+  return <Navigate to={to} state={loc.state} replace />
 }

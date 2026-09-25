@@ -437,7 +437,7 @@ export default function App() {
         <>
           {/* Railed: the bar is gone and the links live in the chat sidebar,
               portaled into the slot it published. Otherwise the usual top bar.
-              Review wears the pending count — the bell's old job. */}
+              Security wears the pending count — the bell's old job. */}
           {/* the bar always exists and folds to zero height instead of being
               torn out — otherwise the page below jumped 56px the instant the
               rail handed the nav back, which read as a jolt under the icons'

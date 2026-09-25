@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { human, sevClass } from './format.js'
 
-// The evidence board for one security alert. A card in the Review Center says
+// The evidence board for one security alert. A card on the Security page says
 // "write flag: network_call in fetch.py"; this is where the operator finds out
 // whether that matters — the flagged lines in place, the diff against git HEAD,
 // the directory the file lives in, the traffic behind an egress cut, the

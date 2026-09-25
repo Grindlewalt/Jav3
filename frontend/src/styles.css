@@ -466,7 +466,7 @@ nav a.active .nav-ico, .rail-links > a.active .nav-ico { color: var(--accent); }
 .vm-nuke-row button { flex: 1; font-size: 12px; }
 
 /* ---- Auto review card (the triage reviewer; first section of Review) ---- */
-/* The reviewer is the Review Center's first SECTION, not a card bolted above
+/* The reviewer is the Security page's first SECTION, not a card bolted above
    it: same head, same count chip, same row shape as the queues below, so the
    page reads as one list. (It used .notif-item from the old nav-bell dropdown,
    which is why it looked like a visitor from another screen.) */
@@ -1958,7 +1958,7 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
 .egr-bytes { color: var(--dim); font-size: 11.5px; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
 
-/* ---- Review Center ----
+/* ---- Security page ----
    A layout route: the shell's header bar carries the <h1> and the tab strip;
    .review-body is the one column every tab renders into. It owns the insets
    and is the scroll container for a tab that just flows (the queue, Secrets);
@@ -2534,7 +2534,7 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
    The bell and the shield are gone; anything that needs operator eyes lands
    here as a desktop-style alert instead. Severity colours the edge (red =
    critical, amber = the rest), the bar underneath drains while it waits and
-   pauses on hover, and a click lands in the Review Center. At most three
+   pauses on hover, and a click lands on the Security page. At most three
    cards show; the backlog folds into a "+N" chip.
    Bottom, not top: every page puts its heading, its tab strip and its main
    actions at the top right, and a card there covered Review's tabs, Agents'

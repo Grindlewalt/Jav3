@@ -84,7 +84,7 @@ def substitute(text: str | None) -> str | None:
             have = ", ".join(sorted(secrets)) or "(none saved yet)"
             raise KeyError(
                 f"unknown secret '{name}'. Available secrets: {have}. "
-                "The operator adds keys in Review → Secrets.")
+                "The operator adds keys in Security → Secrets.")
         return secrets[name]
 
     return PLACEHOLDER.sub(repl, text)
@@ -120,7 +120,7 @@ def substitute_url(url: str) -> str:
         if name not in secrets:
             have = ", ".join(sorted(secrets)) or "(none saved yet)"
             raise KeyError(f"unknown secret '{name}'. Available: {have}. The "
-                           "operator adds keys in Review → Secrets.")
+                           "operator adds keys in Security → Secrets.")
         allowed = hosts_for(name)
         if not allowed:
             raise ValueError(

@@ -5,7 +5,7 @@ import { api, subscribeSse } from './api.js'
 
 // Bottom-right notices — the successor to the nav bell and shield. Anything that
 // needs operator eyes arrives as a desktop-style alert (red = critical
-// security, amber = the rest) and clicks through to the Review Center, which
+// security, amber = the rest) and clicks through to the Security page, which
 // is the actual ledger; the count badge on the Review nav link means a missed
 // toast is never lost. The bar under each card drains its lifetime away and
 // pauses while hovered (dismissal rides the CSS animation's end, so the pause
@@ -29,7 +29,7 @@ import { api, subscribeSse } from './api.js'
 let seq = 0
 
 // The pending count, for anything below App that wears it: the Review nav
-// link is App's own, but the Review page's Queue tab shows the same number
+// link is App's own, but the Security page's Queue tab shows the same number
 // and must not run a second poll to get it. App provides useNotices().count.
 export const PendingCountContext = createContext(0)
 
@@ -101,7 +101,7 @@ export function useNotices(enabled) {
 
   // ...and the app's own fire-and-forget messages (see notify.js). These are
   // marked `local`: they are not queue items, so they must not click through
-  // to the Review Center the way every other card does.
+  // to the Security page the way every other card does.
   useEffect(() => {
     if (!enabled) return
     const onNotice = (e) => push({ ...(e.detail || {}), local: true })
@@ -129,10 +129,10 @@ export function useNotices(enabled) {
 }
 
 // A queue card (not the app's own message, not an agent run's result) exists
-// to say "go to Review". On Review it says nothing the page is not already
+// to say "go to Security". On Security it says nothing the page is not already
 // showing, and at the top of the screen it sat on the page's own tab strip.
 const isQueueCard = (t) => !t.local && !t.project
-const onReview = (path) => path === '/review' || path.startsWith('/review/')
+const onReview = (path) => path === '/security' || path.startsWith('/security/')
 
 export default function Notices({ toasts, dismiss, clear }) {
   const navigate = useNavigate()
@@ -159,9 +159,9 @@ export default function Notices({ toasts, dismiss, clear }) {
   const open = (t) => {
     dismiss(t.id)
     // an agent notice belongs to the board it ran on; everything else is a
-    // queue item and belongs in the Review Center
+    // queue item and belongs on the Security page
     if (t.project) navigate(`/projects/${t.project}`)
-    else navigate('/review', t.eventId ? { state: { openEvent: t.eventId } } : undefined)
+    else navigate('/security', t.eventId ? { state: { openEvent: t.eventId } } : undefined)
   }
   return (
     <div className="notices" role="status" aria-live="polite">
@@ -191,7 +191,7 @@ export default function Notices({ toasts, dismiss, clear }) {
         <div key={t.id} className={`notice ${t.sev}`} role="button" tabIndex={0}
                 title={t.project ? `open the ${t.project} board`
                   : t.eventId ? 'open the evidence for this alert'
-                    : 'open the Review Center'}
+                    : 'open Security'}
                 onClick={() => open(t)}
                 onKeyDown={(e) => {
                   if (e.target !== e.currentTarget) return
@@ -213,8 +213,8 @@ export default function Notices({ toasts, dismiss, clear }) {
       )))}
       {extra > 0 && (
         <button type="button" className="notice-more"
-                onClick={() => { clear(); navigate('/review') }}>
-          +{extra} more — open review
+                onClick={() => { clear(); navigate('/security') }}>
+          +{extra} more — open Security
         </button>
       )}
     </div>

@@ -6,7 +6,7 @@ import { Button, Toggle } from './components/index.js'
 
 // Control strip for Auto review — the isolated triage reviewer
 // (backend/reviewer.py; "triage" stays the internal name) — the first section
-// of the Review Center. It does not list the flagged
+// of the Security page. It does not list the flagged
 // hosts/alerts itself — those live once, as the ⚑ rows in the queue sections
 // below. What remains: the Auto/Manual switch (beside the heading), a
 // run-now button, the last

@@ -86,7 +86,7 @@ export const NAV_ITEMS = [
   { to: '/', label: 'Chat', icon: 'chat', end: true, primary: true },
   { to: '/projects', label: 'Projects', icon: 'projects', primary: true },
   { to: '/agents', label: 'Agents', icon: 'agents', primary: true },
-  { to: '/review', label: 'Review', icon: 'review', primary: true, count: 'review' },
+  { to: '/security', label: 'Security', icon: 'review', primary: true, count: 'review' },
   { to: '/tools', label: 'Tools', icon: 'tools', primary: true },
   { to: '/settings', label: 'Settings', icon: 'settings', primary: true },
   { to: '/memory', label: 'Memory', icon: 'memory' },
