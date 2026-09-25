@@ -263,8 +263,13 @@ export default function Workspace() {
     // into the NEW slug's layout (cross-project board bleed)
     setPanels(null)
     // opening a project's board loads it into Jav3's context — this tab is
-    // where you live, so what you're looking at is what Jav3 is thinking about
-    api(`/api/projects/${slug}/load`, { method: 'POST' }).then(refreshProject)
+    // where you live, so what you're looking at is what Jav3 is thinking about.
+    // The board renders whether or not that succeeds: a refused load (a 403
+    // from the origin gate, say) used to leave `project` null and the page on
+    // its spinner forever.
+    api(`/api/projects/${slug}/load`, { method: 'POST' })
+      .catch(notifyError)
+      .then(refreshProject)
     loadLayout()
   }, [slug, refreshProject, loadLayout])
 
