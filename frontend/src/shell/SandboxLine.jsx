@@ -1,25 +1,24 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
 import Menu from '../components/Menu.jsx'
+import { VmExplainer } from '../VmStrip.jsx'
 
 // The VM in plain words, at the sidebar's foot:
 //
 //   ● Sandbox ready · network: approved only · keeps: nothing
 //
-// "Sandbox", not VM/guest/overlay. Every fact comes from GET /api/vm/status —
-// state from running/inflight/rebuilding/base_built, network from `egress`
-// (off = netless, on = only through the approving proxy), and the wipe
-// interval from `idle_scrub_seconds`. Nothing here is hardcoded.
-//
-// TODO(persistence): the sandbox keeps nothing today — the overlay is
-// discarded on idle scrub or nuke. When the VM-persistence work lands it adds
-// a field to /api/vm/status; read it in `keeps()` below (e.g. `approved
-// changes`, or "3 changes waiting" as a link to where they are approved).
+// "Sandbox", not VM/guest/overlay. Every fact comes from the server: state
+// from /api/vm/status (running / inflight / rebuilding / base_built), network
+// from its `egress` flag (off = netless, on = only through the approving
+// proxy), and "keeps" from the open project's /persist approval
+// (GET /api/projects/{slug}/persist) — a project-less chat keeps nothing.
+// The popover is VmStrip's three lines (disposable / persists / approved), so
+// the shell and the Workspace header explain the VM the same way; approving
+// or revoking /persist stays in the Workspace header, where the modal lives.
 
 const POLL_MS = 15000
 
 function state(s) {
-  if (!s) return { word: 'unknown', tone: '' }
   if (s.rebuilding) return { word: 'rebuilding', tone: 'amber' }
   if (!s.base_built) return { word: 'not built', tone: 'amber' }
   if (s.running && s.inflight > 0) return { word: `working (${s.inflight})`, tone: 'live' }
@@ -27,53 +26,49 @@ function state(s) {
   return { word: 'asleep', tone: '' }          // boots on the next turn
 }
 
-function keeps(s) {
-  if (s?.persistence) return String(s.persistence.summary || s.persistence)
-  return 'nothing'
-}
-
-function minutes(sec) {
-  const m = Math.round(sec / 60)
-  return m <= 1 ? 'a minute' : `${m} minutes`
-}
-
-export default function SandboxLine() {
-  const [s, setS] = useState(null)
+export default function SandboxLine({ slug }) {
+  const [vm, setVm] = useState(null)
+  const [persist, setPersist] = useState(null)
   const [open, setOpen] = useState(false)
   const close = useCallback(() => setOpen(false), [])
+
   useEffect(() => {
-    const load = () => api('/api/vm/status').then(setS).catch(() => setS(null))
+    const load = () => api('/api/vm/status').then(setVm).catch(() => setVm(null))
     load()
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') load()
     }, POLL_MS)
     return () => clearInterval(t)
   }, [])
-  if (!s) return null
-  const st = state(s)
-  const net = s.egress ? 'approved only' : 'off'
+  useEffect(() => {
+    setPersist(null)
+    if (!slug) return
+    api(`/api/projects/${encodeURIComponent(slug)}/persist`)
+      .then(setPersist).catch(() => setPersist(null))
+  }, [slug, open])
+
+  if (!vm) return null
+  const st = state(vm)
+  const net = vm.egress ? 'approved only' : 'off'
+  const kept = persist?.approved && persist?.enabled !== false
+  const keeps = kept ? (persist.mount || vm.persist?.mount) : 'nothing'
   return (
-    <Menu open={open} onClose={close} up align="left" floating width={300}
+    <Menu open={open} onClose={close} up align="left" floating width={320}
           label="about the sandbox" wrapClassName="sh-sandbox-wrap"
           trigger={(
             <button type="button" className="sh-sandbox" aria-haspopup="dialog"
-                    aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+                    aria-expanded={open} onClick={() => setOpen((o) => !o)}
+                    title="where the agent runs, and what survives">
               <span className={`sh-dot ${st.tone}`} aria-hidden="true" />
               <span className="ellipsis">
-                Sandbox {st.word} · network: {net} · keeps: {keeps(s)}</span>
+                Sandbox {st.word} · network: {net} · keeps: {keeps}</span>
             </button>
           )}>
-      <div className="sh-sandbox-about">
-        <p>Jav3 thinks and runs code inside a separate, disposable computer on
-          this server. It holds no keys or passwords.</p>
-        <p>{s.egress
-          ? 'It reaches the internet only through a filter: a site you have not approved waits for you first.'
-          : 'It has no network at all right now.'}</p>
-        <p>{s.idle_scrub_seconds > 0
-          ? `After ${minutes(s.idle_scrub_seconds)} idle it is wiped and starts clean next time.`
-          : 'It is wiped when reset and starts clean next time.'}
-          {' '}Project files live on the server, not in the sandbox, so they survive.</p>
-      </div>
+      <VmExplainer vm={vm} persist={slug ? persist : null} />
+      <p className="sh-sandbox-net">
+        {vm.egress
+          ? 'Network: only through this server’s filter. A site not on the allowlist is held for approval.'
+          : 'Network: none. The sandbox cannot reach the internet right now.'}</p>
     </Menu>
   )
 }

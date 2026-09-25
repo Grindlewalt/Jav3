@@ -34,7 +34,7 @@ function LiveSection({ label, children }) {
 }
 
 export default function ShellSidebar({
-  side, activeId, activeSlug, agentName, onOpen, onOpenProject, onNew, onRename,
+  side, activeId, activeSlug, projectSlug, agentName, onOpen, onOpenProject, onNew, onRename,
   onDelete, onChanged, onClose,
 }) {
   const [stopping, setStopping] = useState(null)
@@ -113,7 +113,7 @@ export default function ShellSidebar({
                       onChanged={onChanged} />
         )}
       </div>
-      <div className="sh-side-foot"><SandboxLine /></div>
+      <div className="sh-side-foot"><SandboxLine slug={projectSlug} /></div>
     </aside>
   )
 }

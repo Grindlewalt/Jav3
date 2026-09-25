@@ -10,6 +10,7 @@ import ShellSidebar from './ShellSidebar.jsx'
 import Transcript from './Transcript.jsx'
 import Composer from './Composer.jsx'
 import ScopeChip from './ScopeChip.jsx'
+import { useApprovals } from './approvals.js'
 
 // The terminal-style shell: sidebar · transcript · (dock, M2).
 //
@@ -208,9 +209,20 @@ export default function Shell() {
     : (convo ? listTitle(convo) : `Chat #${cid}`)
   const hasSteps = messages.some((m) => m.activity?.length)
 
+  // what is waiting on the operator in this chat's scope, shown inline. A
+  // chat the sidebar list hasn't caught up with yet has no known scope.
+  const approvalScope = fresh ? slug : (convo ? (convo.project_slug || `chat-${cid}`) : null)
+  const scopeNeed = side?.needs.find((n) => n.scope === approvalScope)
+  const approvals = useApprovals({
+    scope: approvalScope, isProject: !!scopeSlug, busy,
+    poke: scopeNeed ? `${scopeNeed.git}/${scopeNeed.egress}/${scopeNeed.plan}` : '',
+    onChanged: refreshSide,
+  })
+
   return (
     <div className={`shell${drawer ? ' drawer-open' : ''}`}>
       <ShellSidebar side={side} activeId={cid} activeSlug={fresh ? slug : null}
+                    projectSlug={scopeSlug}
                     agentName={agentName} onOpen={open} onOpenProject={openProject}
                     onNew={() => newChat('')}
                     onRename={renameChat} onDelete={deleteChat}
@@ -239,7 +251,7 @@ export default function Shell() {
         </header>
         <Transcript cid={cid} messages={messages} expandAll={expandAll} fresh={fresh}
                     slug={slug} side={side} agentName={agentSlug ? agentName(agentSlug) : 'Jav3'}
-                    temporary={temporary} onOpen={open} />
+                    temporary={temporary} onOpen={open} approvals={approvals} />
         <Composer value={input} onChange={setInput} onSend={() => send()}
                   busy={busy} onStop={stop}
                   peakAsk={peakAsk}

@@ -3349,10 +3349,9 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 }
 .sh-sandbox:hover:not(:disabled) { color: var(--text); background: var(--panel-2);
   filter: none; transform: none; }
-.sh-sandbox-about { padding: var(--sp-3) var(--sp-5); font-size: var(--fs-md);
-  line-height: var(--lh-base); }
-.sh-sandbox-about p { margin: 0 0 var(--sp-4); }
-.sh-sandbox-about p:last-child { margin-bottom: 0; }
+/* the popover is VmStrip's explainer plus one line about the network */
+.sh-sandbox-net { margin: 0; padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  border-top: 1px solid var(--border); font-size: var(--fs-md); color: var(--text); }
 
 /* ---- the transcript column ---- */
 .shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
@@ -3407,6 +3406,25 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .sh-error { padding: var(--pad-row); border-radius: var(--radius-sm);
   border: 1px solid color-mix(in srgb, var(--red) 45%, var(--border));
   color: var(--red); font-size: var(--fs-md); }
+
+/* something waiting on the operator, inline in the turn that raised it: an
+   amber rule on the left (amber = needs you, as in the sidebar), the what on
+   one side and the decisions on the other; the buttons wrap under on a phone */
+.sh-approval {
+  display: flex; align-items: center; gap: var(--sp-6); flex-wrap: wrap;
+  padding: var(--sp-5) var(--sp-6); border: 1px solid var(--border);
+  border-left: 2px solid var(--amber); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-soft); font-size: var(--fs-md);
+}
+.sh-approval-what { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column;
+  gap: var(--sp-1); }
+.sh-approval-kind { font-size: var(--fs-xs); letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--amber); }
+.sh-approval-main { overflow-wrap: anywhere; }
+.sh-approval-main code { font-family: var(--font-mono); font-size: var(--fs-md); }
+.sh-approval-note { font-size: var(--fs-xs); color: var(--dim); overflow-wrap: anywhere; }
+.sh-approval-acts { display: flex; gap: var(--sp-3); flex-shrink: 0; }
+.sh-approval-acts button { padding: var(--pad-btn-sm); font-size: var(--fs-sm); }
 
 /* an empty transcript: a new chat, or a project's home */
 .sh-home { padding-top: var(--sp-10); }
@@ -3479,4 +3497,6 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
   .sh-composer { padding: 0 var(--sp-4) calc(var(--sp-4) + var(--sab)); }
   .sh-input textarea { font-size: 16px; }   /* iOS zooms a focused field under 16px */
   .sh-live-rows li > button:first-child, .sh-stop { min-height: var(--tap); }
+  .sh-approval-acts { width: 100%; }
+  .sh-approval-acts button { flex: 1; min-height: var(--tap); }
 }
