@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .. import egress, secrets as secrets_mod
+from .. import egress, egress_auto, secrets as secrets_mod
 from .. import anomaly, security, websec
 from ..config import settings
 from ..db import get_db
@@ -157,11 +157,19 @@ async def _nft_drop(host: str) -> None:
             return
 
 
-async def _authorize(host: str) -> tuple[str, str]:
+async def _authorize(host: str, port: str | None = None) -> tuple[str, str]:
     ctx = egress.current_context()
     db = await get_db()
     try:
-        verdict, reason = await egress.decide(db, ctx["project"] or egress.GENERAL, host)
+        slug = ctx["project"] or egress.GENERAL
+        verdict, reason = await egress.decide(db, slug, host)
+        # egress auto mode (off by default) may guess on a host nobody has
+        # decided about; it can only turn THAT deny into an allow, and the
+        # SSRF floor below still applies to whatever it lets through
+        if verdict == "deny" and reason == egress.NOT_LISTED:
+            guess = await egress_auto.judge(db, slug, host, port)
+            if guess:
+                verdict, reason = guess
     finally:
         await db.close()
     # Host-side SSRF floor: the proxy dials out from the HOST, so an allowlisted
@@ -201,7 +209,7 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> int:
 
 async def _handle_connect(host, port, cr, cw):
     """HTTPS: tunnel, observing host + byte volume; policy/cut enforced up front."""
-    verdict, reason = await _authorize(host)
+    verdict, reason = await _authorize(host, port)
     if verdict != "allow":
         cw.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
         await cw.drain(); cw.close()
@@ -222,7 +230,7 @@ async def _handle_connect(host, port, cr, cw):
 
 async def _handle_http(method, host, port, head, cr, cw):
     """HTTP: full interception — policy, secret injection, forward, meter."""
-    verdict, reason = await _authorize(host)
+    verdict, reason = await _authorize(host, port)
     if verdict != "allow":
         cw.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
         await cw.drain(); cw.close()

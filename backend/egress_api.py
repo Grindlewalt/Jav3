@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import bus, egress, secctx, security
+from . import bus, egress, egress_auto, secctx, security
 from .auth import require_user
 from .db import get_db
 
@@ -53,7 +53,7 @@ async def _channel_stream(channel: str):
 async def recent_events(limit: int = 200, project: str | None = None):
     db = await get_db()
     try:
-        q = ("SELECT project_slug, host, method, path, bytes_out, bytes_in, verdict, "
+        q = ("SELECT id, project_slug, host, method, path, bytes_out, bytes_in, verdict, "
              "reason, created_at FROM egress_events")
         args: tuple = ()
         if project:
@@ -112,6 +112,119 @@ async def bulk_pending(body: BulkBody):
         return await egress.bulk_pending(db, body.action, body.project)
     finally:
         await db.close()
+
+
+@router.get("/summary")
+async def summary(project: str | None = None):
+    """The Network page's three counts: distinct hosts allowed / denied in the
+    last 24h, and hosts waiting on the operator now."""
+    db = await get_db()
+    try:
+        where, args = "created_at > datetime('now', '-1 day')", ()
+        if project:
+            where += " AND project_slug = ?"
+            args = (project,)
+        async with db.execute(
+                "SELECT COUNT(DISTINCT CASE WHEN verdict IN ('allow','auto_allow') "
+                "THEN host END) AS allowed, "
+                "COUNT(DISTINCT CASE WHEN verdict IN ('deny','auto_deny','cut') "
+                f"THEN host END) AS denied FROM egress_events WHERE {where}", args) as cur:
+            r = dict(await cur.fetchone())
+        r["waiting"] = len(await egress.list_pending(db, project))
+        return r
+    finally:
+        await db.close()
+
+
+# --- egress: auto mode (test only; off by default) ---------------------------
+
+class AutoBody(BaseModel):
+    mode: str                      # on | off | inherit (inherit: per project only)
+    project: str | None = None     # None / '' = the global default
+
+
+@router.get("/auto")
+async def get_auto(project: str | None = None):
+    db = await get_db()
+    try:
+        return await egress_auto.get_mode(db, project)
+    finally:
+        await db.close()
+
+
+@router.put("/auto")
+async def put_auto(body: AutoBody):
+    db = await get_db()
+    try:
+        res = await egress_auto.set_mode(db, body.project, body.mode)
+    finally:
+        await db.close()
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+# --- egress: the standing allowlists (with where each entry came from) -------
+
+@router.get("/allowlist")
+async def allowlist():
+    db = await get_db()
+    try:
+        return {"groups": await egress.allowlist(db)}
+    finally:
+        await db.close()
+
+
+class RevokeBody(BaseModel):
+    project: str = ""              # the list's own slug ('__general__' = shared)
+    host: str = ""
+    id: int | None = None          # an auto entry's id (source='auto')
+
+
+@router.post("/allowlist/revoke")
+async def revoke(body: RevokeBody):
+    db = await get_db()
+    try:
+        if body.id is not None:
+            res = await egress.revoke_auto(db, body.id)
+        else:
+            res = await egress.remove_host(db, body.project, body.host)
+    finally:
+        await db.close()
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res["error"])
+    return res
+
+
+@router.post("/auto/{aid}/promote")
+async def promote(aid: int):
+    db = await get_db()
+    try:
+        res = await egress.promote_auto(db, aid)
+    finally:
+        await db.close()
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res["error"])
+    return res
+
+
+class AllowBody(BaseModel):
+    project: str = ""
+    host: str
+
+
+@router.post("/allow")
+async def allow(body: AllowBody):
+    """Operator override for a host that is not in the waiting queue (an
+    auto-deny): allow it for this project the way an approval would."""
+    db = await get_db()
+    try:
+        res = await egress.allow_host(db, body.project, body.host)
+    finally:
+        await db.close()
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
 
 
 # --- egress: per-project policy ---------------------------------------------

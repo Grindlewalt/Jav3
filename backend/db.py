@@ -167,9 +167,25 @@ CREATE TABLE IF NOT EXISTS egress_events (
     path TEXT,
     bytes_out INTEGER NOT NULL DEFAULT 0,
     bytes_in INTEGER NOT NULL DEFAULT 0,
-    verdict TEXT NOT NULL DEFAULT 'allow',      -- allow | deny | cut
+    verdict TEXT NOT NULL DEFAULT 'allow',      -- allow | deny | cut | auto_allow | auto_deny
     reason TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Egress auto mode (backend/egress_auto.py): hosts the auto-guesser let
+-- through. Kept OUT of egress_policy.hosts on purpose — an auto entry is scoped
+-- to the one project that asked (it never widens the shared general list),
+-- expires on its own, and one row is one-click revocable. Rows are kept after
+-- revoke/promote/expiry: they are the daily-cap ledger and the audit trail.
+CREATE TABLE IF NOT EXISTS egress_auto_allow (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT NOT NULL,
+    host TEXT NOT NULL,
+    rule TEXT NOT NULL,                  -- known | model
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,                     -- operator revoked it
+    promoted_at TEXT                     -- operator kept it (moved onto the real allowlist)
 );
 -- Which secrets a project's guest may use. The proxy injects a {{secret:X}}
 -- only if the project holds a granted row for X — a compromised project can't
@@ -186,7 +202,7 @@ CREATE TABLE IF NOT EXISTS project_secret_grants (
 -- image). Persisted + ack-able, unlike the poll-derived notifications aggregate.
 CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,                  -- egress_anomaly | host_cut | gate_flag | secret_leak | image_stale
+    kind TEXT NOT NULL,                  -- egress_anomaly | host_cut | gate_flag | secret_leak | image_stale | egress_auto
     severity TEXT NOT NULL DEFAULT 'warn',      -- info | warn | critical
     project_slug TEXT,
     summary TEXT NOT NULL,
@@ -330,6 +346,14 @@ async def init_db() -> None:
             for col in ("triage_verdict", "triage_reason", "triage_at"):
                 if col not in tcols:
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        # egress auto mode's guess for a queued host (allow | deny | unsure |
+        # revoked) — the dedupe for its security event and the memo that stops
+        # it re-asking the model on every retry of the same host
+        async with db.execute("PRAGMA table_info(egress_pending)") as cur:
+            pcols = [r["name"] for r in await cur.fetchall()]
+        for col in ("auto_verdict", "auto_rule", "auto_reason", "auto_at"):
+            if col not in pcols:
+                await db.execute(f"ALTER TABLE egress_pending ADD COLUMN {col} TEXT")
         # messages gained `model`: with voice running a 4B locally and DeepSeek
         # only on escalation, "which brain wrote this" stopped being knowable
         # from the reply alone — and that is exactly what the operator needs to
@@ -426,6 +450,9 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_egress_events_host ON egress_events(host, created_at)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_egress_pending_status ON egress_pending(status)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_egress_auto_allow_proj "
+            "ON egress_auto_allow(project_slug, created_at)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_security_events_ack ON security_events(acknowledged, created_at)")
         # the inbox claim runs once per ReAct round of every addressable turn,

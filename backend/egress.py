@@ -129,6 +129,12 @@ async def get_policy(db: aiosqlite.Connection, slug: str) -> dict:
             "hosts": hosts, "effective": effective, "source": "project"}
 
 
+# The one deny reason egress auto mode may act on: an allowlist-mode project
+# meeting a host nobody has decided about. Every other deny (denyall, denylist,
+# cut) is a standing decision the guesser must never second-guess.
+NOT_LISTED = "host not on the allowlist (queued for approval)"
+
+
 async def decide(db: aiosqlite.Connection, slug: str, host: str) -> tuple[str, str]:
     """(verdict, reason) for one host. verdict ∈ {allow, deny, cut}."""
     if (slug, host) in _cut or (GENERAL, host) in _cut:
@@ -143,7 +149,166 @@ async def decide(db: aiosqlite.Connection, slug: str, host: str) -> tuple[str, s
     # allowlist (deny-by-default)
     if _host_matches(host, pol["effective"]):
         return "allow", f"host on the {pol['source']} allowlist"
-    return "deny", "host not on the allowlist (queued for approval)"
+    auto = await active_auto(db, slug, host)
+    if auto:
+        return "allow", f"auto-allowed until {auto['expires_at']} UTC: {auto['reason']}"
+    return "deny", NOT_LISTED
+
+
+# --- auto-allowed hosts (egress auto mode) -------------------------------------
+# Deliberately NOT part of get_policy()['effective']: the triage reviewer
+# approves anything already "on the effective allowlist" onto the real list,
+# which would silently promote a guess into a permanent entry. An auto entry is
+# exact-host (no subdomains), scoped to exactly one slug, and time-boxed.
+
+_AUTO_LIVE = ("revoked_at IS NULL AND promoted_at IS NULL "
+              "AND expires_at > datetime('now')")
+
+
+async def active_auto(db: aiosqlite.Connection, slug: str, host: str) -> dict | None:
+    async with db.execute(
+            f"SELECT id, host, rule, reason, created_at, expires_at FROM egress_auto_allow "
+            f"WHERE project_slug = ? AND host = ? AND {_AUTO_LIVE} "
+            f"ORDER BY id DESC LIMIT 1", (slug, (host or "").lower())) as cur:
+        r = await cur.fetchone()
+    return dict(r) if r else None
+
+
+async def auto_allows_today(db: aiosqlite.Connection, slug: str) -> int:
+    """Auto-allows granted to this project in the last 24h — revoked or not,
+    so revoking does not refill the cap."""
+    async with db.execute(
+            "SELECT COUNT(*) AS n FROM egress_auto_allow WHERE project_slug = ? "
+            "AND created_at > datetime('now', '-1 day')", (slug,)) as cur:
+        return (await cur.fetchone())["n"]
+
+
+async def add_auto(db: aiosqlite.Connection, slug: str, host: str, *, rule: str,
+                   reason: str) -> dict:
+    days = max(1, int(settings.egress_auto_ttl_days))
+    cur = await db.execute(
+        "INSERT INTO egress_auto_allow(project_slug, host, rule, reason, expires_at) "
+        "VALUES (?, ?, ?, ?, datetime('now', ?))",
+        (slug, host.lower(), rule, reason, f"+{days} days"))
+    await db.commit()
+    async with db.execute("SELECT expires_at FROM egress_auto_allow WHERE id = ?",
+                          (cur.lastrowid,)) as c:
+        exp = (await c.fetchone())["expires_at"]
+    return {"id": cur.lastrowid, "expires_at": exp}
+
+
+async def revoke_auto(db: aiosqlite.Connection, auto_id: int) -> dict:
+    """Operator revokes a guess. The queue row is marked so auto mode never
+    re-grants the same host to the same project on its next retry — once the
+    operator has said no, only the operator can say yes."""
+    async with db.execute("SELECT project_slug, host FROM egress_auto_allow WHERE id = ?",
+                          (auto_id,)) as cur:
+        r = await cur.fetchone()
+    if r is None:
+        return {"ok": False, "error": "no such auto-allowed host"}
+    await db.execute("UPDATE egress_auto_allow SET revoked_at = datetime('now') "
+                     "WHERE id = ? AND revoked_at IS NULL", (auto_id,))
+    await db.execute(
+        "UPDATE egress_pending SET status = 'rejected', decided_at = datetime('now'), "
+        "auto_verdict = 'revoked', auto_reason = 'operator revoked the auto-allow', "
+        "auto_at = datetime('now') WHERE project_slug = ? AND host = ?",
+        (r["project_slug"], r["host"]))
+    await db.commit()
+    return {"ok": True, "project": r["project_slug"], "host": r["host"]}
+
+
+async def promote_auto(db: aiosqlite.Connection, auto_id: int) -> dict:
+    """Operator keeps a guess: it moves onto the real allowlist (same training
+    rule as an approval) and stops expiring."""
+    async with db.execute(
+            f"SELECT project_slug, host FROM egress_auto_allow WHERE id = ? AND {_AUTO_LIVE}",
+            (auto_id,)) as cur:
+        r = await cur.fetchone()
+    if r is None:
+        return {"ok": False, "error": "no live auto-allowed host with that id"}
+    target = await _append_host(db, r["project_slug"], r["host"])
+    await db.execute("UPDATE egress_auto_allow SET promoted_at = datetime('now') "
+                     "WHERE id = ?", (auto_id,))
+    await db.commit()
+    return {"ok": True, "host": r["host"], "added_to": target}
+
+
+async def allow_host(db: aiosqlite.Connection, slug: str, host: str) -> dict:
+    """Operator allows a host directly — the override for an auto-deny (which
+    has left the waiting queue). Trains the list like an approval, and closes
+    any queue row for the pair."""
+    host = (host or "").strip().lower().rstrip(".")
+    if not host:
+        return {"ok": False, "error": "host required"}
+    slug = slug or GENERAL
+    target = await _append_host(db, slug, host)
+    await db.execute(
+        "UPDATE egress_pending SET status = 'approved', decided_at = datetime('now') "
+        "WHERE project_slug = ? AND host = ?", (slug, host))
+    await db.commit()
+    return {"ok": True, "host": host, "added_to": target}
+
+
+async def remove_host(db: aiosqlite.Connection, slug: str, host: str) -> dict:
+    """Operator revokes a standing allowlist entry from the row that holds it
+    (`slug` is the row's own slug — a project, or GENERAL for the shared list)."""
+    await ensure_general(db)
+    row = await _row(db, slug)
+    if row is None:
+        return {"ok": False, "error": "no such policy"}
+    hosts = json.loads(row["hosts"] or "[]")
+    if host not in hosts:
+        return {"ok": False, "error": "host is not on that list"}
+    hosts.remove(host)
+    await db.execute("UPDATE egress_policy SET hosts = ?, updated_at = datetime('now') "
+                     "WHERE project_slug = ?", (json.dumps(sorted(hosts)), slug))
+    await db.commit()
+    return {"ok": True, "project": slug, "host": host}
+
+
+async def allowlist(db: aiosqlite.Connection) -> list[dict]:
+    """Every standing allowlist, grouped by the row that holds it, each entry
+    tagged with where it came from: seed (config), reviewer (the triage
+    reviewer approved it), operator (anything else on the list) or auto (a live
+    auto-mode guess, with its expiry and reason)."""
+    await ensure_general(db)
+    seed = {h.lower() for h in settings.egress_seed_hosts}
+    reviewed: set[tuple[str, str]] = set()
+    async with db.execute(
+            "SELECT detail, subject FROM triage_log WHERE item_kind = 'egress' "
+            "AND action = 'approved' AND undone = 0") as cur:
+        for r in await cur.fetchall():
+            try:
+                target = (json.loads(r["detail"] or "{}") or {}).get("added_to") or GENERAL
+            except (ValueError, TypeError, AttributeError):
+                target = GENERAL
+            reviewed.add((target, r["subject"]))
+    groups: dict[str, dict] = {}
+    async with db.execute("SELECT project_slug, mode, hosts FROM egress_policy "
+                          "ORDER BY project_slug = ? DESC, project_slug", (GENERAL,)) as cur:
+        for r in await cur.fetchall():
+            if r["mode"] != "allowlist":
+                continue
+            entries = []
+            for h in json.loads(r["hosts"] or "[]"):
+                src = ("seed" if r["project_slug"] == GENERAL and h.lower() in seed
+                       else "reviewer" if (r["project_slug"], h) in reviewed
+                       else "operator")
+                entries.append({"host": h, "source": src})
+            groups[r["project_slug"]] = {"project": r["project_slug"], "entries": entries}
+    async with db.execute(
+            f"SELECT id, project_slug, host, rule, reason, created_at, expires_at "
+            f"FROM egress_auto_allow WHERE {_AUTO_LIVE} ORDER BY id DESC") as cur:
+        for r in await cur.fetchall():
+            g = groups.setdefault(r["project_slug"],
+                                  {"project": r["project_slug"], "entries": []})
+            g["entries"].append({"host": r["host"], "source": "auto", "id": r["id"],
+                                 "rule": r["rule"], "reason": r["reason"],
+                                 "created_at": r["created_at"],
+                                 "expires_at": r["expires_at"]})
+    for g in groups.values():
+        g["entries"].sort(key=lambda e: (e["source"] != "auto", e["host"]))
+    return list(groups.values())
 
 
 async def note_denied(db: aiosqlite.Connection, slug: str, host: str) -> None:
@@ -152,7 +317,12 @@ async def note_denied(db: aiosqlite.Connection, slug: str, host: str) -> None:
         "INSERT INTO egress_pending(project_slug, host) VALUES (?, ?) "
         "ON CONFLICT(project_slug, host) DO UPDATE SET "
         "hit_count = hit_count + 1, last_seen = datetime('now'), "
+        # a re-hit re-queues an operator reject/dismiss (the long-standing
+        # behaviour) but NOT an auto-mode deny or a revoked auto-allow: those
+        # would otherwise bounce straight back into "waiting for you" on every
+        # retry of the same bad host
         "status = CASE WHEN status IN ('rejected', 'dismissed') "
+        "AND COALESCE(auto_verdict, '') NOT IN ('deny', 'revoked') "
         "THEN 'pending' ELSE status END",
         (slug, host))
     await db.commit()
@@ -213,8 +383,10 @@ async def approve_host(db: aiosqlite.Connection, pending_id: int) -> dict:
 
 
 async def reject_host(db: aiosqlite.Connection, pending_id: int) -> dict:
-    await db.execute("UPDATE egress_pending SET status='rejected', decided_at=datetime('now') "
-                     "WHERE id = ?", (pending_id,))
+    # clearing auto_verdict marks the row as a human decision, which egress
+    # auto mode never overrides (egress_auto.judge)
+    await db.execute("UPDATE egress_pending SET status='rejected', decided_at=datetime('now'), "
+                     "auto_verdict=NULL WHERE id = ?", (pending_id,))
     await db.commit()
     return {"ok": True}
 
@@ -235,7 +407,8 @@ async def bulk_pending(db: aiosqlite.Connection, action: str,
     status = {"approve": "approved", "reject": "rejected",
               "dismiss": "dismissed"}[action]
     await db.executemany(
-        "UPDATE egress_pending SET status=?, decided_at=datetime('now') WHERE id=?",
+        "UPDATE egress_pending SET status=?, decided_at=datetime('now'), "
+        "auto_verdict=NULL WHERE id=?",
         [(status, r["id"]) for r in rows])
     await db.commit()
     return {"ok": True, "done": len(rows)}
@@ -243,7 +416,8 @@ async def bulk_pending(db: aiosqlite.Connection, action: str,
 
 async def list_pending(db: aiosqlite.Connection, slug: str | None = None) -> list[dict]:
     q = ("SELECT id, project_slug, host, hit_count, first_seen, last_seen, status, "
-         "triage_verdict, triage_reason FROM egress_pending WHERE status='pending'")
+         "triage_verdict, triage_reason, auto_verdict, auto_reason FROM egress_pending "
+         "WHERE status='pending'")
     args: tuple = ()
     if slug:
         q += " AND project_slug = ?"

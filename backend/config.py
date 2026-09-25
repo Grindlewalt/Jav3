@@ -483,6 +483,19 @@ class Settings(BaseSettings):
     egress_beacon_min_hits: int = 6           # regular hits to one host before cadence is judged
     egress_beacon_cv_max: float = 0.15        # inter-arrival coefficient-of-variation below this = beacon
 
+    # --- Egress auto mode (backend/egress_auto.py) -------------------------
+    # Off unless the operator flips it (globally or per project). A host it
+    # lets through is scoped to that one project and expires after ttl_days
+    # unless the operator promotes it; past daily_cap auto-allows in 24h a
+    # project's new hosts wait for the operator again. The model is asked only
+    # when the deterministic rules have no answer, with its own tiny budget and
+    # a timeout (the guest's request is held open while it decides).
+    egress_auto_ttl_days: int = 7
+    egress_auto_daily_cap: int = 20
+    egress_auto_model_timeout: float = 20.0
+    egress_auto_budget_input: int = 4_000
+    egress_auto_budget_output: int = 300
+
     # --- Triage reviewer (backend/reviewer.py) ----------------------------
     # The isolated no-tools second reader that clears routine noise from the
     # review/network queues. The sweep interval is the auto cadence (<= 0
