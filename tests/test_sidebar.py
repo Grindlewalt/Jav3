@@ -136,6 +136,28 @@ async def test_needs_for_a_projectless_chat_and_a_chatless_project(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_pinned_to_a_deleted_project_is_flagged(client):
+    for name in ("Kept", "Doomed", "Stash"):
+        await client.post("/api/projects", json={"name": name})
+    ids = {}
+    for slug in ("kept", "doomed", "stash"):
+        ids[slug] = await _chat(slug)
+        r = await client.patch(f"/api/conversations/{ids[slug]}",
+                               json={"project": slug, "mode": "pin"})
+        assert r.status_code == 200, r.text
+    loose = await _chat("loose")
+    await _sql("UPDATE projects SET deleted_at = datetime('now') WHERE slug = 'doomed'")
+    # hidden is not gone: an artifact store is a live project the list omits
+    await _sql("UPDATE projects SET is_hidden = 1 WHERE slug = 'stash'")
+
+    s = (await client.get("/api/sidebar")).json()
+    gone = {c["id"]: c["project_gone"] for c in s["conversations"]}
+    assert gone == {ids["kept"]: False, ids["doomed"]: True, ids["stash"]: False,
+                    loose: False}
+    assert [p["slug"] for p in s["projects"]] == ["kept"]
+
+
+@pytest.mark.asyncio
 async def test_sidebar_requires_login(tmp_env):
     await init_db()
     transport = httpx.ASGITransport(app=app)

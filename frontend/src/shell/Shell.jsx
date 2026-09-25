@@ -139,6 +139,10 @@ export default function Shell() {
   const agentSlug = fresh ? newAs : (threadAgent ?? convo?.agent_slug ?? null)
   const agentName = (s) => agents.find((a) => a.slug === s)?.name || s
   const scopeSlug = fresh ? slug : (convo?.project_slug || null)
+  // pinned to a project that has since been deleted: say so on the chip and
+  // don't aim the sandbox line or the dock at its endpoints (they 404)
+  const scopeGone = !fresh && !!convo?.project_gone
+  const liveSlug = scopeGone ? null : scopeSlug
 
   const open = (id) => navigate(`/shell/c/${id}`)
   const openProject = (s) => navigate(`/shell/p/${encodeURIComponent(s)}`)
@@ -252,13 +256,13 @@ export default function Shell() {
   })
 
   // the dock follows the scope: the project, else this chat's own store
-  const dockSlug = scopeSlug || (cid != null ? `chat-${cid}` : null)
-  const dockTab = tabsFor(!!scopeSlug).includes(dock.tab) ? dock.tab : 'files'
+  const dockSlug = liveSlug || (cid != null ? `chat-${cid}` : null)
+  const dockTab = tabsFor(!!liveSlug).includes(dock.tab) ? dock.tab : 'files'
 
   return (
     <div className={`shell${drawer ? ' drawer-open' : ''}`}>
       <ShellSidebar side={side} activeId={cid} activeSlug={fresh ? slug : null}
-                    projectSlug={scopeSlug}
+                    projectSlug={liveSlug}
                     agentName={agentName} onOpen={open} onOpenProject={openProject}
                     onNew={() => newChat('')}
                     onRename={renameChat} onDelete={deleteChat}
@@ -276,7 +280,8 @@ export default function Shell() {
               <span className="sh-agent" title={`this chat runs as the ${agentName(agentSlug)} agent`}>
                 @{agentSlug}</span>
             )}
-            <ScopeChip projects={projects} value={scopeSlug} onPick={setScope} />
+            <ScopeChip projects={projects} value={scopeSlug} gone={scopeGone}
+                       onPick={setScope} />
             <button type="button" className="sh-toggle sh-panels" aria-pressed={dock.open}
                     title={dock.open ? 'close the panels' : 'files, git, plan, terminal, network, runs'}
                     onClick={() => setDock((d) => ({ ...d, open: !d.open }))}>Panels</button>
@@ -307,7 +312,7 @@ export default function Shell() {
         <div className="shell-scrim dock-scrim" onClick={() => setDock((d) => ({ ...d, open: false }))} />
       )}
       {dock.open && (
-        <Dock slug={dockSlug} isProject={!!scopeSlug} chatJobs={chatJobs}
+        <Dock slug={dockSlug} isProject={!!liveSlug} chatJobs={chatJobs}
               tab={dockTab} onTab={(t) => setDock((d) => ({ ...d, tab: t }))}
               onClose={() => setDock((d) => ({ ...d, open: false }))}
               width={dock.w} onWidth={(w) => setDock((d) => ({ ...d, w }))} />

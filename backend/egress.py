@@ -246,6 +246,7 @@ async def allow_host(db: aiosqlite.Connection, slug: str, host: str) -> dict:
         "UPDATE egress_pending SET status = 'approved', decided_at = datetime('now') "
         "WHERE project_slug = ? AND host = ?", (slug, host))
     await db.commit()
+    await note_approved(db, slug, host)
     return {"ok": True, "host": host, "added_to": target}
 
 
@@ -369,7 +370,25 @@ async def _append_host(db: aiosqlite.Connection, slug: str, host: str) -> str:
     return target
 
 
-async def approve_host(db: aiosqlite.Connection, pending_id: int) -> dict:
+APPROVED_BY = {"operator": "approved later by you",
+               "reviewer": "approved later by the triage reviewer"}
+
+
+async def note_approved(db: aiosqlite.Connection, slug: str | None, host: str,
+                        by: str = "operator") -> None:
+    """Log the approval as its own event. egress_events is a request log: the
+    request that queued a host was logged `deny` at the time and that row stays
+    true, so without this the Network page's "Recent decisions" went on showing
+    only the deny after the host had been approved. The verdicts (`approved`,
+    `reviewer_approved`) are never counted as traffic: the summary and the
+    anomaly baseline read allow/deny only."""
+    await record_event(db, slug=slug, host=host,
+                       verdict="reviewer_approved" if by == "reviewer" else "approved",
+                       reason=APPROVED_BY.get(by, f"approved later by {by}"))
+
+
+async def approve_host(db: aiosqlite.Connection, pending_id: int,
+                       by: str = "operator") -> dict:
     async with db.execute("SELECT project_slug, host, status FROM egress_pending WHERE id = ?",
                           (pending_id,)) as cur:
         r = await cur.fetchone()
@@ -379,6 +398,8 @@ async def approve_host(db: aiosqlite.Connection, pending_id: int) -> dict:
     await db.execute("UPDATE egress_pending SET status='approved', decided_at=datetime('now') "
                      "WHERE id = ?", (pending_id,))
     await db.commit()
+    if r["status"] != "approved":
+        await note_approved(db, r["project_slug"], r["host"], by)
     return {"ok": True, "host": r["host"], "added_to": target}
 
 
@@ -411,6 +432,9 @@ async def bulk_pending(db: aiosqlite.Connection, action: str,
         "auto_verdict=NULL WHERE id=?",
         [(status, r["id"]) for r in rows])
     await db.commit()
+    if action == "approve":
+        for r in rows:
+            await note_approved(db, r["project_slug"], r["host"])
     return {"ok": True, "done": len(rows)}
 
 

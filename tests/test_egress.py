@@ -62,6 +62,35 @@ async def test_denied_host_queues_and_trains_up(db):
     assert await egress.list_pending(db) == []
 
 
+async def _verdicts(db, host):
+    async with db.execute("SELECT verdict, reason FROM egress_events WHERE host = ? "
+                          "ORDER BY id", (host,)) as cur:
+        return [(r["verdict"], r["reason"]) for r in await cur.fetchall()]
+
+
+async def test_approval_logs_its_own_decision_row(db):
+    # the proxy logs the request's deny; the later approval must not leave
+    # that deny as the last word in "Recent decisions"
+    await egress.record_event(db, slug="proj", host="httpbin.org", verdict="deny",
+                              reason=egress.NOT_LISTED)
+    await egress.note_denied(db, "proj", "httpbin.org")
+    pid = (await egress.list_pending(db))[0]["id"]
+    await egress.approve_host(db, pid, by="reviewer")
+    await egress.approve_host(db, pid, by="reviewer")      # idempotent: one row
+    rows = await _verdicts(db, "httpbin.org")
+    assert [v for v, _ in rows] == ["deny", "reviewer_approved"]
+    assert "reviewer" in rows[-1][1]
+
+    await egress.note_denied(db, "proj", "b.example")
+    await egress.bulk_pending(db, "approve")
+    await egress.allow_host(db, "proj", "c.example")
+    assert [v for v, _ in await _verdicts(db, "b.example")] == ["approved"]
+    assert [v for v, _ in await _verdicts(db, "c.example")] == ["approved"]
+    # an approval is not traffic: the anomaly baseline never sees it
+    async with db.execute("SELECT COUNT(*) FROM egress_events WHERE verdict='allow'") as cur:
+        assert (await cur.fetchone())[0] == 0
+
+
 async def test_note_denied_bumps_hit_count(db):
     await egress.note_denied(db, "proj", "x.com")
     await egress.note_denied(db, "proj", "x.com")

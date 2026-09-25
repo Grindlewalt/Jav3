@@ -53,6 +53,10 @@ async def sidebar():
             "SELECT slug, name FROM projects WHERE deleted_at IS NULL AND is_hidden = 0 "
             "ORDER BY created_at DESC") as cur:
             projects = [dict(r) for r in await cur.fetchall()]
+        # every project that still exists, hidden ones included (an artifact's
+        # store is a real project the sidebar just doesn't list)
+        async with db.execute("SELECT slug FROM projects WHERE deleted_at IS NULL") as cur:
+            live = {r["slug"] for r in await cur.fetchall()}
         # last activity per chat: the newest message, else when it started
         async with db.execute(
             "SELECT conversation_id AS id, MAX(created_at) AS at FROM messages "
@@ -81,6 +85,10 @@ async def sidebar():
 
     for c in convos:
         c["last_at"] = last.get(c["id"]) or c["started_at"]
+        # a chat pinned to a project that was deleted afterwards keeps its
+        # project_id; the shell labels it instead of fetching the project's
+        # endpoints (they 404) or offering it as a scope
+        c["project_gone"] = bool(c.get("project_slug")) and c["project_slug"] not in live
     newest: dict[str, dict] = {}
     for c in convos:
         s = _scope(c)

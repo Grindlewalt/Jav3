@@ -240,7 +240,7 @@ async def _run_locked(source: str) -> dict:
             if slug not in policies:
                 policies[slug] = await egress.get_policy(db, slug)
             if egress._host_matches(host, policies[slug]["effective"]):
-                res = await egress.approve_host(db, h["id"])
+                res = await egress.approve_host(db, h["id"], by="reviewer")
                 reason = "already on the effective allowlist"
                 await _mark_host(db, h["id"], "allow", reason)
                 await _log(db, run_id, "egress", h["id"], slug, host, "allow",
@@ -286,7 +286,7 @@ async def _run_locked(source: str) -> dict:
                     slug, host = row["project_slug"], row["host"]
                     # re-check the guard: a cut/anomaly may have landed mid-run
                     if v["verdict"] == "allow" and not _host_guard(slug, host, alerted):
-                        res = await egress.approve_host(db, row["id"])
+                        res = await egress.approve_host(db, row["id"], by="reviewer")
                         await _mark_host(db, row["id"], "allow", v["reason"])
                         await _log(db, run_id, "egress", row["id"], slug, host,
                                    "allow", v["reason"], "approved",

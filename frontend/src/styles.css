@@ -3390,6 +3390,7 @@ body.jarvis-float { margin: 0; height: 100vh; overflow: hidden; }
 .sh-chip .chev { transform: rotate(-90deg); }
 .sh-chip .chev.open { transform: rotate(90deg); }
 .sh-scope.pinned { color: var(--text); }
+.sh-scope.gone { color: var(--dim); font-style: italic; }
 
 .sh-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .sh-thread { max-width: var(--measure); margin: 0 auto;

@@ -28,7 +28,12 @@ const VERDICTS = {
   auto_allow: { text: 'auto-allowed', tone: 'done', auto: true },
   auto_deny: { text: 'auto-denied', tone: 'pending', auto: true },
   cut: { text: 'cut', tone: 'error' },
+  // not a request: the queue approval that followed a deny, logged so the
+  // deny isn't the last word on a host that has since been let through
+  approved: { text: 'approved', tone: 'done' },
+  reviewer_approved: { text: 'approved', tone: 'done', auto: true },   // dashed = the reviewer
 }
+const APPROVALS = new Set(['approved', 'reviewer_approved'])
 const verdictOf = (v) => VERDICTS[v] || { text: v || '?', tone: 'pending' }
 
 function VerdictTag({ verdict }) {
@@ -221,7 +226,7 @@ function DecisionRow({ d, names, onAllow }) {
           <span className="dim net-dec-n"> ×{d.n}</span>)}</span>
         <span className="net-dec-proj dim">{projLabel(d.project, names)}</span>
         <span className="net-dec-bytes dim" title="sent / received">
-          ↑{human(d.bytes_out)} ↓{human(d.bytes_in)}</span>
+          {!APPROVALS.has(d.verdict) && <>↑{human(d.bytes_out)} ↓{human(d.bytes_in)}</>}</span>
       </button>
       {open && (
         <div className="net-dec-detail">
