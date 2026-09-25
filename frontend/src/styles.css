@@ -1223,8 +1223,10 @@ input:focus, textarea:focus { border-color: var(--accent);
   white-space: pre; word-wrap: normal;
   font: 13px/1.5 ui-monospace, "Cascadia Code", Menlo, monospace;
 }
+/* the chip's side padding is kept to a hair: at 4px it read as a space
+   typed before a closing bracket — "(pypi.org )" */
 .md-body code {
-  background: var(--bg); border-radius: 5px; padding: 1px 4px;
+  background: var(--bg); border-radius: 5px; padding: 1px 0.2em;
   font: 0.9em ui-monospace, Menlo, monospace;
 }
 .md-body pre code { background: none; padding: 0; }
@@ -1594,8 +1596,15 @@ kbd {
 .skill-chip.off { color: var(--dim); opacity: 0.55; text-decoration: line-through; }
 
 /* own-memory notes: agent-written, so plain text only */
+/* the app's disclosure is the › chevron, turned down when open (as on the
+   deleted folds), not the UA's ▶ triangle */
 .agent-notes summary, .agent-notes-list summary { cursor: pointer; color: var(--dim);
-  font-size: var(--fs-md); }
+  font-size: var(--fs-md); list-style: none; }
+.agent-notes summary::-webkit-details-marker,
+.agent-notes-list summary::-webkit-details-marker { display: none; }
+.agent-notes summary .chev, .agent-notes-list summary .chev { margin-right: var(--sp-3); }
+.agent-notes[open] > summary .chev,
+.agent-notes-list details[open] > summary .chev { transform: rotate(90deg); }
 .agent-notes-list { list-style: none; margin: var(--sp-3) 0 0; padding: 0;
   display: flex; flex-direction: column; gap: var(--sp-2); }
 .agent-note-body { margin: var(--sp-2) 0 0; padding: var(--sp-3); white-space: pre-wrap;
@@ -1731,8 +1740,14 @@ kbd {
 .sched-list li.off { opacity: 0.55; }
 .sched-head { display: flex; align-items: center; gap: 6px; }
 .sched-result { margin: 4px 0 0; padding: 7px 10px; background: var(--bg);
-  border: 1px solid var(--border); border-radius: 7px; font-size: 13px;
-  max-height: 160px; overflow: auto; }
+  border: 1px solid var(--border); border-radius: 7px; font-size: 13px; }
+/* a long result folds to 160px and says so: the text fades out over its last
+   lines and "show more" opens the rest in place. It used to be a 160px
+   scroll box that simply stopped mid-line. The mask only reads alpha. */
+.sched-result.folded { max-height: 160px; overflow: hidden;
+  mask-image: linear-gradient(to bottom, currentColor calc(100% - 40px), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, currentColor calc(100% - 40px), transparent); }
+button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-sm); }
 .sched-result .md-body > :first-child { margin-top: 0; }
 .sched-result .md-body > :last-child { margin-bottom: 0; }
 .sched-result .md-body p, .sched-result .md-body ul { margin: 4px 0; }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
@@ -167,7 +167,7 @@ export default function Schedules() {
               <div className="dim small">{s.task}</div>
               <div className="dim small">{cadence(s)} · next {s.next_run?.replace('T', ' ')}
                 {s.last_run && ` · last ${s.last_run.replace('T', ' ')}`}</div>
-              {s.last_result && <div className="sched-result"><Md text={s.last_result} /></div>}
+              {s.last_result && <SchedResult text={s.last_result} />}
             </li>
           ))}
         </ul>
@@ -198,5 +198,32 @@ export default function Schedules() {
         )}
       </main>
     </Page>
+  )
+}
+
+// A run's last result, folded to 160px when it is longer than that. Measured
+// rather than guessed from the text length: markdown renders to any height.
+// "show more" only appears when there is something to show.
+const FOLD_PX = 160
+
+function SchedResult({ text }) {
+  const ref = useRef(null)
+  const [long, setLong] = useState(false)
+  const [open, setOpen] = useState(false)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (el) setLong(el.scrollHeight > FOLD_PX + 1)
+  }, [text])
+  return (
+    <>
+      <div ref={ref} className={long && !open ? 'sched-result folded' : 'sched-result'}>
+        <Md text={text} />
+      </div>
+      {long && (
+        <button type="button" className="link sched-more" aria-expanded={open}
+                onClick={() => setOpen((o) => !o)}>
+          {open ? 'show less' : 'show more'}</button>
+      )}
+    </>
   )
 }

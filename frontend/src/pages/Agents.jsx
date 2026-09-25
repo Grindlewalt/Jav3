@@ -206,8 +206,8 @@ export function AgentDefinitions() {
     <>
       <aside>
         <form className="row agent-new" onSubmit={create}>
-          <input ref={nameRef} className="grow" placeholder="new agent name  (n)"
-                 aria-label="new agent name" />
+          <input ref={nameRef} className="grow" placeholder="new agent name"
+                 aria-label="new agent name" title="new agent name — press n to jump here" />
           <Button type="submit" aria-label="create agent">+</Button>
         </form>
         <ul className="agent-list">
@@ -413,7 +413,7 @@ function OwnMemory({ slug, on, onChange }) {
           the shared notes — the operator's standing notes still lead its prompt</span>
       </div>
       <details className="agent-notes" onToggle={load}>
-        <summary>its private notes</summary>
+        <summary><span className="chev" aria-hidden="true">›</span>its private notes</summary>
         {notes === null ? <span className="dim small">loading…</span>
           : notes.length === 0 ? <EmptyState>none yet</EmptyState>
           : (
@@ -421,7 +421,8 @@ function OwnMemory({ slug, on, onChange }) {
               {notes.map((n) => (
                 <li key={n.name}>
                   <details>
-                    <summary><code>{n.name}</code>
+                    <summary><span className="chev" aria-hidden="true">›</span>
+                      <code>{n.name}</code>
                       {n.description && <span className="dim"> — {n.description}</span>}
                     </summary>
                     <pre className="agent-note-body">{n.body}</pre>

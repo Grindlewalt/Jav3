@@ -113,14 +113,14 @@ export default function Projects() {
   return (
     <Page title="Projects">
       <Card as="form" className="create-project" onSubmit={create}>
-        <Input placeholder={cloning ? 'project name (repo name if empty)' : 'project name'}
+        <Input placeholder={cloning ? 'project name (optional)' : 'project name'}
                value={name} onChange={(e) => setName(e.target.value)}
                required={!cloning} />
         <Input placeholder="what are you building?" value={summary}
                onChange={(e) => setSummary(e.target.value)} />
         <Input className="gh-url" type="url"
-               placeholder="GitHub URL to clone (optional)"
-               title="https://github.com/owner/repo — the project starts as a clone of it"
+               placeholder="GitHub URL (optional)"
+               title="https://github.com/owner/repo — optional: the project starts as a clone of it"
                value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
         <Button type="submit" disabled={creating}>
           {creating && cloning ? 'cloning…' : cloning ? 'Clone & create' : 'Create'}</Button>

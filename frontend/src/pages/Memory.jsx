@@ -23,7 +23,8 @@ export default function Memory() {
 
   async function refresh() {
     const r = await api('/api/memory')
-    setFiles(r.files)
+    // a dotfile (.gitkeep) is plumbing that keeps a folder in version control, not memory
+    setFiles(r.files.filter((f) => !f.path.split('/').pop().startsWith('.')))
     api('/api/memory/notes').then((r2) => {
       const m = {}; (r2.notes || []).forEach((n) => { m[nkey(n.name)] = n })
       setNotes(m)
