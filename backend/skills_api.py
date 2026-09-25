@@ -12,6 +12,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from .agent.tools import imported
 from .agent.tools.registry import compile_registry, load_registry, _parse_md
 from .auth import require_user
 from .config import settings
@@ -26,6 +27,10 @@ class CreateSkill(BaseModel):
 
 class SaveSkill(BaseModel):
     content: str
+
+
+class Grant(BaseModel):
+    granted: bool
 
 
 class SkillFields(BaseModel):
@@ -85,11 +90,18 @@ async def list_skills():
     if settings.skills_dir.exists():
         for md in sorted(settings.skills_dir.glob("*/SKILL.md")):
             meta = _parse_md(md) or {}
+            if imported.is_imported(md.parent, meta):
+                e = imported.entry({**meta, "source": str(md)}, md.parent)
+                skills.append({"slug": md.parent.name, "name": e["name"],
+                               "description": e["description"],
+                               "enabled": imported.offerable(e), "imported": True})
+                continue
             skills.append({
                 "slug": md.parent.name,
                 "name": meta.get("name", md.parent.name),
                 "description": meta.get("description", ""),
                 "enabled": meta.get("enabled", True) is not False,
+                "imported": False,
             })
     return {"skills": skills}
 
@@ -117,12 +129,21 @@ async def read_skill(slug: str):
     return {"slug": slug, "content": path.read_text(), "fields": _fields(path)}
 
 
-@router.put("/skills/{slug}")
-async def save_skill(slug: str, body: SaveSkill):
-    """Raw-content save (the advanced editor path)."""
+def _editable(slug: str):
     path = settings.skills_dir / slug / "SKILL.md"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="no such skill")
+    if imported.is_imported(path.parent, _parse_md(path)):
+        # an edit would break the pin and disable it; re-import to change it
+        raise HTTPException(status_code=409,
+                            detail="imported skills are pinned; re-import to change one")
+    return path
+
+
+@router.put("/skills/{slug}")
+async def save_skill(slug: str, body: SaveSkill):
+    """Raw-content save (the advanced editor path)."""
+    path = _editable(slug)
     path.write_text(body.content)
     compile_registry()
     return {"ok": True}
@@ -131,9 +152,7 @@ async def save_skill(slug: str, body: SaveSkill):
 @router.put("/skills/{slug}/fields")
 async def save_skill_fields(slug: str, body: SkillFields):
     """Form save: fields in, valid frontmatter out — no hand-written YAML."""
-    path = settings.skills_dir / slug / "SKILL.md"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="no such skill")
+    path = _editable(slug)
     if not body.description.strip():
         raise HTTPException(status_code=400, detail="description is required")
     path.write_text(_serialize(slug, body))
@@ -141,14 +160,54 @@ async def save_skill_fields(slug: str, body: SkillFields):
     return {"ok": True}
 
 
+@router.put("/skills/{slug}/grant")
+async def grant_skill(slug: str, body: Grant):
+    """Grant or revoke an imported skill. Operator cookie only (this router's
+    require_user); a grant is refused while any requirement is unmet or the pin
+    fails, so the switch the Tools page locks is locked here too."""
+    path = settings.skills_dir / slug / "SKILL.md"
+    meta = _parse_md(path) if path.is_file() else None
+    if meta is None or not imported.is_imported(path.parent, meta):
+        raise HTTPException(status_code=404, detail="no such imported skill")
+    if body.granted:
+        e = imported.entry(meta, path.parent)
+        unmet = [r["reason"] for r in e["requirements"] if not r["met"]]
+        if e["blocked"] or unmet:
+            raise HTTPException(status_code=409, detail=e["blocked"] or unmet[0])
+    imported.set_grant(path.parent, body.granted)
+    compile_registry()
+    return {"ok": True, "granted": body.granted}
+
+
+def _group(e: dict) -> str:
+    if e.get("origin") == imported.ORIGIN:
+        return "imported"
+    return "yours" if e.get("kind") == "skill" else "builtin"
+
+
 @router.get("/tools")
 async def list_tools():
-    """Everything in the registry, granted or not — the Tools tab reads this."""
-    entries = load_registry()
-    return {"tools": [{
-        "name": e["name"],
-        "description": e.get("description", ""),
-        "when_to_use": e.get("when_to_use", ""),
-        "enabled": e.get("enabled", True) is not False,
-        "source": e.get("source", ""),
-    } for e in entries]}
+    """Everything in the registry, granted or not — the Tools tab reads this.
+    `group` is yours (skills) / imported (OpenClaw, pinned) / builtin (tool
+    folders shipped with the code)."""
+    out = []
+    for e in load_registry():
+        row = {
+            "name": e["name"],
+            "group": _group(e),
+            "description": e.get("description", ""),
+            "when_to_use": e.get("when_to_use", ""),
+            "enabled": e.get("enabled", True) is not False and not e.get("clash"),
+            "clash": e.get("clash", ""),
+        }
+        if row["group"] == "imported":
+            row.update({
+                "slug": e["dir"], "enabled": imported.offerable(e),
+                "granted": e.get("granted", False), "blocked": e.get("blocked", ""),
+                "requirements": e.get("requirements", []),
+                "install_hints": e.get("install_hints", []),
+                "pin": e.get("pin", {}), "homepage": e.get("homepage", ""),
+                "body": e.get("body", ""),
+            })
+        out.append(row)
+    return {"tools": out}
