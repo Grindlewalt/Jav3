@@ -67,7 +67,9 @@ function ImportedCard({ t, onChanged }) {
         </div>
       )}
       {reason && <div className="tool-meta tool-lock">{reason}</div>}
-      <div className="tool-meta">
+      {/* one line: a URL broken anywhere read as "skills/weat / her" */}
+      <div className="tool-meta tool-src"
+           title={[t.pin?.source, t.pin?.ref].filter(Boolean).join(' · ') || undefined}>
         {t.pin?.source}{ref && ` · ${ref}`}
       </div>
       <details className="output-fold tool-text">

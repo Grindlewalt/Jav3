@@ -153,6 +153,8 @@
   --term-cursor: #8caa93;      /* = dark --accent */
   --term-selection: rgba(140, 170, 147, 0.3);   /* the accent, translucent */
   --danger-ink: #ffffff;      /* text on a --red badge, both themes */
+  /* a filled destructive button: --red darkened until white ink reads (4.5:1+) */
+  --danger-fill: #b8483f;
   --knob: #f1efe9;            /* a switch's thumb: light on every track */
   /* a switch's OFF track, and a filled button that can't be pressed. Dark
      keeps the recessed panel and the old 45% fade; light states both outright,
@@ -178,6 +180,7 @@
   --accent-ink: #f7f5ec;
   --green: #3e7d4e;
   --red: #b5433a;
+  --danger-fill: #a63b33;
   --amber: #96701f;
   --bubble: #dee4d0;
   --bubble-border: #c8d2b6;
@@ -555,6 +558,13 @@ button.ghost:hover, .ghost-link:hover { border-color: var(--accent); filter: non
 button.ghost.danger { color: var(--red);
   border-color: color-mix(in srgb, var(--red) 40%, var(--border)); }
 button.ghost.danger:hover { border-color: var(--red); color: var(--red); }
+/* <Button danger> without ghost: a filled red primary. It rendered as the
+   sage accent — a green "Revoke" in a revoke dialog. */
+button.danger:not(.ghost):not(.link):not(.icon-btn):not(.menu-item) {
+  background: var(--danger-fill); color: var(--danger-ink); }
+button.danger:not(.ghost):not(.link):not(.icon-btn):not(.menu-item):disabled {
+  background: color-mix(in srgb, var(--danger-fill) 45%, var(--panel));
+  color: color-mix(in srgb, var(--danger-ink) 60%, var(--panel)); opacity: 1; }
 input, textarea, select {
   background: var(--bg-soft); color: var(--text); border: 1px solid var(--border);
   border-radius: 10px; padding: 8px 10px; font: inherit; outline: none;
@@ -974,6 +984,16 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .convo-list li:hover .convo-actions,
 .convo-list li:focus-within .convo-actions { opacity: 1; pointer-events: auto; }
+/* ...and the text fades out before it: the ⋯ used to sit square on the
+   title's last letters ("Protoc⋯"). Only where the actions overlay — on touch
+   they take their own place in the row (below). */
+@media (hover: hover) {
+  .convo-list li:hover .convo-main,
+  .convo-list li:focus-within .convo-main,
+  .convo-list li.menu-open .convo-main {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent calc(100% - 22px));
+    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent calc(100% - 22px)); }
+}
 /* an agent's thread: the agent's name leads the caption line */
 .convo-agent { color: var(--accent); margin-right: 6px; }
 /* ---- chat list groups (ChatGroups.jsx): Projects, Starred, each folder,
@@ -1613,6 +1633,8 @@ kbd {
 .tool-meta { margin-top: var(--sp-3); font-size: var(--fs-sm); color: var(--dim);
   overflow-wrap: anywhere; }
 .tool-lock { color: var(--red); }
+.tool-src { overflow-wrap: normal; word-break: keep-all; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .tool-text { margin-top: var(--sp-4); }
 .tool-text pre {
   margin: 0; max-height: 320px; overflow: auto; white-space: pre-wrap;
@@ -2088,6 +2110,18 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
 .net-auto { display: flex; align-items: center; gap: var(--sp-4); min-width: 0;
   flex-wrap: wrap; }
 .net-auto .toggle-text { white-space: normal; }
+/* a button centres its text by default: a wrapped Auto label came out as a
+   centred paragraph beside the track */
+.net-auto .toggle { text-align: left; min-width: 0; }
+.net-view, .net-panel { container-type: inline-size; }
+/* narrow (phone, the dock's Net tab, a board panel): the label flows as one
+   paragraph that wraps back under the switch instead of a thin column */
+@container (max-width: 480px) {
+  .net-auto .toggle { display: block; }
+  .net-auto .toggle-track { display: inline-block; vertical-align: middle;
+    margin-right: var(--sp-4); }
+  .net-auto .toggle-text { line-height: 1.6; }
+}
 .net-counts { display: flex; gap: var(--sp-7); margin-left: auto;
   font-size: var(--fs-md); color: var(--dim); font-variant-numeric: tabular-nums; }
 .net-counts b { color: var(--text); font-weight: 600; }
@@ -3506,12 +3540,17 @@ body.nav-locked .notice-pill { display: none; }
 .sh-temp { margin-left: var(--sp-2); }
 
 /* ---- the dock: the board's panels as tabs beside the transcript ----
-   One tab visible; the left edge drags (360–760px, remembered). Below the
-   width where sidebar + transcript + dock fit side by side it floats over the
-   transcript's right edge instead of crushing it; on a phone it is a bottom
-   sheet. The body is a .window-body, so every panel lays out as on the board. */
+   One tab visible; the left edge drags (360–760px, remembered). It always
+   sits beside the transcript (see the width below); on a phone it is a
+   bottom sheet. The body is a .window-body, so every panel lays out as on the board. */
+/* Never floats: a floating dock at 1024 sat on the composer's send button.
+   It gives way instead — its chosen width, narrowed so the transcript keeps
+   ~340px, never below 320px (under ~1000px that squeezes the transcript
+   rather than covering it, so the input and send stay reachable). The same
+   cap stops a 760px drag from crushing the transcript on a 1200px screen. */
 .shell-dock {
-  width: var(--dock-w, 480px); flex-shrink: 0; position: relative;
+  width: min(var(--dock-w, 480px), max(320px, calc(100% - var(--side-w) - 340px)));
+  flex-shrink: 0; position: relative;
   display: flex; flex-direction: column; min-height: 0;
   background: var(--bg-soft); border-left: 1px solid var(--border);
 }
@@ -3542,9 +3581,20 @@ body.nav-locked .notice-pill { display: none; }
 .dock-run .small { flex-shrink: 0; }
 .dock-run-tree { padding: var(--sp-2) 0 var(--sp-4) var(--sp-8); }
 .dock-scrim { z-index: 40; }
-@media (max-width: 1199px) and (min-width: 769px) {
-  .shell-dock { position: absolute; top: 0; right: 0; bottom: 0; z-index: 30;
-    box-shadow: var(--shadow-win); max-width: calc(100% - 120px); }
+/* a narrow transcript column (the dock beside it) tightens its gutters.
+   Desktop only: the phone header (☰ · title · chips) has its own rules below. */
+.shell-main { container-type: inline-size; }
+@media (min-width: 769px) {
+@container (max-width: 520px) {
+  /* the title gets its own row rather than being cut to "Cron …" by the chips */
+  .sh-head { padding: var(--sp-3) var(--sp-6); gap: var(--sp-2) var(--sp-3);
+    flex-wrap: wrap; }
+  .sh-title { flex-basis: 100%; }
+  .sh-head-meta { flex-wrap: wrap; }
+  .sh-thread { padding-left: var(--sp-6); padding-right: var(--sp-6); }
+  .sh-composer { padding-left: var(--sp-5); padding-right: var(--sp-5); }
+  .sh-scope { max-width: 140px; }
+}
 }
 
 /* ---- phone: the transcript is the screen ----
