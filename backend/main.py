@@ -13,7 +13,7 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, device
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
                notifications_api, plan_api, projects, reviewer, reviewer_api, runs_api,
-               schedules, skills_api, vm_api, voice_api, workspace, secrets)
+               schedules, sidebar_api, skills_api, vm_api, voice_api, workspace, secrets)
 from .agent.model import (MODEL_STATE_KEY, get_model_override,
                           load_model_override, set_model_override)
 from .agent.tools.registry import compile_registry
@@ -101,6 +101,7 @@ app.include_router(devices_api.pair_router)
 app.include_router(devices_api.cli_router)
 app.include_router(projects.router)
 app.include_router(chat.router)
+app.include_router(sidebar_api.router)
 app.include_router(memory_api.router)
 app.include_router(workspace.router)
 app.include_router(skills_api.router)
