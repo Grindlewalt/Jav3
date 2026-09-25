@@ -1,4 +1,7 @@
 """Admin CLI:
+  python -m backend.cli setup [--add-user] [--username U --password-stdin]
+                             [--provider ID [--api-key-stdin] [--base-url URL]] [--no-test]
+                                                     # first-run setup (login + model provider)
   python -m backend.cli create-user <username> [password]  # omit it: hidden prompt
   python -m backend.cli guest-shell [project-slug]   # drop into the sandbox guest
   python -m backend.cli services-check               # probe the companion services
@@ -157,6 +160,8 @@ def main() -> None:
         # interactively, leave it off and type it at the hidden prompt
         password = sys.argv[3] if len(sys.argv) > 3 else _prompt_password()
         asyncio.run(create_user(username, password))
+    elif len(sys.argv) >= 2 and sys.argv[1] == "setup":
+        setup_command(sys.argv[2:])
     elif len(sys.argv) >= 2 and sys.argv[1] == "guest-shell":
         guest_shell(sys.argv[2] if len(sys.argv) > 2 else None)
     elif len(sys.argv) >= 2 and sys.argv[1] == "services-check":
@@ -170,6 +175,177 @@ def main() -> None:
     else:
         print(__doc__.split("\n", 1)[1].rstrip())
         sys.exit(1)
+
+
+def server_urls() -> list[str]:
+    """Where to open the GUI: the mDNS name the running server advertises
+    (`<instance>.local`), then each LAN IP, all on the configured port."""
+    from . import lan
+    from .config import settings
+    try:
+        from .main import app
+        title = app.title
+    except Exception:          # noqa: BLE001 — a URL hint is never fatal
+        title = ""
+    port = settings.lan_port
+    hosts = [f"{lan.instance_name(title)}.local"] if settings.mdns else []
+    try:
+        hosts += lan.lan_ips()
+    except Exception:          # noqa: BLE001
+        pass
+    return [f"http://{h}:{port}/" for h in dict.fromkeys(hosts)] \
+        or [f"http://localhost:{port}/"]
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    try:
+        v = input(prompt).strip()
+    except EOFError:
+        sys.exit("\nsetup: input ended")
+    return v or default
+
+
+def _yes(prompt: str, default: bool) -> bool:
+    v = _ask(f"{prompt} [{'Y/n' if default else 'y/N'}] ").lower()
+    return default if not v else v.startswith("y")
+
+
+def _stdin_line(what: str) -> str:
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(f"setup: expected the {what} on stdin")
+    return line.rstrip("\r\n")
+
+
+def setup_command(args: list[str]) -> None:
+    """The TUI twin of the web /setup page: login, model provider, finish.
+    Interactive on a terminal; scriptable with the flags (secrets on stdin,
+    one per line, password first — never in argv, where `ps` can read them)."""
+    import argparse
+    from . import setup_api
+    from .setup_api import SetupError
+
+    ap = argparse.ArgumentParser(prog="python -m backend.cli setup")
+    ap.add_argument("--username")
+    ap.add_argument("--password-stdin", action="store_true")
+    ap.add_argument("--provider", help="provider id, or 'none' to skip")
+    ap.add_argument("--api-key-stdin", action="store_true")
+    ap.add_argument("--base-url")
+    ap.add_argument("--no-test", action="store_true", help="skip the test call")
+    ap.add_argument("--add-user", action="store_true",
+                    help="add another login even though setup is done")
+    a = ap.parse_args(args)
+    tty = sys.stdin.isatty()
+    scripted = a.password_stdin or a.api_key_stdin
+
+    asyncio.run(init_db())
+    exists = asyncio.run(setup_api.users_exist())
+    if exists and not a.add_user:
+        print("setup is already done (a login exists). To add another login: "
+              "python -m backend.cli setup --add-user", file=sys.stderr)
+        sys.exit(1)
+    if not tty and not (a.username and a.password_stdin):
+        print("setup: no terminal — pass --username and --password-stdin",
+              file=sys.stderr)
+        sys.exit(2)
+
+    # 1. the login
+    print("\n1. Create your login")
+    username = a.username or _ask("   username: ")
+    if a.password_stdin:
+        password = _stdin_line("password")
+    else:
+        print(f"   (at least {setup_api.MIN_PASSWORD} characters; a few "
+              "unrelated words beat one clever one)")
+        password = _prompt_password()
+    try:
+        username = setup_api.validate_credentials(username, password)
+    except SetupError as e:
+        sys.exit(f"setup: {e.detail}")
+
+    # 2. the provider (skipped by --add-user unless one is named)
+    pid = key = base = ""
+    if a.provider:
+        pid = "" if a.provider.lower() == "none" else a.provider.strip().lower()
+    elif tty and not scripted and not a.add_user:
+        cat = setup_api.catalogue()
+        print("\n2. Connect a model provider")
+        for i, p in enumerate(cat, 1):
+            print(f"   {i}) {p['label']}")
+        print("   0) skip for now (add one later in Settings)")
+        while True:
+            pick = _ask("   choose a number: ", "0")
+            if pick.isdigit() and 0 <= int(pick) <= len(cat):
+                break
+            print("   not on the list")
+        pid = cat[int(pick) - 1]["id"] if int(pick) else ""
+    if pid:
+        try:
+            entry = setup_api._entry(pid)
+        except SetupError as e:
+            sys.exit(f"setup: {e.detail}")
+        if a.api_key_stdin:
+            key = _stdin_line("API key").strip()
+        elif entry["needs_key"] and tty:
+            key = getpass.getpass("   API key (paste; hidden): ").strip()
+        base = a.base_url or ""
+        if not base and entry["needs_base_url"] and tty and not scripted:
+            # a {VAR} in the catalogue URL: there is no usable default
+            base = _ask(f"   base URL (like {entry['base_url']}): ")
+        elif not base and not entry["needs_key"] and tty and not scripted:
+            base = _ask(f"   base URL [{entry['base_url']}]: ")
+        try:
+            setup_api.check_provider(pid, key, base)
+        except SetupError as e:
+            sys.exit(f"setup: {e.detail}")
+        print("   the key is stored on this server, never in the sandbox VM")
+        run_test = (not a.no_test) and (not tty or scripted
+                                       or _yes("   test it now?", True))
+        if run_test:
+            res = asyncio.run(setup_api.test_provider(pid, key, base))
+            if res["ok"]:
+                print(f"   ok · {len(res['models_found'])} models")
+            else:
+                print(f"   test failed: {res['detail']}")
+                if not tty or scripted or not _yes("   save it anyway?", False):
+                    sys.exit("setup: provider test failed (nothing was created; "
+                             "--no-test skips the check)")
+
+    # 3. finish
+    try:
+        if exists:
+            asyncio.run(add_user(username, password))
+        else:
+            asyncio.run(setup_api.create_first_user(username, password))
+    except SetupError as e:
+        sys.exit(f"setup: {e.detail}")
+    print(f"\nlogin '{username}' created")
+    if pid:
+        try:
+            r = setup_api.store_provider(pid, key, base)
+            print(f"provider {pid} saved" + (f" · default model {r['default']}"
+                                             if r.get("default") else ""))
+        except SetupError as e:
+            print(f"provider not saved: {e.detail} (add it in Settings)")
+    urls = server_urls()
+    print("\nopen " + urls[0] + ("   (or " + ", ".join(urls[1:]) + ")"
+                                  if len(urls) > 1 else ""))
+
+
+async def add_user(username: str, password: str) -> None:
+    """A further login; refuses an existing name (create-user overwrites)."""
+    from .setup_api import SetupError
+    await init_db()
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
+            (username, hash_password(password)))
+        await db.commit()
+        if cur.rowcount != 1:
+            raise SetupError(409, f"a login named '{username}' already exists")
+    finally:
+        await db.close()
 
 
 _PATHS = ("state_dir", "data_dir", "db_path", "memory_dir", "projects_dir",
