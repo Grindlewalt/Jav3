@@ -142,8 +142,11 @@ def require_user(request: Request) -> dict:
 _DEFAULT_PORT = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 # Routes with no cookie authentication of their own: the device redeem (a
-# code in the body), the CLI files, and git-over-HTTP (Basic auth).
-_ORIGIN_EXEMPT_EXACT = {"/api/devices/login"}
+# code in the body), first-run setup (open only while no user exists; a stale
+# cookie from an earlier install must not wedge it, and setup_api refuses a
+# browser-declared cross-site request itself), the CLI files, and git-over-HTTP
+# (Basic auth). Exact paths only: /api/setup/<anything> is not exempt.
+_ORIGIN_EXEMPT_EXACT = {"/api/devices/login", "/api/setup"}
 _ORIGIN_EXEMPT_PREFIX = ("/cli/", "/git/")
 
 
@@ -406,6 +409,18 @@ async def check_password_login(username: str, password: str, request: Request,
     return row
 
 
+def set_session_cookie(response: Response, user_id: int, username: str) -> None:
+    """The one place a session cookie is issued: login, and first-run setup."""
+    response.set_cookie(
+        COOKIE_NAME,
+        make_token(user_id, username),
+        httponly=True,
+        samesite="lax",
+        secure=settings.cookie_secure,
+        max_age=settings.jwt_ttl_hours * 3600,
+    )
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -416,14 +431,7 @@ async def login(body: LoginRequest, request: Request, response: Response):
     row = await check_password_login(body.username, body.password, request)
     if row is None:
         raise HTTPException(status_code=401, detail="bad credentials")
-    response.set_cookie(
-        COOKIE_NAME,
-        make_token(row["id"], row["username"]),
-        httponly=True,
-        samesite="lax",
-        secure=settings.cookie_secure,
-        max_age=settings.jwt_ttl_hours * 3600,
-    )
+    set_session_cookie(response, row["id"], row["username"])
     return {"ok": True, "username": row["username"]}
 
 

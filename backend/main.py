@@ -13,8 +13,8 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, desk_a
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
                notifications_api, plan_api, projects, providers, reviewer,
-               reviewer_api, runs_api, schedules, sidebar_api, skills_api, vm_api,
-               voice_api, workspace, secrets)
+               reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
+               vm_api, voice_api, workspace, secrets)
 from .agent.tools.registry import compile_registry
 from .auth import require_user
 from .config import settings, ensure_dirs
@@ -95,6 +95,7 @@ async def _security_headers(request, call_next):
 app.add_middleware(auth.SameOriginMiddleware)
 
 app.include_router(auth.router)
+app.include_router(setup_api.router)
 app.include_router(devices_api.router)
 app.include_router(devices_api.pair_router)
 app.include_router(devices_api.cli_router)
