@@ -511,13 +511,16 @@ export default function Workspace() {
           <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close
             · <kbd>ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add
             · <kbd>esc</kbd> collapse</span>
+          {/* on a phone the words go and the glyphs stay, so the dial and
+              both actions share one row at touch size */}
           <button className="ghost" onClick={autoArrange}
                   title="auto-arrange the open panels into a tight block (grows ≤2 grid units, shrinks ≤1)">
-            ⌗ tidy</button>
-          <button className="ghost" onClick={(e) => {
-            const b = e.currentTarget.getBoundingClientRect()
-            openMenuAt(b.right, b.bottom + 8, true)
-          }}>+ panel</button>
+            ⌗<span className="ws-btn-word"> tidy</span></button>
+          <button className="ghost" title="add a panel"
+                  onClick={(e) => {
+                    const b = e.currentTarget.getBoundingClientRect()
+                    openMenuAt(b.right, b.bottom + 8, true)
+                  }}>+<span className="ws-btn-word"> panel</span></button>
         </div>
       </header>
       <div className="board" ref={boardRef} onContextMenu={openMenu}
@@ -1429,7 +1432,8 @@ function GitPanel({ slug }) {
         </div>
       ) : (
         <div className="row">
-          <input className="grow" placeholder="https://github.com/owner/repo"
+          <input className="grow" placeholder="GitHub repo URL"
+                 title="https://github.com/owner/repo"
                  value={remoteUrl} onChange={(e) => setRemoteUrl(e.target.value)} />
           <button className="ghost" disabled={busy || !remoteUrl.trim()}
                   onClick={connect}>connect</button>
