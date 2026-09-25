@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
-import { useIsPhone } from '../breakpoints.js'
+import { isPhone, useIsPhone } from '../breakpoints.js'
 import { notify, notifyError } from '../notify.js'
 import { useChatStream } from '../useChatStream.js'
 import { listTitle } from '../ChatGroups.jsx'
@@ -11,6 +11,7 @@ import Transcript from './Transcript.jsx'
 import Composer from './Composer.jsx'
 import ScopeChip from './ScopeChip.jsx'
 import { useApprovals } from './approvals.js'
+import Dock, { tabsFor } from './Dock.jsx'
 
 // The terminal-style shell: sidebar · transcript · (dock, M2).
 //
@@ -25,6 +26,7 @@ import { useApprovals } from './approvals.js'
 // and on a slow poll so "Working" tracks turns started elsewhere.
 
 const EXPAND_KEY = 'jarvis.shell.expand'
+const DOCK_KEY = 'jarvis.shell.dock'
 const SIDEBAR_POLL_MS = 10000
 
 function parseRest(rest) {
@@ -32,6 +34,14 @@ function parseRest(rest) {
   if (kind === 'c' && /^\d+$/.test(arg || '')) return { cid: Number(arg), slug: null }
   if (kind === 'p' && arg) return { cid: null, slug: decodeURIComponent(arg) }
   return { cid: null, slug: null }
+}
+
+// the dock opens closed on a first visit; after that it remembers
+function readDock() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DOCK_KEY)) || {}
+    return { open: !!d.open, tab: d.tab || 'files', w: Number(d.w) || 480 }
+  } catch { return { open: false, tab: 'files', w: 480 } }
 }
 
 function readExpand() {
@@ -53,6 +63,12 @@ export default function Shell() {
   const [threadAgent, setThreadAgent] = useState(null)
   const [expandAll, setExpandAll] = useState(readExpand)
   const [drawer, setDrawer] = useState(false)    // phone: the sidebar sheet
+  // a sheet over the whole transcript never greets you on a phone
+  const [dock, setDock] = useState(() => {
+    const d = readDock()
+    return isPhone() ? { ...d, open: false } : d
+  })
+  const [chatJobs, setChatJobs] = useState([])   // jobs this chat launched (/messages)
 
   const chat = useChatStream()
   const { messages, busy, peakAsk, setPeakAsk, openThread, stopTurn, runTurn,
@@ -76,6 +92,10 @@ export default function Shell() {
   useEffect(() => {
     try { localStorage.setItem(EXPAND_KEY, expandAll ? '1' : '0') } catch { /* private mode */ }
   }, [expandAll])
+  useEffect(() => {
+    try { localStorage.setItem(DOCK_KEY, JSON.stringify(dock)) } catch { /* private mode */ }
+  }, [dock])
+  const openDock = useCallback((tab) => setDock((d) => ({ ...d, open: true, tab: tab || d.tab })), [])
 
   // The URL is the source of truth for what is open. A send that creates a
   // conversation writes its id into the URL itself; that one is already on
@@ -86,9 +106,10 @@ export default function Shell() {
     setPeakAsk(null)
     setTemporary(false)
     setThreadAgent(null)
+    setChatJobs([])
     if (cid == null) { openThread(null); return }
     openThread(cid, { onTailDone: refreshSide })
-      .then((r) => { if (r) setThreadAgent(r.agent_slug || null) })
+      .then((r) => { if (r) { setThreadAgent(r.agent_slug || null); setChatJobs(r.jobs || []) } })
       .catch(notifyError)
   }, [cid, openThread, refreshSide, setPeakAsk])
 
@@ -124,6 +145,17 @@ export default function Shell() {
   // on a phone the sidebar is a sheet over the transcript: anything that
   // navigates (a chat, a project row, ＋) should reveal what it opened
   useEffect(() => { setDrawer(false) }, [cid, slug])
+  // Escape backs out of the phone's sheets, like every other popover
+  useEffect(() => {
+    if (!phone || !(drawer || dock.open)) return undefined
+    const onKey = (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (drawer) setDrawer(false)
+      else setDock((d) => ({ ...d, open: false }))
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [phone, drawer, dock.open])
   // a new chat stays in the scope you are in: from a project's chat, the
   // project's home; from a global one, /shell
   function newChat(asAgent = '') {
@@ -219,6 +251,10 @@ export default function Shell() {
     onChanged: refreshSide,
   })
 
+  // the dock follows the scope: the project, else this chat's own store
+  const dockSlug = scopeSlug || (cid != null ? `chat-${cid}` : null)
+  const dockTab = tabsFor(!!scopeSlug).includes(dock.tab) ? dock.tab : 'files'
+
   return (
     <div className={`shell${drawer ? ' drawer-open' : ''}`}>
       <ShellSidebar side={side} activeId={cid} activeSlug={fresh ? slug : null}
@@ -241,6 +277,9 @@ export default function Shell() {
                 @{agentSlug}</span>
             )}
             <ScopeChip projects={projects} value={scopeSlug} onPick={setScope} />
+            <button type="button" className="sh-toggle sh-panels" aria-pressed={dock.open}
+                    title={dock.open ? 'close the panels' : 'files, git, plan, terminal, network, runs'}
+                    onClick={() => setDock((d) => ({ ...d, open: !d.open }))}>Panels</button>
             {hasSteps && (
               <button type="button" className="sh-toggle" aria-pressed={expandAll}
                       title={expandAll ? 'fold every turn’s steps' : 'show every turn’s steps'}
@@ -251,7 +290,8 @@ export default function Shell() {
         </header>
         <Transcript cid={cid} messages={messages} expandAll={expandAll} fresh={fresh}
                     slug={slug} side={side} agentName={agentSlug ? agentName(agentSlug) : 'Jav3'}
-                    temporary={temporary} onOpen={open} approvals={approvals} />
+                    temporary={temporary} onOpen={open} approvals={approvals}
+                    onReview={() => openDock('git')} />
         <Composer value={input} onChange={setInput} onSend={() => send()}
                   busy={busy} onStop={stop}
                   peakAsk={peakAsk}
@@ -263,6 +303,15 @@ export default function Shell() {
                   temporary={temporary} onTemporary={setTemporary}
                   history={messages} />
       </main>
+      {dock.open && phone && (
+        <div className="shell-scrim dock-scrim" onClick={() => setDock((d) => ({ ...d, open: false }))} />
+      )}
+      {dock.open && (
+        <Dock slug={dockSlug} isProject={!!scopeSlug} chatJobs={chatJobs}
+              tab={dockTab} onTab={(t) => setDock((d) => ({ ...d, tab: t }))}
+              onClose={() => setDock((d) => ({ ...d, open: false }))}
+              width={dock.w} onWidth={(w) => setDock((d) => ({ ...d, w }))} />
+      )}
     </div>
   )
 }
