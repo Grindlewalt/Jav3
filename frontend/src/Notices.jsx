@@ -72,6 +72,13 @@ export function useNotices(enabled) {
       ;(d.git || []).filter((g) => !oldGit.has(g.id)).forEach((g) => push({
         title: `commit request · ${g.project}`, body: g.message,
       }))
+      // a turn is blocked on these for a minute at most: the card goes
+      // straight to the ask in Settings → Computer use
+      const oldShell = new Set((p.desk_shell || []).map((s) => s.id))
+      ;(d.desk_shell || []).filter((s) => !oldShell.has(s.id)).forEach((s) => push({
+        title: `shell on ${s.name} · waiting for you`, body: s.command,
+        to: '/settings#desk', life: 60,
+      }))
       const oldSched = new Set((p.schedules || []).map((s) => s.id))
       ;(d.schedules || []).filter((s) => !oldSched.has(s.id)).forEach((s) => push({
         title: `proposed schedule · ${s.name}`,
@@ -131,7 +138,8 @@ export function useNotices(enabled) {
 // A queue card (not the app's own message, not an agent run's result) exists
 // to say "go to Security". On Security it says nothing the page is not already
 // showing, and at the top of the screen it sat on the page's own tab strip.
-const isQueueCard = (t) => !t.local && !t.project
+// A card with its own destination (`to`: a shell ask) is not a queue card.
+const isQueueCard = (t) => !t.local && !t.project && !t.to
 const onReview = (path) => path === '/security' || path.startsWith('/security/')
 
 export default function Notices({ toasts, dismiss, clear }) {
@@ -161,6 +169,7 @@ export default function Notices({ toasts, dismiss, clear }) {
     // an agent notice belongs to the board it ran on; everything else is a
     // queue item and belongs on the Security page
     if (t.project) navigate(`/projects/${t.project}`)
+    else if (t.to) navigate(t.to)
     else navigate('/security', t.eventId ? { state: { openEvent: t.eventId } } : undefined)
   }
   return (

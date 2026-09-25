@@ -4,7 +4,7 @@ What the architecture is, what it actually buys, and — the point of this
 document — what it does **not** cover. Written to be read by someone deciding
 whether to trust the agent with a new capability. Last updated 2026-07-19,
 covering the monitored-egress build (Layers 1–6; deploy separation / Layer 7 is
-out of scope), amended 2026-07-20 for the **staging-quarantine removal** (operator decision: writes land live; git is the review/undo surface), and 2026-09-23 for the **removal of Computer Use and Cloudflare Access** (operator decision: LAN-first; see #12). **This supersedes the netless posture** — the guest now has a
+out of scope), amended 2026-07-20 for the **staging-quarantine removal** (operator decision: writes land live; git is the review/undo surface), and 2026-09-23 for the **removal of Computer Use and Cloudflare Access** (operator decision: LAN-first; see #12). Amended 2026-09-24 for **computer use rebuilt as `jav3-desk`** (see #15). **This supersedes the netless posture** — the guest now has a
 real, monitored internet path, a deliberate trade of maximal containment for
 watchability and genuine developer autonomy.
 
@@ -246,6 +246,51 @@ a watched, policy-gated, cuttable pipe to the internet.
       turn makes `/persist` read-only for every concurrent turn of that
       project until the last one ends (fail-safe direction).
 
+15. **Computer use, rebuilt as `jav3-desk` (2026-09-24).** A client on the
+    operator's computer (`clients/jav3-desk`) holds one outbound WebSocket to
+    `/api/desk/ws` with a `desk`-scoped device token; the agent drives it with
+    host-side `desk_*` tools, so every gate is host-side in `backend/desk.py`
+    and the guest never learns the token. What is closed: a desk token opens
+    only the desk socket (chat refuses it) and a CLI token is refused there —
+    so a leaked CLI token cannot pose as a desk and feed forged screenshots,
+    and a desk cannot start turns. Grants (screen / input / shell) are per
+    computer, server-side, and set only from cookie routes; the client's own
+    ceiling can narrow them and never be widened — shell stays off until
+    `jav3-desk allow-shell` is run at that computer. Input is refused without
+    a screenshot of that computer from this turn under 60 s old, with
+    coordinates bounded by it; 10 input/s, 2 screenshots/s, one shell at a
+    time; every action is audited (typed text as length + digest); typing a
+    stored secret's value is refused; every desk result taints the turn, and
+    a tainted turn loses "trusted" shell (off-allowlist commands go back to an
+    in-page ask with a 60 s timeout). Stop turns every grant off and kills the
+    session; revoking the token drops it. What deliberately remains:
+    - **Screens are an injection channel into a turn that can act.** A page,
+      a chat window or a document on screen can carry instructions. Taint and
+      the shell downgrade contain the shell; clicks and keystrokes inside the
+      granted Input are not individually approved. Input on is trust in the
+      model's judgement against whatever it reads on that screen.
+    - **Input is shell by other means.** With Input granted the agent can open
+      a terminal and type into it, which is a shell with none of the shell
+      gates. The client refuses typed text naming its own controls (so input
+      cannot type its way to `allow-shell`) and offers no terminal in its
+      default app list, but a terminal reached by clicking is reachable. Grant
+      Input only while watching, or for a machine whose shell you would grant.
+    - **The allowlist runs argv, not a sandbox.** An allowlisted `git *` can
+      still run `git -c core.pager=… log`; patterns are per argument and the
+      command runs with shell=False, but a permissive pattern is permissive.
+    - **Trust in the server for approvals.** The client enforces its ceiling
+      but cannot tell an operator-approved shell command from one a
+      compromised server claims was approved; `allow-shell` is the line a
+      compromised server cannot cross, `deny-shell` / `panic` the way back.
+    - **Wayland trust model.** The rootless backends (grim, wtype, the
+      wlroots virtual pointer) work because the compositor trusts every local
+      Wayland client; anything else running as the operator can do the same.
+      The client adds no new privilege, but it is a long-lived process holding
+      a credential that drives the desktop.
+    - **Not yet built:** GNOME/KDE portals and `/dev/uinput` (M2), and
+      accessibility-tree targeting (M4). macOS relies on Accessibility and
+      Screen Recording grants to the python that runs the client.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -268,6 +313,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Web origin (CSRF / agent HTML) | Critical | Low | One global scheme+host+port same-origin gate for every cookie state change and WebSocket; agent files served sandboxed/inert. Residual = a missing-Origin non-browser client holding the cookie. |
 | Host-side project runner | Critical | Medium | Executes on the host by design; same-origin gated and audited per run. Existence is the operator's decision. |
 | Backup contents and destination | High | Medium | DB snapshot (incl. bcrypt hashes) uploaded unencrypted; secrets only through rclone crypt; destination changes raise a security event; rclone binary constrained; git hooks never restored. |
+| Computer use (`jav3-desk`) | Critical | **Medium** | Desk-scoped token, server-side per-computer grants under a client ceiling (shell off until allowed at the keyboard), screenshot-before-input, rate limits, audit, taint with shell falling back to asking. Residual = on-screen prompt injection steering granted Input, and Input reaching a terminal. |
 | Single-process assumption | Medium | Low | In-memory codes/throttle/turns; `--workers 1` + startup refusal of WEB_CONCURRENCY > 1. |
 
 **Closing frame:** the netless design made the room have no phone; this design

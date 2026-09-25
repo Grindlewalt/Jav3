@@ -4,9 +4,12 @@
  * The grants are the server's half of the gate: Screen, Input, Shell, set
  * here and nowhere else. The computer's own ceiling is the other half — shell
  * reads "off until enabled at the computer" while `jav3-desk allow-shell` has
- * not been run there, whatever this switch says. Stop turns every grant off
+ * not been run there, whatever this switch says. Shell commands a turn is
+ * waiting on appear at the top with Allow once / Always / Deny (an in-page
+ * ask: iOS standalone suppresses window.confirm). Stop turns every grant off
  * and drops the session. */
 import { useCallback, useEffect, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { api } from './api.js'
 import { ago } from './format.js'
 import { notifyError } from './notify.js'
@@ -21,7 +24,7 @@ import Toggle from './components/Toggle.jsx'
 const POLL_MS = 3000
 
 export default function DeskPanel() {
-  const [data, setData] = useState(null)       // {desks, trusted_minutes}
+  const [data, setData] = useState(null)       // {desks, pending, trusted_minutes}
 
   const load = useCallback(() => api('/api/desk').then(setData)
     .catch(() => setData((d) => d || { desks: [], pending: [] })), [])
@@ -31,6 +34,13 @@ export default function DeskPanel() {
     const id = setInterval(() => { if (!document.hidden) load() }, POLL_MS)
     return () => clearInterval(id)
   }, [load])
+
+  // the bell's shell-ask card lands on /settings#desk: bring the ask into view
+  const { hash } = useLocation()
+  const loaded = data !== null
+  useEffect(() => {
+    if (hash === '#desk' && loaded) document.getElementById('desk')?.scrollIntoView()
+  }, [hash, loaded])
 
   const put = async (id, body) => {
     try {
@@ -45,8 +55,33 @@ export default function DeskPanel() {
     load()
   }
 
+  const decide = async (pid, action) => {
+    try {
+      await api(`/api/desk/shell/${pid}`,
+        { method: 'POST', body: JSON.stringify({ action }) })
+    } catch (e) { notifyError(e) }
+    load()
+  }
+
   return (
     <Card title="Computer use" headingLevel={2} id="desk">
+      {data?.pending?.length > 0 && (
+        <ul className="desk-asks" aria-label="Shell commands waiting">
+          {data.pending.map((p) => (
+            <li key={p.id} className="desk-ask">
+              <div className="desk-ask-main">
+                <span className="dim small">{p.name} · {p.reason}</span>
+                <code className="desk-cmd">{p.command}</code>
+              </div>
+              <div className="settings-actions">
+                <Button onClick={() => decide(p.id, 'once')}>Allow once</Button>
+                <Button variant="ghost" onClick={() => decide(p.id, 'always')}>Always</Button>
+                <Button variant="ghost" danger onClick={() => decide(p.id, 'deny')}>Deny</Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
       {data === null ? <EmptyState>loading…</EmptyState>
         : data.desks.length === 0 ? (
           <EmptyState>No computers. Log one in with <code>jav3-desk login</code>.</EmptyState>
