@@ -49,8 +49,8 @@ change what the reader does next.
 
 FIELD_DEFAULTS = {
     "description": "",
-    "model": "",          # "" = inherit the main model (deepseek-flash)
-    "base_url": "",       # "" = default DeepSeek endpoint; e.g. ollama: http://localhost:11434/v1
+    "model": "",          # "" = the default model; else provider/model (bare = default provider)
+    "base_url": "",       # "" = the model's provider; else an allowlisted endpoint, e.g. a local ollama
     # memory_read/memory_write use agents/<slug>/memory/ instead of the shared
     # memory/notes/ whenever a turn runs as this agent (memory.notes_dir via
     # runtime.agent_memory). The shared standing notes still lead its prompt —

@@ -387,6 +387,10 @@ async def init_db() -> None:
         # scheduler sweeps it past its window
         if "deleted_at" not in scols:
             await db.execute("ALTER TABLE schedules ADD COLUMN deleted_at TEXT")
+        # provider/model the run is pinned to; NULL = the agent's own pin
+        # (agent kind) or the default model
+        if "model" not in scols:
+            await db.execute("ALTER TABLE schedules ADD COLUMN model TEXT")
         async with db.execute("PRAGMA table_info(git_requests)") as cur:
             gcols = [r["name"] for r in await cur.fetchall()]
         if "kind" not in gcols:
@@ -478,7 +482,10 @@ async def init_db() -> None:
                           # (SET NULL — foreign_keys is ON in get_db).
                           ("folder_id",
                            "INTEGER REFERENCES chat_folders(id) ON DELETE SET NULL"),
-                          ("starred", "INTEGER NOT NULL DEFAULT 0")):
+                          ("starred", "INTEGER NOT NULL DEFAULT 0"),
+                          # the provider/model this thread is pinned to
+                          # (POST /api/chat `model`); NULL follows the default
+                          ("model", "TEXT")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(

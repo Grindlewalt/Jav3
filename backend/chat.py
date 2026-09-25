@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import autonomy, bus, compaction, gui, runtime
+from . import autonomy, bus, compaction, gui, providers, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink
@@ -50,6 +50,11 @@ class ChatRequest(BaseModel):
     # /api/gui/stream, so anything this turn plays comes out of the machine the
     # operator is sitting at instead of every open tab at once.
     tab: str | None = None
+    # `provider/model` (a bare id = the default provider) from the enabled
+    # list. Pins THIS conversation to it — new or existing, since switching
+    # model mid-thread is ordinary; omitted keeps the thread's pin, and a
+    # thread with none follows the default.
+    model: str | None = None
 
 
 def sse(event: dict) -> str:
@@ -572,13 +577,30 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # project loaded.
         async with db.execute(
             "SELECT c.project_locked AS locked, c.agent_slug AS agent_slug, "
-            "p.slug AS slug FROM conversations c "
+            "c.model AS model, p.slug AS slug FROM conversations c "
             "LEFT JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL "
             "WHERE c.id = ?", (conversation_id,)) as cur:
             row = await cur.fetchone()
         agent_slug = row["agent_slug"] if row else None
+        # IDENTITY (read before `start` so the event can name the model the
+        # turn runs on). A conversation bound to an agent slug runs AS that
+        # agent: its AGENT.md prompt leads the sandwich and its exclusions bite.
+        # Nothing else about the turn changes — multi-turn history, tier-2
+        # compaction, the project pin, detach/re-attach and stop are all the
+        # chat machinery, unmodified. A general agent is a chat with a name,
+        # not a second runtime.
+        agent_def = _agent_def(agent_slug)
+        # model: the caller's routing (voice picks its tier per utterance and
+        # must win) > the thread's own pin > the agent definition's > default
+        if not voice and model_name is None and base_url is None:
+            if row and row["model"]:
+                model_name = row["model"]
+            elif agent_def is not None:
+                from .agents_run import _agent_overrides
+                model_name, base_url = _agent_overrides(agent_def)
+        model_name = providers.turn_model_id(model_name, base_url)
         bus.publish(chan, {"type": "start", "conversation_id": conversation_id,
-                           "agent_slug": agent_slug})
+                           "agent_slug": agent_slug, "model": model_name})
         if row and row["slug"]:
             active = row["slug"]
         elif row and row["locked"]:
@@ -588,25 +610,14 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # tools deep in the loop (and spawn_agent children) resolve this pin
         # instead of the DB global — see toolctx.active_slug
         ptoken = runtime.active_project.set(active)
-        # IDENTITY. A conversation bound to an agent slug runs AS that agent:
-        # its AGENT.md prompt leads the sandwich and its exclusions bite.
-        # Nothing else about the turn changes — multi-turn history, tier-2
-        # compaction, the project pin, detach/re-attach and stop are all the
-        # chat machinery, unmodified. A general agent is a chat with a name,
-        # not a second runtime.
-        agent_def = _agent_def(agent_slug)
         # context_exclude: the voice local tier runs an 8B with a small ctx
         # window — it gets a slim sandwich (operator rules are never droppable)
         if agent_def is not None:
-            from .agents_run import (_agent_overrides, _agent_system_prompt,
+            from .agents_run import (_agent_system_prompt,
                                      memory_slug as _memory_slug)
             system_prompt = await _agent_system_prompt(
                 db, agent_def, active=active,
                 extra_exclude=set(context_exclude) or None)
-            # the definition's model override, unless the caller already routed
-            # this turn (voice picks its tier per utterance and must win)
-            if not voice and model_name is None and base_url is None:
-                model_name, base_url = _agent_overrides(agent_def)
         else:
             system_prompt = await assemble_system_prompt(
                 db, active=active, exclude=set(context_exclude) or None)
@@ -774,7 +785,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, model) "
             "VALUES (?, 'assistant', ?, ?)",
-            (conversation_id, final_content, model_name or settings.model_name),
+            (conversation_id, final_content, model_name),
         )
         await _link_tool_calls(db, conversation_id, tools_before, cur.lastrowid)
         await db.commit()
@@ -808,8 +819,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 cur = await db.execute(
                     "INSERT INTO messages (conversation_id, role, content, model) "
                     "VALUES (?, 'assistant', ?, ?)",
-                    (conversation_id, content,
-                     model_name or settings.model_name))
+                    (conversation_id, content, model_name))
                 # a barge-in cancels the turn but the tools it already ran are
                 # real — bind them to the marker so the next turn still sees
                 # that acting happens through tool calls
@@ -971,6 +981,12 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
     # the router already depends on require_actor; FastAPI caches it per
     # request, so this is the same resolved actor, not a second token lookup
     device_id = actor.get("device_id") if actor.get("is_device") else None
+    pinned_model = None
+    if body.model:
+        try:
+            pinned_model = providers.checked(body.model)
+        except providers.ProviderError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
     db = await get_db()
     try:
         conversation_id = body.conversation_id
@@ -980,8 +996,9 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             # Peak-cost gate (spec §4) BEFORE the conversation exists: the old
             # order created the row first, so this 409 left an orphan,
             # blank-rendering conversation behind (and the retry opened a
-            # fresh one — twin entries in the sidebar).
-            if in_peak_window() and not body.confirm_peak:
+            # fresh one — twin entries in the sidebar). DeepSeek hours only.
+            if (in_peak_window() and not body.confirm_peak
+                    and providers.peak_priced(pinned_model)):
                 raise HTTPException(status_code=409,
                                     detail="peak_confirmation_required")
             # identity is validated here, not in the detached turn: a typo'd
@@ -1030,21 +1047,26 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
                 confirm_peak(conversation_id)
         else:
             async with db.execute(
-                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+                "SELECT model FROM conversations WHERE id = ?", (conversation_id,)
             ) as cur:
-                if not await cur.fetchone():
+                existing = await cur.fetchone()
+                if not existing:
                     raise HTTPException(status_code=404, detail="no such conversation")
             # Peak-cost gate for an existing conversation: confirmation is
             # keyed to its id, so it can (and must) be checked after lookup.
             if body.confirm_peak:
                 confirm_peak(conversation_id)
-            if in_peak_window() and not peak_confirmed(conversation_id):
+            if (in_peak_window() and not peak_confirmed(conversation_id)
+                    and providers.peak_priced(pinned_model or existing["model"])):
                 raise HTTPException(
                     status_code=409,
                     detail="peak_confirmation_required",
                     headers={"X-Conversation-Id": str(conversation_id)},
                 )
 
+        if pinned_model:
+            await db.execute("UPDATE conversations SET model = ? WHERE id = ?",
+                             (pinned_model, conversation_id))
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
             (conversation_id, body.message),

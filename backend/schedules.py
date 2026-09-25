@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from .agent.loop import db_tool_sink
 from .vm.turn import run_agent_turn
+from . import providers
 from .agent.model import confirm_peak
 from .agents_run import run_agent_headless
 from .auth import require_user
@@ -102,6 +103,18 @@ class CreateSchedule(BaseModel):
     cadence_kind: str = "daily"   # 'daily' | 'interval'
     daily_at: str | None = "09:00"
     interval_minutes: int | None = None
+    # provider/model (bare = the default provider); omitted = the agent's own
+    # pin, else the default model at run time
+    model: str | None = None
+
+
+def _checked_model(body: CreateSchedule) -> str | None:
+    if not body.model:
+        return None
+    try:
+        return providers.checked(body.model)
+    except providers.ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @router.get("")
@@ -116,7 +129,7 @@ async def list_schedules():
             rows = await cur.fetchall()
         async with db.execute(
             "SELECT id, name, kind, agent_slug, project_slug, task, "
-            "cadence_kind, daily_at, interval_minutes, deleted_at "
+            "cadence_kind, daily_at, interval_minutes, model, deleted_at "
             "FROM schedules WHERE deleted_at IS NOT NULL "
             "AND deleted_at > datetime('now', ?) ORDER BY deleted_at DESC",
             (TRASH_WINDOW,)) as cur:
@@ -137,17 +150,18 @@ async def create_schedule(body: CreateSchedule):
         raise HTTPException(status_code=400, detail="cadence_kind must be 'daily' or 'interval'")
     if not body.task.strip():
         raise HTTPException(status_code=400, detail="task is required")
+    model = _checked_model(body)
     next_run = compute_next(body.cadence_kind, body.daily_at,
                             body.interval_minutes, _now())
     db = await get_db()
     try:
         cur = await db.execute(
             "INSERT INTO schedules (name, kind, agent_slug, project_slug, task, "
-            "cadence_kind, daily_at, interval_minutes, next_run) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "cadence_kind, daily_at, interval_minutes, next_run, model) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (body.name, body.kind, body.agent_slug, body.project_slug, body.task,
              body.cadence_kind, body.daily_at, body.interval_minutes,
-             next_run.isoformat(timespec="minutes")))
+             next_run.isoformat(timespec="minutes"), model))
         await db.commit()
         sid = cur.lastrowid
     finally:
@@ -167,17 +181,18 @@ async def update_schedule(sid: int, body: CreateSchedule):
         raise HTTPException(status_code=400, detail="cadence_kind must be 'daily' or 'interval'")
     if not body.task.strip():
         raise HTTPException(status_code=400, detail="task is required")
+    model = _checked_model(body)
     nxt = compute_next(body.cadence_kind, body.daily_at, body.interval_minutes, _now())
     db = await get_db()
     try:
         cur = await db.execute(
             "UPDATE schedules SET name = ?, kind = ?, agent_slug = ?, "
             "project_slug = ?, task = ?, cadence_kind = ?, daily_at = ?, "
-            "interval_minutes = ?, next_run = ? "
+            "interval_minutes = ?, next_run = ?, model = ? "
             "WHERE id = ? AND deleted_at IS NULL",
             (body.name, body.kind, body.agent_slug, body.project_slug, body.task,
              body.cadence_kind, body.daily_at, body.interval_minutes,
-             nxt.isoformat(timespec="minutes"), sid))
+             nxt.isoformat(timespec="minutes"), model, sid))
         await db.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="no such schedule")
@@ -290,7 +305,8 @@ async def run_now(sid: int):
     return {"result": result}
 
 
-async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
+async def _run_jarvis_headless(task: str, project_slug: str | None,
+                               model: str | None = None) -> str:
     db = await get_db()
     try:
         title = "[scheduled] " + " ".join(task.split())[:40]
@@ -315,7 +331,7 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
         try:
             async for ev in run_agent_turn(conversation_id, system_prompt,
                                            [{"role": "user", "content": task}],
-                                           active_project=active,
+                                           active_project=active, model_name=model,
                                            on_tool_call=db_tool_sink(db, conversation_id)):
                 if ev["type"] == "final":
                     final = ev["content"]
@@ -324,8 +340,9 @@ async def _run_jarvis_headless(task: str, project_slug: str | None) -> str:
             runtime.active_project.reset(ptoken)
             runtime.web_session.reset(wtoken)
         await db.execute(
-            "INSERT INTO messages (conversation_id, role, content) "
-            "VALUES (?, 'assistant', ?)", (conversation_id, final))
+            "INSERT INTO messages (conversation_id, role, content, model) "
+            "VALUES (?, 'assistant', ?, ?)",
+            (conversation_id, final, providers.turn_model_id(model)))
         await db.commit()
         return final
     finally:
@@ -338,9 +355,11 @@ async def _run_schedule(row: dict) -> str:
         if row["kind"] == "agent":
             out = await run_agent_headless(
                 row["agent_slug"], row["task"],
-                active=row["project_slug"] if row["project_slug"] else None)
+                active=row["project_slug"] if row["project_slug"] else None,
+                model=row.get("model"))
             return out["final"][:2000]
-        return (await _run_jarvis_headless(row["task"], row["project_slug"]))[:2000]
+        return (await _run_jarvis_headless(row["task"], row["project_slug"],
+                                           row.get("model")))[:2000]
     except Exception as e:  # noqa: BLE001 — a failing run must not kill the loop
         return f"error: {e}"
 

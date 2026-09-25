@@ -233,10 +233,14 @@ async def _open_run(db, agent: dict, task: str, active=_USE_DB, *,
     return conversation_id, active
 
 
-async def run_agent_headless(slug: str, task: str, active=_USE_DB, **hooks) -> dict:
+async def run_agent_headless(slug: str, task: str, active=_USE_DB, *,
+                             model: str | None = None, **hooks) -> dict:
     """Run a defined agent to completion, no streaming — for scheduled runs and
-    the spawn_agent tool. `hooks` are _run_headless's keyword hooks."""
+    the spawn_agent tool. `model` (provider/model) overrides the definition's
+    own pin for this run; `hooks` are _run_headless's keyword hooks."""
     agent = _read(slug)  # 404s if missing
+    if model:
+        agent = {**agent, "model": model, "base_url": ""}
     return await _run_headless(agent, task, active, **hooks)
 
 

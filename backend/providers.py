@@ -512,12 +512,41 @@ def update_model(pid: str, model: str, enabled: bool | None = None,
         return _model_view(st, p["id"], m, dflt)
 
 
+def checked(model_id: str) -> str:
+    """Canonical id of a model the operator switched on — what a chat, a
+    schedule or the nav switcher may pick. ProviderError otherwise."""
+    full = canonical(model_id)
+    if full not in {m["id"] for m in enabled_models()}:
+        raise ProviderError(f"model {model_id!r} is not an enabled model "
+                            "(Settings → Providers)")
+    return full
+
+
+def turn_model_id(model_name: str | None, base_url: str | None = None) -> str:
+    """The id a turn runs on and reports (start event, message rows): the
+    canonical provider/model, resolved once at turn start so a default switch
+    mid-turn doesn't split it. A pinned local endpoint keeps its raw name."""
+    if base_url:
+        return model_name or default_model()
+    try:
+        return canonical(model_name or default_model())
+    except ProviderError:
+        return model_name or default_model()
+
+
+def peak_priced(model_id: str | None) -> bool:
+    """Whether a turn on this model (None = the default) spends in DeepSeek's
+    peak-priced hours — the only provider the peak gate applies to."""
+    try:
+        return split_id(canonical(model_id or default_model()))[0] == "deepseek"
+    except ProviderError:
+        return True
+
+
 def set_default(model_id: str) -> str:
     """The nav switcher (PUT /api/model): the id must already be an enabled
     model. Returns the canonical id."""
-    full = canonical(model_id)
-    if full not in {m["id"] for m in enabled_models()}:
-        raise ProviderError(f"model must be one of the enabled models, not {model_id!r}")
+    full = checked(model_id)
     pid, mid = split_id(full)
     update_model(pid, mid, default=True)
     return full
