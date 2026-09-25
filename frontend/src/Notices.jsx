@@ -141,16 +141,26 @@ export function useNotices(enabled) {
 // A card with its own destination (`to`: a shell ask) is not a queue card.
 const isQueueCard = (t) => !t.local && !t.project && !t.to
 const onReview = (path) => path === '/security' || path.startsWith('/security/')
+// The shell shows approvals inline in the transcript and "Needs you" in its
+// sidebar, so a routine queue card there repeats the page — and on a phone it
+// sat on the composer. A critical security card still shows.
+const onShell = (path) => path === '/shell' || path.startsWith('/shell/')
+const shellQuiet = (t) => isQueueCard(t) && t.sev !== 'crit'
 
 export default function Notices({ toasts, dismiss, clear }) {
   const navigate = useNavigate()
-  const here = onReview(useLocation().pathname)
-  // arriving on Review retires the queue cards rather than hiding them: a
-  // hidden card's drain never runs, so it would pop back up on the way out
+  const path = useLocation().pathname
+  const here = onReview(path)
+  const shell = onShell(path)
+  // arriving on Review (or the shell) retires the queue cards rather than
+  // hiding them: a hidden card's drain never runs, so it would pop back up on
+  // the way out
   useEffect(() => {
     if (here) toasts.filter(isQueueCard).forEach((t) => dismiss(t.id))
-  }, [here, toasts, dismiss])
+    else if (shell) toasts.filter(shellQuiet).forEach((t) => dismiss(t.id))
+  }, [here, shell, toasts, dismiss])
   if (here) toasts = toasts.filter((t) => !isQueueCard(t))
+  else if (shell) toasts = toasts.filter((t) => !shellQuiet(t))
   if (toasts.length === 0) return null
   // Which three survive. Straight `slice(-3)` meant a burst of "save failed"
   // could push a critical security card off the screen — a UI convenience

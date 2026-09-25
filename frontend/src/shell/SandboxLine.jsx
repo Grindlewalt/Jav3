@@ -60,8 +60,10 @@ export default function SandboxLine({ slug }) {
                     aria-expanded={open} onClick={() => setOpen((o) => !o)}
                     title="where the agent runs, and what survives">
               <span className={`sh-dot ${st.tone}`} aria-hidden="true" />
-              <span className="ellipsis">
-                Sandbox {st.word} · network: {net} · keeps: {keeps}</span>
+              <span className="sh-sandbox-text">
+                <span className="ellipsis">Sandbox {st.word}</span>
+                <span className="ellipsis sh-sandbox-sub">network: {net} · keeps: {keeps}</span>
+              </span>
             </button>
           )}>
       <VmExplainer vm={vm} persist={slug ? persist : null} />

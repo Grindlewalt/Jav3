@@ -82,18 +82,19 @@ export function useApprovals({ scope, isProject, busy, poke, onChanged }) {
   return { items, acting, decide }
 }
 
-// Where each approval goes in the transcript: before the first reply that was
-// written after it was raised (i.e. inside the turn that raised it). Anything
-// newer than every finished reply — including everything raised by the turn
-// still streaming — goes at the end.
+// Where each approval goes in the transcript: right after the first reply
+// that was written after it was raised — the end of the turn that raised it,
+// which for the latest turn is just above the composer, where the eye is.
+// Anything newer than every finished reply (including whatever the turn still
+// streaming raises) goes at the very end.
 export function placeApprovals(messages, items) {
-  const before = new Map()
+  const after = new Map()
   const tail = []
   for (const a of items) {
     const i = a.ts ? messages.findIndex((m) => m.role === 'assistant' && m.created_at
                                               && tsKey(m.created_at) >= a.ts) : -1
     if (i === -1) tail.push(a)
-    else before.set(i, [...(before.get(i) || []), a])
+    else after.set(i, [...(after.get(i) || []), a])
   }
-  return { before, tail }
+  return { after, tail }
 }

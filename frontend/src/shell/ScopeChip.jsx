@@ -18,7 +18,7 @@ export default function ScopeChip({ projects, value, onPick }) {
                     title={value ? `works in the ${name} project`
                                  : 'no project — files go to this chat’s own store'}
                     onClick={() => setOpen((o) => !o)}>
-              <span className="proj-dot" aria-hidden="true" />
+              <span className={`proj-dot${value ? ' pinned' : ' none'}`} aria-hidden="true" />
               <span className="ellipsis">{name || 'No project'}</span>
               <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>
             </button>

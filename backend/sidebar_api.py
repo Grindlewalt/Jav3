@@ -89,9 +89,12 @@ async def sidebar():
     names = {p["slug"]: p["name"] for p in projects}
     needs = []
     for slug, counts in waiting.items():
+        # an approval for a scope the shell can't open — a deleted project,
+        # the general policy row — has no home in the sidebar (Security shows
+        # it); only visible projects and chat stores count
+        if slug not in names and not slug.startswith("chat-"):
+            continue
         c = newest.get(slug)
-        # an approval for a scope nobody can open (a deleted project, the
-        # general policy row) has no home in the sidebar — Security shows it
         if c is None and slug not in names:
             continue
         needs.append({

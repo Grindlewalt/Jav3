@@ -121,6 +121,12 @@ async def test_needs_for_a_projectless_chat_and_a_chatless_project(client):
     assert r.status_code == 200, r.text
     # an approval for a scope that is neither — shown on Security, not here
     await _sql("INSERT INTO git_requests (project_slug, message) VALUES ('gone', 'm')")
+    # ...even when a chat is still pinned to that deleted project
+    await client.post("/api/projects", json={"name": "Doomed"})
+    pinned = await _chat("pinned to doomed")
+    await client.patch(f"/api/conversations/{pinned}", json={"project": "doomed", "mode": "pin"})
+    await _sql("INSERT INTO git_requests (project_slug, message) VALUES ('doomed', 'm')")
+    await _sql("UPDATE projects SET deleted_at = datetime('now') WHERE slug = 'doomed'")
 
     needs = {n["scope"]: n for n in (await client.get("/api/sidebar")).json()["needs"]}
     assert set(needs) == {f"chat-{cid}", "quiet"}

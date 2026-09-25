@@ -42,11 +42,17 @@ export default function ApprovalRow({ a, acting, onDecide, onReview }) {
   }
   if (a.kind === 'git') {
     const files = paths(a)
+    // a commit message is a subject line and maybe a body; the row shows the
+    // subject and a two-line taste of the body (the full text is the tooltip
+    // and the Git tab)
+    const [subject, ...rest] = String(a.message || '').split('\n')
+    const body = rest.join(' ').trim()
     return (
       <div className="sh-approval" role="group" aria-label="git request">
         <div className="sh-approval-what">
           <span className="sh-approval-kind">{a.git_kind === 'remote' ? 'Push' : 'Commit'}</span>
-          <span className="sh-approval-main">{a.message}</span>
+          <span className="sh-approval-main sh-clamp" title={a.message}>{subject}</span>
+          {body && <span className="sh-approval-note sh-clamp">{body}</span>}
           <span className="sh-approval-note">
             {a.git_kind === 'remote' ? 'connect this remote and push'
               : files?.length ? `${files.length} file${files.length > 1 ? 's' : ''}`

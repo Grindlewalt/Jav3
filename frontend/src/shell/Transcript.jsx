@@ -93,6 +93,7 @@ function ProjectHome({ slug, side, onOpen }) {
 
 export default function Transcript({
   cid, messages, expandAll, fresh, slug, side, agentName, temporary, onOpen, approvals,
+  onReview,
 }) {
   const box = useRef(null)
   const stick = useRef(true)
@@ -109,10 +110,10 @@ export default function Transcript({
   }, [messages, approvals?.items])
 
   const empty = messages.length === 0
-  const { before, tail } = placeApprovals(messages, approvals?.items || [])
+  const { after, tail } = placeApprovals(messages, approvals?.items || [])
   const approvalRows = (list) => list.map((a) => (
     <ApprovalRow key={a.key} a={a} acting={approvals.acting} onDecide={approvals.decide}
-                 onReview={approvals.onReview} />
+                 onReview={onReview} />
   ))
   return (
     <div className="sh-scroll" ref={box} onScroll={onScroll}>
@@ -132,10 +133,8 @@ export default function Transcript({
           const row = m.role === 'user' ? <Prompt text={m.content} />
             : m.role === 'assistant' ? <Reply m={m} expandAll={expandAll} />
               : <div className="sh-error" role="alert">{m.content}</div>
-          const waiting = before.get(i)
-          return waiting
-            ? <Fragment key={i}>{approvalRows(waiting)}{row}</Fragment>
-            : <Fragment key={i}>{row}</Fragment>
+          const waiting = after.get(i)
+          return <Fragment key={i}>{row}{waiting && approvalRows(waiting)}</Fragment>
         })}
         {tail.length > 0 && approvalRows(tail)}
       </div>
