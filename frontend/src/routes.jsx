@@ -21,6 +21,8 @@ import NotFound from './pages/NotFound.jsx'
 // chunk arrives; with it, the fallback realistically never renders. It starts
 // on idle rather than on mount so it cannot compete with the first paint, and
 // a browser without requestIdleCallback just gets a short timer.
+// first run only, so never prefetched
+const Setup = lazy(() => import('./pages/Setup.jsx'))
 const Projects = lazy(() => import('./pages/Projects.jsx'))
 const Workspace = lazy(() => import('./pages/Workspace.jsx'))
 // Agents is a layout route like Review: the shell + tab strip is the default
@@ -80,7 +82,7 @@ function usePrefetchRoutes(enabled) {
   }, [enabled])
 }
 
-export default function AppRoutes({ onLogin, authed }) {
+export default function AppRoutes({ onLogin, onSetup, authed }) {
   usePrefetchRoutes(authed)
   return (
     // The fallback paints nothing rather than a spinner: it is on screen for a
@@ -89,6 +91,7 @@ export default function AppRoutes({ onLogin, authed }) {
     <Suspense fallback={<div className="route-pending" aria-busy="true" />}>
       <Routes>
         <Route path="/login" element={<Login onLogin={onLogin} />} />
+        <Route path="/setup" element={<Setup onDone={onSetup} />} />
 
         {/* the bar */}
         <Route path="/" element={<Chat />} />

@@ -875,6 +875,37 @@ input:focus, textarea:focus { border-color: var(--accent);
   font-family: "Helvetica Neue", Arial, system-ui, sans-serif;
 }
 
+/* ---- first-run setup: the login card, widened, with numbered steps ----
+   Top-aligned in a scrolling wrap rather than .center's 80vh box, so a phone
+   keyboard or a short screen never pushes the Finish button out of reach. */
+.setup-wrap {
+  display: flex; justify-content: center; align-items: flex-start;
+  padding: max(var(--sp-11), calc(var(--sat) + var(--sp-8))) var(--sp-8)
+           calc(var(--sab) + var(--sp-11));
+  flex: 1; min-height: 0; overflow-y: auto; box-sizing: border-box;
+}
+.login.setup { width: 440px; max-width: 100%; box-sizing: border-box; gap: var(--sp-9); }
+.setup-step { display: flex; flex-direction: column; gap: var(--sp-6); }
+.setup-step + .setup-step { border-top: 1px solid var(--border); padding-top: var(--sp-9); }
+.setup-step h2 {
+  display: flex; align-items: center; gap: var(--sp-5); margin: 0;
+  font-size: var(--fs-lg); font-weight: 600; color: var(--text);
+}
+.setup-num {
+  display: inline-grid; place-items: center; width: 22px; height: 22px;
+  border-radius: 50%; border: 1px solid var(--accent); color: var(--accent);
+  font-size: var(--fs-sm); flex-shrink: 0;
+}
+.setup-strength.good, .setup-ok { color: var(--green); }
+.setup-strength.warn { color: var(--amber); }
+.setup-test { display: flex; align-items: center; gap: var(--sp-6); flex-wrap: wrap;
+  font-size: var(--fs-md); }
+.setup-where { margin: 0; }
+@media (max-width: 480px) {
+  .login.setup { padding: var(--sp-9) var(--sp-8); }
+  .setup-wrap { padding-left: var(--sp-6); padding-right: var(--sp-6); }
+}
+
 /* ---- chat ---- */
 .chat-layout { display: flex; flex: 1; min-height: 0; }
 /* The list runs to the bottom edge. It used to stop 54px short, a gap kept

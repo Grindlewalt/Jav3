@@ -274,6 +274,8 @@ function GuiBridge() {
 
 export default function App() {
   const [user, setUser] = useState(undefined) // undefined = checking
+  // first run: no login exists yet, so every route funnels to /setup
+  const [setupNeeded, setSetupNeeded] = useState(undefined)
   const [, setCfgReady] = useState(false) // bump once the media allowlist lands
   const [menuOpen, setMenuOpen] = useState(false) // mobile nav drawer
   const [moreOpen, setMoreOpen] = useState(false) // desktop overflow menu
@@ -357,6 +359,11 @@ export default function App() {
 
   useEffect(() => {
     api('/api/auth/me').then(setUser).catch(() => setUser(null))
+    // an older server without the route (or any failure) means "not needed":
+    // the worst case is the ordinary login page, never a trap on /setup
+    api('/api/setup/status')
+      .then((r) => setSetupNeeded(!!r.needed))
+      .catch(() => setSetupNeeded(false))
     api('/api/config')
       .then((c) => {
         setMediaHosts(c.media_hosts)
@@ -370,10 +377,14 @@ export default function App() {
     setUser(null)
   }, [])
 
-  if (user === undefined) return <div className="center">…</div>
+  if (user === undefined || setupNeeded === undefined)
+    return <div className="center">…</div>
+  if (setupNeeded && location.pathname !== '/setup') return <Navigate to="/setup" replace />
+  if (!setupNeeded && location.pathname === '/setup')
+    return <Navigate to={user ? '/' : '/login'} replace />
   // The page being asked for rides along, so logging in lands back on it
   // instead of always on Chat.
-  if (user === null && location.pathname !== '/login')
+  if (user === null && !setupNeeded && location.pathname !== '/login')
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
 
   const counts = { review: notices.count }
@@ -499,7 +510,8 @@ export default function App() {
           and the toasts stay mounted through a page's failure, so there is
           always a way out of a broken page. */}
       <ErrorBoundary resetKey={location.pathname}>
-      <AppRoutes onLogin={setUser} authed={!!user} />
+      <AppRoutes onLogin={setUser} authed={!!user}
+                 onSetup={(u) => { setSetupNeeded(false); setUser(u) }} />
       </ErrorBoundary>
       </NavSlotContext.Provider>
     </div>
