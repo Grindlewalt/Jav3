@@ -57,3 +57,17 @@ export function ago(s, now = Date.now()) {
 // A live count for a badge. Counts come from real queues and reached 294 in
 // practice, which overflowed the nav's pill and smeared across the icon.
 export const badge = (n) => (n > 99 ? '99+' : String(n))
+
+// "3h ago" for a timestamp. SQLite's datetime('now') is UTC with no zone
+// ("2026-09-24 14:03:00"), so a zoneless string is read as UTC, not local.
+export function ago(s) {
+  if (!s) return ''
+  const iso = String(s).replace(' ', 'T')
+  const t = Date.parse(/(Z|[+-]\d\d:?\d\d)$/.test(iso) ? iso : `${iso}Z`)
+  if (Number.isNaN(t)) return ''
+  const m = Math.floor((Date.now() - t) / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  if (m < 60 * 24) return `${Math.floor(m / 60)}h ago`
+  return `${Math.floor(m / 1440)}d ago`
+}

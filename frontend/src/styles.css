@@ -1532,8 +1532,8 @@ kbd {
 /* ---- agents ---- */
 /* the roster (and the Skills tab's list): one button per row, so a row is a
    focus stop and Enter opens it — the old <li onClick> rows were mouse-only */
-.agent-new { margin: 0; flex-wrap: nowrap; }
-.agent-new input { min-width: 0; }
+.agent-new { display: flex; gap: var(--sp-4); }
+.agent-new input { flex: 1; min-width: 0; }
 /* the bin folds like Projects' (the shared .deleted-fold summary), but in a
    250px aside: tighter, and its rows are names, not file paths */
 .split-layout > aside .deleted-fold { margin-top: var(--sp-4); }
@@ -1562,6 +1562,61 @@ kbd {
   white-space: nowrap; }
 .agent-row-sub { display: flex; flex-wrap: wrap; gap: var(--sp-2); max-width: 100%; }
 .agent-row-sub .tag, .agent-row-sub .badge { margin-left: 0; }
+/* the Definitions roster: the name, and a project tag at the far end */
+.agent-row.inline { flex-direction: row; align-items: center; }
+.agent-row.inline .agent-row-name { flex: 1; min-width: 0; }
+.agent-row.inline .tag { flex-shrink: 0; max-width: 45%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+
+/* the detail: header, the prompt as the hero, one Settings card. The pane is
+   one column that fits 1440x900 as is; it only scrolls if the notes open. */
+.agent-detail { gap: var(--sp-4); overflow-y: auto; }
+.agent-head { display: flex; align-items: center; gap: var(--sp-4); flex-shrink: 0; }
+.agent-title { flex: 1; min-width: 0; margin: 0; font-size: var(--fs-xl);
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-back { display: none; }
+.agent-last { margin-top: calc(-1 * var(--sp-3)); font-size: var(--fs-sm);
+  color: var(--dim); }
+.agent-prompt-head { display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-4); margin-top: var(--sp-3); font-size: var(--fs-sm); color: var(--dim); }
+.agent-prompt { flex: 1 1 auto; min-height: 240px; resize: none; }
+.agent-settings { flex-shrink: 0; }
+.agent-grid { display: grid; grid-template-columns: 1fr 1fr;
+  gap: var(--sp-6) var(--sp-8); }
+.agent-wide { grid-column: 1 / -1; }
+/* a toggle or a tag row sits on the same line height as the inputs beside it */
+.agent-inline { display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--sp-4); min-height: 38px; }
+.agent-inline .tag { margin-left: 0; display: inline-flex; align-items: center;
+  font-size: var(--fs-sm); }
+.tag-x { background: none; color: inherit; border: 0; padding: 0 0 0 var(--sp-2);
+  min-height: 0; font-weight: 400; font-size: inherit; line-height: 1; }
+.tag-x:hover:not(:disabled) { color: var(--red); filter: none; transform: none; }
+.agent-notes > summary, .agent-note > summary { cursor: pointer; list-style: none;
+  color: var(--dim); }
+.agent-notes > summary:hover, .agent-note > summary:hover { color: var(--text); }
+.agent-notes > summary::-webkit-details-marker,
+.agent-note > summary::-webkit-details-marker { display: none; }
+.agent-notes .chev { display: inline-block; }
+.agent-notes[open] > summary .chev { transform: rotate(90deg); }
+.agent-notes[open] { flex-basis: 100%; display: flex; flex-direction: column;
+  gap: var(--sp-3); }
+.agent-note pre { margin: var(--sp-2) 0 0; padding: var(--pad-row);
+  background: var(--bg-soft); border-radius: var(--radius-md);
+  font: var(--fs-sm) / var(--lh-base) var(--font-mono); white-space: pre-wrap; }
+/* phone: the roster is the screen until an agent is picked, then the detail
+   replaces it (with a way back). The pane scrolls as one; the prompt takes the
+   first screen — the viewport less the bar, the page head with its wrapped
+   tabs, and the detail's header rows above the textarea (~320px) — and
+   Settings follows below it. */
+@media (max-width: 768px) {
+  .split-layout > aside.agents-aside.picked { display: none; }
+  .agent-back { display: inline-flex; }
+  .agent-detail { padding-bottom: calc(var(--sp-8) + var(--sab)); }
+  .agent-prompt { flex: none;
+    height: max(240px, calc(100dvh - var(--nav-h) - var(--sat) - var(--sab) - 320px)); }
+  .agent-grid { grid-template-columns: 1fr; }
+}
 
 .skill-param { margin: 0; flex-wrap: nowrap; }
 /* the argument row's bare inputs matched the base 15px; everything else in
