@@ -17,6 +17,7 @@ import { AuthContext } from './auth.jsx'
 import Menu from './components/Menu.jsx'
 import Notices, { PendingCountContext, useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
+import { VmExplainer, freshness } from './VmStrip.jsx'
 import { notify, notifyError } from './notify.js'
 import { AskProvider, useAsk } from './ask.jsx'
 
@@ -162,6 +163,12 @@ function VmStatus() {
       </button>
       {open && (
         <div className="notif-drop vm-drop">
+          {/* the same three lines as the Workspace's VM strip (VmStrip.jsx):
+              what is disposable, what persists, what the operator approved */}
+          <div className="vm-drop-head">
+            <b>Runs in a VM</b> · {freshness(s).short}
+          </div>
+          <VmExplainer vm={s} persist={null} />
           <div className="notif-item"><span className="grow">state</span>
             <span className={s.running ? '' : 'dim'}>
               {s.running ? 'running' : (s.base_built ? 'off' : 'no image')}</span></div>

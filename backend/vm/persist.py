@@ -287,7 +287,8 @@ def generation() -> int:
 
 
 def status() -> dict:
-    return {"enabled": settings.vm_persist_enabled, "holder": _state.holder,
+    return {"enabled": settings.vm_persist_enabled, "mount": MOUNT,
+            "holder": _state.holder,
             "read_only": _state.read_only, "turns": _state.count}
 
 

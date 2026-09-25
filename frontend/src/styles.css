@@ -459,8 +459,45 @@ nav a.active .nav-ico, .rail-links > a.active .nav-ico { color: var(--accent); }
 .vm-stale-badge { background: var(--amber); top: 8px; right: 1px;
   min-width: 13px; height: 13px; padding: 0; border-radius: 50%;
   font-size: 9px; line-height: 10px; }
-.vm-drop { width: 230px; }
+/* wide enough for the three-line explainer (VmStrip.jsx) it now opens with */
+.vm-drop { width: min(300px, calc(100vw - 2 * var(--sp-8))); }
 .vm-drop .notif-item { cursor: default; }
+.vm-drop-head { padding: var(--pad-row); font-size: var(--fs-md); }
+.vm-drop .vm-explain { border-bottom: 1px solid var(--border);
+  padding-bottom: var(--sp-4); margin-bottom: var(--sp-2); }
+
+/* ---- VM strip (VmStrip.jsx): where the agent runs, in one line ----
+   A quiet text button in the Workspace header; its explainer is a Menu. The
+   middle clause ("fresh each session") is the first thing to go when the
+   header runs short — the persistence state is the part that matters. */
+.vm-strip-btn {
+  display: inline-flex; align-items: center; gap: var(--sp-3);
+  background: none; border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-pill); padding: var(--pad-row-sm);
+  font-size: var(--fs-sm); white-space: nowrap; min-width: 0;
+}
+.vm-strip-btn:hover { background: var(--panel-2); }
+.vm-strip-btn .run-dot { display: inline-block; background: var(--dim); }
+/* a state, not an activity: no pulse (the Runs tab's dot pulses; this sits
+   in a header that is on screen the whole time) */
+.vm-strip-btn .run-dot.running { background: var(--accent); animation: none;
+  box-shadow: none; }
+.vm-strip-sep { color: var(--dim); }
+.vm-strip-on { color: var(--accent); }
+@media (max-width: 1200px) {
+  .vm-strip-fresh, .vm-strip-fresh + .vm-strip-sep { display: none; }
+}
+@media (max-width: 768px) {
+  .vm-strip-btn > span:not(.run-dot):not(.vm-strip-on):not(.dim) { display: none; }
+}
+.vm-explain { margin: 0; padding: var(--sp-3) var(--sp-4);
+  display: grid; grid-template-columns: auto 1fr; gap: var(--sp-3) var(--sp-6);
+  font-size: var(--fs-md); line-height: var(--lh-tight); }
+.vm-explain dt { color: var(--dim); font-size: var(--fs-xs);
+  text-transform: uppercase; letter-spacing: 0.04em; padding-top: 2px; }
+.vm-explain dd { margin: 0; color: var(--text); }
+.vm-explain-foot { display: flex; justify-content: flex-end;
+  border-top: 1px solid var(--border); padding: var(--sp-4) var(--sp-3) var(--sp-2); }
 .vm-nuke-row { padding: 6px 4px 2px; border-top: 1px solid var(--border);
   margin-top: 4px; display: flex; }
 .vm-nuke-row button { flex: 1; font-size: 12px; }

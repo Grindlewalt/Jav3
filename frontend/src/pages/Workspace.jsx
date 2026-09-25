@@ -13,6 +13,7 @@ import { cspMediaSources } from '../mediaHosts.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import PlanPanel from '../PlanPanel.jsx'
+import VmStrip from '../VmStrip.jsx'
 import Toggle from '../components/Toggle.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import { SaveButton } from '../components/Button.jsx'
@@ -499,6 +500,7 @@ export default function Workspace() {
                             { method: 'POST' })
                   refreshProject()
                 }} />
+        <VmStrip slug={slug} />
         <div className="ws-actions">
           <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close
             · <kbd>ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add
