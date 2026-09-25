@@ -6,20 +6,18 @@ import Page from '../components/Page.jsx'
 import Card from '../components/Card.jsx'
 import Button from '../components/Button.jsx'
 import Input from '../components/Input.jsx'
-import Select from '../components/Select.jsx'
 import Tag from '../components/Tag.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import Menu, { MenuItem, MenuSep } from '../components/Menu.jsx'
-import { AUTONOMY, autonomyHint } from '../autonomy.js'
 import { ts } from '../format.js'
 
 // A project is a card: its name is the way in (the Workspace), the slug and
-// the remote say what it is, the autonomy dial is the one setting worth
-// having on the card, and everything rarer — rename, load/unload, delete —
-// is behind ⋯. The list this replaces put six controls on every row, the
-// same six at the same weight whether you were about to open a project or
-// about to delete it. The dial's levels are autonomy.js's, shared with the
-// Workspace header.
+// the remote say what it is, and everything rarer — rename, load/unload,
+// delete — is behind ⋯. The list this replaces put six controls on every
+// row, the same six at the same weight whether you were about to open a
+// project or about to delete it. The per-project autonomy dial is not shown:
+// the operator found it confusing, so every project runs at the backend's
+// default (NULL == `full`, backend/autonomy.py).
 
 export default function Projects() {
   const [projects, setProjects] = useState([])
@@ -102,12 +100,6 @@ export default function Projects() {
     await api(`/api/projects/${slug}/purge`, { method: 'DELETE' })
     refresh()
   }
-  async function setAutonomy(slug, level) {
-    await api(`/api/projects/${slug}/autonomy`, {
-      method: 'PUT', body: JSON.stringify({ level }),
-    })
-    refresh()
-  }
 
   const cloning = !!repoUrl.trim()
   return (
@@ -134,8 +126,7 @@ export default function Projects() {
                        setMenuOpen={(open) => setMenuFor(open ? p.slug : null)}
                        onRename={() => rename(p)}
                        onToggleContext={() => (active === p.slug ? unload() : load(p.slug))}
-                       onDelete={() => softDelete(p.slug)}
-                       onAutonomy={(level) => setAutonomy(p.slug, level)} />
+                       onDelete={() => softDelete(p.slug)} />
         ))}
         {projects.length === 0 && (
           <EmptyState pad className="project-grid-empty">
@@ -172,7 +163,7 @@ export default function Projects() {
 }
 
 function ProjectCard({
-  p, inContext, menuOpen, setMenuOpen, onRename, onToggleContext, onDelete, onAutonomy,
+  p, inContext, menuOpen, setMenuOpen, onRename, onToggleContext, onDelete,
 }) {
   const close = () => setMenuOpen(false)
   const pick = (fn) => () => { close(); fn() }
@@ -200,14 +191,6 @@ function ProjectCard({
       {p.github_remote && (
         <span className="dim small ellipsis project-remote" title={p.github_remote}>
           {p.github_remote}</span>)}
-      <div className="project-card-foot">
-        <label className="project-autonomy dim small">
-          autonomy
-          <Select className="autonomy-sel" value={p.autonomy || 'full'} options={AUTONOMY}
-                  title={`how much the agent may do unattended here — ${autonomyHint(p.autonomy || 'full')}`}
-                  onChange={(e) => onAutonomy(e.target.value)} />
-        </label>
-      </div>
     </Card>
   )
 }

@@ -1290,15 +1290,14 @@ input:focus, textarea:focus { border-color: var(--accent);
 
 /* ---- projects ---- */
 .page { padding: 26px; max-width: var(--page-w); width: 100%; margin: 0 auto; overflow-y: auto; }
-.autonomy-sel { padding: 3px 7px; font-size: 12px; }
 /* the create form is a card of its own above the grid */
 .create-project { display: flex; gap: 8px; margin-bottom: 18px;
   align-items: center; flex-wrap: wrap; }
 .create-project input:nth-child(2) { flex: 1 1 200px; }
 .create-project .gh-url { flex: 1 1 240px; }
 /* one card per project (Projects.jsx ProjectCard): the name is the link in,
-   ⋯ holds the rare actions, the autonomy dial sits in the foot. The old
-   .project-list rows carried six controls each at one weight. */
+   ⋯ holds the rare actions. The old .project-list rows carried six controls
+   each at one weight. */
 .project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: var(--sp-6); }
 .project-grid-empty { grid-column: 1 / -1; }
@@ -1318,11 +1317,10 @@ a.project-name:hover { color: var(--accent); }
 .project-slug { color: var(--dim); font-size: var(--fs-sm); }
 .project-remote { display: block; }
 /* pinned to the card's bottom: cards in a grid row share a height, so the
-   autonomy dials line up whether or not a card has a remote line */
+   deleted cards' actions line up whether or not a card has a remote line */
 .project-card-foot { display: flex; align-items: center; gap: var(--sp-4);
   margin-top: auto; padding-top: var(--sp-2); flex-wrap: wrap; }
 .project-when { white-space: nowrap; }
-.project-autonomy { display: flex; align-items: center; gap: var(--sp-3); }
 .project-card.deleted { opacity: 0.65; border-style: dashed; }
 .project-card.deleted:hover { border-color: var(--border); }
 .project-card.deleted .project-card-foot { flex-wrap: nowrap; }
@@ -1332,8 +1330,7 @@ a.project-name:hover { color: var(--accent); }
 /* .ws-head's layout, padding, border, background and title size are the
    shared page-header rules now (`.page-shell > .page-head, .ws-head`) — this
    header was the model for them. Only what is peculiar to it is left. */
-/* The bar holds a title, the context switch, the autonomy dial and the
-   actions. Nothing in it wraps inside itself: the title ellipsises, every
+/* The bar holds a title, the context switch and the actions. Nothing in it wraps inside itself: the title ellipsises, every
    control keeps its one line, and the keyboard hint — help, not a control —
    is the first thing to go when the row runs short. */
 .ws-head { min-width: 0; }
@@ -1341,7 +1338,7 @@ a.project-name:hover { color: var(--accent); }
   overflow: hidden; text-overflow: ellipsis; }
 .ws-head > * { flex-shrink: 0; }
 .ws-head > h1 { flex-shrink: 1; }
-.ws-head button, .ws-autonomy { white-space: nowrap; }
+.ws-head button { white-space: nowrap; }
 .ws-actions { display: flex; align-items: center; gap: var(--sp-4);
   margin-left: auto; min-width: 0; }
 .ws-head .hint { font-size: var(--fs-sm); white-space: nowrap; }
@@ -1647,10 +1644,6 @@ kbd {
   border: 1px solid var(--border); border-radius: 7px; margin-bottom: 4px;
   background: var(--panel); font-size: 13px; }
 .grow-scroll { flex: 1; min-height: 0; overflow-y: auto; }
-
-/* ---- autonomy dial ---- */
-.ws-head label { display: flex; align-items: center; gap: 6px; }
-.autonomy-dial { font-size: 12px; padding: 3px 6px; }
 
 /* ---- context files panel ---- */
 .ctx-total { font-size: 12px; color: var(--accent); white-space: nowrap; }
@@ -2283,11 +2276,7 @@ button.sched-more { align-self: flex-start; margin-left: 0; font-size: var(--fs-
      above two stretched ones */
   .create-project input { flex: 1 1 100%; }
   .sched-head button, .sbx-actions button { min-height: 38px; }
-  .autonomy-sel, .sched-form select { min-height: 38px; }
-  /* the Workspace bar's dial sat at 24px beside 38px buttons: on a phone it
-     is a touch control like them, at the 16px that keeps iOS from zooming */
-  .ws-head .autonomy-dial { min-height: 38px; font-size: 16px;
-    padding: var(--pad-field); }
+  .sched-form select { min-height: 38px; }
   /* visually hidden, not display:none — the word stays the button's name */
   .ws-head .ws-btn-word { position: absolute; width: 1px; height: 1px;
     overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

@@ -13,8 +13,6 @@ import { cspMediaSources } from '../mediaHosts.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import PlanPanel from '../PlanPanel.jsx'
-import { AUTONOMY, autonomyHint } from '../autonomy.js'
-import Select from '../components/Select.jsx'
 import Toggle from '../components/Toggle.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import { SaveButton } from '../components/Button.jsx'
@@ -496,23 +494,12 @@ export default function Workspace() {
                             { method: 'POST' })
                   refreshProject()
                 }} />
-        <label className="ws-autonomy dim small"
-               title={`which tools Jav3 is offered here — enforced server-side per turn. ${autonomyHint(project.autonomy || 'full')}`}>
-          autonomy
-          <Select className="autonomy-dial" value={project.autonomy || 'full'}
-                  options={AUTONOMY}
-                  onChange={async (e) => {
-                    await api(`/api/projects/${slug}/autonomy`, {
-                      method: 'PUT', body: JSON.stringify({ level: e.target.value }) })
-                    refreshProject()
-                  }} />
-        </label>
         <div className="ws-actions">
           <span className="dim hint">hover + <kbd>f</kbd> expand · <kbd>q</kbd> close
             · <kbd>ctrl+z</kbd> restore · <kbd>n</kbd> / right-click add
             · <kbd>esc</kbd> collapse</span>
-          {/* on a phone the words go and the glyphs stay, so the dial and
-              both actions share one row at touch size */}
+          {/* on a phone the words go and the glyphs stay, so both
+              actions share one row at touch size */}
           <button className="ghost" onClick={autoArrange}
                   title="auto-arrange the open panels into a tight block (grows ≤2 grid units, shrinks ≤1)">
             ⌗<span className="ws-btn-word"> tidy</span></button>
