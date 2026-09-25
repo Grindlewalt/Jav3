@@ -94,10 +94,16 @@ class AssignProject(BaseModel):
     # goes to the chat's artifact store instead. "pin": use `project`.
     # Omitted, it reads the old shape: a slug pins, a null follows.
     mode: Literal["follow", "none", "pin"] | None = None
+    # sidebar organisation. Each is applied only when present in the body, so
+    # a star toggle can never fall through to the project path; an explicit
+    # null folder_id unfiles the chat.
+    starred: bool | None = None
+    folder_id: int | None = None
 
 
 @router.get("/conversations")
-async def list_conversations(project: str | None = None):
+async def list_conversations(project: str | None = None, folder: str | None = None):
+    """`folder` narrows the list: a folder id, `none` (unfiled) or `starred`."""
     db = await get_db()
     try:
         # only real chats in the sidebar — head/leader/subagent job nodes live
@@ -105,17 +111,28 @@ async def list_conversations(project: str | None = None):
         q = ("SELECT c.*, p.slug AS project_slug, p.name AS project_name "
              "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id "
              "WHERE (c.kind = 'chat' OR c.kind IS NULL) ")
-        params: tuple = ()
+        params: list = []
         if project:
             q += "AND p.slug = ? "
-            params = (project,)
-        q += "ORDER BY c.started_at DESC"
+            params.append(project)
+        if folder == "none":
+            q += "AND c.folder_id IS NULL "
+        elif folder == "starred":
+            q += "AND c.starred = 1 "
+        elif folder is not None:
+            if not folder.isdigit():
+                raise HTTPException(status_code=400,
+                                    detail="folder must be an id, 'none' or 'starred'")
+            q += "AND c.folder_id = ? "
+            params.append(int(folder))
+        q += "ORDER BY c.started_at DESC, c.id DESC"
         async with db.execute(q, params) as cur:
             rows = await cur.fetchall()
     finally:
         await db.close()
     # `running` lets a remounted panel find and re-attach to an in-flight turn
-    return {"conversations": [{**dict(r), "running": r["id"] in _active_turns}
+    return {"conversations": [{**dict(r), "starred": bool(r["starred"]),
+                               "running": r["id"] in _active_turns}
                               for r in rows]}
 
 
@@ -170,6 +187,11 @@ async def delete_conversation(conversation_id: int):
 
 @router.patch("/conversations/{conversation_id}")
 async def assign_conversation(conversation_id: int, body: AssignProject):
+    """Rename, star, file and/or re-bind a chat. Only the fields present in the
+    body are touched: a star toggle or a rename must never reset the project
+    binding, which is what an absent `project` used to mean."""
+    sent = body.model_fields_set
+    out: dict = {"ok": True}
     db = await get_db()
     try:
         async with db.execute(
@@ -183,28 +205,156 @@ async def assign_conversation(conversation_id: int, body: AssignProject):
                 raise HTTPException(status_code=400, detail="title cannot be blank")
             await db.execute("UPDATE conversations SET summary = ? WHERE id = ?",
                              (name, conversation_id))
-            await db.commit()
-            if body.project is None and body.mode is None:
-                return {"ok": True, "title": name}      # rename only
-        mode = body.mode or ("pin" if body.project else "follow")
-        project_id = None
-        if mode == "pin" and body.project:
-            async with db.execute(
-                "SELECT id FROM projects WHERE slug = ? AND deleted_at IS NULL",
-                (body.project,),
-            ) as cur:
-                row = await cur.fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="no such project")
-            project_id = row["id"]
-        await db.execute(
-            "UPDATE conversations SET project_id = ?, project_locked = ? WHERE id = ?",
-            (project_id, 0 if mode == "follow" else 1, conversation_id),
-        )
+            out["title"] = name
+        if "starred" in sent and body.starred is not None:
+            await db.execute("UPDATE conversations SET starred = ? WHERE id = ?",
+                             (1 if body.starred else 0, conversation_id))
+            out["starred"] = body.starred
+        if "folder_id" in sent:
+            if body.folder_id is not None:
+                async with db.execute("SELECT 1 FROM chat_folders WHERE id = ?",
+                                      (body.folder_id,)) as cur:
+                    if not await cur.fetchone():
+                        raise HTTPException(status_code=404, detail="no such folder")
+            await db.execute("UPDATE conversations SET folder_id = ? WHERE id = ?",
+                             (body.folder_id, conversation_id))
+            out["folder_id"] = body.folder_id
+        if "project" in sent or "mode" in sent:
+            mode = body.mode or ("pin" if body.project else "follow")
+            project_id = None
+            if mode == "pin" and body.project:
+                async with db.execute(
+                    "SELECT id FROM projects WHERE slug = ? AND deleted_at IS NULL",
+                    (body.project,),
+                ) as cur:
+                    row = await cur.fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="no such project")
+                project_id = row["id"]
+            await db.execute(
+                "UPDATE conversations SET project_id = ?, project_locked = ? WHERE id = ?",
+                (project_id, 0 if mode == "follow" else 1, conversation_id),
+            )
+            out.update(project=project_id and body.project, mode=mode)
         await db.commit()
     finally:
         await db.close()
-    return {"ok": True, "project": project_id and body.project, "mode": mode}
+    return out
+
+
+# ---- chat folders --------------------------------------------------------
+# Sidebar organisation only: a folder is a name and a place in the order. It
+# has no bearing on a turn (no context, no project binding), and deleting one
+# unfiles its chats rather than deleting them.
+
+class FolderCreate(BaseModel):
+    name: str
+
+
+class FolderPatch(BaseModel):
+    name: str | None = None
+    position: int | None = None   # the index to move it to, 0 = first
+
+
+def _folder_name(raw: str) -> str:
+    name = " ".join(raw.split())[:60]
+    if not name:
+        raise HTTPException(status_code=400, detail="folder name cannot be blank")
+    return name
+
+
+async def _folder_rows(db) -> list[dict]:
+    async with db.execute(
+        "SELECT f.id, f.name, f.position, f.created_at, "
+        "  (SELECT COUNT(*) FROM conversations c WHERE c.folder_id = f.id "
+        "   AND (c.kind = 'chat' OR c.kind IS NULL)) AS count "
+        "FROM chat_folders f ORDER BY f.position, f.id") as cur:
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def _name_taken(db, name: str, but: int | None = None) -> bool:
+    async with db.execute(
+        "SELECT 1 FROM chat_folders WHERE name = ? COLLATE NOCASE AND id IS NOT ?",
+        (name, but)) as cur:
+        return await cur.fetchone() is not None
+
+
+@router.get("/chat/folders")
+async def list_folders():
+    db = await get_db()
+    try:
+        return {"folders": await _folder_rows(db)}
+    finally:
+        await db.close()
+
+
+@router.post("/chat/folders")
+async def create_folder(body: FolderCreate):
+    name = _folder_name(body.name)
+    db = await get_db()
+    try:
+        if await _name_taken(db, name):
+            raise HTTPException(status_code=409, detail="a folder with that name exists")
+        cur = await db.execute(
+            "INSERT INTO chat_folders (name, position) "
+            "VALUES (?, (SELECT COALESCE(MAX(position) + 1, 0) FROM chat_folders))",
+            (name,))
+        await db.commit()
+        fid = cur.lastrowid
+        folder = next(f for f in await _folder_rows(db) if f["id"] == fid)
+    finally:
+        await db.close()
+    return {"ok": True, "folder": folder}
+
+
+@router.patch("/chat/folders/{folder_id}")
+async def update_folder(folder_id: int, body: FolderPatch):
+    db = await get_db()
+    try:
+        rows = await _folder_rows(db)
+        if not any(f["id"] == folder_id for f in rows):
+            raise HTTPException(status_code=404, detail="no such folder")
+        if body.name is not None:
+            name = _folder_name(body.name)
+            if await _name_taken(db, name, but=folder_id):
+                raise HTTPException(status_code=409,
+                                    detail="a folder with that name exists")
+            await db.execute("UPDATE chat_folders SET name = ? WHERE id = ?",
+                             (name, folder_id))
+        if body.position is not None:
+            # a move, not a raw write: take it out of the order, put it back at
+            # the index, renumber densely — so two folders never share a slot
+            order = [f["id"] for f in rows if f["id"] != folder_id]
+            order.insert(max(0, min(body.position, len(order))), folder_id)
+            for i, fid in enumerate(order):
+                await db.execute("UPDATE chat_folders SET position = ? WHERE id = ?",
+                                 (i, fid))
+        await db.commit()
+        folders = await _folder_rows(db)
+    finally:
+        await db.close()
+    return {"ok": True, "folder": next(f for f in folders if f["id"] == folder_id),
+            "folders": folders}
+
+
+@router.delete("/chat/folders/{folder_id}")
+async def delete_folder(folder_id: int):
+    db = await get_db()
+    try:
+        async with db.execute("SELECT 1 FROM chat_folders WHERE id = ?",
+                              (folder_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="no such folder")
+        # ON DELETE SET NULL does this too; spelled out so the unfiling holds
+        # even on a connection that forgot PRAGMA foreign_keys
+        cur = await db.execute(
+            "UPDATE conversations SET folder_id = NULL WHERE folder_id = ?", (folder_id,))
+        unfiled = cur.rowcount
+        await db.execute("DELETE FROM chat_folders WHERE id = ?", (folder_id,))
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": True, "unfiled": unfiled}
 
 
 @router.get("/conversations/{conversation_id}/messages")

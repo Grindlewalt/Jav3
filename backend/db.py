@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS conversations (
     rollup TEXT,
     job_id TEXT
 );
+-- Sidebar folders for chats. A chat is in at most one (conversations.folder_id,
+-- added in init_db); deleting a folder unfiles its chats, never deletes them.
+-- position is the operator's order; ties fall back to id.
+CREATE TABLE IF NOT EXISTS chat_folders (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 -- indexes on the run-tree columns are created in init_db AFTER the migration
 -- ALTERs, so they don't reference columns a pre-existing DB hasn't gained yet.
 CREATE TABLE IF NOT EXISTS messages (
@@ -384,7 +393,14 @@ async def init_db() -> None:
                           # this conversation; NULL = the operator's session
                           # or an internal run. Attribution, so the operator
                           # can see which threads a computer started.
-                          ("device_id", "INTEGER")):
+                          ("device_id", "INTEGER"),
+                          # sidebar organisation. The FK points OUT of the
+                          # conversation, so deleting a chat needs nothing from
+                          # _drop_references; deleting a folder unfiles its chats
+                          # (SET NULL — foreign_keys is ON in get_db).
+                          ("folder_id",
+                           "INTEGER REFERENCES chat_folders(id) ON DELETE SET NULL"),
+                          ("starred", "INTEGER NOT NULL DEFAULT 0")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
@@ -393,6 +409,11 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_conv_job ON conversations(job_id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_conv_agent ON conversations(agent_slug)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_folder ON conversations(folder_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_starred ON conversations(starred) "
+            "WHERE starred = 1")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_calls_conv ON model_calls(conversation_id)")
         await db.execute(
