@@ -55,6 +55,8 @@ export const PATHS = {
   // a terminal prompt in a window: the /shell trial
   shell: <><rect x="3" y="4.5" width="18" height="15" rx="2.2" />
            <path d="m7.5 10 3 2.5-3 2.5M12.5 15.5h4" /></>,
+  // a box, front face and lid: the VM manager
+  vms: <><path d="M12 3.2 20 7.4v9.2l-8 4.2-8-4.2V7.4Z" /><path d="M4 7.4l8 4.2 8-4.2M12 11.6v9.2" /></>,
   history: <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v3.2h3.2M12 8v4l2.8 1.8" />,
 }
 
@@ -90,6 +92,7 @@ export const NAV_ITEMS = [
   { to: '/', label: 'Work', icon: 'chat', end: true, primary: true },
   { to: '/agents', label: 'Agents', icon: 'agents', primary: true },
   { to: '/security', label: 'Security', icon: 'review', primary: true, count: 'review' },
+  { to: '/vms', label: 'VMs', icon: 'vms', primary: true, dot: 'vms' },
   { to: '/tools', label: 'Tools', icon: 'tools', primary: true },
   { to: '/settings', label: 'Settings', icon: 'settings', primary: true },
   { to: '/memory', label: 'Memory', icon: 'memory' },
@@ -113,28 +116,35 @@ export const NavSlotContext = createContext(() => {})
 // the container's class and by CSS, never by markup — which is exactly what
 // lets the icons fly between the bar and the rail, and what stops the drawer
 // drifting away from the bar again.
+// `dot` is a state word ('on' | 'busy' | 'off' | 'warn') drawn as a small
+// status dot on the icon — the VMs item's replacement for the old VM chip.
 export function NavItem({
-  item, className, iconRef, count = 0, onClick, tabIndex, role,
+  item, className, iconRef, count = 0, dot, onClick, tabIndex, role,
 }) {
   return (
-    <NavLink to={item.to} end={item.end} title={item.label}
+    <NavLink to={item.to} end={item.end} title={dot ? `${item.label} — ${DOT_TEXT[dot] || dot}` : item.label}
              className={className} onClick={onClick} tabIndex={tabIndex} role={role}>
       <NavIcon name={item.icon} innerRef={iconRef} />
+      {dot && <span className={`nav-dot ${dot}`} aria-hidden="true" />}
       <span className="nav-label">{item.label}</span>
       {count > 0 && <span className="nav-count">{badge(count)}</span>}
     </NavLink>
   )
 }
 
+const DOT_TEXT = {
+  on: 'boxes running', busy: 'working', off: 'no box running', warn: 'needs a look',
+}
+
 // A run of items — the body of the ⋯ menu and the body of the drawer, which
 // are the same list in two containers. `counts` maps an item's `count` key to
 // its live number.
 export function NavList({
-  items, itemClassName, counts = {}, onNavigate, tabIndex, itemRole,
+  items, itemClassName, counts = {}, dots = {}, onNavigate, tabIndex, itemRole,
 }) {
   return items.map((item) => (
     <NavItem key={item.to} item={item} className={itemClassName}
-             count={counts[item.count] || 0} role={itemRole}
+             count={counts[item.count] || 0} dot={dots[item.dot]} role={itemRole}
              onClick={onNavigate} tabIndex={tabIndex} />
   ))
 }

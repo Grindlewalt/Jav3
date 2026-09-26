@@ -20,7 +20,6 @@ export const WINDOW_TYPES = {
   review: { title: 'Security', label: 'Security — approvals & alerts' },
   network: { title: 'Network', label: 'Network — egress & host approvals' },
   secrets: { title: 'Secrets', label: 'Secrets — key grants for this project' },
-  vm: { title: 'Project VM', label: 'Project VM — context, disk, persist' },
 }
 
 export const isWindowType = (t) => Object.prototype.hasOwnProperty.call(WINDOW_TYPES, t)

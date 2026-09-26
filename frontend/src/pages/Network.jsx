@@ -3,7 +3,13 @@ import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { human, tsShort } from '../format.js'
+import { Link } from 'react-router-dom'
 import { Button, EmptyState, Input, Select, Tag, Toggle } from '../components/index.js'
+import { listProfiles } from '../boxes/api/profiles.js'
+import {
+  allowlist, getPolicy, promoteAuto, promoteToProfile, putPolicy, revokeAllow,
+} from '../boxes/api/policy.js'
+import { groupPolicy, parseHosts } from '../boxes/logic.js'
 
 // The guest's network, read like a log: what is waiting on you, what was
 // decided (and by whom — you, the allowlist, or the auto guesser), and what
@@ -269,74 +275,146 @@ function Decisions({ feed, names, onChanged }) {
   )
 }
 
-// ---- allowlist --------------------------------------------------------------------
+// ---- allow and deny, by project, then the profile baselines ----------------------
+// Every approval writes the project's OWN list now (DESIGN-BOXES (c)); the
+// profile's lists are the shared baseline under it, edited by the operator
+// only — here by "→ profile" (promote), or on the Profiles tab. Deny beats
+// allow at every level.
 
-function Allowlist({ project, names, tick, onChanged }) {
+function PolicyLists({ project, names, projects, tick, onChanged }) {
   const ask = useAsk()
-  const [groups, reload] = usePoll('/api/egress/allowlist', (r) => r.groups || [])
-  useEffect(() => { reload() }, [tick]) // eslint-disable-line
-  // a picked project shows its own list and the shared one it inherits
-  const shown = (groups || []).filter((g) =>
-    !project || g.project === project || g.project === GENERAL)
+  const [groups, setGroups] = useState(null)
+  const reload = useCallback(() => { allowlist().then(setGroups).catch(() => {}) }, [])
+  useEffect(() => {
+    const t = setInterval(reload, 10000)
+    return () => clearInterval(t)
+  }, [reload])
+  const [profiles, setProfiles] = useState([])
+  const loadProfiles = useCallback(() => {
+    listProfiles().then(setProfiles).catch(() => setProfiles([]))
+  }, [])
+  useEffect(() => { reload(); loadProfiles() }, [tick]) // eslint-disable-line
+  const { projectGroups, profileGroups } = useMemo(() => groupPolicy({
+    groups: groups || [], profiles, filter: project,
+    projects: projects.length ? projects : Object.entries(names).map(([slug, name]) => ({ slug, name })),
+  }), [groups, profiles, project, projects, names])
+  const refresh = () => { reload(); loadProfiles(); onChanged?.() }
 
-  async function revoke(g, e) {
-    const where = g.project === GENERAL ? 'the shared list (every project)'
-      : projLabel(g.project, names)
+  async function revoke(slug, e) {
     const ok = await ask.confirm(`Revoke ${e.host}?`, {
-      body: `It comes off ${where}; the next attempt waits for you again.`,
+      body: `It comes off ${projLabel(slug, names)}'s own list; the next attempt is judged by `
+        + 'its profile (and waits for you if the profile does not allow it).',
       confirmLabel: 'Revoke', danger: true })
     if (!ok) return
     try {
-      await api('/api/egress/allowlist/revoke', { method: 'POST',
-        body: JSON.stringify(e.source === 'auto'
-          ? { id: e.id } : { project: g.project, host: e.host }) })
-      reload(); onChanged?.()
+      await revokeAllow(e.source === 'auto' ? { id: e.id } : { project: slug, host: e.host })
+      refresh()
     } catch (err) { notifyError(err) }
   }
   async function keep(e) {
+    try { await promoteAuto(e.id); refresh() } catch (err) { notifyError(err) }
+  }
+  async function editDeny(slug, host, add) {
     try {
-      await api(`/api/egress/auto/${e.id}/promote`, { method: 'POST' })
-      reload(); onChanged?.()
+      const pol = await getPolicy(slug)
+      const deny = add ? [...new Set([...pol.project_deny, host])]
+        : pol.project_deny.filter((h) => h !== host)
+      const allow = add ? pol.project_allow.filter((h) => h !== host) : pol.project_allow
+      await putPolicy(slug, allow, deny)
+      refresh()
     } catch (err) { notifyError(err) }
+  }
+  async function addDeny(slug) {
+    const host = await ask.prompt(`Deny a host for ${projLabel(slug, names)}`, '',
+                                  { confirmLabel: 'Deny' })
+    if (!host) return
+    editDeny(slug, host.trim().toLowerCase(), true)
+  }
+  async function promote(g, host, kind) {
+    const prof = profiles.find((p) => p.id === g.profile?.id)
+    if (!prof) { notifyError(new Error('this project has no profile to promote to yet')); return }
+    const others = (prof.projects || []).filter((s) => s !== g.slug)
+    const ok = await ask.confirm(`Move ${host} to ${prof.name}'s ${kind} list?`, {
+      body: `It leaves ${g.name}'s own list and becomes part of the ${prof.name} baseline: `
+        + (others.length ? `${others.join(', ')} ${kind === 'deny' ? 'are denied' : 'are allowed'} it too.`
+          : 'no other project uses that profile today, but any project moved onto it will be.'),
+      confirmLabel: 'Promote', danger: kind === 'allow' && others.length > 0 })
+    if (!ok) return
+    try { await promoteToProfile(prof, g.slug, host, kind); refresh() } catch (err) { notifyError(err) }
   }
 
   return (
     <section className="net-sec">
-      <div className="sbx-sec-head"><h3>Allowlist</h3></div>
-      {shown.length === 0 && <EmptyState>nothing allowed yet</EmptyState>}
-      {shown.map((g) => (
-        <div key={g.project} className="net-group">
+      <div className="sbx-sec-head"><h3>Allow &amp; deny — by project</h3></div>
+      {projectGroups.length === 0 && <EmptyState>no project has its own list yet</EmptyState>}
+      {projectGroups.map((g) => (
+        <div key={g.slug} className="net-group">
           <div className="net-group-head">
-            {g.project === GENERAL ? 'Shared — every project without its own list'
-              : projLabel(g.project, names)}
-            <span className="dim small"> · {g.entries.length}</span>
+            {g.name}
+            {g.profile && <> <Tag title="its profile: the baseline under this list">
+              {g.profile.name}</Tag></>}
+            <span className="dim small"> · {g.allow.length} allowed · {g.deny.length} denied</span>
+            <Button variant="link" onClick={() => addDeny(g.slug)}>+ deny a host</Button>
           </div>
-          {g.entries.length === 0 && <EmptyState>empty</EmptyState>}
           <ul className="net-list">
-            {g.entries.map((e) => {
-              const src = SOURCES[e.source] || { text: e.source }
+            {g.allow.map((e) => {
+              const src = SOURCES[e.source] || { text: e.source || 'you' }
               return (
-                <li key={`${e.source}:${e.id ?? e.host}`} className="net-allow">
+                <li key={`a:${e.source}:${e.id ?? e.host}`} className="net-allow">
                   <span className="net-host mono" title={e.host}>{e.host}</span>
                   <span className="net-allow-meta">
-                    <Tag tone={src.tone}
-                         className={e.source === 'auto' ? 'net-verdict auto' : ''}
+                    <Tag tone={src.tone} className={e.source === 'auto' ? 'net-verdict auto' : ''}
                          title={e.reason || ''}>{src.text}</Tag>
                     {e.source === 'auto' && (
-                      <span className="dim small" title={e.reason || ''}>
-                        until {tsShort(e.expires_at)}</span>)}
+                      <span className="dim small" title={e.reason || ''}>until {tsShort(e.expires_at)}</span>)}
                   </span>
                   <span className="net-actions">
-                    {e.source === 'auto' && (
-                      <Button variant="ghost" title="keep it: move it onto the allowlist"
-                              onClick={() => keep(e)}>Keep</Button>)}
-                    <Button variant="ghost" danger onClick={() => revoke(g, e)}>
-                      Revoke</Button>
+                    {e.source === 'auto' ? (
+                      <Button variant="ghost" title="keep it: move it onto the list"
+                              onClick={() => keep(e)}>Keep</Button>
+                    ) : g.profile && (
+                      <Button variant="ghost" title={`move it to ${g.profile.name}'s allow list`}
+                              onClick={() => promote(g, e.host, 'allow')}>→ profile</Button>
+                    )}
+                    <Button variant="ghost" danger onClick={() => revoke(g.slug, e)}>Revoke</Button>
                   </span>
                 </li>
               )
             })}
+            {g.deny.map((e) => (
+              <li key={`d:${e.host}`} className="net-allow net-deny">
+                <span className="net-host mono" title={e.host}>{e.host}</span>
+                <span className="net-allow-meta"><Tag tone="error">denied</Tag></span>
+                <span className="net-actions">
+                  {g.profile && (
+                    <Button variant="ghost" title={`move it to ${g.profile.name}'s deny list`}
+                            onClick={() => promote(g, e.host, 'deny')}>→ profile</Button>)}
+                  <Button variant="ghost" onClick={() => editDeny(g.slug, e.host, false)}>Remove</Button>
+                </span>
+              </li>
+            ))}
           </ul>
+        </div>
+      ))}
+
+      <div className="sbx-sec-head"><h3>Profile baselines</h3>
+        <Link className="small" to="/security/profiles">edit profiles →</Link></div>
+      {profileGroups.length === 0 && <EmptyState>no profiles on this server yet</EmptyState>}
+      {profileGroups.map((p) => (
+        <div key={p.id} className="net-group">
+          <div className="net-group-head">
+            {p.name}
+            <span className="dim small">
+              {' · '}{p.network_off ? 'network off'
+                : `unlisted hosts ${p.default_verdict === 'allow' ? 'allowed' : 'denied'}`}
+              {p.projects.length ? ` · ${p.projects.map((s) => projLabel(s, names)).join(', ')}` : ''}
+            </span>
+          </div>
+          {p.allow.length === 0 && p.deny.length === 0 && <EmptyState>empty</EmptyState>}
+          <div className="bx-hosts">
+            {p.allow.map((h) => <Tag key={`a${h}`} tone="done" className="mono">{h}</Tag>)}
+            {p.deny.map((h) => <Tag key={`d${h}`} tone="error" className="mono" title="denied">✕ {h}</Tag>)}
+          </div>
         </div>
       ))}
     </section>
@@ -344,26 +422,27 @@ function Allowlist({ project, names, tick, onChanged }) {
 }
 
 // ---- per-project egress policy editor ---------------------------------------
+// The project's own lists over its profile's baseline. What the proxy applies
+// is the effective pair (decision order: cut, project deny, profile deny,
+// project allow, profile allow, live auto-allow, the profile's default).
 function PolicyEditor({ slug }) {
   const [pol, setPol] = useState(null)
-  const [hostsText, setHostsText] = useState('')
+  const [allowText, setAllowText] = useState('')
+  const [denyText, setDenyText] = useState('')
   const [status, setStatus] = useState('')
   const [saving, setSaving] = useState(false)
 
   function load() {
-    api(`/api/egress/policy/${slug}`).then((p) => {
-      setPol(p); setHostsText((p.hosts || []).join('\n'))
+    getPolicy(slug).then((p) => {
+      setPol(p); setAllowText(p.project_allow.join('\n')); setDenyText(p.project_deny.join('\n'))
     }).catch(() => setPol(null))
   }
   useEffect(() => { load() }, [slug]) // eslint-disable-line
 
   async function save() {
     setSaving(true)
-    const hosts = hostsText.split(/[\s,]+/).map((h) => h.trim()).filter(Boolean)
     try {
-      await api(`/api/egress/policy/${slug}`, {
-        method: 'PUT',
-        body: JSON.stringify({ mode: pol.mode, inherit_general: pol.inherit_general, hosts }) })
+      await putPolicy(slug, parseHosts(allowText), parseHosts(denyText))
       setStatus('saved'); setTimeout(() => setStatus(''), 1500); load()
     } catch (err) { notifyError(err) }
     setSaving(false)
@@ -372,32 +451,29 @@ function PolicyEditor({ slug }) {
   if (!pol) return null
   return (
     <div className="sbx-card">
-      {/* the project is named by the picker above (or is the panel's own) —
-          repeated here in the uppercase head it hyphen-broke across lines */}
       <div className="sbx-sec-head"><h3>Egress policy</h3>
         <span className="dim small">{status}</span></div>
       <div className="net-policy">
-        <Select label="Mode" value={pol.mode || 'allowlist'}
-                onChange={(e) => setPol({ ...pol, mode: e.target.value })}
-                options={[
-                  { value: 'allowlist', label: 'Allowlist — only listed hosts' },
-                  { value: 'denylist', label: 'Denylist — all but listed hosts' },
-                  { value: 'denyall', label: 'Deny all — no egress' }]} />
-        <Toggle checked={!!pol.inherit_general} label="Inherit the general allowlist"
-                onText="Inherit the general allowlist"
-                offText="Inherit the general allowlist"
-                onChange={(on) => setPol({ ...pol, inherit_general: on })} />
-        <Input textarea label="Hosts (one per line)" className="md-editor" rows={4}
-               spellCheck={false} value={hostsText}
-               onChange={(e) => setHostsText(e.target.value)} />
+        <div className="small">
+          profile <b>{pol.profile?.name || 'Default'}</b>
+          {pol.profile?.default && (
+            <span className="dim"> · unlisted hosts {pol.profile.default === 'allow' ? 'allowed' : 'denied'}</span>)}
+          {' '}<Link to="/security/profiles" className="small">change…</Link>
+        </div>
+        <div className="bx-two">
+          <Input textarea label="This project allows (one per line)" className="md-editor" rows={4}
+                 spellCheck={false} value={allowText} onChange={(e) => setAllowText(e.target.value)} />
+          <Input textarea label="This project denies — beats every allow" className="md-editor" rows={4}
+                 spellCheck={false} value={denyText} onChange={(e) => setDenyText(e.target.value)} />
+        </div>
         <div className="row">
-          <span className="dim small grow">
-            effective: {pol.mode}{pol.source ? ` · source: ${pol.source}` : ''}</span>
+          <span className="grow" />
           <Button disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save policy'}</Button>
         </div>
-        {Array.isArray(pol.effective) && pol.effective.length > 0 && (
-          <div className="dim small">effective hosts: {pol.effective.join(', ')}</div>
-        )}
+        {pol.effective_allow.length > 0 && (
+          <div className="dim small">effective allow: {pol.effective_allow.join(', ')}</div>)}
+        {pol.effective_deny.length > 0 && (
+          <div className="dim small">effective deny: {pol.effective_deny.join(', ')}</div>)}
       </div>
     </div>
   )
@@ -494,7 +570,7 @@ export function NetworkPanel({ slug }) {
       </div>
       <Waiting project={slug} names={{}} lastTry={lastTry} tick={tick} onDecided={bump} />
       <Decisions feed={feed.slice(0, 60)} names={{}} onChanged={bump} />
-      <Allowlist project={slug} names={{}} tick={tick} onChanged={bump} />
+      <PolicyLists project={slug} names={{}} projects={[]} tick={tick} onChanged={bump} />
       <PolicyEditor slug={slug} />
       <Grants slug={slug} />
     </div>
@@ -535,7 +611,7 @@ export default function Network() {
       <Waiting project={filter} names={names} showProject={!filter}
                lastTry={lastTry} tick={tick} onDecided={bump} />
       <Decisions feed={shown} names={names} onChanged={bump} />
-      <Allowlist project={filter} names={names} tick={tick} onChanged={bump} />
+      <PolicyLists project={filter} names={names} projects={projects} tick={tick} onChanged={bump} />
 
       {filter ? (
         <details className="net-sec net-more">

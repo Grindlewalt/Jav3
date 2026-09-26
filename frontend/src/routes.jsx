@@ -41,6 +41,14 @@ const ReviewHome = lazy(() => import('./pages/Review.jsx')
 const Network = lazy(() => import('./pages/Network.jsx'))
 const Logs = lazy(() => import('./pages/Logs.jsx'))
 const SecretsPanel = lazy(() => import('./SecretsPanel.jsx'))
+const Persistent = lazy(() => import('./pages/Persistent.jsx'))
+const Profiles = lazy(() => import('./pages/Profiles.jsx'))
+// the VM manager (DESIGN-BOXES (e)): a layout route like Security, tabs
+// Boxes · Images · Catalogue
+const Vms = lazy(() => import('./pages/Vms.jsx'))
+const VmBoxes = lazy(() => import('./pages/Vms.jsx').then((m) => ({ default: m.Boxes })))
+const VmImages = lazy(() => import('./pages/Vms.jsx').then((m) => ({ default: m.Images })))
+const Catalogue = lazy(() => import('./pages/Catalogue.jsx'))
 
 const Memory = lazy(() => import('./pages/Memory.jsx'))
 // the terminal-style shell, on trial beside the classic UI: /shell, a chat at
@@ -62,6 +70,8 @@ const PREFETCH = [
   () => import('./pages/Schedules.jsx'), () => import('./SkillsPanel.jsx'),
   () => import('./AgentOutputs.jsx'), () => import('./shell/Shell.jsx'),
   () => import('./pages/Voice.jsx'), () => import('./pages/Artifacts.jsx'),
+  () => import('./pages/Vms.jsx'), () => import('./pages/Catalogue.jsx'),
+  () => import('./pages/Persistent.jsx'), () => import('./pages/Profiles.jsx'),
 ]
 
 function usePrefetchRoutes(enabled) {
@@ -109,9 +119,16 @@ export default function AppRoutes({ onLogin, onSetup, authed }) {
         </Route>
         <Route path="/security" element={<Review />}>
           <Route index element={<ReviewHome />} />
+          <Route path="persistent" element={<Persistent />} />
           <Route path="network" element={<Network />} />
+          <Route path="profiles" element={<Profiles />} />
           <Route path="logs" element={<Logs />} />
           <Route path="secrets" element={<SecretsPanel />} />
+        </Route>
+        <Route path="/vms" element={<Vms />}>
+          <Route index element={<VmBoxes />} />
+          <Route path="images" element={<VmImages />} />
+          <Route path="catalogue" element={<Catalogue />} />
         </Route>
         <Route path="/tools" element={<Tools />} />
         <Route path="/settings" element={<Settings />} />

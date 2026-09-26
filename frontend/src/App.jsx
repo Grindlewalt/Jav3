@@ -5,7 +5,6 @@ import { createPortal } from 'react-dom'
 import { NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { api } from './api.js'
 import { subscribe } from './events.js'
-import { useDismiss } from './useDismiss.js'
 import { setMediaHosts } from './mediaHosts.js'
 import Player from './Player.jsx'
 import AppRoutes from './routes.jsx'
@@ -17,9 +16,9 @@ import { AuthContext } from './auth.jsx'
 import Menu from './components/Menu.jsx'
 import Notices, { PendingCountContext, useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
-import { VmExplainer, freshness } from './VmStrip.jsx'
-import { notify, notifyError } from './notify.js'
-import { AskProvider, useAsk } from './ask.jsx'
+import { listBoxes } from './boxes/api/vms.js'
+import { navState } from './boxes/logic.js'
+import { AskProvider } from './ask.jsx'
 
 // The destinations, their icons and their split between the bar and the ⋯
 // menu all live in nav.jsx, which is the ONE source the bar, the rail, the
@@ -69,144 +68,20 @@ function ThemeToggle({ theme, onToggle }) {
   )
 }
 
-// Guest-VM status (GET /api/vm/status) plus the one operator control: nuke —
-// discard the overlay and reboot fresh from the golden image. Nuke is
-// double-confirmed and refuses while a turn is in flight; boot/teardown stay
-// elsewhere. The status read itself never mutates.
-// (The runtime model switch lives in the chat composer now — ComposerModel in
-// Chat.jsx; the bar copy was redundant and the operator asked for its removal.)
-// It rides the status cluster beside the theme toggle — in the top bar, or in
-// the rail's foot when the nav is collapsed. No prop for the two cases: the
-// rail's container carries .side-nav, which is all the CSS needs.
-let lastVmStatus = null   // survives the bar <-> rail remount; see below
-function VmStatus() {
-  // Railing the nav moves the chip between two places in the tree, so this
-  // unmounts and remounts. Seeding from the last known status keeps it on
-  // screen through the move — without it the chip renders null and blinks out
-  // until the first poll of the new instance comes back.
-  const [s, setS] = useState(lastVmStatus)
-  const [open, setOpen] = useState(false)
-  const [nuking, setNuking] = useState(false)
-  const [rebuilding, setRebuilding] = useState(false)
-  const [toast, setToast] = useState('')
-  const load = () => api('/api/vm/status')
-    .then((r) => { lastVmStatus = r; setS(r) })
-    .catch(() => { lastVmStatus = null; setS(null) })
+// The VMs nav item's state dot (it replaced the old VM chip here, whose
+// explainer, nuke and rebuild moved to the /vms page). One light poll of the
+// boxes list; the word comes from boxes/logic.navState.
+function useVmDot(enabled) {
+  const [dot, setDot] = useState('off')
   useEffect(() => {
+    if (!enabled) return undefined
+    let live = true
+    const load = () => listBoxes().then((r) => { if (live) setDot(navState(r)) }).catch(() => {})
     load()
-    const t = setInterval(load, 10000)
-    return () => clearInterval(t)
-  }, [])
-  const closeDrop = useCallback(() => setOpen(false), [])
-  const wrapRef = useDismiss(open, closeDrop)
-  const ask = useAsk()
-
-  async function nuke() {
-    if (s?.inflight > 0) {
-      notify(`${s.inflight} turn(s) in flight — wait for them to finish before nuking.`)
-      return
-    }
-    if (!await ask.confirm('Nuke the guest VM?',
-                           { body: 'Its overlay disk is discarded and it reboots fresh '
-                                   + 'from the golden image. In-flight work is lost.',
-                             confirmLabel: 'Nuke it', danger: true })) return
-    setNuking(true)
-    try {
-      const r = await api('/api/vm/nuke', {
-        method: 'POST', body: JSON.stringify({ confirm: true }) })
-      lastVmStatus = r
-      setS(r)
-    } catch (err) { notifyError(err) }
-    setNuking(false)
-  }
-
-  // Rebuild the golden image from scratch — heavy, so double-confirmed.
-  async function rebuild() {
-    if (!await ask.confirm('Rebuild the guest image from scratch?',
-                           { body: 'This can take a while.',
-                             confirmLabel: 'Rebuild' })) return
-    if (!await ask.confirm('Are you sure?',
-                           { body: 'The current image is replaced once the build finishes.',
-                             confirmLabel: 'Yes, rebuild', danger: true })) return
-    setRebuilding(true)
-    setToast('rebuild started…')
-    try {
-      await api('/api/vm/rebuild', { method: 'POST', body: JSON.stringify({ confirm: true }) })
-      setToast('image rebuild kicked off')
-      load()
-    } catch (err) { setToast(err.detail || String(err)) }
-    setRebuilding(false)
-    setTimeout(() => setToast(''), 4000)
-  }
-
-  if (!s) return null
-  const age = s.age_seconds != null
-    ? (s.age_seconds < 90 ? `${s.age_seconds}s` : `${Math.round(s.age_seconds / 60)}m`)
-    : null
-  // newer backends carry image freshness metadata; older ones omit it entirely
-  const hasImageMeta = s.image_stale !== undefined || s.image_built_at !== undefined
-    || s.image_age_days !== undefined
-  // whole days: "56.9d" read as a measurement, not an age
-  const imageAge = s.image_age_days != null
-    ? `${Math.round(s.image_age_days)}d old`
-    : (s.image_built_at ? String(s.image_built_at).slice(0, 10) : null)
-  return (
-    <div className="notif-wrap vm-wrap" ref={wrapRef}>
-      <button className={`nav-chip${s.image_stale ? ' has-badge' : ''}`}
-              onClick={() => setOpen((o) => !o)}
-              aria-expanded={open}
-              aria-label={`guest VM — ${s.running ? 'running' : 'off'}`}
-              title="guest VM status">
-        <span className={`run-dot ${s.running ? 'running' : ''}`} />
-        <span className="vm-word">VM</span>
-        {s.image_stale && <span className="notif-badge vm-stale-badge" title="image is stale">!</span>}
-      </button>
-      {open && (
-        <div className="notif-drop vm-drop">
-          {/* the same three lines as the Workspace's VM strip (VmStrip.jsx):
-              what is disposable, what persists, what the operator approved */}
-          <div className="vm-drop-head">
-            <b>Runs in a VM</b> · {freshness(s).short}
-          </div>
-          <VmExplainer vm={s} persist={null} />
-          <div className="notif-item"><span className="grow">state</span>
-            <span className={s.running ? '' : 'dim'}>
-              {s.running ? 'running' : (s.base_built ? 'off' : 'no image')}</span></div>
-          {s.running && age && (
-            <div className="notif-item"><span className="grow">age</span><span>{age}</span></div>)}
-          {s.running && (
-            <div className="notif-item"><span className="grow">in-flight turns</span>
-              <span>{s.inflight}</span></div>)}
-          <div className="notif-item"><span className="grow">gateway</span>
-            <span className={s.gateway ? '' : 'dim'}>{s.gateway ? 'on' : 'off'}</span></div>
-          <div className="notif-item"><span className="grow">image</span>
-            <span className={s.image_stale ? 'warn' : 'dim'}
-                  title={s.image_built_at ? `built ${s.image_built_at}` : undefined}>
-              {s.image_version}</span></div>
-          {s.image_stale && (
-            <div className="notif-item"><span className="grow warn">stale image</span>
-              <span className="warn small">{imageAge || 'rebuild suggested'}</span></div>)}
-          {s.idle_scrub_seconds > 0 && (
-            <div className="notif-item"><span className="grow">idle scrub</span>
-              <span className="dim">{s.idle_scrub_seconds}s</span></div>)}
-          {toast && <div className="notif-item"><span className="grow small dim">{toast}</span></div>}
-          {hasImageMeta && (
-            <div className="vm-nuke-row">
-              <button className="ghost" disabled={rebuilding}
-                      title="rebuild the golden image from scratch"
-                      onClick={rebuild}>{rebuilding ? 'rebuilding…' : '⟳ rebuild image'}</button>
-            </div>
-          )}
-          <div className="vm-nuke-row">
-            <button className="ghost danger" disabled={nuking || !s.running}
-                    title={s.running ? 'discard the overlay, reboot fresh'
-                                     : 'nothing to nuke — guest is off'}
-                    onClick={nuke}>{nuking ? 'nuking…' : '☢ nuke guest'}</button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
+    const t = setInterval(load, 15000)
+    return () => { live = false; clearInterval(t) }
+  }, [enabled])
+  return dot
 }
 
 // Jav3 -> browser bridge: the gui topic of the shared event stream.
@@ -336,6 +211,7 @@ export default function App() {
 
   // toasts + the pending count that lives on the Review nav link
   const notices = useNotices(!!user)
+  const vmDot = useVmDot(!!user)
 
   // close both menus whenever the route changes
   useEffect(() => { setMenuOpen(false); setMoreOpen(false) }, [location.pathname])
@@ -386,6 +262,7 @@ export default function App() {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
 
   const counts = { review: notices.count }
+  const dots = { vms: vmDot }
 
   // The phone drawer's way into chat history. On a phone the Chat sidebar is
   // an off-canvas sheet, and an edge swipe was the only way to open it — an
@@ -408,6 +285,7 @@ export default function App() {
     <>
       {PRIMARY_ITEMS.map((item) => (
         <NavItem key={item.to} item={item} count={counts[item.count] || 0}
+                 dot={dots[item.dot]}
                  iconRef={(el) => {
                    if (el) icoRefs.current.set(item.to, el)
                    else icoRefs.current.delete(item.to)
@@ -422,7 +300,7 @@ export default function App() {
               </button>
             )}>
         <NavList items={OVERFLOW_ITEMS} itemClassName="menu-item" itemRole="menuitem"
-                 counts={counts} onNavigate={closeMore} />
+                 counts={counts} dots={dots} onNavigate={closeMore} />
       </Menu>
     </>
   )
@@ -446,7 +324,6 @@ export default function App() {
               <span className="brand">Jav3</span>
               <div className="nav-links">{navLinks}</div>
               <div className="nav-status">
-                <VmStatus />
                 <ThemeToggle theme={theme} onToggle={toggleTheme} />
               </div>
               <button className="nav-toggle"
@@ -461,7 +338,6 @@ export default function App() {
             <>
               <div className="rail-links">{navLinks}</div>
               <span className="grow" />
-              <VmStatus />
               <ThemeToggle theme={theme} onToggle={toggleTheme} />
             </>, navSlot)}
 
@@ -475,13 +351,13 @@ export default function App() {
           )}
           <div className={menuOpen ? 'nav-drawer open' : 'nav-drawer'}
                aria-hidden={!menuOpen}>
-            <NavList items={[chatItem]} counts={counts} tabIndex={menuOpen ? 0 : -1} />
+            <NavList items={[chatItem]} counts={counts} dots={dots} tabIndex={menuOpen ? 0 : -1} />
             <button type="button" className="drawer-row" tabIndex={menuOpen ? 0 : -1}
                     onClick={openChats}>
               <NavIcon name="history" />
               <span className="nav-label">Chat history</span>
             </button>
-            <NavList items={NAV_ITEMS.filter((i) => i !== chatItem)} counts={counts}
+            <NavList items={NAV_ITEMS.filter((i) => i !== chatItem)} counts={counts} dots={dots}
                      tabIndex={menuOpen ? 0 : -1} />
             {/* the drawer's one theme control — a row like the rest, not a
                 centred white slab; the bar's own toggle hides while the
