@@ -306,6 +306,154 @@ CREATE TABLE IF NOT EXISTS desk_shell_pending (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     decided_at TEXT
 );
+-- ===================================================================
+-- Boxes design (DESIGN-BOXES.md; the WP1 contract, docs/boxes-contract.md).
+-- Boxes themselves are RUNTIME state (backend/vm/boxes.py) and have no table.
+-- ===================================================================
+-- (d) Security profiles. A project points at one via projects.profile_id
+-- (NULL = not yet migrated -> the builtin 'Default'). `service_placement` has
+-- NO default on purpose (operator decision 0.1): a new profile must name one,
+-- so an INSERT that omits it fails. Builtins are migrated to 'per_project'
+-- explicitly by WP2's migration. JSON columns hold arrays of strings.
+CREATE TABLE IF NOT EXISTS security_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    default_verdict TEXT NOT NULL DEFAULT 'deny'
+        CHECK (default_verdict IN ('deny', 'allow')),
+    network_off INTEGER NOT NULL DEFAULT 0,
+    allow_hosts TEXT NOT NULL DEFAULT '[]',
+    deny_hosts TEXT NOT NULL DEFAULT '[]',
+    secrets TEXT NOT NULL DEFAULT '[]',          -- secret NAMES granted to every project under it
+    auto_handle INTEGER NOT NULL DEFAULT 0,      -- reviewer may triage this profile's items
+    separate_box INTEGER NOT NULL DEFAULT 0,     -- turns run in the project's own box
+    box_image TEXT NOT NULL DEFAULT 'main',      -- image variant for its boxes
+    box_mem_mb INTEGER,                          -- NULL = settings.vm_project_box_mem_mb
+    allow_services INTEGER NOT NULL DEFAULT 0,
+    allow_package_requests INTEGER NOT NULL DEFAULT 0,
+    service_placement TEXT NOT NULL
+        CHECK (service_placement IN ('per_service', 'per_project', 'shared')),
+    -- the box runtime for this profile's boxes: 'kvm' (QEMU guest) or 'docker'
+    -- (hardened container: lighter, weaker boundary). Same no-default rule as
+    -- service_placement; builtins are migrated to 'kvm' explicitly.
+    box_runtime TEXT NOT NULL CHECK (box_runtime IN ('kvm', 'docker')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- (a) Services: an agent-filed, operator-approved, content-hashed definition
+-- (tool service_request). One row per REQUEST; a code change is a new row whose
+-- `supersedes_id` names the approved one it is diffed against. `placement` is
+-- the placement actually used (proposed from the profile at filing, changeable
+-- in the approval dialog, shown everywhere the service is listed).
+CREATE TABLE IF NOT EXISTS services (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    command TEXT NOT NULL,               -- JSON argv
+    workdir TEXT,
+    files TEXT NOT NULL DEFAULT '[]',    -- JSON project paths/globs
+    ports TEXT NOT NULL DEFAULT '[]',    -- JSON [{port, protocol, purpose, expose}]
+    restart TEXT NOT NULL DEFAULT 'no'
+        CHECK (restart IN ('no', 'on-failure', 'always')),
+    egress_hosts TEXT NOT NULL DEFAULT '[]',
+    env TEXT NOT NULL DEFAULT '{}',      -- JSON {K: V}; '{{secret:' values refused
+    reason TEXT,
+    artifact_sha256 TEXT,                -- hash of the host-snapshotted file tar
+    artifact_path TEXT,                  -- <vm_dir>/svc/<slug>/<id>/<sha256>.tar
+    definition_sha256 TEXT,              -- hash of the canonical definition JSON
+    placement TEXT NOT NULL
+        CHECK (placement IN ('per_service', 'per_project', 'shared')),
+    expose_ports TEXT NOT NULL DEFAULT '[]',   -- JSON [{port, bind:'loopback'|'lan'}] the operator exposed
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected', 'revoked', 'superseded')),
+    desired_state TEXT NOT NULL DEFAULT 'stopped'
+        CHECK (desired_state IN ('running', 'stopped')),
+    supersedes_id INTEGER REFERENCES services(id),
+    conversation_id INTEGER,
+    requested_by TEXT,                   -- 'agent' or an operator name
+    decided_by TEXT,
+    decided_at TEXT,
+    decision_note TEXT,
+    last_reported_at TEXT,               -- svcd's last status report for it
+    revoked_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_services_proj ON services(project_slug, status);
+-- (a) Inbound relay sessions (backend/vm/portfwd.py): host-truth inbound bytes
+-- for exposed service ports; the process view joins on (service_id, port).
+CREATE TABLE IF NOT EXISTS service_port_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_id INTEGER NOT NULL,
+    box_id TEXT,
+    port INTEGER NOT NULL,
+    bind TEXT NOT NULL CHECK (bind IN ('loopback', 'lan')),
+    peer TEXT,
+    bytes_in INTEGER NOT NULL DEFAULT 0,
+    bytes_out INTEGER NOT NULL DEFAULT 0,
+    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_service_port_events_svc
+    ON service_port_events(service_id, opened_at);
+-- (f) Persistent package catalogue: agent requests (package_request) and
+-- operator additions. Approval adds the package to `target_variant`'s recipe
+-- and builds a new version of that variant.
+CREATE TABLE IF NOT EXISTS package_catalogue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT,
+    source TEXT NOT NULL DEFAULT 'agent' CHECK (source IN ('agent', 'operator')),
+    manager TEXT NOT NULL CHECK (manager IN ('apt', 'pip', 'npm')),
+    package TEXT NOT NULL,
+    version_req TEXT,
+    resolved_version TEXT,
+    integrity TEXT,                      -- pip sha256 / npm dist.integrity / apt policy line
+    requested_command TEXT,              -- the agent's string: stored, never run
+    canonical_command TEXT,              -- the host-built command that is run
+    reason TEXT,
+    conversation_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected', 'building', 'built',
+                          'failed', 'removed')),
+    target_variant TEXT,
+    decided_by TEXT,
+    decided_at TEXT,
+    built_version INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_package_catalogue_status
+    ON package_catalogue(status, created_at);
+-- (e) Image variants (frozen layers over base-vN) and their built versions.
+-- Builtin recipes live in vm/images/<name>.recipe; `recipe` here is the
+-- effective recipe JSON (builtin + approved catalogue packages) and its hash.
+CREATE TABLE IF NOT EXISTS image_variants (
+    name TEXT PRIMARY KEY,               -- main | dev | desktop | svc | <operator's>
+    from_variant TEXT,                   -- NULL = directly on base
+    builtin INTEGER NOT NULL DEFAULT 0,
+    recipe TEXT NOT NULL DEFAULT '{}',
+    recipe_sha256 TEXT,
+    min_mem_mb INTEGER,                  -- desktop needs >= 1280
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS image_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    variant TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    base_version TEXT NOT NULL,          -- the base-vN it layers on (kept while referenced)
+    path TEXT,                           -- <vm_dir>/layer-<variant>-v<M>.qcow2
+    size_bytes INTEGER,
+    recipe_sha256 TEXT,
+    baseline_path TEXT,                  -- baseline.json recorded at build
+    status TEXT NOT NULL DEFAULT 'building'
+        CHECK (status IN ('building', 'built', 'failed', 'retired')),
+    active INTEGER NOT NULL DEFAULT 0,
+    build_log TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    built_at TEXT,
+    UNIQUE(variant, version)
+);
 """
 
 
@@ -566,9 +714,58 @@ async def init_db() -> None:
         if "from_operator" not in mcols:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
+        await _migrate_boxes(db)
         await db.commit()
     finally:
         await db.close()
+
+
+async def _add_columns(db: aiosqlite.Connection, table: str,
+                       cols: tuple[tuple[str, str], ...]) -> None:
+    async with db.execute(f"PRAGMA table_info({table})") as cur:
+        have = {r["name"] for r in await cur.fetchall()}
+    for col, decl in cols:
+        if col not in have:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+async def _migrate_boxes(db: aiosqlite.Connection) -> None:
+    """Columns the boxes design adds to existing tables (DESIGN-BOXES.md, the
+    WP1 contract in docs/boxes-contract.md). Idempotent and additive only: no
+    column is renamed or dropped here, so code that predates the design reads
+    exactly what it always did. Data migrations (profiles_migrated, hosts ->
+    allow list) are WP2's, in one transaction of their own."""
+    await _add_columns(db, "projects", (
+        # (d) the project's security profile; NULL = the builtin 'Default'
+        ("profile_id", "INTEGER REFERENCES security_profiles(id)"),
+        # (a) /persist retirement (operator decision 0.3): when its data was
+        # imported into the service box's /srv, and when the old disk goes
+        ("persist_imported_at", "TEXT"),
+        ("persist_delete_after", "TEXT"),
+    ))
+    # (c) project-level deny list beside the existing `hosts`. `hosts` stays
+    # the allow list (allowlist mode) until WP2's migration moves it; renaming
+    # it here would break egress.py, which WP1 does not own.
+    await _add_columns(db, "egress_policy", (
+        ("deny_hosts", "TEXT NOT NULL DEFAULT '[]'"),
+    ))
+    # (b)/(proxy attribution) the guest end of each proxied connection and
+    # which box it came from, so the process view can join a proxy row to a
+    # guest socket; service traffic is attributed to its service row.
+    await _add_columns(db, "egress_events", (
+        ("peer_ip", "TEXT"),
+        ("peer_port", "INTEGER"),
+        ("box_id", "TEXT"),
+        ("service_id", "INTEGER"),
+    ))
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_egress_events_peer "
+        "ON egress_events(box_id, peer_port, created_at)")
+    # the approval queue remembers which box asked (shared-box rows are the
+    # unattributed ones the operator assigns to a project on approval)
+    await _add_columns(db, "egress_pending", (
+        ("box_id", "TEXT"),
+    ))
 
 
 async def get_state(db: aiosqlite.Connection, key: str) -> str | None:

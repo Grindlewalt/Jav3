@@ -318,6 +318,69 @@ class Settings(BaseSettings):
     vm_persist_enabled: bool = True
     vm_persist_max_mb: int = 2048
 
+    # --- Boxes (DESIGN-BOXES.md; backend/vm/boxes.py) -----------------------
+    # Master switch for multi-box: per-project turn boxes, service boxes and
+    # builder boxes, each with its own CID, tap, /30 and proxy listener. OFF,
+    # everything is exactly the single shared guest above (`vm`), byte for byte.
+    vm_boxes_enabled: bool = False
+    # Caps, sized for the 4 GB Pi 4 test box (~3 GB available): shared 768 +
+    # one project box 768 + a service box 384 = 1920 fits the 2250 budget with
+    # room for the host. A request over a cap is refused (BoxCapError), never
+    # squeezed in. `vm_max_boxes` counts every box including the shared one.
+    vm_max_boxes: int = 4
+    vm_max_project_boxes: int = 1        # extra project turn boxes at a time
+    vm_guest_ram_budget_mb: int = 2250   # sum of mem_mb over all allocated boxes
+    vm_project_box_mem_mb: int = 768     # profile box_mem_mb overrides
+    vm_service_box_mem_mb: int = 384
+    vm_service_box_cpus: int = 1
+    vm_builder_box_mem_mb: int = 1024
+    vm_desktop_min_mem_mb: int = 1280    # the chromium variant; the budget keeps it alone
+    vm_builder_timeout_seconds: int = 3600   # (e) one variant-layer build
+    vm_box_cpus: int = 2
+    # CID ranges per kind (inclusive). The shared box keeps vm_guest_cid (3).
+    # A box's CID also names its tap (jvtap<cid>) and its /30
+    # (10.201.<cid>.0/30: host .1, guest .2), so all three stay <= 254.
+    vm_cid_project_min: int = 10
+    vm_cid_project_max: int = 49
+    vm_cid_service_min: int = 50
+    vm_cid_service_max: int = 89
+    vm_cid_builder_min: int = 90
+    vm_cid_builder_max: int = 127
+    # Idle project boxes are stopped after this long with no turn in flight
+    # (disposable, so stopping IS the scrub). 0 = never.
+    vm_box_idle_stop_seconds: int = 600
+    # (a) service boxes: the in-guest supervisor's vsock port (host dials it),
+    # the /srv data disk's hard size, and how often the host pings svcd.
+    vm_svcd_port: int = 5558
+    vm_svc_data_max_mb: int = 2048
+    vm_svc_ping_seconds: int = 15
+    # (b) process telemetry poll interval
+    vm_procwatch_seconds: int = 5
+    # (a) operator decision 0.3: old /persist disks are deleted this many days
+    # after their data was imported into a service box's /srv.
+    persist_retire_days: int = 30
+    # (a) operator decision 0.4: services with expose "lan" bind their metered
+    # relay to THIS second LAN address (an alias; never the address the Jav3 UI
+    # is served on). Empty = LAN exposure unavailable, loopback only.
+    services_lan_ip: str = ""
+    # --- Docker box runtime (WP8; Box.runtime "docker") ---------------------
+    # A lighter, weaker alternative to a KVM guest, chosen per profile
+    # (`box_runtime`). OFF: a profile asking for docker gets a refusal, never a
+    # silent kvm box. Same protocol as kvm over per-box AF_UNIX sockets
+    # (<box dir>/sock, mounted at /run/jav3); no TCP channel, never the docker
+    # socket. Hardening (rootless/userns-remap, cap-drop ALL, no-new-privileges,
+    # seccomp, read-only rootfs, pids/memory limits) is in docs/boxes-contract.md.
+    docker_enabled: bool = False
+    docker_bin: str = "docker"
+    docker_image_turn: str = "jav3-guest-turn:latest"
+    docker_image_svc: str = "jav3-guest-svc:latest"
+    docker_image_builder: str = "jav3-guest-builder:latest"
+    docker_oci_runtime: str = ""          # "" = default runc; "runsc" = gVisor when installed
+    docker_box_mem_mb: int = 512
+    docker_box_pids: int = 256
+    docker_box_cpus: float = 1.0
+    docker_tmpfs_mb: int = 256            # /tmp tmpfs on the read-only rootfs
+
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,
     # and refuse internal/private targets (SSRF guard).
