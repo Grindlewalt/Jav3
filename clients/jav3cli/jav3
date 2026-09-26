@@ -6,12 +6,15 @@
     jav3 -c | -r ID            resume the latest chat | chat ID
     jav3 -p "message"          one turn, plain output (also: cmd | jav3 -p)
     jav3 login                 paste the line from Settings -> Add computer
+                               (or /login inside the TUI: that line, or a password)
     jav3 chat [message]        one turn, or the TUI with no message
     jav3 whoami
     jav3 logout
 
 Credentials live in $XDG_CONFIG_HOME/jav3/credentials.json (default
-~/.config/jav3), file 0600 in a 0700 directory: {"address", "token"}.
+~/.config/jav3), file 0600 in a 0700 directory: {"address", "token"} for a
+device token (chat only), or {"address", "session", "username"} for an
+operator password session (full access, like the web app).
 Needs Python 3.11+ and httpx; the TUI also needs textual (the installer
 provides it; without it `jav3` falls back to a plain REPL).
 """
@@ -39,10 +42,16 @@ except ImportError:  # pragma: no cover — the installer provides it
 
 PROMPT = "Paste the line from Settings → Add computer: "
 RELOGIN = "not logged in (token missing, revoked or expired) — run: jav3 login"
+COOKIE_NAME = "jarvis_token"       # backend/auth.py: the operator session cookie
+SESSION_PREFIX = "session:"        # a credential string that is a session, not a token
 
 
 class CliError(Exception):
     """A message for the user; main() prints it and exits 1."""
+
+
+class NotLoggedIn(CliError):
+    """A 401, or no credential at all: the TUI's /login state."""
 
 
 # --- credentials --------------------------------------------------------------------
@@ -56,7 +65,8 @@ def cred_path() -> Path:
     return config_dir() / "credentials.json"
 
 
-def save_credentials(address: str, token: str) -> Path:
+def save_credentials(address: str, token: str | None = None, *,
+                     session: str | None = None, username: str | None = None) -> Path:
     """Write atomically, 0600 from the first byte, in a 0700 directory.
 
     Every step goes through a descriptor for the config dir itself, opened
@@ -88,7 +98,9 @@ def save_credentials(address: str, token: str) -> Path:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600,
                      dir_fd=dfd)
         try:
-            data = json.dumps({"address": address, "token": token}).encode()
+            rec = ({"address": address, "session": session, "username": username or ""}
+                   if session else {"address": address, "token": token})
+            data = json.dumps(rec).encode()
             while data:
                 data = data[os.write(fd, data):]
             os.fsync(fd)
@@ -111,9 +123,32 @@ def load_credentials() -> dict | None:
         data = json.loads(cred_path().read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not data.get("token") or not data.get("address"):
+    if not isinstance(data, dict) or not data.get("address") or not (
+            data.get("token") or data.get("session")):
         return None
     return data
+
+
+def cred_of(creds: dict) -> str:
+    """The one credential string the HTTP helpers take: a device token as is,
+    a password session as SESSION_PREFIX + the session JWT."""
+    if creds.get("session"):
+        return SESSION_PREFIX + creds["session"]
+    return creds["token"]
+
+
+def is_session(cred: str | None) -> bool:
+    return bool(cred) and cred.startswith(SESSION_PREFIX)
+
+
+def auth_headers(cred: str | None) -> dict:
+    """A device token rides as a bearer; a session as the operator's cookie —
+    the same one the web app holds, so it has the same (full) rights."""
+    if not cred:
+        return {}
+    if is_session(cred):
+        return {"Cookie": f"{COOKIE_NAME}={cred[len(SESSION_PREFIX):]}"}
+    return {"Authorization": f"Bearer {cred}"}
 
 
 def delete_credentials() -> bool:
@@ -161,9 +196,7 @@ def base_url(address: str) -> str:
 # --- HTTP -------------------------------------------------------------------------------
 
 def _client(base: str, token: str | None = None, timeout: float | None = 30.0) -> httpx.Client:
-    headers = {"User-Agent": "jav3-cli"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    headers = {"User-Agent": "jav3-cli", **auth_headers(token)}
     # no redirects: a bearer token is never replayed to wherever a 3xx points
     return httpx.Client(base_url=base, headers=headers, timeout=timeout,
                         follow_redirects=False)
@@ -192,7 +225,7 @@ def _session(args) -> tuple[str, str]:
     creds = load_credentials()
     if not creds:
         raise CliError(RELOGIN)
-    return base_url(args.server or creds["address"]), creds["token"]
+    return base_url(args.server or creds["address"]), cred_of(creds)
 
 
 # --- commands ---------------------------------------------------------------------------
@@ -307,6 +340,8 @@ def cmd_logout(args, out=sys.stdout) -> int:
         print("not logged in", file=out)
         return 0
     base = base_url(args.server or creds["address"])
+    if creds.get("session"):
+        return _logout_session(base, creds, out)
     try:
         with _client(base, creds["token"], timeout=10) as c:
             r = c.delete("/api/devices/self")
@@ -318,6 +353,77 @@ def cmd_logout(args, out=sys.stdout) -> int:
     delete_credentials()
     print("logged out", file=out)
     return 0
+
+
+def _logout_session(base: str, creds: dict, out) -> int:
+    """A password session is a signed cookie with no server-side row to revoke:
+    tell the server (it clears the cookie; harmless if unreachable) and forget
+    the local copy, which is the only one."""
+    try:
+        with _client(base, cred_of(creds), timeout=10) as c:
+            c.post("/api/auth/logout")
+    except httpx.HTTPError:
+        pass
+    delete_credentials()
+    print("logged out", file=out)
+    return 0
+
+
+PLAIN_HTTP_PASSWORD = ("warning: {base} is plain http — your password, and the session "
+                       "it is traded for, cross the network unencrypted. Only use it on "
+                       "a network you trust.")
+
+
+def _session_cookie(r: httpx.Response) -> str | None:
+    """The session JWT from Set-Cookie, read by hand: the server may mark it
+    Secure, and a cookie jar would then drop it for a plain-http LAN address."""
+    from http.cookies import CookieError, SimpleCookie
+    for raw in r.headers.get_list("set-cookie"):
+        jar = SimpleCookie()
+        try:
+            jar.load(raw)
+        except CookieError:
+            continue
+        if COOKIE_NAME in jar and jar[COOKIE_NAME].value:
+            return jar[COOKIE_NAME].value
+    return None
+
+
+def login_with_password(address: str, username: str, password: str,
+                        server: str | None = None) -> tuple[str, str, str]:
+    """POST /api/auth/login, the web app's own login — the operator session
+    cookie, full rights. Saved to the credentials file; (base, cred, username)."""
+    if server:
+        address = server
+    base = upgrade_to_https(base_url(address))
+    if base.startswith("https://") and not address.startswith("https://"):
+        address = base
+    if base.startswith("http://"):
+        print(PLAIN_HTTP_PASSWORD.format(base=base), file=sys.stderr)
+    # the server slows repeated failures down (up to 8s each): leave room for it
+    with _client(base, timeout=40) as c:
+        try:
+            r = c.post("/api/auth/login", json={"username": username, "password": password})
+        except httpx.HTTPError as e:
+            raise CliError(f"could not reach {base}: {e}")
+    if r.is_redirect:
+        raise CliError(redirect_hint(base, r.headers.get("location", "")))
+    if r.status_code == 401:
+        raise CliError("wrong username or password (each further miss waits a little "
+                       "longer)")
+    _check(r)
+    jwt = _session_cookie(r)
+    if not jwt:
+        raise CliError(f"{base} did not answer like a Jav3 server (no session cookie)")
+    try:
+        who = r.json().get("username") or username
+    except (ValueError, AttributeError):
+        who = username
+    try:
+        save_credentials(address, session=jwt, username=who)
+    except OSError as e:
+        raise CliError(f"could not save credentials: {e}")
+    return base, SESSION_PREFIX + jwt, who
 
 
 def iter_sse(lines):
@@ -434,6 +540,14 @@ def run_turn(c: httpx.Client, message: str, conversation_id: int | None,
     raise CliError("not sent")
 
 
+EXIT_WORDS = ("exit", "quit", "/exit", "/quit")
+
+
+def is_exit(text: str) -> bool:
+    """Only a prompt that is nothing but exit/quit (slash optional, any case)
+    quits; a message that merely contains the word is sent."""
+    return (text or "").strip().lower() in EXIT_WORDS
+
 
 def cmd_chat(args, out=sys.stdout, read=input) -> int:
     """One turn with a message; with none, the interactive TUI (or, when its
@@ -454,7 +568,7 @@ def cmd_chat(args, out=sys.stdout, read=input) -> int:
                 except EOFError:
                     print(file=out)
                     return 0
-                if msg.strip() in ("/exit", "/quit"):
+                if is_exit(msg):
                     return 0
                 if not msg.strip():
                     continue
@@ -486,6 +600,11 @@ EXAMPLES = ("Fix the failing test in tests/", "What changed in the last commit?"
             "Summarise this week's journal", "Research a quiet NAS for the rack",
             "Write a script that backs up ~/notes")
 COLLAPSED_LINES = 10
+NOTICE_CAP = 50                    # notifications kept in the sidebar
+NOT_LOGGED_IN = ("not logged in — /login: paste the line from Settings → Add computer "
+                 "(chat only), or use your password (full access)")
+SESSION_LOST = "not logged in (session expired, or token revoked) — /login"
+NEW_PROJECT = "+new"               # the /project picker's "+ New project" row
 
 
 def tui_available() -> bool:
@@ -717,6 +836,51 @@ class TurnState:
         self.printed: list[str] = []      # finished text segments
         self.running: dict = {}           # tool id -> ToolView
         self.tools: list[dict] = []       # finished calls
+        self.done = False                 # a final arrived (not an error)
+
+
+def _subsequence_gaps(q: str, t: str) -> int | None:
+    """Letters of q in order inside t: how many letters of t lie between the
+    first and the last hit beyond q's own (None = not all found)."""
+    pos, first = 0, None
+    for ch in q:
+        pos = t.find(ch, pos)
+        if pos < 0:
+            return None
+        first = pos if first is None else first
+        pos += 1
+    return (pos - first) - len(q)
+
+
+def picker_score(query: str, value, label: str = "", meta: str = "") -> int:
+    """How closely a picker row matches what was typed; 0 = not at all. An
+    exact name beats a prefix, beats a word that starts with it, beats a
+    substring (earlier is better), beats its letters in order (tighter is
+    better), beats a hit in the row's detail text only."""
+    import re
+    q = (query or "").strip().lower()
+    if not q:
+        return 1
+    best = 0
+    for text in (label or "", str(value or "")):
+        t = text.lower()
+        if not t:
+            continue
+        if t == q:
+            sc = 1000
+        elif t.startswith(q):
+            sc = 900 - min(len(t) - len(q), 99)
+        elif any(w.startswith(q) for w in re.split(r"[\s/_.:\-]+", t)):
+            sc = 800 - min(len(t), 99)
+        elif q in t:
+            sc = 700 - min(t.index(q), 99)
+        else:
+            gaps = _subsequence_gaps(q, t)
+            sc = 0 if gaps is None else 400 - min(gaps, 99)
+        best = max(best, sc)
+    if not best and q in (meta or "").lower():
+        best = 200
+    return best
 
 
 class Command:
@@ -871,61 +1035,117 @@ def build_tui(base: str, token: str, **kw):
     # -- dialogs ----------------------------------------------------------------------------
 
     class Picker(ModalScreen):
-        """opencode's DialogSelect: a title, a filter, a list. Enter picks; with
-        `custom`, Enter on text that matches nothing returns the text itself."""
+        """opencode's DialogSelect, arrow-first. It opens on the list: ↑ ↓ move,
+        enter picks, esc closes. `t` (or any other printable key, which is kept
+        as the first letter) starts typing a filter: rows then sort by how
+        closely they match (picker_score) with the closest highlighted, ↑ ↓
+        still move, backspace edits (and on an empty filter goes back to the
+        list). With `custom`, enter on text that matches nothing returns the
+        text itself. Rows are (value, label, meta); a None value is a heading.
+        `actions` maps a key, live in list mode only, to (label, async
+        fn(value) -> new rows or None) — space toggling a model, say."""
 
         BINDINGS = [Binding("escape", "cancel", show=False)]
 
         def __init__(self, title: str, rows: list[tuple[str, str, str]],
                      current: str | None = None, custom: bool = False,
-                     hint: str = "") -> None:
+                     hint: str = "", actions: dict | None = None) -> None:
             super().__init__()
             self.title_text, self.rows, self.current = title, rows, current
             self.custom, self.hint = custom, hint
+            self.actions = actions or {}
+            self.typing = False
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog"):
                 with Horizontal(id="dialog-head"):
                     yield Static(f"[b]{_esc(self.title_text)}[/]", id="dialog-title")
                     yield Static("[$text-muted]esc[/]", id="dialog-esc")
-                yield Input(placeholder="Search" + (" or type a name" if self.custom else ""),
-                            id="filter")
+                yield Input(placeholder="Filter" + (" or type a name" if self.custom else ""),
+                            id="filter", select_on_focus=False)
                 yield OptionList(id="choices")
-                yield Static(f"[$text-muted]{_esc(self.hint)}[/]" if self.hint else "",
-                             id="dialog-hint")
+                yield Static(id="dialog-hint")
 
         def on_mount(self) -> None:
+            self.query_one("#filter", Input).display = False
             self.fill("")
-            self.query_one("#filter", Input).focus()
+            self.query_one("#choices", OptionList).focus()
+            self._show_hint()
 
-        def fill(self, q: str) -> None:
+        def _show_hint(self) -> None:
+            keys = ["↑↓ move", "enter pick"]
+            keys.append("backspace back to the list" if self.typing else "t type to filter")
+            if not self.typing:
+                keys += [f"{'␣' if k == 'space' else k} {label}"
+                         for k, (label, _) in self.actions.items()]
+            text = "  ".join(keys) + (f"\n{self.hint}" if self.hint else "")
+            self.query_one("#dialog-hint", Static).update(f"[$text-muted]{_esc(text)}[/]")
+
+        def fill(self, q: str, keep: str | None = None) -> None:
             ol = self.query_one("#choices", OptionList)
             ol.clear_options()
-            ql = q.lower()
-            hit = 0
-            for value, label, meta in self.rows:
-                if ql and ql not in f"{value} {label} {meta}".lower():
+            rows = self.rows
+            if q.strip():
+                scored = [(picker_score(q, v, lb, m), i, (v, lb, m))
+                          for i, (v, lb, m) in enumerate(rows) if v is not None]
+                rows = [r for sc, _, r in sorted((x for x in scored if x[0] > 0),
+                                                 key=lambda x: (-x[0], x[1]))]
+            hit = None
+            for value, label, meta in rows:
+                if value is None:
+                    ol.add_option(Option(f"[$accent b]{_esc(label)}[/]", disabled=True))
                     continue
                 mark = "[$primary]●[/] " if value == self.current else "  "
                 text = f"{mark}{_esc(label or value)}"
                 if meta:
                     text += f"  [$text-muted]{_esc(meta)}[/]"
                 ol.add_option(Option(text, id=value))
-                if value == self.current and not ql:
+                if keep is not None and value == keep:
                     hit = ol.option_count - 1
-            if ol.option_count:
+                elif keep is None and not q.strip() and value == self.current and hit is None:
+                    hit = ol.option_count - 1
+            if hit is None:
+                hit = next((i for i in range(ol.option_count)
+                            if not ol.get_option_at_index(i).disabled), None)
+            if hit is not None:
                 ol.highlighted = hit
+
+        def start_typing(self, text: str = "") -> None:
+            f = self.query_one("#filter", Input)
+            self.typing = True
+            f.display = True
+            f.value = text
+            f.cursor_position = len(text)
+            f.focus()
+            self.fill(text)
+            self._show_hint()
+
+        def stop_typing(self) -> None:
+            f = self.query_one("#filter", Input)
+            ol = self.query_one("#choices", OptionList)
+            keep = (ol.get_option_at_index(ol.highlighted).id
+                    if ol.highlighted is not None and ol.option_count else None)
+            self.typing = False
+            f.value = ""
+            f.display = False
+            self.fill("", keep=keep)
+            ol.focus()
+            self._show_hint()
 
         @on(Input.Changed, "#filter")
         def _changed(self, ev) -> None:
-            self.fill(ev.value)
+            if self.typing:
+                self.fill(ev.value)
 
         @on(Input.Submitted, "#filter")
         def _submitted(self, ev) -> None:
             ol = self.query_one("#choices", OptionList)
             if ol.highlighted is not None and ol.option_count:
-                self.dismiss(ol.get_option_at_index(ol.highlighted).id)
-            elif self.custom and ev.value.strip():
+                opt = ol.get_option_at_index(ol.highlighted)
+                if not opt.disabled:
+                    self.dismiss(opt.id)
+                    return
+            if self.custom and ev.value.strip():
                 self.dismiss(ev.value.strip())
 
         @on(OptionList.OptionSelected)
@@ -934,10 +1154,48 @@ def build_tui(base: str, token: str, **kw):
 
         def on_key(self, event) -> None:
             ol = self.query_one("#choices", OptionList)
-            if event.key in ("up", "down", "pageup", "pagedown") and ol.option_count:
+            key = event.key
+            if key in ("up", "down", "pageup", "pagedown"):
                 event.stop()
-                {"up": ol.action_cursor_up, "down": ol.action_cursor_down,
-                 "pageup": ol.action_page_up, "pagedown": ol.action_page_down}[event.key]()
+                event.prevent_default()
+                if ol.option_count:
+                    {"up": ol.action_cursor_up, "down": ol.action_cursor_down,
+                     "pageup": ol.action_page_up, "pagedown": ol.action_page_down}[key]()
+                return
+            if self.typing:
+                if key == "backspace" and not self.query_one("#filter", Input).value:
+                    event.stop()
+                    event.prevent_default()
+                    self.stop_typing()
+                return
+            if key in self.actions:
+                event.stop()
+                event.prevent_default()
+                self.run_worker(self._run_action(key), group="picker-action")
+                return
+            ch = event.character
+            if event.is_printable and ch and not ch.isspace():
+                event.stop()
+                event.prevent_default()
+                self.start_typing("" if key == "t" else ch)
+
+        async def _run_action(self, key: str) -> None:
+            ol = self.query_one("#choices", OptionList)
+            if ol.highlighted is None or not ol.option_count:
+                return
+            opt = ol.get_option_at_index(ol.highlighted)
+            if opt.disabled or opt.id is None:
+                return
+            _, fn = self.actions[key]
+            try:
+                rows = await fn(opt.id)
+            except CliError as e:
+                self.app.notify(str(e), severity="error")
+                return
+            if rows is not None:
+                self.rows = rows
+                self.fill(self.query_one("#filter", Input).value if self.typing else "",
+                          keep=opt.id)
 
         def action_cancel(self) -> None:
             self.dismiss(None)
@@ -1034,6 +1292,8 @@ def build_tui(base: str, token: str, **kw):
         #sidebar { width: 42; background: $surface; padding: 1 2; scrollbar-size-vertical: 1; }
         #sidebar Static { margin-bottom: 1; }
         #sb-foot { dock: bottom; margin: 0; color: $text-muted; }
+        #sidebar #sb-title, #sidebar #sb-context { margin-bottom: 0; }
+        #sb-notes { margin-top: 1; }
         Home { height: 1fr; align: center middle; }
         #logo { width: auto; }
         #home-hints { width: auto; margin-top: 2; color: $text-muted; }
@@ -1094,7 +1354,8 @@ def build_tui(base: str, token: str, **kw):
         _MAIN_ONLY = {"leader", "new", "toggle_sidebar", "toggle_tools", "external_editor",
                       "scroll_log", "ctrl_d"}
 
-        def __init__(self, base: str, token: str, *, server_override: str | None = None,
+        def __init__(self, base: str, token: str | None, *,
+                     server_override: str | None = None,
                      project: str | None = None, agent: str | None = None,
                      model: str | None = None, resume: int | None = None,
                      cont: bool = False, prompt: str | None = None, transport=None):
@@ -1108,6 +1369,9 @@ def build_tui(base: str, token: str, **kw):
             self.shown_model: str | None = None
             self.ephemeral = False
             self.whoami = "?"
+            self.logged_in: bool | None = None    # None = not checked yet
+            self.notices: list[tuple[float, str, str]] = []   # (time, kind, text), newest first
+            self.unread = 0
             self.options: dict = {}
             self.convs: list[dict] = []
             self.info: dict | None = None
@@ -1159,6 +1423,7 @@ def build_tui(base: str, token: str, **kw):
                     yield Static(id="sb-model")
                     yield Static(id="sb-files")
                     yield Static(id="sb-todo")
+                    yield Static(id="sb-notes")
                     yield Static(id="sb-foot")
 
         @property
@@ -1188,18 +1453,17 @@ def build_tui(base: str, token: str, **kw):
 
         async def _startup(self) -> None:
             self.client = self._new_client()
-            try:
-                who = await self.api("GET", "/api/devices/whoami")
-                self.whoami = who.get("username") or "?"
-            except CliError as e:
-                await self.note(str(e), "error")
+            resume, cont, prompt = self.initial
+            if not await self._check_login():
+                if prompt:                 # keep it for after /login
+                    self.editor.text = prompt
+                    self.editor.move_cursor(self.editor.document.end)
                 return
-            await asyncio.gather(self.refresh_options(), self.refresh_convs())
+            await self._after_login()
             if not self.options:
                 await self.note("this server predates the TUI's pickers (/api/chat/options): "
                                 "/model, /agent and /project take typed names", "warn")
             self.refresh_chrome()
-            resume, cont, prompt = self.initial
             try:
                 if cont and self.convs:
                     await self.open_conversation(self.convs[0]["id"])
@@ -1209,6 +1473,101 @@ def build_tui(base: str, token: str, **kw):
                 await self.note(str(e), "error")
             if prompt:
                 self.send(prompt)
+
+        async def _check_login(self) -> bool:
+            """Who the saved credential is. No credential, or a 401: the
+            not-logged-in state (the TUI runs; /login fixes it)."""
+            if not self.token or not self.base:
+                self.logged_in = False
+                await self.note(NOT_LOGGED_IN, "warn")
+                self.refresh_chrome()
+                return False
+            try:
+                who = await self.api("GET", "/api/devices/whoami")
+            except NotLoggedIn:
+                self.logged_in = False
+                await self.note("the saved login was refused (revoked or expired) — /login",
+                                "warn")
+                self.refresh_chrome()
+                return False
+            except CliError as e:
+                await self.note(str(e), "error")
+                return False
+            self.whoami = who.get("username") or "?"
+            self.logged_in = True
+            return True
+
+        async def _after_login(self) -> None:
+            await asyncio.gather(self.refresh_options(), self.refresh_convs())
+            if is_session(self.token):
+                self.run_worker(self._notice_loop(), group="notices", exclusive=True)
+            self.refresh_chrome()
+
+        @property
+        def full_access(self) -> bool:
+            return is_session(self.token) and self.logged_in is not False
+
+        def _access_label(self) -> str:
+            if not self.token or self.logged_in is False:
+                return "not logged in"
+            return "full access" if is_session(self.token) else "chat only"
+
+        def _need_full(self, what: str) -> None:
+            if not self.full_access:
+                raise CliError(f"{what} needs full access — /login with your password "
+                               "(a device token from Settings → Add computer is chat only)")
+
+        async def _notice_loop(self) -> None:
+            """The server's notice stream (agent runs the operator started
+            finishing elsewhere) -> notifications. Operator session only."""
+            backoff = 2.0
+            while is_session(self.token) and self.client is not None:
+                try:
+                    async with self.client.stream("GET", "/api/agents/notices/stream") as r:
+                        if r.status_code in (401, 403):
+                            return
+                        if r.status_code < 400:
+                            backoff = 2.0
+                            async for ev in aiter_sse(r.aiter_lines()):
+                                if ev.get("type") == "agent_run_done":
+                                    self._agent_notice(ev)
+                except (httpx.HTTPError, ValueError):
+                    pass
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+
+        def _agent_notice(self, ev: dict) -> None:
+            who = ev.get("agent") or ev.get("slug") or "an agent"
+            where = f" #{ev['conversation_id']}" if ev.get("conversation_id") else ""
+            if ev.get("ok") is False:
+                self.push_notice(f"◆ {who}{where} failed after {ev.get('took', '?')}: "
+                                 f"{_short(ev.get('error') or 'error', 120)}", "error")
+            else:
+                tail = f" — {_short(ev['summary'], 120)}" if ev.get("summary") else ""
+                self.push_notice(f"◆ {who}{where} finished in {ev.get('took', '?')}{tail}",
+                                 "done")
+
+        # -- notifications ---------------------------------------------------------------------
+
+        def sidebar_shown(self) -> bool:
+            return bool(self.sidebar_pref)
+
+        def push_notice(self, text: str, kind: str = "info", toast: bool = True) -> None:
+            """Newest first, capped. With the sidebar hidden it also counts as
+            unread (the badge in the status row) and shows as a toast."""
+            from textual.css.query import NoMatches
+            self.notices.insert(0, (time.time(), kind, text))
+            del self.notices[NOTICE_CAP:]
+            if not self.sidebar_shown():
+                self.unread += 1
+                if toast:
+                    self.notify(text, timeout=5, severity={"error": "error", "warn": "warning"}
+                                .get(kind, "information"))
+            try:
+                self._refresh_sidebar()
+                self._refresh_status()
+            except NoMatches:
+                pass          # a dialog is on top; the next refresh catches up
 
         async def on_unmount(self) -> None:
             if self.client is not None:
@@ -1286,10 +1645,12 @@ def build_tui(base: str, token: str, **kw):
         def _new_client(self):
             return httpx.AsyncClient(
                 base_url=self.base, follow_redirects=False, transport=self.transport,
-                headers={"User-Agent": "jav3-cli", "Authorization": f"Bearer {self.token}"},
+                headers={"User-Agent": "jav3-cli", **auth_headers(self.token)},
                 timeout=httpx.Timeout(30.0, read=None))
 
         async def api(self, method: str, path: str, **kw):
+            if not self.base or self.client is None or not self.token:
+                raise NotLoggedIn(NOT_LOGGED_IN)
             try:
                 r = await self.client.request(method, path, **kw)
             except httpx.HTTPError as e:
@@ -1297,13 +1658,20 @@ def build_tui(base: str, token: str, **kw):
             if r.is_redirect:
                 raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
             if r.status_code == 401:
-                raise CliError("not logged in (token missing, revoked or expired) — /login")
+                self._login_lost()
+                raise NotLoggedIn(SESSION_LOST)
             if r.status_code >= 400:
                 raise CliError(f"server said {r.status_code}: {_detail(r)}")
             try:
                 return r.json()
             except ValueError:
                 return {}
+
+        def _login_lost(self) -> None:
+            if self.logged_in:
+                self.logged_in = False
+                self.push_notice("the server refused the login (expired or revoked) — /login",
+                                 "warn")
 
         async def refresh_options(self) -> None:
             try:
@@ -1340,6 +1708,8 @@ def build_tui(base: str, token: str, **kw):
 
         async def note(self, text: str, kind: str = "info") -> None:
             await self.mount_log(Note(_esc(text), classes=kind))
+            if kind == "error":
+                self.push_notice(text, "error")
 
         async def clear_log(self) -> None:
             await self.log_view.remove_children()
@@ -1391,20 +1761,23 @@ def build_tui(base: str, token: str, **kw):
             except Exception:  # noqa: BLE001
                 home_hints = None
             if home_hints is not None:
+                who = (f"[$text-muted]{_esc(self.whoami)} @ {_esc(self.base)} · "
+                       f"{self._access_label()}[/]" if self.logged_in else
+                       "[$warning]not logged in[/] [$text-muted]— /login[/]"
+                       if self.logged_in is False else f"[$text-muted]{_esc(self.base)}[/]")
                 home_hints.update(
-                    f"[$text-muted]{_esc(self.whoami)} @ {_esc(self.base)}[/]\n\n"
+                    f"{who}\n\n"
                     "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
                     "[$text]ctrl+x l[/]    [$text-muted]sessions[/]\n"
                     "[$text]ctrl+x m[/]    [$text-muted]models[/]\n"
                     "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
-            wide = self.size.width >= 110
-            show = self.sidebar_pref if self.sidebar_pref is not None else wide
+            show = self.sidebar_shown()        # hidden unless the operator opened it
             self.query_one("#sidebar").display = show
             header = self.query_one("#header", Static)
             header.display = not show
             header.update(f"[b]{_esc(self.title_text or 'New chat')}[/]"
                           + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
-                          + "  [$text-muted]ctrl+b sidebar[/]")
+                          + "  [$text-muted]ctrl+b notifications[/]")
 
         def _refresh_status(self) -> None:
             left = self.query_one("#status-left", Static)
@@ -1412,7 +1785,7 @@ def build_tui(base: str, token: str, **kw):
             if self.leader:
                 keys = "  ".join(f"[$primary]{c.leader}[/] {name}"
                                  for name, c in self.unique_commands() if c.leader)
-                left.update(f"[$warning b]ctrl+x[/]  {keys}  [$primary]b[/] sidebar")
+                left.update(f"[$warning b]ctrl+x[/]  {keys}  [$primary]b[/] notifications")
                 right.update("")
                 return
             if self.busy and self.turn is not None:
@@ -1426,10 +1799,15 @@ def build_tui(base: str, token: str, **kw):
                        if time.monotonic() - self.esc_armed < 2 else "esc interrupt")
                 q = f"  [$accent]{len(self.queue)} queued[/]" if self.queue else ""
                 left.update(f"[$accent]{spin}[/] {verb}…  [$text-muted]{secs}s · {esc}[/]{q}")
+            elif self.logged_in is False:
+                left.update("[$warning]not logged in[/] [$text-muted]— /login · "
+                            "/ commands[/]")
             else:
                 left.update("[$text-muted]enter send · ctrl+j newline · / commands · "
                             "@ file · ! shell[/]")
-            right.update("[$text-muted]ctrl+x leader · ctrl+p commands[/]")
+            badge = (f"[$warning b]● {self.unread}[/] [$text-muted]ctrl+b[/]  "
+                     if self.unread else "")
+            right.update(f"{badge}[$text-muted]ctrl+x leader · ctrl+p commands[/]")
 
         def _refresh_sidebar(self) -> None:
             info = self.info or {}
@@ -1442,26 +1820,24 @@ def build_tui(base: str, token: str, **kw):
                 sub.append(f"⌂ {proj}")
             self.query_one("#sb-title", Static).update(
                 f"[b]{_esc(title)}[/]\n[$text-muted]{_esc(' · '.join(sub))}[/]")
-            ctx = ["[b]Context[/]"]
+            # the chat, compactly: usage on one line, the model on the next
+            ctx = []
             if info:
-                ctx.append(f"{_fmt_tokens(info.get('input_tokens', 0) + info.get('output_tokens', 0))}"
-                           " tokens")
+                line = (f"{_fmt_tokens(info.get('input_tokens', 0) + info.get('output_tokens', 0))}"
+                        f" tok · ${info.get('cost_usd', 0):.4f}")
                 c = info.get("context") or {}
                 if c.get("used") and c.get("window"):
                     pct = min(100, round(100 * c["used"] / c["window"]))
-                    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
                     colour = "$error" if pct > 85 else "$warning" if pct > 60 else "$primary"
-                    ctx.append(f"[{colour}]{bar}[/] {pct}% used")
-                ctx.append(f"${info.get('cost_usd', 0):.4f} spent")
-                ctx.append(f"[$text-muted]{info.get('calls', 0)} model calls[/]")
+                    line += f" · [{colour}]{pct}%[/] ctx"
+                ctx.append(line)
             else:
                 ctx.append("[$text-muted]no usage yet[/]")
             self.query_one("#sb-context", Static).update("\n".join(ctx))
             model = self._model_label()
-            m = ["[b]Model[/]", _esc(model.split("/")[-1])]
-            if "/" in model:
-                m.append(f"[$text-muted]{_esc(model.split('/')[0])}[/]")
-            self.query_one("#sb-model", Static).update("\n".join(m))
+            self.query_one("#sb-model", Static).update(
+                f"{_esc(model.split('/')[-1])}"
+                + (f" [$text-muted]· {_esc(model.split('/')[0])}[/]" if "/" in model else ""))
             files = info.get("files") or []
             fw = self.query_one("#sb-files", Static)
             fw.display = bool(files)
@@ -1478,9 +1854,20 @@ def build_tui(base: str, token: str, **kw):
                 tw.update("[b]Todo[/]\n" + "\n".join(
                     f"[$success]✓[/] [$text-muted strike]{_esc(_short(t, 32))}[/]" if done
                     else f"[$warning]☐[/] {_esc(_short(t, 32))}" for done, t in self.todos))
+            icons = {"error": "[$error]✗[/]", "warn": "[$warning]![/]",
+                     "done": "[$success]✓[/]"}
+            notes = ["[b]Notifications[/]"]
+            for ts, kind, text in self.notices:
+                notes.append(f"[$text-muted]{time.strftime('%H:%M', time.localtime(ts))}[/] "
+                             f"{icons.get(kind, '[$primary]·[/]')} {_esc(_short(text, 160))}")
+            if not self.notices:
+                notes.append("[$text-muted]nothing yet[/]")
+            self.query_one("#sb-notes", Static).update("\n".join(notes))
+            access = self._access_label()
+            colour = {"full access": "$success", "chat only": "$primary"}.get(access, "$warning")
             self.query_one("#sb-foot", Static).update(
-                f"[$primary]●[/] [b]Jav3[/] [$text-muted]{_esc(self.whoami)}[/]\n"
-                f"[$text-muted]{_esc(self.base.split('://')[-1])}[/]")
+                f"[{colour}]●[/] [b]Jav3[/] [$text-muted]{_esc(self.whoami)} · {access}[/]\n"
+                f"[$text-muted]{_esc(self.base.split('://')[-1] or '(no server)')}[/]")
 
         def _tick(self) -> None:
             from textual.css.query import NoMatches
@@ -1572,8 +1959,8 @@ def build_tui(base: str, token: str, **kw):
                     if r.is_redirect:
                         raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
                     if r.status_code == 401:
-                        raise CliError("not logged in (token missing, revoked or expired) "
-                                       "— /login")
+                        self._login_lost()
+                        raise NotLoggedIn(SESSION_LOST)
                     if r.status_code >= 400:
                         await r.aread()
                         raise CliError(f"server said {r.status_code}: {_detail(r)}")
@@ -1633,6 +2020,7 @@ def build_tui(base: str, token: str, **kw):
             elif t == "inbox":
                 await self.note(f"✉ {_short(ev.get('text', ''), 200)}")
             elif t == "final":
+                turn.done = True
                 await self._finish(ev.get("content") or "")
                 return True
             elif t == "error":
@@ -1686,6 +2074,13 @@ def build_tui(base: str, token: str, **kw):
             await self.mount_log(Footer(f"[$primary]▣[/] {_esc(who)} · {_esc(model)} · {secs}s"))
 
         async def _end_turn(self) -> None:
+            t = self.turn
+            if t is not None and t.done and t.cid is not None and not self.ephemeral \
+                    and (t.cid != self.cid or not self.sidebar_shown()):
+                name = (self.title_text if t.cid == self.cid and self.title_text
+                        else f"#{t.cid}")
+                self.push_notice(f"reply ready in {_short(name, 60)} · "
+                                 f"{int(time.monotonic() - t.started)}s", "done")
             if self.turn is not None:
                 self.last_turn = self.turn
             self.turn, self.busy = None, False
@@ -1748,12 +2143,17 @@ def build_tui(base: str, token: str, **kw):
 
         def dispatch(self, text: str) -> None:
             s = text.strip()
+            if is_exit(s):
+                self.exit()
+                return
             if s == "?":
                 s = "/help"
             if s.startswith("/") and not s.startswith("//"):
                 self.run_worker(self.run_command(s), group="cmd")
             elif s.startswith("!"):
                 self.run_worker(self.local_shell(s[1:].strip()), group="shell")
+            elif not self.token or self.logged_in is False:
+                self.run_worker(self.note(NOT_LOGGED_IN, "warn"), group="cmd")
             else:
                 self.send(text[text.index("/") + 1:] if s.startswith("//") else text)
 
@@ -2000,6 +2400,8 @@ def build_tui(base: str, token: str, **kw):
         def action_toggle_sidebar(self) -> None:
             shown = self.query_one("#sidebar").display
             self.sidebar_pref = not shown
+            if self.sidebar_pref:
+                self.unread = 0
             self._save_settings(sidebar=self.sidebar_pref)
             self.refresh_chrome()
 
@@ -2039,12 +2441,16 @@ def build_tui(base: str, token: str, **kw):
                 "new": Command(self.c_new, "start a fresh chat", leader="n"),
                 "sessions": Command(self.c_sessions, "switch to another chat", "[id]",
                                     takes_arg=True, leader="l"),
-                "models": Command(self.c_model, "pick the model", "[provider/id]",
+                "models": Command(self.c_model, "pick the model (full access: switch "
+                                  "models on/off, set the default)", "[provider/id]",
                                   takes_arg=True, leader="m"),
+                "provider": Command(self.c_provider, "add a provider's API key / base URL, "
+                                    "then test it", "[id]", takes_arg=True, leader="k"),
                 "agents": Command(self.c_agent, "start a new chat as an agent", "[slug]",
                                   takes_arg=True, leader="a"),
-                "project": Command(self.c_project, "pin this chat to a project",
-                                   "[slug|none|follow]", takes_arg=True, leader="p"),
+                "project": Command(self.c_project, "pin this chat to a project (or make "
+                                   "a new one)", "[slug|none|follow]", takes_arg=True,
+                                   leader="p"),
                 "themes": Command(self.c_theme, "change the colours", "[name]",
                                   takes_arg=True, busy_ok=True, leader="t"),
                 "temp": Command(self.c_temp, "toggle temporary chats (nothing saved)"),
@@ -2067,15 +2473,17 @@ def build_tui(base: str, token: str, **kw):
                                   leader="s"),
                 "editor": Command(self.c_editor, "write the prompt in $EDITOR (ctrl+g)",
                                   busy_ok=True, leader="e"),
-                "login": Command(self.c_login, "log in with a new line from Settings"),
-                "logout": Command(self.c_logout, "revoke this computer's token and quit"),
+                "login": Command(self.c_login, "log in: the line from Settings (chat only) "
+                                 "or your password (full access)", "[line|password]"),
+                "logout": Command(self.c_logout, "log out (a device token is revoked)"),
                 "exit": Command(self.c_exit, "quit (a running turn keeps going)",
                                 busy_ok=True, leader="q"),
             }
             for alias, name in (("quit", "exit"), ("resume", "sessions"),
                                 ("history", "sessions"), ("model", "models"),
                                 ("agent", "agents"), ("theme", "themes"),
-                                ("clear", "new"), ("tools", "details")):
+                                ("clear", "new"), ("tools", "details"),
+                                ("providers", "provider")):
                 c[alias] = c[name]
             return c
 
@@ -2106,10 +2514,14 @@ def build_tui(base: str, token: str, **kw):
                         for cv in self.convs[:60]]
             if fn == self.c_theme:
                 return [(t, "") for t in sorted(self.available_themes)]
+            if fn == self.c_login:
+                return [("password", "full access"), ("line", "chat only")]
             return []
 
-        async def pick(self, title: str, rows, current=None, custom=False, hint=""):
-            return await self.push_screen_wait(Picker(title, rows, current, custom, hint))
+        async def pick(self, title: str, rows, current=None, custom=False, hint="",
+                       actions=None):
+            return await self.push_screen_wait(Picker(title, rows, current, custom, hint,
+                                                      actions))
 
         async def c_help(self, arg: str) -> None:
             lines = ["# Jav3", "", "## Commands", "", "| command | | leader |", "|---|---|---|"]
@@ -2123,10 +2535,13 @@ def build_tui(base: str, token: str, **kw):
                          ("esc esc", "interrupt the running turn"),
                          ("esc esc (idle)", "clear the prompt"),
                          ("ctrl+c", "clear prompt · interrupt · twice to quit"),
-                         ("ctrl+x then a key", "leader: see the table above; b = sidebar"),
+                         ("ctrl+x then a key", "leader: see the table above; "
+                                               "b = notifications"),
                          ("ctrl+p", "command palette"),
                          ("ctrl+n", "new chat"),
-                         ("ctrl+b", "toggle the sidebar"),
+                         ("ctrl+b", "notifications sidebar (● n = unread)"),
+                         ("in a picker", "↑↓ enter esc · t or any letter filters"),
+                         ("exit · quit", "alone on the prompt: quit"),
                          ("ctrl+o", "expand / collapse tool output (or click a tool)"),
                          ("ctrl+g", "edit the prompt in $EDITOR"),
                          ("pgup / pgdn", "scroll the transcript"),
@@ -2209,6 +2624,9 @@ def build_tui(base: str, token: str, **kw):
                 self.run_worker(self.attach(cid), group="turn")
 
         async def c_model(self, arg: str) -> None:
+            if not arg and self.full_access:
+                await self._pick_model_full()
+                return
             if not arg:
                 rows = [(v, v.split("/")[-1], meta) for v, meta in self.arg_options("models")]
                 cur = self.model or self.shown_model or (self.options or {}).get("default")
@@ -2245,9 +2663,16 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_project(self, arg: str) -> None:
             if not arg:
-                rows = [(v, v, meta) for v, meta in self.arg_options("project")]
-                arg = await self.pick("Projects", rows, self.project or self.project_mode,
-                                      custom=True) or ""
+                actions = {"l": ("load as active", self._load_project)} \
+                    if self.full_access else None
+                arg = await self.pick("Projects", await self._project_rows(),
+                                      self.project or self.project_mode, custom=True,
+                                      actions=actions,
+                                      hint="enter pins this chat to it") or ""
+                if not arg:
+                    return
+            if arg == NEW_PROJECT:
+                arg = await self._new_project() or ""
                 if not arg:
                     return
             mode = arg if arg in ("none", "follow") else "pin"
@@ -2360,7 +2785,8 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_status(self, arg: str) -> None:
             info = self.info or {}
-            rows = [("server", self.base), ("signed in as", self.whoami),
+            rows = [("server", self.base or "(none)"), ("signed in as", self.whoami),
+                    ("access", self._access_label()),
                     ("chat", f"#{self.cid} {self.title_text or ''}" if self.cid else "(new)"),
                     ("model", self._model_label()),
                     ("project", self._project_label() or "none"),
@@ -2381,33 +2807,255 @@ def build_tui(base: str, token: str, **kw):
             self.action_external_editor()
 
         async def c_login(self, arg: str) -> None:
-            line = await self.push_screen_wait(Ask(PROMPT.rstrip(": "), secret=True))
-            if not line:
-                return
+            how = arg if arg in ("line", "password") else None
+            if how is None:
+                how = await self.pick("Log in", [
+                    ("password", "Server address, username and password",
+                     "full access, like the web app"),
+                    ("line", "Paste the line from Settings → Add computer", "chat only")],
+                    hint="a password session can manage providers, models and projects")
+                if not how:
+                    return
             err = io.StringIO()
+            if how == "line":
+                line = await self.push_screen_wait(Ask(PROMPT.rstrip(": "), secret=True))
+                if not line:
+                    return
 
-            def go():
-                with contextlib.redirect_stderr(err):
-                    return login_with_line(line, self.server_override)
+                def go():
+                    with contextlib.redirect_stderr(err):
+                        return login_with_line(line, self.server_override)
+            else:
+                saved = load_credentials() or {}
+                addr = await self.push_screen_wait(Ask(
+                    "Server address (host:port or URL)",
+                    value=self.server_override or saved.get("address") or self.base))
+                if not (addr or "").strip():
+                    return
+                user = await self.push_screen_wait(Ask(
+                    "Username", value=saved.get("username") or ""))
+                if not (user or "").strip():
+                    return
+                password = await self.push_screen_wait(Ask("Password", secret=True))
+                if not password:
+                    return
+
+                def go():
+                    with contextlib.redirect_stderr(err):
+                        return login_with_password(addr.strip(), user.strip(), password)
             try:
-                base, token, who = await asyncio.to_thread(go)
+                base, cred, who = await asyncio.to_thread(go)
             finally:
                 if err.getvalue().strip():
                     await self.note(err.getvalue().strip(), "warn")
-            self.base, self.token, self.whoami = base, token, who
-            await self.client.aclose()
+            await self._logged_in_as(base, cred, who)
+
+        async def _logged_in_as(self, base: str, cred: str, who: str) -> None:
+            self.base, self.token, self.whoami = base, cred, who
+            self.logged_in = True
+            if self.client is not None:
+                await self.client.aclose()
             self.client = self._new_client()
-            await self.refresh_options()
-            self.refresh_chrome()
-            self.notify(f"logged in to {base} as {who}")
+            await self._after_login()
+            msg = f"logged in to {base.split('://')[-1]} as {who} — {self._access_label()}"
+            self.push_notice(msg, "done", toast=False)
+            self.notify(msg)
 
         async def c_logout(self, arg: str) -> None:
-            if not await self.push_screen_wait(Confirm("Log out?",
-                                                       "Revokes this computer's token and quits.")):
+            if not self.token:
+                self.notify("not logged in")
+                return
+            detail = ("Forgets this password session." if is_session(self.token)
+                      else "Revokes this computer's token.")
+            if not await self.push_screen_wait(Confirm("Log out?", detail)):
                 return
             ns = argparse.Namespace(server=self.server_override)
             await asyncio.to_thread(cmd_logout, ns, io.StringIO())
-            self.exit(message="logged out")
+            self.workers.cancel_group(self, "notices")
+            self.token, self.logged_in, self.whoami = None, False, "?"
+            self.options, self.convs = {}, []
+            if self.client is not None:
+                await self.client.aclose()
+            self.client = self._new_client()
+            self.push_notice("logged out", "info", toast=False)
+            self.notify("logged out — /login to log in again")
+            self.refresh_chrome()
+
+        # -- providers, models, projects (full access) ------------------------------------
+
+        async def _providers(self) -> list[dict]:
+            return (await self.api("GET", "/api/providers", params={"models": 0})) \
+                .get("providers") or []
+
+        async def _pick_model_full(self) -> None:
+            """Every model of every provider that has a key, grouped by provider;
+            space switches one on/off on the server, d makes it the default."""
+            usable = [p for p in await self._providers()
+                      if (p.get("key_set") or not p.get("needs_key"))
+                      and not p.get("needs_base_url")]
+            views = await asyncio.gather(*(self.api("GET", f"/api/providers/{p['id']}")
+                                           for p in usable), return_exceptions=True)
+            provs = [v for v in views if isinstance(v, dict) and v.get("models")]
+            if not provs:
+                raise CliError("no provider has a key yet — /provider adds one")
+            state: dict[str, tuple[dict, dict]] = {}
+
+            def rows():
+                out = [("default", "Server default", "clears this chat's model pin")]
+                for pv in provs:
+                    out.append((None, (pv.get("label") or pv["id"])
+                                + ("" if pv.get("enabled") else "  (provider off)"), ""))
+                    for m in pv["models"]:
+                        v = f"{pv['id']}/{m['id']}"
+                        state[v] = (pv, m)
+                        out.append((v, m.get("label") or m["id"],
+                                    "default" if m.get("default") else
+                                    "" if m.get("enabled") else "off"))
+                return out
+
+            async def toggle(v):
+                if v not in state:
+                    return None
+                pv, m = state[v]
+                r = await self.api("PUT", f"/api/providers/{pv['id']}/models/{m['id']}",
+                                   json={"enabled": not m.get("enabled")})
+                m.update(r.get("model") or {"enabled": not m.get("enabled")})
+                self.notify(f"{v}: {'on' if m.get('enabled') else 'off'}")
+                await self.refresh_options()
+                return rows()
+
+            async def make_default(v):
+                if v not in state:
+                    return None
+                pv, m = state[v]
+                r = await self.api("PUT", f"/api/providers/{pv['id']}/models/{m['id']}",
+                                   json={"default": True})
+                for _, other in state.values():
+                    other["default"] = False
+                m.update(r.get("model") or {})
+                m["default"], m["enabled"] = True, True
+                self.notify(f"default model: {v}")
+                await self.refresh_options()
+                self.refresh_chrome()
+                return rows()
+
+            cur = self.model or self.shown_model or (self.options or {}).get("default")
+            v = await self.pick("Models", rows(), cur,
+                                actions={"space": ("on/off", toggle),
+                                         "d": ("make default", make_default)},
+                                hint="enter pins the model to this chat")
+            if not v:
+                return
+            if v == "default":
+                self.model = None
+                self.notify("model: server default for new chats")
+            else:
+                pv, m = state[v]
+                if not m.get("enabled"):
+                    raise CliError(f"{v} is switched off — press space on it in /model "
+                                   "to switch it on")
+                if not pv.get("enabled"):
+                    raise CliError(f"provider {pv['id']} is off — /provider {pv['id']} "
+                                   "switches it on")
+                self.model = v
+                self.notify(f"model: {v}" + (" — pinned to this chat from the next message"
+                                             if self.cid else ""))
+            self.refresh_chrome()
+
+        async def c_provider(self, arg: str) -> None:
+            self._need_full("/provider")
+            provs = await self._providers()
+            if not arg:
+                rows = []
+                for p in provs:
+                    bits = ["key set" if p.get("key_set") else
+                            "no key needed" if not p.get("needs_key") else "no key"]
+                    if p.get("needs_base_url"):
+                        bits.append("needs base URL")
+                    bits.append("on" if p.get("enabled") else "off")
+                    rows.append((p["id"], p.get("label") or p["id"], " · ".join(bits)))
+                arg = await self.pick("Providers", rows,
+                                      hint="enter: set its key / base URL, then test it") or ""
+                if not arg:
+                    return
+            p = next((x for x in provs if x["id"] == arg), None)
+            if p is None:
+                raise CliError(f"no provider {arg!r} in the catalogue")
+            label = p.get("label") or p["id"]
+            body: dict = {"enabled": True}
+            if p.get("needs_base_url"):
+                url = await self.push_screen_wait(Ask(
+                    f"{label}: base URL (replace the {{PLACEHOLDER}})",
+                    value=p.get("base_url") or ""))
+                if not (url or "").strip():
+                    return
+                body["base_url"] = url.strip()
+            if p.get("needs_key"):
+                key = await self.push_screen_wait(Ask(
+                    f"{label}: API key" + (" — empty keeps the saved one"
+                                           if p.get("key_set") else ""), secret=True))
+                if key is None:
+                    return
+                if key.strip():
+                    body["api_key"] = key.strip()
+                elif not p.get("key_set"):
+                    await self.note(f"{label} needs an API key — nothing changed", "warn")
+                    return
+            if not p.get("needs_base_url"):
+                url = await self.push_screen_wait(Ask(
+                    f"{label}: base URL — enter keeps it", value=p.get("base_url") or ""))
+                if url is None:
+                    return
+                if url.strip() and url.strip().rstrip("/") != (p.get("base_url") or "").rstrip("/"):
+                    body["base_url"] = url.strip()
+            await self.api("PUT", f"/api/providers/{p['id']}", json=body)
+            self.notify(f"{label}: saved — testing…")
+            res = await self.api("POST", f"/api/providers/{p['id']}/test", json={})
+            found = res.get("models_found") or []
+            if res.get("ok"):
+                msg = f"{label}: connected" + (f" — {len(found)} models" if found else "")
+                self.push_notice(msg, "done", toast=False)
+                await self.note(msg + " · /model to pick one")
+            else:
+                await self.note(f"{label}: test failed — {res.get('detail') or 'no detail'}",
+                                "error")
+            await self.refresh_options()
+            self.refresh_chrome()
+
+        async def _project_rows(self) -> list[tuple]:
+            if self.full_access:
+                r = await self.api("GET", "/api/projects")
+                projects = [(p["slug"], p.get("name") or "") for p in r.get("projects") or []]
+                active = r.get("active")
+            else:
+                o = self.options or {}
+                projects = [(p["slug"], p.get("name") or "") for p in o.get("projects", [])]
+                active = o.get("active_project")
+            return ([(NEW_PROJECT, "+ New project", "" if self.full_access
+                      else "needs /login with a password"),
+                     ("none", "none", "no project: files go to the chat's artifacts"),
+                     ("follow", "follow", "whatever project is loaded")]
+                    + [(slug, slug, " · ".join(x for x in (name, "loaded" if slug == active
+                                                            else "") if x))
+                       for slug, name in projects])
+
+        async def _load_project(self, slug: str):
+            if slug in (NEW_PROJECT, "none", "follow"):
+                return None
+            await self.api("POST", f"/api/projects/{slug}/load")
+            self.notify(f"loaded {slug} as the active project")
+            await self.refresh_options()
+            return await self._project_rows()
+
+        async def _new_project(self) -> str | None:
+            self._need_full("a new project")
+            name = (await self.push_screen_wait(Ask("New project name")) or "").strip()
+            if not name:
+                return None
+            r = await self.api("POST", "/api/projects", json={"name": name})
+            await self.refresh_options()
+            self.push_notice(f"created project {r.get('slug', name)}", "done", toast=False)
+            return r.get("slug") or name
 
         async def c_exit(self, arg: str = "") -> None:
             self.exit()
@@ -2463,15 +3111,6 @@ def login_with_line(line: str, server: str | None) -> tuple[str, str, str]:
     return base, creds["token"], who
 
 
-def _token_works(base: str, token: str) -> bool:
-    """False only on a definite 401; an unreachable server is the TUI's to report."""
-    try:
-        with _client(base, token, timeout=10) as c:
-            return c.get("/api/devices/whoami").status_code != 401
-    except httpx.HTTPError:
-        return True
-
-
 def cmd_tui(args) -> int:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise CliError("the interactive TUI needs a terminal — use jav3 -p <message> "
@@ -2480,15 +3119,13 @@ def cmd_tui(args) -> int:
         print(f"jav3: {TUI_HINT}; using the plain REPL", file=sys.stderr)
         args.message = []
         return cmd_chat(args)
+    # no login prompt before the TUI: with no (or a dead) credential it starts
+    # in its not-logged-in state and /login inside it fixes that
     creds = load_credentials()
-    if not creds:
-        print("Not logged in yet.", file=sys.stderr)
-        cmd_login(args, out=sys.stderr)
-    elif not _token_works(base_url(args.server or creds["address"]), creds["token"]):
-        print("The saved login was refused (revoked or expired) — log in again.",
-              file=sys.stderr)
-        cmd_login(args, out=sys.stderr)
-    base, token = _session(args)
+    if creds:
+        base, token = base_url(args.server or creds["address"]), cred_of(creds)
+    else:
+        base, token = (base_url(args.server) if args.server else ""), None
     prompt = " ".join(getattr(args, "prompt", None) or []) or None
     app = build_tui(base, token, server_override=args.server,
                     project=getattr(args, "project", None), agent=getattr(args, "agent", None),
