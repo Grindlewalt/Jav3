@@ -397,6 +397,11 @@ async def init_db() -> None:
             # remote-connect requests ride the same approval queue as commits
             await db.execute("ALTER TABLE git_requests ADD COLUMN "
                              "kind TEXT NOT NULL DEFAULT 'commit'")
+        if "conversation_id" not in gcols:
+            # the turn that filed the request (runtime.conversation_id), so the
+            # agents tree can show that node as waiting on the operator. NULL
+            # for a request filed over HTTP, or one from before this column.
+            await db.execute("ALTER TABLE git_requests ADD COLUMN conversation_id INTEGER")
         # triage reviewer verdict columns on the two queue tables
         for table in ("egress_pending", "security_events"):
             async with db.execute(f"PRAGMA table_info({table})") as cur:
@@ -499,7 +504,16 @@ async def init_db() -> None:
                           # value because `kind` = 'chat' is what keeps a
                           # conversation in the sidebar, and an orchestrator
                           # is a chat the operator opened.
-                          ("mode", "TEXT")):
+                          ("mode", "TEXT"),
+                          # a short generated name for a spawned agent/node
+                          # (agenttree.name_later), shown by the agents tree.
+                          # NOT `summary`: the peer roster and the runs views
+                          # read summary as the node's task line ("[item i3]
+                          # ..."), so a generated name there would hide what
+                          # the node was asked to do. NULL = never named (the
+                          # naming call failed, or the node's plan item title
+                          # already says it).
+                          ("title", "TEXT")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
@@ -513,6 +527,10 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_conv_starred ON conversations(starred) "
             "WHERE starred = 1")
+        # a conversation's messages in order: the transcript read, and the
+        # agents tree's "how did it end, and when" (its last message)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_calls_conv ON model_calls(conversation_id)")
         await db.execute(

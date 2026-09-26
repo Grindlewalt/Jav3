@@ -278,6 +278,14 @@ async def _fetch_request(db, rid: int) -> dict:
     return dict(row)
 
 
+def _requesting_turn() -> int | None:
+    """The conversation whose turn filed a request (the broker restores it for
+    a guest tool call); None over HTTP. Recorded so the agents tree can show
+    which node is waiting on this approval."""
+    from . import runtime
+    return runtime.conversation_id.get()
+
+
 async def create_request(slug: str, message: str, paths: list[str] | None = None) -> dict:
     if not message or not message.strip():
         raise ValueError("commit message must not be empty")
@@ -288,8 +296,10 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO git_requests (project_slug, message, paths) VALUES (?, ?, ?)",
-            (slug, message.strip(), json.dumps(paths) if paths else None))
+            "INSERT INTO git_requests (project_slug, message, paths, conversation_id) "
+            "VALUES (?, ?, ?, ?)",
+            (slug, message.strip(), json.dumps(paths) if paths else None,
+             _requesting_turn()))
         await db.commit()
         return await _fetch_request(db, cur.lastrowid)
     finally:
@@ -312,8 +322,8 @@ async def create_remote_request(slug: str, url: str) -> dict:
             raise ValueError(f"remote request #{dup['id']} is already pending "
                              "for this project — wait for the operator")
         cur = await db.execute(
-            "INSERT INTO git_requests (project_slug, kind, message) "
-            "VALUES (?, 'remote', ?)", (slug, url))
+            "INSERT INTO git_requests (project_slug, kind, message, conversation_id) "
+            "VALUES (?, 'remote', ?, ?)", (slug, url, _requesting_turn()))
         await db.commit()
         return await _fetch_request(db, cur.lastrowid)
     finally:

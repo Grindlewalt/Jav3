@@ -17,7 +17,7 @@ lifecycle + tool/token event is published under the job id for the SSE view.
 import asyncio
 import contextlib
 
-from . import bus
+from . import agenttree, bus
 from .agent import budget as budget_mod
 from .agent.agent import Agent
 from .agent.loop import db_tool_sink
@@ -93,8 +93,11 @@ async def _rollup(brief: str, output: str) -> str:
 
 async def _open_child(db, parent_cid: int, job_id: str, project: str,
                       kind: str, title: str) -> int:
-    return await open_conversation(db, project=project, title=f"[{kind}] {title[:60]}",
-                                   kind=kind, parent=parent_cid, job_id=job_id)
+    cid = await open_conversation(db, project=project, title=f"[{kind}] {title[:60]}",
+                                  kind=kind, parent=parent_cid, job_id=job_id)
+    # the head's plan line, cut at 60, is all the tree would otherwise show
+    agenttree.name_later(cid, title)
+    return cid
 
 
 async def _node_context(kind: str, project: str, parent_summary: str) -> str:
@@ -256,6 +259,7 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
             root_id = await open_conversation(
                 db, project=project, title=f"[head] {(title or brief)[:60]}",
                 kind="head", job_id=job_id, parent=launched_by)
+            agenttree.name_later(root_id, title or brief)
         finally:
             await db.close()
     except Exception as e:
