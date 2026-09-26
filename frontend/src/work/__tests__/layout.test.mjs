@@ -1,7 +1,7 @@
 // node frontend/src/work/__tests__/layout.test.mjs
 import assert from 'node:assert/strict'
 import {
-  addCard, close, closeCard, defaultBoard, fromSaved, geometry, leaves, makeLeaf,
+  addCard, close, closeCard, classicBoard, fromSaved, geometry, leaves, makeLeaf,
   neighbor, patchCardState, reconcile, resize, split, switchCard, toSaved, treeFromLegacy,
 } from '../layout.js'
 
@@ -12,7 +12,7 @@ const sum = (a) => a.reduce((x, y) => x + y, 0)
 const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`)
 
 t('default board: chat | board | git over network', () => {
-  const b = defaultBoard()
+  const b = classicBoard()
   assert.equal(types(b.root), 'chat,board,git,network')
   const g = geometry(b.root)
   near(g.leaves.p1.w, 0.36); near(g.leaves.p3.y, 0); near(g.leaves.p4.y, 0.54)
@@ -64,14 +64,14 @@ t('resize clamps to min and keeps the pair total', () => {
 })
 
 t('neighbor', () => {
-  const b = defaultBoard()
+  const b = classicBoard()
   assert.equal(neighbor(b.root, 'p1', 'right'), 'p2')
   assert.equal(neighbor(b.root, 'p3', 'down'), 'p4')
   assert.equal(neighbor(b.root, 'p1', 'left'), null)
 })
 
 t('board ops: add, switch, close, state', () => {
-  let b = defaultBoard()
+  let b = classicBoard()
   b = addCard(b, 'terminal', 'p3', 'col')
   const term = b.focus
   assert.equal(types(b.root), 'chat,board,git,terminal,network')
@@ -115,13 +115,25 @@ t('legacy two stacked columns', () => {
   near(r.children[0].sizes[0], 400 / 600)
 })
 
-t('legacy unfitted default and empty load the default board', () => {
+t('Work: legacy chat cards dropped; empty/unarranged load empty', () => {
+  const { board } = fromSaved({ panels: [
+    { id: 'a', type: 'chat', x: 0, y: 0, w: 400, h: 400 },
+    { id: 'b', type: 'git', x: 420, y: 0, w: 400, h: 400 },
+  ] }, undefined, { legacyDrop: ['chat'] })
+  assert.equal(types(board.root), 'git'); assert.equal(board.panels.length, 1)
+  assert.equal(fromSaved(null).board.root, null)
+  assert.equal(fromSaved({ panels: [{ id: 'a', type: 'chat', x: 0, y: 0, w: 1, h: 1 }] },
+                         undefined, { legacyDrop: ['chat'] }).board.root, null)
+})
+
+t('legacy unfitted default and empty load the given fresh board', () => {
   const legacy = [
     ['p1', 'chat', 16, 16, 460, 560], ['p2', 'board', 492, 16, 400, 560],
     ['p3', 'git', 908, 16, 540, 300], ['p4', 'network', 908, 332, 540, 244],
   ].map(([id, type, x, y, w, h]) => ({ id, type, x, y, w, h }))
-  assert.equal(types(fromSaved({ panels: legacy }).board.root), 'chat,board,git,network')
-  assert.equal(types(fromSaved(null).board.root), 'chat,board,git,network')
+  const o = { fresh: classicBoard }
+  assert.equal(types(fromSaved({ panels: legacy }, undefined, o).board.root), 'chat,board,git,network')
+  assert.equal(types(fromSaved(null, undefined, o).board.root), 'chat,board,git,network')
 })
 
 t('unknown types are dropped', () => {
@@ -132,7 +144,7 @@ t('unknown types are dropped', () => {
 })
 
 t('v2 round trip keeps tree, focus, maximized and state; x/y/w/h filled in', () => {
-  let b = defaultBoard()
+  let b = classicBoard()
   b = patchCardState(b, 'p2', { tab: 'runs' })
   b = { ...b, focus: 'p3', maximized: 'p2' }
   const saved = JSON.parse(JSON.stringify(toSaved(b)))
@@ -149,7 +161,7 @@ t('v2 round trip keeps tree, focus, maximized and state; x/y/w/h filled in', () 
 })
 
 t('v2 reconciles panels the agent added or removed server-side', () => {
-  const saved = toSaved(defaultBoard())
+  const saved = toSaved(classicBoard())
   saved.panels = saved.panels.filter((p) => p.id !== 'p2')          // workspace_panel close
   saved.panels.push({ id: 'p5', type: 'terminal', x: 2000, y: 16, w: 560, h: 360, state: {} })
   const { board } = fromSaved(saved)

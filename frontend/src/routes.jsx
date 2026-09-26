@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Login from './pages/Login.jsx'
-import Chat from './pages/Chat.jsx'
+import Work from './work/Work.jsx'
 import NotFound from './pages/NotFound.jsx'
 
 // The routing table, in the order the nav lists it (see nav.jsx): the six
@@ -11,10 +11,9 @@ import NotFound from './pages/NotFound.jsx'
 // around nothing at all and looked precisely like a page that had failed to
 // load.
 //
-// Login and Chat are eager: Login is the first thing an unauthenticated visit
-// needs, and Chat is `/`, which is where almost every session starts.
-// Everything else is a chunk — Workspace alone is 1,600 lines the chat page
-// has no use for.
+// Login and Work are eager: Login is the first thing an unauthenticated visit
+// needs, and Work (the chat plus its project's windows) is `/`, which is where
+// almost every session starts. Everything else is a chunk.
 //
 // The chunks are then pulled in on idle, right after the first page settles.
 // Without that, every first visit to a route pays a blank frame while its
@@ -23,8 +22,6 @@ import NotFound from './pages/NotFound.jsx'
 // a browser without requestIdleCallback just gets a short timer.
 // first run only, so never prefetched
 const Setup = lazy(() => import('./pages/Setup.jsx'))
-const Projects = lazy(() => import('./pages/Projects.jsx'))
-const Workspace = lazy(() => import('./pages/Workspace.jsx'))
 // Agents is a layout route like Review: the shell + tab strip is the default
 // export, the definitions editor the index child, Skills and Outputs siblings.
 const Agents = lazy(() => import('./pages/Agents.jsx'))
@@ -57,7 +54,7 @@ const Voice = lazy(() => import('./pages/Voice.jsx'))
 const Artifacts = lazy(() => import('./pages/Artifacts.jsx'))
 
 const PREFETCH = [
-  () => import('./pages/Projects.jsx'), () => import('./pages/Workspace.jsx'),
+  () => import('./work/windows.jsx'), () => import('./pages/Projects.jsx'),
   () => import('./pages/Agents.jsx'), () => import('./pages/Review.jsx'),
   () => import('./pages/Tools.jsx'), () => import('./pages/Settings.jsx'),
   () => import('./pages/Network.jsx'), () => import('./pages/Logs.jsx'),
@@ -94,9 +91,16 @@ export default function AppRoutes({ onLogin, onSetup, authed }) {
         <Route path="/setup" element={<Setup onDone={onSetup} />} />
 
         {/* the bar */}
-        <Route path="/" element={<Chat />} />
-        <Route path="/projects" element={<Projects />} />
-        <Route path="/projects/:slug" element={<Workspace />} />
+        {/* Work: the chat, with the chat's project's windows beside it. The
+            old Chat and Projects destinations both land here: a project's
+            board link puts that project on the chat (Work then replaces the
+            address with /), and /projects opens the Projects sheet. Every
+            one renders the same <Work />, so React keeps it mounted across
+            the hop and a chat mid-stream is not torn down. */}
+        <Route path="/" element={<Work />} />
+        <Route path="/work" element={<Navigate to="/" replace />} />
+        <Route path="/projects" element={<Work openProjects />} />
+        <Route path="/projects/:slug" element={<Work />} />
         <Route path="/agents" element={<Agents />}>
           <Route index element={<AgentDefinitions />} />
           <Route path="skills" element={<SkillsPanel />} />

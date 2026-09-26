@@ -81,14 +81,13 @@ export const MoreIcon = () => (
 )
 
 // ---- the destinations ----
-// `end` is react-router's exact flag: Chat is `/`, so it must not stay lit on
-// every other route. Projects has no `end` on purpose — /projects/:slug is the
-// Workspace, the most important surface in the app, and this is how it stays
-// located in the nav while it has no row of its own. `count` names the live
-// count the item wears (App.jsx's notices).
+// `end` is react-router's exact flag: Work is `/`, so it must not stay lit on
+// every other route. Work replaced both Chat and Projects: the chat with its
+// project's windows beside it (work/Work.jsx); project management is its
+// "Projects…" sheet. `count` names the live count the item wears (App.jsx's
+// notices).
 export const NAV_ITEMS = [
-  { to: '/', label: 'Chat', icon: 'chat', end: true, primary: true },
-  { to: '/projects', label: 'Projects', icon: 'projects', primary: true },
+  { to: '/', label: 'Work', icon: 'chat', end: true, primary: true },
   { to: '/agents', label: 'Agents', icon: 'agents', primary: true },
   { to: '/security', label: 'Security', icon: 'review', primary: true, count: 'review' },
   { to: '/tools', label: 'Tools', icon: 'tools', primary: true },

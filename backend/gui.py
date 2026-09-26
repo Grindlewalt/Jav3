@@ -237,8 +237,14 @@ def media_src(source: str, slug: str | None) -> tuple[str | None, str | None]:
 
 
 # --- workspace layout ---------------------------------------------------------
-# Mirrors the GUI's PANEL_TYPES / DEFAULT_PANELS (Workspace.jsx). If a panel
-# type is added there, add it here or workspace_panel refuses it.
+# Mirrors the GUI's window types (frontend/src/work/types.js). If a type is
+# added there, add it here or workspace_panel refuses it.
+#
+# The file is {"panels": [...]} from the old free-floating board, or, from the
+# Work page, {"v": 2, "panels": [...], "tree": ..., "focus": ..., "maximized":
+# ...}: the same panel list plus a split tree saying where each panel sits.
+# This module only edits `panels`; the page reconciles its tree with them on
+# the next load (new panels split in beside the focused one, gone ones close).
 
 PANEL_SIZES = {
     "chat": (440, 520), "journal": (460, 420), "editor": (520, 440),
@@ -271,16 +277,29 @@ def load_panels(slug: str) -> list[dict]:
     p = _layout_path(slug)
     if p.exists():
         try:
-            panels = json.loads(p.read_text()).get("panels") or []
-            if panels:
+            saved = json.loads(p.read_text())
+            panels = saved.get("panels") or []
+            # a Work layout with every window closed is an arrangement too
+            if panels or saved.get("v"):
                 return panels
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, AttributeError):
             pass
     return [dict(p, state=dict(p["state"])) for p in DEFAULT_PANELS]
 
 
 def save_panels(slug: str, panels: list[dict]) -> int:
-    _layout_path(slug).write_text(json.dumps({"panels": panels}))
+    """Replace the panel list, keeping everything else in the file (the Work
+    page's split tree, focus and version marker)."""
+    path = _layout_path(slug)
+    saved: dict = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text())
+            if isinstance(loaded, dict):
+                saved = loaded
+        except (json.JSONDecodeError, OSError):
+            pass
+    path.write_text(json.dumps({**saved, "panels": panels}))
     return push({"type": "layout_changed", "slug": slug})
 
 

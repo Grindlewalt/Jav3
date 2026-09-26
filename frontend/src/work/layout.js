@@ -204,8 +204,8 @@ export function neighbor(root, id, direction) {
 const col = (children, sizes) => normalize({ id: makeId('s'), dir: 'col', children, sizes })
 const row = (children, sizes) => normalize({ id: makeId('s'), dir: 'row', children, sizes })
 
-// A fresh project: chat · task board · git over network (the old default).
-export function defaultBoard() {
+// The old board's default: chat · task board · git over network.
+export function classicBoard() {
   const panels = [
     { id: 'p1', type: 'chat', state: {} }, { id: 'p2', type: 'board', state: {} },
     { id: 'p3', type: 'git', state: {} }, { id: 'p4', type: 'network', state: {} },
@@ -214,6 +214,10 @@ export function defaultBoard() {
   return { root: row([a, b, col([c, d], [0.54, 0.46])], [0.36, 0.29, 0.35]),
            focus: 'p1', maximized: null, panels }
 }
+
+// A fresh project on the Work page: no windows. The chat is the main area,
+// and the first window the operator opens splits in to its right.
+export const emptyBoard = () => ({ root: null, focus: null, maximized: null, panels: [] })
 
 // The fixed default every board got before it was fitted. A saved layout that
 // is still exactly this was never arranged by anyone (the autosave persisted
@@ -285,7 +289,12 @@ export function reconcile(root, panels, focus) {
 // Parse what GET /layout returned. `known(type)` filters out card types this
 // client no longer has. Returns { board, converted } where `converted` says
 // the saved file was not a v2 tree (so the first save upgrades it).
-export function fromSaved(raw, known = () => true) {
+//   fresh       the board for a project with nothing saved (and for the old
+//               never-arranged default)
+//   legacyDrop  card types an old free-floating board loses on conversion
+//               (Work drops 'chat': the main chat replaced that card)
+export function fromSaved(raw, known = () => true,
+                          { fresh = emptyBoard, legacyDrop = [] } = {}) {
   const src = raw && typeof raw === 'object' ? raw : {}
   const seen = new Set()
   const panels = (Array.isArray(src.panels) ? src.panels : []).filter((p) => {
@@ -308,11 +317,13 @@ export function fromSaved(raw, known = () => true) {
       },
     }
   }
-  if (!panels.length || isLegacyDefault(panels)) return { converted: true, board: defaultBoard() }
-  const root = treeFromLegacy(panels)
+  if (!panels.length || isLegacyDefault(panels)) return { converted: true, board: fresh() }
+  const kept = panels.filter((p) => !legacyDrop.includes(p.type))
+  if (!kept.length) return { converted: true, board: emptyBoard() }
+  const root = treeFromLegacy(kept)
   // the panel on top (highest z) was the one last touched: focus it
-  const top = [...panels].sort((a, b) => num(b.z, 0) - num(a.z, 0))[0]
-  return { converted: true, board: { root, panels, focus: top.id, maximized: null } }
+  const top = [...kept].sort((a, b) => num(b.z, 0) - num(a.z, 0))[0]
+  return { converted: true, board: { root, panels: kept, focus: top.id, maximized: null } }
 }
 
 function cleanTree(n) {

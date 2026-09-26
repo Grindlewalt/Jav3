@@ -166,7 +166,15 @@ function ProjectPicker({ projects, mode, value, global: loaded, onPick }) {
   )
 }
 
-export default function Chat() {
+// Work (work/Work.jsx) hosts this page and adds its windows beside it. Every
+// prop is optional, so Chat on its own renders exactly as it always has:
+//   toolbarExtra     rendered at the end of the chat toolbar (Work's +)
+//   beside           rendered after <main>, inside .chat-layout (the windows)
+//   onProjectChange  called with the slug this chat's work goes to, or null
+//   controlRef       filled with { pickProject(slug), openProject(slug) }
+export default function Chat({
+  toolbarExtra = null, beside = null, onProjectChange, controlRef,
+} = {}) {
   const [conversations, setConversations] = useState([])
   const [conversationId, setConversationId] = useState(null)
   const [messages, setMessages] = useState([])
@@ -431,6 +439,35 @@ export default function Chat() {
     refreshConvos()
   }
 
+  // The project this chat's work goes to right now: a saved chat's pin (or
+  // the loaded project while it follows), a new chat's pending choice.
+  const effectiveProject = conversationId
+    ? (openConvo?.project_slug
+       || (convoMode(openConvo) === 'follow' ? active : null) || null)
+    : (pendingMode === 'pin' ? (pendingProject || null)
+       : pendingMode === 'follow' ? (active || null) : null)
+  useEffect(() => { onProjectChange?.(effectiveProject) },
+            [effectiveProject, onProjectChange])
+  if (controlRef) {
+    controlRef.current = {
+      // the pill's "pin to this project", from outside
+      pickProject: (slug) => {
+        if (conversationId) return assignProject('pin', slug)
+        setPendingMode('pin')
+        setPendingProject(slug)
+      },
+      // a /projects/:slug link: a new chat pinned to it, unless this chat is
+      // already there (or still empty, when it just takes the pin)
+      openProject: (slug) => {
+        resumeId.current = null   // a cold load: don't let the resume win
+        if (slug === effectiveProject) return
+        if (conversationId || messages.length) newConversation()
+        setPendingMode('pin')
+        setPendingProject(slug)
+      },
+    }
+  }
+
   async function stop() {
     // the turn ends server-side and every tail gets a final "[Request
     // interrupted]" event — the normal finish path settles the UI
@@ -568,6 +605,7 @@ export default function Chat() {
                   chat can't retroactively not exist, and a disabled switch
                   read as broken while crowding the phone toolbar. */}
               {!conversationId && tempSwitch}
+              {toolbarExtra}
             </div>
           </div>
         )}
@@ -635,6 +673,7 @@ export default function Chat() {
           </div>
         </form>
       </main>
+      {beside}
     </div>
   )
 }

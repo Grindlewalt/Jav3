@@ -3707,3 +3707,153 @@ body.nav-locked .notice-pill { display: none; }
   .sh-approval-acts { width: 100%; }
   .sh-approval-acts button { flex: 1; min-height: var(--tap); }
 }
+
+/* ==== Work (src/work/) ====
+   The chat page with the chat's project's windows beside it: .chat-layout
+   gains a .work-windows column after <main>, sized by flex-basis (the
+   chat|windows split), and the windows inside are placed absolutely from the
+   split tree's geometry (layout.js), with the split dividers on top.
+   Phone (768, see breakpoints.js): no splits; a tab strip of Chat and the
+   open windows shows one at a time. */
+.work { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.work-windows {
+  position: relative; display: flex; flex: 0 0 auto; min-width: 280px; min-height: 0;
+  border-left: 1px solid var(--border); background: var(--bg);
+}
+.work-windows.hidden { display: none; }
+.work-windows.phone { flex: 1 1 auto; min-width: 0; border-left: 0; }
+.work-show-window > .chat-layout > main { display: none; }
+.work-stage { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.work-div-chat {
+  position: absolute; left: -6px; top: 0; bottom: 0; width: 11px; z-index: 6;
+  cursor: col-resize; touch-action: none;
+}
+.work-div-chat::after { content: ''; position: absolute; left: 5px; width: 2px; top: 0; bottom: 0;
+  background: var(--accent); opacity: 0; transition: opacity 0.12s; }
+.work-div-chat:hover::after, .work-div-chat:active::after { opacity: 0.7; }
+
+.work-win {
+  position: absolute; box-sizing: border-box; padding: 3px;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+}
+.work-wh {
+  display: flex; align-items: center; gap: 2px; flex: none;
+  height: 30px; padding: 0 3px 0 2px;
+  background: var(--panel); border: 1px solid var(--border); border-bottom: 0;
+  border-radius: 9px 9px 0 0; user-select: none; min-width: 0;
+}
+/* .window-body keeps the padding and the rules every card was written for */
+.work-wb {
+  position: relative; overflow: auto; min-width: 0;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 0 0 9px 9px;
+}
+.work-win.focused .work-wh { border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.work-win.focused .work-wb { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.work-wh-type {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0;
+  background: none; color: var(--text); padding: 2px 6px; border-radius: 6px;
+  font-size: var(--fs-sm); font-weight: 600; height: 24px; min-height: 0; white-space: nowrap;
+}
+.work-wh-type > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.work-win.focused .work-wh-type { color: var(--accent); }
+.work-wh-type:hover:not(:disabled), .work-wh-btn:hover:not(:disabled) {
+  background: var(--panel-2); transform: none; filter: none;
+}
+.work-caret { font-size: 9px; opacity: 0.7; }
+.work-wh-btn {
+  background: none; color: var(--dim); padding: 0; width: 24px; height: 24px; min-height: 0;
+  border-radius: 6px; font-size: 14px; font-weight: 400; flex: none; line-height: 1;
+}
+.work-wh-btn:hover:not(:disabled) { color: var(--text); }
+
+.work-div { position: absolute; z-index: 5; touch-action: none; }
+.work-div.col { width: 10px; transform: translateX(-50%); cursor: col-resize; }
+.work-div.row { height: 10px; transform: translateY(-50%); cursor: row-resize; }
+.work-div::after { content: ''; position: absolute; background: var(--accent);
+  opacity: 0; transition: opacity 0.12s; }
+.work-div.col::after { left: 4px; width: 2px; top: 6px; bottom: 6px; }
+.work-div.row::after { top: 4px; height: 2px; left: 6px; right: 6px; }
+.work-div:hover::after, .work-div:active::after { opacity: 0.7; }
+body.work-dragging-col, body.work-dragging-col * { cursor: col-resize !important; user-select: none; }
+body.work-dragging-row, body.work-dragging-row * { cursor: row-resize !important; user-select: none; }
+/* iframes (renderer, terminal) swallow pointer moves mid-drag */
+body.work-dragging-col iframe, body.work-dragging-row iframe { pointer-events: none; }
+
+/* the + in the chat toolbar (and at the end of the phone's tab strip) */
+.work-plus {
+  background: none; color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  height: 28px; min-width: 28px; min-height: 0; padding: 0 7px; font-size: 18px;
+  font-weight: 400; line-height: 1; flex: none;
+}
+.work-plus:hover:not(:disabled) { background: var(--panel-2); transform: none; filter: none; }
+.work-plus.on { border-color: var(--accent); color: var(--accent); }
+
+.work-picker {
+  position: fixed; z-index: 80; width: 300px; display: flex; flex-direction: column;
+  background: var(--glass); border: 1px solid var(--border); border-radius: 12px;
+  backdrop-filter: blur(16px) saturate(1.15); -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  box-shadow: var(--shadow-pop); padding: 6px; gap: 4px; overflow: hidden;
+  animation: drop-in 0.14s cubic-bezier(0.21, 1.02, 0.55, 1) both;
+}
+.work-picker-note { font-size: var(--fs-sm); padding: 4px 6px 2px; }
+.work-picker-q {
+  width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 8px;
+  background: var(--bg-soft); border: 1px solid var(--border); color: var(--text);
+  font-size: var(--fs-base);
+}
+.work-picker-list { overflow-y: auto; min-height: 0; flex: 1; display: flex;
+  flex-direction: column; gap: 1px; }
+.work-picker-none { padding: 8px; }
+.work-picker-foot { border-top: 1px solid var(--border); padding-top: 4px; }
+.work-pick {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: none; color: var(--text); padding: 6px 8px; border-radius: 7px;
+  font-size: var(--fs-md); font-weight: 400; min-height: 0;
+}
+.work-pick.sel, .work-pick:hover:not(:disabled) { background: var(--panel-2); transform: none; filter: none; }
+.work-pick.current { color: var(--accent); }
+.work-pick.foot { color: var(--dim); }
+
+/* Projects… : the old Projects page in a sheet */
+.work-sheet-scrim {
+  position: fixed; inset: 0; z-index: 4000; display: flex; align-items: center;
+  justify-content: center; background: rgb(0 0 0 / 0.45); padding: 16px;
+}
+.work-sheet {
+  position: relative; width: min(1100px, 100%); height: min(86vh, 100%);
+  display: flex; flex-direction: column; overflow: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: var(--shadow-pop);
+}
+.work-sheet-x { position: absolute; top: 10px; right: 10px; z-index: 2; }
+.work-vm { gap: 12px; }
+
+.work-tabs {
+  display: flex; gap: 4px; overflow-x: auto; flex: none; align-items: center;
+  padding: 4px var(--sp-4); background: var(--bg-soft);
+  border-bottom: 1px solid var(--border); scrollbar-width: none;
+}
+.work-tabs::-webkit-scrollbar { display: none; }
+.work-tab { display: flex; align-items: center; flex: none; border-radius: 8px;
+  border: 1px solid transparent; }
+.work-tab.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.work-tab > button {
+  background: none; color: var(--dim); padding: 4px 10px; font-size: var(--fs-sm);
+  font-weight: 500; min-height: 32px;
+}
+.work-tab.on > button { color: var(--text); }
+.work-tab > button.work-tab-x { padding: 4px 8px 4px 2px; font-size: 16px; }
+.work-tab > button:hover:not(:disabled) { transform: none; filter: none; }
+@media (max-width: 768px) {  /* BP.phone */
+  .work-win { padding: 0; }
+  .work-wh { border-radius: 0; border-left: 0; border-right: 0; }
+  .work-wb { border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0;
+    padding-bottom: calc(12px + var(--sab)); }
+  .work-wh button { min-height: 0; padding: 2px 6px; }
+  .work-picker { width: auto; left: 8px !important; right: 8px; }
+  .work-sheet-scrim { padding: 0; }
+  .work-sheet { width: 100%; height: 100%; border-radius: 0; border: 0; }
+  .work-tabs .work-plus { margin-left: auto; }
+}

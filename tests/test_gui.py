@@ -33,6 +33,33 @@ def test_add_remove_roundtrip(proj):
     assert dropped == 1 and not any(p["type"] == "secrets" for p in kept)
 
 
+def test_save_panels_keeps_the_work_tree(proj):
+    path = settings.projects_dir / proj / ".workspace.json"
+    tree = {"id": "s1", "dir": "row", "sizes": [0.5, 0.5],
+            "children": [{"id": "a", "type": "git"}, {"id": "b", "type": "run"}]}
+    path.write_text(json.dumps({
+        "v": 2, "tree": tree, "focus": "b", "maximized": None,
+        "panels": [{"id": "a", "type": "git", "x": 16, "y": 16, "w": 700, "h": 880, "state": {}},
+                   {"id": "b", "type": "run", "x": 716, "y": 16, "w": 700, "h": 880,
+                    "state": {"code": "print(1)"}}]}))
+    panels = gui.load_panels(proj)
+    gui.add_panel(panels, "terminal")
+    gui.save_panels(proj, panels)
+    saved = json.loads(path.read_text())
+    assert saved["v"] == 2 and saved["tree"] == tree and saved["focus"] == "b"
+    assert [p["type"] for p in saved["panels"]] == ["git", "run", "terminal"]
+    assert saved["panels"][1]["state"] == {"code": "print(1)"}
+
+
+def test_empty_work_layout_is_not_refilled_with_defaults(proj):
+    path = settings.projects_dir / proj / ".workspace.json"
+    path.write_text(json.dumps({"v": 2, "panels": [], "tree": None}))
+    assert gui.load_panels(proj) == []
+    # the old board format with nothing saved still gets the defaults
+    path.write_text(json.dumps({"panels": []}))
+    assert len(gui.load_panels(proj)) == 4
+
+
 def test_tile_no_overlap_and_size_preserved(proj):
     panels = gui.load_panels(proj)
     for _ in range(4):
