@@ -67,6 +67,19 @@ def base_built() -> bool:
     return _base_image().exists()
 
 
+def no_image_message() -> str:
+    """Why there is no guest image, and the next step, from facts on this host:
+    without /dev/kvm build_base.sh cannot run either, so saying "run it" alone
+    sends the operator into a second failure."""
+    build = (f"VM_DIR={settings.vm_dir} bash {settings.base_dir}/vm/build_base.sh")
+    if not os.path.exists("/dev/kvm"):
+        return ("no golden image, and it cannot be built yet: /dev/kvm is missing "
+                "(CPU virtualization off in BIOS, or the kvm module not loaded; "
+                f"`bash {settings.base_dir}/scripts/install.sh --check` says which). "
+                f"Once it exists: {build}")
+    return f"no golden image — build it (about 10 min): {build}"
+
+
 def _console_log() -> Path:
     return settings.vm_dir / "console.log"
 
@@ -110,7 +123,7 @@ class GuestVM:
     async def _build_overlay(self) -> None:
         base = _base_image()
         if not base.exists():
-            raise VMError(f"no golden image {base.name} — run vm/build_base.sh on the Pi")
+            raise VMError(no_image_message())
         overlay = settings.vm_dir / "overlay.qcow2"
         overlay.unlink(missing_ok=True)
         proc = await asyncio.create_subprocess_exec(
@@ -281,7 +294,7 @@ class GuestVM:
         accepts a connection. Caller holds `_lock`. Idempotent — one guest serves
         many turns; the idle reaper reboots it between operation batches."""
         if not base_built():
-            raise VMError("no golden image — run vm/build_base.sh on the Pi first")
+            raise VMError(no_image_message())
         if not gateway.enabled:
             raise VMError("vsock gateway not running (no vsock on this host?)")
         from .guest_turn import GUEST_RUNTURN_PORT
@@ -313,7 +326,7 @@ class GuestVM:
         the host gateway). Returns the guest's answer + the isolation report.
         Tears the guest down after."""
         if not base_built():
-            raise VMError("no golden image — run vm/build_base.sh on the Pi first")
+            raise VMError(no_image_message())
         if not gateway.enabled:
             raise VMError("vsock gateway not running (no vsock on this host?)")
         from ..agent.model import confirm_peak

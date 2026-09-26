@@ -144,7 +144,8 @@ elif command -v dnf     >/dev/null 2>&1; then PKG=dnf
 else PKG=unknown
 fi
 
-DISTRO="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" )"
+# No os-release (macOS, where --target is run from) must not trip set -e.
+DISTRO="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" || uname -s )"
 
 case "$PKG" in
   apt)    PACKAGES=(python3-venv python3-pip nodejs npm git curl rsync rclone
@@ -167,7 +168,7 @@ case "$NAME_OPT" in
   *[!a-zA-Z0-9_-]*)   die "--name wants letters, digits, - or _ only, got '$NAME_OPT'" ;;
   *)                  UNIT="jarvis-$NAME_OPT" ;;
 esac
-DEFAULT_CFG_DIR="$CFG_DIR"
+DEFAULT_CFG_DIR="$HOME/.config/jarvis"
 CFG_DIR="${CFG_DIR_OPT:-${JARVIS_CONFIG_DIR:-$HOME/.config/$UNIT}}"
 CFG_DIR="${CFG_DIR/#\~/$HOME}"
 # so every `python -m backend.cli ...` this script runs reads THIS instance
