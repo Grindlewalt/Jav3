@@ -164,25 +164,69 @@ export function treeTotals(tree) {
   return t
 }
 
-// Fold a `procs` stream event into the per-box state. The event is either a
-// whole snapshot ({boxes:[...]}) or one box ({box: {...}} / a box row itself).
-// Returns a new array, sorted like the boxes page.
-export function mergeProcs(prev, ev) {
-  if (!ev) return prev
-  const incoming = Array.isArray(ev.boxes) ? ev.boxes
-    : ev.box && typeof ev.box === 'object' ? [ev.box]
-      : ev.box_id ? [ev] : null
-  if (!incoming) return prev
-  if (Array.isArray(ev.boxes) && ev.full !== false && ev.partial !== true) {
-    return sortBoxes(incoming.map(normBoxProcs))
+// Server totals win where the box sent them (they count every process, even
+// when the tree was truncated); the tree fills in what they do not carry
+// (service/run_code counts, byte mismatches, in/out split).
+export function boxTotals(b) {
+  const t = treeTotals(b?.tree)
+  const s = b?.totals
+  if (!s) return t
+  const num = (v, d) => (v == null ? d : Number(v) || 0)
+  return {
+    ...t,
+    procs: num(s.procs, t.procs),
+    unexpected: num(s.unexpected, t.unexpected),
+    conns: num(s.conns, t.conns),
+    guest_out: num(s.guest_bytes_out, t.guest_out),
+    guest_in: num(s.guest_bytes_in, t.guest_in),
+    host_out: num(s.host_bytes_out, t.host_out),
+    host_in: num(s.host_bytes_in, t.host_in),
   }
-  const m = new Map((prev || []).map((b) => [b.box_id, b]))
-  for (const b of incoming) m.set(b.box_id, normBoxProcs(b))
-  return sortBoxes([...m.values()])
+}
+
+// Something on this box wants the operator's eye: an unexpected process, a
+// guest/host byte disagreement, host-seen traffic no process owns, or an error.
+export function boxIsOdd(b) {
+  const t = boxTotals(b)
+  return !!(t.unexpected || t.mismatches || (b?.orphan_conns || []).length || b?.error)
+}
+
+// Fold one `procs` stream event into the per-box rows (docs/boxes-api-final.md
+// section 6). The topic carries ONE box at a time:
+//   {type:"box_procs", box:<row>}     replace that row by box_id
+//   {type:"box_gone", box_id}         drop it
+//   {type:"box_procs_changed", box_id} the row was too big to send: the caller
+//                                     refetches ?box= (procsRefetch) — no change here
+//   {type:"stream_open"}               no change here (the caller reloads)
+// Anything else is ignored. Returns `prev` itself when nothing changed.
+export function mergeProcs(prev, ev) {
+  if (!ev || typeof ev !== 'object') return prev
+  if (ev.type === 'box_procs' && ev.box && typeof ev.box === 'object' && ev.box.box_id) {
+    const m = new Map((prev || []).map((b) => [b.box_id, b]))
+    m.set(ev.box.box_id, normBoxProcs(ev.box))
+    return sortBoxes([...m.values()])
+  }
+  if (ev.type === 'box_gone' && ev.box_id) {
+    if (!(prev || []).some((b) => b.box_id === ev.box_id)) return prev
+    return (prev || []).filter((b) => b.box_id !== ev.box_id)
+  }
+  return prev
+}
+
+// What an event asks the caller to fetch: a box id (GET ?box=<id>), '*' for a
+// full reload (the stream (re)opened, so events may have been missed), or null.
+export function procsRefetch(ev) {
+  if (!ev || typeof ev !== 'object') return null
+  if (ev.type === 'box_procs_changed' && ev.box_id) return ev.box_id
+  if (ev.type === 'stream_open') return '*'
+  return null
 }
 
 export function normBoxProcs(b) {
-  return { ...b, id: b.box_id, tree: nestProcs(b.tree || b.procs || []) }
+  return {
+    ...b, id: b.box_id, tree: nestProcs(b.tree || []),
+    orphan_conns: Array.isArray(b.orphan_conns) ? b.orphan_conns : [],
+  }
 }
 
 // ---- catalogue -----------------------------------------------------------------

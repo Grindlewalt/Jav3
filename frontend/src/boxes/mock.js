@@ -157,7 +157,10 @@ function conn(o) {
 function procs() {
   const j = () => Math.round(Math.random() * 3000)
   return [
-    { box_id: 's-alpha', kind: 'service', project: 'alpha', reported_at: now(), stale: false, tree: [
+    { box_id: 's-alpha', kind: 'service', project: 'alpha', reported_at: now(), stale: false,
+      error: null, baseline: 'image', truncated: false, totals: null,
+      orphan_conns: [conn({ laddr: '10.201.50.2', lport: 40999, host: 'paste.example', guest_bytes_out: null,
+        guest_bytes_in: null, host_bytes_out: 12000, host_bytes_in: 800, verified: true })], tree: [
       { pid: 412, ppid: 1, user: 'jav3-svc-7', exe: '/usr/bin/python3', cmd: 'python3 -m http.server 8080',
         unit: 'jav3-svc-7.service', service_id: 7, tag: 'service', rss: 24 * 2 ** 20, cpu_pct: 0.3,
         started: '2026-09-24 10:05:00', conns: [
@@ -169,13 +172,17 @@ function procs() {
             started: now(), conns: [
               conn({ lport: 40122, host: '203.0.113.9', guest_bytes_out: 310, guest_bytes_in: 900,
                 host_bytes_out: 310, host_bytes_in: 480000, verified: true })], children: [] }] }] },
-    { box_id: 's-bravo', kind: 'service', project: 'bravo', reported_at: now(), stale: false, tree: [
+    { box_id: 's-bravo', kind: 'service', project: 'bravo', reported_at: now(), stale: false,
+      error: null, baseline: 'builtin', truncated: false, totals: null, orphan_conns: [], tree: [
       { pid: 88, ppid: 1, user: 'svc', exe: '/usr/bin/node', cmd: 'node worker.js', unit: 'jav3-svc-11.service',
         service_id: 11, tag: 'service', rss: 61 * 2 ** 20, cpu_pct: 1.4, started: '2026-09-26 09:00:00',
         conns: [conn({ laddr: '10.201.51.2', lport: 40800, host: 'example.org', guest_bytes_out: 5100,
           guest_bytes_in: 230000 + j(), host_bytes_out: 5100, host_bytes_in: 231000, verified: true })],
         children: [] }] },
-    { box_id: 'shared', kind: 'shared', project: null, reported_at: now(), stale: false, tree: [
+    { box_id: 'shared', kind: 'shared', project: null, reported_at: now(), stale: false,
+      error: null, baseline: 'image', truncated: true, orphan_conns: [],
+      totals: { procs: 212, unexpected: 0, conns: 3, guest_bytes_out: 0, guest_bytes_in: 0,
+        host_bytes_out: 0, host_bytes_in: 0 }, tree: [
       { pid: 2301, ppid: 1, user: 'agent', exe: '/usr/bin/node', cmd: 'nohup npm run dev',
         unit: null, service_id: null, tag: 'run_code', rss: 90 * 2 ** 20, cpu_pct: 2.2,
         started: '2026-09-26 10:00:00', conns: [conn({ laddr: '10.201.0.2', lport: 5173, dir: 'in',
@@ -184,7 +191,8 @@ function procs() {
             tag: 'run_code', rss: 70 * 2 ** 20, cpu_pct: 1.1, started: '2026-09-26 10:00:01',
             conns: [], children: [] }] }] },
     { box_id: 'p-alpha', kind: 'project', project: 'alpha', reported_at: '2026-09-26 07:00:00',
-      stale: true, tree: [] },
+      stale: true, error: 'ps: no answer from the box in 5 s', baseline: 'image', truncated: false,
+      totals: null, orphan_conns: [], tree: [] },
   ]
 }
 
@@ -322,7 +330,14 @@ const routes = [
     const s = Object.assign(svc(id), { status: 'revoked', desired_state: 'stopped', state: 'stopped' })
     return { ...s, data_deleted: !!b.delete_data }
   }],
-  ['GET', /^\/api\/vm\/processes$/, () => ({ boxes: procs() })],
+  ['GET', /^\/api\/vm\/processes$/, (_, __, q) => {
+    if (!S.enabled) return { enabled: false, boxes: [] }
+    const all = procs()
+    const want = q.get('box')
+    if (!want) return { enabled: true, boxes: all }
+    const row = all.find((b) => b.box_id === want) || fail(404, 'no such box')
+    return { enabled: true, boxes: [row] }
+  }],
   ['GET', /^\/api\/profiles$/, () => ({ profiles: S.profiles })],
   ['POST', /^\/api\/profiles$/, (_, b) => {
     if (!b.service_placement || !b.box_runtime) fail(422, 'service_placement and box_runtime are required')
@@ -403,7 +418,17 @@ function emit(topic, ev) { for (const fn of listeners.get(topic) || []) fn(clone
 export function follow(topic, fn) {
   if (!listeners.has(topic)) listeners.set(topic, new Set())
   listeners.get(topic).add(fn)
+  // procs: one box per event, like the host (stream_open, then box_procs per
+  // box every 5 s; now and then a box_procs_changed for the refetch path)
+  let tick = 0
   const t = topic === 'procs'
-    ? setInterval(() => emit('procs', { type: 'procs', boxes: procs() }), 5000) : null
+    ? setInterval(() => {
+      tick += 1
+      for (const b of procs()) {
+        if (tick % 4 === 0 && b.box_id === 'shared') emit('procs', { type: 'box_procs_changed', box_id: b.box_id })
+        else emit('procs', { type: 'box_procs', box: b })
+      }
+    }, 5000) : null
+  if (topic === 'procs') setTimeout(() => fn({ type: 'stream_open' }), 0)
   return () => { listeners.get(topic)?.delete(fn); if (t) clearInterval(t) }
 }

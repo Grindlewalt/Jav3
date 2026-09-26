@@ -7,7 +7,8 @@ import {
   listServices, revokeService, serviceLogs, startService, stopService,
 } from '../boxes/api/services.js'
 import {
-  SERVICE_STATE_TONE, bytes, connCheck, flattenTree, mergeProcs, normBoxProcs, sortBoxes, treeTotals,
+  SERVICE_STATE_TONE, boxIsOdd, boxTotals, bytes, connCheck, flattenTree, mergeProcs, normBoxProcs,
+  procsRefetch, sortBoxes,
 } from '../boxes/logic.js'
 import { Confirm, LoadError, PlacementTag, Unavailable, useLoad } from '../boxes/ui.jsx'
 
@@ -23,14 +24,34 @@ import { Confirm, LoadError, PlacementTag, Unavailable, useLoad } from '../boxes
 const TAG_TONE = { service: 'done', unexpected: 'error', run_code: 'running' }
 
 export default function Persistent() {
-  const { data, error, unavailable, setData } = useLoad(
-    () => listProcesses().then((bs) => sortBoxes(bs.map(normBoxProcs))))
+  const { data, error, unavailable, setData, reload } = useLoad(
+    () => listProcesses().then((r) => ({ enabled: r.enabled, boxes: sortBoxes(r.boxes.map(normBoxProcs)) })))
   const svc = useLoad(() => listServices(), { every: 20000 })
   const [onlyOdd, setOnlyOdd] = useState(false)
   const [dlg, setDlg] = useState(null)
   const [logs, setLogs] = useState(null)
 
-  useEffect(() => followProcs((ev) => setData((prev) => mergeProcs(prev || [], ev))), [setData])
+  // One box per event: fold box_procs / box_gone in place; fetch what a
+  // box_procs_changed (row too big for the stream) or a (re)opened stream asks.
+  useEffect(() => followProcs((ev) => {
+    setData((prev) => {
+      if (!prev) return prev
+      const boxes = mergeProcs(prev.boxes, ev)
+      return boxes === prev.boxes ? prev : { ...prev, boxes }
+    })
+    const want = procsRefetch(ev)
+    if (want === '*') reload()
+    else if (want) {
+      listProcesses(want).then((r) => {
+        const row = r.boxes.find((b) => b.box_id === want)
+        setData((prev) => (prev ? { ...prev, boxes: mergeProcs(prev.boxes,
+          row ? { type: 'box_procs', box: row } : { type: 'box_gone', box_id: want }) } : prev))
+      }).catch((e) => {
+        if (e?.status === 404) setData((prev) => (prev ? { ...prev,
+          boxes: mergeProcs(prev.boxes, { type: 'box_gone', box_id: want }) } : prev))
+      })
+    }
+  }), [setData, reload])
 
   const services = useMemo(() => Object.fromEntries(
     (svc.data?.services || []).map((s) => [s.id, s])), [svc.data])
@@ -50,21 +71,28 @@ export default function Persistent() {
   }
 
   if (unavailable) return <div className="bx-page"><Unavailable what="The process view" /></div>
-  const boxes = data || []
+  const boxes = data?.boxes || []
   const all = boxes.reduce((t, b) => {
-    const x = treeTotals(b.tree)
-    return { procs: t.procs + x.procs, unexpected: t.unexpected + x.unexpected, mism: t.mism + x.mismatches }
-  }, { procs: 0, unexpected: 0, mism: 0 })
+    const x = boxTotals(b)
+    return { procs: t.procs + x.procs, unexpected: t.unexpected + x.unexpected,
+      mism: t.mism + x.mismatches, orphans: t.orphans + b.orphan_conns.length }
+  }, { procs: 0, unexpected: 0, mism: 0, orphans: 0 })
 
   return (
     <div className="bx-page">
       <LoadError error={error} />
+      {data && !data.enabled && (
+        <div className="bx-unavail dim small">The process view is switched off on the server
+          (boxes are off): no box reports its processes.</div>
+      )}
       <div className="net-top">
         <div className="net-counts">
           <span><b>{boxes.length}</b> boxes</span>
           <span><b>{all.procs}</b> processes</span>
           <span className={all.unexpected ? 'bx-red' : ''}><b>{all.unexpected}</b> unexpected</span>
           <span className={all.mism ? 'bx-red' : ''}><b>{all.mism}</b> byte mismatches</span>
+          {all.orphans > 0 && (
+            <span className="bx-red"><b>{all.orphans}</b> unowned connection{all.orphans === 1 ? '' : 's'}</span>)}
         </div>
         <span className="grow" />
         <Toggle checked={onlyOdd} onChange={setOnlyOdd} label="only boxes with something unexpected"
@@ -74,8 +102,8 @@ export default function Persistent() {
                    onStart={start} onRevoke={(x) => setDlg(x)} onLogs={setLogs} />
       <ServiceLogs s={logs} onClose={() => setLogs(null)} />
       {!data && !error && <div className="dim">…</div>}
-      {data && boxes.length === 0 && <EmptyState pad>no box is reporting</EmptyState>}
-      {boxes.filter((b) => !onlyOdd || treeTotals(b.tree).unexpected || treeTotals(b.tree).mismatches)
+      {data && data.enabled && boxes.length === 0 && <EmptyState pad>no box is reporting</EmptyState>}
+      {boxes.filter((b) => !onlyOdd || boxIsOdd(b))
         .map((b) => (
           <BoxTree key={b.box_id} b={b} services={services}
                    onStop={stop} onRevoke={(s) => setDlg(s)} />
@@ -166,7 +194,7 @@ function ServiceLogs({ s, onClose }) {
 
 function BoxTree({ b, services, onStop, onRevoke }) {
   const [collapsed, setCollapsed] = useState(() => new Set())
-  const t = useMemo(() => treeTotals(b.tree), [b.tree])
+  const t = useMemo(() => boxTotals(b), [b])
   const rows = useMemo(() => flattenTree(b.tree, collapsed), [b.tree, collapsed])
   const flip = (key) => setCollapsed((c) => {
     const n = new Set(c)
@@ -174,11 +202,14 @@ function BoxTree({ b, services, onStop, onRevoke }) {
     return n
   })
   return (
-    <details className={`sbx-card bx-tree${t.unexpected ? ' odd' : ''}`} open>
+    <details className={`sbx-card bx-tree${boxIsOdd(b) ? ' odd' : ''}`} open>
       <summary className="bx-tree-head">
         <b className="mono">{b.box_id}</b>
         <span className="dim small">{b.kind}{b.project ? ` · ${b.project}` : ''}</span>
         {b.stale && <Tag tone="pending" title="the box has not reported recently">stale</Tag>}
+        {b.truncated && <Tag tone="pending" title="the box reported more than fits; totals count everything">truncated</Tag>}
+        {b.baseline === 'builtin' && (
+          <Tag title="no image baseline yet: 'unexpected' is judged against the built-in set">built-in baseline</Tag>)}
         <span className="dim small">reported {ago(b.reported_at) || 'never'}</span>
         <span className="grow" />
         <span className="small bx-totals">
@@ -192,7 +223,16 @@ function BoxTree({ b, services, onStop, onRevoke }) {
           {t.mismatches ? <b className="bx-red"> · {t.mismatches} mismatch</b> : null}
         </span>
       </summary>
-      {rows.length === 0 && <div className="dim small bx-none">nothing beyond the OS baseline</div>}
+      {b.error && <div className="error small bx-row-err">{b.error}</div>}
+      {b.orphan_conns.length > 0 && (
+        <div className="bx-orphans">
+          <div className="small bx-red"><b>Possibly hidden process</b> — the host saw
+            {' '}{b.orphan_conns.length} connection{b.orphan_conns.length === 1 ? '' : 's'} from this box
+            that no reported process owns.</div>
+          {b.orphan_conns.map((c, i) => <ConnRow key={i} c={c} depth={0} orphan />)}
+        </div>
+      )}
+      {rows.length === 0 && !b.error && <div className="dim small bx-none">nothing beyond the OS baseline</div>}
       <div className="bx-procs">
         {rows.map((r) => (
           <ProcRow key={r.key} r={r} svc={services[r.node.service_id]}
@@ -236,11 +276,11 @@ function ProcRow({ r, svc, onFlip, onStop, onRevoke }) {
   )
 }
 
-function ConnRow({ c, depth }) {
-  const check = connCheck(c)
+function ConnRow({ c, depth, orphan = false }) {
+  const check = orphan ? 'unowned' : connCheck(c)
   const peer = c.host || (c.raddr ? `${c.raddr}:${c.rport}` : '—')
   return (
-    <div className={`bx-conn${check === 'mismatch' ? ' mismatch' : ''}`}
+    <div className={`bx-conn${check === 'mismatch' || orphan ? ' mismatch' : ''}`}
          style={{ paddingLeft: `${depth * 18 + 44}px` }}>
       <span className="mono small">{c.dir === 'in' ? '⇠ in ' : '⇢ out'} {c.proto}</span>
       <span className="mono small bx-cmd" title={`${c.laddr}:${c.lport} ${c.dir === 'in' ? '←' : '→'} ${peer}`}>
@@ -250,7 +290,7 @@ function ConnRow({ c, depth }) {
         guest {bytes(c.guest_bytes_out)}↑ {bytes(c.guest_bytes_in)}↓</span>
       <span className="small" title="host-metered (proxy / relay): sent / received">
         host {c.host_bytes_out != null ? `${bytes(c.host_bytes_out)}↑ ${bytes(c.host_bytes_in)}↓` : '—'}</span>
-      <Tag tone={check === 'mismatch' ? 'error' : check === 'verified' ? 'done' : undefined}>
+      <Tag tone={check === 'mismatch' || orphan ? 'error' : check === 'verified' ? 'done' : undefined}>
         {check}</Tag>
     </div>
   )

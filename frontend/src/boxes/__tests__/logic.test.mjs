@@ -4,7 +4,7 @@ import {
   budgetSegments, connCheck, diffLines, filterCatalogue, flattenTree, groupPolicy,
   mergeProcs, navState, nestProcs, parseHosts, persistDaysLeft, profilePayload,
   sortBoxes, treeTotals, uptime, validPackage, validateProfile, variantUsers, blankProfile,
-  exposeChoices, exposeDefault, exposePayload,
+  exposeChoices, exposeDefault, exposePayload, procsRefetch, boxTotals, boxIsOdd, normBoxProcs,
 } from '../logic.js'
 
 let n = 0
@@ -61,14 +61,51 @@ t('treeTotals counts every node and conn', () => {
   assert.equal(s.mismatches, 1); assert.equal(s.rss, 15)
 })
 
-t('mergeProcs: full snapshot replaces, single box merges', () => {
-  let st = mergeProcs([], { boxes: [{ box_id: 'p-a', kind: 'project', tree: [] },
-    { box_id: 'shared', kind: 'shared', tree: [] }] })
+t('mergeProcs: box_procs replaces by box_id, box_gone drops, the rest is ignored', () => {
+  const box = (id, kind, tree = []) => ({ type: 'box_procs', box: { box_id: id, kind, tree } })
+  let st = mergeProcs([], box('p-a', 'project'))
+  st = mergeProcs(st, box('shared', 'shared'))
   assert.deepEqual(st.map((b) => b.box_id), ['shared', 'p-a'])
-  st = mergeProcs(st, { type: 'procs', box: { box_id: 's-a', kind: 'service', tree: [{ pid: 1, ppid: 0 }] } })
+  st = mergeProcs(st, box('s-a', 'service', [{ pid: 1, ppid: 0 }]))
   assert.deepEqual(st.map((b) => b.box_id), ['shared', 'p-a', 's-a'])
   assert.equal(st[2].tree[0].pid, 1)
-  assert.equal(mergeProcs(st, { type: 'noise' }), st)
+  assert.deepEqual(st[2].orphan_conns, [])
+  // replace, not append
+  st = mergeProcs(st, box('s-a', 'service', [{ pid: 2, ppid: 0 }, { pid: 3, ppid: 2 }]))
+  assert.equal(st.length, 3)
+  assert.equal(st[2].tree[0].children[0].pid, 3)
+  // box_gone drops; an unknown id is a no-op returning the same array
+  st = mergeProcs(st, { type: 'box_gone', box_id: 'p-a' })
+  assert.deepEqual(st.map((b) => b.box_id), ['shared', 's-a'])
+  assert.equal(mergeProcs(st, { type: 'box_gone', box_id: 'nope' }), st)
+  // box_procs_changed / stream_open / noise change nothing here; a bare
+  // {box_id} (box_gone's shape) is never mistaken for a row
+  assert.equal(mergeProcs(st, { type: 'box_procs_changed', box_id: 's-a' }), st)
+  assert.equal(mergeProcs(st, { type: 'stream_open' }), st)
+  assert.equal(mergeProcs(st, { type: 'noise', box_id: 'x' }), st)
+  assert.equal(mergeProcs(st, { boxes: [] }), st)
+})
+
+t('procsRefetch: changed -> that box, stream_open -> everything', () => {
+  assert.equal(procsRefetch({ type: 'box_procs_changed', box_id: 's-a' }), 's-a')
+  assert.equal(procsRefetch({ type: 'stream_open' }), '*')
+  assert.equal(procsRefetch({ type: 'box_procs', box: {} }), null)
+  assert.equal(procsRefetch(null), null)
+})
+
+t('boxTotals prefers the server totals; boxIsOdd sees orphans and errors', () => {
+  const tree = [{ pid: 1, tag: 'service', conns: [{ dir: 'out', guest_bytes_out: 10, host_bytes_out: 10 }] }]
+  const b = normBoxProcs({ box_id: 'x', tree, truncated: true,
+    totals: { procs: 900, unexpected: 2, conns: 40, guest_bytes_out: 5, guest_bytes_in: 6,
+      host_bytes_out: 7, host_bytes_in: 8 } })
+  const t2 = boxTotals(b)
+  assert.equal(t2.procs, 900); assert.equal(t2.unexpected, 2); assert.equal(t2.conns, 40)
+  assert.equal(t2.host_in, 8); assert.equal(t2.service, 1)
+  assert.equal(boxTotals(normBoxProcs({ box_id: 'y', tree, totals: null })).procs, 1)
+  assert.equal(boxIsOdd(normBoxProcs({ box_id: 'y', tree })), false)
+  assert.equal(boxIsOdd(normBoxProcs({ box_id: 'y', tree, orphan_conns: [{ lport: 1 }] })), true)
+  assert.equal(boxIsOdd(normBoxProcs({ box_id: 'y', tree, error: 'ps timed out' })), true)
+  assert.equal(boxIsOdd(b), true)
 })
 
 t('budgetSegments sums reservations and flags over-cap', () => {
