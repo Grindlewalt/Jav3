@@ -756,6 +756,80 @@ AGENT_ICONS = {"orchestrator": "◆", "chat": "●", "agent": "◇", "head": "�
                "leader": "◈", "subagent": "◦"}
 
 
+def clean_title(raw, n: int = 60) -> str:
+    """A node's title the way a person would write it: no "[item i1]" / "[head]"
+    tag, no "Plan:" prefix, no "Project: /path" lead-in, no trailing colon, cut
+    at a word boundary. The server sends a clean `title` now; this keeps older
+    servers (and whatever slips through) readable."""
+    import re
+    s = " ".join(str(raw or "").split())
+    s = re.sub(r"^(\[[^\]]*\]\s*)+", "", s)
+    s = re.sub(r"^(Plan|Task|Job)\s*:\s*", "", s, flags=re.I)
+    s = re.sub(r"^Project:\s*\S+\s*[-—:.,]?\s*", "", s, flags=re.I)
+    s = s.strip().rstrip(":").strip()
+    if len(s) <= n:
+        return s
+    cut = s[:n].rsplit(" ", 1)[0].rstrip(",.;:-—")
+    return (cut if len(cut) > n // 2 else s[:n]) + "…"
+
+
+def node_role(nd: dict) -> str:
+    import re
+    if nd.get("role"):
+        return str(nd["role"])
+    kind = nd.get("kind") or "agent"
+    m = re.match(r"\s*\[([^\]]+)\]", str(nd.get("title") or ""))
+    tag = m.group(1).strip() if m else ""
+    if tag.startswith("item "):
+        return tag
+    if kind == "head" or tag == "head":
+        return "plan"
+    if nd.get("agent_slug"):
+        return f"@{nd['agent_slug']}"
+    # older rows carry the agent in the title's tag: "[morning-stocks] Fetch…"
+    if tag:
+        return f"@{tag}" if " " not in tag else tag
+    return kind
+
+
+def node_status(nd: dict) -> str:
+    """running | needs_you | done | failed | stopped; an older server only says
+    whether a node is running."""
+    st = nd.get("status")
+    if st in ("running", "needs_you", "done", "failed", "stopped"):
+        return st
+    return "running" if nd.get("running") else "done"
+
+
+STATUS_GLYPH = {"running": "", "needs_you": "[$warning]![/]", "done": "[$success]✓[/]",
+                "failed": "[$error]✗[/]", "stopped": "[$text-muted]■[/]"}
+
+
+def time_bucket(ts, now: float | None = None) -> str:
+    from datetime import datetime, timedelta, timezone
+    try:
+        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return "Older"
+    if d.tzinfo is None:                      # the server's naive timestamps are UTC
+        d = d.replace(tzinfo=timezone.utc)
+    d = d.astimezone().replace(tzinfo=None)
+    today = datetime.fromtimestamp(now if now is not None else time.time()).date()
+    day = d.date()
+    if day >= today:
+        return "Today"
+    if day == today - timedelta(days=1):
+        return "Yesterday"
+    if day > today - timedelta(days=7):
+        return "This week"
+    if day > today - timedelta(days=31):
+        return "This month"
+    return "Older"
+
+
+TIME_BUCKETS = ("Today", "Yesterday", "This week", "This month", "Older")
+
+
 class AgentTree:
     """/api/chat/agents nodes as a forest: roots (parent_id null, or a parent not
     in the list) grouped by project, each with its descendants in depth order."""
@@ -801,6 +875,23 @@ class AgentTree:
             if p is None or p not in self.by_id:
                 return nid
             nid = p
+        return None
+
+    def root_status(self, root_id) -> str:
+        """A root's status counts its whole subtree: running if anything under it
+        runs, needs_you if anything under it waits on the operator."""
+        nodes = [self.by_id[root_id]] + [k for k, _ in self.descendants(root_id)]
+        sts = [node_status(k) for k in nodes]
+        for s in ("running", "needs_you"):
+            if s in sts:
+                return s
+        return sts[0]
+
+    def needs(self, root_id) -> str | None:
+        nodes = [self.by_id[root_id]] + [k for k, _ in self.descendants(root_id)]
+        for k in nodes:
+            if node_status(k) == "needs_you":
+                return k.get("needs") or "waiting on you"
         return None
 
     def counts(self) -> tuple[int, int, int]:
@@ -1781,9 +1872,11 @@ def build_tui(base: str, token: str, **kw):
                 self.screen.click_row(self)
 
     class AgentsScreen(Screen):
-        """← from an empty prompt: every conversation that is working, across
-        projects. ↑↓ walk the roots; the highlighted root's agents unfold under it
-        and shift+↑↓ walk those; enter opens one in the main screen."""
+        """← from an empty prompt. The active view: what is running and what needs
+        the operator, then a Finished row; the finished view: everything else,
+        grouped by project or by time (tab). ↑↓ move between entries, the
+        highlighted one unfolds its agents, → steps into them and ← back out,
+        enter opens. Plain arrows only: Terminal.app keeps shift+↑↓ for itself."""
 
         DEFAULT_CSS = """
         AgentsScreen { background: $background; }
@@ -1791,18 +1884,24 @@ def build_tui(base: str, token: str, **kw):
         #ag-list { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
         #ag-foot { height: 1; padding: 0 2; color: $text-muted; }
         AgentRow { height: 1; padding: 0 1; }
-        AgentRow.project { color: $text-muted; text-style: bold; margin-top: 1; }
+        AgentRow.section { color: $text-muted; text-style: bold; margin-top: 1; }
+        AgentRow.group { color: $text-muted; margin-top: 1; }
+        AgentRow.link { margin-top: 1; color: $text-muted; }
         AgentRow.child { color: $text; }
         AgentRow.-sel { background: $primary 25%; }
         AgentRow.current { background: $success 18%; color: $success; }
         AgentRow.current.-sel { background: $success 38%; }
         """
         BINDINGS = [
-            Binding("escape,left,right", "back", show=False),
-            Binding("up", "move(-1)", show=False),
-            Binding("down", "move(1)", show=False),
-            Binding("shift+up", "child(-1)", show=False),
-            Binding("shift+down", "child(1)", show=False),
+            Binding("escape", "back", show=False),
+            Binding("left", "left", show=False),
+            Binding("right", "right", show=False),
+            Binding("up,k", "move(-1)", show=False),
+            Binding("down,j", "move(1)", show=False),
+            # still honoured where the terminal sends them
+            Binding("shift+up", "root(-1)", show=False),
+            Binding("shift+down", "root(1)", show=False),
+            Binding("tab", "group", show=False),
             Binding("enter", "open", show=False),
             Binding("r", "reload", show=False),
             Binding("pageup", "page(-1)", show=False),
@@ -1812,9 +1911,13 @@ def build_tui(base: str, token: str, **kw):
         def __init__(self, origin=None) -> None:
             super().__init__()
             self.origin = origin              # the conversation the operator came from
-            self.forest = AgentTree([])
-            self.sel_root = None
-            self.sel_child = None
+            self.mode = "active"              # or "finished"
+            self.group_by = "project"         # finished view: or "time"
+            self.trees = {"active": AgentTree([]), "finished": AgentTree([])}
+            self.total_finished: int | None = None
+            self.sel = None                   # a root id, a child id, or "finished"
+            self.in_kids = False              # ↑↓ walk the open root's agents
+            self.open_root = None
             self.loaded = False
             self.error: str | None = None
             self._lock = asyncio.Lock()
@@ -1823,132 +1926,258 @@ def build_tui(base: str, token: str, **kw):
         def compose(self) -> ComposeResult:
             yield Static(id="ag-head")
             yield VerticalScroll(id="ag-list", can_focus=False)
-            yield Static("[$primary]↑↓[/] agents   [$primary]shift+↑↓[/] the agents under "
-                         "one   [$primary]enter[/] open   [$primary]← esc[/] back   "
-                         "[$primary]r[/] refresh   [$success]■[/] where you were",
-                         id="ag-foot")
+            yield Static(id="ag-foot")
 
         def on_mount(self) -> None:
-            self.render_head()
+            self.render_chrome()
             self.run_worker(self.reload(), group="ag-reload", exclusive=True)
-            self.set_interval(2, lambda: self.run_worker(self.reload(), group="ag-reload",
-                                                         exclusive=True))
+            self.set_interval(2, self._auto_reload)
             self.set_interval(0.15, self.spin)
+
+        def _auto_reload(self) -> None:
+            if self.mode == "active":
+                self.run_worker(self.reload(), group="ag-reload", exclusive=True)
+
+        @property
+        def tree(self) -> AgentTree:
+            return self.trees[self.mode]
+
+        async def _fetch(self, scope: str):
+            q = "?scope=finished&limit=500" if scope == "finished" else "?scope=active"
+            data = await self.app.api("GET", f"/api/chat/agents{q}")
+            nodes = data.get("nodes") if isinstance(data, dict) else None
+            nodes = nodes if isinstance(nodes, list) else []
+            return nodes, (data.get("total") if isinstance(data, dict) else None)
 
         async def reload(self) -> None:
             try:
-                data = await self.app.api("GET", "/api/chat/agents")
-                nodes = data.get("nodes") if isinstance(data, dict) else None
+                nodes, _ = await self._fetch("active")
+                if nodes and not any("status" in n for n in nodes):
+                    # an older server ignores `scope` and sends everything: split
+                    # it here, by whether anything in a root's tree is running
+                    whole = AgentTree(nodes)
+                    act, fin = [], []
+                    for r in whole.roots:
+                        grp = act if whole.root_status(r["id"]) in ("running",
+                                                                    "needs_you") else fin
+                        grp += [r] + [k for k, _ in whole.descendants(r["id"])]
+                    self.trees = {"active": AgentTree(act), "finished": AgentTree(fin)}
+                    self.total_finished = len(AgentTree(fin).roots)
+                else:
+                    self.trees["active"] = AgentTree(nodes)
+                    if self.mode == "finished" or self.total_finished is None:
+                        fnodes, total = await self._fetch("finished")
+                        self.trees["finished"] = AgentTree(fnodes)
+                        self.total_finished = (total if isinstance(total, int)
+                                               else len(self.trees["finished"].roots))
                 self.error = None
-                self.set_tree(AgentTree(nodes if isinstance(nodes, list) else []))
             except CliError as e:
                 self.error = str(e)
-            await self.rebuild()
-
-        def set_tree(self, tree: AgentTree) -> None:
-            self.forest = tree
             if not self.loaded:
                 self.loaded = True
-                root = tree.root_of(self.origin) if self.origin in tree.by_id else None
-                if root is not None:
-                    self.sel_root = root
-                    self.sel_child = self.origin if self.origin != root else None
-            if self.sel_root not in {r["id"] for r in tree.roots}:
-                self.sel_root = tree.roots[0]["id"] if tree.roots else None
-                self.sel_child = None
-            if self.sel_child is not None and self.sel_child not in {
-                    n["id"] for n, _ in tree.descendants(self.sel_root)}:
-                self.sel_child = None
+                self._select_origin()
+            self._keep_selection()
+            await self.rebuild()
 
-        def row_markup(self, n: dict, depth: int, root: bool) -> str:
-            icon = AGENT_ICONS.get(n.get("kind"), "·")
-            nk = len(self.forest.descendants(n["id"])) if root else 0
-            fold = ("▾" if n["id"] == self.sel_root else "▸") if nk else " "
-            indent = "  " * depth + ("└ " if depth else "")
-            title = n.get("title") or "#{}".format(n["id"])
-            bits = [f"{fold} {indent}[$secondary]{icon}[/] [b]{_esc(_short(title, 50))}[/]"]
-            if n.get("agent_slug"):
-                bits.append(f"[$text-muted]@{_esc(n['agent_slug'])}[/]")
-            if n.get("model"):
-                bits.append(f"[$text-muted]{_esc(str(n['model']).split('/')[-1])}[/]")
+        # -- what is shown, in order --------------------------------------------------
+
+        def _sections(self) -> list[tuple[str, list[dict]]]:
+            tr = self.tree
+            if self.mode == "active":
+                run = [r for r in tr.roots if tr.root_status(r["id"]) == "running"]
+                need = [r for r in tr.roots if tr.root_status(r["id"]) == "needs_you"]
+                return [("Active", run), ("Needs you", need)]
+            if self.group_by == "time":
+                buckets: dict = {}
+                for r in tr.roots:
+                    buckets.setdefault(time_bucket(r.get("ended_at") or r.get("started_at")),
+                                       []).append(r)
+                return [(b, buckets[b]) for b in TIME_BUCKETS if b in buckets]
+            return [(f"⌂ {p or 'no project'}", rs) for p, rs in tr.groups]
+
+        def _root_ids(self) -> list:
+            ids = [r["id"] for _, rs in self._sections() for r in rs]
+            if self.mode == "active":
+                ids.append("finished")
+            return ids
+
+        def _select_origin(self) -> None:
+            for mode in ("active", "finished"):
+                tr = self.trees[mode]
+                if self.origin in tr.by_id:
+                    self.mode = mode
+                    root = tr.root_of(self.origin)
+                    self.sel, self.open_root = root, root
+                    if self.origin != root:
+                        self.sel, self.in_kids = self.origin, True
+                    return
+
+        def _keep_selection(self) -> None:
+            ids = self._root_ids()
+            if self.in_kids:
+                kids = [k["id"] for k, _ in self.tree.descendants(self.open_root)] \
+                    if self.open_root in self.tree.by_id else []
+                if self.sel in kids:
+                    return
+                self.in_kids = False
+                self.sel = self.open_root
+            if self.sel not in ids:
+                self.sel = ids[0] if ids else None
+            self.open_root = self.sel if self.sel != "finished" else None
+
+        # -- drawing ------------------------------------------------------------------
+
+        def row_markup(self, nd: dict, depth: int, root: bool) -> str:
+            tr = self.tree
+            icon = AGENT_ICONS.get(nd.get("kind"), "·")
+            nk = len(tr.descendants(nd["id"])) if root else 0
+            fold = ("▾" if nd["id"] == self.open_root else "▸") if nk else " "
+            indent = "   " * depth
+            st = tr.root_status(nd["id"]) if root else node_status(nd)
+            glyph = (f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/]" if st == "running"
+                     else STATUS_GLYPH.get(st, ""))
+            title = clean_title(nd.get("title")) or f"#{nd['id']}"
+            meta = [node_role(nd)]
+            if root and nd.get("project") and not (self.mode == "finished"
+                                                   and self.group_by == "project"):
+                meta.append(f"⌂ {nd['project']}")
+            if nd.get("model"):
+                meta.append(str(nd["model"]).split("/")[-1])
             if nk:
-                bits.append(f"[$text-muted]{nk} agent{'s' * (nk != 1)}[/]")
-            bits.append(f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/]"
-                        if n.get("running") else "[$success]✓[/]")
-            age = _age(n.get("started_at"))
-            if age:
-                bits.append(f"[$text-muted]{age}[/]")
-            return "  ".join(bits)
+                meta.append(f"{nk} agent{'s' * (nk != 1)}")
+            line = (f"{fold} {indent}[$secondary]{icon}[/] [b]{_esc(title)}[/]  "
+                    f"[$text-muted]{_esc(' · '.join(meta))}[/]  {glyph} "
+                    f"[$text-muted]{_age(nd.get('ended_at') or nd.get('started_at'))}[/]")
+            why = tr.needs(nd["id"]) if root else (nd.get("needs") if st == "needs_you"
+                                                    else None)
+            if why:
+                line += f"  [$warning]{_esc(_short(why, 60))}[/]"
+            return line
 
-        def render_head(self) -> None:
-            running, n, projects = self.forest.counts()
-            head = (f"[b]Agents[/]   [$accent]{running} running[/] [$text-muted]·[/] "
-                    f"{n} agent{'s' * (n != 1)} [$text-muted]·[/] "
-                    f"{projects} project{'s' * (projects != 1)}")
+        def render_chrome(self) -> None:
+            act = self.trees["active"]
+            run = sum(1 for r in act.roots if act.root_status(r["id"]) == "running")
+            need = sum(1 for r in act.roots if act.root_status(r["id"]) == "needs_you")
+            if self.mode == "active":
+                head = (f"[b]Agents[/]   [$accent]{run} running[/] [$text-muted]·[/] "
+                        + (f"[$warning]{need} need you[/]" if need else
+                           "[$text-muted]nothing needs you[/]"))
+                foot = ("[$primary]↑↓[/] move   [$primary]→ ←[/] into / out of its agents   "
+                        "[$primary]enter[/] open   [$primary]esc[/] back   "
+                        "[$primary]r[/] refresh   [$success]■[/] where you were")
+            else:
+                total = self.total_finished or 0
+                head = (f"[b]Finished[/]   {total} [$text-muted]· grouped by[/] "
+                        f"[b]{self.group_by}[/]")
+                foot = (f"[$primary]tab[/] group by {'time' if self.group_by == 'project' else 'project'}"
+                        "   [$primary]↑↓[/] move   [$primary]→ ←[/] into / out of its agents   "
+                        "[$primary]enter[/] open   [$primary]esc[/] back to active")
             if self.error:
                 head += f"   [$error]{_esc(self.error)}[/]"
             self.query_one("#ag-head", Static).update(head)
+            self.query_one("#ag-foot", Static).update(foot)
 
         async def rebuild(self) -> None:
             async with self._lock:
                 rows: list = []
-                for proj, roots in self.forest.groups:
-                    rows.append(AgentRow(f"⌂ {_esc(proj or 'no project')}  "
-                                         f"[$text-muted]{len(roots)}[/]", "project"))
+                tr = self.tree
+                for name, roots in self._sections():
+                    if self.mode == "active" and not roots:
+                        continue
+                    rows.append(AgentRow(f"{_esc(name)}  [$text-muted]{len(roots)}[/]",
+                                         "section" if self.mode == "active" else "group"))
                     for r in roots:
                         rows.append(AgentRow(self.row_markup(r, 0, True), "root", r["id"]))
-                        if r["id"] == self.sel_root:
-                            for k, d in self.forest.descendants(r["id"]):
+                        if r["id"] == self.open_root:
+                            for k, d in tr.descendants(r["id"]):
                                 rows.append(AgentRow(self.row_markup(k, d, False), "child",
                                                      k["id"], d))
-                if not rows:
-                    rows.append(AgentRow("[$text-muted]no agents or chats are running — "
-                                         "/orchestration starts some[/]", "project"))
-                sel = self.sel_child if self.sel_child is not None else self.sel_root
-                want = "child" if self.sel_child is not None else "root"
+                if self.mode == "active":
+                    if not any(r.kind == "root" for r in rows):
+                        rows.append(AgentRow("[$text-muted]nothing is running and nothing "
+                                             "needs you — /orchestration starts a team[/]",
+                                             "section"))
+                    n = self.total_finished
+                    rows.append(AgentRow(f"  Finished  [$text-muted]{'' if n is None else n}  "
+                                         "enter →[/]", "link", "finished"))
+                elif not rows:
+                    rows.append(AgentRow("[$text-muted]nothing has finished yet[/]", "group"))
                 target = None
                 for row in rows:
                     if row.nid is not None and row.nid == self.origin:
                         row.add_class("current")
-                    if row.nid == sel and row.kind == want:
+                    if row.nid == self.sel and (row.kind == "child") == self.in_kids \
+                            and row.kind in ("root", "child", "link"):
                         row.add_class("-sel")
                         target = row
                 lst = self.query_one("#ag-list", VerticalScroll)
                 with self.app.batch_update():
                     await lst.remove_children()
                     await lst.mount_all(rows)
-                self.render_head()
+                self.render_chrome()
                 if target is not None:
                     target.scroll_visible(animate=False)
 
         def spin(self) -> None:
             self.frame += 1
             for row in self.query(AgentRow):
-                n = self.forest.by_id.get(row.nid)
-                if n is not None and n.get("running"):
-                    row.update(self.row_markup(n, row.depth, row.kind == "root"))
+                nd = self.tree.by_id.get(row.nid)
+                if nd is not None and (row.kind == "root" and self.tree.root_status(
+                        row.nid) == "running" or node_status(nd) == "running"):
+                    row.update(self.row_markup(nd, row.depth, row.kind == "root"))
+
+        # -- keys -------------------------------------------------------------------------
 
         async def action_move(self, d: int) -> None:
-            ids = [r["id"] for r in self.forest.roots]
+            if self.in_kids:
+                kids = [k["id"] for k, _ in self.tree.descendants(self.open_root)]
+                i = kids.index(self.sel) + d if self.sel in kids else 0
+                if i < 0:                         # above the first agent: back to its root
+                    self.in_kids, self.sel = False, self.open_root
+                elif i >= len(kids):              # below the last: on to the next entry
+                    self.in_kids = False
+                    self.sel = self.open_root
+                    return await self.action_root(1)
+                else:
+                    self.sel = kids[i]
+                return await self.rebuild()
+            await self.action_root(d)
+
+        async def action_root(self, d: int) -> None:
+            ids = self._root_ids()
             if not ids:
                 return
-            i = ids.index(self.sel_root) if self.sel_root in ids else -1
-            self.sel_root = ids[max(0, min(len(ids) - 1, i + d))]
-            self.sel_child = None
+            if self.in_kids:
+                self.in_kids, self.sel = False, self.open_root
+            i = ids.index(self.sel) if self.sel in ids else -1
+            self.sel = ids[max(0, min(len(ids) - 1, i + d))]
+            self.open_root = self.sel if self.sel != "finished" else None
             await self.rebuild()
 
-        async def action_child(self, d: int) -> None:
-            kids = [n["id"] for n, _ in self.forest.descendants(self.sel_root)]
-            if not kids:
-                return
-            if self.sel_child is None:
-                if d < 0:
-                    return
-                self.sel_child = kids[0]
+        async def action_right(self) -> None:
+            if self.sel == "finished":
+                return await self.action_open()
+            if not self.in_kids and self.open_root is not None:
+                kids = self.tree.descendants(self.open_root)
+                if kids:
+                    self.in_kids, self.sel = True, kids[0][0]["id"]
+                    await self.rebuild()
+
+        async def action_left(self) -> None:
+            if self.in_kids:
+                self.in_kids, self.sel = False, self.open_root
+                await self.rebuild()
             else:
-                i = kids.index(self.sel_child) + d
-                self.sel_child = None if i < 0 else kids[min(i, len(kids) - 1)]
-            await self.rebuild()
+                await self.action_back()
+
+        async def action_group(self) -> None:
+            if self.mode == "finished":
+                self.group_by = "time" if self.group_by == "project" else "project"
+                self.in_kids = False
+                ids = self._root_ids()
+                self.sel = ids[0] if ids else None
+                self.open_root = self.sel
+                await self.rebuild()
 
         def action_page(self, d: int) -> None:
             lst = self.query_one("#ag-list", VerticalScroll)
@@ -1957,23 +2186,39 @@ def build_tui(base: str, token: str, **kw):
         async def action_reload(self) -> None:
             await self.reload()
 
-        def action_back(self) -> None:
-            self.app.pop_screen()
+        async def action_back(self) -> None:
+            if self.mode == "finished":
+                self.mode, self.in_kids = "active", False
+                self.sel = "finished"
+                self.open_root = None
+                await self.rebuild()
+            else:
+                self.app.pop_screen()
 
-        def action_open(self) -> None:
-            nid = self.sel_child if self.sel_child is not None else self.sel_root
-            node = self.forest.by_id.get(nid)
+        async def action_open(self) -> None:
+            if self.sel == "finished":
+                self.mode, self.in_kids = "finished", False
+                if self.total_finished is None or not self.trees["finished"].roots:
+                    await self.reload()
+                ids = self._root_ids()
+                self.sel = ids[0] if ids else None
+                self.open_root = self.sel
+                await self.rebuild()
+                return
+            node = self.tree.by_id.get(self.sel)
             if node is None:
                 return
             self.app.pop_screen()
             self.app.run_worker(self.app.open_node(node), group="agents")
 
         def click_row(self, row) -> None:
-            if row.kind == "root":
-                self.sel_root, self.sel_child = row.nid, None
+            if row.kind == "link":
+                self.sel = "finished"
+            elif row.kind == "root":
+                self.sel, self.in_kids, self.open_root = row.nid, False, row.nid
             else:
-                self.sel_child = row.nid
-            self.action_open()
+                self.sel, self.in_kids = row.nid, True
+            self.run_worker(self.action_open(), group="ag-open")
 
     class Palette(Provider):
         """Every slash command in ctrl+p."""

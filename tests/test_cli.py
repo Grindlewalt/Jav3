@@ -1029,13 +1029,17 @@ def test_agent_tree_groups_roots_and_orders_descendants():
 
 
 async def test_tui_agents_screen(cfg):
+    """Against an older server (no status/scope): the running root is Active,
+    the rest behind Finished. ↑↓ move between entries (the highlighted one
+    unfolds), → and ← step into and out of its agents, enter opens."""
     pytest.importorskip("textual")
     nodes = [
         {"id": 10, "parent_id": None, "kind": "orchestrator", "title": "Ship it",
          "agent_slug": None, "project": "demo", "model": "deepseek/deepseek-flash",
          "running": True, "started_at": "2026-09-25T10:00:00"},
-        {"id": 11, "parent_id": 10, "kind": "agent", "title": "build", "agent_slug": "coder",
-         "project": "demo", "model": None, "running": True, "started_at": "2026-09-25T10:01:00"},
+        {"id": 11, "parent_id": 10, "kind": "agent", "title": "[item i1] build the thing",
+         "agent_slug": "coder", "project": "demo", "model": None, "running": True,
+         "started_at": "2026-09-25T10:01:00"},
         {"id": 12, "parent_id": 11, "kind": "subagent", "title": "grep", "agent_slug": None,
          "project": "demo", "model": None, "running": False, "started_at": "2026-09-25T10:02:00"},
         {"id": 13, "parent_id": 10, "kind": "agent", "title": "docs", "agent_slug": "writer",
@@ -1061,53 +1065,129 @@ async def test_tui_agents_screen(cfg):
         await pilot.press("left")                        # empty prompt: open the screen
         assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
         scr = app.screen
-        assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 2)
+        assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 1)
 
         def rows():
             return [(r.kind, r.nid) for r in scr.query("AgentRow")]
 
         def sel():
             return [r.nid for r in scr.query("AgentRow") if r.has_class("-sel")]
-        # we came from 20: it is selected and green
-        assert sel() == [20]
-        green = [r for r in scr.query("AgentRow") if r.has_class("current")]
-        assert [r.nid for r in green] == [20]
-        assert "2 running" in str(scr.query_one("#ag-head").render())
-        # ↑ goes to the orchestrator (a root), which unfolds its agents
+        # we came from 20, which has finished: the finished view opens on it, green
+        assert scr.mode == "finished" and sel() == [20]
+        assert [r.nid for r in scr.query("AgentRow") if r.has_class("current")] == [20]
+        # esc: back to the active view, on the Finished row
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert scr.mode == "active" and sel() == ["finished"]
+        assert "1 running" in str(scr.query_one("#ag-head").render())
+        # ↑ to the orchestrator: it unfolds; ↓ skips its agents to Finished
         await pilot.press("up")
         await pilot.pause(0.1)
         assert sel() == [10]
-        assert rows() == [("project", None), ("root", 10), ("child", 11), ("child", 12),
-                          ("child", 13), ("project", None), ("root", 20)]
-        # ↓ skips the children to the next root and folds them away
+        assert rows() == [("section", None), ("root", 10), ("child", 11), ("child", 12),
+                          ("child", 13), ("link", "finished")]
+        assert "build the thing" in str(scr.query("AgentRow")[2].render())
+        assert "[item" not in str(scr.query("AgentRow")[2].render())
         await pilot.press("down")
         await pilot.pause(0.1)
-        assert sel() == [20] and ("child", 11) not in rows()
-        await pilot.press("up", "shift+down", "shift+down")
+        assert sel() == ["finished"]
+        # → steps into the agents, ↑↓ walk them, ← steps back out
+        await pilot.press("up", "right", "down")
         await pilot.pause(0.1)
         assert sel() == [12]
-        await pilot.press("shift+up", "shift+up", "shift+up")
+        await pilot.press("left")
         await pilot.pause(0.1)
-        assert sel() == [10]
-        await pilot.press("shift+down", "enter")         # open agent 11: running
+        assert sel() == [10] and not scr.in_kids
+        await pilot.press("right", "enter")              # open agent 11: running
         assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
         assert await _until(pilot, lambda: "GET /api/chat/agents/11/stream" in srv.paths)
         assert await _until(pilot, lambda: not app.busy and app.last_reply == "built")
         assert app.cid == 11 and "GET /api/conversations/11/messages" in srv.paths
-        assert "GET /api/chat/11/stream" in srv.paths    # tried the chat stream first
         names = [tv.tname for tv in app.query("ToolView")]
         assert names == ["run_code", "read_file"]
-        # back in: now 11 is the green one; esc returns
+        # back in: now 11 is the green one, inside its orchestrator; ← twice leaves
         await pilot.press("left")
         assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
         scr = app.screen
-        assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 2)
+        assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 1)
         assert [r.nid for r in scr.query("AgentRow") if r.has_class("current")] == [11]
-        await pilot.press("escape")
-        await pilot.pause(0.1)
-        assert type(app.screen).__name__ != "AgentsScreen"
-        # a non-empty prompt keeps ← for the cursor
-        app.editor.text = "abc"
+        assert scr.in_kids and sel() == [11]
+        await pilot.press("left", "left")
+        assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
+
+
+async def test_tui_agents_screen_needs_you_and_finished_grouping(cfg):
+    """Against the new contract: status/needs/role/title, scope=active and
+    scope=finished; Needs you gets its own section; tab regroups Finished."""
+    pytest.importorskip("textual")
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    iso = lambda d: (now - timedelta(days=d)).strftime("%Y-%m-%d %H:%M:%S")  # noqa: E731
+    active = [
+        {"id": 1, "parent_id": None, "kind": "orchestrator", "title": "Ship v2", "role":
+         "orchestrator", "status": "running", "running": True, "project": "demo",
+         "started_at": iso(0)},
+        {"id": 2, "parent_id": None, "kind": "agent", "title": "Weather scout", "role":
+         "@weather", "status": "needs_you", "needs": "approval pending: egress to api.x.com",
+         "running": False, "project": "home", "started_at": iso(0)},
+    ]
+    finished = [
+        {"id": 5, "parent_id": None, "kind": "chat", "title": "Old A", "status": "done",
+         "project": "demo", "started_at": iso(0), "ended_at": iso(0)},
+        {"id": 6, "parent_id": None, "kind": "agent", "title": "Old B", "status": "failed",
+         "project": "home", "started_at": iso(3), "ended_at": iso(3)},
+    ]
+
+    def handler(request):
+        path, q = request.url.path, request.url.params
+        if path == "/api/devices/whoami":
+            return httpx.Response(200, json={"username": "device:test"})
+        if path == "/api/chat/agents":
+            if q.get("scope") == "finished":
+                return httpx.Response(200, json={"nodes": finished, "total": 2})
+            return httpx.Response(200, json={"nodes": active})
+        if path == "/api/conversations":
+            return httpx.Response(200, json={"conversations": []})
+        return httpx.Response(404, json={"detail": "nope"})
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=httpx.MockTransport(handler))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
         await pilot.press("left")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 3)
+        text = [str(r.render()) for r in scr.query("AgentRow")]
+        assert text[0].startswith("Active") and any(t.startswith("Needs you") for t in text)
+        assert any("approval pending: egress" in t for t in text)
+        assert "1 need you" in str(scr.query_one("#ag-head").render())
+        assert "Finished" in text[-1] and "2" in text[-1]
+        await pilot.press("down", "down", "enter")       # the Finished row
+        await pilot.pause(0.2)
+        assert scr.mode == "finished"
+        groups = [str(r.render()) for r in scr.query("AgentRow") if r.kind == "group"]
+        assert [g.split()[1] for g in groups] == ["demo", "home"]
+        await pilot.press("tab")
         await pilot.pause(0.1)
-        assert type(app.screen).__name__ != "AgentsScreen"
+        groups = [str(r.render()).split("  ")[0] for r in scr.query("AgentRow")
+                  if r.kind == "group"]
+        assert groups == ["Today", "This week"]
+
+
+def test_agent_titles_and_roles_read_cleanly():
+    assert jav3.clean_title("[item i1] Create notes/hello.txt containing hello") == \
+        "Create notes/hello.txt containing hello"
+    assert jav3.clean_title("[head] Plan: The operator's request, verbatim:") == \
+        "The operator's request, verbatim"
+    assert jav3.clean_title("[gen+mesh perf] Project: /opt/jarvis/projects/x — tune it") == \
+        "tune it"
+    assert jav3.clean_title("  Fetch today's news") == "Fetch today's news"
+    long = jav3.clean_title("word " * 30)
+    assert long.endswith("…") and len(long) <= 61 and not long[:-1].endswith(" ")
+    assert jav3.node_role({"title": "[item i3] x"}) == "item i3"
+    assert jav3.node_role({"kind": "head"}) == "plan"
+    assert jav3.node_role({"kind": "agent", "agent_slug": "coder"}) == "@coder"
+    assert jav3.node_role({"role": "research"}) == "research"
+    assert jav3.node_role({"kind": "agent", "title": "[morning-stocks] Fetch"}) == \
+        "@morning-stocks"
+    assert jav3.node_status({"running": True}) == "running"
+    assert jav3.node_status({"status": "needs_you", "running": False}) == "needs_you"
