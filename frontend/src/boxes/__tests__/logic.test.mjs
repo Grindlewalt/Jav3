@@ -6,7 +6,7 @@ import {
   sortBoxes, treeTotals, uptime, validPackage, validateProfile, variantUsers, blankProfile,
   exposeChoices, exposeDefault, exposePayload, procsRefetch, boxTotals, boxIsOdd, normBoxProcs,
   normRuntimes, assignableProjects, packageReach, buildState, applyBuildEvent, mergeBuildRest,
-  buildNeedsReload, verLabel,
+  buildNeedsReload, verLabel, projectLabel, needsProject,
 } from '../logic.js'
 
 let n = 0
@@ -188,34 +188,52 @@ t('profilePayload carries placement and runtime verbatim', () => {
   assert.equal('projects' in pl, false)
 })
 
-t('groupPolicy: by project with its profile, then baselines', () => {
+t('groupPolicy: project groups by kind, then profile baselines with their keys', () => {
   const profiles = [
-    { id: 1, name: 'Default', builtin: true, allow_hosts: ['pypi.org'], deny_hosts: [], projects: ['a'] },
-    { id: 2, name: 'Scoped', builtin: true, allow_hosts: [], deny_hosts: ['evil.com'], projects: ['b'] },
+    { id: 1, name: 'Default', builtin: true, default_verdict: 'deny', network_off: false, projects: ['a', 'c'] },
+    { id: 2, name: 'Scoped', builtin: true, default_verdict: 'deny', network_off: true, projects: ['b'] },
   ]
   const groups = [
-    { project: 'a', entries: [{ host: 'x.com', source: 'operator' }], deny: ['y.com'] },
-    { project: '__general__', entries: [{ host: 'legacy.org' }] },
-    { project: 'b', entries: [] },
+    { project: 'a', kind: 'project', profile: { id: 1, name: 'Default', default: 'deny' },
+      entries: [{ host: 'x.com', source: 'operator' }, { host: 'auto.io', source: 'auto', id: 9 }],
+      deny: ['y.com'] },
+    { project: 'b', kind: 'project', profile: { id: 2, name: 'Scoped', default: 'deny' },
+      entries: [], deny: ['z.com'] },
+    { project: '__image_build__', kind: 'project', profile: { id: 0, name: 'Image build' }, entries: [], deny: [] },
+    { project: '__general__', kind: 'profile', profile: { id: 1, name: 'Default', default: 'deny' },
+      entries: [{ host: 'pypi.org', source: 'seed' }], deny: [], projects: ['a', 'c'] },
+    { project: 'profile:2', kind: 'profile', profile: { id: 2, name: 'Scoped', default: 'deny' },
+      entries: [], deny: ['evil.com'], projects: ['b'] },
   ]
   const projects = [{ slug: 'a', name: 'Alpha' }, { slug: 'b', name: 'Beta' }, { slug: 'c', name: 'C' }]
   let r = groupPolicy({ groups, profiles, projects })
-  assert.deepEqual(r.projectGroups.map((g) => g.slug), ['a'])
+  assert.deepEqual(r.projectGroups.map((g) => g.slug), ['a', 'b'])      // never __image_build__
+  assert.equal(r.projectGroups[0].name, 'Alpha')
   assert.equal(r.projectGroups[0].profile.name, 'Default')
-  assert.deepEqual(r.projectGroups[0].deny, [{ host: 'y.com' }])
-  assert.deepEqual(r.profileGroups[0].allow, ['pypi.org', 'legacy.org'])
+  assert.equal(r.projectGroups[0].allow[1].source, 'auto')
+  assert.deepEqual(r.projectGroups[0].deny, ['y.com'])
+  assert.deepEqual(r.profileGroups.map((g) => g.key), ['__general__', 'profile:2'])
+  assert.equal(r.profileGroups[0].isDefault, true)
+  assert.equal(r.profileGroups[0].allow[0].source, 'seed')
+  assert.equal(r.profileGroups[1].network_off, true)                    // from /api/profiles
+  assert.deepEqual(r.profileGroups[1].deny, ['evil.com'])
   r = groupPolicy({ groups, profiles, projects, filter: 'b' })
   assert.deepEqual(r.projectGroups.map((g) => g.slug), ['b'])
-  assert.deepEqual(r.profileGroups.map((g) => g.name), ['Scoped'])
+  assert.deepEqual(r.profileGroups.map((g) => g.key), ['profile:2'])
+  // a project without a list of its own: its profile's baseline only
   r = groupPolicy({ groups, profiles, projects, filter: 'c' })
-  assert.equal(r.projectGroups[0].profile.name, 'Default')   // no row: Default
+  assert.equal(r.projectGroups.length, 0)
+  assert.deepEqual(r.profileGroups.map((g) => g.key), ['__general__'])
 })
 
-t('groupPolicy without profiles keeps the legacy shared list', () => {
-  const r = groupPolicy({ groups: [{ project: '__general__', entries: [{ host: 'a.org' }] }] })
-  assert.equal(r.profileGroups.length, 1)
-  assert.equal(r.profileGroups[0].legacy, true)
-  assert.deepEqual(r.profileGroups[0].allow, ['a.org'])
+t('projectLabel and needsProject', () => {
+  assert.equal(projectLabel('__image_build__'), 'image build')
+  assert.equal(projectLabel('__general__'), 'Default profile')
+  assert.equal(projectLabel('', {}), 'unattributed')
+  assert.equal(projectLabel('a', { a: 'Alpha' }), 'Alpha')
+  assert.equal(needsProject({ project_slug: null }), true)
+  assert.equal(needsProject({ project: '__general__' }), true)
+  assert.equal(needsProject({ project_slug: 'a' }), false)
 })
 
 t('diffLines classes', () => {

@@ -453,62 +453,67 @@ export function profilePayload(p) {
 // ---- network grouping ------------------------------------------------------------
 
 export const GENERAL = '__general__'
+export const IMAGE_BUILD = '__image_build__'
 
-// The Network page's allow/deny view: by PROJECT first, each carrying its
-// profile's name, then the profile baselines. `groups` is GET
-// /api/egress/allowlist's list (project rows; a legacy `__general__` group is
-// shown as the Default baseline's entries), `denies` maps slug -> [hosts]
-// (from each group's `deny`, when the server sends it), `profiles` is GET
-// /api/profiles, `projects` is GET /api/projects.
+// The Network page's allow/deny view, from GET /api/egress/allowlist: the
+// PROJECT groups (kind "project"), each with its profile, then the PROFILE
+// baselines (kind "profile", keyed "profile:<id>" or "__general__" for the
+// Default). `profiles` (GET /api/profiles) adds what the groups do not carry
+// (network_off, builtin, the verdict); `projects` names the slugs. A group's
+// `key` is what the revoke route takes as `project`.
 export function groupPolicy({ groups = [], profiles = [], projects = [], filter = '' }) {
-  const profOf = new Map()
-  for (const p of profiles) for (const s of p.projects || []) profOf.set(s, p)
-  const def = profiles.find((p) => p.builtin && /^default$/i.test(p.name)) || null
   const names = Object.fromEntries(projects.map((p) => [p.slug, p.name]))
-  const bySlug = new Map()
-  const legacyShared = []
-  for (const g of groups) {
-    if (g.kind === 'profile') continue
-    if (!g.project || g.project === GENERAL) { legacyShared.push(...(g.entries || [])); continue }
-    bySlug.set(g.project, g)
+  const profById = new Map(profiles.map((p) => [p.id, p]))
+  const denyList = (d) => (d || []).map((x) => (typeof x === 'string' ? x : x?.host)).filter(Boolean)
+  const projectGroups = groups
+    .filter((g) => g && g.kind === 'project' && g.project && g.project !== IMAGE_BUILD)
+    .filter((g) => !filter || g.project === filter)
+    .map((g) => ({
+      key: g.project, slug: g.project, name: names[g.project] || g.project,
+      profile: g.profile ? { id: g.profile.id, name: g.profile.name, default: g.profile.default } : null,
+      allow: g.entries || [],
+      deny: denyList(g.deny),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  // filtered to one project: only its own profile's baseline (it may have no
+  // list of its own yet, so its profile comes from the profiles list)
+  let wanted = null
+  if (filter) {
+    const own = projectGroups[0]?.profile?.id
+      ?? profiles.find((p) => (p.projects || []).includes(filter))?.id
+    wanted = own != null ? own : undefined
   }
-  const slugs = new Set([...bySlug.keys(), ...projects.map((p) => p.slug)])
-  const projectGroups = [...slugs]
-    .filter((s) => !filter || s === filter)
-    .map((slug) => {
-      const g = bySlug.get(slug) || {}
-      const prof = (g.profile && typeof g.profile === 'object' ? g.profile : null)
-        || profOf.get(slug) || def
+  const profileGroups = groups
+    .filter((g) => g && g.kind === 'profile')
+    .filter((g) => wanted === null || (wanted !== undefined && g.profile?.id === wanted)
+      || (wanted === undefined && g.project === GENERAL))
+    .map((g) => {
+      const full = profById.get(g.profile?.id) || {}
       return {
-        slug, name: names[slug] || slug,
-        profile: prof ? { id: prof.id, name: prof.name } : null,
-        allow: g.entries || g.allow || [],
-        deny: (g.deny || g.deny_hosts || []).map((d) => (typeof d === 'string' ? { host: d } : d)),
+        key: g.project, id: g.profile?.id ?? g.project, name: g.profile?.name || full.name || g.project,
+        builtin: !!full.builtin, isDefault: g.project === GENERAL,
+        default_verdict: g.profile?.default || full.default_verdict || 'deny',
+        network_off: !!full.network_off,
+        projects: g.projects || full.projects || [],
+        allow: g.entries || [],
+        deny: denyList(g.deny),
       }
     })
-    .filter((g) => filter || g.allow.length || g.deny.length)
-    .sort((a, b) => a.name.localeCompare(b.name))
-  const wanted = filter ? new Set(projectGroups.map((g) => g.profile?.id)) : null
-  const profileGroups = profiles
-    .filter((p) => !wanted || wanted.has(p.id))
-    .map((p) => ({
-      id: p.id, name: p.name, builtin: !!p.builtin, default_verdict: p.default_verdict,
-      network_off: !!p.network_off, projects: p.projects || [],
-      allow: [...(p.allow_hosts || []),
-        ...(p === def ? legacyShared.map((e) => e.host) : [])]
-        .filter((h, i, a) => a.indexOf(h) === i),
-      deny: p.deny_hosts || [],
-    }))
-  // no profiles yet (a server before WP2): the old shared list still shows
-  if (!def && legacyShared.length && !filter) {
-    profileGroups.push({
-      id: GENERAL, name: 'Shared (every project without its own list)', builtin: true,
-      legacy: true, default_verdict: 'deny', network_off: false, projects: [],
-      allow: [...new Set(legacyShared.map((e) => e.host))], deny: [], entries: legacyShared,
-    })
-  }
   return { projectGroups, profileGroups }
 }
+
+// The label for an egress row's project: the builders' traffic and the
+// Default profile's list have names of their own.
+export function projectLabel(slug, names = {}) {
+  if (!slug) return 'unattributed'
+  if (slug === GENERAL) return 'Default profile'
+  if (slug === IMAGE_BUILD) return 'image build'
+  return names[slug] || slug
+}
+// A waiting row / decision with no project must be given one before it can
+// be approved or allowed (the host answers 409 / needs_project otherwise).
+export const needsProject = (row) => !(row?.project_slug || row?.project)
+  || (row.project_slug || row.project) === GENERAL
 
 // ---- services ------------------------------------------------------------------
 

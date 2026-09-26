@@ -233,6 +233,10 @@ function pkgRow(p) {
   return { ...p, variant_used_by: d.all, variant_used_by_detail: d,
     card: `installs into \`${p.target_variant}\` — used by: ${d.all.join(', ') || 'no project yet'}` }
 }
+function profileOf(slug) {
+  return S.profiles.find((p) => p.projects.includes(slug))
+    || S.profiles.find((p) => p.builtin && p.name === 'Default')
+}
 function box(id) { return S.boxes.find((b) => b.id === id) || fail(404, 'no such box') }
 function budget() {
   const used = S.boxes.reduce((n, b) => n + b.mem_mb, 0)
@@ -473,26 +477,87 @@ const routes = [
     return S.persist[slug]
   }],
   ['GET', /^\/api\/egress\/policy\/([^/]+)$/, ([slug]) => {
+    if (slug === '__image_build__') {
+      return { slug, profile: { id: null, name: 'Image build', default: 'deny', network_off: false, builtin: true },
+        project_allow: [], project_deny: [], source: 'fixed',
+        effective_allow: ['deb.debian.org', 'security.debian.org', 'pypi.org', 'files.pythonhosted.org',
+          'registry.npmjs.org'], effective_deny: [] }
+    }
     const pol = S.policy[slug] || { allow: [], deny: [] }
-    const prof = S.profiles.find((p) => p.projects.includes(slug)) || S.profiles[0]
-    return { profile: { id: prof.id, name: prof.name, default: prof.default_verdict },
+    const prof = profileOf(slug)
+    return { slug, profile: { id: prof.id, name: prof.name, default: prof.default_verdict,
+      network_off: prof.network_off, builtin: prof.builtin },
       project_allow: pol.allow, project_deny: pol.deny,
       effective_allow: [...new Set([...pol.allow, ...prof.allow_hosts])],
-      effective_deny: [...new Set([...pol.deny, ...prof.deny_hosts])] }
+      effective_deny: [...new Set([...pol.deny, ...prof.deny_hosts])], source: 'profile' }
   }],
   ['PUT', /^\/api\/egress\/policy\/([^/]+)$/, ([slug], b) => {
-    S.policy[slug] = { allow: b.allow, deny: b.deny }
+    if (slug === '__general__') fail(400, 'edit the Default profile instead')
+    if (slug === '__image_build__') fail(400, 'the image-build policy is fixed')
+    const cur = S.policy[slug] || { allow: [], deny: [] }
+    S.policy[slug] = { allow: b.allow ?? cur.allow, deny: b.deny ?? cur.deny }
     return { ok: true }
   }],
-  ['GET', /^\/api\/egress\/allowlist$/, () => ({ groups: Object.entries(S.policy).map(([slug, p]) => {
-    const prof = S.profiles.find((x) => x.projects.includes(slug)) || S.profiles[0]
-    return { project: slug, profile: { id: prof.id, name: prof.name },
-      entries: p.allow.map((host) => ({ host, source: 'operator' })), deny: p.deny }
-  }) })],
+  ['POST', /^\/api\/egress\/policy\/([^/]+)\/promote$/, ([slug], b) => {
+    const prof = b.profile_id != null ? S.profiles.find((p) => p.id === Number(b.profile_id)) : profileOf(slug)
+    if (!prof) fail(400, 'no such profile')
+    const list = b.list === 'deny' ? 'deny' : 'allow'
+    const pol = S.policy[slug] || { allow: [], deny: [] }
+    pol[list] = pol[list].filter((h) => h !== b.host)
+    const field = list === 'deny' ? 'deny_hosts' : 'allow_hosts'
+    prof[field] = [...new Set([...prof[field], b.host])]
+    return { ok: true, profile: { id: prof.id, name: prof.name } }
+  }],
+  ['GET', /^\/api\/egress\/allowlist$/, () => {
+    const projectGroups = Object.entries(S.policy)
+      .filter(([, p]) => p.allow.length || p.deny.length)
+      .map(([slug, p]) => {
+        const prof = profileOf(slug)
+        return { project: slug, kind: 'project',
+          profile: { id: prof.id, name: prof.name, default: prof.default_verdict },
+          entries: [...p.allow.map((host) => ({ host, source: 'operator' })),
+            ...(slug === 'alpha' ? [{ host: 'cdn.jsdelivr.net', source: 'auto', id: 5, rule: 'cdn',
+              reason: 'a CDN the page loads from', created_at: now(), expires_at: '2026-09-27 12:00:00' }] : [])],
+          deny: p.deny }
+      })
+    const profileGroups = S.profiles.map((p) => {
+      const isDefault = p.builtin && p.name === 'Default'
+      return { project: isDefault ? '__general__' : `profile:${p.id}`, kind: 'profile',
+        profile: { id: p.id, name: p.name, default: p.default_verdict },
+        entries: p.allow_hosts.map((host) => ({ host, source: isDefault && host === 'pypi.org' ? 'seed' : 'operator' })),
+        deny: p.deny_hosts, projects: p.projects }
+    })
+    return { groups: [...projectGroups, ...profileGroups] }
+  }],
   ['POST', /^\/api\/egress\/allowlist\/revoke$/, (_, b) => {
-    const p = S.policy[b.project]
-    if (p) p.allow = p.allow.filter((h) => h !== b.host)
+    if (b.id != null) return { ok: true }
+    const list = b.list === 'deny' ? 'deny' : 'allow'
+    const m = /^profile:(\d+)$/.exec(b.project || '')
+    const prof = b.project === '__general__' ? S.profiles.find((p) => p.builtin && p.name === 'Default')
+      : m ? S.profiles.find((p) => p.id === Number(m[1])) : null
+    if (prof) {
+      const field = list === 'deny' ? 'deny_hosts' : 'allow_hosts'
+      prof[field] = prof[field].filter((h) => h !== b.host)
+      return { ok: true }
+    }
+    const p = S.policy[b.project] || fail(404, 'no such list')
+    p[list] = p[list].filter((h) => h !== b.host)
     return { ok: true }
+  }],
+  ['POST', /^\/api\/egress\/pending\/(\d+)\/approve$/, (_, b) => {
+    if (!b.project) fail(409, 'this request came from the shared box with no project attached: choose the project it belongs to')
+    const pol = S.policy[b.project] || (S.policy[b.project] = { allow: [], deny: [] })
+    pol.allow = [...new Set([...pol.allow, 'mock.example'])]
+    return { ok: true }
+  }],
+  ['POST', /^\/api\/egress\/pending\/(\d+)\/reject$/, () => ({ ok: true })],
+  ['POST', /^\/api\/egress\/allow$/, (_, b) => {
+    if (!b.project || b.project === '__general__') {
+      fail(400, 'this request came from the shared box with no project attached: choose the project it belongs to')
+    }
+    const pol = S.policy[b.project] || (S.policy[b.project] = { allow: [], deny: [] })
+    pol.allow = [...new Set([...pol.allow, b.host])]
+    return { ok: true, host: b.host, added_to: b.project }
   }],
 ]
 

@@ -15,6 +15,8 @@ import { listServices } from '../boxes/api/services.js'
 import { listPackages } from '../boxes/api/packages.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import { listImages } from '../boxes/api/images.js'
+import { approvePending, rejectPending } from '../boxes/api/policy.js'
+import { needsProject } from '../boxes/logic.js'
 import {
   PackageApprove, PackageSummary, ServiceRequest, usePackageReject,
 } from '../boxes/RequestCards.jsx'
@@ -148,9 +150,27 @@ export function ReviewQueue({ slug }) {
     } catch (e) { notifyError(e) }
     setBusy(false)
   }
-  async function egressAct(id, verb) {
-    try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); loadEgress() }
-    catch (e) { notifyError(e) }
+  // An unattributed row (shared box, no project) is approved onto a project's
+  // list the operator names; the host answers 409 without one.
+  async function egressAct(p, verb) {
+    try {
+      if (verb === 'approve') {
+        let proj = null
+        if (needsProject(p)) {
+          const choices = (slugs || []).filter((x) => !x.startsWith('__'))
+          const got = await ask.prompt(`${p.host} came from no project. Whose list should it go on?`
+            + (choices.length ? ` (${choices.join(', ')})` : ''), slug || (choices.length === 1 ? choices[0] : ''),
+          { confirmLabel: 'Allow' })
+          proj = (got || '').trim()
+          if (!proj) return
+          if (choices.length && !choices.includes(proj)) { notifyError(new Error(`no project "${proj}"`)); return }
+        }
+        await approvePending(p.id, proj)
+      } else {
+        await rejectPending(p.id)
+      }
+      loadEgress()
+    } catch (e) { notifyError(e) }
   }
   async function ackAlert(id) {
     try { await api(`/api/security/events/${id}/ack`, { method: 'POST' })
@@ -306,11 +326,12 @@ export function ReviewQueue({ slug }) {
                 <span className="grow ellipsis" title={p.host}>{p.host}</span>
                 {p.triage_verdict === 'flag' && (
                   <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
-                {!slug && p.project_slug && <span className="tag">{p.project_slug}</span>}
-                <button className="win-btn ok" title="approve host"
-                        onClick={() => egressAct(p.id, 'approve')}>✓</button>
+                {!slug && p.project_slug && !needsProject(p) && <span className="tag">{p.project_slug}</span>}
+                {needsProject(p) && <span className="tag pending" title="pick the project on approve">unattributed</span>}
+                <button className="win-btn ok" title={needsProject(p) ? 'approve host for a project…' : 'approve host'}
+                        onClick={() => egressAct(p, 'approve')}>✓</button>
                 <button className="win-btn" title="reject host"
-                        onClick={() => egressAct(p.id, 'reject')}>✕</button>
+                        onClick={() => egressAct(p, 'reject')}>✕</button>
               </li>
             ))}
           </ul>
