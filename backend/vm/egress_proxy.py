@@ -154,7 +154,7 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
     return att
 
 
-IMAGE_BUILD_SLUG = "__image_build__"
+IMAGE_BUILD_SLUG = egress.IMAGE_BUILD
 
 
 async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None = None):
@@ -169,7 +169,7 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
                                   peer_ip=att["peer_ip"], peer_port=att["peer_port"],
                                   box_id=att["box_id"], service_id=att["service_id"])
         # service traffic never trains a queue: widening is editing the service
-        if verdict == "deny" and att["kind"] != "service":
+        if verdict == "deny" and att["kind"] not in ("service", "builder"):
             await egress.note_denied(db, slug or egress.GENERAL, host,
                                      box_id=att["box_id"])
         if verdict == "allow":

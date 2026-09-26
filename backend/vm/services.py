@@ -1314,42 +1314,25 @@ async def egress_decide(box_id: str, host: str) -> dict:
     whatever the profile says: allowed only if some running service in the
     box listed the host (exact or a subdomain of it), and neither the
     project's nor its profile's deny list names it. No auto-allow, no queue
-    training. {allow, reason, service_ids}."""
+    training. {allow, reason, service_ids}.
+
+    ONE rule: this is a view over `egress.decide_service`, the function the
+    proxy itself calls for service traffic, so the two can never disagree.
+    `service_ids` (which running services in the box listed the host) is
+    informational."""
+    from .. import egress
+    from ..db import get_db
+    box = boxes.get(box_id)
     allowed = _box_egress.get(box_id) or {}
     sids = sorted({i for h, ids in allowed.items() if _host_match(host, [h]) for i in ids})
-    if not sids:
-        return {"allow": False, "reason": "not in the service's approved egress_hosts",
-                "service_ids": []}
-    box = boxes.get(box_id)
-    deny = await _deny_lists(box.project if box else None)
-    if _host_match(host, deny):
-        return {"allow": False, "reason": "on a deny list", "service_ids": sids}
-    return {"allow": True, "reason": "approved egress host", "service_ids": sids}
-
-
-async def _deny_lists(slug: str | None) -> list[str]:
-    from ..db import get_db
-    out: list[str] = []
+    if box is None or box.kind != "service":
+        return {"allow": False, "reason": "not a service box", "service_ids": []}
     db = await get_db()
     try:
-        if slug:
-            async with db.execute("SELECT deny_hosts FROM egress_policy WHERE "
-                                  "project_slug = ?", (slug,)) as cur:
-                r = await cur.fetchone()
-            if r is not None:
-                out += json.loads(r["deny_hosts"] or "[]")
-    except Exception:  # noqa: BLE001 — a schema without the table: nothing extra
-        pass
+        verdict, reason = await egress.decide_service(db, box.project, box.service_id, host)
     finally:
         await db.close()
-    if slug:
-        prof = await boxes.project_profile(slug)
-        if prof:
-            try:
-                out += json.loads(prof.get("deny_hosts") or "[]")
-            except ValueError:
-                pass
-    return [h.lower() for h in out if isinstance(h, str)]
+    return {"allow": verdict == "allow", "reason": reason, "service_ids": sids}
 
 
 # --- logs --------------------------------------------------------------------------------

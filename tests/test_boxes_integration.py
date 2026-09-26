@@ -218,6 +218,70 @@ def test_flag_off_guest_package_has_no_box_only_files(monkeypatch):
     assert "backend/server.py" in off and "tools/run_code/handler.py" in off
 
 
+# --- WP2 <-> WP3 / WP5 / WP8 ------------------------------------------------------
+
+async def test_image_build_policy_is_registry_only_and_fixed(tmp_env):
+    from backend import egress, profiles
+    from backend.db import get_db, init_db
+    from backend.vm import egress_proxy, images
+    await init_db()
+    assert egress_proxy.IMAGE_BUILD_SLUG == images.BUILD_USER == egress.IMAGE_BUILD
+    db = await get_db()
+    try:
+        for h in ("deb.debian.org", "pypi.org", "files.pythonhosted.org",
+                  "registry.npmjs.org", "security.debian.org"):
+            assert (await egress.decide(db, egress.IMAGE_BUILD, h))[0] == "allow"
+        v, why = await egress.decide(db, egress.IMAGE_BUILD, "evil.example")
+        assert v == "deny" and "registr" in why
+        assert v == "deny" and why != egress.NOT_LISTED     # never auto mode
+        assert await egress.granted_secrets(db, egress.IMAGE_BUILD) == set()
+        assert not (await egress.allow_host(db, egress.IMAGE_BUILD, "x.com"))["ok"]
+        assert not (await egress.set_lists(db, egress.IMAGE_BUILD, allow=["x.com"]))["ok"]
+        assert not (await egress.set_policy(db, egress.IMAGE_BUILD,
+                                            mode="denylist"))["ok"]
+        assert not (await egress.grant_secret(db, egress.IMAGE_BUILD, "K"))["ok"]
+        with pytest.raises(profiles.ProfileError):
+            await profiles.assign(db, egress.IMAGE_BUILD, 1)
+        pol = await egress.get_policy(db, egress.IMAGE_BUILD)
+        assert pol["profile"]["name"] == "Image build"
+        assert set(pol["effective_allow"]) == set(egress.IMAGE_BUILD_HOSTS)
+    finally:
+        await db.close()
+
+
+async def test_builder_denials_are_never_queued(on, monkeypatch):
+    from backend import egress
+    from backend.db import get_db, init_db
+    from backend.vm import egress_proxy
+    await init_db()
+    box = boxes.allocate("builder", variant="dev", mem_mb=1024)
+    att = egress_proxy.attribute(box, ("10.201.90.2", 40000))
+    assert att["project"] == egress.IMAGE_BUILD and att["kind"] == "builder"
+    await egress_proxy._record("evil.example", "CONNECT", None, 0, 0, "deny",
+                               "image build: package registries only", att)
+    db = await get_db()
+    try:
+        async with db.execute("SELECT COUNT(*) FROM egress_pending") as cur:
+            assert (await cur.fetchone())[0] == 0
+        async with db.execute("SELECT project_slug, box_id FROM egress_events") as cur:
+            assert tuple(await cur.fetchone()) == (egress.IMAGE_BUILD, box.id)
+    finally:
+        await db.close()
+
+
+def test_reviewer_never_list_covers_every_box_kind():
+    from backend import reviewer
+    for k in ("service_requested", "service_approved", "service_revoked",
+              "service_rejected", "svc_unreported", "package_requested",
+              "package_approved", "package_rejected", "image_variant_built",
+              "unexpected_process", "proc_report_mismatch", "profile_changed",
+              "profiles_migrated", "docker_weak_isolation",
+              "docker_hardening_refused", "docker_socket_refused",
+              "persist_imported"):
+        assert reviewer.never_auto(k), k
+    assert not reviewer.never_auto("egress_auto")
+
+
 # --- WP1 <-> WP3 / WP5 hooks ------------------------------------------------------
 
 from tests.test_boxes_gateway import _rt, _untar  # noqa: E402

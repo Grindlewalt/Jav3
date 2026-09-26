@@ -39,8 +39,11 @@ AUTO_KEY = "reviewer_auto"           # session_state toggle; absent = enabled
 # telemetry alarms and profile changes always need the operator's eyes.
 _NEVER_ACK_KINDS = {"egress_anomaly", "host_cut", "secret_leak",
                     "unexpected_process", "proc_report_mismatch",
-                    "profile_changed", "profiles_migrated"}
-_NEVER_ACK_PREFIXES = ("service_", "package_", "svc_")
+                    "profile_changed", "profiles_migrated",
+                    "persist_imported", "persist_disk_deleted"}
+# service_* / svc_* (service boxes), package_* (catalogue), image_* (variant
+# builds), docker_* (weak isolation, refused hardening, socket refusal)
+_NEVER_ACK_PREFIXES = ("service_", "package_", "svc_", "image_", "docker_")
 
 
 def never_auto(kind: str | None) -> bool:

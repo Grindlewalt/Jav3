@@ -190,8 +190,9 @@ async def test_approval_lifts_the_host_off_the_project_denylist(db):
 async def test_service_egress_is_its_approved_hosts_minus_deny_lists(db):
     await add_project(db, "alpha", "Open")          # allow-by-default must NOT apply
     cur = await db.execute(
-        "INSERT INTO services(project_slug, name, command, placement, status, egress_hosts) "
-        "VALUES ('alpha', 'bot', '[\"x\"]', 'per_service', 'approved', ?)",
+        "INSERT INTO services(project_slug, name, command, placement, status, "
+        "desired_state, egress_hosts) "
+        "VALUES ('alpha', 'bot', '[\"x\"]', 'per_service', 'approved', 'running', ?)",
         (json.dumps(["api.telegram.org", "blocked.dev"]),))
     sid = cur.lastrowid
     await db.commit()
@@ -199,7 +200,12 @@ async def test_service_egress_is_its_approved_hosts_minus_deny_lists(db):
     assert (await egress.decide_service(db, "alpha", sid, "api.telegram.org"))[0] == "allow"
     assert (await egress.decide_service(db, "alpha", sid, "pypi.org"))[0] == "deny"
     assert (await egress.decide_service(db, "alpha", sid, "blocked.dev"))[0] == "deny"
-    await db.execute("UPDATE services SET status = 'revoked' WHERE id = ?", (sid,))
+    # a stopped service's hosts close (its box-mates cannot borrow them)
+    await db.execute("UPDATE services SET desired_state = 'stopped' WHERE id = ?", (sid,))
+    await db.commit()
+    assert (await egress.decide_service(db, "alpha", sid, "api.telegram.org"))[0] == "deny"
+    await db.execute("UPDATE services SET status = 'revoked', desired_state = 'running' "
+                     "WHERE id = ?", (sid,))
     await db.commit()
     assert (await egress.decide_service(db, "alpha", sid, "api.telegram.org"))[0] == "deny"
 

@@ -133,6 +133,20 @@ def is_unattributed(slug: str | None) -> bool:
     return not slug or slug == GENERAL
 
 
+# Builder boxes (WP5 image variants) are attributed to this pseudo-project. It
+# is not a projects row (the slug regex refuses it) and not a security profile
+# anyone can assign: its policy is fixed here. Package registries only, deny
+# everything else, no secrets, no auto mode, no approval queue, no lists.
+IMAGE_BUILD = "__image_build__"
+IMAGE_BUILD_HOSTS = ("deb.debian.org", "security.debian.org", "pypi.org",
+                     "files.pythonhosted.org", "registry.npmjs.org")
+RESERVED = "this name is reserved for image builds; its policy is fixed"
+
+
+def is_reserved(slug: str | None) -> bool:
+    return slug == IMAGE_BUILD
+
+
 async def project_lists(db: aiosqlite.Connection,
                         slug: str | None) -> tuple[list[str], list[str]]:
     """(allow, deny) the project itself holds. Unattributed traffic has none:
@@ -163,6 +177,15 @@ async def get_policy(db: aiosqlite.Connection, slug: str | None) -> dict:
     source) derived from them, for callers and clients that predate the new
     shape. `effective_allow` is what an explicit allow comes from (project +
     profile lists); the profile's `default` decides every other host."""
+    if is_reserved(slug):
+        hosts = list(IMAGE_BUILD_HOSTS)
+        return {"slug": slug,
+                "profile": {"id": None, "name": "Image build", "default": "deny",
+                            "network_off": False, "builtin": True},
+                "project_allow": [], "project_deny": [],
+                "effective_allow": hosts, "effective_deny": [],
+                "mode": "allowlist", "inherit_general": 0, "hosts": [],
+                "effective": hosts, "source": "fixed"}
     prof = await profiles.for_slug(db, slug)
     p_allow, p_deny = await project_lists(db, slug)
     net_off = bool(prof["network_off"])
@@ -203,6 +226,10 @@ async def decide(db: aiosqlite.Connection, slug: str | None, host: str) -> tuple
     host = _norm(host)
     if (slug, host) in _cut or (GENERAL, host) in _cut:
         return "cut", "host auto-cut after an anomaly"
+    if is_reserved(slug):
+        if _host_matches(host, list(IMAGE_BUILD_HOSTS)):
+            return "allow", "image build: package registry"
+        return "deny", "image build: package registries only"
     prof = await profiles.for_slug(db, slug)
     if prof["network_off"]:
         return "deny", f"egress disabled for this project ({prof['name']} profile)"
@@ -244,14 +271,17 @@ async def decide_service(db: aiosqlite.Connection, slug: str | None,
         return "deny", "host on the project denylist"
     if _host_matches(host, prof["deny_hosts"]):
         return "deny", f"host on the {prof['name']} profile denylist"
+    # only services meant to run: a stopped service's hosts must not stay
+    # open to its box-mates (per_project / shared placement)
+    live = "status = 'approved' AND desired_state = 'running'"
     if service_id is not None:
-        q, args = ("SELECT egress_hosts FROM services WHERE id = ? AND status = 'approved'",
+        q, args = (f"SELECT egress_hosts FROM services WHERE id = ? AND {live}",
                    (service_id,))
     elif slug:
         q, args = ("SELECT egress_hosts FROM services WHERE project_slug = ? "
-                   "AND status = 'approved' AND placement = 'per_project'", (slug,))
+                   f"AND {live} AND placement = 'per_project'", (slug,))
     else:
-        q, args = ("SELECT egress_hosts FROM services WHERE status = 'approved' "
+        q, args = (f"SELECT egress_hosts FROM services WHERE {live} "
                    "AND placement = 'shared'", ())
     allowed: list[str] = []
     async with db.execute(q, args) as cur:
@@ -356,6 +386,8 @@ async def allow_host(db: aiosqlite.Connection, slug: str, host: str) -> dict:
         return {"ok": False, "error": "host required"}
     if is_unattributed(slug):
         return {"ok": False, "error": UNATTRIBUTED, "needs_project": True}
+    if is_reserved(slug):
+        return {"ok": False, "error": RESERVED}
     target = await _append_host(db, slug, host)
     await db.execute(
         "UPDATE egress_pending SET status = 'approved', decided_at = datetime('now') "
@@ -685,6 +717,8 @@ async def set_lists(db: aiosqlite.Connection, slug: str, *, allow: list[str] | N
     if is_unattributed(slug):
         return {"ok": False, "error": "the unattributed list is the Default profile's: "
                                       "edit it on the profile"}
+    if is_reserved(slug):
+        return {"ok": False, "error": RESERVED}
     try:
         allow_n = profiles.norm_hosts(allow) if allow is not None else None
         deny_n = profiles.norm_hosts(deny) if deny is not None else None
@@ -716,6 +750,8 @@ async def set_policy(db: aiosqlite.Connection, slug: str, *, mode: str = "allowl
     a `profile_changed` event."""
     if mode not in ("allowlist", "denylist", "denyall"):
         return {"ok": False, "error": "mode must be allowlist|denylist|denyall"}
+    if is_reserved(slug):
+        return {"ok": False, "error": RESERVED}
     name = profiles.legacy_profile_name(mode, inherit_general)
     prof = await profiles.by_name(db, name)
     await profiles.assign(db, slug, prof["id"], require_project=False)
@@ -750,7 +786,9 @@ def clear_cut(slug: str | None, host: str) -> None:
 
 async def granted_secrets(db: aiosqlite.Connection, slug: str | None) -> set[str]:
     """Secret NAMES the project may use. Unattributed (None / __general__):
-    the Default profile's list only."""
+    the Default profile's list only. Image builds: none, ever."""
+    if is_reserved(slug):
+        return set()
     prof = await profiles.for_slug(db, slug)
     names = {n.upper() for n in prof["secrets"]}
     if is_unattributed(slug):
@@ -772,6 +810,8 @@ async def may_use_secret(db: aiosqlite.Connection, slug: str, name: str) -> bool
 
 async def grant_secret(db: aiosqlite.Connection, slug: str, name: str,
                        status: str = "granted") -> dict:
+    if is_reserved(slug) and status == "granted":
+        return {"ok": False, "error": RESERVED}
     await db.execute(
         "INSERT INTO project_secret_grants(project_slug, secret_name, status) VALUES (?,?,?) "
         "ON CONFLICT(project_slug, secret_name) DO UPDATE SET status = excluded.status",

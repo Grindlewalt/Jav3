@@ -541,6 +541,9 @@ async def assign(db: aiosqlite.Connection, slug: str, profile_id: int, *,
     """Point a project at a profile. `require_project=False` (the legacy
     set_policy path only) lets a slug with no projects row be assigned a
     BUILTIN through its egress_policy row's legacy mode instead."""
+    if slug == "__image_build__":
+        # builder boxes' fixed registry-only policy (egress.IMAGE_BUILD)
+        raise ProfileError("the image-build policy is fixed", status=409)
     new = await get(db, profile_id)
     if new is None:
         raise ProfileError("no such profile", status=404)
