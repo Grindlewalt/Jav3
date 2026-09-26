@@ -1268,16 +1268,16 @@ def _security_server(seen, token="sess"):
         if path.startswith("/api/security/events/") and path.endswith("/ack"):
             return httpx.Response(200, json={"ok": True})
         if path.startswith("/api/egress/policy/"):
-            slug = path.rsplit("/", 1)[1]
-            if slug == "__general__":
-                return httpx.Response(200, json={"slug": slug, "mode": "allowlist",
-                                                 "inherit_general": 1, "hosts": [],
-                                                 "effective": ["pypi.org"],
-                                                 "source": "general"})
-            return httpx.Response(200, json={"slug": slug, "mode": "allowlist",
-                                             "inherit_general": 1, "hosts": ["x.org"],
-                                             "effective": ["x.org", "pypi.org"],
-                                             "source": "project"})
+            slug = path.rsplit("/", 1)[1]              # the final shape (boxes-api-final 3)
+            own = [] if slug == "__general__" else ["x.org"]
+            return httpx.Response(200, json={
+                "slug": slug, "profile": {"id": 1, "name": "Default", "default": "deny",
+                                          "network_off": False, "builtin": True},
+                "project_allow": own, "project_deny": [],
+                "effective_allow": own + ["pypi.org"], "effective_deny": [],
+                "mode": "allowlist", "inherit_general": 1, "hosts": own,
+                "effective": own + ["pypi.org"],
+                "source": "general" if not own else "project"})
         if path == "/api/egress/summary":
             return httpx.Response(200, json={"allowed": 1, "denied": 1, "waiting": 1})
         if path == "/api/egress/events":
@@ -1336,7 +1336,7 @@ async def test_tui_security_tabs_and_queue_verdicts_after_confirm(cfg):
         n0 = len(_posts(seen))
         await pilot.press("y")
         assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
-        assert "evil.example" in app.screen.question and "allowlist" in app.screen.detail
+        assert "evil.example" in app.screen.question and "own allow list" in app.screen.detail
         await pilot.press("n")
         await pilot.pause(0.2)
         assert len(_posts(seen)) == n0
@@ -1386,7 +1386,7 @@ async def test_tui_security_network_and_logs(cfg):
         assert await _until(pilot, lambda: scr.loaded["network"]
                             and "pypi.org" in " ".join(_rows(scr)))
         sub = _text(scr.query_one("#sec-sub"))
-        assert "all projects" in sub and "allowlist" in sub and "1 allowed" in sub
+        assert "all projects" in sub and "Default" in sub and "1 allowed" in sub
         rows = _rows(scr)
         assert any("DENY" in r and "evil.example" in r for r in rows)
         assert any("↑120" in r and "48.0k" in r for r in rows)          # metering
@@ -1400,7 +1400,7 @@ async def test_tui_security_network_and_logs(cfg):
                                             {"limit": "200", "project": "demo"}, None) in seen)
         assert ("GET", "/api/egress/policy/demo", {}, None) in seen
         assert await _until(pilot, lambda: not any("evil.example" in r for r in _rows(scr)))
-        assert "own policy + general" in _text(scr.query_one("#sec-sub"))
+        assert "profile Default" in _text(scr.query_one("#sec-sub"))
         # logs: every event, newest first, severity colours; f filters by kind
         await pilot.press("3")
         assert await _until(pilot, lambda: scr.loaded["logs"] and len(_rows(scr)) == 2)
@@ -1877,7 +1877,9 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
                 "effective": own[0] + ["pypi.org"],
                 "source": "general" if slug == "__general__" else "project"})
         return httpx.Response(404, json={"detail": "nope"})
-    return httpx.MockTransport(handler)
+    t = httpx.MockTransport(handler)
+    t.images = images                  # a test may flip the build state
+    return t
 
 
 async def _screen(pilot, app, cmd, name):
@@ -2389,7 +2391,8 @@ async def test_tui_profile_edit_keeps_explicit_values(cfg):
 async def test_tui_vms_boxes_images_catalogue(cfg):
     pytest.importorskip("textual")
     seen: list = []
-    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    tr = _boxes_server(seen)
+    app = jav3.build_tui("http://h:1", "session:sess", transport=tr)
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
         await pilot.press("ctrl+x", "c")                      # the leader letter
@@ -2399,7 +2402,12 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         rows = _rows(scr)
         assert "shared" in rows[0] and "running" in rows[0] and "cpu 4%" in rows[0]
         assert "p-site" in rows[1] and "less isolated" in rows[1] and "stopped" in rows[1]
-        assert "1536/2250" in _text(scr.query_one("#sec-sub"))
+        sub = _text(scr.query_one("#sec-sub"))
+        assert "1536/2250" in sub
+        assert "runtimes:" in sub and "WEAK ISOLATION" in sub and "no user namespace" in sub
+        scr.select_key("Xp-site")
+        assert "WEAK ISOLATION" in _text(scr.query_one("#sec-detail"))
+        scr.select_key("Xshared")
         assert await _until(pilot, lambda: "Catalogue 1" in _text(
             scr.query_one("#sec-tab-catalogue")))
         # s on the running shared box: stop, after a Confirm
@@ -2438,8 +2446,19 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         await pilot.press("2")
         assert await _until(pilot, lambda: scr.loaded["images"] and len(_rows(scr)) == 2)
         rows = _rows(scr)
-        assert "dev" in rows[0] and "site" in rows[0]
+        assert "dev" in rows[0] and "site" in rows[0] and "needs a build" in rows[0]
         assert "v3" in rows[1] and "active" in rows[1] and "p-site" in rows[1]
+        assert "older recipe" in rows[1]
+        sub = _text(scr.query_one("#sec-sub"))
+        assert "building dev (layer): run" in sub and "Setting up golang" in sub
+        d = _text(scr.query_one("#sec-detail"))
+        assert "golang [1]" in d and "untrusted" in d        # the log tail, as text
+        await pilot.press("b")                                # one build at a time
+        await pilot.pause(0.2)
+        assert app.screen is scr and "already running" in _text(scr.query_one("#sec-sub"))
+        tr.images["build"]["running"] = False
+        await pilot.press("r")
+        assert await _until(pilot, lambda: "building" not in _text(scr.query_one("#sec-sub")))
         await pilot.press("b")
         assert await _modal(pilot, app, "Confirm")
         await pilot.press("y")
@@ -2462,6 +2481,20 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         assert await _until(pilot, lambda: app.screen is scr)
         await pilot.press("escape")
         assert await _until(pilot, lambda: type(app.screen).__name__ != "VmsScreen")
+
+
+async def test_tui_vms_docker_greyed_out_with_its_reason(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess",
+                         transport=_boxes_server(seen, docker_ok=False))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/vms", "VmsScreen")
+        assert await _until(pilot, lambda: scr.loaded["boxes"] and scr.runtimes)
+        sub = _text(scr.query_one("#sec-sub"))
+        assert "docker: unavailable — docker_enabled is off" in sub
+        assert "WEAK" not in sub
 
 
 async def test_tui_boxes_surfaces_locked_for_a_chat_only_login(cfg):

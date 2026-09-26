@@ -4527,7 +4527,8 @@ def build_tui(base: str, token: str, **kw):
         return (f"[$accent b]{_esc(r.get('name') or '?')}[/] [$text-muted]from "
                 f"{_esc(r.get('from') or 'base')}{' · builtin' if r.get('builtin') else ''}"
                 f" · min {r.get('min_mem_mb') or '?'}MB · used by "
-                f"{_esc(', '.join(users)) if users else 'no project'}[/]")
+                f"{_esc(', '.join(users)) if users else 'no project'}[/]"
+                + (" [$warning b]needs a build[/]" if r.get("needs_build") else ""))
 
     def _row_version(e) -> str:
         r = e["raw"]
@@ -4539,7 +4540,8 @@ def build_tui(base: str, token: str, **kw):
         return (f"  [$text-muted]v[/]{_esc(str(r.get('version') or '?'))}{active} "
                 f"[{col}]{_esc(st)}[/] [$text-muted]{_bytes(r.get('size_bytes'))}B · built "
                 f"{_esc(str(r.get('built_at') or '-'))} · in use by "
-                f"{_esc(', '.join(map(str, inuse))) if inuse else 'no box'}[/]")
+                f"{_esc(', '.join(map(str, inuse))) if inuse else 'no box'}"
+                f"{' · older recipe' if r.get('stale_recipe') else ''}[/]")
 
     _ROWS.update({"box": _row_box, "variant": _row_variant, "version": _row_version})
 
@@ -4572,6 +4574,7 @@ def build_tui(base: str, token: str, **kw):
             if r is None:
                 return None
             self.vm.update(enabled=r.get("enabled"), budget=r.get("budget") or {})
+            self.runtimes = r.get("runtimes") or {}
             return [{"type": "box", "key": f"X{b.get('id')}", "raw": b}
                     for b in r.get("boxes") or []]
 
@@ -4585,9 +4588,12 @@ def build_tui(base: str, token: str, **kw):
                 out.append({"type": "variant", "key": f"I{v.get('name')}",
                             "raw": {k: x for k, x in v.items() if k != "versions"}})
                 for ver in v.get("versions") or []:
+                    stale = bool(ver.get("recipe_sha256") and v.get("recipe_sha256")
+                                 and ver["recipe_sha256"] != v["recipe_sha256"])
                     out.append({"type": "version", "key": f"I{v.get('name')}:"
                                                           f"{ver.get('version')}",
-                                "raw": {**ver, "variant": v.get("name")}})
+                                "raw": {**ver, "variant": v.get("name"),
+                                        "stale_recipe": stale}})
             return out
 
         async def _load_catalogue(self):
@@ -4611,15 +4617,45 @@ def build_tui(base: str, token: str, **kw):
                         f"{b.get('ram_mb_cap', '?')} MB · boxes {b.get('boxes', '?')}/"
                         f"{b.get('boxes_cap', '?')} · project boxes "
                         f"{b.get('project_boxes', '?')}/{b.get('project_boxes_cap', '?')} "
-                        "(reservations count, running or not)[/]")
+                        "(reservations count, running or not)[/]\n" + self.runtimes_markup())
             if self.tab == "images":
                 bd = self.vm.get("build") or {}
-                return ("[$warning]building " + _esc(str(bd.get("variant") or "?")) + ": "
-                        + _esc(str(bd.get("phase") or "…")) + "[/]" if bd.get("running")
-                        else "[$text-muted]variants are frozen layers over the base; a "
-                             "build makes a new version, never changes one in use[/]")
+                tail = [str(x) for x in _jlist(bd.get("log_tail"))]
+                if bd.get("running"):
+                    return ("[$warning]building " + _esc(str(bd.get("variant") or "?"))
+                            + f" ({_esc(str(bd.get('mode') or '?'))}): "
+                            + _esc(str(bd.get("phase") or "…")) + "[/]"
+                            + (f"\n[$text-muted]› {_esc(_short(tail[-1], 120))}[/]"
+                               if tail else ""))
+                return ("[$text-muted]variants are frozen layers over the base; a build "
+                        "makes a new version, never changes one in use[/]")
             return ("[$text-muted]packages the agents asked for and the operator added; "
                     "an approved one goes into its variant's next version[/]")
+
+        def runtimes_markup(self) -> str:
+            rt = self.runtimes or {}
+            if not rt:
+                return ""
+            bits = []
+            for name in ("kvm", "docker"):
+                info = rt.get(name)
+                if not isinstance(info, dict):
+                    continue
+                if info.get("available") is False:
+                    bits.append(f"[$text-muted]{name}: unavailable — "
+                                f"{_esc(str(info.get('reason') or '?'))}[/]")
+                elif name == "docker":
+                    hard = [k for k in ("rootless", "userns", "gvisor", "seccomp")
+                            if info.get(k)]
+                    bits.append(f"docker {AMBER} less isolated [/]"
+                                + (f" [$text-muted]({', '.join(hard)})[/]" if hard else ""))
+                else:
+                    bits.append(f"[$success]{name}[/]")
+            line = "[$text-muted]runtimes:[/] " + "  ".join(bits)
+            notes = _docker_notes(rt)
+            if notes and (rt.get("docker") or {}).get("available") is not False:
+                line += "\n" + "\n".join(notes)
+            return line
 
         def _detail_box(self, e) -> str:
             r = e["raw"]
@@ -4635,6 +4671,8 @@ def build_tui(base: str, token: str, **kw):
                 f"[b]{_esc(st or '?')}[/]",
                 f"runtime: {_runtime_tag(r.get('runtime'))}"
                 + ("  [$text-muted]a container shares the host kernel[/]"
+                   if r.get("runtime") == "docker" else "")
+                + ("".join("\n" + x for x in _docker_notes(self.runtimes))
                    if r.get("runtime") == "docker" else ""),
                 f"image {_esc(img.get('variant') or 'main')} "
                 f"{_esc(str(img.get('version') or '(active version)'))}  RAM "
@@ -4647,16 +4685,34 @@ def build_tui(base: str, token: str, **kw):
                 (f"service #{r.get('service_id')} · placement {_esc(r.get('placement') or '?')}"
                  if r.get("service_id") or r.get("placement") else "")])
 
+        def _build_log(self, variant) -> list[str]:
+            """The build's log tail, when the last (or running) build is this
+            variant's: guest output, text only."""
+            bd = self.vm.get("build") or {}
+            tail = [str(x) for x in _jlist(bd.get("log_tail"))]
+            if not tail or bd.get("variant") != variant:
+                return []
+            head = ("build running, " + str(bd.get("phase") or "…") if bd.get("running")
+                    else "last build")
+            return (["", f"[b]{_esc(head)}[/] [$text-muted](log tail, untrusted builder "
+                     "output)[/]"] + [_esc(x) for x in tail[-15:]])
+
         def _detail_variant(self, e) -> str:
             r = e["raw"]
+            pk = _jlist(r.get("layer_packages"))
             return "\n".join([
                 "[$primary]b[/] build a new version", "",
                 f"[b]{_esc(r.get('name') or '?')}[/] from {_esc(r.get('from') or 'base')}"
                 f"{'  builtin' if r.get('builtin') else ''}  min RAM "
-                f"{r.get('min_mem_mb') or '?'} MB",
+                f"{r.get('min_mem_mb') or '?'} MB"
+                + (f"  [$warning b]needs a build[/]" if r.get("needs_build") else ""),
                 "used by: " + (_esc(", ".join(_jlist(r.get("used_by")))) or "no project"),
+                "layer packages: " + (_esc(", ".join(
+                    " ".join(str(p.get(k) or "") for k in ("manager", "package", "version")
+                             ).strip() if isinstance(p, dict) else str(p) for p in pk))
+                    or "none"),
                 f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}",
-                "", _esc(str(r.get("recipe") or ""))])
+                "", _esc(str(r.get("recipe") or ""))] + self._build_log(r.get("name")))
 
         def _detail_version(self, e) -> str:
             r = e["raw"]
@@ -4669,7 +4725,11 @@ def build_tui(base: str, token: str, **kw):
                 f"status {_esc(r.get('status') or '?')} · {_bytes(r.get('size_bytes'))}B · "
                 f"built {_esc(str(r.get('built_at') or '-'))}",
                 "in use by: " + (_esc(", ".join(map(str, _jlist(r.get("in_use_by")))))
-                                 or "no box")])
+                                 or "no box"),
+                (f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}"
+                 + ("  [$warning]an older recipe than the variant's[/]"
+                    if r.get("stale_recipe") else ""))]
+                + self._build_log(r.get("variant")))
 
         def action_approve(self) -> None:
             if self.tab == "catalogue":
