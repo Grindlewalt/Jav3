@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI):
     require_single_process()
     ensure_dirs()
     await init_db()
+    await profiles_api.profiles.migrate_at_startup()  # WP2: one-time profiles migration
     ensure_memory_seeds()
     await providers.migrate_legacy_override()   # the old nav switch slot -> default
     await schedules.ensure_default_schedules()
@@ -132,6 +133,9 @@ app.include_router(lan.router)
 app.include_router(guest_shell.router)
 app.include_router(media_api.router)
 app.include_router(voice_api.router)
+from . import profiles_api  # noqa: E402  # WP2
+app.include_router(profiles_api.router)  # WP2
+app.include_router(profiles_api.project_router)  # WP2
 
 
 @app.get("/api/health")

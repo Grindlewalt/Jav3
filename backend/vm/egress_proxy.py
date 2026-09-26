@@ -4,7 +4,10 @@ Every guest HTTP(S) request crosses this: nftables drops the LAN, forces DNS
 through the host resolver, and redirects 80/443 here; the guest has no other
 route off-box. For each request the proxy:
 
-  1. attributes it to the operation driving the guest (egress.current_context),
+  1. attributes it ONCE, at accept (attribute()): a box of its own by the
+     per-box listener it reached (DESIGN-BOXES "Proxy attribution"), the
+     shared box by the turn driving it (egress.current_context); the guest
+     end (peer ip/port) and box/service id go on every egress_events row,
   2. resolves the target host and applies the per-project policy
      (egress.decide -> allow | deny | cut),
   3. injects {{secret:X}} the project is *granted* to use (Layer 2 on the wire —
@@ -28,6 +31,7 @@ import httpx
 
 from .. import egress, egress_auto, secrets as secrets_mod
 from .. import anomaly, security, websec
+from . import boxes
 from ..config import settings
 from ..db import get_db
 
@@ -114,26 +118,72 @@ def _request_path(head: bytes) -> str:
     return path
 
 
-async def _record(host, method, path, bo, bi, verdict, reason):
-    ctx = egress.current_context()
+def attribute(box=None, peer: tuple | None = None) -> dict:
+    """Who a proxied connection belongs to, fixed ONCE when it is accepted.
+
+    `box` is the box whose listener accepted it (None = the legacy single
+    listener, i.e. the shared box). DESIGN-BOXES "Proxy attribution": a box of
+    its own is attributed by its listener — nft pins interface, source and
+    destination together, so a guest cannot reach another box's listener or
+    forge its address — and only the shared box falls back to the turn
+    context stack (residual #7, unchanged for the shared box). The builder
+    box is attributed to IMAGE_BUILD_SLUG. Returns {project, op_id,
+    conversation_id, box_id, service_id, kind, peer_ip, peer_port}."""
+    peer_ip, peer_port = (peer[0], peer[1]) if peer and len(peer) >= 2 else (None, None)
+    att = {"project": None, "op_id": None, "conversation_id": None, "box_id": None,
+           "service_id": None, "kind": "shared", "peer_ip": peer_ip,
+           "peer_port": peer_port}
+    if box is None or box.is_shared:
+        ctx = egress.current_context()
+        att.update(project=ctx["project"], op_id=ctx["op_id"],
+                   conversation_id=ctx["conversation_id"])
+        if boxes.enabled():
+            att["box_id"] = boxes.SHARED_ID
+        return att
+    att.update(box_id=box.id, kind=box.kind)
+    if box.kind == "project":
+        att["project"] = box.project
+        e = egress.context_matching(
+            lambda e: bool(e["op_id"]) and boxes.op_box(e["op_id"]) == box.id)
+        if e:
+            att.update(op_id=e["op_id"], conversation_id=e["conversation_id"])
+    elif box.kind == "service":
+        att.update(project=box.project, service_id=box.service_id)
+    elif box.kind == "builder":
+        att["project"] = IMAGE_BUILD_SLUG
+    return att
+
+
+IMAGE_BUILD_SLUG = "__image_build__"
+
+
+async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None = None):
+    att = att or attribute()
+    slug = att["project"]
     db = await get_db()
     try:
-        await egress.record_event(db, slug=ctx["project"], host=host, method=method,
+        await egress.record_event(db, slug=slug, host=host, method=method,
                                   path=path, bytes_out=bo, bytes_in=bi, verdict=verdict,
-                                  reason=reason, op_id=ctx["op_id"],
-                                  conversation_id=ctx["conversation_id"])
-        if verdict == "deny":
-            await egress.note_denied(db, ctx["project"] or egress.GENERAL, host)
+                                  reason=reason, op_id=att["op_id"],
+                                  conversation_id=att["conversation_id"],
+                                  peer_ip=att["peer_ip"], peer_port=att["peer_port"],
+                                  box_id=att["box_id"], service_id=att["service_id"])
+        # service traffic never trains a queue: widening is editing the service
+        if verdict == "deny" and att["kind"] != "service":
+            await egress.note_denied(db, slug or egress.GENERAL, host,
+                                     box_id=att["box_id"])
         if verdict == "allow":
-            a = await anomaly.check_host(db, ctx["project"], host)
+            a = await anomaly.check_host(db, slug, host)
             if a:
-                egress.mark_cut(ctx["project"], host)
+                egress.mark_cut(slug, host)
                 await _nft_drop(host)
                 await security.raise_event(db, kind="egress_anomaly", severity="critical",
-                                           project=ctx["project"], summary=a["summary"],
+                                           project=slug, summary=a["summary"],
                                            detail=a["detail"])
-                await egress.record_event(db, slug=ctx["project"], host=host, verdict="cut",
-                                          reason=f"auto-cut: {a['kind']}", op_id=ctx["op_id"])
+                await egress.record_event(db, slug=slug, host=host, verdict="cut",
+                                          reason=f"auto-cut: {a['kind']}", op_id=att["op_id"],
+                                          peer_ip=att["peer_ip"], peer_port=att["peer_port"],
+                                          box_id=att["box_id"], service_id=att["service_id"])
     finally:
         await db.close()
 
@@ -157,19 +207,25 @@ async def _nft_drop(host: str) -> None:
             return
 
 
-async def _authorize(host: str, port: str | None = None) -> tuple[str, str]:
-    ctx = egress.current_context()
+async def _authorize(host: str, port: str | None = None,
+                     att: dict | None = None) -> tuple[str, str]:
+    att = att or attribute()
     db = await get_db()
     try:
-        slug = ctx["project"] or egress.GENERAL
-        verdict, reason = await egress.decide(db, slug, host)
-        # egress auto mode (off by default) may guess on a host nobody has
-        # decided about; it can only turn THAT deny into an allow, and the
-        # SSRF floor below still applies to whatever it lets through
-        if verdict == "deny" and reason == egress.NOT_LISTED:
-            guess = await egress_auto.judge(db, slug, host, port)
-            if guess:
-                verdict, reason = guess
+        slug = att["project"] or egress.GENERAL
+        if att["kind"] == "service":
+            # deny-by-default on the approved service's hosts; never auto mode
+            verdict, reason = await egress.decide_service(db, att["project"],
+                                                          att["service_id"], host)
+        else:
+            verdict, reason = await egress.decide(db, slug, host)
+            # egress auto mode (off by default) may guess on a host nobody has
+            # decided about; it can only turn THAT deny into an allow, and the
+            # SSRF floor below still applies to whatever it lets through
+            if verdict == "deny" and reason == egress.NOT_LISTED:
+                guess = await egress_auto.judge(db, slug, host, port)
+                if guess:
+                    verdict, reason = guess
     finally:
         await db.close()
     # Host-side SSRF floor: the proxy dials out from the HOST, so an allowlisted
@@ -207,34 +263,36 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> int:
     return total
 
 
-async def _handle_connect(host, port, cr, cw):
+async def _handle_connect(host, port, cr, cw, att: dict | None = None):
     """HTTPS: tunnel, observing host + byte volume; policy/cut enforced up front."""
-    verdict, reason = await _authorize(host, port)
+    att = att or attribute()
+    verdict, reason = await _authorize(host, port, att)
     if verdict != "allow":
         cw.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
         await cw.drain(); cw.close()
-        await _record(host, "CONNECT", None, 0, 0, verdict, reason)
+        await _record(host, "CONNECT", None, 0, 0, verdict, reason, att)
         return
     try:
         orr, orw = await asyncio.open_connection(host, int(port))
     except OSError as e:
         cw.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
         await cw.drain(); cw.close()
-        await _record(host, "CONNECT", None, 0, 0, "deny", f"connect failed: {e}")
+        await _record(host, "CONNECT", None, 0, 0, "deny", f"connect failed: {e}", att)
         return
     cw.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
     await cw.drain()
     up, down = await asyncio.gather(_pipe(cr, orw), _pipe(orr, cw))
-    await _record(host, "CONNECT", None, up, down, "allow", reason)
+    await _record(host, "CONNECT", None, up, down, "allow", reason, att)
 
 
-async def _handle_http(method, host, port, head, cr, cw):
+async def _handle_http(method, host, port, head, cr, cw, att: dict | None = None):
     """HTTP: full interception — policy, secret injection, forward, meter."""
-    verdict, reason = await _authorize(host, port)
+    att = att or attribute()
+    verdict, reason = await _authorize(host, port, att)
     if verdict != "allow":
         cw.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
         await cw.drain(); cw.close()
-        await _record(host, method, None, 0, 0, verdict, reason)
+        await _record(host, method, None, 0, 0, verdict, reason, att)
         return
     # read any remaining request body up to Content-Length
     body = b""
@@ -243,18 +301,20 @@ async def _handle_http(method, host, port, head, cr, cw):
         need = int(cl.group(1)) - (len(head) - (head.find(b"\r\n\r\n") + 4))
         if need > 0:
             body = await cr.readexactly(need)
-    ctx = egress.current_context()
+    # service boxes never hold or receive secrets (DESIGN-BOXES (a)): no
+    # project context is handed to the injector, which then refuses them all
+    inject_slug = None if att["kind"] == "service" else att["project"]
     db = await get_db()
     try:
         raw = (head + body).decode("latin-1")
-        injected, _refused = await inject_secrets(db, ctx["project"], host, raw)
+        injected, _refused = await inject_secrets(db, inject_slug, host, raw)
         # the forwarded URL is rebuilt from the request line, NOT from
         # `injected` — inject into the path separately or a query-string key
         # (the common ?api_key=... shape) forwards as the literal placeholder.
         # `path` (placeholder intact) is what gets logged; only `send_path`
         # carries the real value, and only onto the wire.
         path = _request_path(head)
-        send_path, _ = await inject_secrets(db, ctx["project"], host, path)
+        send_path, _ = await inject_secrets(db, inject_slug, host, path)
     finally:
         await db.close()
     url = f"http://{host}:{port}{send_path}"
@@ -295,10 +355,33 @@ async def _handle_http(method, host, port, head, cr, cw):
         await cw.drain()
     finally:
         cw.close()
-    await _record(host, method, path, bo, bi, "allow", reason)
+    await _record(host, method, path, bo, bi, "allow", reason, att)
 
 
-async def handle_conn(cr: asyncio.StreamReader, cw: asyncio.StreamWriter):
+def _peer_mismatch(box, peer_ip: str | None) -> str | None:
+    """Defence in depth behind nft: a box's listener only serves that box's
+    guest address, and the shared listener never serves another box's."""
+    if not boxes.enabled() or peer_ip is None:
+        return None
+    if box is not None and not box.is_shared:
+        if peer_ip != box.guest_ip:
+            return f"peer {peer_ip} is not box {box.id}'s guest"
+        return None
+    other = boxes.by_guest_ip(peer_ip)
+    if other is not None and not other.is_shared:
+        return f"peer {peer_ip} belongs to box {other.id}, not the shared box"
+    return None
+
+
+async def handle_conn(cr: asyncio.StreamReader, cw: asyncio.StreamWriter, box=None):
+    """One proxied connection. `box` is the box whose listener accepted it
+    (None = the shared box's legacy listener). Attribution is fixed here,
+    once, before any await on the guest's bytes."""
+    try:
+        peer = cw.get_extra_info("peername")
+    except Exception:  # noqa: BLE001 — a fake transport in tests may not have one
+        peer = None
+    att = attribute(box, peer if isinstance(peer, tuple) else None)
     try:
         head = await cr.readuntil(b"\r\n\r\n")
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError):
@@ -310,17 +393,29 @@ async def handle_conn(cr: asyncio.StreamReader, cw: asyncio.StreamWriter):
         await cw.drain(); cw.close()
         return
     method, host, port = parsed
+    bad = _peer_mismatch(box, att["peer_ip"])
+    if bad:
+        cw.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+        await cw.drain(); cw.close()
+        await _record(host, method, None, 0, 0, "deny", f"refused: {bad}",
+                      {**att, "kind": "service"})    # never queued for approval
+        return
     if method == "CONNECT":
-        await _handle_connect(host, port, cr, cw)
+        await _handle_connect(host, port, cr, cw, att)
     else:
-        await _handle_http(method, host, port, head, cr, cw)
+        await _handle_http(method, host, port, head, cr, cw, att)
 
 
 class EgressProxy:
+    """The shared box's listener (settings.vm_egress_host_ip, unchanged) plus,
+    with boxes enabled, one listener per non-shared box on `box.host_ip`,
+    started and stopped by the boxes `box_up` / `box_down` hook."""
+
     def __init__(self, host: str | None = None, port: int | None = None):
         self.host = host or settings.vm_egress_host_ip
         self.port = port or settings.vm_egress_proxy_port
         self._server: asyncio.AbstractServer | None = None
+        self._box_servers: dict[str, asyncio.AbstractServer] = {}
 
     async def start(self) -> None:
         if not settings.vm_egress:
@@ -333,6 +428,41 @@ class EgressProxy:
     async def stop(self) -> None:
         if self._server:
             self._server.close()
+        for bid in list(self._box_servers):
+            await self.stop_box(bid)
+
+    async def start_box(self, box, host: str | None = None, port: int | None = None) -> None:
+        """Bind `box`'s own listener. Raises on failure: the box_up hook then
+        fails the start (fail closed: no box without its attributed proxy)."""
+        if box.is_shared or box.id in self._box_servers:
+            return
+
+        async def _serve(cr, cw, _box=box):
+            await handle_conn(cr, cw, box=_box)
+
+        self._box_servers[box.id] = await asyncio.start_server(
+            _serve, host or box.host_ip, port or self.port)
+
+    async def stop_box(self, box_or_id) -> None:
+        bid = getattr(box_or_id, "id", box_or_id)
+        srv = self._box_servers.pop(bid, None)
+        if srv is not None:
+            srv.close()
+
+    def box_listeners(self) -> list[str]:
+        return sorted(self._box_servers)
 
 
 proxy = EgressProxy()
+
+
+async def _box_hook(event: str, box) -> None:
+    if box.is_shared or not settings.vm_egress:
+        return
+    if event == "box_up":
+        await proxy.start_box(box)
+    elif event == "box_down":
+        await proxy.stop_box(box)
+
+
+boxes.add_hook(_box_hook)

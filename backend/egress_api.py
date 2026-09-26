@@ -37,7 +37,7 @@ async def recent_events(limit: int = 200, project: str | None = None):
     db = await get_db()
     try:
         q = ("SELECT id, project_slug, host, method, path, bytes_out, bytes_in, verdict, "
-             "reason, created_at FROM egress_events")
+             "reason, created_at, peer_ip, peer_port, box_id, service_id FROM egress_events")
         args: tuple = ()
         if project:
             q += " WHERE project_slug = ?"
@@ -65,13 +65,22 @@ async def pending(project: str | None = None):
         await db.close()
 
 
+class ApproveBody(BaseModel):
+    # the project an UNATTRIBUTED (shared-box, no turn) row belongs to: an
+    # approval always writes a project's own list, so the operator names one
+    project: str | None = None
+
+
 @router.post("/pending/{pid}/approve")
-async def approve(pid: int):
+async def approve(pid: int, body: ApproveBody | None = None):
     db = await get_db()
     try:
-        return await egress.approve_host(db, pid)
+        res = await egress.approve_host(db, pid, project=body.project if body else None)
     finally:
         await db.close()
+    if not res.get("ok") and res.get("needs_project"):
+        raise HTTPException(status_code=409, detail=res["error"])
+    return res
 
 
 @router.post("/pending/{pid}/reject")
@@ -159,9 +168,12 @@ async def allowlist():
 
 
 class RevokeBody(BaseModel):
-    project: str = ""              # the list's own slug ('__general__' = shared)
+    # the list's own key: a project slug, 'profile:<id>' for a profile's list,
+    # or '__general__' for the Default profile's (the old shared list)
+    project: str = ""
     host: str = ""
     id: int | None = None          # an auto entry's id (source='auto')
+    list: str = "allow"            # allow | deny
 
 
 @router.post("/allowlist/revoke")
@@ -171,7 +183,8 @@ async def revoke(body: RevokeBody):
         if body.id is not None:
             res = await egress.revoke_auto(db, body.id)
         else:
-            res = await egress.remove_host(db, body.project, body.host)
+            res = await egress.remove_host(db, body.project, body.host,
+                                           which="deny" if body.list == "deny" else "allow")
     finally:
         await db.close()
     if not res.get("ok"):
@@ -213,13 +226,21 @@ async def allow(body: AllowBody):
 # --- egress: per-project policy ---------------------------------------------
 
 class PolicyBody(BaseModel):
-    mode: str = "allowlist"
+    # the project's OWN lists (DESIGN-BOXES (c)); either may be omitted to
+    # leave it as it is. The profile is changed with PUT /api/projects/{slug}/profile.
+    allow: list[str] | None = None
+    deny: list[str] | None = None
+    # pre-profiles shape, still accepted while clients move over: the mode
+    # picks the builtin profile that reproduces it (egress.set_policy)
+    mode: str | None = None
     inherit_general: bool = True
-    hosts: list[str] = []
+    hosts: list[str] | None = None
 
 
 @router.get("/policy/{slug}")
 async def get_policy(slug: str):
+    """{profile:{id,name,default}, project_allow, project_deny, effective_allow,
+    effective_deny} (+ the pre-profiles keys, read-only)."""
     db = await get_db()
     try:
         return await egress.get_policy(db, slug)
@@ -231,10 +252,40 @@ async def get_policy(slug: str):
 async def put_policy(slug: str, body: PolicyBody):
     db = await get_db()
     try:
-        return await egress.set_policy(db, slug, mode=body.mode,
-                                       inherit_general=body.inherit_general, hosts=body.hosts)
+        if body.allow is None and body.deny is None and body.mode is not None:
+            res = await egress.set_policy(db, slug, mode=body.mode,
+                                          inherit_general=body.inherit_general,
+                                          hosts=body.hosts or [])
+        else:
+            res = await egress.set_lists(db, slug, allow=body.allow, deny=body.deny)
     finally:
         await db.close()
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+class PromoteBody(BaseModel):
+    host: str
+    profile_id: int | None = None  # None = the project's own profile
+    list: str = "allow"            # allow | deny
+
+
+@router.post("/policy/{slug}/promote")
+async def promote(slug: str, body: PromoteBody, user: dict = Depends(require_user)):
+    """Move a host from the project's own list onto a profile's (one call; a
+    `profile_changed` event)."""
+    db = await get_db()
+    try:
+        res = await egress.promote_to_profile(
+            db, slug, body.host, body.profile_id,
+            which="deny" if body.list == "deny" else "allow",
+            actor=str(user.get("username") or "operator"))
+    finally:
+        await db.close()
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
 
 
 # --- egress: per-project secret grants (Layer 2) ----------------------------

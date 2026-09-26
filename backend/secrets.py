@@ -107,14 +107,23 @@ def _host_allowed(host: str, allowed: list[str]) -> bool:
     return any(host == a or host.endswith("." + a) for a in allowed)
 
 
-def substitute_url(url: str) -> str:
+def substitute_url(url: str, granted=None, project: str | None = None) -> str:
     """Substitute placeholders in a URL for a WEB fetch — only for secrets
-    whose host binding covers the URL's host. Raises KeyError/ValueError with
-    a fix-shaped message; callers return it as the tool result."""
+    (a) granted to the turn's project and (b) whose host binding covers the
+    URL's host. Raises KeyError/ValueError with a fix-shaped message; callers
+    return it as the tool result.
+
+    `granted` is the set of secret NAMES the turn's project may use
+    (egress.granted_secrets: its profile's list plus its own grants, minus its
+    revokes — the same rule the proxy applies to wire injection). The web
+    caller (webtools.read) always resolves and passes it; that closes the gap
+    where web_read ignored project grants. None skips (a) and is for callers
+    that have no project context at all (unit use)."""
     if "{{secret:" not in url:
         return url
     host = (urlsplit(url).hostname or "").lower()
     secrets = load()
+    allowed_names = None if granted is None else {str(n).upper() for n in granted}
     for m in PLACEHOLDER.finditer(url):
         name = m.group(1).upper()
         if name not in secrets:
@@ -131,6 +140,12 @@ def substitute_url(url: str) -> str:
             raise ValueError(
                 f"secret '{name}' is bound to {', '.join(allowed)} — refusing "
                 f"to send it to {host}.")
+        if allowed_names is not None and name not in allowed_names:
+            who = f"project '{project}'" if project else "this chat (no project)"
+            raise ValueError(
+                f"secret '{name}' is not granted to {who}. The operator can "
+                "grant it to the project, or add it to its security profile's "
+                "secrets.")
     return PLACEHOLDER.sub(lambda m: secrets[m.group(1).upper()], url)
 
 

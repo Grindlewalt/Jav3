@@ -18,20 +18,19 @@ async def db(tmp_env):
     await conn.close()
 
 
-# --- CONTRACT: the shared general list trains up (by design), a SCOPED project ---
-# stays isolated. Approving a host for a pure-default project (no policy row) adds
-# it to the shared GENERAL allowlist — this is the operator's chosen model ("the
-# general allow list trains up"). A sensitive project is protected by giving it
-# its OWN policy (a scoped allowlist), which _append_host keeps separate. These
-# tests pin that boundary: default projects share; scoped ones do not.
+# --- CONTRACT (since profiles, DESIGN-BOXES (c)): an approval writes the
+# PROJECT's own list, always. The shared baseline is the profile's list, edited
+# only by the operator; no approval for one project widens another's reach.
+# (Until 2026-09-26 a pure-default project's approval trained the shared
+# GENERAL list; that was the operator's earlier model and is gone.)
 
-async def test_default_project_approval_widens_the_shared_list(db):
-    # two pure-default projects share the general trained allowlist (documented).
+async def test_default_project_approval_stays_with_that_project(db):
     await egress.note_denied(db, "projA", "shared-cdn.com")
     pid = (await egress.list_pending(db, "projA"))[0]["id"]
     res = await egress.approve_host(db, pid)
-    assert res["added_to"] == egress.GENERAL            # explicit: widened the shared list
-    assert (await egress.decide(db, "projB", "shared-cdn.com"))[0] == "allow"
+    assert res["added_to"] == "projA"                   # its own list, never a shared one
+    assert (await egress.decide(db, "projA", "shared-cdn.com"))[0] == "allow"
+    assert (await egress.decide(db, "projB", "shared-cdn.com"))[0] == "deny"
 
 
 async def test_scoped_project_is_isolated_from_general_training(db):
