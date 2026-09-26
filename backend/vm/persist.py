@@ -1,4 +1,9 @@
-"""Approved persistence inside the guest VM.
+"""Approved persistence inside the guest VM. RETIRED (DESIGN-BOXES.md, operator
+decision 0.3): no new approvals (projects.py refuses them); a project's data
+moves into its service box /srv with one click (services.import_persist), and
+the old disk is deleted `persist_retire_days` after that (`sweep_retired`).
+Projects approved before the retirement keep attaching until they import or
+revoke; everything below still describes how that works.
 
 The guest is disposable: its overlay is discarded on scrub/nuke and every turn
 gets a fresh copy of the project pushed in. That stays true. What this adds is
@@ -146,6 +151,41 @@ def delete_disk(slug: str) -> bool:
     return existed
 
 
+# --- retirement (operator decision 0.3) ------------------------------------------
+
+async def sweep_retired() -> list[str]:
+    """Delete old /persist disks whose data was imported into a service box
+    more than persist_retire_days ago (projects.persist_delete_after). A disk
+    attached to a live turn is skipped and retried on the next sweep. Returns
+    the slugs whose disk was deleted."""
+    from .. import security
+    from ..db import get_db
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT slug FROM projects WHERE persist_delete_after IS NOT NULL"
+                " AND persist_delete_after <= datetime('now')") as cur:
+            due = [r["slug"] for r in await cur.fetchall()]
+        done = []
+        for slug in due:
+            try:
+                existed = delete_disk(slug)
+            except PersistError:
+                continue                     # attached, or a slug we refuse
+            await db.execute("UPDATE projects SET persist_delete_after = NULL "
+                             "WHERE slug = ?", (slug,))
+            await db.commit()
+            done.append(slug)
+            if existed:
+                await security.raise_event(
+                    db, kind="persist_disk_deleted", severity="info", project=slug,
+                    summary=f"old /persist disk of '{slug}' deleted "
+                            f"({settings.persist_retire_days} days after import)")
+        return done
+    finally:
+        await db.close()
+
+
 # --- approval (the operator's, via projects.py) -----------------------------------
 
 async def approved(slug: str | None) -> bool:
@@ -169,12 +209,15 @@ def qmp_path() -> Path:
     return settings.vm_dir / "qmp.sock"
 
 
-async def qmp(commands: list[dict]) -> list[dict]:
-    """Run QMP commands against the guest's monitor socket, in order. Returns
+async def qmp(commands: list[dict], path: Path | None = None) -> list[dict]:
+    """Run QMP commands against a guest's monitor socket, in order. Returns
     one reply per command ({"return": ...} or {"error": ...}); async events
-    interleaved on the socket are skipped."""
+    interleaved on the socket are skipped. `path` defaults to the shared
+    guest's socket; service boxes (services.py) pass their own box's."""
+    sock = str(path or qmp_path())
+
     async def _run() -> list[dict]:
-        reader, writer = await asyncio.open_unix_connection(str(qmp_path()))
+        reader, writer = await asyncio.open_unix_connection(sock)
         try:
             async def reply() -> dict:
                 while True:

@@ -150,7 +150,10 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               # is as attacker-authorable as a web page
                               "local_read_file", "local_list_files",
                               "local_search", "local_shell",
-                              "local_write_file", "local_edit_file"})
+                              "local_write_file", "local_edit_file",
+                              # WP3: a service's journal is whatever the
+                              # (agent-written, network-facing) service printed
+                              "service_logs"})
 
 # Tools that promote content INTO a trusted store the agent later relies on.
 # memory_write is the one such store the guest can reach through the broker
