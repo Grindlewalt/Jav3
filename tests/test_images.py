@@ -249,7 +249,7 @@ async def test_build_mocked_end_to_end(db, monkeypatch):
         ev = await c.fetchone()
     assert ev[0] == "info" and "p1" in json.loads(ev[1])["variant_used_by"]
     assert images.resolve_image(boxes.shared()) == layer   # the new version is live
-    assert boxes.all_boxes() == [boxes.shared()]            # the builder was released
+    assert [b.id for b in boxes.all_boxes()] == ["shared"]  # the builder was released
 
 
 async def test_build_failure_keeps_old_version(db, monkeypatch):
