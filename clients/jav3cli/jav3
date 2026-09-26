@@ -1883,14 +1883,16 @@ def build_tui(base: str, token: str, **kw):
         #ag-head { height: 1; padding: 0 2; margin: 1 0; }
         #ag-list { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
         #ag-foot { height: 1; padding: 0 2; color: $text-muted; }
-        AgentRow { height: 1; padding: 0 1; }
+        AgentRow { height: 1; padding: 0 1; border-left: blank; }
         AgentRow.section { color: $text-muted; text-style: bold; margin-top: 1; }
         AgentRow.group { color: $text-muted; margin-top: 1; }
         AgentRow.link { margin-top: 1; color: $text-muted; }
         AgentRow.child { color: $text; }
-        AgentRow.-sel { background: $primary 25%; }
+        AgentRow.-sel { background: $primary; color: auto 95%; text-style: bold;
+                        border-left: thick $accent; }
         AgentRow.current { background: $success 18%; color: $success; }
-        AgentRow.current.-sel { background: $success 38%; }
+        AgentRow.current.-sel { background: $success; color: auto 95%;
+                                border-left: thick $accent; }
         """
         BINDINGS = [
             Binding("escape", "back", show=False),
@@ -2268,6 +2270,13 @@ def build_tui(base: str, token: str, **kw):
         ToolView.block { margin: 1 0; }
         ToolView.block #body { border-left: solid $panel-lighten-2; padding: 0 1; margin-left: 1; }
         #bottom { height: auto; padding: 0 2; }
+        OptionList > .option-list--option-highlighted,
+        OptionList:focus > .option-list--option-highlighted {
+            /* solid, not a blend: Terminal.app has 256 colours and rounds a
+               blended teal to grey. `auto` picks black or white for contrast. */
+            background: $primary; color: auto 95%; text-style: bold;
+        }
+        OptionList > .option-list--option-hover { background: $panel; }
         #popup { display: none; height: auto; max-height: 12; background: $surface;
                  border: none; padding: 0 1; }
         #popup:focus { border: none; }
