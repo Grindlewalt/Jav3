@@ -2829,12 +2829,32 @@ def build_tui(base: str, token: str, **kw):
 
     def _row_pbox(e) -> str:
         r = e["raw"]
-        stale = f" {AMBER} stale [/]" if r.get("stale") else ""
+        t = r.get("totals") or {}
+        n = t.get("procs") if isinstance(t.get("procs"), int) else e.get("count", 0)
+        orph = len(_jlist(r.get("orphan_conns")))
+        flags = (f" {AMBER} stale [/]" if r.get("stale") else "")
+        if orph:
+            flags += f" {RED} {orph} possibly hidden process{'es' * (orph != 1)} [/]"
+        if r.get("error"):
+            flags += f" [$error]error: {_esc(_short(str(r['error']), 50))}[/]"
+        if r.get("truncated"):
+            flags += " [$warning]truncated[/]"
+        if r.get("baseline") == "builtin":
+            flags += " [$text-muted]builtin baseline[/]"
         return (f"[$accent b]▣ {_esc(r.get('box_id') or '?')}[/] [$text-muted]"
                 f"{_esc(r.get('kind') or '')}"
                 f"{' ⌂ ' + _esc(r['project']) if r.get('project') else ''} · "
-                f"{e.get('count', 0)} process{'es' * (e.get('count', 0) != 1)} · reported "
-                f"{_esc(str(r.get('reported_at') or 'never'))}[/]{stale}")
+                f"{n} process{'es' * (n != 1)}"
+                + (f" · {t['unexpected']} unexpected" if t.get("unexpected") else "")
+                + f" · reported {_esc(str(r.get('reported_at') or 'never'))}[/]{flags}")
+
+    def _row_orphan(e) -> str:
+        c = e["raw"]
+        return (f"  {RED} ? possibly hidden process [/] "
+                f"{_esc(c.get('proto') or '?')} → {_esc(c.get('host') or '')} "
+                f"{_esc(str(c.get('raddr') or ''))}:{_esc(str(c.get('rport') or ''))} "
+                f"[$text-muted]no reported process owns it · host ↑"
+                f"{_bytes(c.get('host_bytes_out'))} ↓{_bytes(c.get('host_bytes_in'))}[/]")
 
     def _row_proc(e) -> str:
         r, depth = e["raw"], e.get("depth", 1)
@@ -2866,10 +2886,13 @@ def build_tui(base: str, token: str, **kw):
         st = r.get("state") or "?"
         col = {"running": "$success", "failed": "$error", "unreported": "$warning"}.get(
             st, "$text-muted")
+        want = (" [$text-muted](stopped by the operator)[/]"
+                if r.get("desired_state") == "stopped" else "")
+        err = f" [$error]{_esc(_short(str(r['error']), 60))}[/]" if r.get("error") else ""
         return (f"[{col}]●[/] [b]{_esc(r.get('name') or '?')}[/] [$text-muted]#{r.get('id')} "
                 f"⌂ {_esc(r.get('project_slug') or '?')} · placement[/] "
-                f"[b]{_esc(r.get('placement') or '?')}[/] [$text-muted]· {_esc(st)} · box "
-                f"{_esc(r.get('box_id') or '-')}[/]")
+                f"[b]{_esc(r.get('placement') or '?')}[/] [$text-muted]·[/] [{col}]{_esc(st)}[/]"
+                f"{want} [$text-muted]· box {_esc(r.get('box_id') or '-')}[/]{err}")
 
     def _row_profile(e) -> str:
         p = e["raw"]
@@ -2884,6 +2907,7 @@ def build_tui(base: str, token: str, **kw):
 
     _ROWS = {"service": _row_service, "package": _row_package, "policy": _row_policy,
              "group": _row_group, "pbox": _row_pbox, "proc": _row_proc, "svc": _row_svc,
+             "orphan": _row_orphan,
              "profile": _row_profile}
 
     class SecurityScreen(Screen):
@@ -2907,8 +2931,8 @@ def build_tui(base: str, token: str, **kw):
                 "logs": "[$primary]f[/] filter kind  [$primary]a[/] acknowledge",
                 "secrets": "[$primary]a[/] add  [$primary]h[/] hosts  "
                            "[$primary]v[/] new value  [$primary]d[/] delete",
-                "persistent": "[$primary]enter[/] open  [$primary]s[/] stop service  "
-                              "[$primary]d[/] revoke service",
+                "persistent": "[$primary]enter[/] open  [$primary]s[/] stop / start service  "
+                              "[$primary]l[/] service logs  [$primary]d[/] revoke service",
                 "profiles": "[$primary]a[/] new  [$primary]e[/] edit  [$primary]p[/] assign "
                             "to project  [$primary]d[/] delete"}
         POLL_SECONDS = 4.0
@@ -3187,12 +3211,16 @@ def build_tui(base: str, token: str, **kw):
                     for s in ss if s.get("name")]
 
         async def _load_persistent(self):
-            procs, svcs = await asyncio.gather(
-                self._get("persistent", "processes", "/api/vm/processes", "boxes"),
+            pr, svcs = await asyncio.gather(
+                self._get("persistent", "processes", "/api/vm/processes", ""),
                 self._get("persistent", "services", "/api/services", "", quiet404=True))
             self._lan(svcs)
-            if procs is None and svcs is None:
+            if pr is None and svcs is None:
                 return None
+            if pr is not None:
+                # {enabled, boxes}; enabled false (vm_boxes_enabled off) = no view
+                self.procs_enabled = pr.get("enabled") is not False
+            procs = (pr or {}).get("boxes") if self.procs_enabled is not False else []
             self._last_boxes = procs or []
             self._last_services = (svcs or {}).get("services") or []
             return self.persistent_entries_again()
@@ -3221,6 +3249,10 @@ def build_tui(base: str, token: str, **kw):
                 out.append({"type": "pbox", "key": f"B{bid}",
                             "raw": {k: v for k, v in b.items() if k != "tree"},
                             "count": _tree_count(b.get("tree"))})
+                # host-seen traffic no reported process owns: first, in red
+                out += [{"type": "orphan", "key": f"O{bid}:{i}", "box": bid, "raw": c}
+                        for i, c in enumerate(_jlist(b.get("orphan_conns")))
+                        if isinstance(c, dict)]
                 walk(bid, b.get("tree"), 1)
             decided = [s for s in services if s.get("status") not in ("pending", "rejected")]
             if decided:
@@ -3432,15 +3464,60 @@ def build_tui(base: str, token: str, **kw):
         def _detail_group(self, e) -> str:
             return ""
 
+        def _detail_orphan(self, e) -> str:
+            c = e["raw"]
+            return "\n".join([
+                f"{RED} POSSIBLY HIDDEN PROCESS [/] in box [b]{_esc(e.get('box') or '?')}[/]",
+                "",
+                "The host saw this connection at the proxy, but no process the guest "
+                "reported owns it. A process hiding from /proc (a root implant) looks "
+                "exactly like this; so does one that exited between the two reads. If it "
+                "persists across reports, destroy the box (/vms) and read the security "
+                "log.",
+                "",
+                f"{_esc(c.get('proto') or '?')} {_esc(c.get('dir') or '?')} "
+                f"{_esc(str(c.get('laddr') or ''))}:{_esc(str(c.get('lport') or ''))} → "
+                f"{_esc(str(c.get('raddr') or ''))}:{_esc(str(c.get('rport') or ''))} "
+                f"[b]{_esc(c.get('host') or '')}[/] {_esc(c.get('state') or '')}",
+                f"host-verified ↑{_bytes(c.get('host_bytes_out'))}B "
+                f"↓{_bytes(c.get('host_bytes_in'))}B  guest-reported ↑"
+                f"{_bytes(c.get('guest_bytes_out'))}B ↓{_bytes(c.get('guest_bytes_in'))}B"])
+
         def _detail_pbox(self, e) -> str:
             r = e["raw"]
-            return (f"[b]{_esc(r.get('box_id') or '?')}[/] {_esc(r.get('kind') or '')} "
-                    f"{_esc(r.get('project') or '')}\nreported "
-                    f"{_esc(str(r.get('reported_at') or 'never'))}"
-                    + (f"  {AMBER} stale: the guest stopped reporting [/]"
-                       if r.get("stale") else "")
-                    + "\n[$text-muted]processes the image baseline does not know, with "
-                      "their children; Enter opens a row[/]")
+            t = r.get("totals") or {}
+            orph = _jlist(r.get("orphan_conns"))
+            lines = [
+                f"[b]{_esc(r.get('box_id') or '?')}[/] {_esc(r.get('kind') or '')} "
+                f"{_esc(r.get('project') or '')}",
+                f"reported {_esc(str(r.get('reported_at') or 'never'))}"
+                + (f"  {AMBER} stale: the guest stopped reporting [/]"
+                   if r.get("stale") else "")]
+            if r.get("error"):
+                lines.append(f"[$error b]report failed:[/] {_esc(str(r['error']))}")
+            if orph:
+                lines.append(f"{RED} {len(orph)} connection{'s' * (len(orph) != 1)} no "
+                             "process owns: possibly a hidden process [/]")
+            if t:
+                lines.append(
+                    f"{t.get('procs', '?')} processes · {t.get('unexpected', 0)} unexpected · "
+                    f"{t.get('conns', 0)} connections · guest-reported ↑"
+                    f"{_bytes(t.get('guest_bytes_out'))}B ↓{_bytes(t.get('guest_bytes_in'))}B"
+                    f" · host-verified ↑{_bytes(t.get('host_bytes_out'))}B "
+                    f"↓{_bytes(t.get('host_bytes_in'))}B")
+            if r.get("truncated"):
+                lines.append("[$warning]truncated: the report was too big; the tree shows "
+                             "only part of it (totals count everything)[/]")
+            lines.append(
+                "[$text-muted]baseline: "
+                + ("the image's own (from its build)" if r.get("baseline") == "image" else
+                   "the built-in set: this image has no baseline of its own yet, so more "
+                   "shows as unexpected" if r.get("baseline") == "builtin" else
+                   _esc(str(r.get("baseline") or "?")))
+                + "[/]")
+            lines.append("[$text-muted]processes the baseline does not know, with their "
+                         "children; Enter opens a row[/]")
+            return "\n".join(lines)
 
         def _detail_proc(self, e) -> str:
             r = e["raw"]
@@ -3486,11 +3563,19 @@ def build_tui(base: str, token: str, **kw):
 
         def _detail_svc(self, e) -> str:
             r = e["raw"]
+            st = r.get("state") or "?"
+            go = "start" if r.get("desired_state") == "stopped" else "stop"
             return "\n".join([
-                "[$primary]s[/] stop   [$primary]d[/] revoke", "",
+                f"[$primary]s[/] {go}   [$primary]l[/] logs   [$primary]d[/] revoke", "",
                 f"[b]{_esc(r.get('name') or '?')}[/] #{r.get('id')} in "
-                f"{_esc(r.get('project_slug') or '?')}  state [b]{_esc(r.get('state') or '?')}"
-                f"[/]  box {_esc(r.get('box_id') or '-')}",
+                f"{_esc(r.get('project_slug') or '?')}  state [b]{_esc(st)}[/] (wanted "
+                f"{_esc(r.get('desired_state') or '?')})  box {_esc(r.get('box_id') or '-')}",
+                (f"[$error b]error:[/] {_esc(str(r['error']))}" if r.get("error") else ""),
+                ("[$warning]unreported: its box has not answered for it; the state is "
+                 "unknown[/]" if st == "unreported" else ""),
+                f"[$text-muted]last reported {_esc(str(r.get('last_reported_at') or 'never'))}"
+                f" · {_esc(r.get('status') or '?')} by {_esc(r.get('decided_by') or '?')} "
+                f"{_esc(r.get('decided_at') or '')}[/]",
                 f"placement: [b]{_esc(r.get('placement') or '?')}[/]  exposed: "
                 + _esc(", ".join(f"{x.get('port')}→{x.get('bind')}"
                                  for x in _jlist(r.get("expose_ports"))) or "nothing"),
@@ -3560,9 +3645,17 @@ def build_tui(base: str, token: str, **kw):
                 es = self.entries["persistent"]
                 nb = sum(e["type"] == "pbox" for e in es)
                 bad = _tree_bad_count([n for b in self._last_boxes for n in b.get("tree") or []])
-                bits.append(f"[$text-muted]{nb} box{'es' * (nb != 1)} reporting · non-OS "
-                            "processes only · guest-reported vs host-verified bytes[/]"
-                            + (f"  {RED} {bad} need a look [/]" if bad else ""))
+                orph = sum(e["type"] == "orphan" for e in es)
+                if self.procs_enabled is False:
+                    bits.append("[$warning b]boxes are off[/] [$text-muted](vm_boxes_enabled): "
+                                "there is no process view; approved services are listed "
+                                "below[/]")
+                else:
+                    bits.append(f"[$text-muted]{nb} box{'es' * (nb != 1)} reporting · non-OS "
+                                "processes only · guest-reported vs host-verified bytes[/]"
+                                + (f"  {RED} {bad} need a look [/]" if bad else "")
+                                + (f"  {RED} {orph} possibly hidden process"
+                                   f"{'es' * (orph != 1)} [/]" if orph else ""))
             elif self.tab == "profiles":
                 bits.append("[$text-muted]a profile is a project's security baseline: "
                             "network, secrets by name, box runtime, service placement[/]")
@@ -3640,7 +3733,7 @@ def build_tui(base: str, token: str, **kw):
                     if self.locked:
                         rows = [SecRow(f"[$warning]{_esc(self.LOCKED)}[/]", None)]
                     elif not shown:
-                        msg = self.EMPTY[self.tab] if self.loaded[self.tab] else "loading…"
+                        msg = self.empty_text() if self.loaded[self.tab] else "loading…"
                         rows = [SecRow(f"[$text-muted]{msg}[/]", None)]
                     else:
                         rows = [SecRow(m, k) for m, k in zip(marks, keys)]
@@ -3650,6 +3743,11 @@ def build_tui(base: str, token: str, **kw):
                         await lst.mount_all(rows)
                 self.refresh_sel()
                 self.render_chrome()
+
+        def empty_text(self) -> str:
+            if self.tab == "persistent" and self.procs_enabled is False:
+                return "boxes are off: no processes are watched and no service is approved"
+            return self.EMPTY[self.tab]
 
         def refresh_sel(self) -> None:
             target = None
@@ -3744,6 +3842,10 @@ def build_tui(base: str, token: str, **kw):
         def action_stop(self) -> None:
             if self.tab == "persistent":
                 self._act(self._stop_service())
+
+        def action_logs(self) -> None:
+            if self.tab == "persistent":
+                self._act(self._service_logs())
 
         def action_edit(self) -> None:
             if self.tab == "network":
@@ -4095,15 +4197,40 @@ def build_tui(base: str, token: str, **kw):
             known = next((s for s in self._last_services if s.get("id") == sid), None)
             return known or {"id": sid, "name": f"service {sid}"}
 
+        async def _service_logs(self) -> None:
+            s = self._service_of()
+            if s is None:
+                return
+            try:
+                r = await self.app.api("GET", f"/api/services/{s.get('id')}/logs",
+                                       params={"lines": 200}) or {}
+            except CliError as e:
+                self._fail(f"logs: {e}")
+                return
+            # guest output: text only, never markup
+            text = str(r.get("text") or "")
+            await self.app.push_screen_wait(View(
+                f"Logs: {s.get('name')} (#{s.get('id')}), last 200 lines",
+                "[$warning]untrusted: written by the service in its box[/]\n\n"
+                + (_esc(text) if text.strip() else "[$text-muted]no output[/]")))
+
         async def _stop_service(self) -> None:
             s = self._service_of()
             if s is None:
                 return
+            if s.get("desired_state") == "stopped":
+                if await self._confirm(
+                        f"Start service {s.get('name')} (#{s.get('id')})?",
+                        "Starts the approved definition in its box (booting the box if "
+                        "it is down) and reopens its egress hosts; it comes back on every "
+                        "boot until stopped or revoked."):
+                    await self._send("POST", f"/api/services/{s.get('id')}/start",
+                                     f"started {s.get('name')}")
+                return
             if await self._confirm(
                     f"Stop service {s.get('name')} (#{s.get('id')})?",
-                    "Stops its unit now. The approved definition stays; start it again "
-                    "from the web app or /vms, and it comes back on the next box boot "
-                    "unless it is revoked."):
+                    "Stops its unit now and closes its egress hosts. The approved "
+                    "definition stays; s here starts it again."):
                 await self._send("POST", f"/api/services/{s.get('id')}/stop",
                                  f"stopped {s.get('name')}")
 
@@ -4120,10 +4247,16 @@ def build_tui(base: str, token: str, **kw):
             wipe = bool(await self.app.push_screen_wait(Confirm(
                 f"Also delete {s.get('name')}'s /srv data?",
                 "y deletes the data disk for good; n (or esc) keeps it.")))
-            await self._send("POST", f"/api/services/{s.get('id')}/revoke",
-                             f"revoked {s.get('name')}"
-                             + (" and deleted its data" if wipe else ""),
-                             json={"confirm": True, "delete_data": wipe})
+            ok = await self._send("POST", f"/api/services/{s.get('id')}/revoke",
+                                  f"revoked {s.get('name')}",
+                                  json={"confirm": True, "delete_data": wipe})
+            if ok and "data_deleted" in self.last:
+                self.status += (" [$text-muted]· its data was deleted[/]"
+                                if self.last.get("data_deleted") else
+                                " [$text-muted]· its data was kept[/]"
+                                if not wipe else
+                                " [$warning]· its data could not be deleted[/]")
+                self.render_chrome()
 
         async def _edit_policy(self) -> None:
             e = self.selected()

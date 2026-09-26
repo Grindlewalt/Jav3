@@ -2180,6 +2180,68 @@ async def test_tui_persistent_tree_mismatch_stop_and_revoke(cfg):
         assert await _until(pilot, lambda: ("POST", "/api/services/9/revoke",
                                             {"confirm": True, "delete_data": False})
                             in _posts(seen))
+        assert await _until(pilot, lambda: "its data was kept"
+                            in _text(scr.query_one("#sec-sub")))
+
+
+async def test_tui_persistent_orphans_report_notes_logs_and_start(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security persistent", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["persistent"]
+                            and any("s-demo" in r for r in _rows(scr)))
+        rows = _rows(scr)
+        box = next(r for r in rows if "▣ s-demo" in r)
+        assert "possibly hidden process" in box and "truncated" in box
+        assert "builtin baseline" in box and "1 unexpected" in box
+        # the orphan connection sits right under its box, in red
+        i = rows.index(box)
+        assert "possibly hidden process" in rows[i + 1] and "c2.example" in rows[i + 1]
+        assert "possibly hidden process" in _text(scr.query_one("#sec-sub"))
+        scr.select_key("Os-demo:0")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "POSSIBLY HIDDEN PROCESS" in d and "host-verified ↑70.0k" in d
+        scr.select_key("Bs-demo")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "truncated" in d and "built-in set" in d and "host-verified ↑971.0k" in d
+        # a service in state unreported with its error, stopped by the operator
+        cron = next(r for r in _rows(scr) if "cron" in r)
+        assert "unreported" in cron and "svcd did not answer" in cron
+        scr.select_key("S12")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "error:" in d and "unreported" in d and "s start" in d
+        # l: its logs, as text (the markup in them is not applied)
+        await pilot.press("l")
+        assert await _modal(pilot, app, "View")
+        assert ("GET", "/api/services/12/logs", {"lines": "200"}, None) in seen
+        assert "[bold]ok[/]" in _text(app.screen.query_one("#view-body Static"))
+        assert "untrusted" in _text(app.screen.query_one("#view-body Static"))
+        await pilot.press("escape")
+        # s on a stopped service starts it
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("s")
+        assert await _modal(pilot, app, "Confirm")
+        assert "Start" in app.screen.question
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/services/12/start", None)
+                            in _posts(seen))
+
+
+async def test_tui_persistent_says_boxes_are_off(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess",
+                         transport=_boxes_server(seen, procs_enabled=False))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security persistent", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["persistent"])
+        assert "boxes are off" in _text(scr.query_one("#sec-sub"))
+        assert not any("▣" in r for r in _rows(scr))
+        assert not scr.errors["persistent"]
 
 
 async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(cfg):
