@@ -624,6 +624,87 @@ def parse_todos(result: str) -> list[tuple[bool, str]]:
     return out
 
 
+# -- the agents screen: every running conversation, across projects -----------------------
+
+AGENT_ICONS = {"orchestrator": "◆", "chat": "●", "agent": "◇", "head": "▣",
+               "leader": "◈", "subagent": "◦"}
+
+
+class AgentTree:
+    """/api/chat/agents nodes as a forest: roots (parent_id null, or a parent not
+    in the list) grouped by project, each with its descendants in depth order."""
+
+    def __init__(self, nodes: list[dict]) -> None:
+        self.by_id = {n["id"]: n for n in nodes if isinstance(n, dict) and "id" in n}
+        self.kids: dict = {}
+        roots = []
+        for n in self.by_id.values():
+            p = n.get("parent_id")
+            if p is not None and p in self.by_id and p != n["id"]:
+                self.kids.setdefault(p, []).append(n)
+            else:
+                roots.append(n)
+        for ks in self.kids.values():
+            ks.sort(key=lambda n: str(n.get("started_at") or ""))
+        roots.sort(key=lambda n: str(n.get("started_at") or ""), reverse=True)
+        roots.sort(key=lambda n: not n.get("running"))
+        groups: dict = {}
+        for r in roots:
+            groups.setdefault(r.get("project") or None, []).append(r)
+        self.groups = sorted(groups.items(), key=lambda kv: (kv[0] is None, kv[0] or ""))
+        self.roots = [r for _, rs in self.groups for r in rs]
+
+    def descendants(self, root_id) -> list[tuple[dict, int]]:
+        out, seen = [], {root_id}
+
+        def walk(pid, depth):
+            for k in self.kids.get(pid, []):
+                if k["id"] in seen:
+                    continue
+                seen.add(k["id"])
+                out.append((k, depth))
+                walk(k["id"], depth + 1)
+        walk(root_id, 1)
+        return out
+
+    def root_of(self, nid):
+        seen = set()
+        while nid in self.by_id and nid not in seen:
+            seen.add(nid)
+            p = self.by_id[nid].get("parent_id")
+            if p is None or p not in self.by_id:
+                return nid
+            nid = p
+        return None
+
+    def counts(self) -> tuple[int, int, int]:
+        nodes = self.by_id.values()
+        return (sum(1 for n in nodes if n.get("running")), len(self.by_id),
+                len({n.get("project") for n in nodes if n.get("project")}))
+
+
+def _age(ts, now: float | None = None) -> str:
+    """'12s' / '5m' / '3h' / '2d' since an ISO (naive = UTC) or epoch timestamp."""
+    from datetime import datetime, timezone
+    if ts in (None, ""):
+        return ""
+    try:
+        if isinstance(ts, (int, float)):
+            t = float(ts)
+        else:
+            d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            t = d.timestamp()
+    except (ValueError, OverflowError):
+        return ""
+    s = max(0, int((now if now is not None else time.time()) - t))
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if s >= n:
+            return f"{s // n}{unit}"
+    return f"{s}s"
+
+
 def _esc(s: str) -> str:
     from textual.markup import escape
     return escape(s)
@@ -735,9 +816,9 @@ def build_tui(base: str, token: str, **kw):
     from textual.command import DiscoveryHit, Hit, Provider
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.message import Message
-    from textual.screen import ModalScreen
+    from textual.screen import ModalScreen, Screen
     from textual.theme import Theme
-    from textual.widgets import Input, Markdown, OptionList, Static, TextArea
+    from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
     from textual.widgets.option_list import Option
 
     # -- widgets ------------------------------------------------------------------------
@@ -747,6 +828,28 @@ def build_tui(base: str, token: str, **kw):
 
     class UserMsg(Static):
         pass
+
+    class QueuedMsg(UserMsg):
+        """A message typed while a turn runs, posted to /api/chat/{cid}/message:
+        dimmed until the stream's operator_message says the agent has it."""
+
+        def __init__(self, text: str, sent: str) -> None:
+            super().__init__(self._markup(text, "queued — delivered at the next step"),
+                             classes="pending")
+            self.text, self.sent = text, sent
+
+        @staticmethod
+        def _markup(text: str, tag: str, colour: str = "$text-muted") -> str:
+            return f"{_esc(text)}\n[{colour}]{_esc(tag)}[/]"
+
+        def deliver(self) -> None:
+            self.remove_class("pending")
+            self.update(self._markup(self.text, "↳ delivered mid-turn"))
+
+        def fail(self, why: str) -> None:
+            self.remove_class("pending")
+            self.add_class("failed")
+            self.update(self._markup(self.text, why, "$error"))
 
     class Reply(Markdown):
         pass
@@ -842,6 +945,11 @@ def build_tui(base: str, token: str, **kw):
                 event.stop()
                 event.prevent_default()
                 app.popup_key(key)
+                return
+            if key == "left" and not self.text:
+                event.stop()
+                event.prevent_default()
+                app.action_agents_view()
                 return
             if key == "enter":
                 event.stop()
@@ -1002,6 +1110,260 @@ def build_tui(base: str, token: str, **kw):
         def action_close(self) -> None:
             self.dismiss(None)
 
+    class BrainDump(ModalScreen):
+        """/orchestration's second step: a multi-line brain-dump for a project."""
+
+        BINDINGS = [Binding("escape", "cancel", show=False),
+                    Binding("ctrl+s,ctrl+enter", "send", show=False, priority=True),
+                    Binding("ctrl+j,shift+enter", "newline", show=False, priority=True)]
+        PLACEHOLDER = ("Dump the problem: goals, what's broken, what you know, what done "
+                       "looks like. The orchestrator splits it into tasks, sends an agent "
+                       "to each and messages them as they work.\n\nEvery agent uses the "
+                       "default model unless you name one for a task — \"use "
+                       "deepseek-pro for the migration\" pins that model to that task.")
+
+        def __init__(self, project: str) -> None:
+            super().__init__()
+            self.project = project
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="dialog", classes="wide"):
+                with Horizontal(id="dialog-head"):
+                    yield Static(f"[b]Orchestrate[/]  [$text-muted]⌂ {_esc(self.project)}[/]",
+                                 id="dialog-title")
+                    yield Static("[$text-muted]esc[/]", id="dialog-esc")
+                yield TextArea(id="dump", soft_wrap=True, show_line_numbers=False,
+                               placeholder=self.PLACEHOLDER)
+                with Horizontal(id="dump-foot"):
+                    yield Static("[$text-muted]ctrl+s send · esc cancel[/]", id="dump-hint")
+                    yield Button("Send", id="dump-send", variant="primary", compact=True)
+
+        def on_mount(self) -> None:
+            self.query_one("#dump", TextArea).focus()
+
+        def action_send(self) -> None:
+            text = self.query_one("#dump", TextArea).text.strip()
+            if text:
+                self.dismiss(text)
+            else:
+                self.notify("write the brain-dump first", severity="warning")
+
+        def action_newline(self) -> None:
+            self.query_one("#dump", TextArea).insert("\n")
+
+        @on(Button.Pressed, "#dump-send")
+        def _pressed(self, ev) -> None:
+            self.action_send()
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+    class AgentRow(Static):
+        """One row of the agents screen: a project header, a root, or a descendant."""
+
+        def __init__(self, markup: str, kind: str, nid=None, depth: int = 0) -> None:
+            super().__init__(markup, classes=kind)
+            self.kind, self.nid, self.depth = kind, nid, depth
+
+        def on_click(self) -> None:
+            if self.nid is not None:
+                self.screen.click_row(self)
+
+    class AgentsScreen(Screen):
+        """← from an empty prompt: every conversation that is working, across
+        projects. ↑↓ walk the roots; the highlighted root's agents unfold under it
+        and shift+↑↓ walk those; enter opens one in the main screen."""
+
+        DEFAULT_CSS = """
+        AgentsScreen { background: $background; }
+        #ag-head { height: 1; padding: 0 2; margin: 1 0; }
+        #ag-list { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
+        #ag-foot { height: 1; padding: 0 2; color: $text-muted; }
+        AgentRow { height: 1; padding: 0 1; }
+        AgentRow.project { color: $text-muted; text-style: bold; margin-top: 1; }
+        AgentRow.child { color: $text; }
+        AgentRow.-sel { background: $primary 25%; }
+        AgentRow.current { background: $success 18%; color: $success; }
+        AgentRow.current.-sel { background: $success 38%; }
+        """
+        BINDINGS = [
+            Binding("escape,left,right", "back", show=False),
+            Binding("up", "move(-1)", show=False),
+            Binding("down", "move(1)", show=False),
+            Binding("shift+up", "child(-1)", show=False),
+            Binding("shift+down", "child(1)", show=False),
+            Binding("enter", "open", show=False),
+            Binding("r", "reload", show=False),
+            Binding("pageup", "page(-1)", show=False),
+            Binding("pagedown", "page(1)", show=False),
+        ]
+
+        def __init__(self, origin=None) -> None:
+            super().__init__()
+            self.origin = origin              # the conversation the operator came from
+            self.forest = AgentTree([])
+            self.sel_root = None
+            self.sel_child = None
+            self.loaded = False
+            self.error: str | None = None
+            self._lock = asyncio.Lock()
+            self.frame = 0
+
+        def compose(self) -> ComposeResult:
+            yield Static(id="ag-head")
+            yield VerticalScroll(id="ag-list", can_focus=False)
+            yield Static("[$primary]↑↓[/] agents   [$primary]shift+↑↓[/] the agents under "
+                         "one   [$primary]enter[/] open   [$primary]← esc[/] back   "
+                         "[$primary]r[/] refresh   [$success]■[/] where you were",
+                         id="ag-foot")
+
+        def on_mount(self) -> None:
+            self.render_head()
+            self.run_worker(self.reload(), group="ag-reload", exclusive=True)
+            self.set_interval(2, lambda: self.run_worker(self.reload(), group="ag-reload",
+                                                         exclusive=True))
+            self.set_interval(0.15, self.spin)
+
+        async def reload(self) -> None:
+            try:
+                data = await self.app.api("GET", "/api/chat/agents")
+                nodes = data.get("nodes") if isinstance(data, dict) else None
+                self.error = None
+                self.set_tree(AgentTree(nodes if isinstance(nodes, list) else []))
+            except CliError as e:
+                self.error = str(e)
+            await self.rebuild()
+
+        def set_tree(self, tree: AgentTree) -> None:
+            self.forest = tree
+            if not self.loaded:
+                self.loaded = True
+                root = tree.root_of(self.origin) if self.origin in tree.by_id else None
+                if root is not None:
+                    self.sel_root = root
+                    self.sel_child = self.origin if self.origin != root else None
+            if self.sel_root not in {r["id"] for r in tree.roots}:
+                self.sel_root = tree.roots[0]["id"] if tree.roots else None
+                self.sel_child = None
+            if self.sel_child is not None and self.sel_child not in {
+                    n["id"] for n, _ in tree.descendants(self.sel_root)}:
+                self.sel_child = None
+
+        def row_markup(self, n: dict, depth: int, root: bool) -> str:
+            icon = AGENT_ICONS.get(n.get("kind"), "·")
+            nk = len(self.forest.descendants(n["id"])) if root else 0
+            fold = ("▾" if n["id"] == self.sel_root else "▸") if nk else " "
+            indent = "  " * depth + ("└ " if depth else "")
+            title = n.get("title") or "#{}".format(n["id"])
+            bits = [f"{fold} {indent}[$secondary]{icon}[/] [b]{_esc(_short(title, 50))}[/]"]
+            if n.get("agent_slug"):
+                bits.append(f"[$text-muted]@{_esc(n['agent_slug'])}[/]")
+            if n.get("model"):
+                bits.append(f"[$text-muted]{_esc(str(n['model']).split('/')[-1])}[/]")
+            if nk:
+                bits.append(f"[$text-muted]{nk} agent{'s' * (nk != 1)}[/]")
+            bits.append(f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/]"
+                        if n.get("running") else "[$success]✓[/]")
+            age = _age(n.get("started_at"))
+            if age:
+                bits.append(f"[$text-muted]{age}[/]")
+            return "  ".join(bits)
+
+        def render_head(self) -> None:
+            running, n, projects = self.forest.counts()
+            head = (f"[b]Agents[/]   [$accent]{running} running[/] [$text-muted]·[/] "
+                    f"{n} agent{'s' * (n != 1)} [$text-muted]·[/] "
+                    f"{projects} project{'s' * (projects != 1)}")
+            if self.error:
+                head += f"   [$error]{_esc(self.error)}[/]"
+            self.query_one("#ag-head", Static).update(head)
+
+        async def rebuild(self) -> None:
+            async with self._lock:
+                rows: list = []
+                for proj, roots in self.forest.groups:
+                    rows.append(AgentRow(f"⌂ {_esc(proj or 'no project')}  "
+                                         f"[$text-muted]{len(roots)}[/]", "project"))
+                    for r in roots:
+                        rows.append(AgentRow(self.row_markup(r, 0, True), "root", r["id"]))
+                        if r["id"] == self.sel_root:
+                            for k, d in self.forest.descendants(r["id"]):
+                                rows.append(AgentRow(self.row_markup(k, d, False), "child",
+                                                     k["id"], d))
+                if not rows:
+                    rows.append(AgentRow("[$text-muted]no agents or chats are running — "
+                                         "/orchestration starts some[/]", "project"))
+                sel = self.sel_child if self.sel_child is not None else self.sel_root
+                want = "child" if self.sel_child is not None else "root"
+                target = None
+                for row in rows:
+                    if row.nid is not None and row.nid == self.origin:
+                        row.add_class("current")
+                    if row.nid == sel and row.kind == want:
+                        row.add_class("-sel")
+                        target = row
+                lst = self.query_one("#ag-list", VerticalScroll)
+                with self.app.batch_update():
+                    await lst.remove_children()
+                    await lst.mount_all(rows)
+                self.render_head()
+                if target is not None:
+                    target.scroll_visible(animate=False)
+
+        def spin(self) -> None:
+            self.frame += 1
+            for row in self.query(AgentRow):
+                n = self.forest.by_id.get(row.nid)
+                if n is not None and n.get("running"):
+                    row.update(self.row_markup(n, row.depth, row.kind == "root"))
+
+        async def action_move(self, d: int) -> None:
+            ids = [r["id"] for r in self.forest.roots]
+            if not ids:
+                return
+            i = ids.index(self.sel_root) if self.sel_root in ids else -1
+            self.sel_root = ids[max(0, min(len(ids) - 1, i + d))]
+            self.sel_child = None
+            await self.rebuild()
+
+        async def action_child(self, d: int) -> None:
+            kids = [n["id"] for n, _ in self.forest.descendants(self.sel_root)]
+            if not kids:
+                return
+            if self.sel_child is None:
+                if d < 0:
+                    return
+                self.sel_child = kids[0]
+            else:
+                i = kids.index(self.sel_child) + d
+                self.sel_child = None if i < 0 else kids[min(i, len(kids) - 1)]
+            await self.rebuild()
+
+        def action_page(self, d: int) -> None:
+            lst = self.query_one("#ag-list", VerticalScroll)
+            lst.scroll_page_up() if d < 0 else lst.scroll_page_down()
+
+        async def action_reload(self) -> None:
+            await self.reload()
+
+        def action_back(self) -> None:
+            self.app.pop_screen()
+
+        def action_open(self) -> None:
+            nid = self.sel_child if self.sel_child is not None else self.sel_root
+            node = self.forest.by_id.get(nid)
+            if node is None:
+                return
+            self.app.pop_screen()
+            self.app.run_worker(self.app.open_node(node), group="agents")
+
+        def click_row(self, row) -> None:
+            if row.kind == "root":
+                self.sel_root, self.sel_child = row.nid, None
+            else:
+                self.sel_child = row.nid
+            self.action_open()
+
     class Palette(Provider):
         """Every slash command in ctrl+p."""
 
@@ -1077,6 +1439,13 @@ def build_tui(base: str, token: str, **kw):
         #choices:focus { border: none; }
         #dialog-hint { margin-top: 1; }
         #answer { border: none; background: $panel; margin: 1 0; }
+        UserMsg.pending { color: $text-muted; border-left: thick $panel-lighten-2; }
+        UserMsg.failed { border-left: thick $error; }
+        BrainDump { align: center middle; background: $background 60%; }
+        #dump { height: 1fr; min-height: 8; border: none; background: $panel; }
+        #dump:focus { border: none; }
+        #dump-foot { height: 1; margin-top: 1; }
+        #dump-hint { width: 1fr; }
         """
         BINDINGS = [
             Binding("ctrl+x", "leader", "leader", show=False, priority=True),
@@ -1117,6 +1486,8 @@ def build_tui(base: str, token: str, **kw):
             self.last_turn: TurnState | None = None
             self.stop_requested = False
             self.queue: list[str] = []
+            self.pending: list = []          # QueuedMsg posted mid-turn, not yet delivered
+            self.orchestrator = False        # this chat is an orchestrator (/orchestration)
             self.attachments: list[str] = []
             self.last_user: str | None = None
             self.last_reply = ""
@@ -1374,6 +1745,8 @@ def build_tui(base: str, token: str, **kw):
             who = f"[$secondary b]{_esc(self.agent)}[/]" if self.agent else "[$primary b]Jav3[/]"
             model = self._model_label()
             bits = [who, f"[$text]{_esc(model.split('/')[-1])}[/]"]
+            if self.orchestrator:
+                bits.insert(1, "[$accent b]orchestrator[/]")
             if "/" in model:
                 bits.append(f"[$text-muted]{_esc(model.split('/')[0])}[/]")
             proj = self._project_label()
@@ -1424,7 +1797,8 @@ def build_tui(base: str, token: str, **kw):
                 secs = int(time.monotonic() - t.started)
                 esc = ("[$warning]esc again to interrupt[/]"
                        if time.monotonic() - self.esc_armed < 2 else "esc interrupt")
-                q = f"  [$accent]{len(self.queue)} queued[/]" if self.queue else ""
+                nq = len(self.queue) + len(self.pending)
+                q = f"  [$accent]{nq} queued[/]" if nq else ""
                 left.update(f"[$accent]{spin}[/] {verb}…  [$text-muted]{secs}s · {esc}[/]{q}")
             else:
                 left.update("[$text-muted]enter send · ctrl+j newline · / commands · "
@@ -1514,13 +1888,21 @@ def build_tui(base: str, token: str, **kw):
                     body["agent"] = self.agent
                 if self.ephemeral:
                     body["ephemeral"] = True
+                if self.orchestrator:
+                    body["mode"] = "orchestrate"
             if self.model:
                 body["model"] = self.model
             return body
 
         def send(self, text: str) -> None:
             if self.busy:
-                self.queue.append(text)
+                # the turn has an id: the server hands it to the agent at its next
+                # step; before `start` it waits here and is posted when the id comes
+                if self.turn is not None and self.turn.cid is not None \
+                        and not self.stop_requested:
+                    self.run_worker(self._midturn([text]), group="midturn")
+                else:
+                    self.queue.append(text)
                 self._refresh_status()
                 return
             self.busy = True           # claimed now, so a fast second Enter queues
@@ -1580,10 +1962,87 @@ def build_tui(base: str, token: str, **kw):
                     await self._consume(r.aiter_lines())
                     return
 
-        async def _consume(self, lines) -> None:
+        async def _consume(self, lines) -> bool:
+            """Render a stream; True if it carried anything but `idle`."""
+            seen = False
             async for ev in aiter_sse(lines):
+                seen = seen or ev.get("type") != "idle"
                 if await self.handle_event(ev):
                     break
+            return seen
+
+        async def _midturn(self, texts: list[str]) -> None:
+            """Post messages to the running turn (in order). Shown dimmed until the
+            stream's operator_message; a 409 means the turn just ended, so they go
+            as the next turn instead."""
+            for text in texts:
+                cid = self.turn.cid if self.turn is not None else None
+                if cid is None:
+                    self._later(text)
+                    continue
+                message, attached, skipped = expand_attachments(text)
+                for s in skipped:
+                    await self.note(f"not attached: {s}", "warn")
+                w = QueuedMsg(text, message)
+                self.pending.append(w)
+                await self.mount_log(w)
+                try:
+                    r = await self.client.post(f"/api/chat/{cid}/message",
+                                               json={"text": message})
+                except httpx.HTTPError as e:
+                    self._unpend(w)
+                    w.fail(f"not sent: {e}")
+                    continue
+                if r.status_code in (404, 405, 409):
+                    # 409 no_turn_running: it just ended. 404/405: a server without
+                    # mid-turn messages. Either way it becomes the next turn.
+                    self._unpend(w)
+                    await w.remove()
+                    self._later(text)
+                elif r.status_code >= 400:
+                    self._unpend(w)
+                    w.fail(f"not sent — server said {r.status_code}: {_detail(r)}")
+            self._refresh_status()
+
+        def _unpend(self, w) -> None:
+            if w in self.pending:
+                self.pending.remove(w)
+
+        def _later(self, text: str) -> None:
+            """Send after the running turn, or now if none is running."""
+            if self.busy:
+                self.queue.append(text)
+            else:
+                self.send(text)
+
+        def _match_pending(self, sent: str):
+            return (next((w for w in self.pending if w.sent == sent), None)
+                    or next((w for w in self.pending if w.sent.strip() == sent.strip()), None))
+
+        async def _undelivered(self, texts: list[str]) -> None:
+            """The turn ended before these reached the agent: they become the next
+            turn — or, after an interrupt, go back to the prompt."""
+            back = []
+            for u in texts:
+                w = self._match_pending(u)
+                if w is not None:
+                    self._unpend(w)
+                    await w.remove()
+                    back.append(w.text)
+                else:
+                    back.append(u)
+            if not back:
+                return
+            if self.stop_requested:
+                ed = self.editor
+                ed.text = "\n".join(back + ([ed.text] if ed.text else []))
+                ed.move_cursor(ed.document.end)
+            else:
+                self.queue.insert(0, "\n\n".join(back))
+
+        async def _drain_queue(self) -> None:
+            if self.queue and not self.busy:
+                self.send(self.queue.pop(0))
 
         async def handle_event(self, ev: dict) -> bool:
             """Render one event; True when the turn is over."""
@@ -1600,6 +2059,9 @@ def build_tui(base: str, token: str, **kw):
                 self.refresh_chrome()
                 if self.stop_requested:
                     await self._stop_remote()
+                elif self.queue and turn.cid is not None:
+                    texts, self.queue = self.queue, []
+                    self.run_worker(self._midturn(texts), group="midturn")
             elif t == "token":
                 chunk = ev.get("text", "")
                 if turn.md is None:
@@ -1632,8 +2094,20 @@ def build_tui(base: str, token: str, **kw):
                 await self.note(f"◆ job: {ev.get('title', '')}")
             elif t == "inbox":
                 await self.note(f"✉ {_short(ev.get('text', ''), 200)}")
+            elif t == "operator_message":
+                await self._close_seg()
+                text = ev.get("text") or ""
+                w = self._match_pending(text)
+                if w is not None:
+                    self._unpend(w)
+                    w.deliver()
+                elif text.strip():
+                    # sent from elsewhere (the web UI, another terminal)
+                    await self.mount_log(UserMsg(QueuedMsg._markup(text, "↳ delivered mid-turn")))
             elif t == "final":
                 await self._finish(ev.get("content") or "")
+                if ev.get("undelivered"):
+                    await self._undelivered([str(u) for u in ev["undelivered"]])
                 return True
             elif t == "error":
                 await self._close_seg()
@@ -1689,6 +2163,9 @@ def build_tui(base: str, token: str, **kw):
             if self.turn is not None:
                 self.last_turn = self.turn
             self.turn, self.busy = None, False
+            for w in self.pending:        # the server never said either way
+                w.fail("not confirmed — the turn ended without delivering it")
+            self.pending.clear()
             if self.ephemeral:
                 self.cid = None          # a temporary chat is wiped when its turn ends
             self.refresh_chrome()
@@ -1725,13 +2202,20 @@ def build_tui(base: str, token: str, **kw):
             self.turn.cid = cid
             self.refresh_chrome()
             try:
-                async with self.client.stream("GET", f"/api/chat/{cid}/stream") as r:
-                    if r.status_code < 400:
-                        await self._consume(r.aiter_lines())
+                # a job's agents stream from their own endpoint: try it when the
+                # chat stream 404s or only says idle
+                for path in (f"/api/chat/{cid}/stream", f"/api/chat/agents/{cid}/stream"):
+                    async with self.client.stream("GET", path) as r:
+                        if r.status_code >= 400:
+                            await r.aread()
+                            continue
+                        if await self._consume(r.aiter_lines()):
+                            break
             except httpx.HTTPError as e:
                 await self.note(f"lost the stream: {e}", "error")
             finally:
                 await self._end_turn()
+            await self._drain_queue()
 
         # -- input ---------------------------------------------------------------------------
 
@@ -1928,7 +2412,8 @@ def build_tui(base: str, token: str, **kw):
         # -- keys ---------------------------------------------------------------------------------
 
         def check_action(self, action: str, parameters) -> bool | None:
-            if action in self._MAIN_ONLY and isinstance(self.screen, ModalScreen):
+            if action in self._MAIN_ONLY and isinstance(self.screen, (ModalScreen,
+                                                                      AgentsScreen)):
                 return False
             return True
 
@@ -1956,6 +2441,9 @@ def build_tui(base: str, token: str, **kw):
         def action_ctrl_c(self) -> None:
             if isinstance(self.screen, ModalScreen):
                 self.screen.dismiss(None)
+                return
+            if isinstance(self.screen, AgentsScreen):
+                self.pop_screen()
                 return
             if self.editor.text:
                 self.editor.text = ""
@@ -1996,6 +2484,44 @@ def build_tui(base: str, token: str, **kw):
 
         def action_new(self) -> None:
             self.dispatch("/new")
+
+        def action_agents_view(self) -> None:
+            if not isinstance(self.screen, AgentsScreen):
+                self.hide_popup()
+                self.push_screen(AgentsScreen(self.cid))
+
+        async def open_node(self, node: dict) -> None:
+            """Open an agents-screen node here: its transcript, and if it is
+            running, its live stream (typing then messages it mid-turn)."""
+            await self._leave_turn()
+            try:
+                await self.open_conversation(node["id"], running=bool(node.get("running")))
+            except CliError as e:
+                await self.note(str(e), "error")
+                return
+            if node.get("kind") == "orchestrator":
+                self.orchestrator = True
+            if node.get("title"):
+                self.title_text = self.title_text or node["title"]
+            self.refresh_chrome()
+
+        async def _leave_turn(self) -> None:
+            """Stop watching the turn on screen (it keeps running server-side)."""
+            if not self.busy:
+                return
+            workers = [w for w in self.workers if w.group == "turn" and w.is_running]
+            for w in workers:
+                w.cancel()
+            for w in workers:
+                with contextlib.suppress(Exception):
+                    await w.wait()
+            if self.queue:
+                ed = self.editor
+                ed.text = "\n".join(self.queue + ([ed.text] if ed.text else []))
+                ed.move_cursor(ed.document.end)
+                self.queue.clear()
+            self.pending.clear()
+            self.turn, self.busy, self.stop_requested = None, False, False
 
         def action_toggle_sidebar(self) -> None:
             shown = self.query_one("#sidebar").display
@@ -2067,6 +2593,12 @@ def build_tui(base: str, token: str, **kw):
                                   leader="s"),
                 "editor": Command(self.c_editor, "write the prompt in $EDITOR (ctrl+g)",
                                   busy_ok=True, leader="e"),
+                "orchestration": Command(self.c_orchestrate, "brain-dump a problem; an "
+                                         "orchestrator sends agents at it", "[project]",
+                                         takes_arg=True, leader="o"),
+                "agents-view": Command(self.c_agents_view, "every agent and chat that is "
+                                       "working, across projects (← on an empty prompt)",
+                                       busy_ok=True, leader="g"),
                 "login": Command(self.c_login, "log in with a new line from Settings"),
                 "logout": Command(self.c_logout, "revoke this computer's token and quit"),
                 "exit": Command(self.c_exit, "quit (a running turn keeps going)",
@@ -2075,7 +2607,8 @@ def build_tui(base: str, token: str, **kw):
             for alias, name in (("quit", "exit"), ("resume", "sessions"),
                                 ("history", "sessions"), ("model", "models"),
                                 ("agent", "agents"), ("theme", "themes"),
-                                ("clear", "new"), ("tools", "details")):
+                                ("clear", "new"), ("tools", "details"),
+                                ("orchestrate", "orchestration")):
                 c[alias] = c[name]
             return c
 
@@ -2101,6 +2634,8 @@ def build_tui(base: str, token: str, **kw):
                 return ([("none", "no project: files go to the chat's artifacts"),
                          ("follow", "whatever project is loaded")]
                         + [(p["slug"], p.get("name", "")) for p in o.get("projects", [])])
+            if fn == self.c_orchestrate:
+                return [(p["slug"], p.get("name", "")) for p in o.get("projects", [])]
             if fn == self.c_sessions:
                 return [(str(cv["id"]), _short(cv.get("summary") or "(untitled)", 60))
                         for cv in self.convs[:60]]
@@ -2118,7 +2653,10 @@ def build_tui(base: str, token: str, **kw):
                 usage = f"/{name} {cmd.usage}".rstrip().replace("|", "\\|")
                 lines.append(f"| {usage} | {cmd.help} | {lead} |")
             lines += ["", "## Keys", "", "| key | |", "|---|---|"]
-            for k, v in [("enter", "send (while a turn runs: queue it)"),
+            for k, v in [("enter", "send (while a turn runs: the agent gets it at its "
+                                   "next step)"),
+                         ("← (empty prompt)", "agents screen: everything working, "
+                                              "across projects"),
                          ("ctrl+j · shift+enter · alt+enter · \\⏎", "new line"),
                          ("esc esc", "interrupt the running turn"),
                          ("esc esc (idle)", "clear the prompt"),
@@ -2142,6 +2680,7 @@ def build_tui(base: str, token: str, **kw):
         async def c_new(self, arg: str = "") -> None:
             self.cid, self.title_text, self.last_reply = None, None, ""
             self.shown_model, self.info, self.todos = None, None, []
+            self.orchestrator = False
             await self.show_home()
 
         async def c_sessions(self, arg: str) -> None:
@@ -2168,9 +2707,10 @@ def build_tui(base: str, token: str, **kw):
                 arg = str(hits[0]["id"])
             await self.open_conversation(int(arg))
 
-        async def open_conversation(self, cid: int) -> None:
+        async def open_conversation(self, cid: int, running: bool = False) -> None:
             r = await self.api("GET", f"/api/conversations/{cid}/messages")
             self.cid, self.ephemeral = cid, False
+            self.orchestrator = r.get("kind") == "orchestrator" or r.get("mode") == "orchestrate"
             meta = next((cv for cv in self.convs if cv.get("id") == cid), {})
             self.title_text = meta.get("summary")
             self.agent = r.get("agent_slug") or None
@@ -2201,7 +2741,7 @@ def build_tui(base: str, token: str, **kw):
                 self.last_reply = m.get("content") or ""
             self.log_view.scroll_end(animate=False)
             await self.refresh_info()
-            if r.get("running"):
+            if r.get("running") or running:
                 for a in r.get("pending_activity") or []:
                     await self.log_view.mount(ToolView(a["name"], a.get("args"), ok=a.get("ok"),
                                                        result=a.get("result"), done=True))
@@ -2408,6 +2948,27 @@ def build_tui(base: str, token: str, **kw):
             ns = argparse.Namespace(server=self.server_override)
             await asyncio.to_thread(cmd_logout, ns, io.StringIO())
             self.exit(message="logged out")
+
+        async def c_orchestrate(self, arg: str) -> None:
+            if not arg:
+                rows = [(v, name or v, v if name else "")
+                        for v, name in self.arg_options("orchestration")]
+                arg = await self.pick("Orchestrate which project?", rows, self.project,
+                                      custom=True, hint="its agents all work in this "
+                                      "project") or ""
+                if not arg:
+                    return
+            dump = await self.push_screen_wait(BrainDump(arg))
+            if not dump:
+                return
+            await self.c_new()
+            self.project, self.project_mode = arg, "pin"
+            self.agent, self.orchestrator = None, True
+            self.refresh_chrome()
+            self.send(dump)
+
+        async def c_agents_view(self, arg: str) -> None:
+            self.action_agents_view()
 
         async def c_exit(self, arg: str = "") -> None:
             self.exit()
