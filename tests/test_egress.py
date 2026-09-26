@@ -56,7 +56,7 @@ async def test_denied_host_queues_and_trains_up(db):
     pending = await egress.list_pending(db)
     assert len(pending) == 1 and pending[0]["host"] == "newapi.com"
     res = await egress.approve_host(db, pending[0]["id"])
-    assert res["ok"] and res["added_to"] == egress.GENERAL
+    assert res["ok"] and res["added_to"] == "proj"   # the project list (DESIGN-BOXES (c))
     # now it's allowed, and the queue is clear
     assert (await egress.decide(db, "proj", "newapi.com"))[0] == "allow"
     assert await egress.list_pending(db) == []

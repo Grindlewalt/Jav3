@@ -65,7 +65,8 @@ async def test_allow_verdict_approves_and_trains_allowlist(db, monkeypatch):
     async with db.execute("SELECT * FROM triage_log") as cur:
         log = [dict(r) for r in await cur.fetchall()]
     assert len(log) == 1 and log[0]["action"] == "approved"
-    assert json.loads(log[0]["detail"])["added_to"] == egress.GENERAL
+    # the project's own list (DESIGN-BOXES (c)), not the shared baseline
+    assert json.loads(log[0]["detail"])["added_to"] == "proj"
 
 
 async def test_flag_verdict_keeps_host_pending_with_reason(db, monkeypatch):
@@ -162,15 +163,18 @@ async def test_already_allowlisted_host_approved_without_model(db, monkeypatch):
 # --- undo --------------------------------------------------------------------
 
 async def test_undo_auto_approve_removes_host_and_reflags(db, monkeypatch):
-    pid = await seed_host(db, "registry.npmjs.org")
+    # not a seeded host: since profiles an undo removes what the approval wrote
+    # (the project's list) and never strips the profile baseline
+    pid = await seed_host(db, "registry.example-npm.dev")
     monkeypatch.setattr(reviewer, "complete_text",
                         fake_model([{"id": f"h{pid}", "verdict": "allow", "reason": "npm"}]))
     await reviewer.run()
+    assert (await egress.decide(db, "proj", "registry.example-npm.dev"))[0] == "allow"
     async with db.execute("SELECT id FROM triage_log WHERE action='approved'") as cur:
         lid = (await cur.fetchone())["id"]
     res = await reviewer.undo(db, lid)
     assert res["ok"]
-    assert (await egress.decide(db, "proj", "registry.npmjs.org"))[0] == "deny"
+    assert (await egress.decide(db, "proj", "registry.example-npm.dev"))[0] == "deny"
     row = await pending_row(db, pid)
     assert row["status"] == "pending" and row["triage_verdict"] == "flag"
     assert not (await reviewer.undo(db, lid))["ok"]      # idempotent refusal

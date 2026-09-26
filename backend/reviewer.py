@@ -25,7 +25,7 @@ import json
 
 import aiosqlite
 
-from . import anomaly, bus, egress, security
+from . import anomaly, bus, egress, profiles, security
 from .agent.budget import Budget, BudgetExceeded, active_budget
 from .agent.model import ModelError, complete_text, in_peak_window
 from .config import settings
@@ -33,8 +33,20 @@ from .db import get_db, get_state, set_state
 
 AUTO_KEY = "reviewer_auto"           # session_state toggle; absent = enabled
 
-# alerts the model may NEVER auto-ack, no matter what it answers
-_NEVER_ACK_KINDS = {"egress_anomaly", "host_cut", "secret_leak"}
+# alerts the model may NEVER auto-ack, no matter what it answers — and no
+# profile's `auto_handle` can override: "auto handle all" means all ROUTINE
+# alerts (DESIGN-BOXES (d)). Service and package approvals, process
+# telemetry alarms and profile changes always need the operator's eyes.
+_NEVER_ACK_KINDS = {"egress_anomaly", "host_cut", "secret_leak",
+                    "unexpected_process", "proc_report_mismatch",
+                    "profile_changed", "profiles_migrated"}
+_NEVER_ACK_PREFIXES = ("service_", "package_", "svc_")
+
+
+def never_auto(kind: str | None) -> bool:
+    """True for an alert kind the reviewer may never auto-handle."""
+    k = str(kind or "")
+    return k in _NEVER_ACK_KINDS or k.startswith(_NEVER_ACK_PREFIXES)
 
 _lock = asyncio.Lock()               # one run at a time (manual + sweeper)
 
@@ -113,9 +125,19 @@ def _alert_guard(row: dict) -> str | None:
     """Reason this alert may not be auto-acked, or None if the model may."""
     if str(row["severity"]).lower() in ("critical", "crit"):
         return "critical severity"
-    if row["kind"] in _NEVER_ACK_KINDS:
+    if never_auto(row["kind"]):
         return f"{row['kind']} always needs operator eyes"
     return None
+
+
+async def _profile_allows(db, slug: str | None, cache: dict) -> bool:
+    """Whether the triage reviewer may handle items of this project at all:
+    its security profile's `auto_handle` (unattributed items: Default's).
+    The global switch (is_enabled) stays the master kill above this."""
+    key = slug or egress.GENERAL
+    if key not in cache:
+        cache[key] = bool((await profiles.for_slug(db, slug))["auto_handle"])
+    return cache[key]
 
 
 def clip(text: str, limit: int) -> str:
@@ -203,21 +225,39 @@ async def _run_locked(source: str) -> dict:
     tok = active_budget.set(Budget(max_input=settings.reviewer_budget_input,
                                    max_output=settings.reviewer_budget_output))
     try:
-        cur = await db.execute("INSERT INTO triage_runs(source) VALUES (?)", (source,))
-        run_id = cur.lastrowid
-        await db.commit()
-
         cap = settings.reviewer_max_items
+        # items of projects whose profile has auto_handle off are not the
+        # reviewer's: they are skipped entirely (left untriaged, for the
+        # operator), filtered BEFORE the cap so they cannot starve the rest
+        handles: dict[str, bool] = {}
+        hosts, alerts = [], []
         async with db.execute(
                 "SELECT id, project_slug, host, hit_count FROM egress_pending "
-                "WHERE status='pending' AND triage_verdict IS NULL "
-                "ORDER BY id LIMIT ?", (cap,)) as c:
-            hosts = [dict(r) for r in await c.fetchall()]
+                "WHERE status='pending' AND triage_verdict IS NULL ORDER BY id") as c:
+            host_rows = [dict(r) for r in await c.fetchall()]
+        for h in host_rows:
+            if len(hosts) >= cap:
+                break
+            if await _profile_allows(db, h["project_slug"], handles):
+                hosts.append(h)
         async with db.execute(
                 "SELECT id, kind, severity, project_slug, summary, detail "
                 "FROM security_events WHERE acknowledged=0 AND triage_verdict IS NULL "
-                "ORDER BY id LIMIT ?", (max(0, cap - len(hosts)),)) as c:
-            alerts = [dict(r) for r in await c.fetchall()]
+                "ORDER BY id") as c:
+            alert_rows = [dict(r) for r in await c.fetchall()]
+        for a in alert_rows:
+            if len(hosts) + len(alerts) >= cap:
+                break
+            if await _profile_allows(db, a["project_slug"], handles):
+                alerts.append(a)
+        if source == "auto" and not hosts and not alerts:
+            # only auto_handle-off items are waiting: nothing for the sweeper
+            # to do, and no empty run row every tick
+            return {"ok": True, "run_id": None, **counts, "error": None}
+
+        cur = await db.execute("INSERT INTO triage_runs(source) VALUES (?)", (source,))
+        run_id = cur.lastrowid
+        await db.commit()
 
         alerted = await _alerted_hosts(db)
         policies: dict[str, dict] = {}     # slug -> effective policy (cached)
@@ -230,6 +270,10 @@ async def _run_locked(source: str) -> dict:
             counts["examined"] += 1
             slug, host = h["project_slug"], h["host"]
             guard = _host_guard(slug, host, alerted)
+            if guard is None and egress.is_unattributed(slug):
+                # an approval writes a PROJECT's list and this row has none:
+                # only the operator can say which project it belongs to
+                guard = "unattributed shared-box traffic (the operator picks the project)"
             if guard:
                 reason = f"guardrail: {guard}"
                 await _mark_host(db, h["id"], "flag", reason)
@@ -239,7 +283,8 @@ async def _run_locked(source: str) -> dict:
                 continue
             if slug not in policies:
                 policies[slug] = await egress.get_policy(db, slug)
-            if egress._host_matches(host, policies[slug]["effective"]):
+            if egress._host_matches(host, policies[slug]["effective_allow"]) and \
+                    not egress._host_matches(host, policies[slug]["effective_deny"]):
                 res = await egress.approve_host(db, h["id"], by="reviewer")
                 reason = "already on the effective allowlist"
                 await _mark_host(db, h["id"], "allow", reason)
@@ -285,7 +330,8 @@ async def _run_locked(source: str) -> dict:
                 if it["type"] == "egress_host":
                     slug, host = row["project_slug"], row["host"]
                     # re-check the guard: a cut/anomaly may have landed mid-run
-                    if v["verdict"] == "allow" and not _host_guard(slug, host, alerted):
+                    if v["verdict"] == "allow" and not _host_guard(slug, host, alerted) \
+                            and not egress.is_unattributed(slug):
                         res = await egress.approve_host(db, row["id"], by="reviewer")
                         await _mark_host(db, row["id"], "allow", v["reason"])
                         await _log(db, run_id, "egress", row["id"], slug, host,
@@ -338,13 +384,10 @@ async def undo(db: aiosqlite.Connection, log_id: int) -> dict:
         return {"ok": False, "error": "already undone"}
     if row["action"] == "approved":
         detail = json.loads(row["detail"]) if row["detail"] else {}
+        # the list the approval wrote: a project's own (since profiles), or
+        # GENERAL for a pre-profiles approval (now the Default profile's list)
         target = detail.get("added_to") or egress.GENERAL
-        pol = await egress._row(db, target)
-        if pol:
-            hosts = [h for h in json.loads(pol["hosts"] or "[]") if h != row["subject"]]
-            await db.execute(
-                "UPDATE egress_policy SET hosts=?, updated_at=datetime('now') "
-                "WHERE project_slug = ?", (json.dumps(sorted(hosts)), target))
+        await egress.remove_host(db, target, row["subject"])
         await db.execute(
             "UPDATE egress_pending SET status='pending', decided_at=NULL, "
             "triage_verdict='flag', triage_reason='operator undid the auto-approve' "

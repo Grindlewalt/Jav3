@@ -114,6 +114,18 @@ a watched, policy-gated, cuttable pipe to the internet.
    do not depend on attribution being exact, but per-project egress POLICY does
    pick the wrong project's allowlist in a race — treat allowlists as
    operator-wide rather than strictly per-project until this is fixed.
+   **Update 2026-09-26 (boxes, WP2): fixed for every box of its own, unchanged
+   for the shared box.** With `vm_boxes_enabled`, the proxy runs one listener
+   per box on that box's host address and attributes by the listener (plus a
+   peer-address check behind the nft `iif . saddr/daddr` pinning); project,
+   service and builder boxes never consult the context stack. A project whose
+   profile sets `separate_box` is therefore policed under exactly its own
+   lists. Turns in the shared box still share the stack, and are read once
+   per connection now rather than per step. Unattributed shared-box traffic is
+   judged by the Default profile only (never a project list, never auto mode)
+   and its queue rows need the operator to name the project on approval.
+   Approvals now train the PROJECT's own list only, so a mis-attributed
+   approval can no longer widen every default project at once.
 
 8. **Bigger host-side surface / confused deputy.** The proxy and model gateway now
    process guest-controlled bytes on the host. A parsing bug in the proxy
@@ -144,6 +156,16 @@ a watched, policy-gated, cuttable pipe to the internet.
     The residual: a plausible-looking exfil host auto-allowed is exactly risk
     #1 with the human click removed — the anomaly detectors and the undo log
     are the backstop.
+    **Since 2026-09-26 it is per security profile** (`auto_handle`): the
+    reviewer and egress auto mode skip every item of a project whose profile
+    has it off; the global switch stays the master kill. The four builtins
+    were migrated with it ON so nothing changed on day one — turning it off
+    for a sensitive profile is now the operator's lever. "Auto handle all"
+    never means the hard-coded never-list: anomaly / cut / secret-leak,
+    `service_*`, `svc_*`, `package_*`, `unexpected_process`,
+    `proc_report_mismatch`, `profile_changed` and `profiles_migrated` are
+    always left for the operator, and unattributed hosts are never
+    auto-approved (an approval must name a project).
 
 12. **Computer Use and Cloudflare Access removed (2026-09-23, operator decision).**
     The desktop client, its folder grants and the `computer_*` tools are gone,
@@ -322,15 +344,16 @@ a watched, policy-gated, cuttable pipe to the internet.
 | DNS covert channel | Medium | Medium | Forced through logged host resolver + entropy alert; tunnelling physically possible. |
 | Memory poisoning / laundering | Critical | Low–Med | Persisted taint + static approved:false keep it out of binding context; semantic influence on tainted context remains. |
 | Generated-code backdoor | Critical | **Medium-High** | Advisory gates + git history only — no pre-landing human review since 2026-07-20; execution stays guest-only and commits stay gated. Release gate (planned) is the compensating control. |
-| Secret exposure | Critical | Very Low | No secrets in guest; wire injection is grant-scoped per project; key never crosses to a non-DeepSeek endpoint. |
+| Secret exposure | Critical | Very Low | No secrets in guest; wire injection AND web_read substitution are grant-scoped per project (profile `secrets` + project grants, a project revoke wins; the web path ignored grants until 2026-09-26); service boxes never get injection; key never crosses to a non-DeepSeek endpoint. |
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. |
 | Hypervisor / kernel escape | Critical | Low | No passthrough, minimal devices, monthly patched image; unpatched-CVE window only. |
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
 | Approved `/persist` disk (implant survives sessions) | High | **Low–Medium** | Opt-in per project by the operator only (cookie GUI + acknowledge + security event); one project attached at a time, never incognito/nested; size-capped; `noexec,nodev,nosuid`; never read into context; taint re-plugs it read-only at the block layer; a guest that won't release it is torn down; revoke/purge delete it. Residual = interpreters ignore noexec, writes before taint (and `run_code` egress reads) are trusted, and a mount is visible guest-wide. |
 | Persistent package catalogue / image variants | Critical | **Medium-High** | Structured `package_request` only (per-manager name/version grammar; URLs, paths, `git+`, index/registry flags and shell syntax refused); the host builds the canonical argv and never runs the agent's string; a dry-run pins version + integrity (apt SHA256, pip sha256, npm dist.integrity) before the card can be approved, and the build re-resolves and refuses a changed integrity; never auto-handled; builds only in a builder box whose egress is the registry-only `__image_build__` profile; a new frozen layer version per change, never a mutated image; the card names every project on the variant (and on variants built from it). Residual = an approved malicious or typosquatted package (or its install script, run as root in the builder) lands in every box on that variant, and pip/npm dependencies are resolved by the registry, not pinned. Same class as the generated-code backdoor. |
 | In-box screenshots | Medium | Low | In-guest only (`desktop` variant), chromium through the box's egress proxy, app mode on a private Xvfb with no TCP listener; a non-loopback URL, or an app that opened any proxy connection during the run (TIME_WAIT included), taints the turn through the gateway `taint_note` op before the image is returned, and the image is withheld if the note fails. Residual = untrusted pixels in context (prompt injection by image), an app that reaches remote content only via a process started before the capture window, and whatever a response echoes back on screen. |
-| Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
-| Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
+| Egress mis-attribution | Low | **Medium** (shared box) / Very Low (own box) | Boxes of their own are attributed by their per-box proxy listener (nft-pinned + peer check), never the turn stack. The shared box still races (#7); approvals write only the project's own list, and unattributed traffic gets the Default profile only. Core cut/secret controls unaffected. |
+| Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable; per-profile `auto_handle` (off = never touched). Residual = risk #1 without the human click. |
+| Security profiles and per-profile auto-handle | High | Low–Medium | A profile change is one high-impact click (allow-by-default, network on, secrets for every project under it). Cookie-only API; every create/edit/delete/assign is a `profile_changed` event with a field diff (critical when it widens the default or turns the network on); builtins cannot be deleted or renamed; placement and runtime must be chosen explicitly. The hard never-list cannot be overridden by `auto_handle`. The migration from per-project modes was one transaction with identical verdicts (`profiles_migrated`). Residual = operator error. |
 | Paste-code device login (unauthenticated redeem route) | High | Low | A logged-in session mints a 256-bit, single-use, 10-minute code (stored hashed; cancellable from Settings); the redeem route is reachable by anything on the LAN. Valid codes always redeem; misses are throttled per peer and globally on the TCP peer (no proxy headers). Tokens are hashed, revocable, expire (90 days / 30 idle) and die with their user; revoking stops the token's running turns. Residual = a code or token captured in transit on plain http. |
 | Plain-http LAN transport | High | **Medium** | Code, device token and session cookie travel in cleartext unless TLS is put in front (`cookie_secure`). Warned in Settings and the CLI; token lifetime bounds a capture. |
 | CLI / installer delivery (`curl \| sh`) | High | Medium | Served by the server over its own transport, bootstrap from an unpinned branch; truncation-safe scripts, pinned httpx, `npm ci` with a lockfile. Unhashed Python requirements remain. |

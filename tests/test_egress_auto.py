@@ -235,13 +235,15 @@ async def test_promote_moves_it_onto_the_real_list(db):
     await egress_auto.judge(db, "proj", "huggingface.co", 443)
     aid = (await egress.active_auto(db, "proj", "huggingface.co"))["id"]
     res = await egress.promote_auto(db, aid)
-    assert res["ok"] and res["added_to"] == egress.GENERAL   # pure-default project
+    # the project's own list (DESIGN-BOXES (c)), never the shared baseline
+    assert res["ok"] and res["added_to"] == "proj"
     assert await egress.active_auto(db, "proj", "huggingface.co") is None
     v, reason = await egress.decide(db, "proj", "huggingface.co")
     assert v == "allow" and "allowlist" in reason
+    assert (await egress.decide(db, "other", "huggingface.co"))[0] == "deny"
     groups = {g["project"]: g for g in await egress.allowlist(db)}
-    gen = {e["host"]: e["source"] for e in groups[egress.GENERAL]["entries"]}
-    assert gen["huggingface.co"] == "operator"
+    own = {e["host"]: e["source"] for e in groups["proj"]["entries"]}
+    assert own["huggingface.co"] == "operator"
     assert (await egress.promote_auto(db, aid))["ok"] is False
 
 

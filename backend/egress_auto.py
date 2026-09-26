@@ -4,10 +4,12 @@ Test-only by the operator's own framing ("can make mistakes, but you can leave
 it on"), and security-boundary code, so the shape is conservative:
 
   • OFF by default, globally and per project (session_state `egress_auto` and
-    `egress_auto:<slug>`; a project with no value of its own follows the global).
+    `egress_auto:<slug>`; a project with no value of its own follows the global),
+    and never for a project whose security profile has `auto_handle` off.
   • It only ever acts on the one deny that means "nobody has decided":
-    egress.NOT_LISTED in an allowlist-mode project. denyall / denylist / cut are
-    standing decisions it never touches, and a host the operator (or the triage
+    egress.NOT_LISTED under a deny-by-default profile. Network off, deny lists
+    and cut are standing decisions it never touches, unattributed shared-box
+    traffic is never guessed for, and a host the operator (or the triage
     reviewer's flag) has already handled is left to the operator.
   • Deterministic rules first, no model: deny IP literals, non-standard ports,
     punycode/IDN, private names, paste/tunnel/request-catcher services and
@@ -32,7 +34,7 @@ import re
 
 import aiosqlite
 
-from . import egress, security
+from . import egress, profiles, security
 from .reviewer import _alerted_hosts
 from .agent.budget import Budget, BudgetExceeded, active_budget
 from .agent.model import ModelError, complete_text, in_peak_window
@@ -221,13 +223,22 @@ def _key(slug: str | None) -> str:
 
 async def get_mode(db: aiosqlite.Connection, slug: str | None = None) -> dict:
     """{global, project, effective}: global is 'on'|'off'; project is 'on',
-    'off' or None (follows global); effective is the bool that applies."""
+    'off' or None (follows global); effective is the bool that applies.
+
+    The project's security profile gates it (DESIGN-BOXES (d)): a profile
+    with `auto_handle` off never lets auto mode guess for its projects, even
+    if the project or the global switch says on. With `auto_handle` on (all
+    four builtins, as migrated) the project value, else the global, decides —
+    exactly the pre-profiles behaviour. Unattributed traffic is never guessed
+    for: an auto-allow is scoped to one project and there is none."""
     glob = "on" if (await get_state(db, KEY)) == "on" else "off"
     own = None
     if slug and slug != egress.GENERAL:
         v = await get_state(db, _key(slug))
         own = v if v in ("on", "off") else None
     eff = (own or glob) == "on"
+    if eff and slug and slug != egress.GENERAL:
+        eff = bool((await profiles.for_slug(db, slug))["auto_handle"])
     return {"global": glob, "project": own, "effective": eff}
 
 
@@ -284,7 +295,8 @@ async def judge(db: aiosqlite.Connection, slug: str, host: str,
     auto mode lets the host through, ('deny', reason) when it guessed no (the
     deny stands, with a truer reason), and None when it has nothing to say
     (auto off, unsure, capped, no model, or not ours to decide)."""
-    slug = slug or egress.GENERAL
+    if egress.is_unattributed(slug):
+        return None                              # judged by the Default profile only
     host = (host or "").strip().lower().rstrip(".")
     if not (await get_mode(db, slug))["effective"]:
         return None

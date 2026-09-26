@@ -128,6 +128,21 @@ async def search(query: str, session: str) -> str:
     return "\n".join(lines)
 
 
+async def _turn_grants() -> tuple[str | None, set[str]]:
+    """(project slug, secret names it may use) for the running turn — the
+    project-scoped grant check web_read's secret substitution now makes, the
+    same rule the proxy applies to wire injection (egress.granted_secrets).
+    A project-less chat is judged by the Default profile's secrets."""
+    from . import egress
+    from .agent.tools.toolctx import active_slug
+    slug = await active_slug()
+    db = await get_db()
+    try:
+        return slug, await egress.granted_secrets(db, slug)
+    finally:
+        await db.close()
+
+
 async def read(url: str, session: str) -> str:
     """Fetch a page and return inert plain text. SSRF-guarded. Claims the URL
     in the shared ledger BEFORE fetching, so parallel bots never pull the same
@@ -142,7 +157,8 @@ async def read(url: str, session: str) -> str:
     fetch_url = url
     if "{{secret:" in url:
         try:
-            fetch_url = secrets_mod.substitute_url(url)
+            slug, granted = await _turn_grants()
+            fetch_url = secrets_mod.substitute_url(url, granted=granted, project=slug)
         except (KeyError, ValueError) as e:
             return f"error: {str(e).strip(chr(39))}"
     substituted = fetch_url != url
