@@ -194,7 +194,8 @@ async def _persist_view(slug: str) -> dict:
     db = await get_db()
     try:
         async with db.execute(
-                "SELECT persist_approved, persist_approved_at FROM projects "
+                "SELECT persist_approved, persist_approved_at, persist_imported_at,"
+                " persist_delete_after FROM projects "
                 "WHERE slug = ? AND deleted_at IS NULL", (slug,)) as cur:
             row = await cur.fetchone()
     finally:
@@ -206,11 +207,17 @@ async def _persist_view(slug: str) -> dict:
     except persist.PersistError:
         raise HTTPException(status_code=400, detail="bad slug") from None
     held = persist.holder() == slug
+    from .vm import services
     return {"slug": slug, "approved": bool(row["persist_approved"]),
             "approved_at": row["persist_approved_at"],
             "enabled": settings.vm_persist_enabled, "mount": persist.MOUNT,
             "disk": disk, "attached": held,
-            "read_only": held and persist.status()["read_only"]}
+            "read_only": held and persist.status()["read_only"],
+            # retirement (operator decision 0.3)
+            "retired": True,
+            "imported_at": row["persist_imported_at"],
+            "delete_after": row["persist_delete_after"],
+            "import": services.import_state(slug)}
 
 
 @router.get("/projects/{slug}/persist")
@@ -233,9 +240,13 @@ async def set_persist(slug: str, body: SetPersist, user: dict = Depends(require_
     from . import security
     from .vm import persist
     await _persist_view(slug)                       # 404 / slug validation
-    if body.approved and not body.acknowledge:
-        raise HTTPException(status_code=400,
-                            detail="approving persistence requires acknowledge=true")
+    if body.approved:
+        # retired (operator decision 0.3): no NEW approvals. Persistence is a
+        # service box's /srv now; existing data moves there with
+        # POST /api/projects/{slug}/persist/import. Revoking still works.
+        raise HTTPException(status_code=409, detail=(
+            "/persist is retired: request a service (its box has a persistent "
+            "/srv) and import this project's old /persist data into it"))
     deleted, delete_error = False, None
     db = await get_db()
     try:
@@ -270,6 +281,28 @@ async def set_persist(slug: str, body: SetPersist, user: dict = Depends(require_
     if delete_error:
         view["delete_error"] = delete_error
     return view
+
+
+class ImportPersist(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/projects/{slug}/persist/import")
+async def import_persist(slug: str, body: ImportPersist,
+                         user: dict = Depends(require_user)):
+    """One click (operator decision 0.3): freeze this project's /persist,
+    copy its data into the project's service box /srv (read-only at /persist
+    for its services), and delete the old disk persist_retire_days later."""
+    from .vm import services
+    await _persist_view(slug)                       # 404 / slug validation
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="import requires confirm=true")
+    try:
+        out = await services.import_persist(
+            slug, by=user.get("username") or "operator")
+    except services.ServiceError as e:
+        raise HTTPException(status_code=e.status, detail=str(e)) from None
+    return {**(await _persist_view(slug)), **out}
 
 
 class RenameProject(BaseModel):

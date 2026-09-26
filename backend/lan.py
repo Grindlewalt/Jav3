@@ -69,7 +69,10 @@ def lan_ips() -> list[str]:
         except ValueError:
             continue
         if a.is_private and not a.is_loopback and not a.is_link_local \
-                and ip != settings.vm_egress_host_ip and ip not in out:
+                and ip != settings.vm_egress_host_ip and ip not in out \
+                and ip != settings.services_lan_ip:
+            # services_lan_ip (WP3) is the services' dedicated address: never
+            # advertised as Jav3's, never one of its own CSRF hosts
             out.append(ip)
     return out
 

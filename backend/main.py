@@ -60,9 +60,12 @@ async def lifespan(app: FastAPI):
     await guest_shell.start_unix_server()   # co-working shell CLI front door
     # mDNS probing takes seconds; never hold startup for it (non-fatal inside)
     mdns = asyncio.create_task(lan.start(app.title))
+    from .vm import services as _wp3_services  # WP3
+    await _wp3_services.start()   # WP3: service boxes, relays, /persist sweep
     try:
         yield
     finally:
+        await _wp3_services.stop()   # WP3
         task.cancel()
         reaper.cancel()
         triage.cancel()
@@ -132,6 +135,8 @@ app.include_router(lan.router)
 app.include_router(guest_shell.router)
 app.include_router(media_api.router)
 app.include_router(voice_api.router)
+from . import services_api  # noqa: E402  # WP3
+app.include_router(services_api.router)  # WP3
 
 
 @app.get("/api/health")

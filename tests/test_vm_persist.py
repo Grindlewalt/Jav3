@@ -72,21 +72,31 @@ async def test_default_off_and_approve_needs_acknowledge(client):
     assert body["disk"]["cap_bytes"] == settings.vm_persist_max_mb * 1024 * 1024
 
     r = await client.put("/api/projects/demo/persist", json={"approved": True})
-    assert r.status_code == 400
+    assert r.status_code == 409
     assert not await persist.approved("demo")
 
+    # retired (DESIGN-BOXES.md 0.3): new approvals are frozen
     r = await client.put("/api/projects/demo/persist",
                          json={"approved": True, "acknowledge": True})
-    assert r.status_code == 200 and r.json()["approved"] is True
-    assert r.json()["approved_at"]
-    assert await persist.approved("demo")
-    ev = await _events("persist_approved")
-    assert len(ev) == 1 and ev[0]["project_slug"] == "demo"
+    assert r.status_code == 409 and "retired" in r.json()["detail"]
+    assert not await persist.approved("demo")
+    assert await _events("persist_approved") == []
+
+
+async def _legacy_approve(client, *_a, **_kw):
+    """A project approved before the retirement (the only way one exists now)."""
+    db = await get_db()
+    try:
+        await db.execute("UPDATE projects SET persist_approved = 1, "
+                         "persist_approved_at = datetime('now') WHERE slug = 'demo'")
+        await db.commit()
+    finally:
+        await db.close()
 
 
 async def test_revoke_deletes_disk_and_raises_event(client):
-    await client.put("/api/projects/demo/persist",
-                     json={"approved": True, "acknowledge": True})
+    await _legacy_approve(client)
+    assert await persist.approved("demo")
     persist.disk_dir().mkdir(parents=True, exist_ok=True)
     persist.disk_path("demo").write_bytes(b"x")
     persist._ready_marker("demo").touch()
@@ -103,8 +113,8 @@ async def test_revoke_deletes_disk_and_raises_event(client):
 
 
 async def test_revoke_while_attached_keeps_the_disk(client):
-    await client.put("/api/projects/demo/persist",
-                     json={"approved": True, "acknowledge": True})
+    await _legacy_approve(client)
+    assert await persist.approved("demo")
     persist.disk_dir().mkdir(parents=True, exist_ok=True)
     persist.disk_path("demo").write_bytes(b"x")
     persist._state.holder = "demo"            # a live turn holds it
@@ -130,8 +140,8 @@ async def test_unknown_project_and_no_cookie(client, tmp_env):
 
 
 async def test_kill_switch_overrides_approval(client, monkeypatch):
-    await client.put("/api/projects/demo/persist",
-                     json={"approved": True, "acknowledge": True})
+    await _legacy_approve(client)
+    assert await persist.approved("demo")
     monkeypatch.setattr(settings, "vm_persist_enabled", False)
     assert not await persist.approved("demo")
     assert await persist.attach_for_turn("demo") is None

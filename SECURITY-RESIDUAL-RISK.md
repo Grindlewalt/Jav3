@@ -53,8 +53,9 @@ a watched, policy-gated, cuttable pipe to the internet.
   base_url off the allowlist and sends the real key only to the DeepSeek endpoint.
 - **Persistence.** Idle-scrub reboots the single guest from the read-only golden
   image; a monthly timer rebuilds a patched image (highest version auto-activates).
-  The one sanctioned exception is an operator-approved per-project `/persist`
-  disk — residual #14.
+  The sanctioned exception is now operator-approved services in service boxes
+  (root reset every boot, only a capped `/srv` persists), residual #14; the
+  old `/persist` disk is retired.
 
 ## What it does NOT cover — the residual risks
 
@@ -204,9 +205,83 @@ a watched, policy-gated, cuttable pipe to the internet.
       should be treated as possibly exposed; rotating it (logging everyone
       out) is the operator's call.
 
-14. **Approved persistence inside the guest (`/persist`, 2026-09-24).** A
-    project the operator approves (GUI only: `PUT /api/projects/{slug}/persist`,
-    cookie session, explicit acknowledge, a `persist_approved` security event)
+14. **Approved services in service boxes (replaces `/persist`, 2026-09-26).**
+    The one sanctioned way for anything to outlive a turn. The agent files a
+    `service_request` (argv, env, ports, egress hosts, files); nothing starts
+    until the operator approves it over the cookie-only API
+    (`POST /api/services/{id}/approve` with `acknowledge`, an explicit
+    `placement` per_service|per_project|shared and an explicit `expose_ports`;
+    `service_approved` event; the reviewer never decides one). What is approved
+    is immutable: the HOST snapshots the files from the canonical project tree
+    (never from a guest) into a deterministic, sha256-named tar, refuses any
+    file, argv or env value carrying a secret value or a `{{secret:`
+    placeholder, and re-hashes the tar before every boot (a mismatch is
+    refused); a code change is a new request, shown as a diff. It runs in a
+    *service box*: its own CID/tap/subnet/proxy listener, no workspace, no op
+    tokens, no model or broker access (gateway-gated by CID). The root disk is
+    a fresh overlay every boot (the host deletes any stale overlay first) and
+    the host re-applies the definitions each boot, so only `/srv` persists: a
+    capped qcow2 mounted `nodev,nosuid,noexec`, bound in as each unit's
+    StateDirectory. `svcd` runs each service as a transient unit with
+    DynamicUser, ProtectSystem=strict, NoNewPrivileges, no capabilities,
+    INET/UNIX sockets only (no AF_VSOCK, so a service cannot reach svcd or the
+    gateway), a memory cap and read-only code. Egress is deny-by-default
+    whatever the profile says: only the running services' approved
+    `egress_hosts` minus the profile/project deny lists, with no auto mode and no
+    queue training. Revoke = destroy the box (killing QEMU is the authoritative
+    stop). A box that stops answering raises `svc_unreported` and is restarted
+    with backoff. What remains:
+    - **Approved code can be malicious.** The agent wrote it; the operator's
+      review of the snapshot is the control. `/srv` state is writable and an
+      interpreter ignores `noexec`, so a compromised service keeps what it
+      stores in its own StateDirectory across reboots.
+    - **Low-and-slow exfil to an approved host** (#1), now from a process that
+      runs unattended for days.
+    - **Placement is the blast radius.** `per_project` puts a project's
+      services in one box (shared kernel, shared egress allow list); `shared`
+      puts every shared-placement service of every project together, the
+      co-residence the design otherwise avoids. The operator chooses it per
+      service; it is stored and shown with the service.
+    - **Unit hardening is guest-enforced.** A kernel or systemd escape inside
+      the box gets box root: still no secrets, no model, no other box, and the
+      root resets on the next boot, but `/srv` and the box's egress are its.
+    - **svcd's reports are claims.** State, logs and process data come from a
+      box that may be compromised; host truth is the proxy log, the relay
+      counters and whether it answers. Logs are untrusted (`service_logs`
+      taints the turn) and secret-scrubbed.
+    - **Integration pending (2026-09-26):** the box runtime (WP1) and the
+      proxy's per-box listener and `services.egress_decide` hook (WP2) must land
+      before any of this runs; until then `vm_boxes_enabled` is off and
+      services cannot be filed.
+
+14b. **Inbound service ports (2026-09-26).** Nothing reaches a service box by
+    default. An exposure is a separate operator choice at approval, only for a
+    port the agent asked to expose and no wider than it asked. It is a host-side
+    relay (`backend/vm/portfwd.py`) that reaches the service through svcd's
+    tunnel over the box transport: no network path into the box, and svcd
+    tunnels only to ports the host exposed. Each connection is metered into
+    `service_port_events`, with at most 32 concurrent connections and an idle
+    timeout. `loopback` binds 127.0.0.1. `lan` binds ONLY `services_lan_ip`, a
+    dedicated second address added by `vm/net/services_lan_ip.sh` (label
+    `<iface>:jsvc` or macvlan `jsvc0`; the script also drops Jav3's UI port on
+    it). Empty = no LAN exposure. At approval and at every bind, the relay
+    refuses an address that is loopback, wildcard, public, inside 10.201/16,
+    any other host address, the default-route source, or an IP listed as
+    Jav3's. Cookies ignore ports (#13), so a service on Jav3's own origin would
+    receive the session cookie. What remains: the operator's browser renders
+    attacker-authored pages from the services' origin (phishing-shaped but not
+    cookie-bearing); anything on the LAN can reach an exposed port, so the
+    service must do its own auth; and the relay is new host code handling
+    untrusted bytes (it only copies them).
+
+    **Legacy `/persist` (retired 2026-09-26; notes kept until every project has
+    imported).** New approvals are refused (409). Projects approved before
+    keep attaching until the operator imports or revokes. Import is one click
+    (`POST /api/projects/{slug}/persist/import`): approval off, the old disk
+    plugged READ-ONLY into a fresh service box to be copied, the host keeps
+    the tar (never extracts it), services see the result read-only at
+    `/persist`, and the disk is deleted `persist_retire_days` (30) later. How
+    the legacy disk worked: a project the operator approved
     gets a sparse qcow2 at `<vm_dir>/persist/<slug>.qcow2`, hot-plugged into the
     guest over QMP and mounted at `/persist` only while one of that project's
     top-level, non-incognito turns is live. It is a deliberate hole in "nothing
@@ -303,8 +378,9 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Secret exposure | Critical | Very Low | No secrets in guest; wire injection is grant-scoped per project; key never crosses to a non-DeepSeek endpoint. |
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. |
 | Hypervisor / kernel escape | Critical | Low | No passthrough, minimal devices, monthly patched image; unpatched-CVE window only. |
-| Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
-| Approved `/persist` disk (implant survives sessions) | High | **Low–Medium** | Opt-in per project by the operator only (cookie GUI + acknowledge + security event); one project attached at a time, never incognito/nested; size-capped; `noexec,nodev,nosuid`; never read into context; taint re-plugs it read-only at the block layer; a guest that won't release it is torn down; revoke/purge delete it. Residual = interpreters ignore noexec, writes before taint (and `run_code` egress reads) are trusted, and a mount is visible guest-wide. |
+| Persistence | High | Very Low (turn guests) | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. What persists now depends on approved services (next row). |
+| Approved services (service boxes; replaces `/persist`) | High | **Medium** | Operator-only approval (cookie, acknowledge, explicit placement + exposure, never auto-handled) of a host-snapshotted, content-hashed artifact; no secrets; own box with no model/broker/workspace; root reset every boot, only a capped `nodev,nosuid,noexec` `/srv` persists; hardened DynamicUser units; deny-by-default egress on approved hosts only; revoke = kill the box; unreported box alerts. `/persist` frozen, imported, deleted 30 days after import. Residual = approved agent-written code can be malicious, `/srv` state survives, low-and-slow exfil to approved hosts, placement sets co-residence. |
+| Inbound service ports | Medium | **Low–Medium** | Off by default; per-port operator choice no wider than requested; relay through svcd's tunnel (no network path into the box), metered; loopback, or LAN only on a dedicated `services_lan_ip` that is refused if it is any address Jav3 answers on. Residual = the operator's browser renders attacker pages from the services' origin; LAN clients can reach an exposed port. |
 | Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
 | Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
 | Paste-code device login (unauthenticated redeem route) | High | Low | A logged-in session mints a 256-bit, single-use, 10-minute code (stored hashed; cancellable from Settings); the redeem route is reachable by anything on the LAN. Valid codes always redeem; misses are throttled per peer and globally on the TCP peer (no proxy headers). Tokens are hashed, revocable, expire (90 days / 30 idle) and die with their user; revoking stops the token's running turns. Residual = a code or token captured in transit on plain http. |
