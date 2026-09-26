@@ -159,6 +159,26 @@ esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Only the packages that are NOT installed. Handing the full list to the
+# package manager "upgrades" every one whose repo version moved on — on Arch
+# that is a partial upgrade (pacman -S --needed skips only IDENTICAL versions),
+# and it broke node on the operator's server (nodejs built against a newer
+# abseil than the system had). So: never name an installed package.
+missing_pkgs() {
+  local p
+  case "$PKG" in
+    pacman) pacman -T "${PACKAGES[@]}" 2>/dev/null || true ;;   # prints the unsatisfied
+    apt)    for p in "${PACKAGES[@]}"; do
+              dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' \
+                || echo "$p"
+            done ;;
+    dnf)    for p in "${PACKAGES[@]}"; do
+              rpm -q --whatprovides "$p" >/dev/null 2>&1 || echo "$p"
+            done ;;
+    *)      printf '%s\n' "${PACKAGES[@]}" ;;
+  esac
+}
+
 # A checkout installed as a named instance remembers it (see user_phase), so a
 # bare re-run or --check from it inspects that instance, not the default one.
 if [ -z "$NAME_OPT$CFG_DIR_OPT" ] && [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/.jarvis-instance" ]; then
@@ -336,10 +356,11 @@ check_packages() {
     ok "system packages present"
   else
     bad "missing packages: ${missing[*]}"
+    local need; need="$(missing_pkgs | tr '\n' ' ')"
     case "$PKG" in
-      apt)    fix "sudo apt-get install -y ${PACKAGES[*]}" ;;
-      pacman) fix "sudo pacman -S --needed ${PACKAGES[*]}" ;;
-      dnf)    fix "sudo dnf install -y ${PACKAGES[*]}" ;;
+      apt)    fix "sudo apt-get install -y $need" ;;
+      pacman) fix "sudo pacman -S $need   (only these; not -Sy, never the full list)" ;;
+      dnf)    fix "sudo dnf install -y $need" ;;
     esac
     MISSING_ROOT+=("packages")
   fi
@@ -479,6 +500,31 @@ CHANGES=() ROOT_FAILED=0
 # something: a built-in module needs neither (and a modules-load entry for one
 # logs a failure at boot on some kernels), and a failed modprobe (blacklisted,
 # or module loading locked on a hardened kernel) is reported, not persisted.
+# NOT -Sy (a partial upgrade, unsupported on Arch). And if the local sync db is
+# newer than the system, even installing only the missing packages can drag
+# installed libraries forward as dependencies: the same breakage. So ask pacman
+# what it WOULD install, and refuse if any of it is already installed.
+pacman_install() {
+  local need=("$@") plan=() q upgrades=() planned
+  planned="$(pacman -Sp --print-format '%n' "${need[@]}" 2>/dev/null)" \
+    || die "pacman cannot resolve: ${need[*]}. If a package is 'not found', the
+       package database is stale: bring the system up to date first (a full
+       upgrade, the only kind Arch supports), then re-run this phase:
+           sudo pacman -Syu"
+  mapfile -t plan <<<"$planned"
+  for q in "${plan[@]}"; do
+    [ -n "$q" ] || continue
+    if pacman -Q "$q" >/dev/null 2>&1; then upgrades+=("$q"); fi
+  done
+  if [ ${#upgrades[@]} -gt 0 ]; then
+    die "installing ${need[*]} would also upgrade installed packages: ${upgrades[*]}
+       (the sync db is newer than your system — a partial upgrade, which Arch
+       does not support). Bring the system up to date first, then re-run:
+           sudo pacman -Syu"
+  fi
+  pacman -S --noconfirm "${need[@]}" || die "pacman could not install: ${need[*]}"
+}
+
 load_module() {
   local mod="$1" conf="$2" fn
   fn="$(modinfo -F filename "$mod" 2>/dev/null || true)"
@@ -506,24 +552,28 @@ root_phase() {
   id "$TARGET_USER" >/dev/null 2>&1 || die "no such user: $TARGET_USER (pass --user)"
 
   step "packages ($PKG)"
-  case "$PKG" in
-    apt)    apt-get update -qq && apt-get install -y -qq "${PACKAGES[@]}" ;;
-    # NOT -Sy: refreshing the sync db without upgrading is a partial upgrade,
-    # which Arch does not support (new packages linked against libraries the
-    # rest of the system does not have yet). If the local db is too stale to
-    # fetch from (404s), the only supported fix is a full -Syu, and upgrading
-    # the operator's whole server is their call, not ours.
-    pacman) pacman -S --needed --noconfirm "${PACKAGES[@]}" \
-              || die "pacman could not install the packages.
-       If it reported 404s / 'failed retrieving file', the package database is
-       stale: bring the system up to date first (a full upgrade, the only kind
-       Arch supports), then re-run this phase:
-           sudo pacman -Syu" ;;
-    dnf)    dnf install -y -q "${PACKAGES[@]}" ;;
-    *)      warn "unknown package manager — install by hand: ${PACKAGES[*]}" ;;
-  esac
-  ok "packages installed (only the missing ones were added)"
-  CHANGES+=("packages (if missing): ${PACKAGES[*]}")
+  local need=()
+  mapfile -t need < <(missing_pkgs)
+  if [ ${#need[@]} -eq 0 ]; then
+    ok "all packages already installed — nothing to do (installed ones are never upgraded here)"
+  else
+    echo "  installing only what is missing: ${need[*]}"
+    case "$PKG" in
+      apt)    apt-get update -qq && apt-get install -y -qq --no-upgrade "${need[@]}" \
+                || die "apt-get could not install: ${need[*]}" ;;
+      pacman) pacman_install "${need[@]}" ;;
+      dnf)    dnf install -y -q "${need[@]}" || die "dnf could not install: ${need[*]}" ;;
+      *)      warn "unknown package manager — install by hand: ${need[*]}" ;;
+    esac
+    if [ "$PKG" != unknown ]; then
+      ok "installed: ${need[*]}"
+      case "$PKG" in
+        pacman) CHANGES+=("packages installed: ${need[*]}   (revert: pacman -Rs ${need[*]})") ;;
+        apt)    CHANGES+=("packages installed: ${need[*]}   (revert: apt-get remove ${need[*]})") ;;
+        dnf)    CHANGES+=("packages installed: ${need[*]}   (revert: dnf remove ${need[*]})") ;;
+      esac
+    fi
+  fi
 
   step "kvm + vsock kernel modules"
   local kvm_mod=""
@@ -907,7 +957,8 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
   printf '\n%sNeeds one root window. Copy-paste this whole block:%s\n\n' "$BOLD" "$OFF"
   printf '    sudo bash %s/scripts/install.sh --root-phase --user %s\n\n' \
     "${REPO_DIR:-<path-to-jarvis-checkout>}" "$TARGET_USER"
-  printf '  It installs: %s\n' "${PACKAGES[*]}"
+  NEED_PKGS="$(missing_pkgs | tr '\n' ' ')"
+  printf '  It installs only the missing packages: %s\n' "${NEED_PKGS:-(none)}"
   printf '  and: loads kvm + vhost_vsock unless present or built in (persisting a\n'
   printf '  module in /etc/modules-load.d/ only after it loads), adds %s to the\n' "$TARGET_USER"
   printf '  kvm group, and enables systemd linger. Nothing else; it ends by listing\n'
@@ -918,9 +969,9 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
   fi
   printf '\n  If you would rather run the individual commands yourself:\n\n'
   case "$PKG" in
-    apt)    printf '    sudo apt-get update && sudo apt-get install -y %s\n' "${PACKAGES[*]}" ;;
-    pacman) printf '    sudo pacman -S --needed %s\n' "${PACKAGES[*]}" ;;
-    dnf)    printf '    sudo dnf install -y %s\n' "${PACKAGES[*]}" ;;
+    apt)    [ -z "$NEED_PKGS" ] || printf '    sudo apt-get update && sudo apt-get install -y --no-upgrade %s\n' "$NEED_PKGS" ;;
+    pacman) [ -z "$NEED_PKGS" ] || printf '    sudo pacman -S %s    # only if it would not upgrade anything installed; else pacman -Syu first\n' "$NEED_PKGS" ;;
+    dnf)    [ -z "$NEED_PKGS" ] || printf '    sudo dnf install -y %s\n' "$NEED_PKGS" ;;
   esac
   if grep -qw vmx /proc/cpuinfo; then printf '    sudo modprobe kvm_intel && echo kvm_intel | sudo tee /etc/modules-load.d/kvm.conf\n'
   elif grep -qw svm /proc/cpuinfo; then printf '    sudo modprobe kvm_amd   && echo kvm_amd   | sudo tee /etc/modules-load.d/kvm.conf\n'

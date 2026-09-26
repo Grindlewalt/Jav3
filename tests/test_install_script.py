@@ -119,6 +119,64 @@ def _load_module_harness(tmp_path, modinfo_out, modprobe_rc):
     return out, conf
 
 
+def _fn(name):
+    text = SCRIPT.read_text()
+    start = text.index(f"{name}() {{")
+    return text[start:text.index("\n}\n", start) + 3]
+
+
+def _pacman_harness(tmp_path, installed, plan, missing):
+    """missing_pkgs + pacman_install against a stub pacman that logs its calls.
+    installed: names `pacman -Q` knows; plan: what `-Sp` would install;
+    missing: what `-T` reports unsatisfied."""
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    log = tmp_path / "calls"
+    (stub / "pacman").write_text(f"""#!/bin/sh
+echo "$*" >> {log}
+case "$1" in
+  -T) for p in {' '.join(missing)}; do echo "$p"; done; [ -z "{' '.join(missing)}" ] || exit 127 ;;
+  -Sp) for p in {' '.join(plan)}; do echo "$p"; done ;;
+  -Q) for p in {' '.join(installed)}; do [ "$2" = "$p" ] && exit 0; done; exit 1 ;;
+  -S) exit 0 ;;
+esac
+""")
+    (stub / "pacman").chmod(0o755)
+    prog = ("set -euo pipefail\nPKG=pacman\nPACKAGES=(python nodejs qemu-base)\n"
+            "die(){ echo DIE \"$*\"; exit 1; }\n" + _fn("missing_pkgs") + _fn("pacman_install")
+            + 'mapfile -t need < <(missing_pkgs)\necho "need=${need[*]}"\n'
+            + '[ ${#need[@]} -eq 0 ] || pacman_install "${need[@]}"\n')
+    env = {"PATH": f"{stub}:/usr/bin:/bin"}
+    out = subprocess.run([BASH, "-c", prog], capture_output=True, text=True, env=env).stdout
+    calls = log.read_text().splitlines() if log.exists() else []
+    return out, calls
+
+
+@needs_bash
+def test_pacman_never_names_an_installed_package(tmp_path):
+    out, calls = _pacman_harness(tmp_path, installed=["python", "nodejs"],
+                                 plan=["qemu-base", "qemu-img"], missing=["qemu-base"])
+    assert "need=qemu-base" in out
+    assert "-S --noconfirm qemu-base" in calls
+    assert not any(c.startswith("-S") and ("nodejs" in c or "python" in c) for c in calls)
+    assert not any(c.startswith("-Sy") for c in calls)
+
+
+@needs_bash
+def test_pacman_refuses_when_it_would_upgrade_installed_deps(tmp_path):
+    out, calls = _pacman_harness(tmp_path, installed=["python", "nodejs", "abseil-cpp"],
+                                 plan=["qemu-base", "abseil-cpp"], missing=["qemu-base"])
+    assert "DIE" in out and "abseil-cpp" in out and "pacman -Syu" in out
+    assert not any(c.startswith("-S ") for c in calls)
+
+
+@needs_bash
+def test_pacman_nothing_missing_does_nothing(tmp_path):
+    out, calls = _pacman_harness(tmp_path, installed=["python", "nodejs", "qemu-base"],
+                                 plan=[], missing=[])
+    assert "need=" in out and calls == ["-T python nodejs qemu-base"]
+
+
 @needs_bash
 def test_builtin_module_is_not_persisted(tmp_path):
     out, conf = _load_module_harness(tmp_path, "(builtin)", 0)
