@@ -66,18 +66,9 @@ class DockerHardeningError(DockerError):
     """A hardening prerequisite is missing and the settings say to refuse."""
 
 
-# Settings requested from WP1 for config.py. Until they land there, these
-# defaults apply (warn, don't refuse); once they exist, config.py wins.
-PENDING_SETTINGS: dict[str, object] = {
-    "docker_require_runsc": False,     # refuse docker boxes without gVisor
-    "docker_require_userns": False,    # refuse unless rootless or userns-remap
-}
-
-
 def _setting(name: str, default):
-    if name in type(settings).model_fields:
-        return getattr(settings, name)
-    return PENDING_SETTINGS.get(name, default)
+    """docker_require_runsc / docker_require_userns (config.py)."""
+    return getattr(settings, name, default)
 
 
 # --- the daemon ---------------------------------------------------------------

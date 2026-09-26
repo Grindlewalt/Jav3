@@ -373,14 +373,32 @@ def _peer_mismatch(box, peer_ip: str | None) -> str | None:
     return None
 
 
-async def handle_conn(cr: asyncio.StreamReader, cw: asyncio.StreamWriter, box=None):
+async def handle_box_conn(box, cr: asyncio.StreamReader, cw: asyncio.StreamWriter):
+    """A connection handed over by a docker box's per-box unix listener
+    (<vm_dir>/sock/<cid>/proxy.sock; docs/docker-runtime.md 1 and 8). The
+    listener is the identity, exactly like a KVM box's own TCP listener:
+    attribution = `box`, peer_ip = "unix" (there is no guest address and no
+    source port to join on). Refused for the shared box and for any box that
+    is not a docker box: those have TCP listeners with nft-pinned peers."""
+    if (box is None or box.is_shared or box.runtime != "docker"
+            or not settings.vm_egress):     # egress off: netless, like a KVM box
+        cw.close()
+        return
+    await handle_conn(cr, cw, box=box, _unix=True)
+
+
+async def handle_conn(cr: asyncio.StreamReader, cw: asyncio.StreamWriter, box=None,
+                      *, _unix: bool = False):
     """One proxied connection. `box` is the box whose listener accepted it
     (None = the shared box's legacy listener). Attribution is fixed here,
     once, before any await on the guest's bytes."""
-    try:
-        peer = cw.get_extra_info("peername")
-    except Exception:  # noqa: BLE001 — a fake transport in tests may not have one
-        peer = None
+    if _unix:
+        peer = ("unix", None)
+    else:
+        try:
+            peer = cw.get_extra_info("peername")
+        except Exception:  # noqa: BLE001 — a fake transport in tests may not have one
+            peer = None
     att = attribute(box, peer if isinstance(peer, tuple) else None)
     try:
         head = await cr.readuntil(b"\r\n\r\n")
@@ -393,7 +411,7 @@ async def handle_conn(cr: asyncio.StreamReader, cw: asyncio.StreamWriter, box=No
         await cw.drain(); cw.close()
         return
     method, host, port = parsed
-    bad = _peer_mismatch(box, att["peer_ip"])
+    bad = None if _unix else _peer_mismatch(box, att["peer_ip"])
     if bad:
         cw.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
         await cw.drain(); cw.close()
@@ -458,6 +476,10 @@ proxy = EgressProxy()
 
 async def _box_hook(event: str, box) -> None:
     if box.is_shared or not settings.vm_egress:
+        return
+    if box.runtime == "docker":
+        # no host address to bind (--network none): the docker driver serves
+        # the box's proxy.sock through handle_box_conn instead
         return
     if event == "box_up":
         await proxy.start_box(box)

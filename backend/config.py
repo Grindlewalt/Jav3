@@ -380,6 +380,8 @@ class Settings(BaseSettings):
     docker_box_pids: int = 256
     docker_box_cpus: float = 1.0
     docker_tmpfs_mb: int = 256            # /tmp tmpfs on the read-only rootfs
+    docker_require_runsc: bool = False    # refuse docker boxes without gVisor (runsc)
+    docker_require_userns: bool = False   # refuse unless rootless or userns-remap
 
     # Web access (secure + inert). The agent never touches the raw internet:
     # host-side tools query SearXNG and fetch pages, strip them to plain text,

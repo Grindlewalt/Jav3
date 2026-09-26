@@ -1441,3 +1441,8 @@ def _reset_for_tests() -> None:
     _box_egress.clear()
     _health.clear()
     _locks.clear()
+
+
+# import-time registration (like images.py): the gateway serves svcd to a
+# service box and routes svc_report even before the lifespan start() runs
+register()

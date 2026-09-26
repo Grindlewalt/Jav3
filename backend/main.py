@@ -62,6 +62,15 @@ async def lifespan(app: FastAPI):
     await guest_shell.start_unix_server()   # co-working shell CLI front door
     # mDNS probing takes seconds; never hold startup for it (non-fatal inside)
     mdns = asyncio.create_task(lan.start(app.title))
+    if settings.docker_enabled:
+        # WP8: a docker box never outlives the app that started it
+        from .vm import docker_runtime
+        try:
+            gone = await docker_runtime.reap_orphans()
+            if gone:
+                print(f"[docker] reaped orphan containers: {', '.join(gone)}")
+        except Exception as e:  # noqa: BLE001 — a dead daemon must not stop the app
+            print(f"[docker] orphan reap skipped: {e}")
     from .vm import services as _wp3_services  # WP3
     await _wp3_services.start()   # WP3: service boxes, relays, /persist sweep
     try:

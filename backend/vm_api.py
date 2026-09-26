@@ -88,16 +88,56 @@ def _box_or_404(box_id: str, *, allocate: bool = False):
     return b
 
 
+async def runtimes() -> dict:
+    """{kvm:{available,reason}, docker:{available, reason, rootless, userns,
+    gvisor, seccomp, weak, warnings}} (docs/docker-runtime.md 5). The docker
+    driver is imported only when docker_enabled is on."""
+    from .config import settings
+    if settings.docker_enabled:
+        from .vm import docker_runtime
+        return await docker_runtime.runtimes_json()
+    from .vm.gateway_server import gateway
+    import os
+    kvm = ({"available": False, "reason": "no /dev/kvm on this host"}
+           if not os.path.exists("/dev/kvm") else
+           {"available": False, "reason": "vsock gateway not running"}
+           if not gateway.enabled else {"available": True, "reason": None})
+    return {"kvm": kvm,
+            "docker": {"available": False,
+                       "reason": "docker runtime is off (docker_enabled)",
+                       "rootless": None, "userns": None, "gvisor": None,
+                       "seccomp": None, "weak": None, "warnings": []}}
+
+
 @router.get("/boxes")
 async def list_boxes():
     return {"enabled": boxes.enabled(),
             "boxes": [boxes.status_json(b) for b in boxes.all_boxes()],
-            "budget": boxes.budget()}
+            "budget": boxes.budget(),
+            "runtimes": await runtimes()}
+
+
+async def _warm_project_box(box_id: str):
+    """Operator warm-up of p-<slug> before its first turn: allocated with the
+    project's profile (image, memory, runtime), exactly as the turn would."""
+    b = boxes.get(box_id)
+    if b is not None or not boxes.enabled() or not box_id.startswith("p-"):
+        return _box_or_404(box_id)
+    prof = await boxes.project_profile(box_id[2:]) or {}
+    try:
+        return boxes.allocate("project", project=box_id[2:],
+                              variant=prof.get("box_image") or "main",
+                              mem_mb=prof.get("box_mem_mb"),
+                              runtime=prof.get("box_runtime") or "kvm")
+    except boxes.BoxCapError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except boxes.BoxError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/boxes/{box_id}/start")
 async def start_box(box_id: str):
-    b = _box_or_404(box_id, allocate=True)
+    b = await _warm_project_box(box_id)
     try:
         await boxes.start(b)
     except (VMError, boxes.BoxError) as e:

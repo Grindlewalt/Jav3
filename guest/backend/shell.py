@@ -33,6 +33,12 @@ from . import config as guest_config
 PORT = 5557
 
 
+def _home() -> str:
+    """The shell's HOME: the process's own ($HOME is /home/jav3 in a docker
+    box, whose user cannot enter /root); /root in a KVM guest, as before."""
+    return os.environ.get("HOME") or "/root"
+
+
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
     try:
         fcntl.ioctl(fd, termios.TIOCSWINSZ,
@@ -52,12 +58,12 @@ def _spawn(slug: str | None, rows: int, cols: int) -> tuple[int, int]:
                 cwd = str(p)
         if cwd is None:
             proj = guest_config.settings.projects_dir
-            cwd = str(proj) if proj.is_dir() else "/root"
+            cwd = str(proj) if proj.is_dir() else _home()
         try:
             os.chdir(cwd)
         except OSError:
             pass
-        os.environ.update(TERM="xterm-256color", HOME="/root",
+        os.environ.update(TERM="xterm-256color", HOME=_home(),
                           PS1=r"[guest \W]$ ")
         os.execvp("/bin/bash", ["/bin/bash", "-l"])
         os._exit(127)                               # exec failed

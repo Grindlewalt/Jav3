@@ -196,8 +196,18 @@ def _detect_egress_proxy() -> None:
     has only lo, so this stays unset and direct sockets fail closed as before."""
     import os
     n = boxinfo.net()
-    if boxinfo.load().get("runtime") != "docker":   # docker configures its own NIC
-        _bring_up_egress_nic()
+    if boxinfo.load().get("runtime") == "docker":
+        # --network none: no route to probe. The proxy is the in-container
+        # forwarder on loopback (box.json net.proxy), spliced to proxy.sock.
+        proxy = n["proxy"]
+        local = "localhost,127.0.0.1,::1"
+        os.environ["JARVIS_EGRESS_PROXY"] = proxy
+        os.environ.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy,
+                          http_proxy=proxy, https_proxy=proxy,
+                          NO_PROXY=local, no_proxy=local)
+        print(f"GUEST-EGRESS-PROXY: {proxy} (docker forwarder)", flush=True)
+        return
+    _bring_up_egress_nic()
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:

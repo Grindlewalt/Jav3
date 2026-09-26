@@ -80,12 +80,8 @@ def dsettings(monkeypatch, short_dir):
 
 
 def set_req(monkeypatch, name, value):
-    """docker_require_* live in config.py once WP1 adds them; until then in
-    docker_runtime.PENDING_SETTINGS."""
-    if name in type(settings).model_fields:
-        monkeypatch.setattr(settings, name, value)
-    else:
-        monkeypatch.setitem(dr.PENDING_SETTINGS, name, value)
+    """docker_require_* are config.py settings."""
+    monkeypatch.setattr(settings, name, value)
 
 
 def make_box(d: Path, kind="project", bid="p-alpha", project="alpha") -> boxes.Box:

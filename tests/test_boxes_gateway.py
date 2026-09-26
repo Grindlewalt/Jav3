@@ -103,7 +103,23 @@ def test_unknown_cid_may_only_ping(on):
         assert r["error"] == "op_not_allowed" and "unknown" in r["message"]
 
 
-def test_service_box_package_needs_a_builder(on):
+def test_service_box_gets_the_svcd_package(on):
+    # WP3 registers the service package builder when backend.vm.services is
+    # imported: a service box is served svcd as backend/server.py, never the
+    # turn package (no loop, no tools, no model client).
+    from backend.vm import services  # noqa: F401 — importing registers it
+    svc = boxes.allocate("service", project="alpha")
+    r = rt({"op": "get_guest_package"}, peer_cid=svc.cid)
+    assert r["type"] == "guest_package"
+    names, bj = _untar(r["tar_b64"])
+    assert "backend/server.py" in names and "box.json" in names
+    assert "backend/agent/loop.py" not in names
+    assert not any(n.startswith("tools/") for n in names)
+    assert bj["kind"] == "service"
+
+
+def test_a_kind_without_a_builder_gets_no_package(on, monkeypatch):
+    monkeypatch.delitem(gateway_server._PACKAGE_BUILDERS, "service", raising=False)
     svc = boxes.allocate("service", project="alpha")
     r = rt({"op": "get_guest_package"}, peer_cid=svc.cid)
     assert r["error"] == "no_package"

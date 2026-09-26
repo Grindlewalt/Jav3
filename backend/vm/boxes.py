@@ -214,6 +214,8 @@ class Box:
 
     @property
     def transport(self) -> Transport:
+        if self.runtime == "docker":
+            _load_runtime("docker")     # installs the checked UnixTransport
         return _TRANSPORTS[self.runtime](self)
 
     @property
@@ -231,11 +233,18 @@ class Box:
         the guest says about it (identity is the CID / listener, not this)."""
         t = self.transport
         proxy = f"http://{self.host_ip}:{settings.vm_egress_proxy_port}"
+        net = {"guest_ip": self.guest_ip, "prefix": self.prefix,
+               "gateway": self.host_ip, "dns": self.host_ip,
+               "proxy": proxy, "mac": self.mac}
+        if self.runtime == "docker":
+            # --network none (docs/docker-runtime.md 1): the only way out is the
+            # in-container forwarder on the container's own loopback, spliced to
+            # /run/jav3/proxy.sock. guest_ip/gateway/dns name nothing there.
+            net["proxy"] = f"http://127.0.0.1:{settings.vm_egress_proxy_port}"
+            net["proxy_socket"] = f"{UnixTransport.GUEST_DIR}/proxy.sock"
         return {"v": 1, "id": self.id, "kind": self.kind, "project": self.project,
                 "runtime": self.runtime,
-                "net": {"guest_ip": self.guest_ip, "prefix": self.prefix,
-                        "gateway": self.host_ip, "dns": self.host_ip,
-                        "proxy": proxy, "mac": self.mac},
+                "net": net,
                 "gateway": t.gateway_endpoint(),
                 "listen": {"runturn": t.guest_listen(PORT_RUNTURN),
                            "shell": t.guest_listen(PORT_SHELL),
@@ -564,6 +573,25 @@ _data_deleters: list[Callable[[Box], Awaitable[None]]] = []
 BUS_CHAN = "vm-boxes"
 
 
+_RUNTIME_MODULES = {"kvm": ".lifecycle", "docker": ".docker_runtime"}
+
+
+def _load_runtime(name: str) -> None:
+    """Import a runtime's driver on first use: importing registers it (and the
+    docker driver installs its checked transport_unix.UnixTransport). The
+    docker module is never imported unless a docker box is touched, so with
+    docker_enabled off nothing about the process changes."""
+    if name in _DRIVERS:
+        return
+    mod = _RUNTIME_MODULES.get(name)
+    if mod is not None:
+        import importlib
+        m = importlib.import_module(mod, __package__)
+        install = getattr(m, "install", None)     # idempotent re-registration
+        if name not in _DRIVERS and callable(install):
+            install()
+
+
 def register_runtime(name: str, factory: Callable[[Box], Any]) -> None:
     """WP8 registers 'docker' here. lifecycle registers 'kvm' on import."""
     _DRIVERS[name] = factory
@@ -607,9 +635,7 @@ def controller(box: Box):
         from . import lifecycle
         return lifecycle.vm
     if box.ctl is None:
-        if box.runtime not in _DRIVERS and box.runtime == "kvm":
-            import importlib                        # importing registers 'kvm'
-            importlib.import_module(".lifecycle", __package__)
+        _load_runtime(box.runtime)
         if box.runtime not in _DRIVERS:
             raise BoxError(f"runtime {box.runtime!r} is not available")
         box.ctl = _DRIVERS[box.runtime](box)
