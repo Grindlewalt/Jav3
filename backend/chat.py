@@ -284,6 +284,89 @@ async def _name_taken(db, name: str, but: int | None = None) -> bool:
         return await cur.fetchone() is not None
 
 
+@router.get("/chat/options")
+async def chat_options():
+    """What a new or existing chat can be pointed at: the enabled models, the
+    projects and the agents, by name only. The terminal client's /model,
+    /project and /agent pickers read this, since the full lists live on
+    cookie-only routers a CLI token never reaches. Nothing here is more than
+    POST /api/chat already accepts (and 404s on) by name."""
+    from .agents_api import _list_dir
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT slug, name FROM projects WHERE deleted_at IS NULL "
+            "AND is_hidden = 0 ORDER BY created_at DESC"
+        ) as cur:
+            projects = [dict(r) for r in await cur.fetchall()]
+        active = await get_active_project(db)
+    finally:
+        await db.close()
+    agents = [{k: a[k] for k in ("slug", "name", "description")}
+              for a in _list_dir(settings.agents_dir)]
+    return {**providers.models_payload(), "projects": projects,
+            "active_project": active, "agents": agents}
+
+
+_FILE_TOOLS = ("write_file", "edit_file")
+
+
+@router.get("/conversations/{conversation_id}/info")
+async def conversation_info(conversation_id: int):
+    """One chat's running totals for the terminal client's sidebar: tokens and
+    cost (priced like the Costs page), the last call's context against the
+    model's window, and the files its turns wrote or edited."""
+    from .logs_api import _cost_usd
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT c.summary, c.model, c.agent_slug, p.slug AS project_slug "
+            "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id "
+            "WHERE c.id = ?", (conversation_id,)) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such conversation")
+        async with db.execute(
+            "SELECT model, COUNT(*) n, COALESCE(SUM(input_tokens),0) i, "
+            "COALESCE(SUM(output_tokens),0) o, COALESCE(SUM(cache_hit),0) ch, "
+            "COALESCE(SUM(cache_miss),0) cm FROM model_calls "
+            "WHERE conversation_id = ? GROUP BY model", (conversation_id,)) as cur:
+            by_model = [dict(r) for r in await cur.fetchall()]
+        async with db.execute(
+            "SELECT model, input_tokens FROM model_calls WHERE conversation_id = ? "
+            "ORDER BY id DESC LIMIT 1", (conversation_id,)) as cur:
+            last = await cur.fetchone()
+        marks = ",".join("?" * len(_FILE_TOOLS))
+        async with db.execute(
+            f"SELECT tool, args FROM tool_calls WHERE conversation_id = ? "
+            f"AND tool IN ({marks}) ORDER BY id", (conversation_id, *_FILE_TOOLS)) as cur:
+            writes = await cur.fetchall()
+    finally:
+        await db.close()
+    files: dict[str, int] = {}
+    for w in writes:
+        try:
+            path = (json.loads(w["args"] or "{}") or {}).get("path")
+        except (json.JSONDecodeError, AttributeError):
+            path = None
+        if isinstance(path, str) and path:
+            files[path] = files.get(path, 0) + 1
+    ctx = None
+    if last is not None:
+        pid, mid = providers.split_id(last["model"] or "")
+        info = providers.model_info(pid, mid) if pid else None
+        ctx = {"used": last["input_tokens"], "window": (info or {}).get("ctx")}
+    return {"title": row["summary"], "model": row["model"],
+            "agent": row["agent_slug"], "project": row["project_slug"],
+            "calls": sum(m["n"] for m in by_model),
+            "input_tokens": sum(m["i"] for m in by_model),
+            "output_tokens": sum(m["o"] for m in by_model),
+            "cost_usd": round(sum(_cost_usd(m["ch"], m["cm"], m["o"], m["model"])
+                                  for m in by_model), 6),
+            "context": ctx,
+            "files": [{"path": p, "writes": n} for p, n in files.items()]}
+
+
 @router.get("/chat/folders")
 async def list_folders():
     db = await get_db()

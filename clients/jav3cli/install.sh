@@ -5,8 +5,9 @@
 #
 # The server fills in BASE when it serves this file. Installs into
 # ~/.local/share/jav3 and puts a `jav3` launcher in ~/.local/bin (override with
-# JAV3_BIN). httpx comes from the system python if it already has it, else from
-# a private venv — never `pip install` into the system interpreter.
+# JAV3_BIN). Its libraries (httpx, and textual for the TUI) come
+# from the system python if it already has both, else from a private venv —
+# never `pip install` into the system interpreter.
 # Everything runs inside main(), and the call is wrapped in `{ ...; }` so a
 # download cut short anywhere — even inside the last line — is a syntax error
 # that executes nothing.
@@ -15,6 +16,7 @@ set -eu
 # Same constraint as the server's requirements.txt; the upper bound keeps an
 # incompatible major release from landing on a fresh install unannounced.
 HTTPX_SPEC='httpx>=0.27,<1'
+TUI_SPECS='textual>=8,<9'
 
 main() {
   BASE="@@BASE@@"
@@ -33,14 +35,17 @@ main() {
   mv "$tmp" "$share/jav3"
 
   py="$(command -v python3)"
-  if ! python3 -c 'import httpx' >/dev/null 2>&1; then
+  if ! python3 -c 'import httpx, textual' >/dev/null 2>&1; then
     if [ ! -x "$share/venv/bin/python" ]; then
       python3 -m venv "$share/venv" || {
-        echo "could not create a venv — install python3-venv, or httpx via your" >&2
-        echo "package manager (python3-httpx), then re-run this installer" >&2
+        echo "could not create a venv — install python3-venv, or httpx and" >&2
+        echo "textual via your package manager, then re-run this installer" >&2
         exit 1; }
     fi
-    "$share/venv/bin/python" -m pip install --quiet --disable-pip-version-check "$HTTPX_SPEC"
+    # word-split on purpose: TUI_SPECS may hold several specs
+    # shellcheck disable=SC2086
+    "$share/venv/bin/python" -m pip install --quiet --disable-pip-version-check \
+      "$HTTPX_SPEC" $TUI_SPECS
     py="$share/venv/bin/python"
   fi
 
@@ -52,7 +57,7 @@ EOF
 
   echo "installed: $bin_dir/jav3"
   case ":$PATH:" in *":$bin_dir:"*) ;; *) echo "note: $bin_dir is not on your PATH" ;; esac
-  echo "next: jav3 login   (paste the line from Settings → Add computer)"
+  echo "next: jav3         (logs in on first run: paste the line from Settings → Add computer)"
 }
 
 { main "$@"; exit; }

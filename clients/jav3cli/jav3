@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""jav3 — a thin terminal client for a Jav3 server.
+"""jav3 — a terminal client for a Jav3 server: an interactive agent TUI.
 
+    jav3                       the interactive TUI (/help inside it)
+    jav3 fix the flaky test    the TUI, starting with that message
+    jav3 -c | -r ID            resume the latest chat | chat ID
+    jav3 -p "message"          one turn, plain output (also: cmd | jav3 -p)
     jav3 login                 paste the line from Settings -> Add computer
-    jav3 chat [message]        one turn, or a REPL with no message
+    jav3 chat [message]        one turn, or the TUI with no message
     jav3 whoami
     jav3 logout
 
 Credentials live in $XDG_CONFIG_HOME/jav3/credentials.json (default
 ~/.config/jav3), file 0600 in a 0700 directory: {"address", "token"}.
-Needs Python 3.11+ and httpx; nothing else.
+Needs Python 3.11+ and httpx; the TUI also needs textual (the installer
+provides it; without it `jav3` falls back to a plain REPL).
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 import getpass
+import io
 import json
 import os
 import platform
@@ -21,6 +29,7 @@ import secrets
 import socket
 import stat
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -168,6 +177,10 @@ def _detail(r: httpx.Response) -> str:
 
 
 def _check(r: httpx.Response) -> httpx.Response:
+    if r.is_redirect:
+        u = r.request.url
+        raise CliError(redirect_hint(f"{u.scheme}://{u.netloc.decode()}",
+                                     r.headers.get("location", "")))
     if r.status_code == 401:
         raise CliError(RELOGIN)
     if r.status_code >= 400:
@@ -192,12 +205,43 @@ def _read_login_line() -> str:
     return sys.stdin.readline()
 
 
+def redirect_hint(base: str, location: str) -> str:
+    """Why a redirect is a dead end for the CLI, in words the operator can act on.
+    Redirects are never followed with a code or token attached."""
+    if "cloudflareaccess.com" in location:
+        return (f"{base} is behind Cloudflare Access, which sends the CLI to a browser "
+                "login it cannot complete. Use the server's LAN address instead — "
+                "jav3 --server <lan-ip>:8000 (the same login line still works; its code "
+                "was not used) — or add an Access Bypass policy for /api/devices/*, "
+                "/api/chat* and /api/conversations*")
+    return f"{base} redirected to {location or '(nowhere)'} — pass the right address with --server"
+
+
+def upgrade_to_https(base: str) -> str:
+    """If a plain-http server only redirects to https on the same host, use https —
+    found out with a request that carries nothing secret, before the code is sent."""
+    if not base.startswith("http://"):
+        return base
+    try:
+        with _client(base, timeout=10) as c:
+            r = c.get("/api/health")
+    except httpx.HTTPError:
+        return base
+    loc = r.headers.get("location", "")
+    https = "https://" + base[len("http://"):]
+    if r.is_redirect and (loc == https or loc.startswith(https + "/")):
+        return https
+    return base
+
+
 def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
     line = read()
     address, code = parse_login_line(line)
     if args.server:
         address = args.server
-    base = base_url(address)
+    base = upgrade_to_https(base_url(address))
+    if base.startswith("https://") and not address.startswith("https://"):
+        address = base
     if base.startswith("http://"):
         print(PLAIN_HTTP.format(base=base), file=sys.stderr)
     host = socket.gethostname()
@@ -208,9 +252,15 @@ def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
                 "platform": platform.system().lower()})
         except httpx.HTTPError as e:
             raise CliError(f"could not reach {base}: {e}")
+        if r.is_redirect:
+            raise CliError(redirect_hint(base, r.headers.get("location", "")))
         if r.status_code in (401, 429):
             raise CliError(_detail(r))
-        token = _check(r).json()["token"]
+        try:
+            token = _check(r).json()["token"]
+        except (ValueError, KeyError, TypeError):
+            raise CliError(f"{base} did not answer like a Jav3 server "
+                           f"(HTTP {r.status_code}, {r.headers.get('content-type', '?')})")
     try:
         path = save_credentials(address, token)
     except (OSError, CliError) as e:
@@ -333,7 +383,9 @@ class Renderer:
             if ev.get("conversation_id") is not None:
                 self.conversation_id = ev["conversation_id"]
             final = ev.get("content") or ""
-            if final.strip() != self.text.strip():
+            # the final carries the reply after the last tool call, so narration
+            # streamed before a tool is no reason to print it again
+            if not self.text.strip().endswith(final.strip()):
                 if self.text.strip():
                     self._line("--- revised ---")
                 self._w(final)
@@ -382,7 +434,12 @@ def run_turn(c: httpx.Client, message: str, conversation_id: int | None,
     raise CliError("not sent")
 
 
+
 def cmd_chat(args, out=sys.stdout, read=input) -> int:
+    """One turn with a message; with none, the interactive TUI (or, when its
+    libraries are missing or stdin is not a terminal, the plain REPL)."""
+    if not args.message and sys.stdin.isatty() and tui_available():
+        return cmd_tui(args)
     base, token = _session(args)
     # no read timeout: a turn can think for minutes between events
     with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
@@ -409,14 +466,2083 @@ def cmd_chat(args, out=sys.stdout, read=input) -> int:
             return 130
 
 
+# --- the interactive TUI ---------------------------------------------------------------
+#
+# A full-screen Textual app laid out like opencode: the transcript on the left, a
+# sidebar on the right (title, context and cost, model, modified files, todos) that
+# folds away on narrow terminals, and the prompt at the bottom with a status row
+# under it. Pickers (sessions, models, agents, projects, themes) open from slash
+# commands, the ctrl+x leader key or the ctrl+p palette. Without Textual, `jav3`
+# falls back to the plain REPL above.
+
+TUI_DEPS = ("textual",)
+TUI_HINT = ("the interactive TUI needs textual — re-run the installer "
+            "(curl -fsSL <server>/cli/install.sh | sh), or pip install textual")
+INTERRUPTED = "[Request interrupted"
+ATTACH_LIMIT = 256 * 1024          # per @file
+SHELL_KEEP = 20_000                # chars of a `!command`'s output kept for the next turn
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+EXAMPLES = ("Fix the failing test in tests/", "What changed in the last commit?",
+            "Summarise this week's journal", "Research a quiet NAS for the rack",
+            "Write a script that backs up ~/notes")
+COLLAPSED_LINES = 10
+
+
+def tui_available() -> bool:
+    try:
+        for m in TUI_DEPS:
+            __import__(m)
+    except ImportError:
+        return False
+    return True
+
+
+def _argstr(args, n: int = 70) -> str:
+    """Tool args the way a person reads them: the one value when there is one,
+    else key=value pairs."""
+    if not isinstance(args, dict) or not args:
+        return "" if args in ({}, None, "") else _short(args, n)
+    if len(args) == 1:
+        return _short(next(iter(args.values())), n)
+    return _short(", ".join(f"{k}={v if isinstance(v, str) else json.dumps(v)}"
+                            for k, v in args.items()), n)
+
+
+def _summary(result: str, n: int = 110) -> str:
+    lines = [ln for ln in (result or "").splitlines() if ln.strip()]
+    if not lines:
+        return "(no output)"
+    head = _short(lines[0], n)
+    return head + (f"  (+{len(lines) - 1} lines)" if len(lines) > 1 else "")
+
+
+def expand_attachments(text: str, cwd: Path | None = None) -> tuple[str, list[str], list[str]]:
+    """`@path` words that name a readable local text file are appended to the
+    message as fenced blocks, since the agent runs on the server and cannot see
+    this machine. Returns (message, attached, skipped-with-reason)."""
+    import re
+    cwd = cwd or Path.cwd()
+    blocks, attached, skipped, seen = [], [], [], set()
+    for m in re.finditer(r"(?:^|\s)@(\S+)", text):
+        raw = m.group(1).rstrip(".,;:!?)\"'")
+        p = Path(os.path.expanduser(raw))
+        p = p if p.is_absolute() else cwd / p
+        if raw in seen or not p.is_file():
+            continue
+        seen.add(raw)
+        try:
+            if p.stat().st_size > ATTACH_LIMIT:
+                skipped.append(f"{raw} (over {ATTACH_LIMIT // 1024} KB)")
+                continue
+            body = p.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            skipped.append(f"{raw} (not text)")
+            continue
+        except OSError as e:
+            skipped.append(f"{raw} ({e.strerror})")
+            continue
+        fence = "````" if "```" in body else "```"
+        blocks.append(f"File `{raw}`:\n{fence}\n{body.rstrip()}\n{fence}")
+        attached.append(raw)
+    if blocks:
+        text = text + "\n\n" + "\n\n".join(blocks)
+    return text, attached, skipped
+
+
+async def aiter_sse(lines):
+    """iter_sse over an async line iterator."""
+    buf: list[str] = []
+    async for line in lines:
+        if line == "":
+            if buf:
+                yield json.loads("\n".join(buf))
+                buf = []
+        elif line.startswith("data:"):
+            buf.append(line[5:].lstrip(" "))
+    if buf:
+        yield json.loads("\n".join(buf))
+
+
+# -- how tool calls read -----------------------------------------------------------------
+
+def tool_title(name: str, args) -> tuple[str, str]:
+    """(icon, title) for a tool call, opencode-style: → reads, ← writes, $ runs,
+    ◈ web, ✱ search, ◆ agents, ⚙ everything else."""
+    a = args if isinstance(args, dict) else {}
+
+    def s(key, n=80):
+        v = a.get(key)
+        return _short(v, n) if v not in (None, "") else ""
+    if name == "local_shell":
+        return "$", f"{s('command', 100)}  (local)"
+    if name == "read_file":
+        rng = f" [{a['offset']}:{a.get('limit', '')}]" if a.get("offset") else ""
+        return "→", f"Read {s('path')}{rng}"
+    if name == "write_file":
+        n = len(str(a.get("content", "")).splitlines())
+        return "←", f"Write {s('path')}" + (f" ({n} lines)" if n else "")
+    if name == "edit_file":
+        return "←", f"Edit {s('path')}"
+    if name == "run_code":
+        if a.get("command"):
+            return "$", s("command", 100)
+        first = next((ln for ln in str(a.get("code", "")).splitlines() if ln.strip()), "")
+        return "$", f"python  {_short(first, 80)}"
+    if name == "web_search":
+        return "◈", f'Search "{s("query")}"'
+    if name in ("web_read", "open_website"):
+        return "%", f"Fetch {s('url')}"
+    if name == "read_and_summarize":
+        return "%", f"Read {s('url') or _short(a.get('urls', ''), 70)}"
+    if name == "research":
+        return "◈", f"Research {s('topic')}"
+    if name == "search_codebase":
+        return "✱", f'Grep "{s("query")}"' + (f" in {s('subdir')}" if a.get("subdir") else "")
+    if name in ("list_files", "crawl_codebase"):
+        return "✱", f"List {s('path') or '.'}"
+    if name == "todo_update":
+        return "⚙", f"Todo {s('action')} {s('text', 60)}".rstrip()
+    if name in ("spawn_agent", "spawn_temp_agent", "deploy_agents", "orchestrate"):
+        who = s("agent") or s("label") or s("title")
+        what = s("task", 60) or s("brief", 60)
+        return "◆", f"Agent {who}  {what}".replace("  ", " ", 1).strip()
+    if name.startswith("git_"):
+        return "⎇", f"git {name[4:].replace('_', ' ')} {s('path')}".rstrip()
+    if name.startswith("memory_"):
+        return "✎", f"Memory {name[7:]} {s('name')}".rstrip()
+    rest = _argstr(a, 70)
+    return "⚙", f"{name} {rest}".rstrip()
+
+
+def parse_todos(result: str) -> list[tuple[bool, str]]:
+    import re
+    out = []
+    for ln in (result or "").splitlines():
+        m = re.match(r"\s*\d+\.\s*\[([ xX])\]\s*(.*)", ln)
+        if m:
+            out.append((m.group(1).lower() == "x", m.group(2)))
+    return out
+
+
+def _esc(s: str) -> str:
+    from textual.markup import escape
+    return escape(s)
+
+
+def tool_body(name: str, args, ok: bool | None, result: str | None,
+              expanded: bool) -> tuple[str | None, int]:
+    """The block under a tool's title, as Textual markup, and how many lines were
+    left out. None = the call stays a single line."""
+    import difflib
+    a = args if isinstance(args, dict) else {}
+    cap = 400 if expanded else COLLAPSED_LINES
+
+    def clip(lines: list[str]) -> tuple[list[str], int]:
+        return (lines, 0) if len(lines) <= cap else (lines[:cap], len(lines) - cap)
+
+    if ok is False:
+        lines, more = clip((result or "failed").splitlines())
+        return "\n".join(f"[$error]{_esc(ln)}[/]" for ln in lines), more
+    if name == "edit_file" and ("find" in a or "replace" in a):
+        out = []
+        for ln in difflib.unified_diff(str(a.get("find", "")).splitlines(),
+                                       str(a.get("replace", "")).splitlines(),
+                                       lineterm="", n=2):
+            if ln.startswith(("---", "+++")):
+                continue
+            if ln.startswith("@@"):
+                out.append("[$text-muted]⋯[/]")
+            elif ln.startswith("+"):
+                out.append(f"[$success on $success 12%]{_esc(ln)}[/]")
+            elif ln.startswith("-"):
+                out.append(f"[$error on $error 12%]{_esc(ln)}[/]")
+            else:
+                out.append(f"[$text-muted]{_esc(ln)}[/]")
+        lines, more = clip(out)
+        return "\n".join(lines) or None, more
+    if name == "write_file" and a.get("content"):
+        lines, more = clip(str(a["content"]).splitlines())
+        return "\n".join(f"[$text-muted]{i:>4}[/]  {_esc(ln)}"
+                         for i, ln in enumerate(lines, 1)), more
+    if name == "todo_update":
+        todos = parse_todos(result or "")
+        if todos:
+            return "\n".join(f"[$success]✓[/] [$text-muted strike]{_esc(t)}[/]" if done
+                             else f"[$warning]☐[/] {_esc(t)}" for done, t in todos), 0
+        return None, 0
+    if name in ("run_code", "local_shell") and result is not None:
+        lines, more = clip((result or "(no output)").rstrip().splitlines() or ["(no output)"])
+        return "\n".join(_esc(ln) for ln in lines), more
+    if expanded and result:
+        lines, more = clip(result.rstrip().splitlines())
+        return "\n".join(f"[$text-muted]{_esc(ln)}[/]" for ln in lines), more
+    return None, 0
+
+
+LOGO_GLYPHS = {
+    "J": ["  ███", "   █ ", "   █ ", "█  █ ", " ██  "],
+    "A": [" ███ ", "█   █", "█████", "█   █", "█   █"],
+    "V": ["█   █", "█   █", "█   █", " █ █ ", "  █  "],
+    "3": ["████ ", "    █", " ███ ", "    █", "████ "],
+}
+
+
+def logo_markup() -> str:
+    rows = []
+    for r in range(5):
+        parts = []
+        for ch in "JAV3":
+            px = LOGO_GLYPHS[ch][r].replace("█", "██").replace(" ", "  ")
+            parts.append(f"[$primary]{px}[/]" if ch == "3" else f"[$text-muted]{px}[/]")
+        rows.append("  ".join(parts))
+    return "\n".join(rows)
+
+
+def _fmt_tokens(n: int | None) -> str:
+    if not n:
+        return "0"
+    return f"{n / 1000:.1f}k" if n >= 10_000 else f"{n:,}"
+
+
+class TurnState:
+    """What one streaming turn has on screen so far."""
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.cid: int | None = None       # from `start`; set even for a temporary chat
+        self.model: str | None = None
+        self.md = None                    # the Markdown widget text is streaming into
+        self.stream = None
+        self.seg = ""                     # that widget's text
+        self.printed: list[str] = []      # finished text segments
+        self.running: dict = {}           # tool id -> ToolView
+        self.tools: list[dict] = []       # finished calls
+
+
+class Command:
+    def __init__(self, fn, help: str, usage: str = "", busy_ok: bool = False,
+                 takes_arg: bool = False, leader: str = ""):
+        self.fn, self.help, self.usage = fn, help, usage
+        self.busy_ok, self.takes_arg, self.leader = busy_ok, takes_arg, leader
+
+
+def build_tui(base: str, token: str, **kw):
+    """Define the Textual app (imported only when the TUI actually runs, so the
+    plain commands work without Textual) and return an instance."""
+    from textual import on
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.command import DiscoveryHit, Hit, Provider
+    from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.message import Message
+    from textual.screen import ModalScreen
+    from textual.theme import Theme
+    from textual.widgets import Input, Markdown, OptionList, Static, TextArea
+    from textual.widgets.option_list import Option
+
+    # -- widgets ------------------------------------------------------------------------
+
+    class Note(Static):
+        """A one-off line in the transcript: info, a warning, an error."""
+
+    class UserMsg(Static):
+        pass
+
+    class Reply(Markdown):
+        pass
+
+    class Footer(Static):
+        pass
+
+    class Home(Vertical):
+        def compose(self) -> ComposeResult:
+            yield Static(logo_markup(), id="logo")
+            yield Static("", id="home-hints")
+
+    class ToolView(Vertical):
+        """One tool call: a title line, and for edits, writes, commands, todos
+        and failures a block under it. Click to expand or collapse."""
+
+        def __init__(self, name: str, args, *, ok: bool | None = None,
+                     result: str | None = None, done: bool = False):
+            super().__init__()
+            self.tname, self.args, self.ok, self.result = name, args or {}, ok, result
+            self.done, self.expanded, self.t0 = done, False, time.monotonic()
+            self.interrupted = False
+
+        def compose(self) -> ComposeResult:
+            yield Static(id="head")
+            yield Static(id="body")
+
+        def on_mount(self) -> None:
+            self.redraw()
+
+        def finish(self, ok: bool, result: str) -> None:
+            self.ok, self.result, self.done = ok, result, True
+            self.redraw()
+
+        def interrupt(self) -> None:
+            self.done, self.interrupted = True, True
+            self.redraw()
+
+        def on_click(self) -> None:
+            self.expanded = not self.expanded
+            self.redraw()
+
+        def spin(self, frame: str) -> None:
+            if not self.done:
+                self.redraw(frame)
+
+        def redraw(self, frame: str = "") -> None:
+            icon, title = tool_title(self.tname, self.args)
+            if not self.done:
+                secs = f"  [$text-muted]{time.monotonic() - self.t0:.0f}s[/]"
+                head = f"[$warning]{frame or '~'}[/] {_esc(title)}{secs}"
+            elif self.interrupted:
+                head = f"[$warning]{icon}[/] [strike]{_esc(title)}[/]  [$warning]interrupted[/]"
+            elif self.ok is False:
+                head = f"[$error]✗ {_esc(title)}[/]"
+            else:
+                head = f"[$text-muted]{icon}[/] {_esc(title)}"
+            body, more = (tool_body(self.tname, self.args, self.ok, self.result,
+                                    self.expanded) if self.done and not self.interrupted
+                          else (None, 0))
+            if body is None and self.done and self.ok and self.result and not self.expanded \
+                    and self.tname not in ("todo_update",):
+                head += f"  [$text-muted]{_esc(_summary(self.result, 60))}[/]"
+            self.query_one("#head", Static).update(head)
+            b = self.query_one("#body", Static)
+            self.set_class(body is not None, "block")
+            b.display = body is not None
+            if body is not None:
+                if more:
+                    body += f"\n[$text-muted]… {more} more lines · click to expand[/]"
+                elif self.expanded:
+                    body += "\n[$text-muted]click to collapse[/]"
+                b.update(body)
+
+    class Editor(TextArea):
+        """The prompt. Enter sends; ctrl+j / shift+enter / alt+enter (or a
+        trailing backslash) add a line; ↑ on the first line walks history."""
+
+        class Submitted(Message):
+            def __init__(self, text: str) -> None:
+                super().__init__()
+                self.text = text
+
+        async def _on_key(self, event) -> None:
+            app = self.app
+            key = event.key
+            if app.leader:
+                event.stop()
+                event.prevent_default()
+                app.run_leader(key)
+                return
+            if app.popup_open() and key in ("up", "down", "tab", "enter", "escape"):
+                event.stop()
+                event.prevent_default()
+                app.popup_key(key)
+                return
+            if key == "enter":
+                event.stop()
+                event.prevent_default()
+                if self.text.endswith("\\"):
+                    self.text = self.text[:-1] + "\n"
+                    self.move_cursor(self.document.end)
+                else:
+                    self.post_message(self.Submitted(self.text))
+                return
+            if key in ("shift+enter", "ctrl+j", "alt+enter"):
+                event.stop()
+                event.prevent_default()
+                self.insert("\n")
+                return
+            if key == "up" and self.cursor_location[0] == 0 and app.history_step(-1):
+                event.stop()
+                event.prevent_default()
+                return
+            if key == "down" and self.cursor_location[0] == self.document.line_count - 1 \
+                    and app.history_step(1):
+                event.stop()
+                event.prevent_default()
+                return
+            await super()._on_key(event)
+
+    # -- dialogs ----------------------------------------------------------------------------
+
+    class Picker(ModalScreen):
+        """opencode's DialogSelect: a title, a filter, a list. Enter picks; with
+        `custom`, Enter on text that matches nothing returns the text itself."""
+
+        BINDINGS = [Binding("escape", "cancel", show=False)]
+
+        def __init__(self, title: str, rows: list[tuple[str, str, str]],
+                     current: str | None = None, custom: bool = False,
+                     hint: str = "") -> None:
+            super().__init__()
+            self.title_text, self.rows, self.current = title, rows, current
+            self.custom, self.hint = custom, hint
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="dialog"):
+                with Horizontal(id="dialog-head"):
+                    yield Static(f"[b]{_esc(self.title_text)}[/]", id="dialog-title")
+                    yield Static("[$text-muted]esc[/]", id="dialog-esc")
+                yield Input(placeholder="Search" + (" or type a name" if self.custom else ""),
+                            id="filter")
+                yield OptionList(id="choices")
+                yield Static(f"[$text-muted]{_esc(self.hint)}[/]" if self.hint else "",
+                             id="dialog-hint")
+
+        def on_mount(self) -> None:
+            self.fill("")
+            self.query_one("#filter", Input).focus()
+
+        def fill(self, q: str) -> None:
+            ol = self.query_one("#choices", OptionList)
+            ol.clear_options()
+            ql = q.lower()
+            hit = 0
+            for value, label, meta in self.rows:
+                if ql and ql not in f"{value} {label} {meta}".lower():
+                    continue
+                mark = "[$primary]●[/] " if value == self.current else "  "
+                text = f"{mark}{_esc(label or value)}"
+                if meta:
+                    text += f"  [$text-muted]{_esc(meta)}[/]"
+                ol.add_option(Option(text, id=value))
+                if value == self.current and not ql:
+                    hit = ol.option_count - 1
+            if ol.option_count:
+                ol.highlighted = hit
+
+        @on(Input.Changed, "#filter")
+        def _changed(self, ev) -> None:
+            self.fill(ev.value)
+
+        @on(Input.Submitted, "#filter")
+        def _submitted(self, ev) -> None:
+            ol = self.query_one("#choices", OptionList)
+            if ol.highlighted is not None and ol.option_count:
+                self.dismiss(ol.get_option_at_index(ol.highlighted).id)
+            elif self.custom and ev.value.strip():
+                self.dismiss(ev.value.strip())
+
+        @on(OptionList.OptionSelected)
+        def _selected(self, ev) -> None:
+            self.dismiss(ev.option.id)
+
+        def on_key(self, event) -> None:
+            ol = self.query_one("#choices", OptionList)
+            if event.key in ("up", "down", "pageup", "pagedown") and ol.option_count:
+                event.stop()
+                {"up": ol.action_cursor_up, "down": ol.action_cursor_down,
+                 "pageup": ol.action_page_up, "pagedown": ol.action_page_down}[event.key]()
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+    class Confirm(ModalScreen):
+        BINDINGS = [Binding("y,enter", "yes", show=False),
+                    Binding("n,escape", "no", show=False)]
+
+        def __init__(self, question: str, detail: str = "") -> None:
+            super().__init__()
+            self.question, self.detail = question, detail
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="dialog", classes="small"):
+                yield Static(f"[b]{_esc(self.question)}[/]")
+                if self.detail:
+                    yield Static(f"[$text-muted]{_esc(self.detail)}[/]")
+                yield Static("\n[$primary]y[/] yes   [$text-muted]n / esc[/] no")
+
+        def action_yes(self) -> None:
+            self.dismiss(True)
+
+        def action_no(self) -> None:
+            self.dismiss(False)
+
+    class Ask(ModalScreen):
+        """One line of input; `secret` hides it (the login line is a credential)."""
+
+        BINDINGS = [Binding("escape", "cancel", show=False)]
+
+        def __init__(self, question: str, secret: bool = False, value: str = "") -> None:
+            super().__init__()
+            self.question, self.secret, self.value = question, secret, value
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="dialog", classes="small"):
+                yield Static(f"[b]{_esc(self.question)}[/]")
+                yield Input(value=self.value, password=self.secret, id="answer")
+                yield Static("[$text-muted]enter to confirm · esc to cancel[/]")
+
+        def on_mount(self) -> None:
+            self.query_one("#answer", Input).focus()
+
+        @on(Input.Submitted)
+        def _done(self, ev) -> None:
+            self.dismiss(ev.value)
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+    class Help(ModalScreen):
+        BINDINGS = [Binding("escape,q,enter", "close", show=False)]
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll(id="dialog", classes="wide"):
+                yield Markdown(self.text)
+
+        def action_close(self) -> None:
+            self.dismiss(None)
+
+    class Palette(Provider):
+        """Every slash command in ctrl+p."""
+
+        async def discover(self):
+            for name, cmd in self.app.unique_commands():
+                yield DiscoveryHit(f"/{name}", self._runner(name), help=cmd.help)
+
+        async def search(self, query: str):
+            matcher = self.matcher(query)
+            for name, cmd in self.app.unique_commands():
+                score = matcher.match(f"/{name} {cmd.help}")
+                if score > 0:
+                    yield Hit(score, matcher.highlight(f"/{name}"), self._runner(name),
+                              help=cmd.help)
+
+        def _runner(self, name: str):
+            return lambda: self.app.dispatch(f"/{name}")
+
+    # -- the app ---------------------------------------------------------------------------
+
+    class Jav3App(App):
+        TITLE = "Jav3"
+        COMMANDS = App.COMMANDS | {Palette}
+        CSS = """
+        Screen { background: $background; }
+        #main { height: 1fr; }
+        #left { width: 1fr; }
+        #header { height: 1; padding: 0 2; color: $text-muted; display: none; }
+        #log { height: 1fr; padding: 0 2 1 2; scrollbar-size-vertical: 1; }
+        #sidebar { width: 42; background: $surface; padding: 1 2; scrollbar-size-vertical: 1; }
+        #sidebar Static { margin-bottom: 1; }
+        #sb-foot { dock: bottom; margin: 0; color: $text-muted; }
+        Home { height: 1fr; align: center middle; }
+        #logo { width: auto; }
+        #home-hints { width: auto; margin-top: 2; color: $text-muted; }
+        UserMsg { border-left: thick $primary; background: $surface; padding: 1 2; margin-top: 1; }
+        Reply { margin: 1 0 0 0; padding: 0 1 0 2; background: transparent; }
+        Footer { color: $text-muted; padding-left: 2; margin-top: 1; }
+        Note { padding-left: 2; margin-top: 1; color: $text-muted; }
+        Note.warn { color: $warning; }
+        Note.error { color: $error; }
+        ToolView { height: auto; padding-left: 2; }
+        ToolView #body { display: none; }
+        ToolView.block { margin: 1 0; }
+        ToolView.block #body { border-left: solid $panel-lighten-2; padding: 0 1; margin-left: 1; }
+        #bottom { height: auto; padding: 0 2; }
+        #popup { display: none; height: auto; max-height: 12; background: $surface;
+                 border: none; padding: 0 1; }
+        #popup:focus { border: none; }
+        #prompt { height: auto; border-left: thick $primary; background: $surface;
+                  padding: 1 2 0 2; margin-top: 1; }
+        #prompt.agent { border-left: thick $secondary; }
+        #prompt.temp { border-left: thick $warning; }
+        #prompt.busy { border-left: thick $accent; }
+        Editor { height: auto; max-height: 12; min-height: 1; border: none; padding: 0;
+                 background: $surface; }
+        Editor:focus { border: none; }
+        #meta { height: 1; margin: 1 0 1 0; }
+        #status { height: 1; margin: 0 0 0 0; }
+        #status-left { width: 1fr; color: $text-muted; }
+        #status-right { width: auto; color: $text-muted; }
+        Picker, Confirm, Ask, Help { align: center middle; background: $background 60%; }
+        #dialog { width: 72; max-width: 90%; height: auto; max-height: 80%;
+                  background: $surface; padding: 1 2; border: none; }
+        #dialog.small { width: 64; }
+        #dialog.wide { width: 90; height: 80%; }
+        #dialog-head { height: 1; margin-bottom: 1; }
+        #dialog-title { width: 1fr; }
+        #dialog-esc { width: auto; }
+        #filter { border: none; background: $panel; margin-bottom: 1; padding: 0 1; }
+        #filter:focus { border: none; }
+        #choices { height: auto; max-height: 20; border: none; background: $surface; }
+        #choices:focus { border: none; }
+        #dialog-hint { margin-top: 1; }
+        #answer { border: none; background: $panel; margin: 1 0; }
+        """
+        BINDINGS = [
+            Binding("ctrl+x", "leader", "leader", show=False, priority=True),
+            Binding("ctrl+c", "ctrl_c", show=False, priority=True),
+            Binding("escape", "escape", show=False),
+            Binding("ctrl+n", "new", show=False, priority=True),
+            Binding("ctrl+b", "toggle_sidebar", show=False, priority=True),
+            Binding("ctrl+o", "toggle_tools", show=False, priority=True),
+            Binding("ctrl+g", "external_editor", show=False, priority=True),
+            Binding("pageup", "scroll_log(-1)", show=False, priority=True),
+            Binding("pagedown", "scroll_log(1)", show=False, priority=True),
+            Binding("ctrl+d", "ctrl_d", show=False, priority=True),
+        ]
+        # keys the dialogs need for themselves
+        _MAIN_ONLY = {"leader", "new", "toggle_sidebar", "toggle_tools", "external_editor",
+                      "scroll_log", "ctrl_d"}
+
+        def __init__(self, base: str, token: str, *, server_override: str | None = None,
+                     project: str | None = None, agent: str | None = None,
+                     model: str | None = None, resume: int | None = None,
+                     cont: bool = False, prompt: str | None = None, transport=None):
+            super().__init__()
+            self.base, self.token, self.server_override = base, token, server_override
+            self.transport = transport       # tests hand in an httpx mock transport
+            self.cid: int | None = None
+            self.title_text: str | None = None
+            self.project, self.project_mode = project, ("pin" if project else None)
+            self.agent, self.model = agent, model
+            self.shown_model: str | None = None
+            self.ephemeral = False
+            self.whoami = "?"
+            self.options: dict = {}
+            self.convs: list[dict] = []
+            self.info: dict | None = None
+            self.todos: list[tuple[bool, str]] = []
+            self.busy = False
+            self.turn: TurnState | None = None
+            self.last_turn: TurnState | None = None
+            self.stop_requested = False
+            self.queue: list[str] = []
+            self.attachments: list[str] = []
+            self.last_user: str | None = None
+            self.last_reply = ""
+            self.leader = False
+            self._leader_timer = None
+            self.esc_armed = 0.0
+            self.ctrl_c_at = 0.0
+            self.sidebar_pref: bool | None = None     # None = follow the width
+            self.tools_expanded = False
+            self.history: list[str] = []
+            self.hist_pos: int | None = None
+            self.hist_draft = ""
+            self.popup_items: list[tuple[str, str]] = []   # (kind, value)
+            self.initial = (resume, cont, prompt)
+            self.client = None
+            self.commands = self._commands()
+            self.frame = 0
+            self.example = EXAMPLES[int(time.time()) % len(EXAMPLES)]
+
+        # -- composition ---------------------------------------------------------------
+
+        def compose(self) -> ComposeResult:
+            with Horizontal(id="main"):
+                with Vertical(id="left"):
+                    yield Static(id="header")
+                    yield VerticalScroll(Home(), id="log", can_focus=False)
+                    with Vertical(id="bottom"):
+                        yield OptionList(id="popup")
+                        with Vertical(id="prompt"):
+                            yield Editor(id="editor", compact=True, show_line_numbers=False,
+                                         highlight_cursor_line=False,
+                                         placeholder=f'Ask anything… "{self.example}"')
+                            yield Static(id="meta")
+                        with Horizontal(id="status"):
+                            yield Static(id="status-left")
+                            yield Static(id="status-right")
+                with VerticalScroll(id="sidebar", can_focus=False):
+                    yield Static(id="sb-title")
+                    yield Static(id="sb-context")
+                    yield Static(id="sb-model")
+                    yield Static(id="sb-files")
+                    yield Static(id="sb-todo")
+                    yield Static(id="sb-foot")
+
+        @property
+        def log_view(self):
+            return self.query_one("#log", VerticalScroll)
+
+        @property
+        def editor(self):
+            return self.query_one("#editor", Editor)
+
+        async def on_mount(self) -> None:
+            self.register_theme(Theme(
+                name="jav3", primary="#5fd7af", secondary="#af87ff", accent="#ffaf5f",
+                foreground="#e4e4e4", background="#0e1014", surface="#161a20",
+                panel="#1e232b", warning="#ffaf00", error="#ff6b6b", success="#5fd787",
+                dark=True))
+            settings = self._load_settings()
+            self.theme = settings.get("theme") if settings.get("theme") in \
+                self.available_themes else "jav3"
+            self.sidebar_pref = settings.get("sidebar")
+            self._load_history()
+            self.log_view.anchor()
+            self.editor.focus()
+            self.set_interval(0.1, self._tick)
+            self.refresh_chrome()
+            self.run_worker(self._startup(), group="startup")
+
+        async def _startup(self) -> None:
+            self.client = self._new_client()
+            try:
+                who = await self.api("GET", "/api/devices/whoami")
+                self.whoami = who.get("username") or "?"
+            except CliError as e:
+                await self.note(str(e), "error")
+                return
+            await asyncio.gather(self.refresh_options(), self.refresh_convs())
+            if not self.options:
+                await self.note("this server predates the TUI's pickers (/api/chat/options): "
+                                "/model, /agent and /project take typed names", "warn")
+            self.refresh_chrome()
+            resume, cont, prompt = self.initial
+            try:
+                if cont and self.convs:
+                    await self.open_conversation(self.convs[0]["id"])
+                elif resume is not None:
+                    await self.open_conversation(resume)
+            except CliError as e:
+                await self.note(str(e), "error")
+            if prompt:
+                self.send(prompt)
+
+        async def on_unmount(self) -> None:
+            if self.client is not None:
+                await self.client.aclose()
+
+        # -- settings and history ------------------------------------------------------------
+
+        def _settings_path(self) -> Path:
+            return config_dir() / "tui.json"
+
+        def _load_settings(self) -> dict:
+            try:
+                d = json.loads(self._settings_path().read_text())
+                return d if isinstance(d, dict) else {}
+            except (OSError, ValueError):
+                return {}
+
+        def _save_settings(self, **kw) -> None:
+            d = self._load_settings()
+            d.update(kw)
+            try:
+                config_dir().mkdir(parents=True, exist_ok=True)
+                self._settings_path().write_text(json.dumps(d))
+            except OSError:
+                pass
+
+        def _history_path(self) -> Path:
+            return config_dir() / "history.jsonl"
+
+        def _load_history(self) -> None:
+            try:
+                for ln in self._history_path().read_text().splitlines()[-500:]:
+                    try:
+                        self.history.append(json.loads(ln))
+                    except ValueError:
+                        pass
+            except OSError:
+                pass
+
+        def _remember(self, text: str) -> None:
+            if not text.strip() or (self.history and self.history[-1] == text):
+                return
+            self.history.append(text)
+            try:
+                config_dir().mkdir(parents=True, exist_ok=True)
+                fd = os.open(self._history_path(), os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                             0o600)
+                with os.fdopen(fd, "a") as f:
+                    f.write(json.dumps(text) + "\n")
+            except OSError:
+                pass
+
+        def history_step(self, d: int) -> bool:
+            if not self.history:
+                return False
+            ed = self.editor
+            if self.hist_pos is None:
+                if d > 0:
+                    return False
+                self.hist_draft, self.hist_pos = ed.text, len(self.history)
+            pos = self.hist_pos + d
+            if pos < 0:
+                return True
+            if pos >= len(self.history):
+                self.hist_pos = None
+                ed.text = self.hist_draft
+            else:
+                self.hist_pos = pos
+                ed.text = self.history[pos]
+            ed.move_cursor(ed.document.end)
+            return True
+
+        # -- HTTP --------------------------------------------------------------------------
+
+        def _new_client(self):
+            return httpx.AsyncClient(
+                base_url=self.base, follow_redirects=False, transport=self.transport,
+                headers={"User-Agent": "jav3-cli", "Authorization": f"Bearer {self.token}"},
+                timeout=httpx.Timeout(30.0, read=None))
+
+        async def api(self, method: str, path: str, **kw):
+            try:
+                r = await self.client.request(method, path, **kw)
+            except httpx.HTTPError as e:
+                raise CliError(f"could not reach {self.base}: {e}")
+            if r.is_redirect:
+                raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
+            if r.status_code == 401:
+                raise CliError("not logged in (token missing, revoked or expired) — /login")
+            if r.status_code >= 400:
+                raise CliError(f"server said {r.status_code}: {_detail(r)}")
+            try:
+                return r.json()
+            except ValueError:
+                return {}
+
+        async def refresh_options(self) -> None:
+            try:
+                self.options = await self.api("GET", "/api/chat/options")
+            except CliError:
+                self.options = {}
+
+        async def refresh_convs(self) -> list[dict]:
+            try:
+                self.convs = (await self.api("GET", "/api/conversations"))["conversations"]
+            except (CliError, KeyError, TypeError):
+                pass
+            return self.convs
+
+        async def refresh_info(self) -> None:
+            if self.cid is None:
+                self.info = None
+            else:
+                try:
+                    self.info = await self.api("GET", f"/api/conversations/{self.cid}/info")
+                    if self.info.get("title"):
+                        self.title_text = self.info["title"]
+                except CliError:
+                    self.info = None
+            self.refresh_chrome()
+
+        # -- transcript -------------------------------------------------------------------------
+
+        async def mount_log(self, widget) -> None:
+            home = self.query(Home)
+            if home:
+                await home.remove()
+            await self.log_view.mount(widget)
+
+        async def note(self, text: str, kind: str = "info") -> None:
+            await self.mount_log(Note(_esc(text), classes=kind))
+
+        async def clear_log(self) -> None:
+            await self.log_view.remove_children()
+
+        async def show_home(self) -> None:
+            await self.clear_log()
+            await self.log_view.mount(Home())
+            self.refresh_chrome()
+
+        # -- chrome: prompt meta, status row, sidebar ----------------------------------------------
+
+        def _model_label(self) -> str:
+            return self.model or self.shown_model or (self.options or {}).get("default") or "default"
+
+        def _project_label(self) -> str | None:
+            if self.project:
+                return self.project
+            if self.project_mode == "none":
+                return "no project"
+            return (self.info or {}).get("project") or (self.options or {}).get("active_project")
+
+        def refresh_chrome(self) -> None:
+            if not self.is_mounted:
+                return
+            try:
+                prompt = self.query_one("#prompt")
+            except Exception:  # noqa: BLE001 — a dialog is on top
+                return
+            prompt.set_class(bool(self.agent), "agent")
+            prompt.set_class(self.ephemeral, "temp")
+            prompt.set_class(self.busy, "busy")
+            who = f"[$secondary b]{_esc(self.agent)}[/]" if self.agent else "[$primary b]Jav3[/]"
+            model = self._model_label()
+            bits = [who, f"[$text]{_esc(model.split('/')[-1])}[/]"]
+            if "/" in model:
+                bits.append(f"[$text-muted]{_esc(model.split('/')[0])}[/]")
+            proj = self._project_label()
+            if proj:
+                bits.append(f"[$text-muted]⌂ {_esc(proj)}[/]")
+            if self.ephemeral:
+                bits.append("[$warning]temporary[/]")
+            if self.attachments:
+                bits.append(f"[$accent]+{len(self.attachments)} attached[/]")
+            self.query_one("#meta", Static).update("  ".join(bits))
+            self._refresh_status()
+            self._refresh_sidebar()
+            try:
+                home_hints = self.query_one("#home-hints", Static)
+            except Exception:  # noqa: BLE001
+                home_hints = None
+            if home_hints is not None:
+                home_hints.update(
+                    f"[$text-muted]{_esc(self.whoami)} @ {_esc(self.base)}[/]\n\n"
+                    "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
+                    "[$text]ctrl+x l[/]    [$text-muted]sessions[/]\n"
+                    "[$text]ctrl+x m[/]    [$text-muted]models[/]\n"
+                    "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
+            wide = self.size.width >= 110
+            show = self.sidebar_pref if self.sidebar_pref is not None else wide
+            self.query_one("#sidebar").display = show
+            header = self.query_one("#header", Static)
+            header.display = not show
+            header.update(f"[b]{_esc(self.title_text or 'New chat')}[/]"
+                          + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
+                          + "  [$text-muted]ctrl+b sidebar[/]")
+
+        def _refresh_status(self) -> None:
+            left = self.query_one("#status-left", Static)
+            right = self.query_one("#status-right", Static)
+            if self.leader:
+                keys = "  ".join(f"[$primary]{c.leader}[/] {name}"
+                                 for name, c in self.unique_commands() if c.leader)
+                left.update(f"[$warning b]ctrl+x[/]  {keys}  [$primary]b[/] sidebar")
+                right.update("")
+                return
+            if self.busy and self.turn is not None:
+                t = self.turn
+                spin = SPINNER[self.frame % len(SPINNER)]
+                verb = ("Interrupting" if self.stop_requested else
+                        "Running tools" if t.running else
+                        "Writing" if t.seg else "Thinking")
+                secs = int(time.monotonic() - t.started)
+                esc = ("[$warning]esc again to interrupt[/]"
+                       if time.monotonic() - self.esc_armed < 2 else "esc interrupt")
+                q = f"  [$accent]{len(self.queue)} queued[/]" if self.queue else ""
+                left.update(f"[$accent]{spin}[/] {verb}…  [$text-muted]{secs}s · {esc}[/]{q}")
+            else:
+                left.update("[$text-muted]enter send · ctrl+j newline · / commands · "
+                            "@ file · ! shell[/]")
+            right.update("[$text-muted]ctrl+x leader · ctrl+p commands[/]")
+
+        def _refresh_sidebar(self) -> None:
+            info = self.info or {}
+            title = self.title_text or ("New chat" if self.cid is None else f"Chat #{self.cid}")
+            sub = [f"#{self.cid}"] if self.cid else []
+            if self.agent:
+                sub.append(f"@{self.agent}")
+            proj = self._project_label()
+            if proj:
+                sub.append(f"⌂ {proj}")
+            self.query_one("#sb-title", Static).update(
+                f"[b]{_esc(title)}[/]\n[$text-muted]{_esc(' · '.join(sub))}[/]")
+            ctx = ["[b]Context[/]"]
+            if info:
+                ctx.append(f"{_fmt_tokens(info.get('input_tokens', 0) + info.get('output_tokens', 0))}"
+                           " tokens")
+                c = info.get("context") or {}
+                if c.get("used") and c.get("window"):
+                    pct = min(100, round(100 * c["used"] / c["window"]))
+                    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                    colour = "$error" if pct > 85 else "$warning" if pct > 60 else "$primary"
+                    ctx.append(f"[{colour}]{bar}[/] {pct}% used")
+                ctx.append(f"${info.get('cost_usd', 0):.4f} spent")
+                ctx.append(f"[$text-muted]{info.get('calls', 0)} model calls[/]")
+            else:
+                ctx.append("[$text-muted]no usage yet[/]")
+            self.query_one("#sb-context", Static).update("\n".join(ctx))
+            model = self._model_label()
+            m = ["[b]Model[/]", _esc(model.split("/")[-1])]
+            if "/" in model:
+                m.append(f"[$text-muted]{_esc(model.split('/')[0])}[/]")
+            self.query_one("#sb-model", Static).update("\n".join(m))
+            files = info.get("files") or []
+            fw = self.query_one("#sb-files", Static)
+            fw.display = bool(files)
+            if files:
+                lines = ["[b]Modified Files[/]"]
+                for f in files[-12:]:
+                    n = f.get("writes", 1)
+                    lines.append(f"{_esc(_short(f['path'], 30))}"
+                                 + (f" [$text-muted]×{n}[/]" if n > 1 else ""))
+                fw.update("\n".join(lines))
+            tw = self.query_one("#sb-todo", Static)
+            tw.display = bool(self.todos)
+            if self.todos:
+                tw.update("[b]Todo[/]\n" + "\n".join(
+                    f"[$success]✓[/] [$text-muted strike]{_esc(_short(t, 32))}[/]" if done
+                    else f"[$warning]☐[/] {_esc(_short(t, 32))}" for done, t in self.todos))
+            self.query_one("#sb-foot", Static).update(
+                f"[$primary]●[/] [b]Jav3[/] [$text-muted]{_esc(self.whoami)}[/]\n"
+                f"[$text-muted]{_esc(self.base.split('://')[-1])}[/]")
+
+        def _tick(self) -> None:
+            from textual.css.query import NoMatches
+            self.frame += 1
+            try:
+                if self.busy and self.turn is not None:
+                    for tv in self.turn.running.values():
+                        tv.spin(SPINNER[self.frame % len(SPINNER)])
+                self._refresh_status()
+            except NoMatches:
+                pass          # shutting down, or a screen without the status row
+
+        def on_resize(self, event) -> None:
+            self.refresh_chrome()
+
+        def watch_theme(self, theme: str) -> None:
+            if self.is_mounted:
+                for tv in self.query(ToolView):
+                    tv.redraw()
+
+        # -- turns ------------------------------------------------------------------------------
+
+        def _body(self, message: str) -> dict:
+            body: dict = {"message": message, "conversation_id": self.cid}
+            if self.cid is None:
+                if self.project_mode:
+                    body["project_mode"] = self.project_mode
+                if self.project and self.project_mode == "pin":
+                    body["project"] = self.project
+                if self.agent:
+                    body["agent"] = self.agent
+                if self.ephemeral:
+                    body["ephemeral"] = True
+            if self.model:
+                body["model"] = self.model
+            return body
+
+        def send(self, text: str) -> None:
+            if self.busy:
+                self.queue.append(text)
+                self._refresh_status()
+                return
+            self.busy = True           # claimed now, so a fast second Enter queues
+            self.run_worker(self._turn(text), group="turn")
+
+        async def _turn(self, text: str) -> None:
+            self.busy, self.stop_requested = True, False
+            self.turn = TurnState()
+            self.refresh_chrome()
+            try:
+                await self.mount_log(UserMsg(_esc(text)))
+                message, attached, skipped = expand_attachments(text)
+                for a in attached:
+                    await self.note(f"attached {a}")
+                for s in skipped:
+                    await self.note(f"not attached: {s}", "warn")
+                if self.attachments:
+                    message += "\n\n" + "\n\n".join(self.attachments)
+                    self.attachments = []
+                self.last_user = text
+                await self._post(self._body(message))
+            except CliError as e:
+                await self.note(str(e), "error")
+            except httpx.HTTPError as e:
+                await self.note(f"connection to {self.base} failed: {e}", "error")
+            finally:
+                await self._end_turn()
+            if self.queue and not self.busy:
+                self.send(self.queue.pop(0))
+
+        async def _post(self, body: dict) -> None:
+            for _ in range(2):
+                async with self.client.stream("POST", "/api/chat", json=body) as r:
+                    if r.status_code == 409:
+                        await r.aread()
+                        why = _detail(r)
+                        if why == "peak_confirmation_required" and not body.get("confirm_peak"):
+                            if await self.push_screen_wait(Confirm(
+                                    "Peak pricing right now", "This reply costs 2×. "
+                                    "Send anyway?")):
+                                body["confirm_peak"] = True
+                                continue
+                            await self.note("not sent")
+                            return
+                        if why == "turn_in_progress":
+                            raise CliError("a turn is still running in this chat — wait, "
+                                           "or /stop it")
+                        raise CliError(f"server said 409: {why}")
+                    if r.is_redirect:
+                        raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
+                    if r.status_code == 401:
+                        raise CliError("not logged in (token missing, revoked or expired) "
+                                       "— /login")
+                    if r.status_code >= 400:
+                        await r.aread()
+                        raise CliError(f"server said {r.status_code}: {_detail(r)}")
+                    await self._consume(r.aiter_lines())
+                    return
+
+        async def _consume(self, lines) -> None:
+            async for ev in aiter_sse(lines):
+                if await self.handle_event(ev):
+                    break
+
+        async def handle_event(self, ev: dict) -> bool:
+            """Render one event; True when the turn is over."""
+            t, turn = ev.get("type"), self.turn
+            if turn is None:
+                return True
+            if t == "start":
+                if ev.get("conversation_id") is not None:
+                    turn.cid = ev["conversation_id"]
+                    if not self.ephemeral:
+                        self.cid = turn.cid
+                turn.model = ev.get("model") or turn.model
+                self.shown_model = turn.model or self.shown_model
+                self.refresh_chrome()
+                if self.stop_requested:
+                    await self._stop_remote()
+            elif t == "token":
+                chunk = ev.get("text", "")
+                if turn.md is None:
+                    if not chunk.strip():
+                        return False
+                    turn.md = Reply("")
+                    await self.mount_log(turn.md)
+                    turn.stream = Markdown.get_stream(turn.md)
+                turn.seg += chunk
+                await turn.stream.write(chunk)
+            elif t == "tool":
+                await self._close_seg()
+                tv = ToolView(ev.get("name", "?"), ev.get("args") or {})
+                tv.expanded = self.tools_expanded
+                turn.running[ev.get("id")] = tv
+                await self.mount_log(tv)
+            elif t == "tool_result":
+                tv = turn.running.pop(ev.get("id"), None)
+                if tv is None:
+                    tv = ToolView(ev.get("name", "?"), {})
+                    await self.mount_log(tv)
+                ok = ev.get("ok") is not False
+                res = ev.get("result", "")
+                tv.finish(ok, res)
+                turn.tools.append({"name": tv.tname, "args": tv.args, "ok": ok, "result": res})
+                if tv.tname == "todo_update" and ok and parse_todos(res):
+                    self.todos = parse_todos(res)
+                    self._refresh_sidebar()
+            elif t == "job":
+                await self.note(f"◆ job: {ev.get('title', '')}")
+            elif t == "inbox":
+                await self.note(f"✉ {_short(ev.get('text', ''), 200)}")
+            elif t == "final":
+                await self._finish(ev.get("content") or "")
+                return True
+            elif t == "error":
+                await self._close_seg()
+                await self.note(ev.get("message") or "error", "error")
+                return True
+            elif t == "idle":
+                return True
+            return False
+
+        async def _close_seg(self) -> None:
+            turn = self.turn
+            if turn is None:
+                return
+            if turn.stream is not None:
+                await turn.stream.stop()
+                turn.stream = None
+            if turn.md is not None:
+                if turn.seg.strip():
+                    turn.printed.append(turn.seg)
+                else:
+                    await turn.md.remove()
+            turn.md, turn.seg = None, ""
+
+        async def _finish(self, final: str) -> None:
+            turn = self.turn
+            for tv in turn.running.values():
+                tv.interrupt()
+            turn.running.clear()
+            secs = int(time.monotonic() - turn.started)
+            who = self.agent or "Jav3"
+            model = (turn.model or self._model_label()).split("/")[-1]
+            if final.startswith(INTERRUPTED):
+                await self._close_seg()
+                await self.mount_log(Footer(f"[$warning]▣[/] {_esc(who)} · {_esc(model)} · "
+                                            f"{secs}s · [$warning]interrupted[/]"))
+                return
+            if turn.stream is not None:
+                await turn.stream.stop()
+                turn.stream = None
+            # the final reply is authoritative (the rules pass can rewrite it): it
+            # replaces the text that streamed, or is added if none did
+            if turn.md is not None:
+                if final.strip() and final.strip() != turn.seg.strip():
+                    await turn.md.update(final)
+                turn.printed.append(final or turn.seg)
+                turn.md, turn.seg = None, ""
+            elif final.strip() and final.strip() not in "".join(turn.printed):
+                await self.mount_log(Reply(final))
+            self.last_reply = final or "".join(turn.printed)
+            await self.mount_log(Footer(f"[$primary]▣[/] {_esc(who)} · {_esc(model)} · {secs}s"))
+
+        async def _end_turn(self) -> None:
+            if self.turn is not None:
+                self.last_turn = self.turn
+            self.turn, self.busy = None, False
+            if self.ephemeral:
+                self.cid = None          # a temporary chat is wiped when its turn ends
+            self.refresh_chrome()
+            await self.refresh_info()
+
+        async def _stop_remote(self) -> None:
+            cid = self.turn.cid if self.turn and self.turn.cid else self.cid
+            if cid is None:
+                return
+            try:
+                await self.api("POST", f"/api/chat/{cid}/stop")
+            except CliError:
+                pass
+
+        def interrupt(self) -> None:
+            """Stop the turn server-side (every tail then gets its final) and hand
+            queued messages back to the prompt."""
+            if not self.busy:
+                return
+            self.stop_requested = True
+            if self.queue:
+                ed = self.editor
+                ed.text = "\n".join(self.queue + ([ed.text] if ed.text else []))
+                ed.move_cursor(ed.document.end)
+                self.queue.clear()
+            if self.turn and self.turn.cid is not None:
+                self.run_worker(self._stop_remote(), group="stop")
+            # no start event yet: on_event("start") sends the stop when the id arrives
+
+        async def attach(self, cid: int) -> None:
+            """Watch a turn that is still running server-side."""
+            self.busy, self.stop_requested = True, False
+            self.turn = TurnState()
+            self.turn.cid = cid
+            self.refresh_chrome()
+            try:
+                async with self.client.stream("GET", f"/api/chat/{cid}/stream") as r:
+                    if r.status_code < 400:
+                        await self._consume(r.aiter_lines())
+            except httpx.HTTPError as e:
+                await self.note(f"lost the stream: {e}", "error")
+            finally:
+                await self._end_turn()
+
+        # -- input ---------------------------------------------------------------------------
+
+        @on(Editor.Submitted)
+        def _submitted(self, ev) -> None:
+            text = ev.text
+            if not text.strip():
+                return
+            self._remember(text)
+            self.hist_pos = None
+            self.editor.text = ""
+            self.hide_popup()
+            self.dispatch(text)
+
+        def dispatch(self, text: str) -> None:
+            s = text.strip()
+            if s == "?":
+                s = "/help"
+            if s.startswith("/") and not s.startswith("//"):
+                self.run_worker(self.run_command(s), group="cmd")
+            elif s.startswith("!"):
+                self.run_worker(self.local_shell(s[1:].strip()), group="shell")
+            else:
+                self.send(text[text.index("/") + 1:] if s.startswith("//") else text)
+
+        async def run_command(self, line: str) -> None:
+            name, _, arg = line[1:].partition(" ")
+            cmd = self.commands.get(name.lower())
+            if cmd is None:
+                await self.note(f"unknown command /{name} — /help lists them", "error")
+                return
+            if self.busy and not cmd.busy_ok:
+                self.notify(f"/{name} waits for the turn to finish — esc interrupts it",
+                            severity="warning")
+                return
+            try:
+                await cmd.fn(arg.strip())
+            except CliError as e:
+                await self.note(str(e), "error")
+
+        async def local_shell(self, command: str) -> None:
+            """`!cmd` runs on THIS machine; its output rides along with the next message."""
+            if not command:
+                await self.note("usage: !<command> — runs here; the output is attached to "
+                                "your next message")
+                return
+            tv = ToolView("local_shell", {"command": command})
+            await self.mount_log(tv)
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    command, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT, stdin=asyncio.subprocess.DEVNULL)
+                out, _ = await asyncio.wait_for(proc.communicate(), 300)
+                code = proc.returncode
+            except asyncio.TimeoutError:
+                proc.kill()
+                tv.finish(False, "timed out after 5 minutes")
+                return
+            text = out.decode("utf-8", "replace").rstrip()
+            tv.finish(code == 0, text + (f"\nexit {code}" if code else ""))
+            self.attachments.append(f"I ran `{command}` on my machine (exit {code}):\n"
+                                    f"```\n{text[-SHELL_KEEP:]}\n```")
+            self.refresh_chrome()
+            self.notify("output attached to your next message (/detach drops it)")
+
+        # -- completion popup ---------------------------------------------------------------------
+
+        def popup_open(self) -> bool:
+            return self.query_one("#popup", OptionList).display
+
+        def hide_popup(self) -> None:
+            self.query_one("#popup", OptionList).display = False
+
+        @on(TextArea.Changed, "#editor")
+        def _editor_changed(self, ev) -> None:
+            self.update_popup()
+
+        def _word_before_cursor(self) -> str:
+            ed = self.editor
+            row, col = ed.cursor_location
+            before = ed.document.get_line(row)[:col]
+            return "" if not before or before[-1].isspace() else before.split()[-1]
+
+        def update_popup(self) -> None:
+            ed = self.editor
+            text = ed.text
+            pop = self.query_one("#popup", OptionList)
+            items: list[tuple[str, str, str]] = []     # (kind, value, label markup)
+            if text.startswith("/") and "\n" not in text:
+                if " " not in text:
+                    q = text[1:].lower()
+                    for name, cmd in self.unique_commands():
+                        if name.startswith(q):
+                            items.append(("cmd", name, f"[b]/{name}[/] "
+                                          f"[$text-muted]{_esc(cmd.usage)}  {_esc(cmd.help)}[/]"))
+                else:
+                    head, _, arg = text.partition(" ")
+                    for value, meta in self.arg_options(head[1:].lower()):
+                        if value.startswith(arg) or (arg and arg.lower() in meta.lower()):
+                            items.append(("arg", value, f"{_esc(value)}  "
+                                          f"[$text-muted]{_esc(meta)}[/]"))
+            else:
+                word = self._word_before_cursor()
+                if word.startswith("@"):
+                    paths = self._paths(word[1:])
+                    # a word that already names a file needs no menu (Enter sends)
+                    if paths != [word[1:]]:
+                        for path in paths:
+                            items.append(("path", path, _esc(path)))
+            self.popup_items = [(k, v) for k, v, _ in items[:40]]
+            if not items or (len(items) == 1 and items[0][0] == "cmd"
+                             and items[0][1] == text[1:]
+                             and not self.commands[items[0][1]].takes_arg):
+                pop.display = False
+                return
+            pop.clear_options()
+            for _, _, label in items[:40]:
+                pop.add_option(Option(label))
+            pop.highlighted = 0
+            pop.display = True
+
+        def _paths(self, frag: str) -> list[str]:
+            d, _, prefix = frag.rpartition("/")
+            base = Path(os.path.expanduser(d or ".")) if d or not frag.startswith("/") \
+                else Path("/")
+            if frag.startswith("/") and not d:
+                base = Path("/")
+            try:
+                entries = sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            except OSError:
+                return []
+            out = []
+            for p in entries:
+                if not p.name.startswith(prefix) or (p.name.startswith(".")
+                                                     and not prefix.startswith(".")):
+                    continue
+                out.append((f"{d}/" if d else "") + p.name + ("/" if p.is_dir() else ""))
+                if len(out) >= 40:
+                    break
+            return out
+
+        def popup_key(self, key: str) -> None:
+            pop = self.query_one("#popup", OptionList)
+            if key == "escape":
+                self.hide_popup()
+            elif key == "up":
+                pop.action_cursor_up()
+            elif key == "down":
+                pop.action_cursor_down()
+            elif key in ("tab", "enter"):
+                i = pop.highlighted or 0
+                if not self.popup_items:
+                    self.hide_popup()
+                    return
+                kind, value = self.popup_items[min(i, len(self.popup_items) - 1)]
+                self.accept_popup(kind, value, submit=(key == "enter"))
+
+        def accept_popup(self, kind: str, value: str, submit: bool) -> None:
+            ed = self.editor
+            if kind == "cmd":
+                cmd = self.commands[value]
+                if cmd.takes_arg:
+                    ed.text = f"/{value} "
+                    ed.move_cursor(ed.document.end)
+                    self.update_popup()
+                    if not self.popup_open() and submit and not self.arg_options(value):
+                        self.hide_popup()
+                    return
+                ed.text = f"/{value}"
+                ed.move_cursor(ed.document.end)
+                self.hide_popup()
+                if submit:
+                    ed.post_message(Editor.Submitted(ed.text))
+                return
+            if kind == "arg":
+                head = ed.text.partition(" ")[0]
+                ed.text = f"{head} {value}"
+                ed.move_cursor(ed.document.end)
+                self.hide_popup()
+                if submit:
+                    ed.post_message(Editor.Submitted(ed.text))
+                return
+            # an @path: swap the word before the cursor
+            row, col = ed.cursor_location
+            word = self._word_before_cursor()
+            start = col - len(word)
+            ed.replace(f"@{value}" + ("" if value.endswith("/") else " "),
+                       (row, start), (row, col))
+            if value.endswith("/"):
+                self.update_popup()
+            else:
+                self.hide_popup()
+
+        # -- keys ---------------------------------------------------------------------------------
+
+        def check_action(self, action: str, parameters) -> bool | None:
+            if action in self._MAIN_ONLY and isinstance(self.screen, ModalScreen):
+                return False
+            return True
+
+        def action_leader(self) -> None:
+            self.leader = True
+            if self._leader_timer is not None:
+                self._leader_timer.stop()
+            self._leader_timer = self.set_timer(2, self._leader_off)
+            self._refresh_status()
+
+        def _leader_off(self) -> None:
+            self.leader = False
+            self._refresh_status()
+
+        def run_leader(self, key: str) -> None:
+            self._leader_off()
+            if key == "b":
+                self.action_toggle_sidebar()
+                return
+            for name, cmd in self.unique_commands():
+                if cmd.leader == key:
+                    self.dispatch(f"/{name}")
+                    return
+
+        def action_ctrl_c(self) -> None:
+            if isinstance(self.screen, ModalScreen):
+                self.screen.dismiss(None)
+                return
+            if self.editor.text:
+                self.editor.text = ""
+                self.hide_popup()
+            elif self.busy:
+                self.interrupt()
+            elif time.monotonic() - self.ctrl_c_at < 2:
+                self.exit()
+            else:
+                self.ctrl_c_at = time.monotonic()
+                self.notify("ctrl+c again to quit", timeout=2)
+
+        def action_ctrl_d(self) -> None:
+            if self.editor.text:
+                self.editor.action_delete_right()
+            else:
+                self.exit()
+
+        def action_escape(self) -> None:
+            if self.leader:
+                self._leader_off()
+            elif self.popup_open():
+                self.hide_popup()
+            elif self.busy:
+                if time.monotonic() - self.esc_armed < 2:
+                    self.esc_armed = 0.0
+                    self.interrupt()
+                else:
+                    self.esc_armed = time.monotonic()
+                self._refresh_status()
+            elif self.editor.text:
+                if time.monotonic() - self.esc_armed < 1:
+                    self.editor.text = ""
+                    self.esc_armed = 0.0
+                else:
+                    self.esc_armed = time.monotonic()
+                    self.notify("esc again to clear the prompt", timeout=1)
+
+        def action_new(self) -> None:
+            self.dispatch("/new")
+
+        def action_toggle_sidebar(self) -> None:
+            shown = self.query_one("#sidebar").display
+            self.sidebar_pref = not shown
+            self._save_settings(sidebar=self.sidebar_pref)
+            self.refresh_chrome()
+
+        def action_toggle_tools(self) -> None:
+            self.tools_expanded = not self.tools_expanded
+            for tv in self.query(ToolView):
+                tv.expanded = self.tools_expanded
+                tv.redraw()
+
+        def action_scroll_log(self, direction: int) -> None:
+            lv = self.log_view
+            if direction < 0:
+                lv.scroll_page_up()
+            else:
+                lv.scroll_page_down()
+
+        def action_external_editor(self) -> None:
+            import subprocess
+            import tempfile
+            editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+            with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False) as f:
+                f.write(self.editor.text)
+                path = f.name
+            try:
+                with self.suspend():
+                    subprocess.call([*editor.split(), path])
+                self.editor.text = Path(path).read_text().rstrip("\n")
+                self.editor.move_cursor(self.editor.document.end)
+            finally:
+                os.unlink(path)
+
+        # -- slash commands ---------------------------------------------------------------------
+
+        def _commands(self) -> dict[str, Command]:
+            c = {
+                "help": Command(self.c_help, "commands and keys", busy_ok=True, leader="h"),
+                "new": Command(self.c_new, "start a fresh chat", leader="n"),
+                "sessions": Command(self.c_sessions, "switch to another chat", "[id]",
+                                    takes_arg=True, leader="l"),
+                "models": Command(self.c_model, "pick the model", "[provider/id]",
+                                  takes_arg=True, leader="m"),
+                "agents": Command(self.c_agent, "start a new chat as an agent", "[slug]",
+                                  takes_arg=True, leader="a"),
+                "project": Command(self.c_project, "pin this chat to a project",
+                                   "[slug|none|follow]", takes_arg=True, leader="p"),
+                "themes": Command(self.c_theme, "change the colours", "[name]",
+                                  takes_arg=True, busy_ok=True, leader="t"),
+                "temp": Command(self.c_temp, "toggle temporary chats (nothing saved)"),
+                "rename": Command(self.c_rename, "rename this chat", "[title]",
+                                  takes_arg=True, leader="r"),
+                "star": Command(self.c_star, "star or unstar this chat"),
+                "delete": Command(self.c_delete, "delete this chat (asks first)"),
+                "retry": Command(self.c_retry, "send your last message again"),
+                "stop": Command(self.c_stop, "stop the running turn", busy_ok=True),
+                "copy": Command(self.c_copy, "copy the last reply", busy_ok=True, leader="y"),
+                "export": Command(self.c_export, "save this chat as markdown", "[file]",
+                                  takes_arg=True, busy_ok=True, leader="x"),
+                "details": Command(self.c_details, "expand or collapse tool output (ctrl+o)",
+                                   busy_ok=True),
+                "detach": Command(self.c_detach, "drop pending !command output",
+                                  busy_ok=True),
+                "web": Command(self.c_web, "open this chat in the browser", busy_ok=True,
+                               leader="w"),
+                "status": Command(self.c_status, "server, chat, model, usage", busy_ok=True,
+                                  leader="s"),
+                "editor": Command(self.c_editor, "write the prompt in $EDITOR (ctrl+g)",
+                                  busy_ok=True, leader="e"),
+                "login": Command(self.c_login, "log in with a new line from Settings"),
+                "logout": Command(self.c_logout, "revoke this computer's token and quit"),
+                "exit": Command(self.c_exit, "quit (a running turn keeps going)",
+                                busy_ok=True, leader="q"),
+            }
+            for alias, name in (("quit", "exit"), ("resume", "sessions"),
+                                ("history", "sessions"), ("model", "models"),
+                                ("agent", "agents"), ("theme", "themes"),
+                                ("clear", "new"), ("tools", "details")):
+                c[alias] = c[name]
+            return c
+
+        def unique_commands(self):
+            seen = set()
+            for name, cmd in self.commands.items():
+                if id(cmd) not in seen:
+                    seen.add(id(cmd))
+                    yield name, cmd
+
+        def arg_options(self, name: str) -> list[tuple[str, str]]:
+            cmd = self.commands.get(name)
+            fn = cmd.fn if cmd else None
+            o = self.options or {}
+            if fn == self.c_model:
+                return [(m["id"], m.get("label", "") + ("  (default)" if m["id"] == o.get("default")
+                                                        else ""))
+                        for m in o.get("models", [])]
+            if fn == self.c_agent:
+                return [("none", "plain Jav3")] + [(a["slug"], a.get("name", ""))
+                                                  for a in o.get("agents", [])]
+            if fn == self.c_project:
+                return ([("none", "no project: files go to the chat's artifacts"),
+                         ("follow", "whatever project is loaded")]
+                        + [(p["slug"], p.get("name", "")) for p in o.get("projects", [])])
+            if fn == self.c_sessions:
+                return [(str(cv["id"]), _short(cv.get("summary") or "(untitled)", 60))
+                        for cv in self.convs[:60]]
+            if fn == self.c_theme:
+                return [(t, "") for t in sorted(self.available_themes)]
+            return []
+
+        async def pick(self, title: str, rows, current=None, custom=False, hint=""):
+            return await self.push_screen_wait(Picker(title, rows, current, custom, hint))
+
+        async def c_help(self, arg: str) -> None:
+            lines = ["# Jav3", "", "## Commands", "", "| command | | leader |", "|---|---|---|"]
+            for name, cmd in self.unique_commands():
+                lead = f"ctrl+x {cmd.leader}" if cmd.leader else ""
+                usage = f"/{name} {cmd.usage}".rstrip().replace("|", "\\|")
+                lines.append(f"| {usage} | {cmd.help} | {lead} |")
+            lines += ["", "## Keys", "", "| key | |", "|---|---|"]
+            for k, v in [("enter", "send (while a turn runs: queue it)"),
+                         ("ctrl+j · shift+enter · alt+enter · \\⏎", "new line"),
+                         ("esc esc", "interrupt the running turn"),
+                         ("esc esc (idle)", "clear the prompt"),
+                         ("ctrl+c", "clear prompt · interrupt · twice to quit"),
+                         ("ctrl+x then a key", "leader: see the table above; b = sidebar"),
+                         ("ctrl+p", "command palette"),
+                         ("ctrl+n", "new chat"),
+                         ("ctrl+b", "toggle the sidebar"),
+                         ("ctrl+o", "expand / collapse tool output (or click a tool)"),
+                         ("ctrl+g", "edit the prompt in $EDITOR"),
+                         ("pgup / pgdn", "scroll the transcript"),
+                         ("↑ ↓", "prompt history"),
+                         ("tab", "complete a /command, its argument or an @path"),
+                         ("!cmd", "run a command here; output goes with your next message"),
+                         ("@path", "attach a local file"),
+                         ("//text", "send text that starts with a slash"),
+                         ("ctrl+d", "quit on an empty prompt")]:
+                lines.append(f"| `{k}` | {v} |")
+            await self.push_screen_wait(Help("\n".join(lines)))
+
+        async def c_new(self, arg: str = "") -> None:
+            self.cid, self.title_text, self.last_reply = None, None, ""
+            self.shown_model, self.info, self.todos = None, None, []
+            await self.show_home()
+
+        async def c_sessions(self, arg: str) -> None:
+            convs = await self.refresh_convs()
+            if not arg:
+                rows = []
+                for cv in convs[:100]:
+                    meta = (cv.get("started_at") or "")[:16]
+                    if cv.get("project_slug"):
+                        meta += f"  ⌂ {cv['project_slug']}"
+                    if cv.get("running"):
+                        meta += "  ● running"
+                    if cv.get("starred"):
+                        meta = "★ " + meta
+                    rows.append((str(cv["id"]), cv.get("summary") or "(untitled)", meta))
+                arg = await self.pick("Sessions", rows, str(self.cid) if self.cid else None,
+                                      hint="type to filter · enter opens") or ""
+                if not arg:
+                    return
+            if not arg.isdigit():
+                hits = [cv for cv in convs if arg.lower() in (cv.get("summary") or "").lower()]
+                if not hits:
+                    raise CliError(f"no chat matches {arg!r}")
+                arg = str(hits[0]["id"])
+            await self.open_conversation(int(arg))
+
+        async def open_conversation(self, cid: int) -> None:
+            r = await self.api("GET", f"/api/conversations/{cid}/messages")
+            self.cid, self.ephemeral = cid, False
+            meta = next((cv for cv in self.convs if cv.get("id") == cid), {})
+            self.title_text = meta.get("summary")
+            self.agent = r.get("agent_slug") or None
+            self.project = meta.get("project_slug") or None
+            self.project_mode = "pin" if self.project else None
+            self.todos, self.last_reply = [], ""
+            await self.clear_log()
+            msgs = [m for m in r.get("messages", []) if m.get("role") in ("user", "assistant")]
+            if len(msgs) > 60:
+                await self.note(f"… {len(msgs) - 60} earlier messages (/export has them all)")
+            for m in msgs[-60:]:
+                if m["role"] == "user":
+                    await self.log_view.mount(UserMsg(_esc(m.get("content") or "")))
+                    continue
+                for a in m.get("activity") or []:
+                    tv = ToolView(a["name"], a.get("args"), ok=a.get("ok"),
+                                  result=a.get("result"), done=True)
+                    await self.log_view.mount(tv)
+                    if a["name"] == "todo_update" and parse_todos(a.get("result") or ""):
+                        self.todos = parse_todos(a["result"])
+                if (m.get("content") or "").strip():
+                    await self.log_view.mount(Reply(m["content"]))
+                if m.get("model"):
+                    self.shown_model = m["model"]
+                who = self.agent or "Jav3"
+                await self.log_view.mount(Footer(
+                    f"[$primary]▣[/] {_esc(who)} · {_esc((m.get('model') or '').split('/')[-1])}"))
+                self.last_reply = m.get("content") or ""
+            self.log_view.scroll_end(animate=False)
+            await self.refresh_info()
+            if r.get("running"):
+                for a in r.get("pending_activity") or []:
+                    await self.log_view.mount(ToolView(a["name"], a.get("args"), ok=a.get("ok"),
+                                                       result=a.get("result"), done=True))
+                await self.note("a turn is running — attached", "warn")
+                self.run_worker(self.attach(cid), group="turn")
+
+        async def c_model(self, arg: str) -> None:
+            if not arg:
+                rows = [(v, v.split("/")[-1], meta) for v, meta in self.arg_options("models")]
+                cur = self.model or self.shown_model or (self.options or {}).get("default")
+                arg = await self.pick("Models", rows, cur, custom=True,
+                                      hint="provider/model · 'default' clears the pin") or ""
+                if not arg:
+                    return
+            if arg in ("default", "none"):
+                self.model = None
+                self.notify("model: server default for new chats")
+                self.refresh_chrome()
+                return
+            known = [m["id"] for m in (self.options or {}).get("models", [])]
+            if known and arg not in known:
+                near = [k for k in known if arg in k]
+                if len(near) != 1:
+                    raise CliError(f"not an enabled model: {arg}")
+                arg = near[0]
+            self.model = arg
+            self.notify(f"model: {arg}" + (" — pinned to this chat from the next message"
+                                           if self.cid else ""))
+            self.refresh_chrome()
+
+        async def c_agent(self, arg: str) -> None:
+            if not arg:
+                rows = [(v, meta or v, "") for v, meta in self.arg_options("agents")]
+                arg = await self.pick("Agents", rows, self.agent or "none", custom=True,
+                                      hint="a new chat starts as the agent you pick") or ""
+                if not arg:
+                    return
+            self.agent = None if arg == "none" else arg
+            await self.c_new()
+            self.notify(f"new chat as {self.agent or 'Jav3'}")
+
+        async def c_project(self, arg: str) -> None:
+            if not arg:
+                rows = [(v, v, meta) for v, meta in self.arg_options("project")]
+                arg = await self.pick("Projects", rows, self.project or self.project_mode,
+                                      custom=True) or ""
+                if not arg:
+                    return
+            mode = arg if arg in ("none", "follow") else "pin"
+            slug = arg if mode == "pin" else None
+            if self.cid is not None:
+                body = {"mode": mode}
+                if slug:
+                    body["project"] = slug
+                await self.api("PATCH", f"/api/conversations/{self.cid}", json=body)
+            self.project, self.project_mode = slug, mode
+            self.notify({"pin": f"project: {slug}",
+                         "none": "project: none — file work goes to the chat's artifacts",
+                         "follow": "project: follows whatever is loaded"}[mode])
+            self.refresh_chrome()
+
+        async def c_theme(self, arg: str) -> None:
+            if not arg:
+                before = self.theme
+                rows = [(t, t, "") for t in sorted(self.available_themes)]
+                arg = await self.pick("Themes", rows, before) or ""
+                if not arg:
+                    return
+            if arg not in self.available_themes:
+                raise CliError(f"no theme {arg!r}")
+            self.theme = arg
+            self._save_settings(theme=arg)
+
+        async def c_temp(self, arg: str) -> None:
+            self.ephemeral = not self.ephemeral
+            if self.ephemeral:
+                await self.c_new()
+                self.notify("temporary: each message is a standalone chat, and nothing is "
+                            "saved", severity="warning")
+            else:
+                self.notify("temporary off")
+            self.refresh_chrome()
+
+        async def c_rename(self, arg: str) -> None:
+            if self.cid is None:
+                raise CliError("no chat yet — send a message first")
+            if not arg:
+                arg = (await self.push_screen_wait(Ask("Rename chat",
+                                                       value=self.title_text or "")) or "").strip()
+                if not arg:
+                    return
+            r = await self.api("PATCH", f"/api/conversations/{self.cid}", json={"title": arg})
+            self.title_text = r.get("title", arg)
+            self.refresh_chrome()
+
+        async def c_star(self, arg: str) -> None:
+            if self.cid is None:
+                raise CliError("no chat yet — send a message first")
+            await self.refresh_convs()
+            cur = next((cv.get("starred") for cv in self.convs if cv.get("id") == self.cid),
+                       False)
+            await self.api("PATCH", f"/api/conversations/{self.cid}", json={"starred": not cur})
+            self.notify("starred" if not cur else "unstarred")
+
+        async def c_delete(self, arg: str) -> None:
+            cid = int(arg) if arg.isdigit() else self.cid
+            if cid is None:
+                raise CliError("no chat to delete")
+            if not await self.push_screen_wait(Confirm(f"Delete chat #{cid}?",
+                                                       "This cannot be undone.")):
+                return
+            await self.api("DELETE", f"/api/conversations/{cid}")
+            self.notify(f"deleted #{cid}")
+            if cid == self.cid:
+                await self.c_new()
+
+        async def c_retry(self, arg: str) -> None:
+            if not self.last_user:
+                raise CliError("nothing to retry")
+            self.send(self.last_user)
+
+        async def c_stop(self, arg: str) -> None:
+            if not self.busy:
+                self.notify("nothing is running")
+                return
+            self.interrupt()
+
+        async def c_copy(self, arg: str) -> None:
+            if not self.last_reply:
+                raise CliError("no reply to copy yet")
+            how = copy_to_clipboard(self.last_reply, osc52=self.copy_to_clipboard)
+            self.notify(f"copied the last reply ({how})")
+
+        async def c_export(self, arg: str) -> None:
+            if self.cid is None:
+                raise CliError("no chat to export")
+            r = await self.api("GET", f"/api/conversations/{self.cid}/messages")
+            path = Path(os.path.expanduser(arg or f"jav3-{self.cid}.md"))
+            path.write_text(transcript_markdown(self.title_text or f"Jav3 chat #{self.cid}",
+                                                r.get("messages", [])))
+            self.notify(f"saved {path}")
+
+        async def c_details(self, arg: str) -> None:
+            self.action_toggle_tools()
+
+        async def c_detach(self, arg: str) -> None:
+            n, self.attachments = len(self.attachments), []
+            self.refresh_chrome()
+            self.notify(f"dropped {n} pending output{'s' * (n != 1)}")
+
+        async def c_web(self, arg: str) -> None:
+            import webbrowser
+            url = self.base + (f"/shell/c/{self.cid}" if self.cid else "/shell")
+            webbrowser.open(url)
+            self.notify(f"opened {url}")
+
+        async def c_status(self, arg: str) -> None:
+            info = self.info or {}
+            rows = [("server", self.base), ("signed in as", self.whoami),
+                    ("chat", f"#{self.cid} {self.title_text or ''}" if self.cid else "(new)"),
+                    ("model", self._model_label()),
+                    ("project", self._project_label() or "none"),
+                    ("agent", self.agent or "none"),
+                    ("temporary", "on" if self.ephemeral else "off"),
+                    ("theme", self.theme), ("cwd", str(Path.cwd()))]
+            if info:
+                rows.append(("usage", f"{info.get('input_tokens', 0):,} in · "
+                                      f"{info.get('output_tokens', 0):,} out · "
+                                      f"${info.get('cost_usd', 0):.4f}"))
+            if self.attachments:
+                rows.append(("pending", f"{len(self.attachments)} !command output(s)"))
+            md = "# Status\n\n| | |\n|---|---|\n" + "\n".join(
+                f"| {k} | {str(v).replace('|', '/')} |" for k, v in rows)
+            await self.push_screen_wait(Help(md))
+
+        async def c_editor(self, arg: str) -> None:
+            self.action_external_editor()
+
+        async def c_login(self, arg: str) -> None:
+            line = await self.push_screen_wait(Ask(PROMPT.rstrip(": "), secret=True))
+            if not line:
+                return
+            err = io.StringIO()
+
+            def go():
+                with contextlib.redirect_stderr(err):
+                    return login_with_line(line, self.server_override)
+            try:
+                base, token, who = await asyncio.to_thread(go)
+            finally:
+                if err.getvalue().strip():
+                    await self.note(err.getvalue().strip(), "warn")
+            self.base, self.token, self.whoami = base, token, who
+            await self.client.aclose()
+            self.client = self._new_client()
+            await self.refresh_options()
+            self.refresh_chrome()
+            self.notify(f"logged in to {base} as {who}")
+
+        async def c_logout(self, arg: str) -> None:
+            if not await self.push_screen_wait(Confirm("Log out?",
+                                                       "Revokes this computer's token and quits.")):
+                return
+            ns = argparse.Namespace(server=self.server_override)
+            await asyncio.to_thread(cmd_logout, ns, io.StringIO())
+            self.exit(message="logged out")
+
+        async def c_exit(self, arg: str = "") -> None:
+            self.exit()
+
+    return Jav3App(base, token, **kw)
+
+
+def transcript_markdown(title: str, messages: list[dict]) -> str:
+    parts = [f"# {title}\n"]
+    for m in messages:
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        parts.append(f"## {'You' if m['role'] == 'user' else 'Jav3'}\n")
+        for a in m.get("activity") or []:
+            icon, title_ = tool_title(a["name"], a.get("args"))
+            parts.append(f"- {icon} {title_}" + ("" if a.get("ok") else " (failed)"))
+        parts.append((m.get("content") or "") + "\n")
+    return "\n".join(parts)
+
+
+def copy_to_clipboard(text: str, osc52=None) -> str:
+    import shutil
+    import subprocess
+    for cmd in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"],
+                ["xsel", "--clipboard", "--input"]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text.encode(), check=True, timeout=5)
+                return cmd[0]
+            except (OSError, subprocess.SubprocessError):
+                continue
+    # OSC 52: most terminals (and tmux with set-clipboard on) put this on the
+    # clipboard even over SSH. Inside the TUI the app writes it, not us.
+    if osc52 is not None:
+        osc52(text)
+        return "OSC 52"
+    import base64
+    sys.stdout.write(f"\033]52;c;{base64.b64encode(text.encode()).decode()}\a")
+    sys.stdout.flush()
+    return "OSC 52"
+
+
+def login_with_line(line: str, server: str | None) -> tuple[str, str, str]:
+    """Run `jav3 login` with an already-read line; (base, token, username)."""
+    ns = argparse.Namespace(server=server)
+    out = io.StringIO()
+    cmd_login(ns, out, read=lambda: line)
+    creds = load_credentials()
+    if not creds:
+        raise CliError("login did not save credentials")
+    base = base_url(server or creds["address"])
+    who = out.getvalue().rsplit("you are ", 1)[-1].strip() or "?"
+    return base, creds["token"], who
+
+
+def _token_works(base: str, token: str) -> bool:
+    """False only on a definite 401; an unreachable server is the TUI's to report."""
+    try:
+        with _client(base, token, timeout=10) as c:
+            return c.get("/api/devices/whoami").status_code != 401
+    except httpx.HTTPError:
+        return True
+
+
+def cmd_tui(args) -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise CliError("the interactive TUI needs a terminal — use jav3 -p <message> "
+                       "for one-shot output")
+    if not tui_available():
+        print(f"jav3: {TUI_HINT}; using the plain REPL", file=sys.stderr)
+        args.message = []
+        return cmd_chat(args)
+    creds = load_credentials()
+    if not creds:
+        print("Not logged in yet.", file=sys.stderr)
+        cmd_login(args, out=sys.stderr)
+    elif not _token_works(base_url(args.server or creds["address"]), creds["token"]):
+        print("The saved login was refused (revoked or expired) — log in again.",
+              file=sys.stderr)
+        cmd_login(args, out=sys.stderr)
+    base, token = _session(args)
+    prompt = " ".join(getattr(args, "prompt", None) or []) or None
+    app = build_tui(base, token, server_override=args.server,
+                    project=getattr(args, "project", None), agent=getattr(args, "agent", None),
+                    model=getattr(args, "model", None), resume=getattr(args, "resume", None),
+                    cont=getattr(args, "cont", False), prompt=prompt)
+    app.run()
+    if app.busy and app.cid:
+        print(f"the turn keeps running on the server — `jav3 -r {app.cid}` re-attaches")
+    if getattr(app, "return_code", 0):
+        return app.return_code
+    return 0
+
+
+def cmd_print(args, out=sys.stdout) -> int:
+    """`jav3 -p message` (or a pipe): one turn, plain text, for scripts."""
+    msg = " ".join(args.prompt or [])
+    if not sys.stdin.isatty():
+        piped = sys.stdin.read()
+        msg = f"{msg}\n\n{piped}".strip() if msg else piped.strip()
+    if not msg:
+        raise CliError("nothing to send")
+    base, token = _session(args)
+    with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
+        try:
+            run_turn(c, msg, getattr(args, "resume", None), args.project, out)
+        except httpx.HTTPError as e:
+            raise CliError(f"connection to {base} failed: {e}")
+    return 0
+
+
+# --- arguments ---------------------------------------------------------------------------
+
+SUBCOMMANDS = ("login", "chat", "whoami", "logout")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="jav3", description="Terminal client for a Jav3 server.")
+    p = argparse.ArgumentParser(
+        prog="jav3", description="Terminal client for a Jav3 server. With no command, "
+        "starts the interactive TUI (optionally with a first message).",
+        usage="jav3 [options] [message ...]\n       jav3 {login,chat,whoami,logout} ...")
     p.add_argument("--server", help="server address (host:port or URL), overriding the saved one")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p.add_argument("-p", "--print", dest="print_mode", action="store_true",
+                   help="send the message (or stdin), print the reply, exit")
+    p.add_argument("-c", "--continue", dest="cont", action="store_true",
+                   help="resume the most recent chat")
+    p.add_argument("-r", "--resume", type=int, metavar="ID", help="resume chat ID")
+    p.add_argument("--model", help="provider/model for this session's chats")
+    p.add_argument("--agent", help="start the new chat as this agent")
+    p.add_argument("--project", help="pin a new conversation to this project slug")
+    sub = p.add_subparsers(dest="cmd")
     # the line is read from the terminal (or a pipe), never argv: argv lands in
     # shell history and is visible to every user via ps
     sub.add_parser("login", help="log in with the line from Settings → Add computer")
-    ch = sub.add_parser("chat", help="send a message, or start a REPL with none")
+    ch = sub.add_parser("chat", help="send a message, or start the TUI with none")
     ch.add_argument("message", nargs="*")
     ch.add_argument("--project", help="pin a new conversation to this project slug")
     sub.add_parser("whoami", help="show who the saved token authenticates as")
@@ -424,12 +2550,43 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Subcommands as before; anything else is the TUI, and free words are its
+    first message (`jav3 fix the tests`)."""
+    parser = build_parser()
+    takes_value = {"--server", "-r", "--resume", "--model", "--agent", "--project"}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("-"):
+            i += 1 if ("=" in a or a not in takes_value) else 2
+            continue
+        break
+    if i < len(argv) and argv[i] in SUBCOMMANDS:
+        args = parser.parse_args(argv)
+        args.prompt = []
+        return args
+    words = [w for w in argv[i:] if w != "--"] if i < len(argv) else []
+    head = [w for w in argv[:i] if w != "--"]
+    args = parser.parse_args(head)
+    args.prompt = words
+    return args
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    cmds = {"login": cmd_login, "chat": cmd_chat, "whoami": cmd_whoami,
-            "logout": cmd_logout}
+    argv = sys.argv[1:] if argv is None else argv
     try:
-        return cmds[args.cmd](args)
+        args = parse_args(argv)
+        cmds = {"login": cmd_login, "chat": cmd_chat, "whoami": cmd_whoami,
+                "logout": cmd_logout}
+        if args.cmd:
+            return cmds[args.cmd](args)
+        if args.print_mode or not sys.stdin.isatty():
+            return cmd_print(args)
+        return cmd_tui(args)
     except CliError as e:
         print(f"jav3: {e}", file=sys.stderr)
         return 1
