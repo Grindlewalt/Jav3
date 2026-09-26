@@ -10,6 +10,16 @@ import { sevClass, ts } from '../format.js'
 import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
+import Button from '../components/Button.jsx'
+import { listServices } from '../boxes/api/services.js'
+import { listPackages } from '../boxes/api/packages.js'
+import { listProfiles } from '../boxes/api/profiles.js'
+import { listImages } from '../boxes/api/images.js'
+import { approvePending, rejectPending } from '../boxes/api/policy.js'
+import { needsProject } from '../boxes/logic.js'
+import {
+  PackageApprove, PackageSummary, ServiceRequest, usePackageReject,
+} from '../boxes/RequestCards.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
 // requests, egress host approvals, and security alerts (which now include the
@@ -35,6 +45,14 @@ export function ReviewQueue({ slug }) {
   const [alerts, setAlerts] = useState([])                   // unacknowledged security events
   const [busy, setBusy] = useState(false)
   const [board, setBoard] = useState(null)   // {id, seed} — the open evidence board
+  // the boxes requests (WP3 services, WP5 packages). Either route may not
+  // exist on this server yet: then the section simply never shows.
+  const [svcReqs, setSvcReqs] = useState([])
+  const [lan, setLan] = useState(null)       // {ip, configured, error}
+  const [pkgReqs, setPkgReqs] = useState([])
+  const [profiles, setProfiles] = useState([])
+  const [variants, setVariants] = useState(null)
+  const [approvingPkg, setApprovingPkg] = useState(null)
   const loc = useLocation()
   const ask = useAsk()
 
@@ -74,10 +92,32 @@ export function ReviewQueue({ slug }) {
     }).catch(() => {})
   }
 
+  function loadBoxReqs() {
+    listServices(slug || undefined).then((r) => {
+      setSvcReqs(r.services.filter((x) => x.status === 'pending'))
+      setLan({ ip: r.lanIp, configured: r.lanConfigured, error: r.lanError })
+    }).catch(() => setSvcReqs([]))
+    listPackages('pending').then((rows) =>
+      setPkgReqs(slug ? rows.filter((r) => r.project_slug === slug) : rows))
+      .catch(() => setPkgReqs([]))
+  }
+  useEffect(() => {
+    listProfiles().then(setProfiles).catch(() => {})
+    listImages().then((r) => setVariants(r.variants)).catch(() => {})
+  }, [])
+  const rejectPkg = usePackageReject(loadBoxReqs)
+  const placementOf = (proj) => {
+    const p = profiles.find((x) => (x.projects || []).includes(proj))
+      || profiles.find((x) => x.builtin && /^default$/i.test(x.name))
+    return p?.service_placement || ''
+  }
+
   const key = slugs ? slugs.join(',') : ''
   useEffect(() => {
     if (!slugs) return
-    const refresh = () => { slugs.forEach(loadProject); loadEgress(); loadAlerts() }
+    const refresh = () => {
+      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadBoxReqs()
+    }
     refresh()
     const t = setInterval(refresh, 12000)
     const h = () => refresh()
@@ -110,9 +150,27 @@ export function ReviewQueue({ slug }) {
     } catch (e) { notifyError(e) }
     setBusy(false)
   }
-  async function egressAct(id, verb) {
-    try { await api(`/api/egress/pending/${id}/${verb}`, { method: 'POST' }); loadEgress() }
-    catch (e) { notifyError(e) }
+  // An unattributed row (shared box, no project) is approved onto a project's
+  // list the operator names; the host answers 409 without one.
+  async function egressAct(p, verb) {
+    try {
+      if (verb === 'approve') {
+        let proj = null
+        if (needsProject(p)) {
+          const choices = (slugs || []).filter((x) => !x.startsWith('__'))
+          const got = await ask.prompt(`${p.host} came from no project. Whose list should it go on?`
+            + (choices.length ? ` (${choices.join(', ')})` : ''), slug || (choices.length === 1 ? choices[0] : ''),
+          { confirmLabel: 'Allow' })
+          proj = (got || '').trim()
+          if (!proj) return
+          if (choices.length && !choices.includes(proj)) { notifyError(new Error(`no project "${proj}"`)); return }
+        }
+        await approvePending(p.id, proj)
+      } else {
+        await rejectPending(p.id)
+      }
+      loadEgress()
+    } catch (e) { notifyError(e) }
   }
   async function ackAlert(id) {
     try { await api(`/api/security/events/${id}/ack`, { method: 'POST' })
@@ -158,7 +216,7 @@ export function ReviewQueue({ slug }) {
   const multi = !slug && (slugs?.length || 0) > 1
   const projLabel = (s) => names[s] || s
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
-  const total = alerts.length + gitTotal + pending.length
+  const total = alerts.length + gitTotal + pending.length + svcReqs.length + pkgReqs.length
 
   if (!slugs) return <div className="dim center-pad">…</div>
 
@@ -201,6 +259,48 @@ export function ReviewQueue({ slug }) {
         </section>
       )}
 
+      {/* ---- service requests: each one individually, never in bulk, and
+             never auto-handled (the reviewer's never-list) ---- */}
+      {svcReqs.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Service requests</h3>
+            <span className="sec-count">{svcReqs.length}</span>
+          </div>
+          {svcReqs.map((x) => (
+            <ServiceRequest key={x.id} s={x} lan={lan}
+                            profilePlacement={placementOf(x.project_slug)}
+                            onDone={loadBoxReqs} />
+          ))}
+        </section>
+      )}
+
+      {/* ---- package requests ---- */}
+      {pkgReqs.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Package requests</h3>
+            <span className="sec-count">{pkgReqs.length}</span>
+          </div>
+          {pkgReqs.map((p) => (
+            <div key={p.id} className="sbx-row sev-warn bx-cat-row">
+              <div className="grow"><PackageSummary p={p} />
+                {p.card && <div className="small bx-reach">{p.card}</div>}</div>
+              <div className="sbx-right bx-cat-right">
+                <span className="small">into <code>{p.target_variant}</code></span>
+                <span className="row">
+                  <Button variant="ghost" onClick={() => setApprovingPkg(p)}>Approve…</Button>
+                  <Button variant="ghost" danger onClick={() => rejectPkg(p)}>Reject</Button>
+                </span>
+              </div>
+            </div>
+          ))}
+          <PackageApprove p={approvingPkg} variants={variants}
+                          onClose={() => setApprovingPkg(null)}
+                          onDone={() => { setApprovingPkg(null); loadBoxReqs() }} />
+        </section>
+      )}
+
       {/* ---- egress host approvals ---- */}
       {pending.length > 0 && (
         <section className="sbx-sec">
@@ -226,11 +326,12 @@ export function ReviewQueue({ slug }) {
                 <span className="grow ellipsis" title={p.host}>{p.host}</span>
                 {p.triage_verdict === 'flag' && (
                   <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
-                {!slug && p.project_slug && <span className="tag">{p.project_slug}</span>}
-                <button className="win-btn ok" title="approve host"
-                        onClick={() => egressAct(p.id, 'approve')}>✓</button>
+                {!slug && p.project_slug && !needsProject(p) && <span className="tag">{p.project_slug}</span>}
+                {needsProject(p) && <span className="tag pending" title="pick the project on approve">unattributed</span>}
+                <button className="win-btn ok" title={needsProject(p) ? 'approve host for a project…' : 'approve host'}
+                        onClick={() => egressAct(p, 'approve')}>✓</button>
                 <button className="win-btn" title="reject host"
-                        onClick={() => egressAct(p.id, 'reject')}>✕</button>
+                        onClick={() => egressAct(p, 'reject')}>✕</button>
               </li>
             ))}
           </ul>
@@ -332,7 +433,9 @@ export default function Review() {
           actions={(
             <Tabs label="Security sections" items={[
               { to: '/security', end: true, label: 'Queue', count },
+              { to: '/security/persistent', label: 'Persistent' },
               { to: '/security/network', label: 'Network' },
+              { to: '/security/profiles', label: 'Profiles' },
               { to: '/security/logs', label: 'Logs' },
               { to: '/security/secrets', label: 'Secrets' },
             ]} />

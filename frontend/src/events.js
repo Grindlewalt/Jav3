@@ -29,7 +29,13 @@
 
 import { TAB_ID, tabName } from './tab.js'
 
-export const TOPICS = ['gui', 'security', 'notices', 'egress']
+// The topics this app reads. The stream itself is opened with NO topics
+// parameter, which the host answers with every topic it has: naming a topic
+// the host does not know yet is a 400 for the whole stream, so the boxes
+// topics (`procs`, WP4; `vm-images`, WP5; `vm-boxes`, WP1) start flowing the moment the backend
+// registers them in events_api.TOPICS, with no frontend change and no risk to
+// the four existing feeds before then.
+export const TOPICS = ['gui', 'security', 'notices', 'egress', 'procs', 'vm-images', 'vm-boxes']
 
 // the old per-feed URLs, so api.js subscribeSse callers need not change
 export const URL_TOPIC = {
@@ -91,7 +97,7 @@ function lead() {
   }
 
   const connect = () => {
-    es = new EventSource('/api/events?topics=' + TOPICS.join(','))
+    es = new EventSource('/api/events')
     es.onmessage = (m) => {
       let f
       try { f = JSON.parse(m.data) } catch { return }
