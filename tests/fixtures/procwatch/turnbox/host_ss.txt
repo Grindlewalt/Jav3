@@ -1,0 +1,10 @@
+ESTAB 0      0      10.201.10.1:8443  10.201.10.2:43210
+	 ts sack cubic wscale:7,7 rto:204 mss:1448 cwnd:10 bytes_sent:48213 bytes_acked:48214 bytes_received:1520 segs_out:52 segs_in:40
+ESTAB 0      0      10.201.10.1:8443  10.201.10.2:51000
+	 ts sack cubic wscale:7,7 rto:204 mss:1448 cwnd:10 bytes_sent:3100 bytes_acked:3101 bytes_received:9010000 segs_out:900 segs_in:6300
+ESTAB 0      0      10.201.10.1:8443  10.201.10.2:52000
+	 ts sack cubic wscale:7,7 rto:204 mss:1448 cwnd:10 bytes_sent:800 bytes_acked:801 bytes_received:250000 segs_out:30 segs_in:180
+ESTAB 0      0      10.201.10.1:39000 10.201.10.2:8000
+	 ts sack cubic wscale:7,7 rto:204 mss:1448 cwnd:10 bytes_sent:410 bytes_acked:411 bytes_received:20480 segs_out:10 segs_in:20
+ESTAB 0      0      10.201.11.1:8443  10.201.11.2:40001
+	 ts sack cubic bytes_sent:1 bytes_received:1

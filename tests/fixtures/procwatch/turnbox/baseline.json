@@ -1,0 +1,25 @@
+{
+ "v": 1,
+ "entries": [
+  {
+   "exe": "/usr/lib/systemd/systemd",
+   "unit": "init.scope"
+  },
+  {
+   "exe": "/usr/lib/systemd/systemd-journald",
+   "unit": "systemd-journald.service"
+  },
+  {
+   "exe": "/usr/bin/dbus-daemon",
+   "unit": "dbus.service"
+  },
+  {
+   "exe": "/usr/sbin/cron",
+   "unit": "cron.service"
+  },
+  {
+   "exe": "/usr/bin/python3.13",
+   "unit": "jarvis-guest.service"
+  }
+ ]
+}
