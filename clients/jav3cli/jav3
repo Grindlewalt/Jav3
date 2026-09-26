@@ -2026,7 +2026,8 @@ def build_tui(base: str, token: str, **kw):
                   ("allow_package_requests", "may request packages", "bool")]
 
         def __init__(self, profile: dict | None, secret_names: list[str] | None = None,
-                     variants: list[str] | None = None) -> None:
+                     variants: list[str] | None = None,
+                     runtimes: dict | None = None) -> None:
             super().__init__()
             self.editing = profile
             p = profile or {}
@@ -2049,6 +2050,7 @@ def build_tui(base: str, token: str, **kw):
             }
             self.secret_names = secret_names or []
             self.variants = variants or []
+            self.runtimes = runtimes or {}        # GET /api/vm/boxes `runtimes`
             self.cur = 0
             self.error = ""
 
@@ -2096,6 +2098,7 @@ def build_tui(base: str, token: str, **kw):
             if self.v["box_runtime"] == "docker":
                 lines.append(f"\n{AMBER} docker [/] less isolated than a KVM box: the "
                              "container shares the host kernel")
+                lines += _docker_notes(self.runtimes)
             if self.error:
                 lines.append(f"\n[$error b]{_esc(self.error)}[/]")
             self.query_one("#pf-body", Static).update("\n".join(lines))
@@ -2125,8 +2128,22 @@ def build_tui(base: str, token: str, **kw):
                 says = {"kvm": "a KVM virtual machine (strongest)",
                         "docker": "a hardened container: less isolated than a VM",
                         **PLACEMENT_SAYS}
+                off = {}
+                if key == "box_runtime":
+                    for rt in kind:
+                        info = self.runtimes.get(rt)
+                        if isinstance(info, dict) and info.get("available") is False:
+                            off[rt] = str(info.get("reason") or "unavailable")
+                            says[rt] = f"UNAVAILABLE: {off[rt]}"
+                        elif rt == "docker" and isinstance(info, dict) and info.get("weak"):
+                            says[rt] += " — WEAK here: " + ("; ".join(
+                                map(str, _jlist(info.get("warnings")))) or "no user namespace")
                 rows = [(c, c, says.get(c, "")) for c in kind]
                 v = await self.app.push_screen_wait(Picker(label, rows, self.v[key]))
+                if v is not None and v in off:
+                    self.error = f"{v} is unavailable on this host: {off[v]}"
+                    self.redraw()
+                    return
                 if v is not None:
                     self.v[key] = v
             else:
@@ -2669,6 +2686,19 @@ def build_tui(base: str, token: str, **kw):
         return "\n\n".join(parts)
 
     # -- boxes, services, processes, profiles, packages (docs/boxes-contract.md) --------
+
+    def _docker_notes(runtimes: dict) -> list[str]:
+        """What GET /api/vm/boxes `runtimes.docker` says about this host: why
+        docker is unavailable, or the warnings when it would run weak."""
+        d = (runtimes or {}).get("docker")
+        if not isinstance(d, dict):
+            return []
+        if d.get("available") is False:
+            return [f"[$error b]docker is unavailable here:[/] {_esc(str(d.get('reason') or '?'))}"]
+        if d.get("weak"):
+            ws = _jlist(d.get("warnings")) or ["no user namespace"]
+            return [f"{RED} WEAK ISOLATION [/] " + _esc(w) for w in ws]
+        return []
 
     def _runtime_tag(rt) -> str:
         if rt == "docker":
@@ -3262,7 +3292,11 @@ def build_tui(base: str, token: str, **kw):
             return out
 
         async def _load_profiles(self):
-            ps = await self._get("profiles", "profiles", "/api/profiles", "profiles")
+            ps, vm = await asyncio.gather(
+                self._get("profiles", "profiles", "/api/profiles", "profiles"),
+                self._get("profiles", "runtimes", "/api/vm/boxes", "", quiet404=True))
+            if vm is not None:
+                self.runtimes = vm.get("runtimes") or {}
             if ps is None:
                 return None
             self.profiles = ps
@@ -3585,8 +3619,10 @@ def build_tui(base: str, token: str, **kw):
             p = e["raw"]
             keys = ("[$primary]p[/] assign to a project   [$primary]e[/] edit   "
                     "[$primary]a[/] new profile"
-                    + ("" if p.get("builtin") else "   [$primary]d[/] delete"))
-            return "\n".join([keys, ""] + _profile_lines(p))
+                    + ("   [$text-muted]builtin: cannot be deleted[/]" if p.get("builtin")
+                       else "   [$primary]d[/] delete"))
+            notes = _docker_notes(self.runtimes) if p.get("box_runtime") == "docker" else []
+            return "\n".join([keys, ""] + _profile_lines(p) + ([""] + notes if notes else []))
 
         @staticmethod
         def _paths(r: dict) -> list[str]:
@@ -4412,7 +4448,7 @@ def build_tui(base: str, token: str, **kw):
             have = set(_jlist(p.get("projects")))
             rows = [(x["slug"], x.get("name") or x["slug"],
                      "already on it" if x["slug"] in have else "")
-                    for x in ps if x.get("slug")]
+                    for x in ps if x.get("slug") and x["slug"] != IMAGE_BUILD]
             slug = await self.app.push_screen_wait(Picker(
                 f"Assign {p.get('name')} to which project", rows))
             if slug is None:
@@ -4452,7 +4488,8 @@ def build_tui(base: str, token: str, **kw):
                     "GET", "/api/secrets") or {}).get("secrets") or [] if s.get("name")]
             except CliError:
                 pass
-            v = await self.app.push_screen_wait(ProfileForm(p, names))
+            v = await self.app.push_screen_wait(ProfileForm(p, names,
+                                                            runtimes=self.runtimes))
             if not v:
                 return
             if p is None:

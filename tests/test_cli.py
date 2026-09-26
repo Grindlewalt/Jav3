@@ -2329,6 +2329,46 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
                             in _posts(seen))
 
 
+async def test_tui_profiles_runtimes_weak_unavailable_and_server_refusals(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["profiles"] and scr.runtimes)
+        scr.select_key("R2")                                  # the docker profile
+        d = _text(scr.query_one("#sec-detail"))
+        assert "WEAK ISOLATION" in d and "no user namespace" in d
+        # a 422's pydantic detail reads as field: message
+        await scr._send("POST", "/api/profiles", "x", json={"name": "Bad"})
+        sub = _text(scr.query_one("#sec-sub"))
+        assert "422" in sub and "service_placement: Field required" in sub
+        # a builtin's 409 from the server is shown as it came
+        await scr._send("DELETE", "/api/profiles/1", "x")
+        assert "a builtin profile cannot be deleted" in _text(scr.query_one("#sec-sub"))
+    # docker off on the host: greyed with its reason, and refused in the form
+    seen = []
+    app = jav3.build_tui("http://h:1", "session:sess",
+                         transport=_boxes_server(seen, docker_ok=False))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["profiles"] and scr.runtimes)
+        await pilot.press("a")
+        assert await _modal(pilot, app, "ProfileForm")
+        form = app.screen
+        form.cur = 1
+        await pilot.press("enter")
+        assert await _modal(pilot, app, "Picker")
+        docker = next(r for r in app.screen.rows if r[0] == "docker")
+        assert "UNAVAILABLE: docker_enabled is off" in docker[2]
+        await pilot.press("down", "enter")
+        assert await _until(pilot, lambda: app.screen is form)
+        await pilot.pause(0.1)
+        assert form.v["box_runtime"] is None and "docker_enabled is off" in form.error
+
+
 async def test_tui_profile_edit_keeps_explicit_values(cfg):
     pytest.importorskip("textual")
     seen: list = []
