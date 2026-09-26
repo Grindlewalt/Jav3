@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import agentmsg, autonomy, bus, compaction, gui, localexec, providers, runtime
+from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, providers, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink
@@ -1196,9 +1196,6 @@ async def operator_message(conversation_id: int, body: OperatorMessage):
     return {"queued": True}
 
 
-# how many of the newest roots the agents tree shows, besides every running one
-AGENT_TREE_ROOTS = 50
-
 # a conversation is a root of the agents tree when it has no parent and is
 # agent work of some kind: an orchestrator, a job/agent node, an agent thread,
 # or an ordinary chat that spawned agent work (it is shown as the root). A
@@ -1214,7 +1211,9 @@ WHERE c.parent_conversation_id IS NULL AND c.ephemeral = 0
 # ...and its nodes: the roots plus every descendant that is not itself a plain
 # chat (voice continues a conversation as a kind='chat' child; that is the same
 # conversation carried on, not an agent). UNION, not UNION ALL, so a malformed
-# parent cycle terminates.
+# parent cycle terminates. The message subqueries feed agenttree: the task
+# (first user message) for the title, the last message for how and when the
+# node ended — each an index hit on idx_messages_conv.
 _TREE_SQL = """
 WITH RECURSIVE tree(id) AS (
     SELECT value FROM json_each(?)
@@ -1223,13 +1222,22 @@ WITH RECURSIVE tree(id) AS (
     WHERE c.kind != 'chat' AND c.ephemeral = 0
 )
 SELECT c.id, c.parent_conversation_id AS parent_id, c.kind, c.mode,
-       c.summary AS title, c.agent_slug, c.model, c.started_at, c.job_id,
-       c.rollup, p.slug AS project
+       c.summary, c.title AS gen_title, c.agent_slug, c.model, c.started_at,
+       c.job_id, c.rollup, p.slug AS project,
+       (SELECT substr(m.content, 1, 2000) FROM messages m
+        WHERE m.conversation_id = c.id AND m.role = 'user'
+        ORDER BY m.id LIMIT 1) AS task,
+       (SELECT m.role FROM messages m WHERE m.conversation_id = c.id
+        ORDER BY m.id DESC LIMIT 1) AS last_role,
+       (SELECT substr(m.content, 1, 64) FROM messages m WHERE m.conversation_id = c.id
+        ORDER BY m.id DESC LIMIT 1) AS last_head,
+       (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id
+        ORDER BY m.id DESC LIMIT 1) AS last_at
 FROM conversations c JOIN tree t ON t.id = c.id
 LEFT JOIN projects p ON p.id = c.project_id
 """
 
-# walk up from a running node to its root
+# walk up from a running (or waiting) node to its root
 _ROOT_OF_SQL = """
 WITH RECURSIVE up(id, parent, d) AS (
     SELECT id, parent_conversation_id, 0 FROM conversations WHERE id = ?
@@ -1238,6 +1246,23 @@ WITH RECURSIVE up(id, parent, d) AS (
     JOIN up ON c.id = up.parent WHERE up.d < 32
 )
 SELECT id FROM up ORDER BY d DESC LIMIT 1
+"""
+
+# every tree root with the time of the latest thing in its subtree (a message,
+# or a node starting): the finished list's newest-first order, computed for all
+# roots in one pass so a page does not have to load every subtree to sort
+_ROOT_LAST_SQL = """
+WITH RECURSIVE tree(root, id) AS (
+    SELECT id, id FROM (""" + _TREE_ROOT_SQL + """)
+    UNION
+    SELECT t.root, c.id FROM conversations c JOIN tree t ON c.parent_conversation_id = t.id
+    WHERE c.kind != 'chat' AND c.ephemeral = 0
+)
+SELECT t.root AS id,
+       MAX(MAX(COALESCE((SELECT MAX(m.created_at) FROM messages m
+                         WHERE m.conversation_id = t.id), ''), c.started_at)) AS last
+FROM tree t JOIN conversations c ON c.id = t.id
+GROUP BY t.root
 """
 
 
@@ -1254,62 +1279,123 @@ def _running_loops() -> set[int]:
     return ids
 
 
+async def _roots_of(db, ids) -> list[int]:
+    out: list[int] = []
+    for cid in sorted(ids):
+        async with db.execute(_ROOT_OF_SQL, (cid,)) as cur:
+            r = await cur.fetchone()
+        if r and r["id"] not in out:
+            out.append(r["id"])
+    return out
+
+
+async def _tree_groups(db, roots: list[int], live: set[int], needs: dict,
+                       plans) -> dict[int, list[dict]]:
+    """root id -> its nodes in the wire shape, the root first and then its
+    descendants depth-first. A root that is a plain chat with nothing under it
+    (pulled in only because its own turn runs, or waits) is not agent work and
+    has no entry."""
+    if not roots:
+        return {}
+    async with db.execute(_TREE_SQL, (json.dumps(roots),)) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    agenttree.decorate(rows, live, needs, plans)
+    by_id = {r["id"]: r for r in rows}
+    rootset = set(roots)
+    kids: dict[int, list[dict]] = {}
+    for r in rows:
+        if r["parent_id"] in by_id and r["id"] not in rootset:
+            kids.setdefault(r["parent_id"], []).append(r)
+    out: dict[int, list[dict]] = {}
+
+    def walk(r: dict, acc: list[dict]) -> None:
+        if r["kind"] == "chat" and not r["mode"] and not r["agent_slug"] \
+                and r["id"] not in kids:
+            return
+        acc.append({
+            "id": r["id"],
+            "parent_id": r["parent_id"] if r["parent_id"] in by_id else None,
+            "kind": "orchestrator" if r["mode"] == "orchestrate" else r["kind"],
+            # `title` was the raw summary; it is now the clean one, and the raw
+            # text stays available as `summary`
+            "title": r["clean_title"], "summary": r["summary"] or "",
+            "role": r["role"], "status": r["status"], "needs": r["needs"],
+            "agent_slug": r["agent_slug"], "project": r["project"],
+            "model": r["model"], "running": r["id"] in live,
+            "started_at": r["started_at"], "ended_at": r["ended_at"]})
+        for k in sorted(kids.get(r["id"], ()), key=lambda k: k["id"]):
+            walk(k, acc)
+
+    for i in roots:
+        if i in by_id:
+            acc: list[dict] = []
+            walk(by_id[i], acc)
+            if acc:
+                out[i] = acc
+    return out
+
+
 @router.get("/chat/agents")
-async def agents_tree():
+async def agents_tree(scope: Literal["active", "finished", "all"] = "active",
+                      limit: int = agenttree.FINISHED_DEFAULT, offset: int = 0):
     """Every orchestrator, agent and job across all projects, as one flat list
-    of nodes the client nests by parent_id: everything running, plus the
-    newest AGENT_TREE_ROOTS roots with their whole subtrees. Roots come first,
-    newest first, each followed by its descendants depth-first."""
+    of nodes the client nests by parent_id: each root followed by its
+    descendants depth-first. Each node carries a clean `title`, a `role`, a
+    `status` (running | needs_you | done | failed | stopped), `needs` (why the
+    operator is wanted, or null) and `ended_at` — agenttree.py has the rules.
+
+    scope=active (default): every root that is running or has a needs_you node
+    anywhere under it, newest first, with its whole subtree.
+    scope=finished: every other root, newest first by when its subtree last
+    did anything, paged by limit (default 100, max 500) and offset, with
+    `total` = how many finished roots there are.
+    scope=all: the historic view — the newest 50 roots plus every active one."""
+    limit = max(1, min(limit, agenttree.FINISHED_MAX))
+    offset = max(0, offset)
     live = _running_loops()
     db = await get_db()
     try:
-        async with db.execute(
-            _TREE_ROOT_SQL + " ORDER BY c.started_at DESC, c.id DESC LIMIT ?",
-            (AGENT_TREE_ROOTS,)) as cur:
-            roots = [r["id"] for r in await cur.fetchall()]
         # a running head is live without a loop of its own
         async with db.execute(
             "SELECT id, job_id, rollup FROM conversations "
             "WHERE kind = 'head' AND rollup IS NULL") as cur:
-            heads = {r["id"] for r in await cur.fetchall() if _head_running(r)}
-        live |= heads
-        for cid in sorted(live):
-            async with db.execute(_ROOT_OF_SQL, (cid,)) as cur:
-                r = await cur.fetchone()
-            if r and r["id"] not in roots:
-                roots.append(r["id"])
-        async with db.execute(_TREE_SQL, (json.dumps(roots),)) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
+            live |= {r["id"] for r in await cur.fetchall() if _head_running(r)}
+        plans = await agenttree.Plans.load(db)
+        needs = await agenttree.collect_needs(db, plans)
+        # an active root is the root of something running or waiting; which of
+        # those really are active is decided on the decorated subtree (a
+        # waiting plain-chat child is not in the tree, so it activates nothing)
+        seeds = await _roots_of(db, live | set(needs))
+        groups = await _tree_groups(db, seeds, live, needs, plans)
+        active = [i for i in seeds if i in groups and any(
+            n["status"] in ("running", "needs_you") for n in groups[i])]
+        total = None
+        if scope == "finished":
+            async with db.execute(_ROOT_LAST_SQL) as cur:
+                order = sorted(((r["last"] or "", r["id"]) for r in await cur.fetchall()),
+                               reverse=True)
+            skip = set(active)
+            finished = [i for _, i in order if i not in skip]
+            total = len(finished)
+            roots = finished[offset:offset + limit]
+            groups = await _tree_groups(db, roots, live, needs, plans)
+        elif scope == "all":
+            async with db.execute(
+                _TREE_ROOT_SQL + " ORDER BY c.started_at DESC, c.id DESC LIMIT ?",
+                (agenttree.ALL_ROOTS,)) as cur:
+                roots = [r["id"] for r in await cur.fetchall()]
+            roots += [i for i in active if i not in roots]
+            groups = await _tree_groups(db, roots, live, needs, plans)
+        else:
+            roots = active
     finally:
         await db.close()
-    # a root pulled in only because something under it runs must itself be agent
-    # work or have agent work under it — a running plain chat is not a node
-    by_id = {r["id"]: r for r in rows}
-    kids: dict[int, list[dict]] = {}
-    for r in rows:
-        if r["parent_id"] in by_id and r["id"] not in roots:
-            kids.setdefault(r["parent_id"], []).append(r)
-    ordered = sorted((by_id[i] for i in roots if i in by_id),
-                     key=lambda r: (r["started_at"] or "", r["id"]), reverse=True)
-    out: list[dict] = []
-
-    def walk(r: dict) -> None:
-        if r["kind"] == "chat" and not r["mode"] and not r["agent_slug"] \
-                and r["id"] not in kids:
-            return
-        out.append({
-            "id": r["id"],
-            "parent_id": r["parent_id"] if r["parent_id"] in by_id else None,
-            "kind": "orchestrator" if r["mode"] == "orchestrate" else r["kind"],
-            "title": r["title"] or "", "agent_slug": r["agent_slug"],
-            "project": r["project"], "model": r["model"],
-            "running": r["id"] in live, "started_at": r["started_at"]})
-        for k in sorted(kids.get(r["id"], ()), key=lambda k: k["id"]):
-            walk(k)
-
-    for r in ordered:
-        walk(r)
-    return {"nodes": out}
+    if scope != "finished":
+        # newest first by start, the order the tree always listed roots in
+        roots = sorted((i for i in roots if i in groups),
+                       key=lambda i: (groups[i][0]["started_at"] or "", i), reverse=True)
+    nodes = [n for i in roots for n in groups.get(i, ())]
+    return {"nodes": nodes} if total is None else {"nodes": nodes, "total": total}
 
 
 @router.post("/chat/{conversation_id}/stop")

@@ -301,7 +301,8 @@ async def test_agents_tree_nests_every_kind_and_marks_running(client, monkeypatc
     vm_turn._live.add(item)
     budget_mod.register("jobA", budget_mod.Budget(1000, 1000))
     try:
-        r = await client.get("/api/chat/agents")
+        # scope=all: the historic view (the default is now active roots only)
+        r = await client.get("/api/chat/agents", params={"scope": "all"})
     finally:
         budget_mod.release("jobA")
         vm_turn._live.discard(item)
@@ -319,8 +320,10 @@ async def test_agents_tree_nests_every_kind_and_marks_running(client, monkeypatc
     assert nodes[orch]["running"] is False
     order = [n["id"] for n in r.json()["nodes"]]
     assert order.index(orch) < order.index(head) < order.index(item)
+    # every field older clients read is still there, plus agenttree's
     assert set(nodes[orch]) == {"id", "parent_id", "kind", "title", "agent_slug",
-                                "project", "model", "running", "started_at"}
+                                "project", "model", "running", "started_at",
+                                "summary", "role", "status", "needs", "ended_at"}
 
 
 async def test_node_transcripts_open_through_the_chat_router(client):
@@ -380,7 +383,7 @@ async def test_an_orchestrator_turn_gets_its_prompt_tools_and_cap(client, monkey
     finally:
         await db.close()
     assert (row["mode"], row["kind"]) == ("orchestrate", "chat")
-    nodes = (await client.get("/api/chat/agents")).json()["nodes"]
+    nodes = (await client.get("/api/chat/agents", params={"scope": "all"})).json()["nodes"]
     assert any(n["id"] == cid and n["kind"] == "orchestrator" for n in nodes)
     # an ordinary chat is offered no plan_status
     seen.clear()

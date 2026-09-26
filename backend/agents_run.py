@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import bus
+from . import agenttree, bus
 from .agent.loop import db_tool_sink
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .vm.turn import run_agent_turn
@@ -215,6 +215,9 @@ async def _open_run(db, agent: dict, task: str, active=_USE_DB, *,
     that job's node; `title` overrides the default `[name] task…` summary —
     the plan runner titles items `[item i3] …` so the peer roster names them."""
     active = await resolve_run_project(db, agent, active)
+    # a caller-given title (the plan runner's "[item i3] <item title>") already
+    # names the node; only the default "[name] task cut at 40" gets a naming pass
+    named = title is not None
     title = title or f"[{agent['name']}] " + " ".join(task.split())[:40]
     # parent: the turn that dispatched spawn_agent/spawn_temp_agent (the broker
     # restores runtime.conversation_id for a guest turn), so the run tree stays
@@ -234,6 +237,8 @@ async def _open_run(db, agent: dict, task: str, active=_USE_DB, *,
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
     await db.commit()
+    if not named:
+        agenttree.name_later(conversation_id, task)
     return conversation_id, active
 
 
@@ -427,6 +432,7 @@ async def run_agent(slug: str, body: RunAgent):
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
             (conversation_id, body.task))
         await db.commit()
+        agenttree.name_later(conversation_id, body.task)
     finally:
         await db.close()
 

@@ -1,6 +1,6 @@
 import pytest
 
-from backend import gui
+from backend import agenttree, gui
 from backend.config import settings
 
 
@@ -19,6 +19,15 @@ def clean_player():
                        "duration": None, "queue": 0, "volume": 100,
                        "started": False, "error": ""})
     yield
+
+
+@pytest.fixture(autouse=True)
+def no_node_naming(monkeypatch):
+    """Spawned agents get a background naming call (agenttree.name_later). A
+    test that scripts model.complete call by call would see that extra call
+    consume one of its scripted replies, so it is off unless a test turns it
+    back on."""
+    monkeypatch.setattr(agenttree, "NAMING", False)
 
 
 @pytest.fixture
