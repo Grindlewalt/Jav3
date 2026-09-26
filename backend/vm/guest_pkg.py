@@ -28,7 +28,19 @@ _COPY_MODULES = {
 # ONLY here — code execution exists nowhere on the host.
 IN_GUEST_TOOLS = ("read_file", "list_files", "search_codebase", "crawl_codebase",
                   "write_file", "edit_file", "dashboard", "todo_update",
-                  "run_code")
+                  "run_code", "screenshot")
+
+# in-guest tools that exist only with boxes on (the contract: flag off, the
+# guest package is byte-for-byte today's). `screenshot` needs the desktop
+# image variant and reports "needs the desktop image" on any other.
+BOX_ONLY_TOOLS = frozenset({"screenshot"})
+
+
+def in_guest_tools() -> tuple[str, ...]:
+    """IN_GUEST_TOOLS as shipped right now (the box-only ones need the flag)."""
+    if settings.vm_boxes_enabled:
+        return IN_GUEST_TOOLS
+    return tuple(n for n in IN_GUEST_TOOLS if n not in BOX_ONLY_TOOLS)
 
 
 def _guest_src():
@@ -44,7 +56,7 @@ def build_package_tar() -> bytes:
             tar.add(p, arcname=f"backend/{p.relative_to(src)}")
         for arcname, relpath in _COPY_MODULES.items():   # verbatim host modules
             _add_bytes(tar, arcname, (base / relpath).read_bytes())
-        for name in IN_GUEST_TOOLS:                  # the clean tool handlers
+        for name in in_guest_tools():                # the clean tool handlers
             _add_bytes(tar, f"tools/{name}/handler.py",
                        (base / "tools" / name / "handler.py").read_bytes())
     return buf.getvalue()

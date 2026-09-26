@@ -1,0 +1,11 @@
+# A headless display for the in-guest `screenshot` tool (DESIGN-BOXES 2(g)):
+# chromium for url mode, Xvfb + scrot (and Pillow for the downscale) for app
+# mode. About +450 MB. chromium peaks at 300-500 MB, hence the memory floor:
+# on a 4 GB host the RAM budget then keeps it from running beside another
+# large box.
+name desktop
+from main
+min_mem_mb 1280
+
+apt xvfb chromium fonts-dejavu-core scrot matchbox-window-manager
+apt python3-pil

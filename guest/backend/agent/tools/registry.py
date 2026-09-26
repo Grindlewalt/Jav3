@@ -23,7 +23,8 @@ HOST_CID = socket.VMADDR_CID_HOST          # 2
 # tools safe to run in the disposable guest against the pushed workspace
 IN_GUEST_TOOLS = frozenset({"read_file", "list_files", "search_codebase",
                             "crawl_codebase", "write_file", "edit_file",
-                            "dashboard", "todo_update", "run_code"})
+                            "dashboard", "todo_update", "run_code",
+                            "screenshot"})
 
 # the model's id for the call being dispatched (set by loop.py around
 # dispatch). Forwarded on tool_broker_call so a host handler can name the call

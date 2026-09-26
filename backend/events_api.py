@@ -41,6 +41,8 @@ TOPICS: dict[str, tuple[Callable[[Request], dict], Callable[[], sse.Subscription
     "notices": (require_user, agents_run.notice_feed),
     "egress": (require_user, lambda: channel_feed(egress.EGRESS_CHAN)),
     "procs": (require_user, procview_api.procs_feed),   # WP4: Security > Persistent
+    # WP5: image builder progress ({"type":"image_build", phase, variant, ...})
+    "vm-images": (require_user, lambda: channel_feed("vm-images")),
 }
 
 

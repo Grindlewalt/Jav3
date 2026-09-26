@@ -1,0 +1,9 @@
+# Service boxes (WP3). procwatch and svcd are PUSHED over vsock with the
+# service package, not baked, so the recipe itself is minimal. Under KVM a
+# layer can only add to base-vN, so svc resolves to the base image; under
+# Docker this is the whole image (debian:trixie-slim + python3).
+name svc
+from none
+min_mem_mb 384
+
+apt python3 ca-certificates
