@@ -55,6 +55,23 @@ def _warn_missing_guest_devices() -> None:
             " or ".join(missing))
 
 
+async def _announce_setup_link() -> None:
+    """Until the first login exists, put the one-time setup link in the
+    journal: the operator can read it there, a LAN visitor cannot."""
+    import logging
+    from . import setup_api
+    try:
+        if await setup_api.users_exist():
+            setup_api.drop_setup_token()
+            return
+        from .cli import server_urls
+        logging.getLogger("jav3").warning(
+            "first-run setup is open: finish it at %s",
+            setup_api.setup_link(server_urls()[0]))
+    except Exception:          # noqa: BLE001 — a hint is never fatal
+        logging.getLogger("jav3").exception("could not announce the setup link")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     require_single_process()
@@ -65,6 +82,7 @@ async def lifespan(app: FastAPI):
     await schedules.ensure_default_schedules()
     compile_registry()
     _warn_missing_guest_devices()
+    await _announce_setup_link()
     task = asyncio.create_task(schedules.scheduler_loop())
     reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
     triage = asyncio.create_task(reviewer.sweeper_loop())  # auto queue triage

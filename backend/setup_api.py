@@ -16,7 +16,9 @@ Keys stay host-side either way; model calls go out from the host gateway, never
 from the sandbox VM.
 """
 import asyncio
+import os
 import re
+import secrets
 import time
 
 import httpx
@@ -69,6 +71,56 @@ async def users_exist() -> bool:
             return await cur.fetchone() is not None
     finally:
         await db.close()
+
+
+# The one-time setup token. The server listens on the LAN from its first
+# second, and until the first login exists whoever reaches /api/setup first
+# becomes the operator. So the door needs a key only the operator has: a random
+# token in a 0600 file under the state dir, printed by the installer and
+# `backend.cli setup --status` as part of the setup link, and logged once at
+# startup (the journal is the operator's). The CLI's own setup never goes
+# through HTTP and does not need it. Deleted once the first login exists.
+def _token_path():
+    from .config import settings
+    return settings.data_dir / "setup_token"
+
+
+def setup_token() -> str:
+    """The current token, created (0600, atomically) on first use."""
+    p = _token_path()
+    try:
+        tok = p.read_text().strip()
+        if tok:
+            return tok
+    except FileNotFoundError:
+        pass
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tok = secrets.token_urlsafe(18)
+    tmp = p.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(tok + "\n")
+    os.replace(tmp, p)
+    return tok
+
+
+def drop_setup_token() -> None:
+    _token_path().unlink(missing_ok=True)
+
+
+def setup_link(base_url: str) -> str:
+    return base_url.rstrip("/") + "/setup?token=" + setup_token()
+
+
+def token_ok(supplied: str | None) -> bool:
+    return bool(supplied) and secrets.compare_digest(
+        supplied.encode(), setup_token().encode())
+
+
+NO_TOKEN = ("this setup page needs the one-time link printed by the installer "
+            "(…/setup?token=…). On the server: .venv/bin/python -m backend.cli "
+            "setup --status, or finish setup there with: .venv/bin/python -m "
+            "backend.cli setup")
 
 
 class SetupError(Exception):
@@ -327,12 +379,14 @@ class SetupRequest(BaseModel):
     provider: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    token: str | None = None
 
 
 class TestRequest(BaseModel):
     provider: str
     api_key: str | None = None
     base_url: str | None = None
+    token: str | None = None
 
 
 @router.get("/status")
@@ -352,6 +406,9 @@ async def test(body: TestRequest, request: Request):
     _refuse_cross_site(request)
     if await users_exist():
         raise HTTPException(status_code=409, detail="setup is already done")
+    if not token_ok(body.token):
+        await _charge(_KEY_SETUP, request)
+        raise HTTPException(status_code=403, detail=NO_TOKEN)
     try:
         res = await test_provider(body.provider, body.api_key or "", body.base_url or "")
     except SetupError as e:
@@ -367,6 +424,8 @@ async def setup(body: SetupRequest, request: Request, response: Response):
     try:
         if await users_exist():
             raise SetupError(409, "setup is already done — log in instead")
+        if not token_ok(body.token):
+            raise SetupError(403, NO_TOKEN)
         # validate everything BEFORE the user row exists, so a bad provider
         # choice never leaves a half-done setup the page can no longer retry
         username = validate_credentials(body.username, body.password)
@@ -376,10 +435,11 @@ async def setup(body: SetupRequest, request: Request, response: Response):
     except SetupError as e:
         # only the closed door is charged: a too-short password is a typo,
         # a setup after setup is someone trying the handle
-        if e.status == 409:
+        if e.status in (403, 409):
             await _charge(_KEY_SETUP, request)
         raise HTTPException(status_code=e.status, detail=e.detail)
     auth._clear(_KEY_SETUP)
+    drop_setup_token()
     provider = None
     if body.provider:
         try:

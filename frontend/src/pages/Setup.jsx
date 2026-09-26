@@ -34,8 +34,19 @@ function strength(pw) {
   return { label: 'weak — a few unrelated words beat one clever one', tone: 'warn' }
 }
 
+// The one-time token from the setup link the installer printed
+// (…/setup?token=…). Kept for the tab in case the query is lost on a reload.
+function setupToken() {
+  const q = new URLSearchParams(window.location.search).get('token')
+  try {
+    if (q) sessionStorage.setItem('jav3-setup-token', q)
+    return q || sessionStorage.getItem('jav3-setup-token') || ''
+  } catch { return q || '' }
+}
+
 export default function Setup({ onDone }) {
   const navigate = useNavigate()
+  const [token] = useState(setupToken)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -70,7 +81,7 @@ export default function Setup({ onDone }) {
     try {
       const r = await api('/api/setup/test', {
         method: 'POST',
-        body: JSON.stringify({ provider, api_key: apiKey, base_url: baseUrl }),
+        body: JSON.stringify({ provider, api_key: apiKey, base_url: baseUrl, token }),
       })
       const n = r.models_found?.length || 0
       setTest(r.ok ? { ok: true, text: `ok · ${n} model${n === 1 ? '' : 's'}` }
@@ -88,7 +99,7 @@ export default function Setup({ onDone }) {
     if (password !== confirm) { setError('the passwords do not match'); return }
     setBusy(true)
     try {
-      const body = { username, password }
+      const body = { username, password, token }
       if (provider) Object.assign(body, { provider, api_key: apiKey, base_url: baseUrl })
       const r = await api('/api/setup', { method: 'POST', body: JSON.stringify(body) })
       onDone({ username: r.username })
@@ -109,6 +120,13 @@ export default function Setup({ onDone }) {
     <div className="setup-wrap">
       <form className="login setup" onSubmit={finish}>
         <h1>Jav3</h1>
+        {!token && (
+          <div className="error" role="alert">
+            Open the one-time setup link the installer printed (it ends in
+            /setup?token=…). On the server, <code>.venv/bin/python -m backend.cli
+            setup --status</code> prints it again.
+          </div>
+        )}
 
         <section className="setup-step">
           <h2><span className="setup-num">1</span>Create your login</h2>
