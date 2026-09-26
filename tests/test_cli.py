@@ -1483,3 +1483,196 @@ async def test_tui_security_locked_for_a_chat_only_login(cfg):
         assert type(app.screen).__name__ == "SecurityScreen"
         guarded = ("/api/security", "/api/egress", "/api/secrets", "/api/projects")
         assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
+
+
+# --- found by driving the TUI like an operator (QA pass, 2026-09-26) -------------------
+
+def test_markup_escape_survives_unbalanced_brackets():
+    """A `[` with no `]` after it swallowed the markup that followed and the
+    next [/] raised MarkupError: the real server's "[startup — …" chat titles
+    crashed /sessions. Every `[` is escaped now, and a trailing backslash can
+    not eat the tag after it."""
+    pytest.importorskip("textual")
+    from textual.markup import to_content
+    for raw in ("[startup — the operator just woke you", "a [ b", "x [/] y",
+                "a\\[b]", "C:\\dir\\", "[b]bold[/b]", "[$error]x", "plain"):
+        out = to_content(jav3._esc(raw) + "[b]tail[/]").plain
+        assert out.replace("\u200b", "") == raw + "tail"
+
+
+def _conv_server(convs, messages=None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/devices/whoami":
+            return httpx.Response(200, json={"username": "device:test"})
+        if path == "/api/chat/options":
+            return httpx.Response(200, json={"default": "deepseek/deepseek-flash",
+                                             "models": [], "projects": [], "agents": []})
+        if path == "/api/conversations":
+            return httpx.Response(200, json={"conversations": convs})
+        if path.endswith("/messages"):
+            return httpx.Response(200, json=messages or {"messages": []})
+        if path.endswith("/info"):
+            return httpx.Response(200, json={"title": "t", "files": []})
+        return httpx.Response(404, json={"detail": "nope"})
+    return httpx.MockTransport(handler)
+
+
+async def test_tui_brackets_in_titles_and_tool_args_do_not_crash(cfg):
+    pytest.importorskip("textual")
+    convs = [{"id": 300, "summary": "[startup — the operator just woke you (voice)",
+              "started_at": "2026-08-10 06:12", "project_slug": "startup"},
+             {"id": 301, "summary": "summarise\nthis", "started_at": "2026-08-10 06:13"}]
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server(convs))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/sessions")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        await pilot.pause(0.2)
+        assert app.is_running
+        assert app.screen.rows[1][1] == "summarise this"      # one line per chat
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        # a command with an unbalanced bracket, running then done
+        app.turn = jav3.TurnState()
+        await app.handle_event({"type": "tool", "id": "1", "name": "run_code",
+                                "args": {"command": "test [ -f x"}})
+        await pilot.pause(0.3)                                  # the spinner redraws it
+        await app.handle_event({"type": "tool_result", "id": "1", "name": "run_code",
+                                "ok": False, "result": "[: missing ]"})
+        app.notify("reply ready in [startup — x")                # toasts are plain text
+        await pilot.pause(0.3)
+        assert app.is_running
+        assert "test [ -f x" in _text(app.query("ToolView").last().query_one("#head"))
+
+
+def test_print_mode_peak_without_an_answer_is_not_sent():
+    """jav3 -p in the peak window with stdin a pipe (read to the end already)
+    died with an EOFError traceback; now it is a plain `not sent`."""
+    def handler(request):
+        return httpx.Response(409, json={"detail": "peak_confirmation_required"})
+
+    def no_tty(question):
+        raise EOFError
+    with httpx.Client(base_url="http://h:1", transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(jav3.CliError, match="not sent"):
+            jav3.run_turn(c, "hi", None, None, io.StringIO(), no_tty)
+
+
+async def test_tui_export_to_a_missing_dir_and_a_missing_editor_are_errors(cfg, monkeypatch):
+    """Both used to end the app with a traceback."""
+    pytest.importorskip("textual")
+    import contextlib as _cl
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([]))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.cid = 5
+        app.dispatch("/export /nonexistent-qa-dir/x.md")
+        assert await _until(pilot, lambda: any("could not save" in _text(n)
+                                               for n in app.query("Note")))
+        monkeypatch.setenv("EDITOR", "/nonexistent-qa-editor")
+        monkeypatch.setattr(app, "suspend", _cl.nullcontext)     # headless: no terminal
+        app.editor.text = "draft"
+        app.action_external_editor()
+        await pilot.pause(0.2)
+        assert app.is_running and app.editor.text == "draft"
+        assert any("could not run" in str(n.message) for n in app._notifications)
+
+
+async def test_tui_picker_keeps_letters_typed_before_the_filter_has_focus(cfg):
+    """Typing "e2e" fast in a picker filtered on "e": the letters after the
+    first reached the list before the filter had focus, and were dropped."""
+    pytest.importorskip("textual")
+    from textual import events
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([]))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        rows = [("demo", "demo", ""), ("e2e-smoke", "e2e-smoke", "")]
+        app.run_worker(app.pick("Projects", rows))
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        scr = app.screen
+        scr.start_typing("e")
+        for ch in "2e":            # as if still in flight to the list
+            scr.on_key(events.Key(ch, ch))
+        await pilot.pause(0.1)
+        assert scr.query_one("#filter").value == "e2e"
+        ol = scr.query_one("#choices")
+        assert ol.get_option_at_index(ol.highlighted).id == "e2e-smoke"
+
+
+async def test_tui_local_approval_ignores_keys_typed_before_it_opened(cfg):
+    """The /local approval pops up mid-turn, often while the operator is typing
+    the next message: a stray a (always) or enter (yes) must not answer it."""
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([]))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        answers = []
+
+        async def ask():
+            answers.append(await app.local_approve("shell", "$ rm -rf build"))
+        app.run_worker(ask())
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "LocalApprove")
+        await pilot.press("a", "enter")                # the tail of a sentence
+        await pilot.pause(0.1)
+        assert type(app.screen).__name__ == "LocalApprove" and not answers
+        await pilot.pause(0.6)
+        await pilot.press("n")
+        assert await _until(pilot, lambda: answers == ["no"])
+
+
+async def test_tui_leader_hint_shows_every_key(cfg):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([]))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("ctrl+x")
+        await pilot.pause(0.2)
+        assert app.query_one("#status").size.height >= 2      # it wraps, not cut off
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert app.query_one("#status").size.height == 1
+
+
+async def test_tui_finished_by_time_is_newest_first_and_footer_without_model(cfg):
+    pytest.importorskip("textual")
+    msgs = {"messages": [{"role": "user", "content": "hi"},
+                         {"role": "assistant", "content": "hello"}]}
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([], msgs))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await app.open_conversation(7)
+        await pilot.pause(0.1)
+        assert _text(app.query("Footer").last()).rstrip() == "▣ Jav3"   # no dangling ·
+        app.action_agents_view()
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
+        scr = app.screen
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        def ago(m):                       # the server's naive UTC timestamps
+            return (now - timedelta(minutes=m)).isoformat(timespec="seconds")
+        scr.trees["finished"] = jav3.AgentTree([
+            {"id": 1, "project": "a", "started_at": ago(3)},
+            {"id": 2, "project": "b", "started_at": ago(1)},
+            {"id": 3, "project": "a", "started_at": ago(2)}])
+        scr.mode, scr.group_by = "finished", "time"
+        [(bucket, roots)] = scr._sections()
+        assert bucket == "Today" and [r["id"] for r in roots] == [2, 3, 1]
+
+
+async def test_tui_local_chat_shows_local_during_its_first_turn(cfg, tmp_path, monkeypatch):
+    """Between `start` and the first /info the prompt said the loaded project
+    instead of `local <dir>`."""
+    pytest.importorskip("textual")
+    monkeypatch.chdir(tmp_path)
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([]))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.local = True
+        app.turn = jav3.TurnState()
+        app.turn.local = True
+        await app.handle_event({"type": "start", "conversation_id": 12})
+        await pilot.pause(0.1)
+        assert app.cid == 12 and app._project_label() is None
+        assert "local" in _text(app.query_one("#meta"))

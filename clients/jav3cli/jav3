@@ -518,11 +518,15 @@ def run_turn(c: httpx.Client, message: str, conversation_id: int | None,
             if r.status_code == 409:
                 r.read()
                 if _detail(r) == "peak_confirmation_required" and not body.get("confirm_peak"):
-                    ans = confirm("Peak-pricing window — send anyway? [y/N] ")
+                    try:
+                        ans = confirm("Peak-pricing window — send anyway? [y/N] ")
+                    except EOFError:         # a pipe with nothing left to answer
+                        ans = ""
                     if ans.strip().lower().startswith("y"):
                         body["confirm_peak"] = True
                         continue
-                    raise CliError("not sent")
+                    raise CliError("not sent: peak-pricing window (each reply costs 2× now) "
+                                   "and no yes was given")
                 raise CliError(f"server said 409: {_detail(r)}")
             if r.status_code >= 400:
                 r.read()
@@ -923,8 +927,15 @@ def _age(ts, now: float | None = None) -> str:
 
 
 def _esc(s: str) -> str:
-    from textual.markup import escape
-    return escape(s)
+    """Text made safe to splice into Textual markup. textual.markup.escape only
+    escapes a `[` that already looks like a whole tag, so an unbalanced one
+    ("[startup — …" as a chat title, `test [ -f x` as a command) swallowed the
+    markup after it and a later [/] raised MarkupError — a crash. Every `[` is
+    escaped here; a single backslash before `[` is the only escape Textual
+    knows, so a trailing backslash gets a zero-width space to keep it off the
+    tag that follows."""
+    s = str(s).replace("[", "\\[")
+    return s + "​" if s.endswith("\\") else s
 
 
 def tool_body(name: str, args, ok: bool | None, result: str | None,
@@ -1016,6 +1027,7 @@ class TurnState:
         self.running: dict = {}           # tool id -> ToolView
         self.tools: list[dict] = []       # finished calls
         self.done = False                 # a final arrived (not an error)
+        self.local = False                # this turn opened a new /local chat
 
 
 def _subsequence_gaps(q: str, t: str) -> int | None:
@@ -1683,10 +1695,18 @@ def build_tui(base: str, token: str, **kw):
                      "pageup": ol.action_page_up, "pagedown": ol.action_page_down}[key]()
                 return
             if self.typing:
-                if key == "backspace" and not self.query_one("#filter", Input).value:
+                f = self.query_one("#filter", Input)
+                if key == "backspace" and not f.value:
                     event.stop()
                     event.prevent_default()
                     self.stop_typing()
+                elif event.is_printable and event.character:
+                    # the filter stops every letter it gets, so one here was
+                    # typed before its focus landed (fast typing, a paste):
+                    # "e2e" used to filter on "e" alone
+                    event.stop()
+                    event.prevent_default()
+                    f.insert_text_at_cursor(event.character)
                 return
             if key in self.actions:
                 event.stop()
@@ -1724,9 +1744,13 @@ def build_tui(base: str, token: str, **kw):
         BINDINGS = [Binding("y,enter", "yes", show=False),
                     Binding("n,escape", "no", show=False)]
 
-        def __init__(self, question: str, detail: str = "") -> None:
+        def __init__(self, question: str, detail: str = "", grace: float = 0.0) -> None:
             super().__init__()
             self.question, self.detail = question, detail
+            # a dialog that pops up on its own (not from the key just pressed)
+            # ignores keys for `grace` seconds: the tail of what the operator
+            # was typing must not answer a question they have not seen
+            self.grace, self.opened = grace, time.monotonic()
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog", classes="small"):
@@ -1735,11 +1759,16 @@ def build_tui(base: str, token: str, **kw):
                     yield Static(f"[$text-muted]{_esc(self.detail)}[/]")
                 yield Static("\n[$primary]y[/] yes   [$text-muted]n / esc[/] no")
 
+        def _early(self) -> bool:
+            return time.monotonic() - self.opened < self.grace
+
         def action_yes(self) -> None:
-            self.dismiss(True)
+            if not self._early():
+                self.dismiss(True)
 
         def action_no(self) -> None:
-            self.dismiss(False)
+            if not self._early():
+                self.dismiss(False)
 
     class LocalApprove(ModalScreen):
         """/local: may this write, edit or command run on this machine?"""
@@ -1748,9 +1777,13 @@ def build_tui(base: str, token: str, **kw):
                     Binding("a", "answer('always')", show=False),
                     Binding("n,escape", "answer('no')", show=False)]
 
+        GRACE = 0.6      # seconds: it opens mid-turn, often while the operator
+                         # types a message; a stray y, a or enter must not approve
+
         def __init__(self, kind: str, summary: str) -> None:
             super().__init__()
             self.kind, self.summary = kind, summary
+            self.opened = time.monotonic()
 
         def compose(self) -> ComposeResult:
             what = {"shell": "Run this command here?", "write": "Write this file?",
@@ -1771,7 +1804,8 @@ def build_tui(base: str, token: str, **kw):
                              "[$text-muted]n / esc[/] no")
 
         def action_answer(self, what: str) -> None:
-            self.dismiss(what)
+            if time.monotonic() - self.opened >= self.GRACE:
+                self.dismiss(what)
 
     class Ask(ModalScreen):
         """One line of input; `secret` hides it (the login line is a credential)."""
@@ -1882,7 +1916,7 @@ def build_tui(base: str, token: str, **kw):
         AgentsScreen { background: $background; }
         #ag-head { height: 1; padding: 0 2; margin: 1 0; }
         #ag-list { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
-        #ag-foot { height: 1; padding: 0 2; color: $text-muted; }
+        #ag-foot { height: auto; padding: 0 2; color: $text-muted; }  /* wraps when narrow */
         AgentRow { height: 1; padding: 0 1; border-left: blank; }
         AgentRow.section { color: $text-muted; text-style: bold; margin-top: 1; }
         AgentRow.group { color: $text-muted; margin-top: 1; }
@@ -1991,9 +2025,11 @@ def build_tui(base: str, token: str, **kw):
                 return [("Active", run), ("Needs you", need)]
             if self.group_by == "time":
                 buckets: dict = {}
-                for r in tr.roots:
-                    buckets.setdefault(time_bucket(r.get("ended_at") or r.get("started_at")),
-                                       []).append(r)
+                # newest first inside each bucket: tr.roots is in project order,
+                # which read as shuffled once the rows were grouped by time
+                when = lambda r: str(r.get("ended_at") or r.get("started_at") or "")  # noqa: E731
+                for r in sorted(tr.roots, key=when, reverse=True):
+                    buckets.setdefault(time_bucket(when(r)), []).append(r)
                 return [(b, buckets[b]) for b in TIME_BUCKETS if b in buckets]
             return [(f"⌂ {p or 'no project'}", rs) for p, rs in tr.groups]
 
@@ -2326,7 +2362,7 @@ def build_tui(base: str, token: str, **kw):
                       border-left: thick $accent; }
         #sec-detail-wrap { height: 40%; border-top: solid $panel; padding: 0 2;
                            scrollbar-size-vertical: 1; }
-        #sec-foot { height: 1; padding: 0 2; color: $text-muted; }
+        #sec-foot { height: auto; padding: 0 2; color: $text-muted; }  /* wraps when narrow */
         """
         BINDINGS = [
             Binding("escape", "back", show=False),
@@ -3132,6 +3168,7 @@ def build_tui(base: str, token: str, **kw):
             self.ephemeral = False
             self.local = False                         # /local: the next new chat runs here
             self.local_execs: dict[int, LocalExecutor] = {}
+            self.local_cids: set[int] = set()         # chats this client opened as /local
             self.whoami = "?"
             self.logged_in: bool | None = None    # None = not checked yet
             self.notices: list[tuple[float, str, str]] = []   # (time, kind, text), newest first
@@ -3152,6 +3189,7 @@ def build_tui(base: str, token: str, **kw):
             self.last_reply = ""
             self.leader = False
             self._leader_timer = None
+            self._status_tall = False        # the status row grown for the leader keys
             self.esc_armed = 0.0
             self.ctrl_c_at = 0.0
             self.sidebar_pref: bool | None = None     # None = follow the width
@@ -3201,11 +3239,18 @@ def build_tui(base: str, token: str, **kw):
             return self.query_one("#editor", Editor)
 
         async def on_mount(self) -> None:
+            # With 256 colours (Terminal.app) the three near-black greys all round
+            # to the same black: dialogs, the prompt box and the input fields
+            # vanished into the background. There they are greys from the
+            # 256-colour ramp itself (233/235/237), which survive the rounding.
+            truecolor = self.console.color_system == "truecolor"
             self.register_theme(Theme(
                 name="jav3", primary="#5fd7af", secondary="#af87ff", accent="#ffaf5f",
-                foreground="#e4e4e4", background="#0e1014", surface="#161a20",
-                panel="#1e232b", warning="#ffaf00", error="#ff6b6b", success="#5fd787",
-                dark=True))
+                foreground="#e4e4e4",
+                background="#0e1014" if truecolor else "#121212",
+                surface="#161a20" if truecolor else "#262626",
+                panel="#1e232b" if truecolor else "#3a3a3a",
+                warning="#ffaf00", error="#ff6b6b", success="#5fd787", dark=True))
             settings = self._load_settings()
             self.theme = settings.get("theme") if settings.get("theme") in \
                 self.available_themes else "jav3"
@@ -3334,6 +3379,11 @@ def build_tui(base: str, token: str, **kw):
                 self._refresh_status()
             except NoMatches:
                 pass          # a dialog is on top; the next refresh catches up
+
+        def notify(self, message, *, markup: bool = False, **kw):
+            # every toast here is plain text, often the server's (a chat title,
+            # an agent's summary, an error): never parse it as markup
+            return super().notify(message, markup=markup, **kw)
 
         async def on_unmount(self) -> None:
             if self.client is not None:
@@ -3490,9 +3540,20 @@ def build_tui(base: str, token: str, **kw):
         def _model_label(self) -> str:
             return self.model or self.shown_model or (self.options or {}).get("default") or "default"
 
+        def _here(self) -> dict | None:
+            """Where this chat works when it is a /local one: the conversation's
+            own record, or — during its first turn, before /info has been read —
+            this directory, since this client opened it as local."""
+            if self.cid is None:
+                return {"cwd": os.getcwd()} if self.local else None
+            here = (self.info or {}).get("local")
+            if here:
+                return here
+            return {"cwd": os.getcwd()} if self.cid in self.local_cids else None
+
         def _project_label(self) -> str | None:
             # a local chat works on this machine, not in any project
-            if (self.info or {}).get("local") if self.cid else (self.local and self.cid is None):
+            if self._here():
                 return None
             if self.project:
                 return self.project
@@ -3522,9 +3583,9 @@ def build_tui(base: str, token: str, **kw):
                 bits.append(f"[$text-muted]⌂ {_esc(proj)}[/]")
             if self.ephemeral:
                 bits.append("[$warning]temporary[/]")
-            here = (self.info or {}).get("local") if self.cid else None
-            if here or (self.local and self.cid is None):
-                bits.append(f"[$success]local {_esc((here or {}).get('cwd') or os.getcwd())}[/]")
+            here = self._here()
+            if here:
+                bits.append(f"[$success]local {_esc(here.get('cwd') or os.getcwd())}[/]")
             if self.attachments:
                 bits.append(f"[$accent]+{len(self.attachments)} attached[/]")
             self.query_one("#meta", Static).update("  ".join(bits))
@@ -3556,6 +3617,11 @@ def build_tui(base: str, token: str, **kw):
         def _refresh_status(self) -> None:
             left = self.query_one("#status-left", Static)
             right = self.query_one("#status-right", Static)
+            # the leader's key list is longer than one row even at 140 columns:
+            # the row grows while it shows, so q, b and the rest are not cut off
+            if self._status_tall != self.leader:
+                self._status_tall = self.leader
+                self.query_one("#status").styles.height = "auto" if self.leader else 1
             if self.leader:
                 keys = "  ".join(f"[$primary]{c.leader}[/] {name}"
                                  for name, c in self.unique_commands() if c.leader)
@@ -3713,7 +3779,9 @@ def build_tui(base: str, token: str, **kw):
                     message += "\n\n" + "\n\n".join(self.attachments)
                     self.attachments = []
                 self.last_user = text
-                await self._post(self._body(message))
+                body = self._body(message)
+                self.turn.local = bool(body.get("local"))
+                await self._post(body)
             except CliError as e:
                 await self.note(str(e), "error")
             except httpx.HTTPError as e:
@@ -3732,7 +3800,7 @@ def build_tui(base: str, token: str, **kw):
                         if why == "peak_confirmation_required" and not body.get("confirm_peak"):
                             if await self.push_screen_wait(Confirm(
                                     "Peak pricing right now", "This reply costs 2×. "
-                                    "Send anyway?")):
+                                    "Send anyway?", grace=0.6)):
                                 body["confirm_peak"] = True
                                 continue
                             await self.note("not sent")
@@ -3844,6 +3912,8 @@ def build_tui(base: str, token: str, **kw):
                     turn.cid = ev["conversation_id"]
                     if not self.ephemeral:
                         self.cid = turn.cid
+                    if turn.local:
+                        self.local_cids.add(turn.cid)
                 turn.model = ev.get("model") or turn.model
                 self.shown_model = turn.model or self.shown_model
                 self.refresh_chrome()
@@ -3928,7 +3998,7 @@ def build_tui(base: str, token: str, **kw):
                 me = socket.gethostname() or "localhost"
                 if here and here.get("hostname") == me and Path(here.get("cwd", "")).is_dir():
                     async def approve(kind, summary):
-                        ans = await self.push_screen_wait(LocalApprove(kind, summary))
+                        ans = await self.local_approve(kind, summary)
                         # a dialog answered after the turn was stopped must not
                         # run anything: nobody is waiting for the result
                         live = self.turn is not None and self.turn.cid == cid
@@ -3944,6 +4014,10 @@ def build_tui(base: str, token: str, **kw):
                                json={"id": str(ev.get("id", "")), "ok": ok, "result": result})
             except CliError as e:
                 await self.note(f"local result not delivered: {e}", "warn")
+
+        async def local_approve(self, kind: str, summary: str):
+            """yes / always / no (None: closed with ctrl+c) from the operator."""
+            return await self.push_screen_wait(LocalApprove(kind, summary))
 
         async def _close_seg(self) -> None:
             turn = self.turn
@@ -4397,6 +4471,10 @@ def build_tui(base: str, token: str, **kw):
                     subprocess.call([*editor.split(), path])
                 self.editor.text = Path(path).read_text().rstrip("\n")
                 self.editor.move_cursor(self.editor.document.end)
+            except OSError as e:
+                # a $EDITOR that is not installed: say so, keep the prompt as it was
+                self.notify(f"could not run {editor}: {e.strerror or e} — set $EDITOR",
+                            severity="error")
             finally:
                 os.unlink(path)
 
@@ -4521,7 +4599,10 @@ def build_tui(base: str, token: str, **kw):
                                               "across projects"),
                          ("/security (ctrl+x v)", "queue · network · logs · secrets: tab "
                                                   "→ ← or 1-4 switch, esc back"),
-                         ("ctrl+j · shift+enter · alt+enter · \\⏎", "new line"),
+                         # Terminal.app sends shift+enter as enter, and option+enter
+                         # as ESC CR, which Textual reads as a plain enter: those send
+                         ("ctrl+j · \\⏎", "new line (shift+enter / alt+enter only "
+                                         "where the terminal reports them)"),
                          ("esc esc", "interrupt the running turn"),
                          ("esc esc (idle)", "clear the prompt"),
                          ("ctrl+c", "clear prompt · interrupt · twice to quit"),
@@ -4562,7 +4643,11 @@ def build_tui(base: str, token: str, **kw):
                         meta += "  ● running"
                     if cv.get("starred"):
                         meta = "★ " + meta
-                    rows.append((str(cv["id"]), cv.get("summary") or "(untitled)", meta))
+                    # one row per chat: a summary that is still the first
+                    # message can carry newlines
+                    rows.append((str(cv["id"]),
+                                 " ".join(str(cv.get("summary") or "").split()) or "(untitled)",
+                                 meta))
                 arg = await self.pick("Sessions", rows, str(self.cid) if self.cid else None,
                                       hint="type to filter · enter opens") or ""
                 if not arg:
@@ -4603,8 +4688,9 @@ def build_tui(base: str, token: str, **kw):
                 if m.get("model"):
                     self.shown_model = m["model"]
                 who = self.agent or "Jav3"
+                mname = (m.get("model") or "").split("/")[-1]
                 await self.log_view.mount(Footer(
-                    f"[$primary]▣[/] {_esc(who)} · {_esc((m.get('model') or '').split('/')[-1])}"))
+                    f"[$primary]▣[/] {_esc(who)}" + (f" · {_esc(mname)}" if mname else "")))
                 self.last_reply = m.get("content") or ""
             self.log_view.scroll_end(animate=False)
             await self.refresh_info()
@@ -4767,8 +4853,11 @@ def build_tui(base: str, token: str, **kw):
                 raise CliError("no chat to export")
             r = await self.api("GET", f"/api/conversations/{self.cid}/messages")
             path = Path(os.path.expanduser(arg or f"jav3-{self.cid}.md"))
-            path.write_text(transcript_markdown(self.title_text or f"Jav3 chat #{self.cid}",
-                                                r.get("messages", [])))
+            try:
+                path.write_text(transcript_markdown(self.title_text or f"Jav3 chat #{self.cid}",
+                                                    r.get("messages", [])))
+            except OSError as e:     # a missing directory, no permission: not a crash
+                raise CliError(f"could not save {path}: {e.strerror or e}")
             self.notify(f"saved {path}")
 
         async def c_details(self, arg: str) -> None:
@@ -5171,7 +5260,21 @@ def cmd_tui(args) -> int:
     return 0
 
 
-def cmd_print(args, out=sys.stdout) -> int:
+def _ask_tty(question: str) -> str:
+    """-p's peak question: stdout is the reply (maybe a file) and stdin may be a
+    pipe already read to the end, so ask on the terminal itself; no terminal
+    reads as no."""
+    try:
+        # two handles: a text-mode "r+" on a tty is refused as unseekable
+        with open("/dev/tty", "w") as out, open("/dev/tty") as inp:
+            out.write(question)
+            out.flush()
+            return inp.readline()
+    except OSError:
+        return ""
+
+
+def cmd_print(args, out=sys.stdout, confirm=_ask_tty) -> int:
     """`jav3 -p message` (or a pipe): one turn, plain text, for scripts."""
     msg = " ".join(args.prompt or [])
     if not sys.stdin.isatty():
@@ -5182,7 +5285,7 @@ def cmd_print(args, out=sys.stdout) -> int:
     base, token = _session(args)
     with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
         try:
-            run_turn(c, msg, getattr(args, "resume", None), args.project, out)
+            run_turn(c, msg, getattr(args, "resume", None), args.project, out, confirm)
         except httpx.HTTPError as e:
             raise CliError(f"connection to {base} failed: {e}")
     return 0
