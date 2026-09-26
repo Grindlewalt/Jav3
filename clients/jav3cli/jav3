@@ -175,6 +175,19 @@ def parse_login_line(line: str) -> tuple[str, str]:
     return fields["address"], fields["code"]
 
 
+def _loopback_base(base: str) -> bool:
+    """http to this same machine never crosses a network: no warning for it."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    host = (urlsplit(base).hostname or "").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 PLAIN_HTTP = ("warning: {base} is plain http — the login code, and the token it "
               "is traded for, cross the network unencrypted. Only use it on a "
               "network you trust.")
@@ -275,7 +288,7 @@ def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
     base = upgrade_to_https(base_url(address))
     if base.startswith("https://") and not address.startswith("https://"):
         address = base
-    if base.startswith("http://"):
+    if base.startswith("http://") and not _loopback_base(base):
         print(PLAIN_HTTP.format(base=base), file=sys.stderr)
     host = socket.gethostname()
     with _client(base) as c:
@@ -398,7 +411,7 @@ def login_with_password(address: str, username: str, password: str,
     base = upgrade_to_https(base_url(address))
     if base.startswith("https://") and not address.startswith("https://"):
         address = base
-    if base.startswith("http://"):
+    if base.startswith("http://") and not _loopback_base(base):
         print(PLAIN_HTTP_PASSWORD.format(base=base), file=sys.stderr)
     # the server slows repeated failures down (up to 8s each): leave room for it
     with _client(base, timeout=40) as c:
@@ -500,7 +513,7 @@ class Renderer:
             return True
         elif t == "error":
             self.error = ev.get("message") or "error"
-            self._line(f"error: {self.error}")
+            # not printed here: run_turn raises it and main prints it once, on stderr
             return True
         elif t == "idle":
             return True

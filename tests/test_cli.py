@@ -1676,3 +1676,11 @@ async def test_tui_local_chat_shows_local_during_its_first_turn(cfg, tmp_path, m
         await pilot.pause(0.1)
         assert app.cid == 12 and app._project_label() is None
         assert "local" in _text(app.query_one("#meta"))
+
+
+def test_plain_http_warning_skips_loopback():
+    assert jav3._loopback_base("http://localhost:8780")
+    assert jav3._loopback_base("http://127.0.0.1:8780")
+    assert jav3._loopback_base("http://[::1]:8780")
+    assert not jav3._loopback_base("http://10.0.0.58:8780")
+    assert not jav3._loopback_base("http://jav3.local:8000")

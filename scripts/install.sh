@@ -699,6 +699,11 @@ user_phase() {
   # The checkout remembers a non-default instance, so the printed
   # `.venv/bin/python -m backend.cli ...` commands (and a bare re-run of this
   # script) land on it rather than on the default ~/.config/jarvis.
+  local was=""
+  [ ! -f .jarvis-instance ] || was="$(sed -n 's/^JARVIS_CONFIG_DIR=//p' .jarvis-instance | tail -1)"
+  [ -n "$was" ] || was="$DEFAULT_CFG_DIR"
+  [ "$was" = "$CFG_DIR" ] \
+    || warn "this checkout now defaults to $UNIT ($CFG_DIR), was $was — bare backend.cli commands follow it"
   if [ "$CFG_DIR" != "$DEFAULT_CFG_DIR" ]; then
     printf 'JARVIS_INSTANCE=%s\nJARVIS_CONFIG_DIR=%s\n' "$NAME_OPT" "$CFG_DIR" > .jarvis-instance
     ok "this checkout is instance ${NAME_OPT:-custom} ($CFG_DIR), recorded in .jarvis-instance"
@@ -780,6 +785,8 @@ first_run_setup() {
   local url; url="$(printf '%s\n' "$st" | sed -n 2p)"
   if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ] || [ ! -t 1 ]; then
     ok "no login yet — finish setup in a browser once the service is up: ${url:-/setup}"
+    # the .local name needs mDNS on the machine you browse from; the LAN IPs don't
+    printf '%s\n' "$st" | sed -n '3,$p' | sed 's/^/          or: /'
     return 0
   fi
   .venv/bin/python -m backend.cli setup \
