@@ -293,7 +293,7 @@ check_packages() {
     bad "missing packages: ${missing[*]}"
     case "$PKG" in
       apt)    fix "sudo apt-get install -y ${PACKAGES[*]}" ;;
-      pacman) fix "sudo pacman -Sy --needed ${PACKAGES[*]}" ;;
+      pacman) fix "sudo pacman -S --needed ${PACKAGES[*]}" ;;
       dnf)    fix "sudo dnf install -y ${PACKAGES[*]}" ;;
     esac
     MISSING_ROOT+=("packages")
@@ -321,7 +321,7 @@ check_packages() {
     bad "no UEFI firmware for $ARCH"
     case "$PKG" in
       apt)    fix "sudo apt-get install -y $FW_PKG_APT" ;;
-      pacman) fix "sudo pacman -Sy --needed $FW_PKG_PAC" ;;
+      pacman) fix "sudo pacman -S --needed $FW_PKG_PAC" ;;
       dnf)    fix "sudo dnf install -y edk2-ovmf" ;;
     esac
     MISSING_ROOT+=("packages")
@@ -396,7 +396,17 @@ root_phase() {
   step "packages ($PKG)"
   case "$PKG" in
     apt)    apt-get update -qq && apt-get install -y -qq "${PACKAGES[@]}" ;;
-    pacman) pacman -Sy --needed --noconfirm "${PACKAGES[@]}" ;;
+    # NOT -Sy: refreshing the sync db without upgrading is a partial upgrade,
+    # which Arch does not support (new packages linked against libraries the
+    # rest of the system does not have yet). If the local db is too stale to
+    # fetch from (404s), the only supported fix is a full -Syu, and upgrading
+    # the operator's whole server is their call, not ours.
+    pacman) pacman -S --needed --noconfirm "${PACKAGES[@]}" \
+              || die "pacman could not install the packages.
+       If it reported 404s / 'failed retrieving file', the package database is
+       stale: bring the system up to date first (a full upgrade, the only kind
+       Arch supports), then re-run this phase:
+           sudo pacman -Syu" ;;
     dnf)    dnf install -y -q "${PACKAGES[@]}" ;;
     *)      warn "unknown package manager — install by hand: ${PACKAGES[*]}" ;;
   esac
@@ -732,7 +742,7 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
   printf '\n  If you would rather run the individual commands yourself:\n\n'
   case "$PKG" in
     apt)    printf '    sudo apt-get update && sudo apt-get install -y %s\n' "${PACKAGES[*]}" ;;
-    pacman) printf '    sudo pacman -Sy --needed %s\n' "${PACKAGES[*]}" ;;
+    pacman) printf '    sudo pacman -S --needed %s\n' "${PACKAGES[*]}" ;;
     dnf)    printf '    sudo dnf install -y %s\n' "${PACKAGES[*]}" ;;
   esac
   if grep -qw vmx /proc/cpuinfo; then printf '    sudo modprobe kvm_intel && echo kvm_intel | sudo tee /etc/modules-load.d/kvm.conf\n'
