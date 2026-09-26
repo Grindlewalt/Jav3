@@ -16,7 +16,7 @@ import { AuthContext } from './auth.jsx'
 import Menu from './components/Menu.jsx'
 import Notices, { PendingCountContext, useNotices } from './Notices.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
-import { listBoxes } from './boxes/api/vms.js'
+import { followBoxes, listBoxes } from './boxes/api/vms.js'
 import { navState } from './boxes/logic.js'
 import { AskProvider } from './ask.jsx'
 
@@ -79,7 +79,8 @@ function useVmDot(enabled) {
     const load = () => listBoxes().then((r) => { if (live) setDot(navState(r)) }).catch(() => {})
     load()
     const t = setInterval(load, 15000)
-    return () => { live = false; clearInterval(t) }
+    const stop = followBoxes(load)          // box_up / box_down on the shared stream
+    return () => { live = false; clearInterval(t); stop() }
   }, [enabled])
   return dot
 }

@@ -7,7 +7,7 @@ import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { ago, ts } from '../format.js'
 import {
-  destroyBox, listBoxes, nukeShared, rebuildBase, startBox, stopBox, vmStatus,
+  destroyBox, followBoxes, listBoxes, nukeShared, rebuildBase, startBox, stopBox, vmStatus,
 } from '../boxes/api/vms.js'
 import { buildVariant, createVariant, followBuilds, listImages } from '../boxes/api/images.js'
 import { requestPackage } from '../boxes/api/packages.js'
@@ -17,7 +17,7 @@ import {
   budgetSegments, bytes, mb, persistDaysLeft, sortBoxes, uptime, validPackage, validVersion,
 } from '../boxes/logic.js'
 import {
-  Confirm, LoadError, PlacementTag, ProjectList, RuntimeTag, StateDot, Unavailable, useLoad,
+  Confirm, LoadError, PlacementTag, ProjectList, RuntimeStatus, RuntimeTag, StateDot, Unavailable, useLoad,
 } from '../boxes/ui.jsx'
 
 // The VM manager: every box Jav3 runs (the shared turn box, project boxes,
@@ -60,6 +60,8 @@ export function Boxes() {
   const [dlg, setDlg] = useState(null)       // {verb, box}
 
   const boxes = useMemo(() => sortBoxes(data?.boxes), [data])
+  // box_up / box_down on the shared stream: refetch (the poll is the fallback)
+  useEffect(() => followBoxes(() => reload()), [reload])
 
   async function act(verb, box, flag) {
     try {
@@ -94,6 +96,7 @@ export function Boxes() {
       )}
 
       <Budget data={data} />
+      {data && !data.legacy && <RuntimeStatus runtimes={data.runtimes} />}
 
       <section className="sbx-sec">
         <div className="sbx-sec-head"><h3>Boxes</h3>
@@ -160,7 +163,8 @@ export function Boxes() {
 
       <PersistRetirement />
 
-      <BoxDialog dlg={dlg} budget={data?.budget} onClose={() => setDlg(null)} onAct={act} />
+      <BoxDialog dlg={dlg} budget={data?.budget} runtimes={data?.runtimes}
+                 onClose={() => setDlg(null)} onAct={act} />
     </div>
   )
 }
@@ -206,7 +210,7 @@ function Budget({ data }) {
 }
 
 // Exactly what each verb does, in the words the operator decides on.
-function BoxDialog({ dlg, budget, onClose, onAct }) {
+function BoxDialog({ dlg, budget, runtimes, onClose, onAct }) {
   if (!dlg) return null
   const { verb, box: b } = dlg
   const who = `${b.id}${b.project ? ` (${b.project})` : ''}`
@@ -220,6 +224,12 @@ function BoxDialog({ dlg, budget, onClose, onAct }) {
           {budget ? ` (${mb(budget.ram_mb_used)} of ${mb(budget.ram_mb_cap)} reserved)` : ''}. If a cap
           is reached the server refuses; nothing is queued.</p>
         {b.kind === 'service' && <p>Every approved service placed in it starts with it.</p>}
+        {b.runtime === 'docker' && runtimes && !runtimes.docker.available && (
+          <p className="error small">Docker is unavailable on this host
+            {runtimes.docker.reason ? `: ${runtimes.docker.reason}` : ''}. The start will fail.</p>)}
+        {b.runtime === 'docker' && runtimes?.docker.weak && (
+          <p className="warn">Weak isolation: this container would run without a user namespace.
+            {runtimes.docker.warnings.length ? ` ${runtimes.docker.warnings.join(' ')}` : ''}</p>)}
       </Confirm>
     )
   }

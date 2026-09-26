@@ -67,6 +67,38 @@ export function RuntimeTag({ runtime }) {
   return <Tag>{runtime || 'kvm'}</Tag>
 }
 
+// What the host can run boxes on (GET /api/vm/boxes `runtimes`, normalised by
+// logic.normRuntimes): docker greyed out with the server's reason when it is
+// unavailable, and its "weak isolation" warnings shown whenever `weak`.
+export function RuntimeStatus({ runtimes, compact = false }) {
+  if (!runtimes) return null
+  const { kvm, docker } = runtimes
+  const flags = ['rootless', 'userns', 'gvisor', 'seccomp'].filter((k) => docker[k])
+  return (
+    <div className={compact ? 'bx-runtimes small' : 'sbx-card bx-runtimes small'}>
+      <div className={kvm.available ? '' : 'bx-runtime-off'}>
+        <b>KVM</b> {kvm.available ? <Tag tone="done">available</Tag> : <Tag tone="error">unavailable</Tag>}
+        {kvm.reason && <span className="dim"> — {kvm.reason}</span>}
+      </div>
+      <div className={docker.available ? '' : 'bx-runtime-off'}>
+        <b>Docker</b> {docker.available ? <Tag tone="done">available</Tag> : <Tag>unavailable</Tag>}
+        {!docker.available && docker.reason && <span className="dim"> — {docker.reason}</span>}
+        {docker.available && flags.length > 0 && <span className="dim"> · {flags.join(' · ')}</span>}
+      </div>
+      {docker.available && (docker.weak || docker.warnings.length > 0) && (
+        <div className="bx-warn-box">
+          {docker.weak && <span className="warn"><b>Weak isolation</b> — a docker box would run
+            without a user namespace.</span>}
+          {docker.warnings.length > 0 && (
+            <ul className="bx-warnings">
+              {docker.warnings.map((w, i) => <li key={i} className="warn">{w}</li>)}
+            </ul>)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function PlacementTag({ placement }) {
   if (!placement) return null
   return <Tag className="bx-place" title="service placement">{placement.replace('_', ' ')}</Tag>

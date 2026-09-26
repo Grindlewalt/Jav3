@@ -146,6 +146,13 @@ const S = {
       imported_at: '2026-09-10 10:00:00', delete_after: '2026-10-10 10:00:00' },
     notes: { approved: false, enabled: true, mount: '/persist', disk: { exists: false } },
   },
+  runtimes: {
+    kvm: { available: true, reason: null },
+    docker: { available: true, reason: null, rootless: false, userns: false, gvisor: false,
+      seccomp: true, weak: true,
+      warnings: ['no user namespace: root in a container is root on the host',
+        'gVisor (runsc) is not installed'] },
+  },
   nextId: 100,
 }
 
@@ -205,6 +212,10 @@ function relays(sid = null) {
       box_id: s.box_id, listening: s.state === 'running', conns: 1, bytes_in: 4100, bytes_out: 88000,
       error: null })))
 }
+function staticHalf(b) {
+  const { rss_bytes, cpu_pct, uptime_s, inflight, disk, ...rest } = b   // eslint-disable-line no-unused-vars
+  return rest
+}
 function box(id) { return S.boxes.find((b) => b.id === id) || fail(404, 'no such box') }
 function budget() {
   const used = S.boxes.reduce((n, b) => n + b.mem_mb, 0)
@@ -214,7 +225,8 @@ function budget() {
 const usedBy = (variant) => S.variants.find((v) => v.name === variant)?.used_by || []
 
 const routes = [
-  ['GET', /^\/api\/vm\/boxes$/, () => ({ enabled: S.enabled, boxes: S.boxes, budget: budget() })],
+  ['GET', /^\/api\/vm\/boxes$/, () => ({ enabled: S.enabled, boxes: S.boxes, budget: budget(),
+    runtimes: S.runtimes })],
   ['POST', /^\/api\/vm\/boxes\/([^/]+)\/start$/, ([id]) => {
     let b = S.boxes.find((x) => x.id === id)
     if (!b && id.startsWith('p-')) {
@@ -225,10 +237,14 @@ const routes = [
     if (!b) fail(404, 'no such box')
     if (budget().ram_mb_used > 2250) fail(409, 'RAM budget exceeded')
     Object.assign(b, { state: 'running', uptime_s: 1, rss_bytes: b.mem_mb * 0.6 * 2 ** 20, cpu_pct: 5 })
+    emit('vm-boxes', { type: 'box_up', box: staticHalf(b) })
     return b
   }],
-  ['POST', /^\/api\/vm\/boxes\/([^/]+)\/stop$/, ([id]) =>
-    Object.assign(box(id), { state: 'stopped', uptime_s: null, rss_bytes: null, cpu_pct: null, inflight: 0 })],
+  ['POST', /^\/api\/vm\/boxes\/([^/]+)\/stop$/, ([id]) => {
+    const b = Object.assign(box(id), { state: 'stopped', uptime_s: null, rss_bytes: null, cpu_pct: null, inflight: 0 })
+    emit('vm-boxes', { type: 'box_down', box: staticHalf(b) })
+    return b
+  }],
   ['POST', /^\/api\/vm\/boxes\/([^/]+)\/destroy$/, ([id], body) => {
     if (!body.confirm) fail(400, 'confirm required')
     if (id === 'shared') Object.assign(box(id), { state: 'stopped' })
@@ -348,19 +364,26 @@ const routes = [
   ['PUT', /^\/api\/profiles\/(\d+)$/, ([id], b) => {
     const p = S.profiles.find((x) => x.id === Number(id)) || fail(404, 'no such profile')
     if (p.builtin && b.name && b.name !== p.name) fail(409, 'builtin profiles keep their name')
+    for (const k of ['service_placement', 'box_runtime']) {
+      if (k in b && !b[k]) fail(422, `${k} is required`)
+    }
     Object.assign(p, b)
     return p
   }],
   ['DELETE', /^\/api\/profiles\/(\d+)$/, ([id]) => {
-    const p = S.profiles.find((x) => x.id === Number(id))
-    if (p?.builtin) fail(409, 'builtin profiles cannot be deleted')
+    const p = S.profiles.find((x) => x.id === Number(id)) || fail(404, 'no such profile')
+    if (p.builtin) fail(409, 'builtin profiles cannot be deleted')
+    if (p.projects.length) fail(409, `profile is in use by: ${p.projects.join(', ')}`)
     S.profiles = S.profiles.filter((x) => x.id !== Number(id))
     return { ok: true }
   }],
   ['PUT', /^\/api\/projects\/([^/]+)\/profile$/, ([slug], b) => {
+    if (slug === '__image_build__') fail(409, 'the image-build policy is fixed')
+    if (!PROJECTS.some((p) => p.slug === slug)) fail(404, 'no such project')
+    const to = S.profiles.find((p) => p.id === Number(b.profile_id)) || fail(404, 'no such profile')
     S.profiles.forEach((p) => { p.projects = p.projects.filter((s) => s !== slug) })
-    S.profiles.find((p) => p.id === Number(b.profile_id))?.projects.push(slug)
-    return { ok: true }
+    to.projects.push(slug)
+    return { ok: true, project: slug, profile: { id: to.id, name: to.name } }
   }],
   ['GET', /^\/api\/secrets$/, () => ({ secrets: S.secrets.map((name) => ({ name })) })],
   ['GET', /^\/api\/projects$/, () => ({ projects: PROJECTS })],

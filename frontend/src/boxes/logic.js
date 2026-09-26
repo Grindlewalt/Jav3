@@ -66,6 +66,21 @@ export function navState(boxesResp) {
   return 'off'
 }
 
+// The runtimes GET /api/vm/boxes reports (WP8). // Unknown = unavailable: a runtime the server did not vouch for is not offered.
+export function normRuntimes(rt) {
+  const kvm = rt?.kvm || {}
+  const d = rt?.docker || {}
+  return {
+    kvm: { available: kvm.available !== false, reason: kvm.reason || null },
+    docker: {
+      available: d.available === true,
+      reason: d.reason || (rt ? null : 'this server does not report its runtimes'),
+      rootless: !!d.rootless, userns: !!d.userns, gvisor: !!d.gvisor, seccomp: !!d.seccomp,
+      weak: !!d.weak, warnings: Array.isArray(d.warnings) ? d.warnings : [],
+    },
+  }
+}
+
 // ---- process trees -------------------------------------------------------------
 
 // A box may report a nested tree (children[]) or a flat list (pid/ppid): nest
@@ -323,6 +338,12 @@ export function validateProfile(p, { names = [], minMem = 256 } = {}) {
   }
   return e
 }
+
+// Projects a profile can be assigned to: never the reserved keys
+// (`__image_build__` is the builders' fixed policy — the server answers 409 —
+// and `__general__` is the Default profile's list, not a project).
+export const assignableProjects = (projects) =>
+  (projects || []).filter((p) => p && p.slug && !String(p.slug).startsWith('__'))
 
 // What a profile save sends (every field; the server wants them all).
 export function profilePayload(p) {

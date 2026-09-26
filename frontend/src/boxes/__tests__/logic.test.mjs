@@ -5,6 +5,7 @@ import {
   mergeProcs, navState, nestProcs, parseHosts, persistDaysLeft, profilePayload,
   sortBoxes, treeTotals, uptime, validPackage, validateProfile, variantUsers, blankProfile,
   exposeChoices, exposeDefault, exposePayload, procsRefetch, boxTotals, boxIsOdd, normBoxProcs,
+  normRuntimes, assignableProjects,
 } from '../logic.js'
 
 let n = 0
@@ -250,6 +251,27 @@ t('exposePayload sends canonical binds only, drops closed and impossible ports',
   // legacy values never go out
   assert.deepEqual(exposePayload({ 8080: 'host' }, ports), [])
   assert.deepEqual(exposePayload({ 22: 'loopback' }, ports), [])
+})
+
+t('normRuntimes: docker is offered only when the server says available', () => {
+  const none = normRuntimes(null)
+  assert.equal(none.kvm.available, true)
+  assert.equal(none.docker.available, false)
+  assert.ok(none.docker.reason)
+  const r = normRuntimes({ kvm: { available: true, reason: null },
+    docker: { available: false, reason: 'docker not installed', weak: false, warnings: [] } })
+  assert.equal(r.docker.available, false); assert.equal(r.docker.reason, 'docker not installed')
+  const w = normRuntimes({ kvm: { available: false, reason: 'no /dev/kvm' },
+    docker: { available: true, reason: null, rootless: false, userns: false, gvisor: false,
+      seccomp: true, weak: true, warnings: ['no userns-remap: root in the container is root on the host'] } })
+  assert.equal(w.kvm.available, false); assert.equal(w.kvm.reason, 'no /dev/kvm')
+  assert.equal(w.docker.weak, true); assert.equal(w.docker.warnings.length, 1)
+  assert.equal(w.docker.seccomp, true)
+})
+
+t('assignableProjects drops the reserved slugs', () => {
+  assert.deepEqual(assignableProjects([{ slug: 'a' }, { slug: '__image_build__' }, { slug: '__general__' }, null])
+    .map((p) => p.slug), ['a'])
 })
 
 console.log(`${n} passed`)

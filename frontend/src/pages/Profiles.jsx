@@ -6,11 +6,12 @@ import {
   assignProfile, createProfile, deleteProfile, listProfiles, secretNames, updateProfile,
 } from '../boxes/api/profiles.js'
 import { listImages } from '../boxes/api/images.js'
+import { listBoxes } from '../boxes/api/vms.js'
 import { listProjects } from '../boxes/api/persist.js'
 import {
-  blankProfile, parseHosts, PLACEMENTS, profilePayload, RUNTIMES, validateProfile,
+  assignableProjects, blankProfile, parseHosts, PLACEMENTS, profilePayload, RUNTIMES, validateProfile,
 } from '../boxes/logic.js'
-import { LoadError, ProjectList, Unavailable, useLoad } from '../boxes/ui.jsx'
+import { LoadError, ProjectList, RuntimeStatus, Unavailable, useLoad } from '../boxes/ui.jsx'
 
 // Security > Profiles: a project's whole security posture in one named row —
 // which secrets it may have, how its egress is judged, whether its alerts are
@@ -20,8 +21,11 @@ import { LoadError, ProjectList, Unavailable, useLoad } from '../boxes/ui.jsx'
 // Placement and runtime have NO default for a new profile (operator decision
 // 0.1 and the docker addendum): the form will not save until both are picked.
 
-const NEVER_AUTO = 'service_*, package_*, unexpected_process and proc_report_mismatch '
-  + 'are never auto-handled, whatever this says; nor is anything on the reviewer\'s own never-list.'
+const NEVER_AUTO = 'Never auto-handled, whatever this says: service_* and svc_unreported, '
+  + 'package_* and image_variant_built, unexpected_process and proc_report_mismatch, '
+  + 'profile_changed and profiles_migrated, docker_weak_isolation / docker_hardening_refused / '
+  + 'docker_socket_refused, persist_imported and persist_disk_deleted, plus egress_anomaly, '
+  + 'host_cut and secret_leak.'
 
 export default function Profiles() {
   const pr = useLoad(listProfiles)
@@ -29,19 +33,22 @@ export default function Profiles() {
   const [secrets, setSecrets] = useState([])
   const [variants, setVariants] = useState(['main', 'dev', 'desktop'])
   const [projects, setProjects] = useState([])
+  const [runtimes, setRuntimes] = useState(null)
   const ask = useAsk()
 
   useEffect(() => {
     secretNames().then(setSecrets).catch(() => {})
     listImages().then((r) => { if (r.variants.length) setVariants(r.variants.map((v) => v.name)) })
       .catch(() => {})
-    listProjects().then(setProjects).catch(() => {})
+    listProjects().then((ps) => setProjects(assignableProjects(ps))).catch(() => {})
+    listBoxes().then((r) => setRuntimes(r.runtimes)).catch(() => {})
   }, [])
 
+  // builtins cannot be deleted (409), nor can a profile a project still uses
+  // (409 "in use by"): move its projects first
   async function remove(p) {
-    const n = (p.projects || []).length
     if (!await ask.confirm(`Delete profile ${p.name}?`, {
-      body: n ? `${n} project(s) use it and move to Default.` : 'No project uses it.',
+      body: 'No project uses it. This cannot be undone.',
       confirmLabel: 'Delete', danger: true })) return
     try { await deleteProfile(p.id); pr.reload() } catch (e) { notifyError(e) }
   }
@@ -75,14 +82,16 @@ export default function Profiles() {
                 </span>
                 <span className="small">projects: <ProjectList slugs={p.projects} empty="none" /></span>
               </span>
-              <Button variant="ghost" onClick={() => setEditing({ ...p })}>
-                {p.builtin ? 'View' : 'Edit'}</Button>
+              <Button variant="ghost" onClick={() => setEditing({ ...p })}>Edit</Button>
               <Button variant="ghost" onClick={() => setEditing({
                 // placement and runtime are picked again: a copy is a new
                 // profile, and new profiles have no default for either
                 ...p, id: null, builtin: false, name: `${p.name} copy`, projects: [],
                 service_placement: '', box_runtime: '' })}>Duplicate</Button>
-              {!p.builtin && <Button variant="ghost" danger onClick={() => remove(p)}>Delete</Button>}
+              {!p.builtin && (
+                <Button variant="ghost" danger disabled={(p.projects || []).length > 0}
+                        title={(p.projects || []).length ? 'move its projects to another profile first' : undefined}
+                        onClick={() => remove(p)}>Delete</Button>)}
             </li>
           ))}
         </ul>
@@ -90,6 +99,7 @@ export default function Profiles() {
 
       {editing && (
         <ProfileForm key={editing.id ?? 'new'} initial={editing} secrets={secrets} variants={variants}
+                     runtimes={runtimes}
                      names={list.filter((p) => p.id !== editing.id).map((p) => p.name)}
                      onCancel={() => setEditing(null)}
                      onSaved={() => { setEditing(null); pr.reload() }} />
@@ -100,13 +110,13 @@ export default function Profiles() {
   )
 }
 
-function ProfileForm({ initial, secrets, variants, names, onCancel, onSaved }) {
+function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, onSaved }) {
   const [p, setP] = useState(initial)
   const [allowText, setAllowText] = useState((initial.allow_hosts || []).join('\n'))
   const [denyText, setDenyText] = useState((initial.deny_hosts || []).join('\n'))
   const [busy, setBusy] = useState(false)
   const [tried, setTried] = useState(false)
-  const ro = !!initial.builtin
+  const builtin = !!initial.builtin     // editable, but its name is fixed (409)
   const isNew = initial.id == null
   const set = (k, v) => setP((x) => ({ ...x, [k]: v }))
   const full = { ...p, allow_hosts: parseHosts(allowText), deny_hosts: parseHosts(denyText) }
@@ -120,7 +130,7 @@ function ProfileForm({ initial, secrets, variants, names, onCancel, onSaved }) {
   async function save(e) {
     e.preventDefault()
     setTried(true)
-    if (!ok || ro) return
+    if (!ok) return
     setBusy(true)
     try {
       const body = profilePayload(full)
@@ -132,18 +142,20 @@ function ProfileForm({ initial, secrets, variants, names, onCancel, onSaved }) {
     setBusy(false)
   }
 
-  const radio = (name, value, cur, onPick) => (
+  const radio = (name, value, cur, onPick, off = false) => (
     <input type="radio" name={name} value={value} checked={cur === value}
-           disabled={ro} onChange={() => onPick(value)} />
+           disabled={off} onChange={() => onPick(value)} />
   )
+  const dockerOff = runtimes && !runtimes.docker.available
 
   return (
     <form className="sbx-card bx-form bx-prof-form" onSubmit={save}>
       <div className="sbx-sec-head">
-        <h3>{ro ? `${p.name} (built-in, read-only)` : isNew ? 'New profile' : `Edit ${initial.name}`}</h3>
+        <h3>{isNew ? 'New profile' : `Edit ${initial.name}`}{builtin ? ' (built-in: cannot be renamed or deleted)' : ''}</h3>
       </div>
-      <fieldset disabled={ro} className="bx-fs">
-        <Input label="Name" value={p.name} error={show('name')} onChange={(e) => set('name', e.target.value)} />
+      <fieldset className="bx-fs">
+        <Input label="Name" value={p.name} error={show('name')} disabled={builtin}
+               onChange={(e) => set('name', e.target.value)} />
 
         <div className="field">
           <span>Secrets it can have <span className="dim small">(names only — values never leave the host)</span></span>
@@ -208,13 +220,19 @@ function ProfileForm({ initial, secrets, variants, names, onCancel, onSaved }) {
           <div className="field">
             <span>Box runtime <span className="dim small">(required)</span></span>
             <div className="bx-radios">
-              {RUNTIMES.map((o) => (
-                <label key={o.value} className="check-row">
-                  {radio('runtime', o.value, p.box_runtime, (v) => set('box_runtime', v))}
-                  <span>{o.label} <span className="dim small">— {o.hint}</span></span>
-                </label>
-              ))}
+              {RUNTIMES.map((o) => {
+                const off = o.value === 'docker' ? dockerOff : (runtimes && !runtimes.kvm.available)
+                const why = o.value === 'docker' ? runtimes?.docker.reason : runtimes?.kvm.reason
+                return (
+                  <label key={o.value} className={`check-row${off ? ' bx-runtime-off' : ''}`}>
+                    {radio('runtime', o.value, p.box_runtime, (v) => set('box_runtime', v), off)}
+                    <span>{o.label} <span className="dim small">— {o.hint}</span>
+                      {off && <span className="dim small"> · unavailable{why ? `: ${why}` : ''}</span>}</span>
+                  </label>
+                )
+              })}
             </div>
+            {p.box_runtime === 'docker' && runtimes && <RuntimeStatus runtimes={runtimes} compact />}
             {show('box_runtime') && <span className="error small">{errs.box_runtime}</span>}
           </div>
           <div className="field">
@@ -230,7 +248,7 @@ function ProfileForm({ initial, secrets, variants, names, onCancel, onSaved }) {
             {show('service_placement') && <span className="error small">{errs.service_placement}</span>}
           </div>
           <div className="row">
-            <Select label="Box image variant" value={p.box_image || 'main'} disabled={ro}
+            <Select label="Box image variant" value={p.box_image || 'main'}
                     onChange={(e) => set('box_image', e.target.value)}
                     options={[...new Set([...variants, p.box_image || 'main'])]} />
             <Input label="Box memory (MB)" type="number" min={256} step={64} value={p.box_mem_mb ?? ''}
@@ -243,8 +261,8 @@ function ProfileForm({ initial, secrets, variants, names, onCancel, onSaved }) {
       <div className="row">
         {tried && !ok && <span className="error small">fix the fields marked above</span>}
         <span className="grow" />
-        <Button variant="ghost" onClick={onCancel}>{ro ? 'Close' : 'Cancel'}</Button>
-        {!ro && <Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save profile'}</Button>}
+        <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+        <Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save profile'}</Button>
       </div>
     </form>
   )
