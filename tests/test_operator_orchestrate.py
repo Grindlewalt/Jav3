@@ -31,6 +31,20 @@ MODEL = "deepseek/deepseek-flash"      # the one model enabled in the test env
 
 @pytest.fixture
 async def client(tmp_env):
+    # Each test gets a fresh database, so conversation ids restart at 1. A turn
+    # an earlier test left running (test_background_chat detaches them on
+    # purpose) would close ITS inbox for that id when it ends — which is this
+    # test's conversation too. Cancel those first, and start with no inbox open.
+    from backend import chat as chat_mod
+    for task in list(chat_mod._active_turns.values()):
+        task.cancel()
+    for task in list(chat_mod._active_turns.values()):
+        try:
+            await task
+        except BaseException:  # noqa: BLE001 — cancelled, or failed; either way gone
+            pass
+    chat_mod._active_turns.clear()
+    agentmsg._accepting.clear()
     await init_db()
     ensure_memory_seeds()
     db = await get_db()
@@ -50,10 +64,15 @@ async def client(tmp_env):
     agentmsg._accepting.clear()
 
 
-async def _new_turn_id(chat_mod) -> int:
+async def _new_turn_id(chat_mod, before=None) -> int:
+    """The id of the turn just started. `before` is the set of in-flight ids
+    from before the POST: an earlier test can leave an entry behind in the
+    module-level table, and the largest id is not necessarily ours."""
+    before = set() if before is None else before
     for _ in range(200):
-        if chat_mod._active_turns:
-            return max(chat_mod._active_turns)
+        fresh = set(chat_mod._active_turns) - before
+        if fresh:
+            return max(fresh)
         await asyncio.sleep(0.01)
     raise AssertionError("turn never started")
 
@@ -109,9 +128,10 @@ async def test_operator_message_reaches_the_next_round_as_the_operator(client, m
         yield {"type": "final", "content": "done"}
 
     monkeypatch.setattr(chat_mod, "guest_turn", turn)
+    before = set(chat_mod._active_turns)
     post = asyncio.create_task(client.post(
         "/api/chat", json={"message": "build it", "confirm_peak": True}))
-    cid = await _new_turn_id(chat_mod)
+    cid = await _new_turn_id(chat_mod, before)
     q = bus.subscribe(f"chat:{cid}")
     r = await client.post(f"/api/chat/{cid}/message", json={"text": "also add tests"})
     assert r.status_code == 200 and r.json() == {"queued": True}
@@ -146,9 +166,10 @@ async def test_a_message_the_turn_never_reads_comes_back_as_undelivered(client, 
         yield {"type": "final", "content": "done"}
 
     monkeypatch.setattr(chat_mod, "guest_turn", turn)
+    before = set(chat_mod._active_turns)
     post = asyncio.create_task(client.post(
         "/api/chat", json={"message": "go", "confirm_peak": True}))
-    cid = await _new_turn_id(chat_mod)
+    cid = await _new_turn_id(chat_mod, before)
     tail = asyncio.create_task(client.get(f"/api/chat/{cid}/stream"))
     await asyncio.sleep(0.05)
     r = await client.post(f"/api/chat/{cid}/message", json={"text": "too late"})

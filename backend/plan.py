@@ -363,8 +363,11 @@ def _parse_items(text: str) -> list[dict]:
 
 
 def _title_from(dump: str) -> str:
-    first = next((ln.strip(" #-*") for ln in dump.splitlines() if ln.strip()), "")
-    return " ".join(first.split())[:60] or "Plan"
+    # a line ending in ':' introduces what follows ("The operator's request,
+    # verbatim:"), so it names nothing; take the first line that says something
+    lines = [ln.strip(" #-*") for ln in dump.splitlines() if ln.strip(" #-*")]
+    first = next((ln for ln in lines if not ln.endswith(":")), lines[0] if lines else "")
+    return " ".join(first.rstrip(":").split())[:60] or "Plan"
 
 
 def _known_agents() -> set[str]:

@@ -5,7 +5,7 @@ from backend.writes import SecretLeakError
 
 
 async def run(dump: str, files: list[str] | None = None, run: bool = True,
-              models: list[dict] | None = None) -> str:
+              models: list[dict] | None = None, title: str = "") -> str:
     if runtime.ephemeral.get():
         # a plan is a persisted file and a team of recorded runs: exactly what
         # an incognito turn promises not to leave behind
@@ -18,7 +18,8 @@ async def run(dump: str, files: list[str] | None = None, run: bool = True,
     except ValueError as e:
         return f"error: {e}. Nothing was planned."
     try:
-        plan = await plan_mod.plan_from_dump(slug, dump, files or [], models=assigned)
+        plan = await plan_mod.plan_from_dump(slug, dump, files or [], models=assigned,
+                                            title=" ".join((title or "").split())[:80])
     except SecretLeakError as e:
         return f"error: refused — the dump contains a secret value ({e}). Remove it and retry."
     except (ValueError, RuntimeError) as e:

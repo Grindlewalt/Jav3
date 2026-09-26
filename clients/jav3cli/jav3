@@ -721,6 +721,13 @@ def tool_title(name: str, args) -> tuple[str, str]:
         return "✱", f"List {s('path') or '.'}"
     if name == "todo_update":
         return "⚙", f"Todo {s('action')} {s('text', 60)}".rstrip()
+    if name == "orchestrate":
+        first = next((ln for ln in str(a.get("dump", "")).splitlines()
+                      if ln.strip() and not ln.strip().endswith(":")), "")
+        return "◆", f"Plan {s('title') or _short(first, 70)}".rstrip()
+    if name == "plan_status":
+        return "◷", "Waiting on the plan" + (f" (up to {a['wait_seconds']}s)"
+                                            if a.get("wait_seconds") else "")
     if name in ("spawn_agent", "spawn_temp_agent", "deploy_agents", "orchestrate"):
         who = s("agent") or s("label") or s("title")
         what = s("task", 60) or s("brief", 60)
@@ -2446,6 +2453,9 @@ def build_tui(base: str, token: str, **kw):
             return self.model or self.shown_model or (self.options or {}).get("default") or "default"
 
         def _project_label(self) -> str | None:
+            # a local chat works on this machine, not in any project
+            if (self.info or {}).get("local") if self.cid else (self.local and self.cid is None):
+                return None
             if self.project:
                 return self.project
             if self.project_mode == "none":
@@ -2835,7 +2845,10 @@ def build_tui(base: str, token: str, **kw):
             elif t == "job":
                 await self.note(f"◆ job: {ev.get('title', '')}")
             elif t == "inbox":
-                await self.note(f"✉ {_short(ev.get('text', ''), 200)}")
+                # an operator message arrives as operator_message too; the
+                # inbox copy is the model-facing framing of the same words
+                if not (ev.get("text") or "").lstrip().startswith("[the operator"):
+                    await self.note(f"✉ {_short(ev.get('text', ''), 200)}")
             elif t == "operator_message":
                 await self._close_seg()
                 text = ev.get("text") or ""

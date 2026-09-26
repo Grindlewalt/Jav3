@@ -31,6 +31,9 @@ parameters:
             type: string
             description: The model id (provider/model) the operator named.
         required: [task, model]
+    title:
+      type: string
+      description: A short name for the plan (under ~8 words) — what it is for, not how the dump starts. Shown in the agents tree and the Jobs view.
   required: [dump]
 ---
 The checklist is saved to the project's .plan.json and shown on the Workspace
