@@ -14,8 +14,25 @@ log = logging.getLogger(__name__)
 # from the process environment only (it has to be known BEFORE the env file is
 # read), so a second instance on the same user account (scripts/install.sh
 # --name) gets its own key and secrets instead of sharing the first one's.
+#
+# A checkout installed as a named instance remembers it in <repo>/.jarvis-instance
+# (one line, JARVIS_CONFIG_DIR=<dir>, written by install.sh), so a plain
+# `.venv/bin/python -m backend.cli ...` run from it targets that instance, not
+# the default one. The environment still wins.
+def _instance_config_dir() -> str | None:
+    try:
+        for line in (BASE_DIR / ".jarvis-instance").read_text().splitlines():
+            k, _, v = line.partition("=")
+            if k.strip() == "JARVIS_CONFIG_DIR" and v.strip():
+                return v.strip()
+    except OSError:
+        pass
+    return None
+
+
 CONFIG_DIR = Path(os.path.expanduser(
-    os.environ.get("JARVIS_CONFIG_DIR") or "~/.config/jarvis"))
+    os.environ.get("JARVIS_CONFIG_DIR") or _instance_config_dir()
+    or "~/.config/jarvis"))
 ENV_FILE = CONFIG_DIR / "env"
 
 # The durable-state dirs a pre-state-dir install kept at the repo root. skills/

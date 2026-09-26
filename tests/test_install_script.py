@@ -76,3 +76,22 @@ def test_foreign_config_dir_is_a_conflict(tmp_path):
     (cfg / "config.yaml").write_text("other: app\n")
     out = run(tmp_path, "--check").stdout
     assert "already holds files from something else" in out
+
+
+@needs_bash
+def test_conflict_does_not_also_advise_creating_the_env(tmp_path):
+    cfg = tmp_path / ".config" / "jarvis"
+    cfg.mkdir(parents=True)
+    (cfg / "config.yaml").write_text("other: app\n")
+    out = run(tmp_path, "--check").stdout
+    assert "touch" not in out and "service not installed" not in out
+
+
+def test_checkout_remembers_its_instance(tmp_path, monkeypatch):
+    from backend import config
+    (tmp_path / ".jarvis-instance").write_text(
+        "JARVIS_INSTANCE=test\nJARVIS_CONFIG_DIR=/srv/cfg-test\n")
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    assert config._instance_config_dir() == "/srv/cfg-test"
+    (tmp_path / ".jarvis-instance").unlink()
+    assert config._instance_config_dir() is None

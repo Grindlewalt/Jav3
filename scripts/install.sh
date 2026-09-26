@@ -159,6 +159,13 @@ esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# A checkout installed as a named instance remembers it (see user_phase), so a
+# bare re-run or --check from it inspects that instance, not the default one.
+if [ -z "$NAME_OPT$CFG_DIR_OPT" ] && [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/.jarvis-instance" ]; then
+  NAME_OPT="$(sed -n 's/^JARVIS_INSTANCE=//p' "$REPO_DIR/.jarvis-instance" | tail -1)"
+  CFG_DIR_OPT="$(sed -n 's/^JARVIS_CONFIG_DIR=//p' "$REPO_DIR/.jarvis-instance" | tail -1)"
+fi
+
 # Instance: the unit name and the config dir. Default is the one instance
 # everything else assumes; --name keeps a second one (a test install, say) from
 # overwriting the first one's unit, env file and secrets. The app reads the
@@ -430,10 +437,14 @@ check_user_side() {
     fi
   fi
 
-  if [ -f "$CFG_DIR/env" ]; then ok "config file present"
+  # after a conflict, "create the env file / install the unit" is exactly the
+  # wrong advice, so those two lines stay quiet
+  if [ ${#CONFLICT[@]} -gt 0 ]; then :
+  elif [ -f "$CFG_DIR/env" ]; then ok "config file present"
   else bad "no $CFG_DIR/env"; fix "mkdir -p $CFG_DIR && touch $CFG_DIR/env && chmod 600 $CFG_DIR/env"; MISSING_USER+=("config"); fi
 
-  if [ -f "$HOME/.config/systemd/user/$UNIT.service" ]; then ok "systemd user unit $UNIT.service installed"
+  if [ ${#CONFLICT[@]} -gt 0 ]; then :
+  elif [ -f "$HOME/.config/systemd/user/$UNIT.service" ]; then ok "systemd user unit $UNIT.service installed"
   else bad "$UNIT.service not installed"; fix "bash $REPO_DIR/scripts/install.sh"; MISSING_USER+=("unit"); fi
 
   local vmd; vmd="$(vm_dir)"
@@ -685,6 +696,15 @@ user_phase() {
   mkdir -p "$CFG_DIR"
   touch "$CFG_DIR/env"
   chmod 600 "$CFG_DIR/env"
+  # The checkout remembers a non-default instance, so the printed
+  # `.venv/bin/python -m backend.cli ...` commands (and a bare re-run of this
+  # script) land on it rather than on the default ~/.config/jarvis.
+  if [ "$CFG_DIR" != "$DEFAULT_CFG_DIR" ]; then
+    printf 'JARVIS_INSTANCE=%s\nJARVIS_CONFIG_DIR=%s\n' "$NAME_OPT" "$CFG_DIR" > .jarvis-instance
+    ok "this checkout is instance ${NAME_OPT:-custom} ($CFG_DIR), recorded in .jarvis-instance"
+  else
+    rm -f .jarvis-instance
+  fi
   # A non-default state dir must reach the service too, not just this script.
   if [ "$STATE_DIR" != "$HOME/.local/share/jarvis" ] \
      && ! grep -qxF "JARVIS_STATE_DIR=$STATE_DIR" "$CFG_DIR/env"; then
@@ -877,6 +897,12 @@ printf '  re-check:             bash %s/scripts/install.sh --check\n' "$REPO_DIR
 # work, and a server that is up says so more usefully than one that is not.
 if [ ${#MISSING_ROOT[@]} -gt 0 ] || [ ${#BLOCKED[@]} -gt 0 ]; then
   printf '\n%sstarting without a guest runtime:%s the web UI works, but agent turns\n' "$YELLOW" "$OFF"
-  printf '  will fail until the root steps above are done (then: systemctl --user restart %s).\n' "$UNIT"
+  if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
+    printf '  will fail until the root steps above are done'
+    [ ${#BLOCKED[@]} -eq 0 ] || printf ' and virtualization is enabled in BIOS (BLOCKED above)'
+  else
+    printf '  will fail until virtualization is enabled in BIOS (BLOCKED above)'
+  fi
+  printf '\n  (then: systemctl --user restart %s).\n' "$UNIT"
 fi
 verify || true
