@@ -1,7 +1,7 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import ChatGroups, { listTitle } from '../ChatGroups.jsx'
-import SandboxLine from './SandboxLine.jsx'
 
 // The shell's left column, top to bottom:
 //
@@ -113,7 +113,8 @@ export default function ShellSidebar({
                       onChanged={onChanged} />
         )}
       </div>
-      <div className="sh-side-foot"><SandboxLine slug={projectSlug} /></div>
+      {/* the sandbox line lived here; the boxes are on the VMs page now */}
+      <div className="sh-side-foot"><Link className="sh-side-vms small dim" to="/vms">VMs →</Link></div>
     </aside>
   )
 }

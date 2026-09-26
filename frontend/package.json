@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node src/work/__tests__/layout.test.mjs && node src/boxes/__tests__/logic.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
