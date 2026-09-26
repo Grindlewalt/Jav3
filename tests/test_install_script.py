@@ -95,3 +95,45 @@ def test_checkout_remembers_its_instance(tmp_path, monkeypatch):
     assert config._instance_config_dir() == "/srv/cfg-test"
     (tmp_path / ".jarvis-instance").unlink()
     assert config._instance_config_dir() is None
+
+
+def _load_module_harness(tmp_path, modinfo_out, modprobe_rc):
+    """Run install.sh's load_module() alone, with modinfo/modprobe stubbed."""
+    text = SCRIPT.read_text()
+    start = text.index("load_module() {")
+    fn = text[start:text.index("\n}\n", start) + 3]
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "modinfo").write_text(f"#!/bin/sh\necho '{modinfo_out}'\n")
+    (stub / "modprobe").write_text(f"#!/bin/sh\nexit {modprobe_rc}\n")
+    for f in stub.iterdir():
+        f.chmod(0o755)
+    conf = tmp_path / "m.conf"
+    prog = ("set -euo pipefail\nok(){ echo ok \"$*\"; }\nbad(){ echo MISS \"$*\"; }\n"
+            "CHANGES=() ROOT_FAILED=0\n" + fn +
+            f"load_module vhost_vsock {conf}\n"
+            'echo "failed=$ROOT_FAILED changes=${#CHANGES[@]}"\n')
+    env = {"PATH": f"{stub}:/usr/bin:/bin"}
+    out = subprocess.run([BASH, "-c", prog], capture_output=True, text=True,
+                         env=env).stdout
+    return out, conf
+
+
+@needs_bash
+def test_builtin_module_is_not_persisted(tmp_path):
+    out, conf = _load_module_harness(tmp_path, "(builtin)", 0)
+    assert "built into the kernel" in out and "failed=0 changes=0" in out
+    assert not conf.exists()
+
+
+@needs_bash
+def test_failed_modprobe_is_not_ok_and_not_persisted(tmp_path):
+    out, conf = _load_module_harness(tmp_path, "/lib/modules/x/vhost_vsock.ko", 1)
+    assert "MISS" in out and not out.startswith("ok") and "failed=1" in out
+    assert not conf.exists()
+
+
+@needs_bash
+def test_loaded_module_is_persisted_once(tmp_path):
+    out, conf = _load_module_harness(tmp_path, "/lib/modules/x/vhost_vsock.ko", 0)
+    assert "failed=0 changes=1" in out and conf.read_text() == "vhost_vsock\n"

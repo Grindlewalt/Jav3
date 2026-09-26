@@ -471,6 +471,36 @@ preflight() {
 }
 
 # --------------------------------------------------------------- root phase --
+# What the root phase changed on the system, printed at the end so it can be
+# reverted; and whether any step failed (never reported as ok).
+CHANGES=() ROOT_FAILED=0
+
+# Load a module now and persist it for boot, but only when that means
+# something: a built-in module needs neither (and a modules-load entry for one
+# logs a failure at boot on some kernels), and a failed modprobe (blacklisted,
+# or module loading locked on a hardened kernel) is reported, not persisted.
+load_module() {
+  local mod="$1" conf="$2" fn
+  fn="$(modinfo -F filename "$mod" 2>/dev/null || true)"
+  if [ -z "$fn" ]; then
+    bad "this kernel has no $mod module"; ROOT_FAILED=1; return 0
+  fi
+  if [ "$fn" = "(builtin)" ]; then
+    ok "$mod is built into the kernel — nothing to load or persist"; return 0
+  fi
+  if ! modprobe "$mod"; then
+    bad "modprobe $mod failed (blacklisted, or module loading locked on this kernel?) — not persisted"
+    ROOT_FAILED=1; return 0
+  fi
+  if grep -qx "$mod" "$conf" 2>/dev/null; then
+    ok "$mod loaded (already persisted in $conf)"
+  else
+    printf '%s\n' "$mod" >> "$conf"
+    CHANGES+=("$conf: $mod   (revert: remove the line; modprobe -r $mod)")
+    ok "$mod loaded and persisted in $conf"
+  fi
+}
+
 root_phase() {
   [ "$(id -u)" -eq 0 ] || die "--root-phase must run as root (use sudo)"
   id "$TARGET_USER" >/dev/null 2>&1 || die "no such user: $TARGET_USER (pass --user)"
@@ -492,34 +522,64 @@ root_phase() {
     dnf)    dnf install -y -q "${PACKAGES[@]}" ;;
     *)      warn "unknown package manager — install by hand: ${PACKAGES[*]}" ;;
   esac
-  ok "packages installed"
+  ok "packages installed (only the missing ones were added)"
+  CHANGES+=("packages (if missing): ${PACKAGES[*]}")
 
   step "kvm + vsock kernel modules"
   local kvm_mod=""
   grep -qw vmx /proc/cpuinfo && kvm_mod=kvm_intel
   grep -qw svm /proc/cpuinfo && kvm_mod=kvm_amd
-  if [ -z "$kvm_mod" ]; then
+  if [ -e /dev/kvm ]; then
+    ok "/dev/kvm present — nothing to load"
+  elif [ -z "$kvm_mod" ]; then
     warn "no vmx/svm flag — virtualization is off in firmware; skipping modprobe"
     warn "enable VT-x / SVM Mode in BIOS and re-run this phase"
   else
-    modprobe "$kvm_mod" || warn "modprobe $kvm_mod failed"
-    printf '%s\n' "$kvm_mod" > /etc/modules-load.d/kvm.conf
-    ok "$kvm_mod loaded and persisted"
+    load_module "$kvm_mod" /etc/modules-load.d/kvm.conf
   fi
-  modprobe vhost_vsock || warn "modprobe vhost_vsock failed"
-  echo vhost_vsock > /etc/modules-load.d/vhost_vsock.conf
-  ok "vhost_vsock loaded and persisted"
+  if [ -e /dev/vhost-vsock ]; then
+    ok "/dev/vhost-vsock present (module loaded or built in) — nothing to load"
+  else
+    load_module vhost_vsock /etc/modules-load.d/vhost_vsock.conf
+  fi
 
   step "group membership"
   # /dev/kvm and /dev/vhost-vsock are group kvm; the service user must be in it
   # or rootless qemu cannot open them.
-  getent group kvm >/dev/null || groupadd -r kvm
-  usermod -aG kvm "$TARGET_USER"
-  ok "$TARGET_USER added to group kvm (needs a fresh login to take effect)"
+  if id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx kvm; then
+    ok "$TARGET_USER is already in group kvm"
+  else
+    if ! getent group kvm >/dev/null; then
+      groupadd -r kvm && CHANGES+=("group kvm created   (revert: groupdel kvm)")
+    fi
+    if usermod -aG kvm "$TARGET_USER"; then
+      CHANGES+=("$TARGET_USER added to group kvm   (revert: gpasswd -d $TARGET_USER kvm)")
+      ok "$TARGET_USER added to group kvm (needs a fresh login to take effect)"
+    else
+      bad "could not add $TARGET_USER to group kvm"; ROOT_FAILED=1
+    fi
+  fi
 
   step "linger"
-  loginctl enable-linger "$TARGET_USER"
-  ok "linger enabled for $TARGET_USER (user service survives logout and reboot)"
+  if [ "$(loginctl show-user "$TARGET_USER" -p Linger --value 2>/dev/null)" = yes ]; then
+    ok "linger already enabled for $TARGET_USER"
+  elif loginctl enable-linger "$TARGET_USER"; then
+    CHANGES+=("linger enabled for $TARGET_USER   (revert: loginctl disable-linger $TARGET_USER)")
+    ok "linger enabled for $TARGET_USER (user service survives logout and reboot)"
+  else
+    bad "loginctl enable-linger $TARGET_USER failed"; ROOT_FAILED=1
+  fi
+
+  step "what this phase changed"
+  if [ ${#CHANGES[@]} -eq 0 ]; then
+    printf '  nothing\n'
+  else
+    printf '  - %s\n' "${CHANGES[@]}"
+  fi
+  if [ "$ROOT_FAILED" = 1 ]; then
+    printf '\n%sroot phase finished with failures (MISS lines above).%s\n' "$RED" "$OFF"
+    exit 1
+  fi
 
   printf '\n%sroot phase done.%s Now run, as %s:\n\n    bash %s/scripts/install.sh\n\n' \
     "$BOLD" "$OFF" "$TARGET_USER" "$REPO_DIR"
@@ -848,8 +908,14 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
   printf '    sudo bash %s/scripts/install.sh --root-phase --user %s\n\n' \
     "${REPO_DIR:-<path-to-jarvis-checkout>}" "$TARGET_USER"
   printf '  It installs: %s\n' "${PACKAGES[*]}"
-  printf '  and: loads kvm + vhost_vsock (persisted), adds %s to the kvm group,\n' "$TARGET_USER"
-  printf '  and enables systemd linger. Nothing else.\n'
+  printf '  and: loads kvm + vhost_vsock unless present or built in (persisting a\n'
+  printf '  module in /etc/modules-load.d/ only after it loads), adds %s to the\n' "$TARGET_USER"
+  printf '  kvm group, and enables systemd linger. Nothing else; it ends by listing\n'
+  printf '  exactly what it changed, with the command to revert each.\n'
+  if [ ${#BLOCKED[@]} -gt 0 ]; then
+    printf '  It is worth running now: packages, group and linger do not wait for the\n'
+    printf '  BIOS. After enabling virtualization, run it again to load kvm.\n'
+  fi
   printf '\n  If you would rather run the individual commands yourself:\n\n'
   case "$PKG" in
     apt)    printf '    sudo apt-get update && sudo apt-get install -y %s\n' "${PACKAGES[*]}" ;;
