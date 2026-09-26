@@ -132,6 +132,9 @@ app.include_router(lan.router)
 app.include_router(guest_shell.router)
 app.include_router(media_api.router)
 app.include_router(voice_api.router)
+from . import packages_api  # noqa: E402  # WP5
+app.include_router(packages_api.router)  # WP5
+app.include_router(packages_api.images_router)  # WP5
 
 
 @app.get("/api/health")

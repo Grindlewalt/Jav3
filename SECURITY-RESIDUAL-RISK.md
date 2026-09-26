@@ -291,6 +291,28 @@ a watched, policy-gated, cuttable pipe to the internet.
       accessibility-tree targeting (M4). macOS relies on Accessibility and
       Screen Recording grants to the python that runs the client.
 
+16. **Persistent packages and image variants (boxes, WP5).** Behind
+    `vm_boxes_enabled`. An agent may ask (`package_request`) for an apt, pip
+    or npm package to persist; the operator approves it into the image
+    variant the project's profile uses, and a builder box produces a new
+    frozen layer (`layer-<variant>-vN.qcow2`) that every project on that
+    variant then boots. What is closed: the name and version are validated
+    per manager and the command is host-built, so a request cannot smuggle an
+    index, a URL, a VCS ref, a local file or shell syntax; the version and
+    integrity are pinned by a dry-run before approval and re-checked at
+    build; the builder reaches only package registries through its own
+    proxy listener, every fetch logged under `__image_build__`; nothing is
+    auto-handled; a running image is never changed. What remains is the
+    supply chain itself: an approved package's code (and its dependencies,
+    which the registry resolves) runs in every box on the variant. Keep
+    approvals for the variant a project actually uses; `main` reaches every
+    project on the default profile.
+17. **In-box screenshots (WP5).** The `screenshot` tool renders pages and
+    GUI apps inside the box and hands the pixels to the model. Remote pages
+    taint the turn (gateway `taint_note`) before the image is returned.
+    Screens are an injection channel exactly like `web_read` text, and are
+    treated the same way.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -305,6 +327,8 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Hypervisor / kernel escape | Critical | Low | No passthrough, minimal devices, monthly patched image; unpatched-CVE window only. |
 | Persistence | High | Very Low | Ephemeral guest + idle scrub + versioned rebuild; nukeable at any time. |
 | Approved `/persist` disk (implant survives sessions) | High | **Low–Medium** | Opt-in per project by the operator only (cookie GUI + acknowledge + security event); one project attached at a time, never incognito/nested; size-capped; `noexec,nodev,nosuid`; never read into context; taint re-plugs it read-only at the block layer; a guest that won't release it is torn down; revoke/purge delete it. Residual = interpreters ignore noexec, writes before taint (and `run_code` egress reads) are trusted, and a mount is visible guest-wide. |
+| Persistent package catalogue / image variants | Critical | **Medium-High** | Structured `package_request` only (per-manager name/version grammar; URLs, paths, `git+`, index/registry flags and shell syntax refused); the host builds the canonical argv and never runs the agent's string; a dry-run pins version + integrity (apt SHA256, pip sha256, npm dist.integrity) before the card can be approved, and the build re-resolves and refuses a changed integrity; never auto-handled; builds only in a builder box whose egress is the registry-only `__image_build__` profile; a new frozen layer version per change, never a mutated image; the card names every project on the variant (and on variants built from it). Residual = an approved malicious or typosquatted package (or its install script, run as root in the builder) lands in every box on that variant, and pip/npm dependencies are resolved by the registry, not pinned. Same class as the generated-code backdoor. |
+| In-box screenshots | Medium | Low | In-guest only (`desktop` variant), chromium through the box's egress proxy, app mode on a private Xvfb with no TCP listener; a non-loopback URL, or an app that opened any proxy connection during the run (TIME_WAIT included), taints the turn through the gateway `taint_note` op before the image is returned, and the image is withheld if the note fails. Residual = untrusted pixels in context (prompt injection by image), an app that reaches remote content only via a process started before the capture window, and whatever a response echoes back on screen. |
 | Egress mis-attribution | Low | **Medium** | Concurrent per-project operations are now normal; policy may consult the wrong project's allowlist in a race. Core cut/secret controls unaffected. |
 | Triage reviewer mis-allow | High | Medium | Isolated no-tools/no-fetch judge; guardrails outrank it; fail-closed parse; audited + undoable. Residual = risk #1 without the human click. |
 | Paste-code device login (unauthenticated redeem route) | High | Low | A logged-in session mints a 256-bit, single-use, 10-minute code (stored hashed; cancellable from Settings); the redeem route is reachable by anything on the LAN. Valid codes always redeem; misses are throttled per peer and globally on the TCP peer (no proxy headers). Tokens are hashed, revocable, expire (90 days / 30 idle) and die with their user; revoking stops the token's running turns. Residual = a code or token captured in transit on plain http. |

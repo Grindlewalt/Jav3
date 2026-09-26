@@ -295,9 +295,10 @@ def test_macos_only_skill_is_unmet(tmp_env):
 # --- the guest-bin list follows the image --------------------------------------
 
 def test_guest_bins_come_from_packages_the_image_installs():
-    text = (settings.base_dir / "vm" / "build_base.sh").read_text()
-    block = text.split("\npackages:\n", 1)[1].split("\nwrite_files:", 1)[0]
-    pkgs = set(re.findall(r"^\s*-\s*(\S+)\s*$", block, re.M))
+    # build_base.sh bakes exactly vm/images/main.recipe's apt list (WP5)
+    from backend.vm import images
+    pkgs = {p["package"] for p in images.builtin_recipes()["main"]["packages"]
+            if p["manager"] == "apt"}
     assert set(imported.GUEST_PACKAGE_BINS) <= pkgs
 
 

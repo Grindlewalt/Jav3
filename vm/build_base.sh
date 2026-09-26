@@ -52,6 +52,33 @@ fi
 
 echo "== [2/5] cloud-init seed (bakes the guest bootstrap + boot unit, no SSH/network) =="
 bootstrap_b64=$(base64 -w0 "$SCRIPT_DIR/guest/bootstrap.py")
+# The base's apt list IS vm/images/main.recipe (one source of truth: the image
+# variants in backend/vm/images.py layer on top of exactly this set). Tokens
+# are checked against the Debian name[=version] grammar before they reach YAML.
+RECIPE="$SCRIPT_DIR/images/main.recipe"
+[[ -f "$RECIPE" ]] || { echo "missing $RECIPE" >&2; exit 1; }
+pkg_yaml=""
+for tok in $(sed -e 's/#.*//' "$RECIPE" | awk '$1 == "apt" { for (i = 2; i <= NF; i++) print $i }'); do
+  [[ "$tok" =~ ^[a-z0-9][a-z0-9+.-]{1,62}(=[0-9A-Za-z.+~:-]{1,64})?$ ]] \
+    || { echo "bad apt package in $RECIPE: $tok" >&2; exit 1; }
+  pkg_yaml+="  - ${tok}"$'\n'
+done
+[[ -n "$pkg_yaml" ]] || { echo "no apt packages in $RECIPE" >&2; exit 1; }
+# baseline.json (what a clean box of this image looks like: packages, enabled
+# units, setuid files, processes, listeners) for WP4's unexpected-process rule.
+# The guest prints each section base64'd on the serial console; step [5/5]
+# assembles the JSON on the host. The script deletes itself after the run.
+baseline_b64=$(base64 -w0 <<'SH'
+#!/bin/sh
+emit() { printf 'JAV3-BASELINE %s %s\n' "$1" "$(base64 -w0)" > /dev/console; }
+dpkg-query -W -f '${Package}\t${Version}\n' | emit dpkg
+systemctl list-unit-files --state=enabled --no-legend 2>/dev/null | awk '{print $1}' | emit units_enabled
+find / -xdev -perm -4000 -type f 2>/dev/null | emit setuid
+ps -eo comm= | sort -u | emit processes
+{ ss -ltnupH 2>/dev/null || true; } | emit listening
+printf 'JAV3-BASELINE-END\n' > /dev/console
+SH
+)
 cat > meta-data <<EOF
 instance-id: jarvis-guest-golden
 local-hostname: jarvis-guest
@@ -69,25 +96,14 @@ package_upgrade: false
 # native modules compile; jq/ripgrep/sqlite3/zip tools because agents reach for
 # them constantly. Deliberately absent: openssh-client, socat, netcat, nmap,
 # tcpdump — the only sanctioned path off-box is vsock + the monitored egress
-# proxy, and those exist to find other paths.
+# proxy, and those exist to find other paths. The list lives in
+# vm/images/main.recipe (read above).
 packages:
-  - python3-pip
-  - python3-venv
-  - python3-dev
-  - git
-  - curl
-  - ca-certificates
-  - nodejs
-  - npm
-  - build-essential
-  - pkg-config
-  - jq
-  - ripgrep
-  - sqlite3
-  - unzip
-  - zip
-  - xz-utils
-write_files:
+${pkg_yaml}write_files:
+  - path: /usr/local/sbin/jav3-baseline
+    encoding: b64
+    permissions: '0755'
+    content: ${baseline_b64}
   - path: /opt/jarvis/bootstrap.py
     encoding: b64
     permissions: '0755'
@@ -123,6 +139,8 @@ runcmd:
   # leaves cloud-init installed with an unmet dep record nothing ever reads.
   - dpkg --purge --force-depends openssh-server openssh-sftp-server openssh-client ssh-import-id socat tcpdump netcat-openbsd || true
   - systemctl enable jarvis-guest.service
+  - /usr/local/sbin/jav3-baseline || true
+  - rm -f /usr/local/sbin/jav3-baseline
   - touch /etc/jarvis-provisioned
 power_state:
   mode: poweroff
@@ -162,5 +180,44 @@ cp "$FW_VARS" efi_vars.fd
 # during a migration, and an arm64 image on an x86 host boots to nothing at all
 # with the guest's console going to a log nobody reads. run_vm.sh checks this.
 echo "$VM_ARCH" > "base-${VERSION}.arch"
+# baseline.json from the console sections the guest printed (see jav3-baseline
+# above). A missing baseline is a warning, not a failed build: WP4 then has no
+# expected-process list for this base and says so.
+python3 - provision-console.log "base-${VERSION}.baseline.json" "$BASE" <<'PY' \
+  || echo "WARNING: no baseline.json for $BASE" >&2
+# --- baseline-parse (tests/test_images.py runs this block) ---
+import base64, datetime, json, sys
+src, dst, image = sys.argv[1], sys.argv[2], sys.argv[3]
+out = {"v": 1, "image": image, "captured_at":
+       datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+ended = False
+for raw in open(src, "rb").read().decode("utf-8", "replace").splitlines():
+    line = raw.strip("\r\n\x00 ")
+    i = line.find("JAV3-BASELINE")
+    if i < 0:
+        continue
+    line = line[i:]
+    if line.startswith("JAV3-BASELINE-END"):
+        ended = True
+        continue
+    parts = line.split(" ", 2)
+    if len(parts) != 3 or parts[1] not in ("dpkg", "units_enabled", "setuid",
+                                           "processes", "listening"):
+        continue
+    try:
+        text = base64.b64decode(parts[2].strip(), validate=True).decode("utf-8", "replace")
+    except ValueError:
+        continue
+    rows = [r for r in text.splitlines() if r.strip()]
+    if parts[1] == "dpkg":
+        out["dpkg"] = dict(r.split("\t", 1) for r in rows if "\t" in r)
+    else:
+        out[parts[1]] = rows
+if not ended or "dpkg" not in out:
+    sys.exit("baseline sections missing from the console log")
+open(dst, "w").write(json.dumps(out, indent=1, sort_keys=True))
+print(f"baseline: {len(out['dpkg'])} packages -> {dst}")
+# --- end baseline-parse ---
+PY
 rm -f seed.iso user-data meta-data efi_vars_build.fd
 echo "built $VM_DIR/$BASE (version $VERSION, $VM_ARCH)"

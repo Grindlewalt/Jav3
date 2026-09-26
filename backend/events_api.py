@@ -40,6 +40,8 @@ TOPICS: dict[str, tuple[Callable[[Request], dict], Callable[[], sse.Subscription
     "security": (require_user, lambda: channel_feed(security.SECURITY_CHAN)),
     "notices": (require_user, agents_run.notice_feed),
     "egress": (require_user, lambda: channel_feed(egress.EGRESS_CHAN)),
+    # WP5: image builder progress ({"type":"image_build", phase, variant, ...})
+    "vm-images": (require_user, lambda: channel_feed("vm-images")),
 }
 
 

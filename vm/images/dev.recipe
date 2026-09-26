@@ -1,0 +1,9 @@
+# Heavier toolchains for projects that build Go / Rust / Java.
+# Roughly +0.9 GB of disk, 8-15 minutes to build on the Pi.
+name dev
+from main
+min_mem_mb 768
+
+apt golang rustc cargo default-jdk-headless python3-pytest
+pip uv
+npm pnpm typescript
