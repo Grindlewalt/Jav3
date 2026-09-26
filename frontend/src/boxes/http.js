@@ -5,9 +5,9 @@
 // through this file, so reconciling a feature with the backend is a change to
 // that one module.
 //
-// Mock mode: while WP1–WP5/WP8 land in parallel, `?mock=1` on any URL (sticky
+// Mock mode: for a preview without boxes on the server, `?mock=1` on any URL (sticky
 // in localStorage; `?mock=0` clears it) answers every boxes call from
-// ./mock.js — the shapes in docs/boxes-contract.md — instead of the server.
+// ./mock.js — the shapes in docs/boxes-api-final.md — instead of the server.
 // Nothing else in the app is mocked, and the mock chunk is only loaded when
 // it is on.
 import { api, ApiError } from '../api.js'

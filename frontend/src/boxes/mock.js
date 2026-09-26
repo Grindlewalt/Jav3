@@ -1,5 +1,5 @@
 // The fake server behind `?mock=1` (see http.js): the shapes of
-// docs/boxes-contract.md section J, with just enough state that the buttons
+// docs/boxes-api-final.md (the merged backend), with just enough state that the buttons
 // do something visible. Only the boxes features read it.
 import { ApiError } from '../api.js'
 
