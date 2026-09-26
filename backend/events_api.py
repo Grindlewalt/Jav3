@@ -6,7 +6,7 @@ tabs over plain http and every ordinary fetch queued forever. The SPA now opens
 this endpoint once per browser (a leader tab, frontend/src/events.js) and fans
 the events out to its tabs over a BroadcastChannel.
 
-    GET /api/events?topics=gui,security,notices,egress     (default: all)
+    GET /api/events?topics=gui,security,notices,egress,procs     (default: all)
 
 Each event is one SSE `data:` line:
 
@@ -27,7 +27,7 @@ from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Request
 
-from . import agents_run, egress, gui, security, sse
+from . import agents_run, egress, gui, procview_api, security, sse
 from .auth import require_user
 from .egress_api import channel_feed
 
@@ -40,6 +40,7 @@ TOPICS: dict[str, tuple[Callable[[Request], dict], Callable[[], sse.Subscription
     "security": (require_user, lambda: channel_feed(security.SECURITY_CHAN)),
     "notices": (require_user, agents_run.notice_feed),
     "egress": (require_user, lambda: channel_feed(egress.EGRESS_CHAN)),
+    "procs": (require_user, procview_api.procs_feed),   # WP4: Security > Persistent
 }
 
 

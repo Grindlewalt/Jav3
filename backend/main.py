@@ -15,6 +15,7 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, desk_a
                notifications_api, plan_api, projects, providers, reviewer,
                reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
                vm_api, voice_api, workspace, secrets)
+from . import procview_api   # WP4
 from .agent.tools.registry import compile_registry
 from .auth import require_user
 from .config import settings, ensure_dirs
@@ -132,6 +133,7 @@ app.include_router(lan.router)
 app.include_router(guest_shell.router)
 app.include_router(media_api.router)
 app.include_router(voice_api.router)
+app.include_router(procview_api.router)   # WP4
 
 
 @app.get("/api/health")
