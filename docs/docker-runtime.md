@@ -175,6 +175,20 @@ visible yet, so WP5 only needs to parse its file into that dict.
 
 ## 8. What other packages must do (small)
 
+**Status (integration, 2026-09-26): all of the items below are done**, and
+`tests/test_boxes_integration.py` tests each one. Two residuals remain:
+
+- Variant builds with `docker build` still use Docker's build network. No code
+  runs `docker build`: the operator runs it from
+  `GET /api/vm/images/{v}/dockerfile`. See the residual in section 7.
+- A docker SERVICE box is not supported yet, for three reasons:
+  - svcd's socket is created root-only (umask 077).
+  - svcd needs systemd, which a container does not have.
+  - `DockerBox.acquire` waits on the run-turn socket, not on svcd's.
+
+  `services.py` always allocates service boxes as kvm, whatever the
+  profile's `box_runtime` says.
+
 WP1 (as of 945c367, which already made `server.py`/`shell.py`/`model.py`/
 `registry.py` go through `boxinfo`, so no guest socket code forks):
 

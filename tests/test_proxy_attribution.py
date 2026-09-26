@@ -167,8 +167,9 @@ async def test_service_box_is_deny_by_default_and_never_queues(env):
     cur = await db.execute(
         "INSERT INTO projects(slug, name, path) VALUES ('alpha', 'a', '/tmp/a')")
     cur = await db.execute(
-        "INSERT INTO services(project_slug, name, command, placement, status, egress_hosts) "
-        "VALUES ('alpha', 'bot', '[\"x\"]', 'per_service', 'approved', ?)",
+        "INSERT INTO services(project_slug, name, command, placement, status, "
+        "desired_state, egress_hosts) "
+        "VALUES ('alpha', 'bot', '[\"x\"]', 'per_service', 'approved', 'running', ?)",
         (json.dumps(["api.allowed.example"]),))
     sid = cur.lastrowid
     await db.commit()

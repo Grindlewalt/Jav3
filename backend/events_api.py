@@ -43,6 +43,8 @@ TOPICS: dict[str, tuple[Callable[[Request], dict], Callable[[], sse.Subscription
     "procs": (require_user, procview_api.procs_feed),   # WP4: Security > Persistent
     # WP5: image builder progress ({"type":"image_build", phase, variant, ...})
     "vm-images": (require_user, lambda: channel_feed("vm-images")),
+    # WP1: {"type":"box_up"|"box_down","box":Box.to_json()} (VM manager refresh)
+    "vm-boxes": (require_user, lambda: channel_feed("vm-boxes")),
 }
 
 
