@@ -899,6 +899,18 @@ def _register() -> None:
     reg_floor = getattr(boxes, "add_mem_floor", None)
     if reg_floor is not None:
         reg_floor(mem_floor)
+    from . import procview
+    procview.add_baseline_resolver(baseline_path_for)
+
+
+def baseline_path_for(box) -> Path | None:
+    """procview baseline resolver: <image>.baseline.json beside the qcow2 the
+    box runs (procview converts this WP5 shape into its (exe, unit) entries)."""
+    try:
+        p = baseline_file(boxes.image_path(box))
+    except Exception:  # noqa: BLE001 — no image: procview falls back
+        return None
+    return p if p.exists() else None
 
 
 def mem_floor(variant: str) -> int | None:

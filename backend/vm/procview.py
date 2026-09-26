@@ -197,9 +197,41 @@ class Baseline:
                    for e, u in self.patterns)
 
 
+# Units whose processes are never "OS" by virtue of the image baseline: the
+# guest server's own unit (what it spawns is run_code / svcd's business) and
+# approved-service units (tagged by cgroup, never baselined).
+_NEVER_BASELINE_UNITS = re.compile(r"^(jarvis-guest\.service|jav3-svc-.*)$")
+_UNIT_NAME = re.compile(r"^[A-Za-z0-9@._:\\-]{1,200}\.(service|scope)$")
+
+
+def entries_from_image_baseline(data: dict) -> list[dict]:
+    """WP5's image baseline (`<image>.baseline.json`: dpkg, pip, npm,
+    units_enabled, setuid, listening, processes) -> WP4 entries.
+
+    Every enabled .service unit of the quiescent image becomes ("*", unit):
+    any process in that unit's cgroup is OS. `processes` are `ps comm` names
+    (truncated, no path, no unit) and are NOT turned into entries: a bare name
+    would whitelist that name in every cgroup (the capture itself runs
+    python3/ps/sh), so it would hide exactly the implant this view exists to
+    show. The built-in systemd/getty/dbus patterns are kept alongside."""
+    out = [{"exe": e, "unit": u} for e, u in BUILTIN_BASELINE]
+    seen = set()
+    for u in data.get("units_enabled") or []:
+        if (isinstance(u, str) and _UNIT_NAME.match(u)
+                and not _NEVER_BASELINE_UNITS.match(u) and u not in seen):
+            seen.add(u)
+            out.append({"exe": "*", "unit": u})
+    return out
+
+
 def parse_baseline(data: Any, source: str = "image") -> Baseline:
     """baseline.json: {"v":1, "entries":[{"exe","unit"}, ...]} or a bare list
-    of {"exe","unit"} / [exe, unit]. Entries with * or ? are glob patterns."""
+    of {"exe","unit"} / [exe, unit]. Entries with * or ? are glob patterns.
+    WP5's image baseline shape (units_enabled, processes, ...) is converted
+    by entries_from_image_baseline."""
+    if (isinstance(data, dict) and "entries" not in data
+            and ("units_enabled" in data or "processes" in data)):
+        data = {"v": 1, "entries": entries_from_image_baseline(data)}
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
         raise ValueError("baseline has no entries")

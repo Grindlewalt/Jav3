@@ -158,6 +158,66 @@ async def test_vm_boxes_lists_runtimes(tmp_env, monkeypatch):
     assert "docker_enabled" in r["runtimes"]["docker"]["reason"]
 
 
+# --- WP4 <-> WP5 baseline, flag-off guest package ---------------------------------
+
+WP5_BASELINE = {"v": 1, "captured_at": "2026-09-26T00:00:00+00:00",
+                "dpkg": {"bash": "5.2"}, "pip": {}, "npm": {},
+                "units_enabled": ["ssh.service", "jarvis-guest.service",
+                                  "jav3-svc-3.service", "getty.target",
+                                  "chrony.service", "bad unit;rm.service"],
+                "setuid": [], "listening": [],
+                "processes": ["python3", "sshd", "chronyd", "ps"]}
+
+
+def test_wp5_baseline_converts_to_procview_entries():
+    from backend.vm import procview
+    b = procview.parse_baseline(WP5_BASELINE)
+    assert b.source == "image"
+    assert b.matches("/usr/sbin/sshd", "ssh.service")
+    assert b.matches("/usr/sbin/chronyd", "chrony.service")
+    assert b.matches("/usr/lib/systemd/systemd-journald", "systemd-journald.service")
+    # never baselined: the guest server's unit, service units, bad names, and
+    # bare process names (python3 would otherwise hide in any cgroup)
+    assert not b.matches("/usr/bin/python3", "jarvis-guest.service")
+    assert not b.matches("/usr/bin/python3", "jav3-svc-3.service")
+    assert not b.matches("/usr/bin/python3", "evil.service")
+    assert not b.matches("/usr/bin/python3", "session-1.scope")
+    assert all("rm" not in u for _, u in b.patterns)
+    # WP4's own format is unchanged
+    b2 = procview.parse_baseline({"v": 1, "entries": [{"exe": "/x", "unit": "y.service"}]})
+    assert b2.matches("/x", "y.service") and not b2.matches("/z", "y.service")
+
+
+async def test_images_registers_the_baseline_resolver(on):
+    import json
+    from backend.vm import images, procview
+    assert images.baseline_path_for in procview._baseline_resolvers
+    settings.vm_dir.mkdir(parents=True, exist_ok=True)
+    (settings.vm_dir / "base-v3.qcow2").write_bytes(b"")
+    (settings.vm_dir / "base-v3.baseline.json").write_text(json.dumps(WP5_BASELINE))
+    box = boxes.allocate("project", project="alpha")
+    b = await procview.baseline_for(None, box)
+    assert b.source == "image" and b.matches("/usr/sbin/sshd", "ssh.service")
+
+
+def _pkg_names(flag: bool, monkeypatch) -> set[str]:
+    import io
+    import tarfile
+    from backend.vm import guest_pkg
+    monkeypatch.setattr(settings, "vm_boxes_enabled", flag)
+    with tarfile.open(fileobj=io.BytesIO(guest_pkg.build_package_tar()), mode="r:gz") as t:
+        return set(t.getnames())
+
+
+def test_flag_off_guest_package_has_no_box_only_files(monkeypatch):
+    off = _pkg_names(False, monkeypatch)
+    on_ = _pkg_names(True, monkeypatch)
+    assert "backend/procwatch.py" not in off
+    assert "tools/screenshot/handler.py" not in off
+    assert on_ - off == {"backend/procwatch.py", "tools/screenshot/handler.py"}
+    assert "backend/server.py" in off and "tools/run_code/handler.py" in off
+
+
 # --- WP1 <-> WP3 / WP5 hooks ------------------------------------------------------
 
 from tests.test_boxes_gateway import _rt, _untar  # noqa: E402

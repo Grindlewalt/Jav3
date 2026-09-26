@@ -35,6 +35,11 @@ IN_GUEST_TOOLS = ("read_file", "list_files", "search_codebase", "crawl_codebase"
 # image variant and reports "needs the desktop image" on any other.
 BOX_ONLY_TOOLS = frozenset({"screenshot"})
 
+# guest/backend modules that ship only with boxes on. procwatch (WP4) is only
+# ever called by the host's process poller, which is off with the flag; the
+# run-turn server's `ps` mode then answers ok:false ("not in the package").
+BOX_ONLY_MODULES = frozenset({"procwatch.py"})
+
 
 def in_guest_tools() -> tuple[str, ...]:
     """IN_GUEST_TOOLS as shipped right now (the box-only ones need the flag)."""
@@ -53,7 +58,10 @@ def build_package_tar() -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for p in sorted(src.rglob("*.py")):          # checked-in shims + server
-            tar.add(p, arcname=f"backend/{p.relative_to(src)}")
+            rel = p.relative_to(src).as_posix()
+            if rel in BOX_ONLY_MODULES and not settings.vm_boxes_enabled:
+                continue
+            tar.add(p, arcname=f"backend/{rel}")
         for arcname, relpath in _COPY_MODULES.items():   # verbatim host modules
             _add_bytes(tar, arcname, (base / relpath).read_bytes())
         for name in in_guest_tools():                # the clean tool handlers
