@@ -282,6 +282,58 @@ def test_reviewer_never_list_covers_every_box_kind():
     assert not reviewer.never_auto("egress_auto")
 
 
+# --- WP4 <-> WP3: svcd answers the process poller ------------------------------------
+
+def _svcd_ps(monkeypatch, snapshot_fn):
+    import importlib.util
+    import json
+    import socket
+    import sys
+    import types
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("svcd_ps_test", root / "guest/svc/svcd.py")
+    svcd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(svcd)
+    if snapshot_fn is not None:
+        fake = types.ModuleType("backend.procwatch")
+        fake.snapshot = snapshot_fn
+        monkeypatch.setitem(sys.modules, "backend.procwatch", fake)
+        import backend
+        monkeypatch.setattr(backend, "procwatch", fake, raising=False)
+    a, b = socket.socketpair()
+    try:
+        a.sendall(b'{"mode":"ps"}\n')
+        svcd.handle(b)
+        return json.loads(a.makefile("rb").readline())
+    finally:
+        a.close()
+        b.close()
+
+
+def test_svcd_answers_ps_with_the_run_turn_shape(monkeypatch):
+    r = _svcd_ps(monkeypatch, lambda: {"procs": {}, "self_pid": 1})
+    assert r == {"type": "ps", "ok": True, "snapshot": {"procs": {}, "self_pid": 1}}
+
+
+def test_svcd_ps_without_procwatch_says_so(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "backend.procwatch", None)
+    r = _svcd_ps(monkeypatch, None)
+    assert r["type"] == "ps" and r["ok"] is False and r["error"]
+
+
+def test_service_unit_names_agree_between_svcd_and_procview():
+    import importlib.util
+    from backend.vm import procview
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("svcd_units", root / "guest/svc/svcd.py")
+    svcd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(svcd)
+    # systemd names the cgroup "<unit>.service" for systemd-run --unit <unit>
+    m = procview.SVC_UNIT.match(svcd.unit_name(42) + ".service")
+    assert m and int(m.group(1)) == 42
+
+
 # --- WP1 <-> WP3 / WP5 hooks ------------------------------------------------------
 
 from tests.test_boxes_gateway import _rt, _untar  # noqa: E402

@@ -386,6 +386,16 @@ def op_logs(req: dict) -> dict:
     return {"ok": True, "text": r.stdout[-LOG_CAP:]}
 
 
+def op_ps() -> dict:
+    """{"type":"ps","ok":true,"snapshot":procwatch.snapshot()} (WP4), or ok
+    false when procwatch is not in the package."""
+    try:
+        from backend import procwatch
+        return {"type": "ps", "ok": True, "snapshot": procwatch.snapshot()}
+    except Exception as e:  # noqa: BLE001 — a poll must never kill svcd
+        return {"type": "ps", "ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+
+
 OPS = {"ping": op_ping, "mount_srv": op_mount_srv, "import_read": op_import_read,
        "apply": op_apply, "logs": op_logs}
 
@@ -425,6 +435,12 @@ def handle(conn: socket.socket) -> None:
     try:
         req = json.loads(_readline(conn) or b"{}")
         op = req.get("op") if isinstance(req, dict) else None
+        if isinstance(req, dict) and req.get("mode") == "ps":
+            # WP4's poller: the same request and reply shape as the run-turn
+            # server's `ps` mode, so procview.rpc_ps serves both box kinds
+            out = op_ps()
+            conn.sendall((json.dumps(out) + "\n").encode())
+            return
         if op == "tunnel":
             port = int(req.get("port"))
             with _lock:
