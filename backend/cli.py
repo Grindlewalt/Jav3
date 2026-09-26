@@ -145,6 +145,9 @@ def services_check() -> None:
 
 
 def _prompt_password() -> str:
+    if not sys.stdin.isatty():
+        sys.exit("create-user: no terminal to read a password from — use "
+                 "`python -m backend.cli setup --add-user --username U --password-stdin`")
     pw = getpass.getpass("password: ")
     if not pw:
         sys.exit("empty password refused")

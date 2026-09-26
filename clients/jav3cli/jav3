@@ -175,6 +175,44 @@ def parse_login_line(line: str) -> tuple[str, str]:
     return fields["address"], fields["code"]
 
 
+def login_alts(line: str) -> list[str]:
+    """The optional `alt=<ip:port>,<ip:port>` of a login line: the server's
+    LAN IPs, for when its .local name does not resolve here."""
+    for part in (line or "").strip().strip("'\"`").split():
+        k, sep, v = part.partition("=")
+        if sep and k == "alt":
+            return [a for a in v.strip("'\"`").split(",") if a]
+    return []
+
+
+def _resolves(address: str) -> bool:
+    from urllib.parse import urlsplit
+    host = urlsplit(base_url(address)).hostname or ""
+    try:
+        socket.getaddrinfo(host, None)
+        return True
+    except (socket.gaierror, UnicodeError):
+        return False
+
+
+def pick_login_address(address: str, alts: list[str]) -> str:
+    """The line's address, unless its name does not resolve on this machine
+    (no mDNS here): then the first LAN-IP alternative the server listed. Only
+    a resolution failure falls back — a name that resolves is never second-
+    guessed, so the code goes where the operator's server said."""
+    from urllib.parse import urlsplit
+    host = (urlsplit(base_url(address)).hostname or "").lower()
+    if not host.endswith(".local") or _resolves(address):
+        return address
+    if alts:
+        print(f"note: {address} does not resolve on this machine (no mDNS?); "
+              f"using {alts[0]}", file=sys.stderr)
+        return alts[0]
+    raise CliError(f"{address} does not resolve on this machine — a .local name "
+                   "needs mDNS here. Use the server's IP instead: jav3 login "
+                   "--server <ip>:<port>")
+
+
 def _loopback_base(base: str) -> bool:
     """http to this same machine never crosses a network: no warning for it."""
     import ipaddress
@@ -285,6 +323,8 @@ def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
     address, code = parse_login_line(line)
     if args.server:
         address = args.server
+    else:
+        address = pick_login_address(address, login_alts(line))
     base = upgrade_to_https(base_url(address))
     if base.startswith("https://") and not address.startswith("https://"):
         address = base

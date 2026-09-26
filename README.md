@@ -53,15 +53,26 @@ Roughly 21k lines of Python and 8k of JS across ~80 test modules and 43 tools.
 ## Install
 
 ```
-git clone https://github.com/Grindlewalt/Jav3.git ~/jarvis
-cd ~/jarvis && bash scripts/install.sh
-echo 'JARVIS_DEEPSEEK_API_KEY=sk-...' >> ~/.config/jarvis/env
-.venv/bin/python -m backend.cli create-user <name>
-systemctl --user restart jarvis     # GUI at http://<host>:8000
+git clone https://github.com/Grindlewalt/Jav3.git ~/jav3     # any path works
+cd ~/jav3 && bash scripts/install.sh
 ```
+
+The installer ends at first-run setup: on a terminal it asks for your login and
+model provider (and tests the key); otherwise it prints a one-time link,
+`http://<host>:<port>/setup?token=…`, to do the same in a browser. Only that
+link can create the first login. `.venv/bin/python -m backend.cli setup --status`
+prints it again.
 
 `scripts/install.sh` is re-runnable, so it is the upgrade path too. It works on
 Debian/Ubuntu, Arch and Fedora, on arm64 and x86_64.
+
+**A second instance beside another** (a test install, or a box where port 8000
+or `~/.config/jarvis` is already taken):
+`bash scripts/install.sh --name test --port 8780 --state-dir ~/jav3-test-state`
+installs `jarvis-test.service` with its config in `~/.config/jarvis-test`. The
+checkout remembers the instance, so later `backend.cli` commands and re-runs
+from it target that one. The installer refuses to overwrite another app's
+config dir, another checkout's unit, or a port something else is using.
 
 The handful of steps that genuinely need root are collected into one phase, so
 they are one paste rather than a conversation:

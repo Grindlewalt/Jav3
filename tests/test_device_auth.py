@@ -280,3 +280,11 @@ async def test_cli_files_are_served(clients):
     assert r.status_code == 200 and '"scope": "desk"' in r.text
     assert (await dev.get("/cli/install.sh",
                           headers={"Host": "a;rm -rf ~"})).status_code == 400
+
+
+def test_login_line_names_lan_ip_alternatives_for_a_local_name(monkeypatch):
+    from backend import devices_api, lan as lan_mod
+    monkeypatch.setattr(lan_mod, "lan_ips", lambda: ["10.0.0.58"])
+    assert devices_api._alt_addresses("jav3-test.local:8780") == ["10.0.0.58:8780"]
+    assert devices_api._alt_addresses("10.0.0.58:8780") == []
+    assert devices_api._alt_addresses("https://jav3.local:8443") == []

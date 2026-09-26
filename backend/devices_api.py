@@ -121,6 +121,17 @@ def _address(request: Request) -> str:
     return addr if _scheme(request) == "http" else f"https://{addr}"
 
 
+def _alt_addresses(address: str) -> list[str]:
+    """LAN-IP fallbacks for a login address that is an mDNS name, http only
+    (an https address names a certificate, which an IP would not match)."""
+    if address.startswith("https://"):
+        return []
+    host, _, port = address.rpartition(":")
+    if not host.endswith(".local"):
+        return []
+    return [f"{ip}:{port}" for ip in lan.lan_ips()]
+
+
 # --- operator side (cookie session) -------------------------------------------
 
 class CodeBody(BaseModel):
@@ -141,7 +152,12 @@ async def mint_login_code(body: CodeBody, request: Request, response: Response,
     # in the browser from its own origin it said `localhost` whenever the
     # operator was browsing on the box, which the other computer cannot reach
     base = address if address.startswith("https://") else f"http://{address}"
-    return {"login": f"address={address} code={code}", "address": address,
+    # a .local name needs mDNS on the other computer (a Linux box without
+    # nss-mdns cannot resolve it): also name the LAN IPs, which `jav3 login`
+    # tries only when the name does not resolve. Older CLIs ignore the field.
+    alt = _alt_addresses(address)
+    line = f"address={address} code={code}" + (f" alt={','.join(alt)}" if alt else "")
+    return {"login": line, "address": address,
             "install": f"curl -fsSL {base}/cli/install.sh | sh",
             "code": code, "name": t.name,
             "expires_at": time.time() + pastelogin.TTL_SECONDS,
