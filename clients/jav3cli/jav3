@@ -29,6 +29,7 @@ import json
 import os
 import platform
 import secrets
+import shlex
 import socket
 import stat
 import sys
@@ -1409,6 +1410,19 @@ def build_tui(base: str, token: str, **kw):
     from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
     from textual.widgets.option_list import Option
 
+    # Boxes (docs/boxes-contract.md). Emphasis is a solid theme colour behind
+    # the text: Terminal.app has 256 colours and turns a blend into grey, so
+    # "red" here is a red block.
+    RED = "[b $background on $error]"         # unexpected process, byte mismatch
+    AMBER = "[b $background on $warning]"     # docker: less isolated than a VM
+    PLACEMENTS = ("per_service", "per_project", "shared")
+    PLACEMENT_SAYS = {
+        "per_service": "its own service box (strongest; one box per service)",
+        "per_project": "the project's service box, beside the project's other services",
+        "shared": "the one shared service box, beside other projects' services",
+    }
+    RUNTIMES = ("kvm", "docker")
+
     # -- widgets ------------------------------------------------------------------------
 
     class Note(Static):
@@ -1846,6 +1860,312 @@ def build_tui(base: str, token: str, **kw):
         def action_close(self) -> None:
             self.dismiss(None)
 
+    class View(ModalScreen):
+        """Read-only markup in a dialog: esc, q or enter closes."""
+
+        BINDINGS = [Binding("escape,q,enter", "close", show=False)]
+
+        def __init__(self, title: str, markup: str) -> None:
+            super().__init__()
+            self.title_text, self.markup = title, markup
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="dialog", classes="wide"):
+                with Horizontal(id="dialog-head"):
+                    yield Static(f"[b]{_esc(self.title_text)}[/]", id="dialog-title")
+                    yield Static("[$text-muted]esc[/]", id="dialog-esc")
+                with VerticalScroll(id="view-body"):
+                    yield Static(self.markup)
+
+        def action_close(self) -> None:
+            self.dismiss(None)
+
+    class ServiceApprove(ModalScreen):
+        """A service request's review: the definition and its diff, then two
+        explicit choices. Placement: 1 per_service · 2 per_project · 3 shared,
+        preselected from the profile; no pick, no approval. Ports: ↑↓ pick a
+        port, space cycles none → host → lan (lan only when the server has a
+        services LAN IP). Enter goes on to the confirm; esc drops it."""
+
+        BINDINGS = [Binding("escape", "cancel", show=False),
+                    Binding("1", "place(0)", show=False),
+                    Binding("2", "place(1)", show=False),
+                    Binding("3", "place(2)", show=False),
+                    Binding("up,k", "port(-1)", show=False),
+                    Binding("down,j", "port(1)", show=False),
+                    Binding("space,e", "expose", show=False),
+                    Binding("enter", "ok", show=False)]
+
+        def __init__(self, req: dict, diff: str | None, lan_ip: str) -> None:
+            super().__init__()
+            self.req, self.diff, self.lan_ip = req, diff, lan_ip
+            pl = req.get("placement")
+            self.profile_placement = pl if pl in PLACEMENTS else None
+            self.placement = self.profile_placement
+            self.ports = [p for p in _jlist(req.get("ports")) if isinstance(p, dict)]
+            self.expose = ["none"] * len(self.ports)
+            self.cur = 0
+            self.error = ""
+
+        def compose(self) -> ComposeResult:
+            r = self.req
+            with Vertical(id="dialog", classes="wide"):
+                with Horizontal(id="dialog-head"):
+                    yield Static(f"[b]Approve service {_esc(r.get('name') or '?')}[/]  "
+                                 f"[$text-muted]⌂ {_esc(r.get('project_slug') or '?')} · "
+                                 f"#{r.get('id')}[/]", id="dialog-title")
+                    yield Static("[$text-muted]esc[/]", id="dialog-esc")
+                body = [_esc(r.get("description") or "")] + _svc_definition(r)
+                if r.get("supersedes_id"):
+                    body += ["", f"[b]changes against approved #{r['supersedes_id']}:[/]",
+                             _diff_markup(self.diff) if self.diff
+                             else "[$warning]diff unavailable[/]"]
+                with VerticalScroll(id="sa-body"):
+                    yield Static("\n".join(body))
+                yield Static(id="sa-choice")
+                yield Static(id="sa-hint")
+
+        def on_mount(self) -> None:
+            self.redraw()
+
+        def options(self) -> list[str]:
+            return ["none", "host", "lan"] if self.lan_ip else ["none", "host"]
+
+        def redraw(self) -> None:
+            lines = ["[b]placement[/] (required)  "
+                     + "  ".join((f"[b $background on $primary] {i + 1} {p} [/]"
+                                  if p == self.placement else f"[$text-muted]{i + 1}[/] {p}")
+                                 for i, p in enumerate(PLACEMENTS))
+                     + (f"  [$text-muted]profile: {_esc(self.profile_placement)}[/]"
+                        if self.profile_placement else "  [$warning]the profile sets none[/]")]
+            if self.placement:
+                lines.append(f"[$text-muted]runs in {PLACEMENT_SAYS[self.placement]}[/]")
+            lines.append("")
+            if not self.ports:
+                lines.append("[b]ports[/] none requested: nothing is exposed")
+            for i, p in enumerate(self.ports):
+                cur = "[$primary]►[/]" if i == self.cur else " "
+                opts = "  ".join(
+                    f"[b $background on $primary] {o} [/]" if o == self.expose[i]
+                    else f"[$text-muted]{o}[/]" for o in self.options())
+                lines.append(f"{cur} port [b]{_esc(str(p.get('port')))}[/]/"
+                             f"{_esc(p.get('protocol') or 'tcp')} "
+                             f"[$text-muted]{_esc(p.get('purpose') or '')} · asked "
+                             f"{_esc(p.get('expose') or 'none')}[/]  {opts}")
+            if not self.lan_ip and self.ports:
+                lines.append("[$text-muted]lan: unavailable, the server has no services "
+                             "LAN IP[/]")
+            if self.error:
+                lines.append(f"[$error b]{_esc(self.error)}[/]")
+            self.query_one("#sa-choice", Static).update("\n".join(lines))
+            self.query_one("#sa-hint", Static).update(
+                "[$primary]1 2 3[/] placement  [$primary]↑↓[/] port  [$primary]space[/] "
+                "expose  [$primary]enter[/] review and confirm  [$text-muted]esc[/] cancel")
+
+        def action_place(self, i: int) -> None:
+            self.placement, self.error = PLACEMENTS[i], ""
+            self.redraw()
+
+        def action_port(self, d: int) -> None:
+            if self.ports:
+                self.cur = max(0, min(len(self.ports) - 1, self.cur + d))
+                self.redraw()
+
+        def action_expose(self) -> None:
+            if self.ports:
+                opts = self.options()
+                i = opts.index(self.expose[self.cur]) if self.expose[self.cur] in opts else 0
+                self.expose[self.cur] = opts[(i + 1) % len(opts)]
+                self.redraw()
+
+        def action_ok(self) -> None:
+            if self.placement not in PLACEMENTS:
+                self.error = "pick a placement first: 1, 2 or 3"
+                self.redraw()
+                return
+            self.dismiss({"placement": self.placement,
+                          "expose": [(p.get("port"), x) for p, x in zip(self.ports, self.expose)
+                                     if x != "none"]})
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+    class ProfileForm(ModalScreen):
+        """Create or edit a security profile, one field per row: ↑↓ move, enter
+        (or space) edits, toggles or picks; the Save row or ctrl+s saves; esc
+        cancels. A new profile starts with NO box runtime and NO service
+        placement, and the form refuses to save until both are picked."""
+
+        BINDINGS = [Binding("escape", "cancel", show=False),
+                    Binding("up,k", "move(-1)", show=False),
+                    Binding("down,j", "move(1)", show=False),
+                    Binding("enter,space", "edit", show=False),
+                    Binding("ctrl+s", "save", show=False, priority=True)]
+
+        # (key, label, kind): text, int, list, bool, or a tuple of choices
+        FIELDS = [("name", "name", "text"),
+                  ("box_runtime", "box runtime (required)", RUNTIMES),
+                  ("service_placement", "service placement (required)", PLACEMENTS),
+                  ("default_verdict", "default verdict", ("deny", "allow")),
+                  ("network_off", "network off", "bool"),
+                  ("allow_hosts", "allow hosts", "list"),
+                  ("deny_hosts", "deny hosts", "list"),
+                  ("secrets", "secrets (names)", "list"),
+                  ("auto_handle", "reviewer auto-handles routine alerts", "bool"),
+                  ("separate_box", "separate box per project", "bool"),
+                  ("box_image", "box image variant", "text"),
+                  ("box_mem_mb", "box RAM MB (empty = default)", "int"),
+                  ("allow_services", "may request services", "bool"),
+                  ("allow_package_requests", "may request packages", "bool")]
+
+        def __init__(self, profile: dict | None, secret_names: list[str] | None = None,
+                     variants: list[str] | None = None) -> None:
+            super().__init__()
+            self.editing = profile
+            p = profile or {}
+            self.v = {
+                "name": p.get("name") or "",
+                # explicit picks only: a new profile has neither
+                "box_runtime": p.get("box_runtime") if profile else None,
+                "service_placement": p.get("service_placement") if profile else None,
+                "default_verdict": p.get("default_verdict") or "deny",
+                "network_off": bool(p.get("network_off")),
+                "allow_hosts": _jlist(p.get("allow_hosts")),
+                "deny_hosts": _jlist(p.get("deny_hosts")),
+                "secrets": [str(x) for x in _jlist(p.get("secrets"))],
+                "auto_handle": bool(p.get("auto_handle")),
+                "separate_box": bool(p.get("separate_box")),
+                "box_image": p.get("box_image") or "main",
+                "box_mem_mb": p.get("box_mem_mb"),
+                "allow_services": bool(p.get("allow_services")),
+                "allow_package_requests": bool(p.get("allow_package_requests")),
+            }
+            self.secret_names = secret_names or []
+            self.variants = variants or []
+            self.cur = 0
+            self.error = ""
+
+        def compose(self) -> ComposeResult:
+            what = (f"Edit profile {self.editing.get('name')}" if self.editing
+                    else "New security profile")
+            with Vertical(id="dialog", classes="wide"):
+                with Horizontal(id="dialog-head"):
+                    yield Static(f"[b]{_esc(what)}[/]", id="dialog-title")
+                    yield Static("[$text-muted]esc[/]", id="dialog-esc")
+                with VerticalScroll(id="view-body"):
+                    yield Static(id="pf-body")
+                yield Static(id="pf-hint")
+
+        def on_mount(self) -> None:
+            self.redraw()
+
+        def _show(self, key: str, kind) -> str:
+            v = self.v[key]
+            if isinstance(kind, tuple):
+                if v is None:
+                    return f"{RED} not chosen [/]"
+                return _runtime_tag(v) if key == "box_runtime" else f"[b]{_esc(v)}[/]"
+            if kind == "bool":
+                return "[$success b]yes[/]" if v else "[$text-muted]no[/]"
+            if kind == "list":
+                return _esc(", ".join(v)) if v else "[$text-muted]none[/]"
+            if v in (None, ""):
+                return "[$text-muted]default[/]" if kind == "int" else "[$text-muted]empty[/]"
+            return _esc(str(v))
+
+        def redraw(self) -> None:
+            lines = []
+            for i, (key, label, kind) in enumerate(self.FIELDS + [("", "Save", "save")]):
+                sel = i == self.cur
+                if kind == "save":
+                    lab = " Save profile "
+                    lines.append("")
+                    lines.append(f"[b $background on $primary]{lab}[/]" if sel
+                                 else f"[b]{lab}[/]")
+                    continue
+                name = (f"[b $background on $primary] {label:<38}[/]" if sel
+                        else f" [$text-muted]{label:<38}[/]")
+                lines.append(f"{name} {self._show(key, kind)}")
+            if self.v["box_runtime"] == "docker":
+                lines.append(f"\n{AMBER} docker [/] less isolated than a KVM box: the "
+                             "container shares the host kernel")
+            if self.error:
+                lines.append(f"\n[$error b]{_esc(self.error)}[/]")
+            self.query_one("#pf-body", Static).update("\n".join(lines))
+            self.query_one("#pf-hint", Static).update(
+                "[$primary]↑↓[/] field  [$primary]enter[/] edit / toggle / pick  "
+                "[$primary]ctrl+s[/] or the Save row saves  [$text-muted]esc[/] cancel"
+                + ("\n[$text-muted]secrets are names only: "
+                   + _esc(", ".join(self.secret_names)) + "[/]" if self.secret_names else ""))
+
+        def action_move(self, d: int) -> None:
+            self.cur = max(0, min(len(self.FIELDS), self.cur + d))
+            self.redraw()
+
+        def action_edit(self) -> None:
+            if self.cur == len(self.FIELDS):
+                self.action_save()
+                return
+            key, label, kind = self.FIELDS[self.cur]
+            if kind == "bool":
+                self.v[key] = not self.v[key]
+                self.redraw()
+                return
+            self.run_worker(self._edit(key, label, kind), group="pf-edit", exclusive=True)
+
+        async def _edit(self, key: str, label: str, kind) -> None:
+            if isinstance(kind, tuple):
+                says = {"kvm": "a KVM virtual machine (strongest)",
+                        "docker": "a hardened container: less isolated than a VM",
+                        **PLACEMENT_SAYS}
+                rows = [(c, c, says.get(c, "")) for c in kind]
+                v = await self.app.push_screen_wait(Picker(label, rows, self.v[key]))
+                if v is not None:
+                    self.v[key] = v
+            else:
+                cur = self.v[key]
+                shown = ", ".join(cur) if kind == "list" else ("" if cur is None else str(cur))
+                hint = {"list": " (comma-separated)",
+                        "int": " (a number; empty = the default)"}.get(kind, "")
+                if key == "secrets":
+                    hint = " (comma-separated NAMES; values stay in Secrets)"
+                ans = await self.app.push_screen_wait(Ask(f"{label}{hint}", value=shown))
+                if ans is None:
+                    return
+                ans = ans.strip()
+                if kind == "list":
+                    self.v[key] = [x.strip() for x in ans.split(",") if x.strip()]
+                    if key == "secrets":
+                        self.v[key] = [x.upper() for x in self.v[key]]
+                elif kind == "int":
+                    if ans and not ans.isdigit():
+                        self.error = f"{label}: a whole number, or empty"
+                        self.redraw()
+                        return
+                    self.v[key] = int(ans) if ans else None
+                else:
+                    self.v[key] = ans
+            self.error = ""
+            self.redraw()
+
+        def action_save(self) -> None:
+            missing = []
+            if not str(self.v["name"]).strip():
+                missing.append("a name")
+            if self.v["box_runtime"] not in RUNTIMES:
+                missing.append("a box runtime (kvm or docker)")
+            if self.v["service_placement"] not in PLACEMENTS:
+                missing.append("a service placement (per_service, per_project or shared)")
+            if missing:
+                self.error = ("not saved — choose " + "; ".join(missing)
+                              + ". There is no default.")
+                self.redraw()
+                return
+            self.dismiss(dict(self.v))
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
     class BrainDump(ModalScreen):
         """/orchestration's second step: a multi-line brain-dump for a project."""
 
@@ -2260,13 +2580,17 @@ def build_tui(base: str, token: str, **kw):
 
     # -- the security screen -------------------------------------------------------------
     #
-    # /security (alias /review): the web app's Security area in four tabs. The
+    # /security (alias /review): the web app's Security area in six tabs. The
     # queue is Review.jsx's (egress hosts waiting, git commit/remote requests
-    # pending in every project, unacknowledged alerts, which carry the diff-gate
-    # flags); Network is Network.jsx's policy, 24h summary and egress feed; Logs
-    # is the whole security-event log; Secrets is SecretsPanel.jsx's list, names
-    # and bound hosts only. Every route is operator-only, so a chat-only login
-    # gets a locked message and no requests at all.
+    # pending in every project, service and package requests, unacknowledged
+    # alerts, which carry the diff-gate flags); Network is each project's allow
+    # and deny lists over its profile's baseline with its egress feed; Logs is
+    # the whole security-event log; Secrets is SecretsPanel.jsx's list, names
+    # and bound hosts only; Persistent is every box's non-OS process tree with
+    # guest-reported vs host-verified bytes, and the approved services;
+    # Profiles lists, assigns, creates and edits security profiles. /vms reuses
+    # the frame for boxes, images and the package catalogue. Every route is
+    # operator-only, so a chat-only login gets a locked message and no requests.
 
     class SecRow(Static):
         """One row of the security screen's list; `key` None is a note."""
@@ -2337,13 +2661,218 @@ def build_tui(base: str, token: str, **kw):
             parts.insert(0, _esc(json.dumps(d, indent=2, sort_keys=True, default=str)))
         return "\n\n".join(parts)
 
-    class SecurityScreen(Screen):
-        """Tabs: Queue · Network · Logs · Secrets. tab / → next, ← previous,
-        1-4 jump, ↑↓ select (detail below), esc back. Plain keys only."""
+    # -- boxes, services, processes, profiles, packages (docs/boxes-contract.md) --------
 
-        TABS = ("queue", "network", "logs", "secrets")
+    def _runtime_tag(rt) -> str:
+        if rt == "docker":
+            return f"docker {AMBER} less isolated [/]"
+        return _esc(str(rt or "kvm"))
+
+    def _tree_count(nodes) -> int:
+        return sum(1 + _tree_count(n.get("children")) for n in nodes or [])
+
+    def _num(v):
+        try:
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _conn_flag(c: dict) -> str:
+        """'mismatch' when the guest's byte count and the proxy's disagree (a
+        root implant can lie to /proc, not to the proxy), 'unverified' when the
+        host could not join it, '' when they agree."""
+        for d in ("out", "in"):
+            g, h = _num(c.get(f"guest_bytes_{d}")), _num(c.get(f"host_bytes_{d}"))
+            if g is not None and h is not None and abs(g - h) > max(4096.0, 0.1 * max(g, h)):
+                return "mismatch"
+        if c.get("verified") is False and (c.get("host_bytes_out") is not None
+                                           or c.get("host_bytes_in") is not None):
+            return "mismatch"
+        return "" if c.get("verified") else "unverified"
+
+    def _node_bad(nd: dict) -> bool:
+        return (nd.get("tag") == "unexpected"
+                or any(_conn_flag(c) == "mismatch" for c in nd.get("conns") or []))
+
+    def _tree_bad(nodes) -> bool:
+        return any(_node_bad(n) or _tree_bad(n.get("children")) for n in nodes or [])
+
+    def _tree_bad_count(nodes) -> int:
+        return sum(_node_bad(n) + _tree_bad_count(n.get("children")) for n in nodes or [])
+
+    def _ports_text(ports) -> str:
+        return ", ".join(f"{p.get('port')}/{p.get('protocol') or 'tcp'}"
+                         f"({p.get('expose') or 'none'})" for p in ports or []) or "none"
+
+    def _argv(cmd) -> str:
+        if isinstance(cmd, (list, tuple)):
+            return " ".join(shlex.quote(str(a)) for a in cmd)
+        return str(cmd or "")
+
+    def _jlist(v) -> list:
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except ValueError:
+                return [v] if v else []
+        return list(v or [])
+
+    def _svc_definition(r: dict) -> list[str]:
+        env = r.get("env") or {}
+        return [
+            f"command: [b]{_esc(_argv(r.get('command')))}[/]",
+            f"workdir: {_esc(r.get('workdir') or '(project root)')}   restart: "
+            f"{_esc(r.get('restart') or 'no')}",
+            "files: " + _esc(", ".join(map(str, _jlist(r.get("files")))) or "none"),
+            "ports: " + _esc(_ports_text(_jlist(r.get("ports")))),
+            "egress hosts: " + _esc(", ".join(map(str, _jlist(r.get("egress_hosts"))))
+                                    or "none (deny everything)"),
+            "env: " + _esc(", ".join(f"{k}={v}" for k, v in dict(env).items()) or "none"),
+            f"content sha256: [b]{_esc(r.get('artifact_sha256') or '?')}[/]",
+            f"reason: {_esc(r.get('reason') or '')}",
+        ]
+
+    def _profile_lines(p: dict) -> list[str]:
+        def yn(k):
+            return "yes" if p.get(k) else "no"
+        return [
+            f"[b]{_esc(p.get('name') or '?')}[/]" + ("  [$text-muted]builtin[/]"
+                                                     if p.get("builtin") else ""),
+            f"box runtime: {_runtime_tag(p.get('box_runtime'))}   service placement: "
+            f"[b]{_esc(p.get('service_placement') or 'NOT SET')}[/]",
+            f"default verdict: [b]{_esc(p.get('default_verdict') or '?')}[/]   network off: "
+            f"{yn('network_off')}   auto-handle alerts: {yn('auto_handle')}",
+            f"separate box: {yn('separate_box')}   image: {_esc(p.get('box_image') or 'main')}"
+            "   box RAM: " + (f"{p['box_mem_mb']} MB" if p.get("box_mem_mb") else "default"),
+            f"services allowed: {yn('allow_services')}   package requests allowed: "
+            f"{yn('allow_package_requests')}",
+            "allow hosts: " + _esc(", ".join(_jlist(p.get("allow_hosts"))) or "none"),
+            "deny hosts: " + _esc(", ".join(_jlist(p.get("deny_hosts"))) or "none"),
+            "secrets (names): " + _esc(", ".join(_jlist(p.get("secrets"))) or "none"),
+            "projects: " + _esc(", ".join(_jlist(p.get("projects"))) or "none"),
+        ]
+
+    def _row_service(e) -> str:
+        r, ts = e["raw"], (e.get("ts") or "")[5:16]
+        return (f"[$warning b]SVC [/] [$text-muted]{ts}[/] [b]{_esc(r.get('name') or '?')}[/] "
+                f"[$text-muted]{_esc(_short(_argv(r.get('command')), 40))} · in "
+                f"{_esc(r.get('project_slug') or '?')} · ports "
+                f"{_esc(_ports_text(_jlist(r.get('ports'))))} · placement "
+                f"{_esc(r.get('placement') or 'not set')}[/]"
+                + (" [$warning]changed[/]" if r.get("supersedes_id") else ""))
+
+    def _row_package(e) -> str:
+        r, ts = e["raw"], (e.get("ts") or "")[5:16]
+        ver = r.get("resolved_version") or r.get("version_req") or ""
+        users = _jlist(r.get("variant_used_by"))
+        return (f"[$warning b]PKG [/] [$text-muted]{ts}[/] {_esc(r.get('manager') or '?')} "
+                f"[b]{_esc(r.get('package') or '?')}[/]{_esc(' ' + ver if ver else '')} "
+                f"[$text-muted]for {_esc(r.get('project_slug') or 'operator')} → "
+                f"{_esc(r.get('target_variant') or '?')} (used by {len(users)})[/]")
+
+    def _row_policy(e) -> str:
+        slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
+        head = f"[$accent b]⌂ {_esc(slug)}[/]"
+        if "project_allow" in p or "profile" in p:
+            prof = p.get("profile") or {}
+            allow, deny = _jlist(p.get("project_allow")), _jlist(p.get("project_deny"))
+            return (f"{head} [$text-muted]profile[/] [b]{_esc(prof.get('name') or '?')}[/] "
+                    f"[$text-muted]({_esc(prof.get('default') or '?')} by default) ·[/] "
+                    f"[$success]allow {len(allow)}[/]"
+                    f"{_esc(': ' + _short(', '.join(allow), 40)) if allow else ''} "
+                    f"[$text-muted]·[/] [$error]deny {len(deny)}[/]"
+                    f"{_esc(': ' + _short(', '.join(deny), 40)) if deny else ''}")
+        if p:
+            eff = _jlist(p.get("effective"))
+            return (f"{head} [$text-muted]policy {_esc(p.get('mode') or '?')} · {len(eff)} "
+                    f"host{'s' * (len(eff) != 1)}[/]")
+        return f"{head} [$text-muted]no policy read[/]"
+
+    def _row_group(e) -> str:
+        return f"[$accent b]{_esc(e['raw'].get('slug') or '')}[/]"
+
+    def _row_pbox(e) -> str:
+        r = e["raw"]
+        stale = f" {AMBER} stale [/]" if r.get("stale") else ""
+        return (f"[$accent b]▣ {_esc(r.get('box_id') or '?')}[/] [$text-muted]"
+                f"{_esc(r.get('kind') or '')}"
+                f"{' ⌂ ' + _esc(r['project']) if r.get('project') else ''} · "
+                f"{e.get('count', 0)} process{'es' * (e.get('count', 0) != 1)} · reported "
+                f"{_esc(str(r.get('reported_at') or 'never'))}[/]{stale}")
+
+    def _row_proc(e) -> str:
+        r, depth = e["raw"], e.get("depth", 1)
+        kids = r.get("children") or []
+        arrow = ("▾" if e.get("open") else "▸") if kids else "·"
+        tag = r.get("tag") or ""
+        if tag == "unexpected":
+            badge = f"{RED} UNEXPECTED [/] "
+        elif tag == "service":
+            badge = f"[$success]svc:{_esc(str(r.get('service_id') or '?'))}[/] "
+        elif tag:
+            badge = f"[$secondary]{_esc(tag)}[/] "
+        else:
+            badge = ""
+        flags = [_conn_flag(c) for c in r.get("conns") or []]
+        conns = (f" [$text-muted]{len(flags)} conn{'s' * (len(flags) != 1)}[/]"
+                 if flags else "")
+        if "mismatch" in flags:
+            conns += f" {RED} bytes mismatch [/]"
+        below = (f" {RED} ! below [/]" if e.get("hidden_bad") else "")
+        more = f" [$text-muted](+{_tree_count(kids)})[/]" if kids and not e.get("open") else ""
+        return ("  " * (depth - 1) + f"{arrow} {badge}[b]{_esc(str(r.get('pid') or '?'))}[/] "
+                f"{_esc(_short(r.get('cmd') or r.get('exe') or '?', 60))} "
+                f"[$text-muted]{_esc(r.get('user') or '')} {_bytes(r.get('rss'))}B "
+                f"{_num(r.get('cpu_pct')) or 0:.0f}%[/]{conns}{more}{below}")
+
+    def _row_svc(e) -> str:
+        r = e["raw"]
+        st = r.get("state") or "?"
+        col = {"running": "$success", "failed": "$error", "unreported": "$warning"}.get(
+            st, "$text-muted")
+        return (f"[{col}]●[/] [b]{_esc(r.get('name') or '?')}[/] [$text-muted]#{r.get('id')} "
+                f"⌂ {_esc(r.get('project_slug') or '?')} · placement[/] "
+                f"[b]{_esc(r.get('placement') or '?')}[/] [$text-muted]· {_esc(st)} · box "
+                f"{_esc(r.get('box_id') or '-')}[/]")
+
+    def _row_profile(e) -> str:
+        p = e["raw"]
+        projects = _jlist(p.get("projects"))
+        return (f"[b]{_esc(p.get('name') or '?')}[/]"
+                + (" [$text-muted]builtin[/]" if p.get("builtin") else "")
+                + f"  {_runtime_tag(p.get('box_runtime'))} [$text-muted]· placement[/] "
+                  f"{_esc(p.get('service_placement') or 'NOT SET')} [$text-muted]· "
+                  f"{_esc(p.get('default_verdict') or '?')} by default"
+                + (" · network off" if p.get("network_off") else "")
+                + f" · {len(projects)} project{'s' * (len(projects) != 1)}[/]")
+
+    _ROWS = {"service": _row_service, "package": _row_package, "policy": _row_policy,
+             "group": _row_group, "pbox": _row_pbox, "proc": _row_proc, "svc": _row_svc,
+             "profile": _row_profile}
+
+    class SecurityScreen(Screen):
+        """Tabs: Queue · Network · Logs · Secrets · Persistent · Profiles. tab / →
+        next, ← previous, 1-6 jump, ↑↓ select (detail below), esc back. Plain
+        keys only (Terminal.app: no shift+arrows)."""
+
+        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles")
         LABELS = {"queue": "Queue", "network": "Network", "logs": "Logs",
-                  "secrets": "Secrets"}
+                  "secrets": "Secrets", "persistent": "Persistent", "profiles": "Profiles"}
+        EMPTY = {"queue": "nothing waits on you", "network": "no egress traffic yet",
+                 "logs": "no security events", "secrets": "no secrets saved — a adds one",
+                 "persistent": "no persistent processes or services reported",
+                 "profiles": "no profiles — a creates one"}
+        COUNTED = ("queue", "secrets")    # tabs whose count shows in the header
+        FOOT = {"queue": "[$primary]y[/] approve  [$primary]n[/] deny  "
+                         "[$primary]a[/] acknowledge",
+                "network": "[$primary]p[/] project  [$primary]e[/] edit allow/deny",
+                "logs": "[$primary]f[/] filter kind  [$primary]a[/] acknowledge",
+                "secrets": "[$primary]a[/] add  [$primary]h[/] hosts  "
+                           "[$primary]v[/] new value  [$primary]d[/] delete",
+                "persistent": "[$primary]enter[/] open  [$primary]s[/] stop service  "
+                              "[$primary]d[/] revoke service",
+                "profiles": "[$primary]a[/] new  [$primary]e[/] edit  [$primary]p[/] assign "
+                            "to project  [$primary]d[/] delete"}
         POLL_SECONDS = 4.0
         LIMIT = 200
         GENERAL = "__general__"          # egress.py's shared baseline policy row
@@ -2372,6 +2901,8 @@ def build_tui(base: str, token: str, **kw):
             Binding("2", "jump(1)", show=False),
             Binding("3", "jump(2)", show=False),
             Binding("4", "jump(3)", show=False),
+            Binding("5", "jump(4)", show=False),
+            Binding("6", "jump(5)", show=False),
             Binding("up,k", "move(-1)", show=False),
             Binding("down,j", "move(1)", show=False),
             Binding("pageup", "page(-1)", show=False),
@@ -2385,6 +2916,10 @@ def build_tui(base: str, token: str, **kw):
             Binding("h", "hosts", show=False),
             Binding("v", "rotate", show=False),
             Binding("d", "delete", show=False),
+            Binding("s", "stop", show=False),
+            Binding("e", "edit", show=False),
+            Binding("b", "build", show=False),
+            Binding("enter", "enter", show=False),
         ]
 
         def __init__(self, tab: str = "queue", project: str | None = None) -> None:
@@ -2398,6 +2933,12 @@ def build_tui(base: str, token: str, **kw):
             self.net: dict = {}               # policy + summary for the Network head
             self.log_filter = "all"
             self.status = ""
+            self.open_nodes: set[str] = set()    # Persistent: expanded process rows
+            self.lan_ip = ""                     # services_lan_ip ("" = no LAN exposure)
+            self.projects: list[dict] = []
+            self.profiles: list[dict] = []
+            self._last_boxes: list[dict] = []
+            self._last_services: list[dict] = []
             self._sig = None
             self._lock = asyncio.Lock()
 
@@ -2423,7 +2964,7 @@ def build_tui(base: str, token: str, **kw):
 
         async def _first_load(self) -> None:
             await self.load(self.tab)
-            for t in ("queue", "secrets"):            # the header's counts
+            for t in self.COUNTED:                    # the header's counts
                 if t != self.tab:
                     await self.load(t, draw=False)
             await self.rebuild()
@@ -2434,11 +2975,15 @@ def build_tui(base: str, token: str, **kw):
 
         # -- data -------------------------------------------------------------------------
 
-        async def _get(self, tab: str, what: str, path: str, key: str, **kw):
+        async def _get(self, tab: str, what: str, path: str, key: str, quiet404=False,
+                       **kw):
+            """GET one route; a failure is noted on the tab (a 404 from a route an
+            older server lacks stays quiet when `quiet404`) and reads as None."""
             try:
                 r = await self.app.api("GET", path, **kw)
             except CliError as e:
-                self.errors[tab].append(f"{what}: {e}")
+                if not (quiet404 and "said 404" in str(e)):
+                    self.errors[tab].append(f"{what}: {e}")
                 return None
             return (r or {}).get(key) if key else (r or {})
 
@@ -2446,9 +2991,7 @@ def build_tui(base: str, token: str, **kw):
             if self.locked:
                 return
             self.errors[tab] = []
-            fn = {"queue": self._load_queue, "network": self._load_network,
-                  "logs": self._load_logs, "secrets": self._load_secrets}[tab]
-            entries = await fn()
+            entries = await getattr(self, f"_load_{tab}")()
             if entries is not None:
                 self.entries[tab] = entries
             self.loaded[tab] = True
@@ -2458,23 +3001,37 @@ def build_tui(base: str, token: str, **kw):
                 self.render_chrome()
 
         async def _load_queue(self):
-            projects, pending, alerts = await asyncio.gather(
+            projects, pending, alerts, svcs, pkgs = await asyncio.gather(
                 self._get("queue", "projects", "/api/projects", "projects"),
                 self._get("queue", "egress", "/api/egress/pending", "pending"),
                 self._get("queue", "alerts", "/api/security/events", "events",
-                          params={"unacknowledged": "true", "limit": self.LIMIT}))
+                          params={"unacknowledged": "true", "limit": self.LIMIT}),
+                self._get("queue", "services", "/api/services", "", quiet404=True),
+                self._get("queue", "packages", "/api/packages", "packages", quiet404=True,
+                          params={"status": "pending"}))
+            if projects is not None:
+                self.projects = projects
+            if svcs is not None:
+                self.lan_ip = str(svcs.get("services_lan_ip") or "")
             slugs = [p.get("slug") for p in projects or [] if p.get("slug")]
             reqs = await asyncio.gather(*[
                 self._get("queue", f"git {s}", f"/api/projects/{s}/git/requests", "requests")
                 for s in slugs])
             if projects is None and pending is None and alerts is None:
                 return None
-            return self.queue_entries(pending or [], dict(zip(slugs, reqs)), alerts or [])
+            return self.queue_entries(pending or [], dict(zip(slugs, reqs)), alerts or [],
+                                      (svcs or {}).get("services") or [], pkgs or [])
 
         @staticmethod
-        def queue_entries(pending, git: dict, alerts) -> list[dict]:
+        def queue_entries(pending, git: dict, alerts, services=(), packages=()) -> list[dict]:
             asks = [{"type": "egress", "key": f"p{e.get('id')}", "raw": e,
                      "ts": e.get("last_seen") or ""} for e in pending]
+            asks += [{"type": "service", "key": f"v{q.get('id')}", "raw": q,
+                      "ts": q.get("created_at") or ""}
+                     for q in services if q.get("status") == "pending"]
+            asks += [{"type": "package", "key": f"pk{q.get('id')}", "raw": q,
+                      "ts": q.get("created_at") or ""}
+                     for q in packages if q.get("status", "pending") == "pending"]
             for slug, reqs in git.items():
                 for q in reqs or []:
                     if q.get("status", "pending") == "pending":
@@ -2495,17 +3052,57 @@ def build_tui(base: str, token: str, **kw):
 
         async def _load_network(self):
             pq = {"project": self.project} if self.project else {}
-            pol, summ, evs = await asyncio.gather(
+            # the general row is the pre-profiles baseline; a server with
+            # profiles may no longer have it, so its absence stays quiet
+            pol, summ, evs, projects, profiles = await asyncio.gather(
                 self._get("network", "policy",
-                          f"/api/egress/policy/{self.project or self.GENERAL}", ""),
+                          f"/api/egress/policy/{self.project or self.GENERAL}", "",
+                          quiet404=not self.project),
                 self._get("network", "summary", "/api/egress/summary", "", params=pq),
                 self._get("network", "events", "/api/egress/events", "events",
-                          params={"limit": self.LIMIT, **pq}))
+                          params={"limit": self.LIMIT, **pq}),
+                self._get("network", "projects", "/api/projects", "projects"),
+                self._get("network", "profiles", "/api/profiles", "profiles", quiet404=True))
             self.net = {"policy": pol, "summary": summ}
+            if projects is not None:
+                self.projects = projects
+            if profiles is not None:
+                self.profiles = profiles
+            slugs = ([self.project] if self.project else
+                     [p.get("slug") for p in self.projects if p.get("slug")])
+            if self.project:
+                pols = [pol]
+            else:
+                pols = await asyncio.gather(*[
+                    self._get("network", f"policy {s}", f"/api/egress/policy/{s}", "")
+                    for s in slugs])
             if evs is None:
                 return None
-            return [{"type": "net", "key": f"e{e.get('id')}", "raw": e,
-                     "ts": e.get("created_at") or ""} for e in evs]
+            return self.network_entries(dict(zip(slugs, pols)), evs,
+                                        None if self.project else self.GENERAL)
+
+        @staticmethod
+        def network_entries(policies: dict, events, general: str | None) -> list[dict]:
+            """Grouped by project: each project's policy row (its own allow and
+            deny lists over the profile baseline), then its traffic, newest
+            first; unattributed traffic last, under `general`."""
+            by: dict[str, list[dict]] = {}
+            for e in events:
+                by.setdefault(e.get("project_slug") or general or "", []).append(e)
+            out = []
+            groups = list(policies) + [g for g in by if g not in policies]
+            for slug in groups:
+                if slug in policies:
+                    out.append({"type": "policy", "key": f"P{slug}",
+                                "raw": {"slug": slug, "policy": policies[slug] or {}}})
+                elif slug == general:
+                    out.append({"type": "group", "key": f"P{slug}",
+                                "raw": {"slug": "general (no project)"}})
+                evs = sorted(by.get(slug, []), key=lambda e: e.get("created_at") or "",
+                             reverse=True)
+                out += [{"type": "net", "key": f"e{e.get('id')}", "raw": e,
+                         "ts": e.get("created_at") or ""} for e in evs]
+            return out
 
         async def _load_logs(self):
             evs = await self._get("logs", "security log", "/api/security/events", "events",
@@ -2526,6 +3123,57 @@ def build_tui(base: str, token: str, **kw):
             return [{"type": "secret", "key": f"k{s.get('name')}",
                      "raw": {"name": s.get("name"), "hosts": list(s.get("hosts") or [])}}
                     for s in ss if s.get("name")]
+
+        async def _load_persistent(self):
+            procs, svcs = await asyncio.gather(
+                self._get("persistent", "processes", "/api/vm/processes", "boxes"),
+                self._get("persistent", "services", "/api/services", "", quiet404=True))
+            if svcs is not None:
+                self.lan_ip = str(svcs.get("services_lan_ip") or "")
+            if procs is None and svcs is None:
+                return None
+            self._last_boxes = procs or []
+            self._last_services = (svcs or {}).get("services") or []
+            return self.persistent_entries_again()
+
+        @staticmethod
+        def persistent_entries(boxes, services, open_nodes) -> list[dict]:
+            """One block per box: the box row, then its non-OS processes as a tree
+            (a row's children show once Enter opens it), then every decided
+            service with its placement."""
+            out = []
+
+            def walk(box_id, nodes, depth):
+                for nd in nodes or []:
+                    key = f"N{box_id}:{nd.get('pid')}"
+                    kids = nd.get("children") or []
+                    out.append({"type": "proc", "key": key, "depth": depth,
+                                "open": key in open_nodes, "box": box_id,
+                                "hidden_bad": (key not in open_nodes
+                                               and _tree_bad(kids)),
+                                "raw": nd})
+                    if key in open_nodes:
+                        walk(box_id, kids, depth + 1)
+
+            for b in boxes:
+                bid = b.get("box_id") or "?"
+                out.append({"type": "pbox", "key": f"B{bid}",
+                            "raw": {k: v for k, v in b.items() if k != "tree"},
+                            "count": _tree_count(b.get("tree"))})
+                walk(bid, b.get("tree"), 1)
+            decided = [s for s in services if s.get("status") not in ("pending", "rejected")]
+            if decided:
+                out.append({"type": "group", "key": "Gsvc",
+                            "raw": {"slug": "services (approved definitions)"}})
+                out += [{"type": "svc", "key": f"S{s.get('id')}", "raw": s} for s in decided]
+            return out
+
+        async def _load_profiles(self):
+            ps = await self._get("profiles", "profiles", "/api/profiles", "profiles")
+            if ps is None:
+                return None
+            self.profiles = ps
+            return [{"type": "profile", "key": f"R{p.get('id')}", "raw": p} for p in ps]
 
         # -- what is shown ------------------------------------------------------------
 
@@ -2586,6 +3234,8 @@ def build_tui(base: str, token: str, **kw):
                 return (f"[{col}]●[/] [$text-muted]{ts}[/] "
                         f"[{col} b]{v.replace('auto_', 'a·')[:5].upper():<5}[/] "
                         f"{_esc(_short(what.strip(), 70))}{proj}{meter}")
+            if t in _ROWS:
+                return _ROWS[t](e)
             hosts = r.get("hosts") or []
             bound = (f"[$text-muted]→ {_esc(', '.join(hosts))}[/]" if hosts
                      else "[$warning]no web host bound — unusable[/]")
@@ -2595,6 +3245,9 @@ def build_tui(base: str, token: str, **kw):
             if e is None:
                 return ""
             r, t = e["raw"], e["type"]
+            fn = getattr(self, f"_detail_{t}", None)
+            if fn is not None:
+                return fn(e)
             if t == "egress":
                 lines = ["[$primary]y[/] allow this host   [$primary]n[/] reject", "",
                          f"[b]{_esc(r.get('host') or '?')}[/]  asked by "
@@ -2649,6 +3302,141 @@ def build_tui(base: str, token: str, **kw):
                     + "\n[$text-muted]project grants live on each project's Network "
                       "policy (web app)[/]")
 
+        def _detail_service(self, e) -> str:
+            r = e["raw"]
+            lan = (f"LAN exposure available on {_esc(self.lan_ip)}" if self.lan_ip
+                   else "LAN exposure unavailable (no services LAN IP on the server)")
+            return "\n".join([
+                "[$primary]y[/] review and approve (placement and ports next)   "
+                "[$primary]n[/] reject", "",
+                f"[b]service request #{r.get('id')}: {_esc(r.get('name') or '?')}[/] in "
+                f"{_esc(r.get('project_slug') or '?')}  [$text-muted]"
+                f"{_esc(r.get('created_at') or '')}[/]",
+                _esc(r.get("description") or ""),
+                f"placement (from the profile, changeable when approving): "
+                f"[b]{_esc(r.get('placement') or 'not set')}[/]",
+                *_svc_definition(r),
+                (f"[$warning]replaces approved #{r['supersedes_id']}: the diff shows on "
+                 "approve[/]" if r.get("supersedes_id") else ""),
+                f"[$text-muted]{lan}[/]"])
+
+        def _detail_package(self, e) -> str:
+            r = e["raw"]
+            users = _jlist(r.get("variant_used_by"))
+            pending = (r.get("status") or "pending") == "pending"
+            return "\n".join([
+                ("[$primary]y[/] approve   [$primary]n[/] reject\n" if pending else "")
+                + f"[b]package request #{r.get('id')}[/] "
+                  f"[$text-muted]{_esc(r.get('status') or 'pending')} · from "
+                  f"{_esc(r.get('source') or 'agent')} · "
+                  f"{_esc(r.get('project_slug') or 'operator')} · "
+                  f"{_esc(r.get('created_at') or '')}[/]",
+                f"{_esc(r.get('manager') or '?')} [b]{_esc(r.get('package') or '?')}[/]  "
+                f"asked version: {_esc(r.get('version_req') or 'any')}  resolved: "
+                f"[b]{_esc(r.get('resolved_version') or 'not yet resolved')}[/]",
+                f"requested command: [$warning]{_esc(r.get('requested_command') or '')}[/]",
+                f"canonical command (what runs): [b]{_esc(r.get('canonical_command') or '')}[/]",
+                f"integrity: {_esc(r.get('integrity') or '?')}",
+                f"reason: {_esc(r.get('reason') or '')}",
+                f"installs into [b]{_esc(r.get('target_variant') or '?')}[/] — used by: "
+                + (_esc(", ".join(users)) if users else "no project yet")])
+
+        def _detail_policy(self, e) -> str:
+            slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
+            if not ("project_allow" in p or "profile" in p):
+                return _esc(json.dumps(p, indent=2, sort_keys=True, default=str))
+            prof = p.get("profile") or {}
+            base = next((x for x in self.profiles if x.get("id") == prof.get("id")), {})
+
+            def ls(v):
+                v = _jlist(v)
+                return _esc(", ".join(v)) if v else "[$text-muted]none[/]"
+            return "\n".join([
+                "[$primary]e[/] edit this project's allow and deny lists", "",
+                f"[b]⌂ {_esc(slug)}[/]  profile [b]{_esc(prof.get('name') or '?')}[/] "
+                f"[$text-muted](default: {_esc(prof.get('default') or '?')}; deny beats "
+                "allow)[/]",
+                f"[$success]project allow:[/] {ls(p.get('project_allow'))}",
+                f"[$error]project deny:[/]  {ls(p.get('project_deny'))}",
+                f"[$text-muted]profile baseline allow:[/] {ls(base.get('allow_hosts'))}",
+                f"[$text-muted]profile baseline deny:[/]  {ls(base.get('deny_hosts'))}",
+                f"effective allow: {ls(p.get('effective_allow'))}",
+                f"effective deny:  {ls(p.get('effective_deny'))}"])
+
+        def _detail_group(self, e) -> str:
+            return ""
+
+        def _detail_pbox(self, e) -> str:
+            r = e["raw"]
+            return (f"[b]{_esc(r.get('box_id') or '?')}[/] {_esc(r.get('kind') or '')} "
+                    f"{_esc(r.get('project') or '')}\nreported "
+                    f"{_esc(str(r.get('reported_at') or 'never'))}"
+                    + (f"  {AMBER} stale: the guest stopped reporting [/]"
+                       if r.get("stale") else "")
+                    + "\n[$text-muted]processes the image baseline does not know, with "
+                      "their children; Enter opens a row[/]")
+
+        def _detail_proc(self, e) -> str:
+            r = e["raw"]
+            svc = r.get("service_id")
+            keys = ("[$primary]enter[/] open/close   "
+                    + ("[$primary]s[/] stop service   [$primary]d[/] revoke service"
+                       if svc else "[$text-muted]not a service: stop it from the "
+                                   "project's chat or destroy the box (/vms)[/]"))
+            tag = r.get("tag") or ""
+            lines = [keys, "",
+                     (f"{RED} UNEXPECTED [/] not in the image baseline and in no approved "
+                      "service" if tag == "unexpected" else f"tag: {_esc(tag or '-')}"),
+                     f"pid [b]{_esc(str(r.get('pid')))}[/]  ppid {_esc(str(r.get('ppid')))}  "
+                     f"user {_esc(r.get('user') or '?')}  unit {_esc(r.get('unit') or '-')}"
+                     f"  service {_esc(str(svc or '-'))}",
+                     f"exe: {_esc(r.get('exe') or '?')}",
+                     f"cmd: {_esc(r.get('cmd') or '')}",
+                     f"rss {_bytes(r.get('rss'))}B  cpu {_num(r.get('cpu_pct')) or 0:.1f}%  "
+                     f"started {_esc(str(r.get('started') or '?'))}", ""]
+            conns = r.get("conns") or []
+            if not conns:
+                lines.append("[$text-muted]no connections[/]")
+            for d in ("out", "in"):
+                cs = [c for c in conns if c.get("dir") == d]
+                if not cs:
+                    continue
+                lines.append(f"[b]connections {d}[/]  [$text-muted]guest-reported ↑↓ vs "
+                             "host-verified ↑↓[/]")
+                for c in cs:
+                    flag = _conn_flag(c)
+                    mark = (f" {RED} MISMATCH [/]" if flag == "mismatch" else
+                            " [$warning]unverified[/]" if flag else " [$success]verified[/]")
+                    lines.append(
+                        f"  {_esc(c.get('proto') or '?')} {_esc(str(c.get('laddr') or ''))}:"
+                        f"{_esc(str(c.get('lport') or ''))} → "
+                        f"{_esc(str(c.get('raddr') or ''))}:{_esc(str(c.get('rport') or ''))}"
+                        f" {_esc(c.get('host') or '')} [$text-muted]{_esc(c.get('state') or '')}"
+                        f"[/]  guest ↑{_bytes(c.get('guest_bytes_out'))} "
+                        f"↓{_bytes(c.get('guest_bytes_in'))}  host "
+                        f"↑{_bytes(c.get('host_bytes_out'))} "
+                        f"↓{_bytes(c.get('host_bytes_in'))}{mark}")
+            return "\n".join(lines)
+
+        def _detail_svc(self, e) -> str:
+            r = e["raw"]
+            return "\n".join([
+                "[$primary]s[/] stop   [$primary]d[/] revoke", "",
+                f"[b]{_esc(r.get('name') or '?')}[/] #{r.get('id')} in "
+                f"{_esc(r.get('project_slug') or '?')}  state [b]{_esc(r.get('state') or '?')}"
+                f"[/]  box {_esc(r.get('box_id') or '-')}",
+                f"placement: [b]{_esc(r.get('placement') or '?')}[/]  exposed: "
+                + _esc(", ".join(f"{x.get('port')}→{x.get('bind')}"
+                                 for x in _jlist(r.get("expose_ports"))) or "nothing"),
+                *_svc_definition(r)])
+
+        def _detail_profile(self, e) -> str:
+            p = e["raw"]
+            keys = ("[$primary]p[/] assign to a project   [$primary]e[/] edit   "
+                    "[$primary]a[/] new profile"
+                    + ("" if p.get("builtin") else "   [$primary]d[/] delete"))
+            return "\n".join([keys, ""] + _profile_lines(p))
+
         @staticmethod
         def _paths(r: dict) -> list[str]:
             p = r.get("paths")
@@ -2671,15 +3459,9 @@ def build_tui(base: str, token: str, **kw):
                 w.update(lab)
                 w.set_class(t == self.tab, "-on")
             self.query_one("#sec-sub", Static).update(self.sub_markup())
-            foot = {"queue": "[$primary]y[/] approve  [$primary]n[/] deny  "
-                             "[$primary]a[/] acknowledge",
-                    "network": "[$primary]p[/] project",
-                    "logs": "[$primary]f[/] filter kind  [$primary]a[/] acknowledge",
-                    "secrets": "[$primary]a[/] add  [$primary]h[/] hosts  "
-                               "[$primary]v[/] new value  [$primary]d[/] delete",
-                    }[self.tab]
-            common = ("[$primary]tab → ←[/] tabs  [$primary]1-4[/] jump  [$primary]↑↓[/] "
-                      "select  [$primary]r[/] refresh  [$primary]esc[/] back")
+            foot = self.FOOT[self.tab]
+            common = (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
+                      "[$primary]↑↓[/] select  [$primary]r[/] refresh  [$primary]esc[/] back")
             self.query_one("#sec-foot", Static).update(
                 common if self.locked else f"{foot}   {common}")
 
@@ -2692,8 +3474,14 @@ def build_tui(base: str, token: str, **kw):
                 eg = sum(e["type"] == "egress" for e in es)
                 gt = sum(e["type"] == "git" for e in es)
                 al = sum(e["type"] == "alert" for e in es)
+                sv = sum(e["type"] == "service" for e in es)
+                pk = sum(e["type"] == "package" for e in es)
+                extra = ""
+                if sv or pk:
+                    extra = (f"{sv} service{'s' * (sv != 1)} · {pk} package"
+                             f"{'s' * (pk != 1)} · ")
                 bits.append(f"[$text-muted]{eg} host{'s' * (eg != 1)} waiting · {gt} git "
-                            f"request{'s' * (gt != 1)} · {al} alert{'s' * (al != 1)} "
+                            f"request{'s' * (gt != 1)} · {extra}{al} alert{'s' * (al != 1)} "
                             "to acknowledge · every project[/]")
             elif self.tab == "network":
                 bits.append(self.net_markup())
@@ -2702,6 +3490,18 @@ def build_tui(base: str, token: str, **kw):
                 bits.append("  ".join(f"[$primary b] {_esc(k)} [/]" if k == self.log_filter
                                       else f"[$text-muted]{_esc(k)}[/]" for k in kinds)
                             + "  [$text-muted]· newest first[/]")
+            elif self.tab == "persistent":
+                es = self.entries["persistent"]
+                nb = sum(e["type"] == "pbox" for e in es)
+                bad = _tree_bad_count([n for b in self._last_boxes for n in b.get("tree") or []])
+                bits.append(f"[$text-muted]{nb} box{'es' * (nb != 1)} reporting · non-OS "
+                            "processes only · guest-reported vs host-verified bytes[/]"
+                            + (f"  {RED} {bad} need a look [/]" if bad else ""))
+            elif self.tab == "profiles":
+                bits.append("[$text-muted]a profile is a project's security baseline: "
+                            "network, secrets by name, box runtime, service placement[/]")
+            elif self.tab != "secrets":
+                bits.append(self.vms_sub())
             else:
                 bits.append("[$text-muted]names and bound hosts only — a value is written, "
                             "never read back[/]")
@@ -2716,7 +3516,22 @@ def build_tui(base: str, token: str, **kw):
             where = (f"[b]⌂ {_esc(self.project)}[/]" if self.project
                      else "[b]all projects[/]")
             line = where
-            if pol:
+            if pol and ("project_allow" in pol or "profile" in pol):
+                prof = pol.get("profile") or {}
+                line += (f"  [$text-muted]profile[/] [b]{_esc(prof.get('name') or '?')}[/] "
+                         f"[$text-muted]({_esc(prof.get('default') or '?')} by default) · "
+                         f"{len(_jlist(pol.get('effective_allow')))} allowed, "
+                         f"{len(_jlist(pol.get('effective_deny')))} denied in effect[/]")
+            elif not self.project:
+                line += ("  [$text-muted]grouped by project: each project's own allow and "
+                         "deny lists over its profile's baseline[/]")
+                if pol:
+                    eff = pol.get("effective") or []
+                    line += (f"\n[$text-muted]general baseline[/] [b]"
+                             f"{_esc(pol.get('mode') or '?')}[/] [$text-muted]· {len(eff)} "
+                             f"host{'s' * (len(eff) != 1)}"
+                             + (": " + _esc(_short(", ".join(eff), 70)) if eff else "") + "[/]")
+            elif pol:
                 mode = pol.get("mode") or "?"
                 src = pol.get("source")
                 if not self.project:
@@ -2751,11 +3566,7 @@ def build_tui(base: str, token: str, **kw):
                     if self.locked:
                         rows = [SecRow(f"[$warning]{_esc(self.LOCKED)}[/]", None)]
                     elif not shown:
-                        empty = {"queue": "nothing waits on you",
-                                 "network": "no egress traffic yet",
-                                 "logs": "no security events",
-                                 "secrets": "no secrets saved — a adds one"}[self.tab]
-                        msg = empty if self.loaded[self.tab] else "loading…"
+                        msg = self.EMPTY[self.tab] if self.loaded[self.tab] else "loading…"
                         rows = [SecRow(f"[$text-muted]{msg}[/]", None)]
                     else:
                         rows = [SecRow(m, k) for m, k in zip(marks, keys)]
@@ -2793,7 +3604,8 @@ def build_tui(base: str, token: str, **kw):
             await self.switch_to(self.TABS.index(self.tab) + d)
 
         async def action_jump(self, i: int) -> None:
-            await self.switch_to(i)
+            if i < len(self.TABS):
+                await self.switch_to(i)
 
         def action_move(self, d: int) -> None:
             keys = [e["key"] for e in self.shown()]
@@ -2838,10 +3650,46 @@ def build_tui(base: str, token: str, **kw):
                 self._act(self._ack())
             elif self.tab == "secrets":
                 self._act(self._add_secret())
+            elif self.tab == "profiles":
+                self._act(self._profile_form(None))
 
         def action_project(self) -> None:
             if self.tab == "network":
                 self._act(self._pick_project())
+            elif self.tab == "profiles":
+                self._act(self._assign_profile())
+
+        def action_stop(self) -> None:
+            if self.tab == "persistent":
+                self._act(self._stop_service())
+
+        def action_edit(self) -> None:
+            if self.tab == "network":
+                self._act(self._edit_policy())
+            elif self.tab == "profiles":
+                e = self.selected()
+                if e is not None and e["type"] == "profile":
+                    self._act(self._profile_form(e["raw"]))
+
+        def action_build(self) -> None:
+            pass
+
+        async def action_enter(self) -> None:
+            e = self.selected()
+            if self.locked or e is None:
+                return
+            if e["type"] == "proc" and e["raw"].get("children"):
+                self.open_nodes ^= {e["key"]}
+                self.entries["persistent"] = self.persistent_entries_again()
+                await self.rebuild()
+            elif e["type"] == "profile":
+                await self.app.push_screen_wait(View(
+                    f"Profile {e['raw'].get('name') or ''}", "\n".join(_profile_lines(e["raw"]))))
+
+        def persistent_entries_again(self) -> list[dict]:
+            """Re-flatten the last report with the new open set (no request)."""
+            return self.persistent_entries(self._last_boxes, self._last_services,
+                                           self.open_nodes)
 
         async def action_filter(self) -> None:
             if self.tab != "logs" or self.locked:
@@ -2862,6 +3710,10 @@ def build_tui(base: str, token: str, **kw):
         def action_delete(self) -> None:
             if self.tab == "secrets":
                 self._act(self._delete_secret())
+            elif self.tab == "persistent":
+                self._act(self._revoke_service())
+            elif self.tab == "profiles":
+                self._act(self._delete_profile())
 
         # -- actions ------------------------------------------------------------------
 
@@ -2881,8 +3733,9 @@ def build_tui(base: str, token: str, **kw):
                     self.status = f"[$success]{_esc(done + into)}[/]"
                     ok = True
             await self.load(self.tab, draw=False)
-            if self.tab != "queue":
-                await self.load("queue", draw=False)
+            for t in self.COUNTED:                     # the header's counts
+                if t != self.tab:
+                    await self.load(t, draw=False)
             await self.rebuild()
             return ok
 
@@ -2891,6 +3744,14 @@ def build_tui(base: str, token: str, **kw):
 
         async def _verdict(self, yes: bool) -> None:
             e = self.selected()
+            if e is not None and e["type"] == "service":
+                await (self._approve_service(e["raw"]) if yes
+                       else self._reject("service", e["raw"]))
+                return
+            if e is not None and e["type"] == "package":
+                await (self._approve_package(e["raw"]) if yes
+                       else self._reject("package", e["raw"]))
+                return
             if e is None or e["type"] not in ("egress", "git"):
                 return
             r = e["raw"]
@@ -3042,6 +3903,489 @@ def build_tui(base: str, token: str, **kw):
                 await self._send("DELETE", f"/api/secrets/{s['name']}",
                                  f"deleted {s['name']}")
 
+        # -- services, packages, policy, profiles ----------------------------------------
+
+        def _fail(self, msg: str) -> None:
+            self.status = f"[$error]{_esc(msg)}[/]"
+            self.render_chrome()
+
+        async def _approve_service(self, r: dict) -> None:
+            sid, name = r.get("id"), r.get("name") or "?"
+            diff = None
+            if r.get("supersedes_id"):
+                try:
+                    diff = (await self.app.api("GET", f"/api/services/{sid}") or {}).get("diff")
+                except CliError as e:
+                    self._fail(f"could not read the diff: {e}")
+                    return
+            pick = await self.app.push_screen_wait(ServiceApprove(r, diff, self.lan_ip))
+            if not pick:
+                return
+            pl = pick["placement"]
+            expose = [{"port": port, "bind": "lan" if how == "lan" else "loopback"}
+                      for port, how in pick["expose"]]
+            ports = "; ".join(
+                f"port {x['port']} on "
+                + (f"the services LAN address {self.lan_ip}" if x["bind"] == "lan"
+                   else "host loopback only")
+                + " through the metered relay" for x in expose) or "no port exposed"
+            hosts = ", ".join(map(str, _jlist(r.get("egress_hosts")))) or "no host"
+            detail = (f"Approves the content-hashed artifact sha256 "
+                      f"{r.get('artifact_sha256') or '?'} for {r.get('project_slug') or '?'} "
+                      f"and runs `{_argv(r.get('command'))}` (restart "
+                      f"{r.get('restart') or 'no'}) in {PLACEMENT_SAYS[pl]} "
+                      f"[placement {pl}"
+                      + ("" if pl == r.get("placement") else
+                         f", changed from the profile's {r.get('placement') or 'none'}")
+                      + f"]. Egress: deny by default; allowed only {hosts} minus the "
+                      f"profile and project deny lists. Inbound: {ports}. It starts now and "
+                      "on every boot until stopped or revoked; a code change is a new "
+                      "request.")
+            if await self._confirm(f"Approve service {name} as {pl}?", detail):
+                await self._send("POST", f"/api/services/{sid}/approve",
+                                 f"approved service {name} ({pl})",
+                                 json={"acknowledge": True, "placement": pl,
+                                       "expose_ports": expose})
+
+        async def _approve_package(self, r: dict) -> None:
+            pid, variant = r.get("id"), r.get("target_variant") or "?"
+            users = ", ".join(_jlist(r.get("variant_used_by"))) or "no project yet"
+            what = (f"{r.get('manager') or '?'} {r.get('package') or '?'}"
+                    f"{' ' + r['resolved_version'] if r.get('resolved_version') else ''}")
+            detail = (f"Installs into `{variant}` — used by: {users}. Every project on "
+                      f"`{variant}` gets it: a new version of the image is built with "
+                      f"`{r.get('canonical_command') or '?'}` (the host's canonical command; "
+                      f"the agent's `{r.get('requested_command') or '?'}` never runs) and "
+                      "boxes pick it up at their next boot. The image in use now is not "
+                      "changed.")
+            if await self._confirm(f"Approve {what} into {variant}?", detail):
+                await self._send("POST", f"/api/packages/{pid}/approve",
+                                 f"approved {what} into {variant}",
+                                 json={"acknowledge": True, "target_variant": variant})
+
+        async def _reject(self, kind: str, r: dict) -> None:
+            rid = r.get("id")
+            what = (f"service {r.get('name') or '?'}" if kind == "service"
+                    else f"package {r.get('package') or '?'}")
+            reason = await self.app.push_screen_wait(Ask(
+                f"Reject {what}: the reason (the agent sees it)"))
+            if reason is None:
+                return
+            reason = reason.strip() or "rejected by the operator"
+            if await self._confirm(f"Reject {what} (#{rid})?",
+                                   f"Marks the request rejected with: {reason}. Nothing "
+                                   "is installed or started."):
+                base = "services" if kind == "service" else "packages"
+                await self._send("POST", f"/api/{base}/{rid}/reject", f"rejected {what}",
+                                 json={"reason": reason})
+
+        def _service_of(self) -> dict | None:
+            """The service behind the selected Persistent row: a service row, or a
+            process whose cgroup names one."""
+            e = self.selected()
+            if e is None:
+                return None
+            if e["type"] == "svc":
+                return e["raw"]
+            sid = e["raw"].get("service_id") if e["type"] == "proc" else None
+            if sid is None:
+                return None
+            known = next((s for s in self._last_services if s.get("id") == sid), None)
+            return known or {"id": sid, "name": f"service {sid}"}
+
+        async def _stop_service(self) -> None:
+            s = self._service_of()
+            if s is None:
+                return
+            if await self._confirm(
+                    f"Stop service {s.get('name')} (#{s.get('id')})?",
+                    "Stops its unit now. The approved definition stays; start it again "
+                    "from the web app or /vms, and it comes back on the next box boot "
+                    "unless it is revoked."):
+                await self._send("POST", f"/api/services/{s.get('id')}/stop",
+                                 f"stopped {s.get('name')}")
+
+        async def _revoke_service(self) -> None:
+            s = self._service_of()
+            if s is None:
+                return
+            if not await self._confirm(
+                    f"Revoke service {s.get('name')} (#{s.get('id')})?",
+                    "Deletes the approved definition and destroys the box it runs in "
+                    "(killing the VM is the authoritative stop). A new request is needed "
+                    "to run it again. Its /srv data is kept unless you say so next."):
+                return
+            wipe = bool(await self.app.push_screen_wait(Confirm(
+                f"Also delete {s.get('name')}'s /srv data?",
+                "y deletes the data disk for good; n (or esc) keeps it.")))
+            await self._send("POST", f"/api/services/{s.get('id')}/revoke",
+                             f"revoked {s.get('name')}"
+                             + (" and deleted its data" if wipe else ""),
+                             json={"confirm": True, "delete_data": wipe})
+
+        async def _edit_policy(self) -> None:
+            e = self.selected()
+            if e is None or e["type"] != "policy":
+                e = next((x for x in self.shown() if x["type"] == "policy"
+                          and x["raw"]["slug"] == self.project), None)
+            if e is None:
+                return
+            slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
+            if not ("project_allow" in p or "profile" in p):
+                self._fail("this server has no per-project allow/deny lists yet")
+                return
+            allow = await self.app.push_screen_wait(Ask(
+                f"{slug}: hosts to ALLOW, comma-separated",
+                value=", ".join(_jlist(p.get("project_allow")))))
+            if allow is None:
+                return
+            deny = await self.app.push_screen_wait(Ask(
+                f"{slug}: hosts to DENY, comma-separated (deny beats allow)",
+                value=", ".join(_jlist(p.get("project_deny")))))
+            if deny is None:
+                return
+            al, dn = self._hosts(allow), self._hosts(deny)
+            prof = (p.get("profile") or {}).get("name") or "its profile"
+            if await self._confirm(
+                    f"Save {slug}'s egress lists?",
+                    f"{slug} only: allow {', '.join(al) or 'nothing extra'}; deny "
+                    f"{', '.join(dn) or 'nothing extra'}. {prof}'s baseline is unchanged; "
+                    "deny beats allow."):
+                await self._send("PUT", f"/api/egress/policy/{slug}", f"saved {slug}'s lists",
+                                 json={"allow": al, "deny": dn})
+
+        def _profile(self) -> dict | None:
+            e = self.selected()
+            return e["raw"] if e is not None and e["type"] == "profile" else None
+
+        async def _assign_profile(self) -> None:
+            p = self._profile()
+            if p is None:
+                return
+            try:
+                ps = (await self.app.api("GET", "/api/projects") or {}).get("projects") or []
+            except CliError as e:
+                self._fail(str(e))
+                return
+            have = set(_jlist(p.get("projects")))
+            rows = [(x["slug"], x.get("name") or x["slug"],
+                     "already on it" if x["slug"] in have else "")
+                    for x in ps if x.get("slug")]
+            slug = await self.app.push_screen_wait(Picker(
+                f"Assign {p.get('name')} to which project", rows))
+            if slug is None:
+                return
+            rt = p.get("box_runtime") or "?"
+            if await self._confirm(
+                    f"Put {slug} under profile {p.get('name')}?",
+                    f"From its next turn {slug} follows {p.get('name')}: default "
+                    f"{p.get('default_verdict') or '?'}, box runtime {rt}"
+                    + (" (less isolated than a VM)" if rt == "docker" else "")
+                    + f", service placement {p.get('service_placement') or '?'}, secrets "
+                    f"{', '.join(_jlist(p.get('secrets'))) or 'none'}. Its own allow/deny "
+                    "lists stay."):
+                await self._send("PUT", f"/api/projects/{slug}/profile",
+                                 f"{slug} now uses {p.get('name')}",
+                                 json={"profile_id": p.get("id")})
+
+        async def _delete_profile(self) -> None:
+            p = self._profile()
+            if p is None:
+                return
+            if p.get("builtin"):
+                self._fail(f"{p.get('name')} is builtin: it cannot be deleted")
+                return
+            users = ", ".join(_jlist(p.get("projects")))
+            if await self._confirm(
+                    f"Delete profile {p.get('name')}?",
+                    "Removes it for good." + (f" Projects on it ({users}) go back to "
+                                              "Default." if users else "")):
+                await self._send("DELETE", f"/api/profiles/{p.get('id')}",
+                                 f"deleted {p.get('name')}")
+
+        async def _profile_form(self, p: dict | None) -> None:
+            names: list[str] = []
+            try:
+                names = [s.get("name") for s in (await self.app.api(
+                    "GET", "/api/secrets") or {}).get("secrets") or [] if s.get("name")]
+            except CliError:
+                pass
+            v = await self.app.push_screen_wait(ProfileForm(p, names))
+            if not v:
+                return
+            if p is None:
+                await self._send("POST", "/api/profiles", f"created {v['name']}", json=v)
+            else:
+                await self._send("PUT", f"/api/profiles/{p.get('id')}", f"saved {v['name']}",
+                                 json=v)
+
+    # -- /vms: boxes, images, package catalogue ------------------------------------------
+
+    def _uptime(s) -> str:
+        s = int(_num(s) or 0)
+        return (f"{s // 86400}d{s % 86400 // 3600}h" if s >= 86400 else
+                f"{s // 3600}h{s % 3600 // 60}m" if s >= 3600 else f"{s // 60}m{s % 60}s")
+
+    def _row_box(e) -> str:
+        r = e["raw"]
+        st = r.get("state") or "?"
+        col = "$success" if st == "running" else "$text-muted"
+        img = r.get("image") or {}
+        up = (f" up {_uptime(r.get('uptime_s'))} · rss {_bytes(r.get('rss_bytes'))}B · cpu "
+              f"{_num(r.get('cpu_pct')) or 0:.0f}%" if st == "running" else "")
+        busy = f" · {r.get('inflight')} turn(s)" if r.get("inflight") else ""
+        return (f"[{col}]●[/] [b]{_esc(r.get('id') or '?')}[/] [$text-muted]"
+                f"{_esc(r.get('kind') or '')}"
+                f"{' ⌂ ' + _esc(r['project']) if r.get('project') else ''}"
+                f"{' · ' + _esc(r['placement']) if r.get('placement') else ''}[/] "
+                f"{_runtime_tag(r.get('runtime'))} [{col}]{_esc(st)}[/] [$text-muted]"
+                f"{r.get('mem_mb') or '?'}MB · {_esc(img.get('variant') or 'main')}"
+                f"{' v' + str(img['version']) if img.get('version') else ''}{up}{busy}[/]")
+
+    def _row_variant(e) -> str:
+        r = e["raw"]
+        users = _jlist(r.get("used_by"))
+        return (f"[$accent b]{_esc(r.get('name') or '?')}[/] [$text-muted]from "
+                f"{_esc(r.get('from') or 'base')}{' · builtin' if r.get('builtin') else ''}"
+                f" · min {r.get('min_mem_mb') or '?'}MB · used by "
+                f"{_esc(', '.join(users)) if users else 'no project'}[/]")
+
+    def _row_version(e) -> str:
+        r = e["raw"]
+        st = r.get("status") or "?"
+        col = ("$success" if st in ("built", "ready") else
+               "$error" if st == "failed" else "$warning")
+        active = " [$primary b]active[/]" if r.get("active") else ""
+        inuse = _jlist(r.get("in_use_by"))
+        return (f"  [$text-muted]v[/]{_esc(str(r.get('version') or '?'))}{active} "
+                f"[{col}]{_esc(st)}[/] [$text-muted]{_bytes(r.get('size_bytes'))}B · built "
+                f"{_esc(str(r.get('built_at') or '-'))} · in use by "
+                f"{_esc(', '.join(map(str, inuse))) if inuse else 'no box'}[/]")
+
+    _ROWS.update({"box": _row_box, "variant": _row_variant, "version": _row_version})
+
+    class VmsScreen(SecurityScreen):
+        """/vms: Boxes · Images · Catalogue. The Security screen's frame (tabs,
+        list, detail, plain keys) over /api/vm/boxes, /api/vm/images and
+        /api/packages. Every action asks first; chat-only logins are locked."""
+
+        TABS = ("boxes", "images", "catalogue")
+        LABELS = {"boxes": "Boxes", "images": "Images", "catalogue": "Catalogue"}
+        EMPTY = {"boxes": "no boxes", "images": "no image variants",
+                 "catalogue": "no package requests"}
+        COUNTED = ("catalogue",)
+        FOOT = {"boxes": "[$primary]s[/] start / stop  [$primary]d[/] destroy",
+                "images": "[$primary]b[/] build a new version",
+                "catalogue": "[$primary]y[/] approve  [$primary]n[/] reject"}
+
+        def __init__(self, tab: str = "boxes") -> None:
+            super().__init__(tab)
+            self.tab = tab if tab in self.TABS else "boxes"
+            self.vm: dict = {}
+
+        def counts(self) -> dict:
+            pend = sum((e["raw"].get("status") or "pending") == "pending"
+                       for e in self.entries["catalogue"])
+            return {"catalogue": pend if self.loaded["catalogue"] else None}
+
+        async def _load_boxes(self):
+            r = await self._get("boxes", "boxes", "/api/vm/boxes", "")
+            if r is None:
+                return None
+            self.vm.update(enabled=r.get("enabled"), budget=r.get("budget") or {})
+            return [{"type": "box", "key": f"X{b.get('id')}", "raw": b}
+                    for b in r.get("boxes") or []]
+
+        async def _load_images(self):
+            r = await self._get("images", "images", "/api/vm/images", "")
+            if r is None:
+                return None
+            self.vm["build"] = r.get("build") or {}
+            out = []
+            for v in r.get("variants") or []:
+                out.append({"type": "variant", "key": f"I{v.get('name')}",
+                            "raw": {k: x for k, x in v.items() if k != "versions"}})
+                for ver in v.get("versions") or []:
+                    out.append({"type": "version", "key": f"I{v.get('name')}:"
+                                                          f"{ver.get('version')}",
+                                "raw": {**ver, "variant": v.get("name")}})
+            return out
+
+        async def _load_catalogue(self):
+            ps = await self._get("catalogue", "packages", "/api/packages", "packages")
+            if ps is None:
+                return None
+            out = [{"type": "package", "key": f"pk{p.get('id')}", "raw": p,
+                    "ts": p.get("created_at") or ""} for p in ps]
+            out.sort(key=lambda x: ((x["raw"].get("status") or "pending") != "pending",
+                                    x["ts"]), reverse=False)
+            return out
+
+        def vms_sub(self) -> str:
+            if self.tab == "boxes":
+                b = self.vm.get("budget") or {}
+                if not self.vm:
+                    return "[$text-muted]…[/]"
+                off = ("" if self.vm.get("enabled") else
+                       "[$warning]boxes are off: the one shared box only[/] · ")
+                return (f"{off}[$text-muted]RAM {b.get('ram_mb_used', '?')}/"
+                        f"{b.get('ram_mb_cap', '?')} MB · boxes {b.get('boxes', '?')}/"
+                        f"{b.get('boxes_cap', '?')} · project boxes "
+                        f"{b.get('project_boxes', '?')}/{b.get('project_boxes_cap', '?')} "
+                        "(reservations count, running or not)[/]")
+            if self.tab == "images":
+                bd = self.vm.get("build") or {}
+                return ("[$warning]building " + _esc(str(bd.get("variant") or "?")) + ": "
+                        + _esc(str(bd.get("phase") or "…")) + "[/]" if bd.get("running")
+                        else "[$text-muted]variants are frozen layers over the base; a "
+                             "build makes a new version, never changes one in use[/]")
+            return ("[$text-muted]packages the agents asked for and the operator added; "
+                    "an approved one goes into its variant's next version[/]")
+
+        def _detail_box(self, e) -> str:
+            r = e["raw"]
+            st = r.get("state")
+            net, disk, img = r.get("net") or {}, r.get("disk") or {}, r.get("image") or {}
+            keys = ("[$primary]s[/] " + ("stop" if st == "running" else "start")
+                    + "   [$primary]d[/] destroy" + (" (stop only)" if r.get("id") == "shared"
+                                                     else ""))
+            return "\n".join([
+                keys, "",
+                f"[b]{_esc(r.get('id') or '?')}[/] {_esc(r.get('kind') or '')} "
+                f"{_esc(r.get('project') or '')}  cid {r.get('cid')}  state "
+                f"[b]{_esc(st or '?')}[/]",
+                f"runtime: {_runtime_tag(r.get('runtime'))}"
+                + ("  [$text-muted]a container shares the host kernel[/]"
+                   if r.get("runtime") == "docker" else ""),
+                f"image {_esc(img.get('variant') or 'main')} "
+                f"{_esc(str(img.get('version') or '(active version)'))}  RAM "
+                f"{r.get('mem_mb') or '?'} MB  rss {_bytes(r.get('rss_bytes'))}B  cpu "
+                f"{_num(r.get('cpu_pct')) or 0:.1f}%  up {_uptime(r.get('uptime_s'))}",
+                f"disk: overlay {_bytes(disk.get('overlay_bytes'))}B, data "
+                f"{_bytes(disk.get('data_bytes'))}B",
+                f"net: {_esc(net.get('tap') or '?')} host {_esc(net.get('host_ip') or '?')} "
+                f"guest {_esc(net.get('guest_ip') or '?')}",
+                (f"service #{r.get('service_id')} · placement {_esc(r.get('placement') or '?')}"
+                 if r.get("service_id") or r.get("placement") else "")])
+
+        def _detail_variant(self, e) -> str:
+            r = e["raw"]
+            return "\n".join([
+                "[$primary]b[/] build a new version", "",
+                f"[b]{_esc(r.get('name') or '?')}[/] from {_esc(r.get('from') or 'base')}"
+                f"{'  builtin' if r.get('builtin') else ''}  min RAM "
+                f"{r.get('min_mem_mb') or '?'} MB",
+                "used by: " + (_esc(", ".join(_jlist(r.get("used_by")))) or "no project"),
+                f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}",
+                "", _esc(str(r.get("recipe") or ""))])
+
+        def _detail_version(self, e) -> str:
+            r = e["raw"]
+            return "\n".join([
+                "[$primary]b[/] build a new version of "
+                f"{_esc(r.get('variant') or '?')}", "",
+                f"[b]{_esc(r.get('variant') or '?')} v{_esc(str(r.get('version')))}[/] on base "
+                f"{_esc(str(r.get('base_version') or '?'))}"
+                + ("  [$primary b]active[/]" if r.get("active") else ""),
+                f"status {_esc(r.get('status') or '?')} · {_bytes(r.get('size_bytes'))}B · "
+                f"built {_esc(str(r.get('built_at') or '-'))}",
+                "in use by: " + (_esc(", ".join(map(str, _jlist(r.get("in_use_by")))))
+                                 or "no box")])
+
+        def action_approve(self) -> None:
+            if self.tab == "catalogue":
+                self._act(self._pkg_verdict(True))
+
+        def action_deny(self) -> None:
+            if self.tab == "catalogue":
+                self._act(self._pkg_verdict(False))
+
+        def action_stop(self) -> None:
+            if self.tab == "boxes":
+                self._act(self._box_startstop())
+
+        def action_delete(self) -> None:
+            if self.tab == "boxes":
+                self._act(self._box_destroy())
+
+        def action_build(self) -> None:
+            if self.tab == "images":
+                self._act(self._build())
+
+        async def _pkg_verdict(self, yes: bool) -> None:
+            e = self.selected()
+            if e is None or e["type"] != "package" or \
+                    (e["raw"].get("status") or "pending") != "pending":
+                return
+            await (self._approve_package(e["raw"]) if yes else self._reject("package", e["raw"]))
+
+        def _box(self) -> dict | None:
+            e = self.selected()
+            return e["raw"] if e is not None and e["type"] == "box" else None
+
+        async def _box_startstop(self) -> None:
+            b = self._box()
+            if b is None:
+                return
+            bid = b.get("id")
+            if b.get("state") == "running":
+                busy = (f" {b.get('inflight')} turn(s) are running in it and are cut off."
+                        if b.get("inflight") else "")
+                ok = await self._confirm(
+                    f"Stop box {bid}?",
+                    f"Powers the {b.get('kind')} box off; its overlay and data stay and it "
+                    f"boots again on next use.{busy}")
+                verb = "stop"
+            else:
+                ok = await self._confirm(
+                    f"Start box {bid}?",
+                    f"Boots it ({b.get('mem_mb') or '?'} MB, runtime "
+                    f"{b.get('runtime') or 'kvm'}"
+                    + (", less isolated than a VM" if b.get("runtime") == "docker" else "")
+                    + "). Refused if it would pass the RAM or box budget.")
+                verb = "start"
+            if ok:
+                await self._send("POST", f"/api/vm/boxes/{bid}/{verb}", f"{verb}: {bid}")
+
+        async def _box_destroy(self) -> None:
+            b = self._box()
+            if b is None:
+                return
+            bid = b.get("id")
+            if bid == "shared":
+                q, detail = ("Stop the shared box?",
+                             "The shared box cannot be destroyed; this stops it.")
+            else:
+                q = f"Destroy box {bid}?"
+                detail = ("Stops it, releases its reservation and deletes its directory "
+                          "(overlay, EFI vars, console log). Its data disk is kept unless "
+                          "you say so next.")
+            if not await self._confirm(q, detail):
+                return
+            wipe = False
+            if bid != "shared" and (b.get("disk") or {}).get("data_bytes"):
+                wipe = bool(await self.app.push_screen_wait(Confirm(
+                    f"Also delete {bid}'s data disk?",
+                    "y deletes it for good; n (or esc) keeps it.")))
+            await self._send("POST", f"/api/vm/boxes/{bid}/destroy", f"destroyed {bid}",
+                             json={"confirm": True, "delete_data": wipe})
+
+        async def _build(self) -> None:
+            e = self.selected()
+            if e is None or e["type"] not in ("variant", "version"):
+                return
+            name = e["raw"].get("name") if e["type"] == "variant" else e["raw"].get("variant")
+            if (self.vm.get("build") or {}).get("running"):
+                self._fail("a build is already running")
+                return
+            if await self._confirm(
+                    f"Build a new version of {name}?",
+                    "Boots a builder box on the monitored path, replays the recipe (every "
+                    "download goes through the proxy and is logged) and freezes a new "
+                    "version. Minutes on the Pi; boxes switch to it at their next boot."):
+                await self._send("POST", f"/api/vm/images/{name}/build",
+                                 f"building {name}", json={"confirm": True})
+
     class Palette(Provider):
         """Every slash command in ctrl+p."""
 
@@ -3112,8 +4456,10 @@ def build_tui(base: str, token: str, **kw):
         #status { height: 1; margin: 0 0 0 0; }
         #status-left { width: 1fr; color: $text-muted; }
         #status-right { width: auto; color: $text-muted; }
-        Picker, Confirm, Ask, Help, LocalApprove { align: center middle;
-                                                   background: $background 60%; }
+        Picker, Confirm, Ask, Help, LocalApprove, View, ServiceApprove, ProfileForm {
+            align: center middle; background: $background 60%; }
+        #view-body, #sa-body { height: auto; max-height: 20; }
+        #sa-choice, #pf-hint, #sa-hint { margin-top: 1; }
         #approve-body { height: auto; max-height: 24; margin-top: 1; }
         #dialog { width: 72; max-width: 90%; height: auto; max-height: 80%;
                   background: $surface; padding: 1 2; border: none; }
@@ -4527,8 +5873,12 @@ def build_tui(base: str, token: str, **kw):
                                        "working, across projects (← on an empty prompt)",
                                        busy_ok=True, leader="g"),
                 "security": Command(self.c_security, "the Security area: queue, network, "
-                                    "logs, secrets (full access)", "[queue|network|logs|"
-                                    "secrets]", takes_arg=True, busy_ok=True, leader="v"),
+                                    "logs, secrets, persistent, profiles (full access)",
+                                    "[queue|network|logs|secrets|persistent|profiles]",
+                                    takes_arg=True, busy_ok=True, leader="v"),
+                "vms": Command(self.c_vms, "boxes, images and the package catalogue "
+                               "(full access)", "[boxes|images|catalogue]", takes_arg=True,
+                               busy_ok=True, leader="c"),
                 "login": Command(self.c_login, "log in: the line from Settings (chat only) "
                                  "or your password (full access)", "[line|password]"),
                 "logout": Command(self.c_logout, "log out (a device token is revoked)"),
@@ -4578,7 +5928,13 @@ def build_tui(base: str, token: str, **kw):
                 return [("password", "full access"), ("line", "chat only")]
             if fn == self.c_security:
                 return [("queue", "waiting on you"), ("network", "egress policy and feed"),
-                        ("logs", "security events"), ("secrets", "names and hosts")]
+                        ("logs", "security events"), ("secrets", "names and hosts"),
+                        ("persistent", "processes and services in every box"),
+                        ("profiles", "security profiles and their projects")]
+            if fn == self.c_vms:
+                return [("boxes", "running and reserved boxes"),
+                        ("images", "variants and versions"),
+                        ("catalogue", "package requests")]
             return []
 
         async def pick(self, title: str, rows, current=None, custom=False, hint="",
@@ -4597,8 +5953,17 @@ def build_tui(base: str, token: str, **kw):
                                    "next step)"),
                          ("← (empty prompt)", "agents screen: everything working, "
                                               "across projects"),
-                         ("/security (ctrl+x v)", "queue · network · logs · secrets: tab "
-                                                  "→ ← or 1-4 switch, esc back"),
+                         ("/security (ctrl+x v)", "queue · network · logs · secrets · "
+                                                  "persistent · profiles: tab → ← or 1-6 "
+                                                  "switch, esc back"),
+                         ("in /security", "y approve · n reject (services: 1 2 3 placement, "
+                                          "↑↓ port, space expose) · a acknowledge / add · "
+                                          "e edit · p project · enter open · s stop · "
+                                          "d delete / revoke"),
+                         ("/vms (ctrl+x c)", "boxes · images · catalogue: s start/stop, "
+                                             "d destroy, b build, y n packages"),
+                         ("profile form", "↑↓ field · enter edit/toggle/pick · Save row or "
+                                          "ctrl+s · runtime and placement have no default"),
                          # Terminal.app sends shift+enter as enter, and option+enter
                          # as ESC CR, which Textual reads as a plain enter: those send
                          ("ctrl+j · \\⏎", "new line (shift+enter / alt+enter only "
@@ -5170,13 +6535,22 @@ def build_tui(base: str, token: str, **kw):
             self.action_agents_view()
 
         async def c_security(self, arg: str) -> None:
-            tab = (arg or "").strip().lower() or "queue"
-            if isinstance(self.screen, SecurityScreen):
-                idx = SecurityScreen.TABS.index(tab) if tab in SecurityScreen.TABS else 0
-                await self.screen.switch_to(idx)
+            await self._tabbed(SecurityScreen, (arg or "").strip().lower() or "queue",
+                               lambda tab: SecurityScreen(tab, self.project))
+
+        async def c_vms(self, arg: str) -> None:
+            await self._tabbed(VmsScreen, (arg or "").strip().lower() or "boxes", VmsScreen)
+
+        async def _tabbed(self, cls, tab: str, make) -> None:
+            """Open a tabbed screen on `tab`, or switch tabs when it is already
+            open; the other tabbed screen on top gives way first."""
+            if type(self.screen) is cls:
+                await self.screen.switch_to(cls.TABS.index(tab) if tab in cls.TABS else 0)
                 return
+            if isinstance(self.screen, SecurityScreen):
+                self.pop_screen()
             self.hide_popup()
-            self.push_screen(SecurityScreen(tab, self.project))
+            self.push_screen(make(tab))
 
         async def c_exit(self, arg: str = "") -> None:
             self.exit()

