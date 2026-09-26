@@ -24,6 +24,7 @@ the same registry from skills/<name>/SKILL.md. A registry entry without a
 handler is surfaced to the model but fails loudly if called — that mismatch is
 a bug we want to see.
 """
+import contextvars
 import importlib.util
 import inspect
 import json
@@ -42,6 +43,12 @@ from . import imported
 # create_agent, ...) genuinely need — 300 silently truncated their most important
 # lines. Authors still keep bodies tight and lead with what matters most.
 SPEC_NOTES_MAX = 600
+
+# The model's id for the call being dispatched. The loop sets it around
+# dispatch(); the guest shim of this module forwards it on tool_broker_call so a
+# host handler can name the call (backend/runtime.tool_call_id). Here, on the
+# host, nothing reads it: a turn's tools all run in the guest or the broker.
+call_id = contextvars.ContextVar("jav3_registry_call_id", default=None)
 
 # handler.py modules loaded from tool folders, keyed by name, with the file
 # mtime so an edited handler reloads without a restart.
@@ -184,6 +191,12 @@ def _requirements_met(entry: dict) -> bool:
         # computer is connected (backend/desk.py), same reasoning as below
         from ... import desk
         if not desk.offered():
+            return False
+    if entry.get("requires_local") is True:
+        # the /local tools (tools/local_*): only a turn of a local chat is
+        # handed these, never a project turn, an agent run or a schedule
+        from ... import runtime
+        if not runtime.local_turn.get():
             return False
     required = entry.get("requires_settings")
     if not required:

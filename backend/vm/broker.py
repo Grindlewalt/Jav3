@@ -144,7 +144,13 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               # return the post-action screenshot).
                               "desk_screenshot", "desk_click", "desk_move",
                               "desk_scroll", "desk_type", "desk_key",
-                              "desk_open", "desk_shell"})
+                              "desk_open", "desk_shell",
+                              # /local: files and command output from the
+                              # operator's own machine — a cloned repo's README
+                              # is as attacker-authorable as a web page
+                              "local_read_file", "local_list_files",
+                              "local_search", "local_shell",
+                              "local_write_file", "local_edit_file"})
 
 # Tools that promote content INTO a trusted store the agent later relies on.
 # memory_write is the one such store the guest can reach through the broker
@@ -189,12 +195,18 @@ def mark_tainted(op_id: str) -> None:
         _tainted.add(op_id)
 
 
-async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
+async def broker_dispatch(op_id: str, name: str, args: dict,
+                          call_id: str | None = None) -> dict:
     """Restore the turn's ambient context and run one host tool. Returns a
     structured {result, taint[, image]} so metadata can grow without a protocol
     change. `image` ({b64, mime, caption}) is present when the tool returned
     one: a host path means nothing to the guest, so the bytes travel inline
-    and the guest registry re-attaches them (imageresult.with_inline)."""
+    and the guest registry re-attaches them (imageresult.with_inline).
+
+    `call_id` is the model's id for this call as the guest loop saw it — a
+    label for correlating with the chat stream's tool events, never trusted
+    for anything else, so it is bounded and dropped if it is not a short
+    string."""
     env = _envelopes.get(op_id)
     if env is None:
         return {"result": f"error: broker has no turn context for op_id {op_id!r}",
@@ -205,6 +217,9 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
     vals = (env.web_session, env.ephemeral, env.artifact_slug, env.event_chan,
             env.active_project, env.conversation_id, env.memory_slug)
     tokens = [v.set(val) for v, val in zip(vars_, vals)]
+    ok_id = (isinstance(call_id, str) and 0 < len(call_id) <= 128
+             and call_id.isprintable())
+    cidtok = runtime.tool_call_id.set(call_id if ok_id else None)
     # also restore the operation's budget id: a tool that itself runs a turn
     # (spawn_agent, deploy_agents) must resolve THIS operation's Budget so the
     # nested loop meters into it and knows it is nested (shares the guest).
@@ -240,6 +255,7 @@ async def broker_dispatch(op_id: str, name: str, args: dict) -> dict:
             out["image"] = wire
         return out
     finally:
+        runtime.tool_call_id.reset(cidtok)
         budget_mod.active_op_id.reset(optok)
         if taint_tok is not None:
             runtime.write_taint.reset(taint_tok)

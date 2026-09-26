@@ -424,4 +424,7 @@ def test_cli_parse_error_does_not_echo_the_line():
 
 def test_cli_reads_no_secret_from_env():
     src = CLI.read_text()
-    assert set(re.findall(r'environ\.get\("([A-Z_]+)"', src)) == {"XDG_CONFIG_HOME"}
+    # SHELL (/local runs the agent's commands with the operator's own shell)
+    # and VISUAL/EDITOR (ctrl+g) each name a program, never a credential.
+    assert set(re.findall(r'environ\.get\("([A-Z_]+)"', src)) == {
+        "XDG_CONFIG_HOME", "SHELL", "VISUAL", "EDITOR"}

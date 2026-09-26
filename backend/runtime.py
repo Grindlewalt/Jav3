@@ -72,3 +72,16 @@ write_taint = contextvars.ContextVar("jav3_write_taint", default=None)
 # TurnEnvelope, never by the guest, and deliberately NOT inherited by a
 # child: each run sets its own (a spawned worker is not its parent).
 agent_memory = contextvars.ContextVar("jav3_agent_memory", default=None)
+
+# The model's id for the tool call being dispatched right now (`call_…`), when
+# the loop supplied one. The broker restores it from the tool_broker_call, so a
+# host handler that has to hand the call to somebody else can name it the way
+# the chat stream already did (the `tool` / `tool_result` events carry the same
+# id). Guest-supplied: an address for correlation, never an authority.
+tool_call_id = contextvars.ContextVar("jav3_tool_call_id", default=None)
+
+# True while a /local chat turn builds its toolset: the local_* tools
+# (`requires_local` in TOOL.md, backend/localexec.py) are offered to that turn
+# and to nothing else. Their handler refuses any conversation that is not
+# local anyway; this only keeps the schemas off every other turn.
+local_turn = contextvars.ContextVar("jav3_local_turn", default=False)

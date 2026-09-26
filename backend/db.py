@@ -485,7 +485,12 @@ async def init_db() -> None:
                           ("starred", "INTEGER NOT NULL DEFAULT 0"),
                           # the provider/model this thread is pinned to
                           # (POST /api/chat `model`); NULL follows the default
-                          ("model", "TEXT")):
+                          ("model", "TEXT"),
+                          # /local: the machine this thread's file and shell
+                          # tools run on, as JSON {cwd, hostname, os, shell}
+                          # from the client that opened it (localexec.py).
+                          # NULL is every other chat. Set once, at creation.
+                          ("local", "TEXT")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
