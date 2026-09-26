@@ -40,7 +40,7 @@ fi
 
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
-FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT="" PORT_OPT=""
+FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT="" PORT_OPT="" NAME_OPT="" CFG_DIR_OPT=""
 # $SUDO_USER is only meaningful when we are actually running under sudo. Taking
 # it unconditionally means a stale value inherited from the environment wins
 # over who we really are — which reported the wrong username inside a sandbox.
@@ -67,6 +67,11 @@ Options
   --state-dir <dir>    where durable state lives (default ~/.local/share/jarvis,
                        or JARVIS_STATE_DIR); a non-default one is written to
                        ~/.config/jarvis/env so the service uses it too
+  --name <name>        install a second, independent instance beside another:
+                       unit jarvis-<name>.service, config ~/.config/jarvis-<name>
+                       (default: none = jarvis.service, ~/.config/jarvis)
+  --config-dir <dir>   where env / secrets.json live (default per --name);
+                       a non-default one is passed to the unit as JARVIS_CONFIG_DIR
   --port <n>           port the web UI listens on (default 8000, or
                        JARVIS_LAN_PORT from ~/.config/jarvis/env); a non-default
                        one is written there and into the systemd unit
@@ -87,6 +92,8 @@ while [ $# -gt 0 ]; do
     --from)       FROM_HOST="$2"; shift ;;
     --state-dir)  STATE_DIR_OPT="$2"; shift ;;
     --port)       PORT_OPT="$2"; shift ;;
+    --name)       NAME_OPT="$2"; shift ;;
+    --config-dir) CFG_DIR_OPT="$2"; shift ;;
     --no-build)   BUILD_FRONTEND=0 ;;
     --no-image)   BUILD_IMAGE=0 ;;
     --force)      FORCE=1 ;;
@@ -151,14 +158,29 @@ esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Instance: the unit name and the config dir. Default is the one instance
+# everything else assumes; --name keeps a second one (a test install, say) from
+# overwriting the first one's unit, env file and secrets. The app reads the
+# config dir from JARVIS_CONFIG_DIR (backend/config.py), set in the unit.
+case "$NAME_OPT" in
+  "")                 UNIT=jarvis ;;
+  *[!a-zA-Z0-9_-]*)   die "--name wants letters, digits, - or _ only, got '$NAME_OPT'" ;;
+  *)                  UNIT="jarvis-$NAME_OPT" ;;
+esac
+DEFAULT_CFG_DIR="$CFG_DIR"
+CFG_DIR="${CFG_DIR_OPT:-${JARVIS_CONFIG_DIR:-$HOME/.config/$UNIT}}"
+CFG_DIR="${CFG_DIR/#\~/$HOME}"
+# so every `python -m backend.cli ...` this script runs reads THIS instance
+export JARVIS_CONFIG_DIR="$CFG_DIR"
+
 # Durable state (memory/ projects/ skills/ agents/ data/) lives in ONE dir
 # outside the checkout — backend/config.py's state_dir. Same precedence as the
 # app: --state-dir, then JARVIS_STATE_DIR from the environment or the env file,
 # then the default.
 STATE_DIR="$STATE_DIR_OPT"
 [ -n "$STATE_DIR" ] || STATE_DIR="${JARVIS_STATE_DIR:-}"
-if [ -z "$STATE_DIR" ] && [ -f "$HOME/.config/jarvis/env" ]; then
-  STATE_DIR="$(sed -n 's/^JARVIS_STATE_DIR=//p' "$HOME/.config/jarvis/env" | tail -1 | tr -d "\"'")"
+if [ -z "$STATE_DIR" ] && [ -f "$CFG_DIR/env" ]; then
+  STATE_DIR="$(sed -n 's/^JARVIS_STATE_DIR=//p' "$CFG_DIR/env" | tail -1 | tr -d "\"'")"
 fi
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/jarvis}"
 STATE_DIR="${STATE_DIR/#\~/$HOME}"
@@ -168,8 +190,8 @@ STATE_DIR="${STATE_DIR/#\~/$HOME}"
 # written from this one value.
 PORT="$PORT_OPT"
 [ -n "$PORT" ] || PORT="${JARVIS_LAN_PORT:-}"
-if [ -z "$PORT" ] && [ -f "$HOME/.config/jarvis/env" ]; then
-  PORT="$(sed -n 's/^JARVIS_LAN_PORT=//p' "$HOME/.config/jarvis/env" | tail -1 | tr -d "\"'")"
+if [ -z "$PORT" ] && [ -f "$CFG_DIR/env" ]; then
+  PORT="$(sed -n 's/^JARVIS_LAN_PORT=//p' "$CFG_DIR/env" | tail -1 | tr -d "\"'")"
 fi
 PORT="${PORT:-8000}"
 case "$PORT" in ''|*[!0-9]*) die "--port wants a number, got '$PORT'" ;; esac
@@ -185,7 +207,7 @@ vm_dir() {
 
 # ---------------------------------------------------------------- preflight --
 # Each check appends to MISSING_ROOT (needs the root phase) or MISSING_USER.
-MISSING_ROOT=() MISSING_USER=() BLOCKED=()
+MISSING_ROOT=() MISSING_USER=() BLOCKED=() CONFLICT=()
 
 check_cpu_virt() {
   # A working /dev/kvm settles the question on every architecture — if the
@@ -357,12 +379,12 @@ check_port() {
   have ss || return 0
   if [ -z "$(ss -Hltn "sport = :$PORT" 2>/dev/null)" ]; then
     ok "port $PORT is free"
-  elif systemctl --user is-active --quiet jarvis 2>/dev/null; then
-    ok "port $PORT is in use by the running jarvis.service"
+  elif systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+    ok "port $PORT is in use by the running $UNIT.service"
   else
     bad "port $PORT is already taken by another program"
     fix "pick a free one: bash ${REPO_DIR:-.}/scripts/install.sh --port 8780   (ss -ltnp shows who has $PORT)"
-    MISSING_USER+=("port")
+    CONFLICT+=("port")
   fi
 }
 
@@ -390,11 +412,28 @@ check_user_side() {
   if [ -f "$REPO_DIR/frontend/dist/index.html" ]; then ok "frontend built"
   else bad "frontend not built"; fix "cd $REPO_DIR/frontend && npm install && npm run build"; MISSING_USER+=("frontend"); fi
 
-  if [ -f "$HOME/.config/jarvis/env" ]; then ok "config file present"
-  else bad "no ~/.config/jarvis/env"; fix "mkdir -p ~/.config/jarvis && touch ~/.config/jarvis/env && chmod 600 ~/.config/jarvis/env"; MISSING_USER+=("config"); fi
+  # Another app (or another Jav3 checkout) already owning this instance's
+  # config dir or unit name: installing would overwrite it. --name avoids both.
+  if [ -d "$CFG_DIR" ] && [ ! -f "$CFG_DIR/env" ] && [ -n "$(ls -A "$CFG_DIR" 2>/dev/null)" ]; then
+    bad "$CFG_DIR already holds files from something else (no Jav3 env file in it)"
+    fix "install beside it: bash $REPO_DIR/scripts/install.sh --name <name>   (or --config-dir <dir>)"
+    CONFLICT+=("config-dir")
+  fi
+  local unitf="$HOME/.config/systemd/user/$UNIT.service" wd
+  if [ -f "$unitf" ]; then
+    wd="$(sed -n 's/^WorkingDirectory=//p' "$unitf" | head -1)"
+    if [ -n "$wd" ] && [ "$wd" != "$REPO_DIR" ]; then
+      bad "$UNIT.service belongs to another checkout ($wd)"
+      fix "install beside it: bash $REPO_DIR/scripts/install.sh --name <name>"
+      CONFLICT+=("unit")
+    fi
+  fi
 
-  if [ -f "$HOME/.config/systemd/user/jarvis.service" ]; then ok "systemd user unit installed"
-  else bad "jarvis.service not installed"; fix "bash $REPO_DIR/scripts/install.sh"; MISSING_USER+=("unit"); fi
+  if [ -f "$CFG_DIR/env" ]; then ok "config file present"
+  else bad "no $CFG_DIR/env"; fix "mkdir -p $CFG_DIR && touch $CFG_DIR/env && chmod 600 $CFG_DIR/env"; MISSING_USER+=("config"); fi
+
+  if [ -f "$HOME/.config/systemd/user/$UNIT.service" ]; then ok "systemd user unit $UNIT.service installed"
+  else bad "$UNIT.service not installed"; fix "bash $REPO_DIR/scripts/install.sh"; MISSING_USER+=("unit"); fi
 
   local vmd; vmd="$(vm_dir)"
   if ls "$vmd"/base-v*.qcow2 >/dev/null 2>&1; then ok "guest golden image present ($vmd)"
@@ -402,7 +441,7 @@ check_user_side() {
 
   if [ -f "$REPO_DIR/data/jarvis.db" ] && [ ! -f "$STATE_DIR/data/jarvis.db" ]; then
     warn "state is still inside the checkout ($REPO_DIR) — it keeps working there"
-    fix "systemctl --user stop jarvis && $REPO_DIR/.venv/bin/python -m backend.cli migrate-state && systemctl --user start jarvis"
+    fix "systemctl --user stop $UNIT && $REPO_DIR/.venv/bin/python -m backend.cli migrate-state && systemctl --user start $UNIT"
   fi
 }
 
@@ -586,15 +625,15 @@ PY" || die "could not snapshot the source database"
   # The JWT secret comes too, or every existing login token is invalidated.
   rsync -a "${private[@]}" "$host:$root/data/jwt_secret" "$STATE_DIR/data/jwt_secret" 2>/dev/null \
     || warn "no data/jwt_secret on the source (existing sessions will need a re-login)"
-  mkdir -p "$HOME/.config/jarvis"
-  chmod 700 "$HOME/.config/jarvis"
-  rsync -a "${private[@]}" "$host:.config/jarvis/env" "$HOME/.config/jarvis/env" 2>/dev/null \
+  mkdir -p "$CFG_DIR"
+  chmod 700 "$CFG_DIR"
+  rsync -a "${private[@]}" "$host:.config/jarvis/env" "$CFG_DIR/env" 2>/dev/null \
     || warn "no ~/.config/jarvis/env on the source — you will need to set the API key"
-  rsync -a "${private[@]}" "$host:.config/jarvis/secrets.json" "$HOME/.config/jarvis/secrets.json" 2>/dev/null \
+  rsync -a "${private[@]}" "$host:.config/jarvis/secrets.json" "$CFG_DIR/secrets.json" 2>/dev/null \
     || true
   # The source's env may pin ITS state dir; this box's is $STATE_DIR.
-  if grep -q '^JARVIS_STATE_DIR=' "$HOME/.config/jarvis/env" 2>/dev/null; then
-    sed -i "s#^JARVIS_STATE_DIR=.*#JARVIS_STATE_DIR=$STATE_DIR#" "$HOME/.config/jarvis/env"
+  if grep -q '^JARVIS_STATE_DIR=' "$CFG_DIR/env" 2>/dev/null; then
+    sed -i "s#^JARVIS_STATE_DIR=.*#JARVIS_STATE_DIR=$STATE_DIR#" "$CFG_DIR/env"
   fi
   ssh "$host" "rm -f '$root/data/jarvis.migrate.db'" || true
   trap - EXIT
@@ -642,39 +681,42 @@ user_phase() {
   fi
 
   step "config"
-  mkdir -p "$HOME/.config/jarvis"
-  touch "$HOME/.config/jarvis/env"
-  chmod 600 "$HOME/.config/jarvis/env"
+  mkdir -p "$CFG_DIR"
+  touch "$CFG_DIR/env"
+  chmod 600 "$CFG_DIR/env"
   # A non-default state dir must reach the service too, not just this script.
   if [ "$STATE_DIR" != "$HOME/.local/share/jarvis" ] \
-     && ! grep -qxF "JARVIS_STATE_DIR=$STATE_DIR" "$HOME/.config/jarvis/env"; then
-    sed -i '/^JARVIS_STATE_DIR=/d' "$HOME/.config/jarvis/env"
-    echo "JARVIS_STATE_DIR=$STATE_DIR" >> "$HOME/.config/jarvis/env"
-    ok "state dir $STATE_DIR recorded in ~/.config/jarvis/env"
+     && ! grep -qxF "JARVIS_STATE_DIR=$STATE_DIR" "$CFG_DIR/env"; then
+    sed -i '/^JARVIS_STATE_DIR=/d' "$CFG_DIR/env"
+    echo "JARVIS_STATE_DIR=$STATE_DIR" >> "$CFG_DIR/env"
+    ok "state dir $STATE_DIR recorded in $CFG_DIR/env"
   fi
-  if [ "$PORT" != 8000 ] && ! grep -qxF "JARVIS_LAN_PORT=$PORT" "$HOME/.config/jarvis/env"; then
-    sed -i '/^JARVIS_LAN_PORT=/d' "$HOME/.config/jarvis/env"
-    echo "JARVIS_LAN_PORT=$PORT" >> "$HOME/.config/jarvis/env"
-    ok "port $PORT recorded in ~/.config/jarvis/env"
+  if [ "$PORT" != 8000 ] && ! grep -qxF "JARVIS_LAN_PORT=$PORT" "$CFG_DIR/env"; then
+    sed -i '/^JARVIS_LAN_PORT=/d' "$CFG_DIR/env"
+    echo "JARVIS_LAN_PORT=$PORT" >> "$CFG_DIR/env"
+    ok "port $PORT recorded in $CFG_DIR/env"
   fi
-  if grep -q 'JARVIS_DEEPSEEK_API_KEY' "$HOME/.config/jarvis/env" 2>/dev/null; then
-    ok "API key present in ~/.config/jarvis/env"
+  if grep -q 'JARVIS_DEEPSEEK_API_KEY' "$CFG_DIR/env" 2>/dev/null; then
+    ok "API key present in $CFG_DIR/env"
   fi
 
   step "systemd user units"
   mkdir -p "$HOME/.config/systemd/user"
   # The unit hardcodes %h/jarvis; if the checkout lives elsewhere, rewrite the
   # paths rather than silently installing a unit that points at nothing.
-  sed -e "s#%h/jarvis#$REPO_DIR#g" -e "s#--port 8000#--port $PORT#" scripts/jarvis.service \
-    > "$HOME/.config/systemd/user/jarvis.service"
-  sed "s#%h/jarvis#$REPO_DIR#g" scripts/jarvis-backup.service \
-    > "$HOME/.config/systemd/user/jarvis-backup.service"
-  cp scripts/jarvis-backup.timer   "$HOME/.config/systemd/user/" 2>/dev/null || true
+  # A non-default config dir reaches the app (and the backup) via the unit.
+  local cfgenv=()
+  [ "$CFG_DIR" = "$DEFAULT_CFG_DIR" ] || cfgenv=(-e "/^\[Service\]/a Environment=JARVIS_CONFIG_DIR=$CFG_DIR")
+  sed -e "s#%h/jarvis#$REPO_DIR#g" -e "s#--port 8000#--port $PORT#" "${cfgenv[@]}" scripts/jarvis.service \
+    > "$HOME/.config/systemd/user/$UNIT.service"
+  sed -e "s#%h/jarvis#$REPO_DIR#g" "${cfgenv[@]}" scripts/jarvis-backup.service \
+    > "$HOME/.config/systemd/user/$UNIT-backup.service"
+  cp scripts/jarvis-backup.timer "$HOME/.config/systemd/user/$UNIT-backup.timer" 2>/dev/null || true
   chmod +x scripts/backup.sh 2>/dev/null || true
   systemctl --user daemon-reload
-  systemctl --user enable jarvis.service >/dev/null
-  systemctl --user enable --now jarvis-backup.timer >/dev/null 2>&1 || true
-  ok "jarvis.service installed and enabled"
+  systemctl --user enable "$UNIT.service" >/dev/null
+  systemctl --user enable --now "$UNIT-backup.timer" >/dev/null 2>&1 || true
+  ok "$UNIT.service installed and enabled"
 
   if [ "$BUILD_IMAGE" = 1 ]; then
     step "guest golden image"
@@ -721,7 +763,7 @@ first_run_setup() {
 # ------------------------------------------------------------------ verify ---
 verify() {
   step "verify"
-  systemctl --user restart jarvis || { warn "could not start jarvis.service"; return 1; }
+  systemctl --user restart "$UNIT" || { warn "could not start $UNIT.service"; return 1; }
   local i
   for i in $(seq 1 30); do
     if curl -sf "localhost:$PORT/api/health" >/dev/null 2>&1; then
@@ -730,7 +772,7 @@ verify() {
     fi
     sleep 1
   done
-  warn "no health response after 30s — check: journalctl --user -u jarvis -n 50"
+  warn "no health response after 30s — check: journalctl --user -u $UNIT -n 50"
   return 1
 }
 
@@ -790,11 +832,16 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
 fi
 
 if [ "$DO_CHECK" = 1 ]; then
-  if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#MISSING_USER[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ]; then
+  if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#MISSING_USER[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ] \
+     && [ ${#CONFLICT[@]} -eq 0 ]; then
     printf '\n%sready.%s\n' "$GREEN" "$OFF"; exit 0
   fi
   exit 1
 fi
+
+# Overwriting another install's unit or another app's config is never the
+# right default, --yes or not.
+[ ${#CONFLICT[@]} -eq 0 ] || die "this would overwrite another install (${CONFLICT[*]}) — see the fix lines above"
 
 # A missing root phase is not fatal for the user phase — the venv and the
 # frontend build fine without KVM, and the image build skips itself with a
@@ -812,9 +859,11 @@ user_phase
 printf '\n%sinstalled.%s\n' "$BOLD" "$OFF"
 printf '  state dir:            %s\n' "$(cd "$REPO_DIR" && .venv/bin/python -m backend.cli paths state_dir 2>/dev/null || echo "$STATE_DIR")"
 printf '  first-run setup:      %s/.venv/bin/python -m backend.cli setup   (or open the GUI; add logins with --add-user)\n' "$REPO_DIR"
-printf '  backups (rclone):     set a remote via /api/backup/config, or JARVIS_BACKUP_REMOTE in ~/.config/jarvis/env\n'
-printf '  start:                systemctl --user restart jarvis\n'
-printf '  logs:                 journalctl --user -u jarvis -f\n'
+printf '  config:               %s/env\n' "$CFG_DIR"
+printf '  web UI:               http://localhost:%s/\n' "$PORT"
+printf '  backups (rclone):     set a remote via /api/backup/config, or JARVIS_BACKUP_REMOTE in %s/env\n' "$CFG_DIR"
+printf '  start:                systemctl --user restart %s\n' "$UNIT"
+printf '  logs:                 journalctl --user -u %s -f\n' "$UNIT"
 printf '  re-check:             bash %s/scripts/install.sh --check\n' "$REPO_DIR"
 
 # Start it either way. Without KVM/vsock no agent turn can run (there is no
@@ -822,6 +871,6 @@ printf '  re-check:             bash %s/scripts/install.sh --check\n' "$REPO_DIR
 # work, and a server that is up says so more usefully than one that is not.
 if [ ${#MISSING_ROOT[@]} -gt 0 ] || [ ${#BLOCKED[@]} -gt 0 ]; then
   printf '\n%sstarting without a guest runtime:%s the web UI works, but agent turns\n' "$YELLOW" "$OFF"
-  printf '  will fail until the root steps above are done (then: systemctl --user restart jarvis).\n'
+  printf '  will fail until the root steps above are done (then: systemctl --user restart %s).\n' "$UNIT"
 fi
 verify || true

@@ -41,6 +41,20 @@ def require_single_process(env=None) -> None:
             "it to 1; the systemd unit passes --workers 1.")
 
 
+def _warn_missing_guest_devices() -> None:
+    """One line in the journal when the guest runtime cannot work here. The
+    web UI runs without it, but every agent turn will fail, and the operator
+    reading `journalctl` should not have to guess why."""
+    import logging
+    import os
+    missing = [d for d in ("/dev/kvm", "/dev/vhost-vsock") if not os.path.exists(d)]
+    if missing:
+        logging.getLogger("jav3").warning(
+            "no %s: the web UI works, but agent turns will fail until KVM and "
+            "vhost_vsock are available (bash scripts/install.sh --check says why)",
+            " or ".join(missing))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     require_single_process()
@@ -50,6 +64,7 @@ async def lifespan(app: FastAPI):
     await providers.migrate_legacy_override()   # the old nav switch slot -> default
     await schedules.ensure_default_schedules()
     compile_registry()
+    _warn_missing_guest_devices()
     task = asyncio.create_task(schedules.scheduler_loop())
     reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
     triage = asyncio.create_task(reviewer.sweeper_loop())  # auto queue triage
