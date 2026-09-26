@@ -23,6 +23,7 @@ from backend.agent.tools import toolctx
 from backend.config import settings
 
 DEFAULT_TIMEOUT = 60
+PIP_VENV_BIN = "/opt/jav3/py/bin"     # images.PIP_VENV: approved pip packages
 MAX_TIMEOUT = 300
 OUT_CAP = 6_000                     # chars kept per stream (head + tail)
 ARTIFACT_FILE_CAP = 2 * 1024 * 1024   # per-file capture cap
@@ -122,7 +123,12 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         before = None               # no project: nothing to stage artifacts into
 
     argv = (["python3", "-c", code] if code else ["/bin/sh", "-c", command])
-    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(cwd),
+    path = "/usr/local/bin:/usr/bin:/bin"
+    if os.path.isdir(PIP_VENV_BIN):
+        # an image variant with approved pip packages: its venv comes first
+        # (absent on the main image, so PATH there is exactly as before)
+        path = f"{PIP_VENV_BIN}:{path}"
+    env = {"PATH": path, "HOME": str(cwd),
            "PYTHONUNBUFFERED": "1", "LANG": "C.UTF-8",
            # Package-manager caches/scratch go to /tmp, never the project copy,
            # so they don't ride the turn-end reconcile back as artifacts.

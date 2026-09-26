@@ -365,6 +365,11 @@ class GuestVM:
         if not gateway.enabled:
             raise VMError("vsock gateway not running (no vsock on this host?)")
         from .guest_turn import GUEST_RUNTURN_PORT
+        ready_port = GUEST_RUNTURN_PORT
+        if self.box is not None and self.box.kind == "service":
+            # a service box runs svcd (5558), not the run-turn server
+            from .boxes import PORT_SVCD
+            ready_port = PORT_SVCD
         await self.boot()
         loop = asyncio.get_event_loop()
         deadline = loop.time() + settings.vm_boot_timeout_seconds
@@ -372,7 +377,7 @@ class GuestVM:
             s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, s.connect, (self._cid, GUEST_RUNTURN_PORT))
+                    None, s.connect, (self._cid, ready_port))
                 return
             except OSError:
                 await asyncio.sleep(1)

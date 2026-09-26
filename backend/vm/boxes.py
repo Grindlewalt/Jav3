@@ -437,8 +437,8 @@ class Registry:
             if existing is not None:
                 return existing
         mem = int(mem_mb or _default_mem(kind))
-        if variant == "desktop":
-            mem = max(mem, settings.vm_desktop_min_mem_mb)
+        if kind != "builder" and runtime == "kvm":
+            mem = max(mem, mem_floor(variant))
         if runtime == "docker":
             mem = int(mem_mb or settings.docker_box_mem_mb)
         self._check_caps(kind, mem)
@@ -573,6 +573,32 @@ _data_deleters: list[Callable[[Box], Awaitable[None]]] = []
 BUS_CHAN = "vm-boxes"
 
 
+_mem_floors: list[Callable[[str], int | None]] = []
+
+
+def add_mem_floor(fn: Callable[[str], int | None]) -> None:
+    """WP5: fn(variant) -> the variant's minimum guest RAM in MB, or None.
+    allocate() raises a KVM box's memory to the highest floor (builders are
+    exempt: they install, they do not run the variant's workload)."""
+    if fn not in _mem_floors:
+        _mem_floors.append(fn)
+
+
+def mem_floor(variant: str) -> int:
+    """The floor for `variant`: the registered floors (images.min_mem_mb reads
+    the recipe's min_mem_mb, inherited by variants built from desktop), and
+    the vm_desktop_min_mem_mb setting for 'desktop' whatever the recipe says."""
+    floor = settings.vm_desktop_min_mem_mb if variant == "desktop" else 0
+    for fn in list(_mem_floors):
+        try:
+            v = fn(variant)
+        except Exception:  # noqa: BLE001 — a broken floor must not block allocation
+            v = None
+        if isinstance(v, int) and v > floor:
+            floor = v
+    return floor
+
+
 _RUNTIME_MODULES = {"kvm": ".lifecycle", "docker": ".docker_runtime"}
 
 
@@ -618,6 +644,11 @@ def add_data_deleter(fn: Callable[[Box], Awaitable[None]]) -> None:
 
 
 def image_path(box: Box) -> Path:
+    if box.image[0] != "main" and not _image_resolvers:
+        # WP5's resolver (variants: svc, dev, desktop, operator ones) registers
+        # on import; a service box must never fail for lack of that import
+        import importlib
+        importlib.import_module(".images", __package__)
     for fn in _image_resolvers:
         p = fn(box)
         if p is not None:

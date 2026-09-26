@@ -898,7 +898,17 @@ def _register() -> None:
         reg_op("build_report", builder.on_report)
     reg_floor = getattr(boxes, "add_mem_floor", None)
     if reg_floor is not None:
-        reg_floor(min_mem_mb)
+        reg_floor(mem_floor)
+
+
+def mem_floor(variant: str) -> int | None:
+    """boxes.add_mem_floor hook. A recipe's min_mem_mb is a FLOOR only where it
+    exceeds the base variant's (desktop and what is built from it): main, dev
+    and svc declare the ordinary default, which must not override a smaller
+    box_mem_mb a profile chose on purpose (4 GB host)."""
+    need = min_mem_mb(variant)
+    base = min_mem_mb(BASE_VARIANT) or 0
+    return need if need and need > base else None
 
 
 _register()

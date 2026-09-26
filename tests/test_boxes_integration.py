@@ -156,3 +156,106 @@ async def test_vm_boxes_lists_runtimes(tmp_env, monkeypatch):
     assert set(r["runtimes"]) == {"kvm", "docker"}
     assert r["runtimes"]["docker"]["available"] is False
     assert "docker_enabled" in r["runtimes"]["docker"]["reason"]
+
+
+# --- WP1 <-> WP3 / WP5 hooks ------------------------------------------------------
+
+from tests.test_boxes_gateway import _rt, _untar  # noqa: E402
+
+
+async def test_builder_package_is_served_to_the_builder_cid(on):
+    from backend.vm import images
+    box = boxes.allocate("builder", variant="dev", version="build",
+                         mem_mb=settings.vm_builder_box_mem_mb)
+    job = images.Job(mode="resolve", variant="dev", items=[{"x": 1}])
+    images.builder.jobs[box.id] = job
+    try:
+        r = await _rt({"op": "get_guest_package"}, peer_cid=box.cid)
+        names, bj = _untar(r["tar_b64"])
+        assert {"backend/server.py", "backend/job.json", "box.json"} <= set(names)
+        assert bj["kind"] == "builder"
+        assert "backend/agent/loop.py" not in names   # never the turn package
+    finally:
+        images.builder.jobs.pop(box.id, None)
+
+
+async def test_build_report_reaches_the_builder_and_is_gated(on):
+    from backend.vm import images
+    box = boxes.allocate("builder", variant="dev", version="build",
+                         mem_mb=settings.vm_builder_box_mem_mb)
+    job = images.Job(mode="resolve", variant="dev")
+    images.builder.jobs[box.id] = job
+    try:
+        r = await _rt({"op": "build_report", "token": job.token, "phase": "log",
+                       "line": "hello"}, peer_cid=box.cid)
+        assert r == {"type": "build_ack", "ok": True} and job.log == ["hello"]
+        r = await _rt({"op": "build_report", "token": "forged", "phase": "log",
+                       "line": "x"}, peer_cid=box.cid)
+        assert r["error"] == "unknown_job"
+        proj = boxes.allocate("project", project="alpha")
+        r = await _rt({"op": "build_report", "token": job.token}, peer_cid=proj.cid)
+        assert r["error"] == "op_not_allowed"
+    finally:
+        images.builder.jobs.pop(box.id, None)
+
+
+async def test_svc_report_reaches_services_and_is_gated(on):
+    from backend.db import init_db
+    from backend.vm import gateway_server, services
+    await init_db()
+    assert gateway_server._OP_HANDLERS["svc_report"] is services.on_svc_report
+    svc = boxes.allocate("service", project="alpha")
+    r = await _rt({"op": "svc_report"}, peer_cid=svc.cid)
+    assert r == {"type": "svc_report_ok"}
+    proj = boxes.allocate("project", project="alpha")
+    r = await _rt({"op": "svc_report"}, peer_cid=proj.cid)
+    assert r["error"] == "op_not_allowed"
+
+
+def test_mem_floor_comes_from_the_variant(on, monkeypatch):
+    from backend.vm import images
+    assert images.mem_floor in boxes._mem_floors
+    assert images.mem_floor("main") is None and images.mem_floor("svc") is None
+    assert images.mem_floor("desktop") >= 1280
+    monkeypatch.setattr(boxes, "_mem_floors", [lambda v: 2000 if v == "big" else None])
+    assert boxes.allocate("project", project="a", variant="big").mem_mb == 2000
+    # the desktop setting holds whatever the registered floors say
+    assert boxes.allocate("project", project="b", variant="desktop").mem_mb \
+        >= settings.vm_desktop_min_mem_mb
+    # builders are exempt: they install, they do not run the workload
+    assert boxes.allocate("builder", variant="big", mem_mb=1024).mem_mb == 1024
+
+
+def test_svc_variant_resolves_to_the_base(on):
+    settings.vm_dir.mkdir(parents=True, exist_ok=True)
+    base = settings.vm_dir / "base-v7.qcow2"
+    base.write_bytes(b"")
+    box = boxes.allocate("service", project="alpha", variant="svc")
+    assert boxes.image_path(box) == base
+
+
+async def test_service_box_readiness_waits_on_svcd_not_run_turn(on, monkeypatch):
+    from backend.vm import lifecycle
+    box = boxes.allocate("service", project="alpha")
+    ctl = boxes.controller(box)
+    dialed = []
+
+    class FakeSock:
+        def __init__(self, *a):
+            pass
+
+        def connect(self, addr):
+            dialed.append(addr)
+
+        def close(self):
+            pass
+
+    async def noboot():
+        pass
+    monkeypatch.setattr(lifecycle, "base_built", lambda: True)
+    monkeypatch.setattr(lifecycle.gateway, "enabled", True)
+    monkeypatch.setattr(ctl, "boot", noboot)
+    monkeypatch.setattr(lifecycle.socket, "socket", FakeSock)
+    monkeypatch.setattr(lifecycle.socket, "AF_VSOCK", 40, raising=False)
+    await ctl._ensure_ready_locked()
+    assert dialed == [(box.cid, boxes.PORT_SVCD)]
