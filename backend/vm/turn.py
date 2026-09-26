@@ -16,7 +16,30 @@ brokered spawn_agent running under a guest chat) — the turn then shares that
 operation's guest + Budget and does NOT re-push the workspace (its parent already
 did; re-pushing would wipe the parent's in-flight staged edits). A top-level turn
 pushes a fresh workspace and its edits reconcile at turn end.
+
+Watching: every event is also published on the conversation's `node:<cid>` bus
+channel, so any agent or job node — a spawned agent, a plan item, a funnel
+leaf, an interactive run — can be tailed by conversation id (GET
+/api/chat/agents/{cid}/stream) the way a chat turn is. And every turn through
+here takes operator messages (agentmsg's operator inbox): open for the turn's
+life, closed after its last drain, with anything that arrived too late for it
+returned on the `final` event as `undelivered`.
 """
+# Conversations with a turn in this function right now: the "is this node
+# running" answer for the agents tree and the node stream. Removed BEFORE the
+# channel's end marker is published, so a subscriber that saw the id here is
+# guaranteed the marker is still ahead of it (chat.py's ordering).
+_live: set[int] = set()
+
+
+def live_nodes() -> set[int]:
+    return set(_live)
+
+
+def node_chan(conversation_id: int) -> str:
+    return f"node:{conversation_id}"
+
+
 async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
                          read_only=None, model_name=None, base_url=None,
                          self_check=True, max_iterations=None, on_tool_call=None,
@@ -44,30 +67,55 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
         # own_memory agent's turn must not write into that agent's notes
         memory_slug=memory_slug)
 
+    from .. import agentmsg, bus
+    chan = node_chan(conversation_id)
+    _live.add(conversation_id)
+    if inbox:
+        # a loop that never drains can't be promised a message
+        agentmsg.open_operator_inbox(conversation_id)
     pending: dict = {}
-    async for ev in guest_turn(
-            conversation_id, system_prompt, history,
-            rules=standing_rules_tail() if self_check else "",
-            tool_specs=tools, read_only=read_only, op_id=op_id, envelope=envelope,
-            active_slug=active_project,
-            push_workspace=(not nested and bool(active_project)),
-            model_name=model_name, base_url=base_url, self_check=self_check,
-            max_iterations=max_iterations, rewrite_rules=rewrite_rules,
-            inject_rules=inject_rules,
-            # addressable by default: every caller of this function (agent runs,
-            # scheduled runs, orchestrator leaves) is a turn with a conversation
-            # a peer can name. Research's scouts and readers never come through
-            # here — they call model.complete directly, no ReAct loop — so the
-            # short-lived internal nodes stay out of the address space for free.
-            inbox=inbox,
-            # a top-level agent/scheduled run of an approved project gets its
-            # /persist; a nested one shares its parent's guest, and an
-            # incognito operation never gets one
-            persist=(not nested and not runtime.ephemeral.get())):
-        if on_tool_call is not None:
-            if ev["type"] == "tool":
-                pending[ev.get("id")] = (ev.get("name"), ev.get("args") or {})
-            elif ev["type"] == "tool_result":
-                nm, ar = pending.pop(ev.get("id"), (ev.get("name"), {}))
-                await on_tool_call(nm, ar, ev.get("result", ""))
-        yield ev
+    final = None
+    try:
+        async for ev in guest_turn(
+                conversation_id, system_prompt, history,
+                rules=standing_rules_tail() if self_check else "",
+                tool_specs=tools, read_only=read_only, op_id=op_id, envelope=envelope,
+                active_slug=active_project,
+                push_workspace=(not nested and bool(active_project)),
+                model_name=model_name, base_url=base_url, self_check=self_check,
+                max_iterations=max_iterations, rewrite_rules=rewrite_rules,
+                inject_rules=inject_rules,
+                # addressable by default: every caller of this function (agent
+                # runs, scheduled runs, orchestrator leaves) is a turn with a
+                # conversation a peer can name. Research's scouts and readers
+                # never come through here — they call model.complete directly,
+                # no ReAct loop — so the short-lived internal nodes stay out of
+                # the address space for free.
+                inbox=inbox,
+                # a top-level agent/scheduled run of an approved project gets
+                # its /persist; a nested one shares its parent's guest, and an
+                # incognito operation never gets one
+                persist=(not nested and not runtime.ephemeral.get())):
+            if on_tool_call is not None:
+                if ev["type"] == "tool":
+                    pending[ev.get("id")] = (ev.get("name"), ev.get("args") or {})
+                elif ev["type"] == "tool_result":
+                    nm, ar = pending.pop(ev.get("id"), (ev.get("name"), {}))
+                    await on_tool_call(nm, ar, ev.get("result", ""))
+            if ev["type"] == "final":
+                # held until the loop is really over: only then is it known
+                # which operator messages it will never drain
+                final = ev
+                continue
+            bus.publish(chan, ev)
+            yield ev
+        if final is not None:
+            late = await agentmsg.close_operator_inbox(conversation_id) if inbox else []
+            if late:
+                final = {**final, "undelivered": late}
+            bus.publish(chan, {**final, "conversation_id": conversation_id})
+            yield final
+    finally:
+        agentmsg.forget_operator_inbox(conversation_id)
+        _live.discard(conversation_id)
+        bus.close_job(chan)

@@ -4,14 +4,21 @@ from backend.agent.tools.toolctx import require_project
 from backend.writes import SecretLeakError
 
 
-async def run(dump: str, files: list[str] | None = None, run: bool = True) -> str:
+async def run(dump: str, files: list[str] | None = None, run: bool = True,
+              models: list[dict] | None = None) -> str:
     if runtime.ephemeral.get():
         # a plan is a persisted file and a team of recorded runs: exactly what
         # an incognito turn promises not to leave behind
         return "error: orchestrate is unavailable in an incognito chat — nothing it does would stay incognito."
     slug = await require_project()
     try:
-        plan = await plan_mod.plan_from_dump(slug, dump, files or [])
+        # validated before the planner runs: a model the operator named that
+        # cannot run is theirs to hear about, not the default's to replace
+        assigned = plan_mod.checked_models(models)
+    except ValueError as e:
+        return f"error: {e}. Nothing was planned."
+    try:
+        plan = await plan_mod.plan_from_dump(slug, dump, files or [], models=assigned)
     except SecretLeakError as e:
         return f"error: refused — the dump contains a secret value ({e}). Remove it and retry."
     except (ValueError, RuntimeError) as e:

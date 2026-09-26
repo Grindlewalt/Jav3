@@ -18,6 +18,19 @@ parameters:
     run:
       type: boolean
       description: Start the run right away (default true). false only plans, so the operator can edit the checklist first.
+    models:
+      type: array
+      description: ONLY when the operator explicitly said which model to use for which task. One entry per assignment; the items doing that task run on that model, every other item on the default. Omit otherwise — never choose a model yourself.
+      items:
+        type: object
+        properties:
+          task:
+            type: string
+            description: The work the operator assigned the model to, in their words.
+          model:
+            type: string
+            description: The model id (provider/model) the operator named.
+        required: [task, model]
   required: [dump]
 ---
 The checklist is saved to the project's .plan.json and shown on the Workspace

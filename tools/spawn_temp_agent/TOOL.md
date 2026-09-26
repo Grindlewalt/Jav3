@@ -18,6 +18,9 @@ parameters:
     label:
       type: string
       description: Short display name for the Jobs view, e.g. "css refactor".
+    model:
+      type: string
+      description: provider/model to run this agent on. ONLY when the operator explicitly said which model to use for this task — otherwise omit it and the default model is used. Never choose one yourself.
   required: [task, prompt]
 ---
 Brief it like a smart colleague who just walked into the room — it has NOT

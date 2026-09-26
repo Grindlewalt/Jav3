@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import autonomy, bus, compaction, gui, providers, runtime
+from . import agentmsg, autonomy, bus, compaction, gui, providers, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink
@@ -55,6 +55,16 @@ class ChatRequest(BaseModel):
     # model mid-thread is ordinary; omitted keeps the thread's pin, and a
     # thread with none follows the default.
     model: str | None = None
+    # "orchestrate" opens this NEW conversation as an orchestrator: it breaks
+    # the operator's dump into a checklist run by a team of agents in
+    # `project` (required), monitors and messages them, and reports. Binds at
+    # creation like `project`/`agent`; ignored for an existing conversation,
+    # which keeps whatever mode it was opened with.
+    mode: Literal["orchestrate"] | None = None
+
+
+class OperatorMessage(BaseModel):
+    text: str
 
 
 def sse(event: dict) -> str:
@@ -645,6 +655,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     ptoken = None
     db = None
     tools_before = None      # set once the turn's tool_calls high-water mark is known
+    late: list[str] = []     # operator messages the turn closed on without reading
     try:
         # inside the try: if the connect fails, the finally must still evict
         # _active_turns and close the bus channel or the conversation bricks
@@ -660,7 +671,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # project loaded.
         async with db.execute(
             "SELECT c.project_locked AS locked, c.agent_slug AS agent_slug, "
-            "c.model AS model, p.slug AS slug FROM conversations c "
+            "c.model AS model, c.mode AS mode, p.slug AS slug FROM conversations c "
             "LEFT JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL "
             "WHERE c.id = ?", (conversation_id,)) as cur:
             row = await cur.fetchone()
@@ -722,6 +733,13 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 system_prompt += await voice_library_prompt()
             else:
                 system_prompt = f"{system_prompt}\n\n{SMART_PROMPT}"
+        # an orchestrator is a chat with a job description: the same turn,
+        # plus the prompt that says how to run a team (after everything, the
+        # voice block's reasoning) and, below, the tool to watch one
+        orchestrating = bool(row and row["mode"] == "orchestrate")
+        if orchestrating:
+            from .plan import orchestrator_prompt
+            system_prompt = f"{system_prompt}\n\n{orchestrator_prompt(active)}"
         # tool subsetting: with no project loaded, project-scoped run/git/
         # search tools can only error — withhold them. The FILE tools stay:
         # they fall back to the chat's hidden artifact store (persistent
@@ -760,6 +778,13 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             from .agents_run import agent_exclusions
             excluded = agent_exclusions(agent_def)
             entries = [e for e in entries if e["name"] not in excluded]
+        if orchestrating and any(e["name"] == "orchestrate" for e in entries):
+            # plan_status is `enabled: false` (an ordinary chat that launches a
+            # plan is told not to wait on it); an orchestrator's whole job is
+            # to. Granted only where orchestrate itself survived the project's
+            # autonomy dial — watching a plan it may not start is pointless.
+            entries = entries + [{**e, "enabled": True} for e in load_registry()
+                                 if e["name"] == "plan_status"]
         # ...and a shortened Notes body. NOT zero: the first line of a body is
         # where the load-bearing operating instruction lives ("Do not call
         # music_search first"), and dropping it entirely broke tool use on the local
@@ -812,16 +837,24 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             # that text instead of obeying it. Escalated voice
                             # turns (DeepSeek, base_url unset) keep it.
                             inject_rules=not (voice and base_url),
-                            # an agent definition may cap its own rounds; None
-                            # keeps the normal chat cap
-                            max_iterations=(agent_def or {}).get("max_iterations") or None,
+                            # an agent definition may cap its own rounds; an
+                            # orchestrator gets the longer monitoring cap (each
+                            # plan_status wait is a round); None keeps the
+                            # normal chat cap
+                            max_iterations=((agent_def or {}).get("max_iterations")
+                                            or (settings.orchestrator_max_iterations
+                                                if orchestrating else None)),
                             # a chat thread is addressable — by its conversation
-                            # id, and by its agent slug when WP4 bound one. An
-                            # ephemeral turn is not: nothing about it is stored,
-                            # so a message delivered into it would leave the
-                            # sender's row marked delivered against a transcript
-                            # the finally block is about to erase.
-                            inbox=not ephemeral,
+                            # id, and by its agent slug when WP4 bound one — and
+                            # every chat turn takes the operator's mid-turn
+                            # messages. An ephemeral turn drains ONLY the
+                            # operator's (agentmsg.fetch_tool): agents cannot
+                            # address it (send refuses, live_peers hides it),
+                            # since a peer's message delivered into it would be
+                            # marked delivered against a transcript the finally
+                            # block is about to erase; the operator's own words
+                            # being erased with the rest is the incognito promise.
+                            inbox=True,
                             # approved /persist (if the operator approved this
                             # project) — never for incognito, which leaves no
                             # trace anywhere, a surviving disk included
@@ -865,6 +898,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             except Exception:  # noqa: BLE001 — the hold is already released
                 pass
 
+        # the loop is over, so nothing will drain the inbox again: whatever the
+        # operator sent during the final answer goes back in `final`
+        late = await agentmsg.close_operator_inbox(conversation_id)
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, model) "
             "VALUES (?, 'assistant', ?, ?)",
@@ -886,8 +922,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                                     final_content, tools_before, active)
             except Exception:  # noqa: BLE001 — journaling never breaks a turn
                 pass
-        bus.publish(chan, {"type": "final", "content": final_content,
-                           "conversation_id": conversation_id})
+        bus.publish(chan, _final_event(conversation_id, final_content, late))
     except asyncio.CancelledError:
         # the operator hit stop. Leave the interruption in the transcript
         # (persistent chats — the ephemeral wipe in finally covers incognito)
@@ -911,12 +946,20 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 await db.commit()
             except Exception:  # noqa: BLE001 — the marker is best-effort
                 pass
-        bus.publish(chan, {"type": "final", "content": content,
-                           "conversation_id": conversation_id})
+        # `late +`: the normal path may have closed already and then failed
+        late = late + await agentmsg.close_operator_inbox(conversation_id)
+        bus.publish(chan, _final_event(conversation_id, content, late))
         raise
     except Exception as exc:  # surfaced to any tail rather than lost
-        bus.publish(chan, {"type": "error", "message": str(exc)})
+        err = {"type": "error", "message": str(exc)}
+        late = late + await agentmsg.close_operator_inbox(conversation_id)
+        if late:
+            err["undelivered"] = late
+        bus.publish(chan, err)
     finally:
+        # normally already closed above; this covers a path that raised
+        # before reaching the close (the rows then wait for the next turn)
+        agentmsg.forget_operator_inbox(conversation_id)
         if db is not None and ephemeral:
             # incognito: no trace in the DB or GUI — but the operator asked
             # for an SSH-only recovery hatch, so the turn's transcript is
@@ -983,10 +1026,20 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         bus.close_job(chan)
 
 
-def _tail(conversation_id: int, q) -> "StreamingResponse":
+def _final_event(conversation_id: int, content: str, late: list[str]) -> dict:
+    """A turn's closing event. `undelivered` is present only when the operator
+    sent messages (POST /api/chat/{cid}/message) that the turn ended without
+    reading — the client sends them on as the next turn."""
+    ev = {"type": "final", "content": content, "conversation_id": conversation_id}
+    if late:
+        ev["undelivered"] = late
+    return ev
+
+
+def _tail(conversation_id: int, q, chan: str | None = None) -> "StreamingResponse":
     """SSE-forward a conversation's bus channel until the turn ends. Client
     disconnect cancels only this tail, never the turn."""
-    chan = _chan(conversation_id)
+    chan = chan or _chan(conversation_id)
 
     async def event_stream():
         try:
@@ -1003,20 +1056,237 @@ def _tail(conversation_id: int, q) -> "StreamingResponse":
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+def _idle() -> StreamingResponse:
+    async def idle():
+        yield sse({"type": "idle"})
+    return StreamingResponse(idle(), media_type="text/event-stream")
+
+
 @router.get("/chat/{conversation_id}/stream")
 async def resume_chat_stream(conversation_id: int):
     """Re-attach to an in-flight turn (page reload, coming back to the tab).
     Tokens streamed before attaching are gone, but the final event carries the
-    complete reply, so the GUI ends up whole either way."""
+    complete reply, so the GUI ends up whole either way.
+
+    Any conversation id works, not only a chat's: a spawned agent, a plan item,
+    a funnel node or a job head is tailed the same way (_stream_node)."""
     q = bus.subscribe(_chan(conversation_id))
     if conversation_id not in _active_turns:
         # subscribe-then-check closes the race with the turn's finally block
         bus.unsubscribe(_chan(conversation_id), q)
-
-        async def idle():
-            yield sse({"type": "idle"})
-        return StreamingResponse(idle(), media_type="text/event-stream")
+        return await _stream_node(conversation_id)
     return _tail(conversation_id, q)
+
+
+@router.get("/chat/agents/{conversation_id}/stream")
+async def agent_node_stream(conversation_id: int):
+    """Tail any node of the agents tree by conversation id — the same SSE
+    contract as a chat turn (token / tool / tool_result / final / error, or
+    one `idle` when nothing is running there). Same as
+    /api/chat/{id}/stream; spelled under /agents for clients that read the
+    tree and want the obvious URL."""
+    return await resume_chat_stream(conversation_id)
+
+
+async def _stream_node(cid: int) -> StreamingResponse:
+    """A conversation that is not a running chat turn: an agent/job turn
+    (vm/turn.py publishes every event on node:<cid>), or a job head, which runs
+    no loop of its own and is tailed through its job's channel instead."""
+    from .vm import turn as vm_turn
+    chan = vm_turn.node_chan(cid)
+    q = bus.subscribe(chan)
+    if cid in vm_turn.live_nodes():
+        return _tail(cid, q, chan)
+    bus.unsubscribe(chan, q)
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT kind, job_id, rollup FROM conversations WHERE id = ?",
+            (cid,)) as cur:
+            row = await cur.fetchone()
+    finally:
+        await db.close()
+    if row and row["kind"] == "head" and _head_running(row):
+        return _tail_head(cid, row["job_id"])
+    return _idle()
+
+
+def _head_running(row) -> bool:
+    """A job head is running while it has no rollup AND its job still holds a
+    Budget. The rollup alone is what runs_api reads, but a job the process lost
+    in a restart never writes one and would read as running forever; every
+    job runner (funnel, research, plan) registers its Budget under the job id
+    for exactly the job's life."""
+    from .agent import budget as budget_mod
+    return row["rollup"] is None and budget_mod.get(row["job_id"]) is not None
+
+
+def _tail_head(cid: int, job_id: str) -> StreamingResponse:
+    """A head's view of its job, in the chat event contract: the job's own
+    events pass through (node_spawned / node_status / plan_item / tool with a
+    node_id ...), and the job's end becomes the head's `final` carrying the
+    rollup, so a client that only knows the chat contract still settles."""
+    q = bus.subscribe(job_id)
+
+    async def event_stream():
+        try:
+            while True:
+                ev = await q.get()
+                t = ev.get("type")
+                if t == "job_end":
+                    break
+                if t == "job_final":
+                    yield sse({"type": "final", "content": ev.get("rollup") or "",
+                               "conversation_id": cid})
+                    break
+                if t == "token":
+                    continue      # leaves' token firehose: not the head's words
+                yield sse(ev)
+        finally:
+            bus.unsubscribe(job_id, q)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/chat/{conversation_id}/message")
+async def operator_message(conversation_id: int, body: OperatorMessage):
+    """The operator talking into a turn that is already running — a chat, or
+    any agent/job node with a loop (a spawned agent, a plan item, a funnel
+    leaf). The words go into that turn's inbox (agentmsg: the same drain as
+    agent mail, framed as the operator) and reach the model at its next
+    reasoning round, after the current tool call returns. At delivery every
+    attached stream gets {"type": "operator_message", "text"} and the words
+    land in the transcript as a user message, in order.
+
+    409 no_turn_running when nothing there will read it — no turn, a job head
+    (it runs no loop), or a turn that just finished: the client then starts a
+    normal turn. A message that arrives too late for a turn that is ending
+    comes back on that turn's `final` as `undelivered`."""
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    if len(text) > agentmsg.OPERATOR_MAX_BODY:
+        raise HTTPException(status_code=400,
+                            detail=f"text is over {agentmsg.OPERATOR_MAX_BODY} characters")
+    if not await agentmsg.queue_operator_message(conversation_id, text):
+        raise HTTPException(status_code=409, detail="no_turn_running")
+    return {"queued": True}
+
+
+# how many of the newest roots the agents tree shows, besides every running one
+AGENT_TREE_ROOTS = 50
+
+# a conversation is a root of the agents tree when it has no parent and is
+# agent work of some kind: an orchestrator, a job/agent node, an agent thread,
+# or an ordinary chat that spawned agent work (it is shown as the root). A
+# plain chat that spawned nothing is not agent work and stays in the sidebar.
+_TREE_ROOT_SQL = """
+SELECT c.id FROM conversations c
+WHERE c.parent_conversation_id IS NULL AND c.ephemeral = 0
+  AND (c.mode = 'orchestrate' OR c.kind != 'chat' OR c.agent_slug IS NOT NULL
+       OR EXISTS (SELECT 1 FROM conversations k
+                  WHERE k.parent_conversation_id = c.id AND k.kind != 'chat'))
+"""
+
+# ...and its nodes: the roots plus every descendant that is not itself a plain
+# chat (voice continues a conversation as a kind='chat' child; that is the same
+# conversation carried on, not an agent). UNION, not UNION ALL, so a malformed
+# parent cycle terminates.
+_TREE_SQL = """
+WITH RECURSIVE tree(id) AS (
+    SELECT value FROM json_each(?)
+    UNION
+    SELECT c.id FROM conversations c JOIN tree t ON c.parent_conversation_id = t.id
+    WHERE c.kind != 'chat' AND c.ephemeral = 0
+)
+SELECT c.id, c.parent_conversation_id AS parent_id, c.kind, c.mode,
+       c.summary AS title, c.agent_slug, c.model, c.started_at, c.job_id,
+       c.rollup, p.slug AS project
+FROM conversations c JOIN tree t ON t.id = c.id
+LEFT JOIN projects p ON p.id = c.project_id
+"""
+
+# walk up from a running node to its root
+_ROOT_OF_SQL = """
+WITH RECURSIVE up(id, parent, d) AS (
+    SELECT id, parent_conversation_id, 0 FROM conversations WHERE id = ?
+    UNION ALL
+    SELECT c.id, c.parent_conversation_id, up.d + 1 FROM conversations c
+    JOIN up ON c.id = up.parent WHERE up.d < 32
+)
+SELECT id FROM up ORDER BY d DESC LIMIT 1
+"""
+
+
+def _running_loops() -> set[int]:
+    """Every conversation with a loop in flight: chat turns, interactive agent
+    runs, agent/job turns (vm/turn.py), and anything else the broker holds a
+    live envelope for."""
+    from . import agents_run
+    from .vm import broker
+    from .vm import turn as vm_turn
+    ids = set(_active_turns) | set(agents_run._active_runs) | vm_turn.live_nodes()
+    ids |= {e.conversation_id for e in broker.live_turns()
+            if e.conversation_id and not e.ephemeral}
+    return ids
+
+
+@router.get("/chat/agents")
+async def agents_tree():
+    """Every orchestrator, agent and job across all projects, as one flat list
+    of nodes the client nests by parent_id: everything running, plus the
+    newest AGENT_TREE_ROOTS roots with their whole subtrees. Roots come first,
+    newest first, each followed by its descendants depth-first."""
+    live = _running_loops()
+    db = await get_db()
+    try:
+        async with db.execute(
+            _TREE_ROOT_SQL + " ORDER BY c.started_at DESC, c.id DESC LIMIT ?",
+            (AGENT_TREE_ROOTS,)) as cur:
+            roots = [r["id"] for r in await cur.fetchall()]
+        # a running head is live without a loop of its own
+        async with db.execute(
+            "SELECT id, job_id, rollup FROM conversations "
+            "WHERE kind = 'head' AND rollup IS NULL") as cur:
+            heads = {r["id"] for r in await cur.fetchall() if _head_running(r)}
+        live |= heads
+        for cid in sorted(live):
+            async with db.execute(_ROOT_OF_SQL, (cid,)) as cur:
+                r = await cur.fetchone()
+            if r and r["id"] not in roots:
+                roots.append(r["id"])
+        async with db.execute(_TREE_SQL, (json.dumps(roots),)) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+    # a root pulled in only because something under it runs must itself be agent
+    # work or have agent work under it — a running plain chat is not a node
+    by_id = {r["id"]: r for r in rows}
+    kids: dict[int, list[dict]] = {}
+    for r in rows:
+        if r["parent_id"] in by_id and r["id"] not in roots:
+            kids.setdefault(r["parent_id"], []).append(r)
+    ordered = sorted((by_id[i] for i in roots if i in by_id),
+                     key=lambda r: (r["started_at"] or "", r["id"]), reverse=True)
+    out: list[dict] = []
+
+    def walk(r: dict) -> None:
+        if r["kind"] == "chat" and not r["mode"] and not r["agent_slug"] \
+                and r["id"] not in kids:
+            return
+        out.append({
+            "id": r["id"],
+            "parent_id": r["parent_id"] if r["parent_id"] in by_id else None,
+            "kind": "orchestrator" if r["mode"] == "orchestrate" else r["kind"],
+            "title": r["title"] or "", "agent_slug": r["agent_slug"],
+            "project": r["project"], "model": r["model"],
+            "running": r["id"] in live, "started_at": r["started_at"]})
+        for k in sorted(kids.get(r["id"], ()), key=lambda k: k["id"]):
+            walk(k)
+
+    for r in ordered:
+        walk(r)
+    return {"nodes": out}
 
 
 @router.post("/chat/{conversation_id}/stop")
@@ -1087,6 +1357,23 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             # identity is validated here, not in the detached turn: a typo'd
             # slug is a 404 on the POST the operator can see, not an error
             # event on a conversation that already exists
+            if body.mode == "orchestrate":
+                # an orchestrator's agents all work one project on this host,
+                # under that project's egress policy — so it must name one up
+                # front rather than follow whatever happens to be loaded
+                if not body.project:
+                    raise HTTPException(status_code=400,
+                                        detail="mode orchestrate needs a project")
+                if body.project_mode not in (None, "pin"):
+                    raise HTTPException(status_code=400,
+                                        detail="mode orchestrate pins its project")
+                if body.ephemeral:
+                    # a plan is a saved file and a team of recorded runs
+                    raise HTTPException(status_code=400,
+                                        detail="mode orchestrate cannot be a temporary chat")
+                if body.agent:
+                    raise HTTPException(status_code=400,
+                                        detail="mode orchestrate runs as Jav3, not an agent")
             agent_def = None
             if body.agent:
                 from .agents_api import _read as read_agent_def
@@ -1125,7 +1412,8 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
                 # at turn end.
                 ephemeral=body.ephemeral,
                 # which computer opened this thread (NULL = the operator)
-                device_id=device_id)
+                device_id=device_id,
+                mode=body.mode)
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:
@@ -1182,6 +1470,10 @@ def start_turn(conversation_id: int, *, ephemeral: bool = False,
                        model_name=model_name, base_url=base_url,
                        context_exclude=context_exclude, tools_only=tools_only))
     _active_turns[conversation_id] = task
+    # open alongside the running flag, in the same tick: from here the turn
+    # takes operator messages (POST /api/chat/{cid}/message) until it closes
+    # its inbox after its last drain
+    agentmsg.open_operator_inbox(conversation_id)
     if actor:
         _turn_actors[conversation_id] = actor
     return task

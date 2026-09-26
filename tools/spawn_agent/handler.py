@@ -3,15 +3,24 @@ from backend.agent.budget import current as current_budget
 from backend.db import get_db
 
 
-async def run(agent: str, task: str) -> str:
+async def run(agent: str, task: str, model: str | None = None) -> str:
     from fastapi import HTTPException
+    from backend import providers
+    if model:
+        # the operator named it, so a model that cannot run is an error they
+        # hear about — not a silent fall back to the default
+        try:
+            model = providers.checked(model)
+        except providers.ProviderError as e:
+            return f"error: {e}. The agent was not started."
     b = current_budget()
     before = (b.input_tokens + b.output_tokens) if b else None
     # one hop deeper for the child's whole run: its toolset keeps spawn_agent
     # below autonomy.MAX_SPAWN_DEPTH and drops it at the cap (fork-bomb fence)
     depth_token = runtime.spawn_depth.set(runtime.spawn_depth.get() + 1)
     try:
-        result = await agents_run.run_agent_headless(agent, task)
+        extra = {"model": model} if model else {}
+        result = await agents_run.run_agent_headless(agent, task, **extra)
     except HTTPException as e:
         if e.status_code == 404 and e.detail == "no such agent":
             return (f"error: no agent named '{agent}'. Check the agent list — "

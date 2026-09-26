@@ -485,7 +485,16 @@ async def init_db() -> None:
                           ("starred", "INTEGER NOT NULL DEFAULT 0"),
                           # the provider/model this thread is pinned to
                           # (POST /api/chat `model`); NULL follows the default
-                          ("model", "TEXT")):
+                          ("model", "TEXT"),
+                          # how the chat machinery runs this conversation.
+                          # NULL is an ordinary chat; 'orchestrate' is an
+                          # orchestrator (POST /api/chat mode): same turn
+                          # path, plus the orchestrator prompt and the plan
+                          # monitoring tool. A column rather than a `kind`
+                          # value because `kind` = 'chat' is what keeps a
+                          # conversation in the sidebar, and an orchestrator
+                          # is a chat the operator opened.
+                          ("mode", "TEXT")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(
@@ -524,6 +533,16 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_msg_inbox_slug "
             "ON agent_messages(delivered_at, to_agent_slug)")
+        # 1 = the operator typed this into a running turn (POST
+        # /api/chat/{cid}/message). It rides the same inbox as agent mail, but
+        # is delivered as the operator speaking rather than as a peer's
+        # information, never taints the turn, and is the one kind of row an
+        # incognito turn's inbox may claim (agentmsg.claim).
+        async with db.execute("PRAGMA table_info(agent_messages)") as cur:
+            mcols = [r["name"] for r in await cur.fetchall()]
+        if "from_operator" not in mcols:
+            await db.execute("ALTER TABLE agent_messages ADD COLUMN "
+                             "from_operator INTEGER NOT NULL DEFAULT 0")
         await db.commit()
     finally:
         await db.close()
@@ -552,6 +571,7 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
                             parent: int | None = None, job_id: str | None = None,
                             locked: bool = False, agent: str | None = None,
                             ephemeral: bool = False, device_id: int | None = None,
+                            mode: str | None = None, model: str | None = None,
                             commit: bool = True) -> int:
     """Create a conversation node and return its id — the one place that resolves
     a project slug to its id and inserts the row.
@@ -573,7 +593,12 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
     truth another agent's send_message consults (agentmsg._is_incognito) to
     refuse messaging a turn that is about to be wiped — the broker envelope that
     also carries this is released too early to be relied on. Deleted with the
-    row at turn end, so it leaves no trace."""
+    row at turn end, so it leaves no trace.
+
+    `mode` is 'orchestrate' for an orchestrator conversation (None = ordinary).
+    `model` records the provider/model the conversation runs on when the
+    caller chose one (a pinned chat, a spawned agent given an explicit model),
+    so the agents tree can show it."""
     project_id = None
     if project:
         async with db.execute("SELECT id FROM projects WHERE slug = ?", (project,)) as cur:
@@ -581,10 +606,10 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
         project_id = row["id"] if row else None
     cur = await db.execute(
         "INSERT INTO conversations (project_id, summary, kind, parent_conversation_id, "
-        "job_id, project_locked, agent_slug, ephemeral, device_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "job_id, project_locked, agent_slug, ephemeral, device_id, mode, model) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (project_id, title, kind, parent, job_id, 1 if locked else 0, agent,
-         1 if ephemeral else 0, device_id))
+         1 if ephemeral else 0, device_id, mode, model))
     if commit:
         await db.commit()
     return cur.lastrowid
