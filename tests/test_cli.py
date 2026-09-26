@@ -412,8 +412,8 @@ async def test_conversation_info_totals_usage_and_files(tmp_env):
 
 # --- logged-out start, password sessions, pickers, notifications -----------------------
 
-async def _until(pilot, cond, tries=60):
-    for _ in range(tries):
+async def _until(pilot, cond, tries=60, n=None):
+    for _ in range(n or tries):
         if cond():
             return True
         await pilot.pause(0.05)
@@ -851,3 +851,263 @@ async def test_notifications_badge_while_the_sidebar_is_hidden(cfg):
         assert "n59" in _text(app.query_one("#sb-notes"))
         app.push_notice("seen it")                            # shown: no badge
         assert app.unread == 0
+
+
+# --- mid-turn messages, /orchestration, the agents screen ------------------------------
+
+class _LiveServer:
+    """A fake server whose /api/chat streams stay open until the test pushes
+    `final`, so messages can be typed mid-turn. Implements the mid-turn,
+    agents and orchestration contract."""
+
+    def __init__(self, projects=(), nodes=(), messages=None):
+        import asyncio
+        self.asyncio = asyncio
+        self.chats: list[dict] = []          # bodies POSTed to /api/chat
+        self.posted: list[tuple] = []        # (cid, text) POSTed mid-turn
+        self.paths: list[str] = []
+        self.running = False
+        self.queues: list = []               # one event queue per /api/chat stream
+        self.projects = list(projects)
+        self.nodes = list(nodes)
+        self.messages = messages or {}       # cid -> /messages body
+        self.streams: dict = {}              # path -> events for GET streams
+
+    def push(self, ev):
+        self.queues[-1].put_nowait(ev)
+        if ev.get("type") in ("final", "error"):
+            self.running = False
+
+    def transport(self):
+        async def body(q):
+            while True:
+                ev = await q.get()
+                yield f"data: {json.dumps(ev)}\n\n".encode()
+                if ev.get("type") in ("final", "error"):
+                    return
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            self.paths.append(f"{request.method} {path}")
+            if path == "/api/devices/whoami":
+                return httpx.Response(200, json={"username": "device:test"})
+            if path == "/api/chat/options":
+                return httpx.Response(200, json={
+                    "default": "deepseek/deepseek-flash", "active_project": None,
+                    "models": [{"id": "deepseek/deepseek-flash", "label": "Flash"}],
+                    "projects": self.projects, "agents": []})
+            if path == "/api/conversations":
+                return httpx.Response(200, json={"conversations": []})
+            if path.endswith("/info"):
+                return httpx.Response(200, json={"title": "t"})
+            if path == "/api/chat/agents":
+                return httpx.Response(200, json={"nodes": self.nodes})
+            if path == "/api/chat" and request.method == "POST":
+                self.chats.append(json.loads(request.content))
+                q = self.asyncio.Queue()
+                self.queues.append(q)
+                self.running = True
+                return httpx.Response(200, content=body(q),
+                                      headers={"content-type": "text/event-stream"})
+            parts = path.strip("/").split("/")
+            if len(parts) == 4 and parts[:2] == ["api", "chat"] and parts[3] == "message":
+                if not self.running:
+                    return httpx.Response(409, json={"detail": "no_turn_running"})
+                self.posted.append((int(parts[2]), json.loads(request.content)["text"]))
+                return httpx.Response(200, json={"queued": True})
+            if path.endswith("/messages"):
+                cid = int(parts[2])
+                return httpx.Response(200, json=self.messages.get(cid, {"messages": []}))
+            if path in self.streams:
+                text = "".join(f"data: {json.dumps(ev)}\n\n" for ev in self.streams[path])
+                return httpx.Response(200, text=text,
+                                      headers={"content-type": "text/event-stream"})
+            return httpx.Response(404, json={"detail": "nope"})
+        return httpx.MockTransport(handler)
+
+
+async def test_tui_mid_turn_messages(cfg):
+    """Enter while a turn runs posts to /api/chat/{cid}/message; the message is
+    dimmed until operator_message; a 409 and an `undelivered` both become the
+    next turn."""
+    pytest.importorskip("textual")
+    srv = _LiveServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        # typed before `start`: held locally, posted once the id arrives
+        app.editor.text = "go"
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: srv.queues)
+        app.editor.text = "early"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app.queue == ["early"] and srv.posted == []
+        srv.push({"type": "start", "conversation_id": 9})
+        assert await _until(pilot, lambda: srv.posted == [(9, "early")])
+        assert app.queue == []
+        # after `start`: straight to the server, shown pending
+        srv.push({"type": "tool", "id": "1", "name": "run_code", "args": {"command": "ls"}})
+        app.editor.text = "steer left"
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: (9, "steer left") in srv.posted)
+        pend = [w for w in app.query("QueuedMsg") if w.has_class("pending")]
+        assert {w.text for w in pend} == {"early", "steer left"}
+        srv.push({"type": "tool_result", "id": "1", "name": "run_code", "ok": True,
+                  "result": "a"})
+        srv.push({"type": "operator_message", "text": "steer left"})
+        srv.push({"type": "operator_message", "text": "early"})
+        assert await _until(pilot, lambda: not app.pending)
+        assert not any(w.has_class("pending") for w in app.query("QueuedMsg"))
+        # the turn ends before this one is delivered: it is the next turn
+        app.editor.text = "late"
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: (9, "late") in srv.posted)
+        srv.push({"type": "final", "content": "ok", "conversation_id": 9,
+                  "undelivered": ["late"]})
+        assert await _until(pilot, lambda: len(srv.chats) == 2)
+        assert srv.chats[1] == {"message": "late", "conversation_id": 9}
+        assert not [w for w in app.query("QueuedMsg") if w.text == "late"]
+        # 409: the server's turn is over but our stream has not said so yet
+        srv.push({"type": "start", "conversation_id": 9})
+        assert await _until(pilot, lambda: app.turn is not None and app.turn.cid == 9)
+        srv.running = False
+        app.editor.text = "too late"
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: app.queue == ["too late"])
+        srv.queues[-1].put_nowait({"type": "final", "content": "done", "conversation_id": 9})
+        assert await _until(pilot, lambda: len(srv.chats) == 3)
+        assert srv.chats[2]["message"] == "too late"
+        srv.push({"type": "final", "content": "x", "conversation_id": 9})
+        assert await _until(pilot, lambda: not app.busy)
+
+
+async def test_tui_orchestration_sends_mode_project_and_braindump(cfg):
+    pytest.importorskip("textual")
+    srv = _LiveServer(projects=[{"slug": "demo", "name": "Demo"},
+                                {"slug": "site", "name": "Site"}])
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/orchestration")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        await pilot.press("s", "i", "enter")          # filter to "site"
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "BrainDump")
+        app.screen.query_one("#dump").text = "fix the build\nand ship the docs"
+        await pilot.press("ctrl+s")
+        assert await _until(pilot, lambda: srv.chats)
+        body = srv.chats[0]
+        assert body["mode"] == "orchestrate" and body["project"] == "site"
+        assert body["message"] == "fix the build\nand ship the docs"
+        assert body["conversation_id"] is None and "agent" not in body
+        assert app.orchestrator
+        assert "orchestrator" in str(app.query_one("#meta").render())
+        srv.push({"type": "start", "conversation_id": 30})
+        srv.push({"type": "final", "content": "sent 2 agents", "conversation_id": 30})
+        assert await _until(pilot, lambda: not app.busy)
+        # esc cancels the brain-dump
+        app.dispatch("/orchestrate demo")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "BrainDump")
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert type(app.screen).__name__ != "BrainDump" and len(srv.chats) == 1
+
+
+def test_agent_tree_groups_roots_and_orders_descendants():
+    t = jav3.AgentTree([
+        {"id": 1, "parent_id": None, "kind": "orchestrator", "project": "b", "running": True},
+        {"id": 2, "parent_id": 1, "kind": "agent", "project": "b", "started_at": "2"},
+        {"id": 3, "parent_id": 2, "kind": "subagent", "project": "b"},
+        {"id": 4, "parent_id": 1, "kind": "agent", "project": "b", "started_at": "3"},
+        {"id": 5, "parent_id": 99, "kind": "chat", "project": "a"},   # parent not listed
+        {"id": 6, "parent_id": None, "kind": "chat", "project": None},
+    ])
+    assert [p for p, _ in t.groups] == ["a", "b", None]
+    assert [r["id"] for r in t.roots] == [5, 1, 6]
+    assert [(n["id"], d) for n, d in t.descendants(1)] == [(2, 1), (3, 2), (4, 1)]
+    assert t.root_of(3) == 1 and t.counts() == (1, 6, 2)
+
+
+async def test_tui_agents_screen(cfg):
+    pytest.importorskip("textual")
+    nodes = [
+        {"id": 10, "parent_id": None, "kind": "orchestrator", "title": "Ship it",
+         "agent_slug": None, "project": "demo", "model": "deepseek/deepseek-flash",
+         "running": True, "started_at": "2026-09-25T10:00:00"},
+        {"id": 11, "parent_id": 10, "kind": "agent", "title": "build", "agent_slug": "coder",
+         "project": "demo", "model": None, "running": True, "started_at": "2026-09-25T10:01:00"},
+        {"id": 12, "parent_id": 11, "kind": "subagent", "title": "grep", "agent_slug": None,
+         "project": "demo", "model": None, "running": False, "started_at": "2026-09-25T10:02:00"},
+        {"id": 13, "parent_id": 10, "kind": "agent", "title": "docs", "agent_slug": "writer",
+         "project": "demo", "model": None, "running": False, "started_at": "2026-09-25T10:03:00"},
+        {"id": 20, "parent_id": None, "kind": "chat", "title": "quick q", "agent_slug": None,
+         "project": "site", "model": None, "running": False, "started_at": "2026-09-25T09:00:00"},
+    ]
+    msgs = {11: {"messages": [{"role": "user", "content": "build it"},
+                              {"role": "assistant", "content": "",
+                               "activity": [{"name": "run_code", "args": {"command": "make"},
+                                             "ok": True, "result": "ok"}]}],
+                 "running": True},
+            20: {"messages": [{"role": "user", "content": "hi"},
+                              {"role": "assistant", "content": "hello"}]}}
+    srv = _LiveServer(nodes=nodes, messages=msgs)
+    srv.streams["/api/chat/agents/11/stream"] = [
+        {"type": "tool", "id": "t", "name": "read_file", "args": {"path": "x"}},
+        {"type": "tool_result", "id": "t", "name": "read_file", "ok": True, "result": "x"},
+        {"type": "final", "content": "built", "conversation_id": 11}]
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport(), resume=20)
+    async with app.run_test(size=(140, 40)) as pilot:
+        assert await _until(pilot, lambda: app.cid == 20)
+        await pilot.press("left")                        # empty prompt: open the screen
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 2)
+
+        def rows():
+            return [(r.kind, r.nid) for r in scr.query("AgentRow")]
+
+        def sel():
+            return [r.nid for r in scr.query("AgentRow") if r.has_class("-sel")]
+        # we came from 20: it is selected and green
+        assert sel() == [20]
+        green = [r for r in scr.query("AgentRow") if r.has_class("current")]
+        assert [r.nid for r in green] == [20]
+        assert "2 running" in str(scr.query_one("#ag-head").render())
+        # ↑ goes to the orchestrator (a root), which unfolds its agents
+        await pilot.press("up")
+        await pilot.pause(0.1)
+        assert sel() == [10]
+        assert rows() == [("project", None), ("root", 10), ("child", 11), ("child", 12),
+                          ("child", 13), ("project", None), ("root", 20)]
+        # ↓ skips the children to the next root and folds them away
+        await pilot.press("down")
+        await pilot.pause(0.1)
+        assert sel() == [20] and ("child", 11) not in rows()
+        await pilot.press("up", "shift+down", "shift+down")
+        await pilot.pause(0.1)
+        assert sel() == [12]
+        await pilot.press("shift+up", "shift+up", "shift+up")
+        await pilot.pause(0.1)
+        assert sel() == [10]
+        await pilot.press("shift+down", "enter")         # open agent 11: running
+        assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
+        assert await _until(pilot, lambda: "GET /api/chat/agents/11/stream" in srv.paths)
+        assert await _until(pilot, lambda: not app.busy and app.last_reply == "built")
+        assert app.cid == 11 and "GET /api/conversations/11/messages" in srv.paths
+        assert "GET /api/chat/11/stream" in srv.paths    # tried the chat stream first
+        names = [tv.tname for tv in app.query("ToolView")]
+        assert names == ["run_code", "read_file"]
+        # back in: now 11 is the green one; esc returns
+        await pilot.press("left")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 2)
+        assert [r.nid for r in scr.query("AgentRow") if r.has_class("current")] == [11]
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert type(app.screen).__name__ != "AgentsScreen"
+        # a non-empty prompt keeps ← for the cursor
+        app.editor.text = "abc"
+        await pilot.press("left")
+        await pilot.pause(0.1)
+        assert type(app.screen).__name__ != "AgentsScreen"
