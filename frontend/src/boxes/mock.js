@@ -144,7 +144,8 @@ const S = {
       disk: { exists: true, bytes_used: 120 * 2 ** 20, cap_bytes: 2 * 2 ** 30 } },
     bravo: { approved: true, approved_at: '2026-07-11 10:00:00', enabled: true, mount: '/persist',
       disk: { exists: true, bytes_used: 30 * 2 ** 20, cap_bytes: 2 * 2 ** 30 },
-      imported_at: '2026-09-10 10:00:00', delete_after: '2026-10-10 10:00:00' },
+      imported_at: '2026-09-10 10:00:00', delete_after: '2026-10-10 10:00:00',
+      import: { state: 'done', disk: '/var/lib/jav3/persist/bravo.img', by: 'operator' } },
     notes: { approved: false, enabled: true, mount: '/persist', disk: { exists: false } },
   },
   runtimes: {
@@ -455,11 +456,16 @@ const routes = [
   }],
   ['GET', /^\/api\/secrets$/, () => ({ secrets: S.secrets.map((name) => ({ name })) })],
   ['GET', /^\/api\/projects$/, () => ({ projects: PROJECTS })],
-  ['GET', /^\/api\/projects\/([^/]+)\/persist$/, ([slug]) => ({ slug, ...(S.persist[slug] || fail(404, 'no such project')) })],
-  ['POST', /^\/api\/projects\/([^/]+)\/persist\/import$/, ([slug]) => {
+  ['GET', /^\/api\/projects\/([^/]+)\/persist$/, ([slug]) => ({ slug, retired: true, imported_at: null,
+    delete_after: null, import: null, attached: false, read_only: false,
+    ...(S.persist[slug] || fail(404, 'no such project')) })],
+  ['POST', /^\/api\/projects\/([^/]+)\/persist\/import$/, ([slug], b) => {
+    if (!b.confirm) fail(400, 'confirm required')
     const d = new Date(Date.now() + 30 * 86400000).toISOString().replace('T', ' ').slice(0, 19)
-    Object.assign(S.persist[slug], { imported_at: now(), delete_after: d })
-    return S.persist[slug]
+    Object.assign(S.persist[slug], { imported_at: now(), delete_after: d,
+      import: { state: 'pending', disk: `/var/lib/jav3/persist/${slug}.img`, by: 'operator' } })
+    setTimeout(() => { S.persist[slug].import.state = 'done' }, 4000)
+    return { ok: true, ...S.persist[slug] }
   }],
   ['PUT', /^\/api\/projects\/([^/]+)\/persist$/, ([slug], b) => {
     if (b.approved) fail(409, '/persist is retired: no new approvals')

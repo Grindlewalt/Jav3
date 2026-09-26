@@ -314,7 +314,7 @@ function PersistRetirement() {
   const [dlg, setDlg] = useState(null)
   const load = () => listProjects().then((ps) => Promise.all(ps.map((p) =>
     getPersist(p.slug).then((v) => ({ ...v, slug: p.slug, name: p.name })).catch(() => null))))
-    .then((vs) => setRows(vs.filter((v) => v && (v.disk?.exists || v.approved))))
+    .then((vs) => setRows(vs.filter((v) => v && (v.disk?.exists || v.approved || v.import))))
     .catch(() => setRows([]))
   useEffect(() => { load() }, [])
   if (!rows || !rows.length) return null
@@ -335,7 +335,8 @@ function PersistRetirement() {
       <ul className="staged-list rev-list">
         {rows.map((r) => {
           const days = persistDaysLeft(r)
-          const imported = r.imported_at || r.persist_imported_at
+          const imported = r.imported_at
+          const st = r.import?.state || null      // pending | done | failed
           return (
             <li key={r.slug}>
               <span className="grow">
@@ -344,12 +345,17 @@ function PersistRetirement() {
                   {r.disk?.exists ? `${bytes(r.disk.bytes_used)} on /persist` : 'no disk'}
                   {imported ? ` · imported ${ago(imported)}` : ''}
                 </span>
+                {r.import?.error && <span className="error small bx-row-err">import: {r.import.error}</span>}
               </span>
-              {days != null
-                ? <Tag tone="pending" title={`deleted after ${ts(r.delete_after || r.persist_delete_after)}`}>
-                    deleted in {days} day{days === 1 ? '' : 's'}</Tag>
-                : <Button variant="ghost" disabled={!r.disk?.exists}
-                          onClick={() => setDlg({ verb: 'import', r })}>Import into service box…</Button>}
+              {st === 'pending' && <Tag tone="running" title="copying into the service box's /srv">importing…</Tag>}
+              {st === 'failed' && <Tag tone="error">import failed</Tag>}
+              {days != null && (
+                <Tag tone="pending" title={`deleted after ${ts(r.delete_after)}`}>
+                  deleted in {days} day{days === 1 ? '' : 's'}</Tag>)}
+              {st !== 'pending' && st !== 'done' && days == null && (
+                <Button variant="ghost" disabled={!r.disk?.exists}
+                        onClick={() => setDlg({ verb: 'import', r })}>
+                  {st === 'failed' ? 'Retry import…' : 'Import into service box…'}</Button>)}
               {r.disk?.exists && (
                 <Button variant="ghost" danger onClick={() => setDlg({ verb: 'delete', r })}>Delete…</Button>)}
             </li>

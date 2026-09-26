@@ -566,7 +566,7 @@ export function diffLines(diff) {
 
 // Days left before an imported /persist disk is deleted (null = not imported).
 export function persistDaysLeft(view, now = Date.now()) {
-  const after = view?.delete_after || view?.persist_delete_after
+  const after = view?.delete_after
   if (!after) return null
   const t = Date.parse(String(after).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(after) ? '' : 'Z'))
   if (Number.isNaN(t)) return null
