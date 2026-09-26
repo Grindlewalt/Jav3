@@ -691,6 +691,11 @@ user_phase() {
     echo "JARVIS_STATE_DIR=$STATE_DIR" >> "$CFG_DIR/env"
     ok "state dir $STATE_DIR recorded in $CFG_DIR/env"
   fi
+  # A named instance advertises its own mDNS name, not a second "jav3.local".
+  if [ -n "$NAME_OPT" ] && ! grep -q '^JARVIS_INSTANCE_NAME=' "$CFG_DIR/env"; then
+    echo "JARVIS_INSTANCE_NAME=jav3-$NAME_OPT" >> "$CFG_DIR/env"
+    ok "mDNS name jav3-$NAME_OPT.local recorded in $CFG_DIR/env"
+  fi
   if [ "$PORT" != 8000 ] && ! grep -qxF "JARVIS_LAN_PORT=$PORT" "$CFG_DIR/env"; then
     sed -i '/^JARVIS_LAN_PORT=/d' "$CFG_DIR/env"
     echo "JARVIS_LAN_PORT=$PORT" >> "$CFG_DIR/env"
