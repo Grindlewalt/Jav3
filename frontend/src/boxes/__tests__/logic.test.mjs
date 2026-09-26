@@ -5,7 +5,8 @@ import {
   mergeProcs, navState, nestProcs, parseHosts, persistDaysLeft, profilePayload,
   sortBoxes, treeTotals, uptime, validPackage, validateProfile, variantUsers, blankProfile,
   exposeChoices, exposeDefault, exposePayload, procsRefetch, boxTotals, boxIsOdd, normBoxProcs,
-  normRuntimes, assignableProjects,
+  normRuntimes, assignableProjects, packageReach, buildState, applyBuildEvent, mergeBuildRest,
+  buildNeedsReload, verLabel,
 } from '../logic.js'
 
 let n = 0
@@ -272,6 +273,46 @@ t('normRuntimes: docker is offered only when the server says available', () => {
 t('assignableProjects drops the reserved slugs', () => {
   assert.deepEqual(assignableProjects([{ slug: 'a' }, { slug: '__image_build__' }, { slug: '__general__' }, null])
     .map((p) => p.slug), ['a'])
+})
+
+t('packageReach: the server detail for the row target, used_by for any other variant', () => {
+  const p = { target_variant: 'main', variant_used_by: ['a', 'b', 'c'],
+    variant_used_by_detail: { all: ['a', 'b', 'c'], direct: ['a'], via: { dev: ['b', 'c'], x: [] } } }
+  const r = packageReach(p, 'main', null)
+  assert.deepEqual(r.all, ['a', 'b', 'c']); assert.deepEqual(r.direct, ['a'])
+  assert.deepEqual(r.via, [['dev', ['b', 'c']]])
+  const o = packageReach(p, 'desktop', { variants: [{ name: 'desktop', used_by: ['z'] }] })
+  assert.deepEqual(o.all, ['z']); assert.deepEqual(o.via, [])
+  assert.deepEqual(packageReach({ target_variant: 'main', variant_used_by: ['q'] }, 'main').all, ['q'])
+})
+
+t('build panel: events fold into phase, log and result; REST keeps the finished log', () => {
+  let s = buildState({ running: false, log_tail: [] })
+  assert.equal(applyBuildEvent(s, { type: 'other' }), s)
+  s = applyBuildEvent(s, { type: 'image_build', phase: 'start', variant: 'dev', version: 3 })
+  assert.equal(s.running, true); assert.equal(s.variant, 'dev')
+  s = applyBuildEvent(s, { type: 'image_build', phase: 'boot', variant: 'dev', box: 'b-dev' })
+  assert.equal(s.phase, 'boot'); assert.equal(s.box, 'b-dev')
+  s = applyBuildEvent(s, { type: 'image_build', phase: 'log', variant: 'dev', line: 'apt-get install' })
+  s = applyBuildEvent(s, { type: 'image_build', phase: 'log', variant: 'dev', line: '<b>x</b>' })
+  assert.deepEqual(s.log, ['apt-get install', '<b>x</b>'])
+  assert.equal(buildNeedsReload({ type: 'image_build', phase: 'log' }), false)
+  assert.equal(buildNeedsReload({ type: 'image_build', phase: 'done' }), true)
+  s = applyBuildEvent(s, { type: 'image_build', phase: 'done', variant: 'dev', version: 3, ok: false, error: 'exit 100' })
+  assert.equal(s.running, false); assert.equal(s.last.ok, false); assert.equal(s.last.error, 'exit 100')
+  // the reload after done: the host has no log_tail any more, this tab keeps its lines
+  const m = mergeBuildRest(s, { running: false, variant: null, phase: null, log_tail: [] })
+  assert.equal(m.log.length, 2); assert.equal(m.last.error, 'exit 100')
+  // a new build seen over REST replaces the old log
+  const n2 = mergeBuildRest(m, { running: true, variant: 'main', phase: 'boot', log_tail: ['l1'] })
+  assert.deepEqual(n2.log, ['l1']); assert.equal(n2.variant, 'main')
+  // the log is capped
+  let big = buildState(null)
+  for (let i = 0; i < 400; i += 1) big = applyBuildEvent(big, { type: 'image_build', phase: 'log', line: `l${i}` })
+  assert.equal(big.log.length, 300); assert.equal(big.log[299], 'l399')
+  const r = applyBuildEvent(big, { type: 'image_build', phase: 'resolved', count: 2, error: null })
+  assert.deepEqual(r.resolved, { count: 2, error: null })
+  assert.equal(verLabel(3), 'v3'); assert.equal(verLabel('v7'), 'v7'); assert.equal(verLabel(null), '?')
 })
 
 console.log(`${n} passed`)

@@ -264,7 +264,8 @@ export function ReviewQueue({ slug }) {
           </div>
           {pkgReqs.map((p) => (
             <div key={p.id} className="sbx-row sev-warn bx-cat-row">
-              <div className="grow"><PackageSummary p={p} /></div>
+              <div className="grow"><PackageSummary p={p} />
+                {p.card && <div className="small bx-reach">{p.card}</div>}</div>
               <div className="sbx-right bx-cat-right">
                 <span className="small">into <code>{p.target_variant}</code></span>
                 <span className="row">

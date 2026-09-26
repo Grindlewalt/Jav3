@@ -266,6 +266,91 @@ export function variantUsers(images, variant, fallback = []) {
   return v ? (v.used_by || []) : fallback
 }
 
+// A package row's reach, from the server's own figures when the variant is
+// the row's target: {all, direct, via:[[variant, slugs]]}. For another variant
+// the operator picked, the images list's used_by is all there is.
+export function packageReach(p, variant, images) {
+  const target = variant || p?.target_variant
+  if (p && target === p.target_variant) {
+    const d = p.variant_used_by_detail
+    if (d && typeof d === 'object') {
+      return {
+        all: d.all || p.variant_used_by || [], direct: d.direct || [],
+        via: Object.entries(d.via || {}).filter(([, s]) => (s || []).length),
+      }
+    }
+    if (p.variant_used_by) return { all: p.variant_used_by, direct: p.variant_used_by, via: [] }
+  }
+  const all = variantUsers(images, target, [])
+  return { all, direct: all, via: [] }
+}
+
+// Rows the operator can take out of an image (the next build drops them).
+export const PKG_REMOVABLE = new Set(['approved', 'built', 'failed'])
+
+// ---- image builds ------------------------------------------------------------
+
+export const BUILD_LOG_MAX = 300
+
+// The build panel's state, seeded from GET /api/vm/images `build` and folded
+// forward by `vm-images` events {type:"image_build", phase, variant, ...}.
+// The host's phases: start, boot, log (with `line`), done ({ok, error,
+// version}), resolved ({count, error}: a package dry-run, not a build).
+export function buildState(build) {
+  const b = build || {}
+  return {
+    running: !!b.running, variant: b.variant || null, mode: b.mode || null,
+    phase: b.phase || null, box: null, log: [...(b.log_tail || [])].slice(-BUILD_LOG_MAX),
+    last: null, resolved: null,
+  }
+}
+export function applyBuildEvent(st, ev) {
+  if (!ev || ev.type !== 'image_build') return st
+  const s = st || buildState(null)
+  switch (ev.phase) {
+    case 'start':
+      return { ...s, running: true, variant: ev.variant || s.variant, phase: 'start', box: null,
+        log: [], last: null }
+    case 'log': {
+      if (ev.line == null) return s
+      const log = [...s.log, String(ev.line)]
+      return { ...s, running: true, variant: ev.variant || s.variant,
+        log: log.length > BUILD_LOG_MAX ? log.slice(-BUILD_LOG_MAX) : log }
+    }
+    case 'done':
+      return { ...s, running: false, phase: 'done',
+        last: { variant: ev.variant || s.variant, version: ev.version ?? null,
+          ok: ev.ok !== false && !ev.error, error: ev.error || null } }
+    case 'resolved':
+      return { ...s, resolved: { count: Number(ev.count) || 0, error: ev.error || null } }
+    default:
+      // boot, and any phase the host adds later: show it, keep the log
+      return { ...s, running: true, variant: ev.variant || s.variant, phase: ev.phase || s.phase,
+        box: ev.box || s.box }
+  }
+}
+// A REST read of `build` folded into the panel. The host keeps log_tail only
+// while a build runs (the last 20 lines), so once it is over the lines and the
+// result this tab collected from the stream are kept.
+export function mergeBuildRest(cur, build) {
+  const fresh = buildState(build)
+  if (!cur) return fresh
+  if (fresh.running) {
+    const same = cur.running && cur.variant === fresh.variant
+    return { ...fresh, box: same ? cur.box : null,
+      log: same && cur.log.length > fresh.log.length ? cur.log : fresh.log,
+      resolved: cur.resolved }
+  }
+  return { ...cur, running: false, phase: cur.running ? null : cur.phase }
+}
+
+export const verLabel = (v) => (v == null ? '?' : typeof v === 'number' || /^\d+$/.test(String(v)) ? `v${v}` : String(v))
+
+// Events after which the variants list itself changed (a version appeared,
+// a package row moved): refetch it.
+export const buildNeedsReload = (ev) =>
+  !!ev && ev.type === 'image_build' && ['start', 'done', 'resolved'].includes(ev.phase)
+
 // The per-manager package name check the host also applies (contract (f)):
 // no URLs, paths, git+, flags or shell metacharacters. The host is the
 // authority; this only stops an obvious typo before a round trip.

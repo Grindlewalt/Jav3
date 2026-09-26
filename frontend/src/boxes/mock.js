@@ -47,7 +47,8 @@ const S = {
           status: 'built', active: false, in_use_by: [] }] },
     { name: 'dev', from: 'main', builtin: true, min_mem_mb: 768, used_by: ['alpha', 'bravo'],
       recipe: 'apt: golang rustc cargo default-jdk-headless python3-pytest\npip: uv\nnpm: pnpm typescript\n',
-      recipe_sha256: 'ffee00112233', versions: [
+      recipe_sha256: 'ffee00112233', layer_packages: ['golang', 'rustc', 'cargo', 'uv', 'pnpm', 'typescript'],
+      needs_build: true, versions: [
         { version: 'v2', base_version: 'base-v7', size_bytes: 0.9 * 2 ** 30, built_at: '2026-09-22 09:10:00',
           status: 'built', active: true, in_use_by: ['p-alpha'] }] },
     { name: 'desktop', from: 'main', builtin: true, min_mem_mb: 1280, used_by: [],
@@ -58,7 +59,7 @@ const S = {
         { version: 'v1', base_version: 'base-v7', size_bytes: 0.4 * 2 ** 30, built_at: '2026-09-21 12:00:00',
           status: 'built', active: true, in_use_by: ['s-alpha', 's-bravo'] }] },
   ],
-  build: { running: false, variant: null, phase: null },
+  build: { running: false, variant: null, mode: null, phase: null, log: [] },
   packages: [
     { id: 1, project_slug: 'alpha', source: 'agent', manager: 'pip', package: 'requests',
       version_req: '>=2.31', resolved_version: '2.32.3',
@@ -216,6 +217,21 @@ function staticHalf(b) {
   const { rss_bytes, cpu_pct, uptime_s, inflight, disk, ...rest } = b   // eslint-disable-line no-unused-vars
   return rest
 }
+function pkg(id) { return S.packages.find((x) => x.id === Number(id)) || fail(404, 'no such package request') }
+// the server's reach fields: projects on the variant directly, and through
+// variants built FROM it
+function reach(variant) {
+  const direct = usedBy(variant)
+  const via = {}
+  for (const v of S.variants) if (v.from === variant && v.used_by.length) via[v.name] = v.used_by
+  const all = [...new Set([...direct, ...Object.values(via).flat()])]
+  return { all, direct, via }
+}
+function pkgRow(p) {
+  const d = reach(p.target_variant)
+  return { ...p, variant_used_by: d.all, variant_used_by_detail: d,
+    card: `installs into \`${p.target_variant}\` — used by: ${d.all.join(', ') || 'no project yet'}` }
+}
 function box(id) { return S.boxes.find((b) => b.id === id) || fail(404, 'no such box') }
 function budget() {
   const used = S.boxes.reduce((n, b) => n + b.mem_mb, 0)
@@ -255,50 +271,102 @@ const routes = [
     image_built_at: '2026-09-20', image_stale: false, base_built: true, gateway: true, age_seconds: 5400 })],
   ['POST', /^\/api\/vm\/nuke$/, () => ({ running: true, inflight: 0, image_version: 'v7' })],
   ['POST', /^\/api\/vm\/rebuild$/, () => ({ ok: true })],
-  ['GET', /^\/api\/vm\/images$/, () => ({ variants: S.variants, build: S.build })],
+  ['GET', /^\/api\/vm\/images$/, () => ({
+    variants: S.variants.map((v) => ({ layer_packages: [], needs_build: false, ...v })),
+    build: { running: S.build.running, variant: S.build.variant, mode: S.build.mode || null,
+      phase: S.build.phase, log_tail: (S.build.log || []).slice(-20) } })],
+  ['GET', /^\/api\/vm\/images\/([^/]+)\/dockerfile$/, ([v]) => {
+    const vv = S.variants.find((x) => x.name === v) || fail(404, 'no such variant')
+    return { variant: v, recipe_sha256: vv.recipe_sha256,
+      dockerfile: `FROM jav3/${vv.from}\nRUN ${vv.recipe.trim().split('\n').join(' \\\n && ')}\n` }
+  }],
   ['POST', /^\/api\/vm\/images$/, (_, body) => {
     if (S.variants.some((v) => v.name === body.name)) fail(409, 'variant exists')
+    const recipe = body.packages.map((p) => `${p.manager}: ${p.package}${p.version ? `=${p.version}` : ''}`).join('\n')
     S.variants.push({ name: body.name, from: body.from, builtin: false, min_mem_mb: 512, used_by: [],
-      recipe: body.packages.map((p) => `${p.manager}: ${p.package}${p.version ? `=${p.version}` : ''}`).join('\n'),
-      recipe_sha256: 'new', versions: [] })
-    return { ok: true }
+      recipe, recipe_sha256: 'new0000', layer_packages: body.packages.map((p) => p.package),
+      needs_build: true, versions: [] })
+    return { name: body.name, from: body.from, recipe_sha256: 'new0000', recipe }
   }],
-  ['POST', /^\/api\/vm\/images\/([^/]+)\/build$/, ([v]) => {
+  ['POST', /^\/api\/vm\/images\/([^/]+)\/build$/, ([v], b) => {
+    if (!b.confirm) fail(400, 'confirm required')
     if (S.build.running) fail(409, 'a build is already running')
-    S.build = { running: true, variant: v, phase: 'booting builder' }
-    const phases = ['installing packages', 'recording baseline', 'freezing layer']
-    phases.forEach((p, i) => setTimeout(() => { S.build.phase = p; emit('vm-images', { type: 'build', ...S.build }) }, 1500 * (i + 1)))
+    const vv = S.variants.find((x) => x.name === v) || fail(404, 'no such variant')
+    const version = (vv.versions.length ? Math.max(...vv.versions.map((x) => Number(String(x.version).replace(/^v/, '')))) : 0) + 1
+    S.build = { running: true, variant: v, mode: 'kvm', phase: 'start', log: [] }
+    const ev = (o) => emit('vm-images', { type: 'image_build', variant: v, ...o })
+    ev({ phase: 'start', version })
+    setTimeout(() => { S.build.phase = 'boot'; ev({ phase: 'boot', box: `b-${v}` }) }, 800)
+    const lines = ['Get:1 http://deb.debian.org/debian bookworm InRelease', 'Unpacking ripgrep (14.1.0-1) ...',
+      '<img src=x onerror=alert(1)> (guest text: shown as text)', 'Setting up ripgrep (14.1.0-1) ...',
+      'baseline: 41 processes recorded']
+    lines.forEach((line, k) => setTimeout(() => { S.build.log.push(line); ev({ phase: 'log', line }) }, 1400 + 700 * k))
     setTimeout(() => {
-      const vv = S.variants.find((x) => x.name === v)
-      const n = (vv.versions.length ? Math.max(...vv.versions.map((x) => Number(x.version.slice(1)))) : 0) + 1
       vv.versions.forEach((x) => { x.active = false })
-      vv.versions.unshift({ version: `v${n}`, base_version: 'base-v7', size_bytes: 0.5 * 2 ** 30,
-        built_at: now(), status: 'built', active: true, in_use_by: [] })
-      S.build = { running: false, variant: null, phase: null }
-      emit('vm-images', { type: 'build_done', variant: v })
-    }, 6500)
-    return { ok: true }
+      vv.versions.unshift({ version: `v${version}`, base_version: 'base-v7', size_bytes: 0.5 * 2 ** 30,
+        built_at: now(), status: 'built', active: true, recipe_sha256: vv.recipe_sha256, in_use_by: [] })
+      vv.needs_build = false
+      S.packages.filter((p) => p.target_variant === v && p.status === 'approved')
+        .forEach((p) => Object.assign(p, { status: 'built', built_version: `v${version}` }))
+      S.build = { running: false, variant: null, mode: null, phase: null, log: [] }
+      ev({ phase: 'done', version, ok: true, error: null })
+    }, 1400 + 700 * lines.length + 500)
+    return { started: true, variant: v }
   }],
   ['GET', /^\/api\/packages$/, (_, __, q) => ({
-    packages: S.packages.filter((p) => !q.get('status') || p.status === q.get('status'))
-      .map((p) => ({ ...p, variant_used_by: usedBy(p.target_variant) })) })],
+    packages: S.packages.filter((p) => !q.get('status') || p.status === q.get('status')).map(pkgRow) })],
   ['POST', /^\/api\/packages$/, (_, b) => {
-    const row = { id: S.nextId++, project_slug: null, source: 'operator', manager: b.manager,
-      package: b.package, version_req: b.version || null, resolved_version: b.version || '(resolving)',
-      integrity: null, requested_command: null,
-      canonical_command: `${b.manager} install ${b.package}${b.version ? `==${b.version}` : ''}`,
-      reason: b.reason, status: 'pending', target_variant: b.target_variant, created_at: now() }
-    S.packages.unshift(row)
-    return row
+    const list = b.packages || [{ manager: b.manager, package: b.package, version: b.version }]
+    const target = b.new_variant || b.target_variant || 'main'
+    const out = []
+    const skipped = []
+    for (const x of list) {
+      if (!x.package || /[\s/;|&$`]/.test(x.package)) { skipped.push({ package: x.package, error: 'not a bare package name' }); continue }
+      const row = { id: S.nextId++, project_slug: null, source: 'operator', manager: x.manager,
+        package: x.package, version_req: x.version || null, resolved_version: null,
+        integrity: null, requested_command: null, canonical_command: null, reason: b.reason,
+        conversation_id: null, status: 'pending', target_variant: target, decided_by: null,
+        decided_at: null, built_version: null, created_at: now() }
+      S.packages.unshift(row)
+      out.push(pkgRow(row))
+    }
+    return { packages: out, skipped, target_variant: target }
+  }],
+  ['POST', /^\/api\/packages\/resolve$/, () => {
+    let n = 0
+    for (const p of S.packages) {
+      if (p.status === 'pending' && !p.resolved_version) {
+        n += 1
+        const v = p.version_req || '1.0.0'
+        Object.assign(p, { resolved_version: v, integrity: `sha256:${'ab'.repeat(16)}`,
+          canonical_command: `${p.manager} install ${p.package}==${v}` })
+      }
+    }
+    emit('vm-images', { type: 'image_build', phase: 'resolved', count: n, error: null })
+    return { resolved: n }
   }],
   ['POST', /^\/api\/packages\/(\d+)\/approve$/, ([id], b) => {
-    if (!b.acknowledge) fail(400, 'acknowledge required')
-    const p = S.packages.find((x) => x.id === Number(id))
-    Object.assign(p, { status: 'approved', target_variant: b.target_variant, decided_at: now() })
-    return p
+    if (!b.acknowledge) fail(400, 'approval needs acknowledge: true')
+    const p = pkg(id)
+    if (p.status !== 'pending') fail(409, `cannot approve a ${p.status} request`)
+    Object.assign(p, { status: 'approved', target_variant: b.target_variant || p.target_variant,
+      decided_by: 'operator', decided_at: now() })
+    const vv = S.variants.find((x) => x.name === p.target_variant)
+    if (vv) { vv.needs_build = true; vv.layer_packages = [...(vv.layer_packages || []), p.package] }
+    let started = false
+    if (b.build && !S.build.running) {
+      routes.find((r) => r[0] === 'POST' && String(r[1]).includes('build'))[2]([p.target_variant], { confirm: true })
+      started = true
+    }
+    return { ...pkgRow(p), build_started: started }
   }],
-  ['POST', /^\/api\/packages\/(\d+)\/reject$/, ([id]) =>
-    Object.assign(S.packages.find((x) => x.id === Number(id)), { status: 'rejected', decided_at: now() })],
+  ['POST', /^\/api\/packages\/(\d+)\/reject$/, ([id], b) =>
+    pkgRow(Object.assign(pkg(id), { status: 'rejected', decided_at: now(), reason: b.reason || pkg(id).reason }))],
+  ['POST', /^\/api\/packages\/(\d+)\/remove$/, ([id]) => {
+    const p = pkg(id)
+    if (!['approved', 'built', 'failed'].includes(p.status)) fail(409, `cannot remove a ${p.status} request`)
+    return pkgRow(Object.assign(p, { status: 'removed' }))
+  }],
   ['GET', /^\/api\/services$/, (_, __, q) => ({
     services_lan_ip: S.lanIp, services_lan_ip_configured: S.lanConfigured,
     lan_error: S.lanConfigured && !S.lanIp ? 'the address is not on any interface' : null,

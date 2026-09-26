@@ -6,13 +6,13 @@
 // diffs — was written by the agent. All of it renders as text nodes.
 import { useEffect, useState } from 'react'
 import { Button, Modal, Select, Tag } from '../components/index.js'
-import { notifyError } from '../notify.js'
+import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { ago } from '../format.js'
 import { approvePackage, rejectPackage } from './api/packages.js'
 import { approveService, getService, rejectService } from './api/services.js'
 import {
-  diffLines, EXPOSE_LABEL, exposeChoices, exposeDefault, exposePayload, PLACEMENTS,
+  diffLines, EXPOSE_LABEL, exposeChoices, exposeDefault, exposePayload, packageReach, PLACEMENTS,
 } from './logic.js'
 import { ProjectList } from './ui.jsx'
 
@@ -41,18 +41,25 @@ export function PackageSummary({ p }) {
 }
 
 // The approval card: the variant it installs into, and every project that
-// variant reaches (operator decision 0.2).
+// variant reaches (operator decision 0.2) — directly, or through a variant
+// built from it. For the row's own target the server's `card` sentence and
+// `variant_used_by_detail` are shown as sent.
 export function PackageApprove({ p, variants, onClose, onDone }) {
   const [target, setTarget] = useState(p?.target_variant || 'main')
   const [ack, setAck] = useState(false)
+  const [build, setBuild] = useState(false)
   const [busy, setBusy] = useState(false)
-  useEffect(() => { setTarget(p?.target_variant || 'main'); setAck(false) }, [p])
+  useEffect(() => { setTarget(p?.target_variant || 'main'); setAck(false); setBuild(false) }, [p])
   if (!p) return null
-  const v = (variants || []).find((x) => x.name === target)
-  const users = v ? (v.used_by || []) : (target === p.target_variant ? p.variant_used_by || [] : [])
+  const reach = packageReach(p, target, { variants })
+  const names = [...new Set([...(variants || []).map((x) => x.name), p.target_variant].filter(Boolean))]
   async function go() {
     setBusy(true)
-    try { await approvePackage(p.id, target); onDone() } catch (e) { notifyError(e) }
+    try {
+      const r = await approvePackage(p.id, { targetVariant: target, build })
+      if (build) notify(r?.build_started ? `building ${target}` : `approved — the build of ${target} did not start (busy?)`)
+      onDone()
+    } catch (e) { notifyError(e) }
     setBusy(false)
   }
   return (
@@ -64,14 +71,23 @@ export function PackageApprove({ p, variants, onClose, onDone }) {
       <PackageSummary p={p} />
       <div className="row">
         <Select label="Installs into" value={target} onChange={(e) => setTarget(e.target.value)}
-                options={(variants && variants.length ? variants.map((x) => x.name) : [target])} />
+                options={names.length ? names : [target]} />
       </div>
-      <p className="bx-reach">
-        installs into <code>{target}</code> — used by: <ProjectList slugs={users} empty="no project yet" />
-      </p>
+      {target === p.target_variant && p.card
+        ? <p className="bx-reach">{p.card}</p>
+        : <p className="bx-reach">installs into <code>{target}</code> — used by:{' '}
+            <ProjectList slugs={reach.all} empty="no project yet" /></p>}
+      {reach.via.length > 0 && (
+        <p className="dim small">
+          {reach.via.map(([v, slugs]) => (
+            <span key={v}>via <code>{v}</code>: <ProjectList slugs={slugs} />{' '}</span>))}
+        </p>)}
       <p className="dim small">Every project on <code>{target}</code> gets it at the variant's next
-        version; a build is a separate click. The host runs the "will run" command, never the
-        agent's.</p>
+        version. The host runs the "will run" command, never the agent's.</p>
+      <label className="check-row">
+        <input type="checkbox" checked={build} onChange={(e) => setBuild(e.target.checked)} />
+        <span>Build a new version of <code>{target}</code> now</span>
+      </label>
       <label className="check-row">
         <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
         <span>I have checked the package name, version and integrity</span>

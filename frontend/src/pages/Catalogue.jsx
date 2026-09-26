@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react'
 import { Button, EmptyState, Input, Select, Tag } from '../components/index.js'
-import { listPackages } from '../boxes/api/packages.js'
+import { notify, notifyError } from '../notify.js'
+import { useAsk } from '../ask.jsx'
+import { listPackages, removePackage, resolvePackages } from '../boxes/api/packages.js'
 import { listImages } from '../boxes/api/images.js'
-import { filterCatalogue, PKG_STATUSES } from '../boxes/logic.js'
+import { filterCatalogue, PKG_REMOVABLE, PKG_STATUSES } from '../boxes/logic.js'
 import { LoadError, Unavailable, useLoad } from '../boxes/ui.jsx'
 import { PackageApprove, PackageSummary, usePackageReject } from '../boxes/RequestCards.jsx'
 
@@ -22,6 +24,26 @@ export default function Catalogue() {
   const [f, setF] = useState({ status: '', manager: '', q: '' })
   const [approving, setApproving] = useState(null)
   const reject = usePackageReject(pk.reload)
+  const [resolving, setResolving] = useState(false)
+  const ask = useAsk()
+
+  // a dry-run of every unresolved pending row, in a builder box: fills in
+  // resolved_version / integrity / the command the host will run
+  async function resolve() {
+    setResolving(true)
+    try {
+      const r = await resolvePackages()
+      notify(r?.error ? `resolve: ${r.error}` : `resolved ${r?.resolved ?? 0} package(s)`)
+      pk.reload()
+    } catch (e) { notifyError(e) }
+    setResolving(false)
+  }
+  async function remove(p) {
+    if (!await ask.confirm(`Remove ${p.package} from ${p.target_variant}?`, {
+      body: `The next build of ${p.target_variant} leaves it out. Versions already built keep it.`,
+      confirmLabel: 'Remove', danger: true })) return
+    try { await removePackage(p.id); pk.reload() } catch (e) { notifyError(e) }
+  }
 
   const rows = useMemo(() => filterCatalogue(pk.data, f), [pk.data, f])
   const pending = (pk.data || []).filter((r) => r.status === 'pending').length
@@ -38,6 +60,11 @@ export default function Catalogue() {
                 options={[{ value: '', label: 'Every manager' }, 'apt', 'pip', 'npm']} />
         <Input aria-label="search" placeholder="package, project, reason…" value={f.q}
                onChange={(e) => setF({ ...f, q: e.target.value })} />
+        <span className="grow" />
+        {pending > 0 && (
+          <Button variant="ghost" disabled={resolving} onClick={resolve}
+                  title="dry-run every unresolved pending request in a builder box">
+            {resolving ? 'Resolving…' : 'Resolve pending'}</Button>)}
       </div>
       {!pk.data && !pk.error && <div className="dim">…</div>}
       {pk.data && rows.length === 0 && <EmptyState>no package requests{f.status || f.manager || f.q ? ' match' : ''}</EmptyState>}
@@ -46,6 +73,7 @@ export default function Catalogue() {
           <div key={p.id} className={`sbx-row bx-cat-row${p.status === 'pending' ? ' sev-warn' : ''}`}>
             <div className="grow">
               <PackageSummary p={p} />
+              {p.card && <div className="small bx-reach">{p.card}</div>}
             </div>
             <div className="sbx-right bx-cat-right">
               <Tag tone={STATUS_TONE[p.status]}>{p.status}</Tag>
@@ -57,6 +85,8 @@ export default function Catalogue() {
                   <Button variant="ghost" danger onClick={() => reject(p)}>Reject</Button>
                 </span>
               )}
+              {PKG_REMOVABLE.has(p.status) && (
+                <Button variant="ghost" danger onClick={() => remove(p)}>Remove</Button>)}
             </div>
           </div>
         ))}

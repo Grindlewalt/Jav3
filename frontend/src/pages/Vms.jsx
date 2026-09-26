@@ -9,12 +9,15 @@ import { ago, ts } from '../format.js'
 import {
   destroyBox, followBoxes, listBoxes, nukeShared, rebuildBase, startBox, stopBox, vmStatus,
 } from '../boxes/api/vms.js'
-import { buildVariant, createVariant, followBuilds, listImages } from '../boxes/api/images.js'
-import { requestPackage } from '../boxes/api/packages.js'
+import {
+  buildVariant, createVariant, followBuilds, listImages, variantDockerfile,
+} from '../boxes/api/images.js'
+import { requestPackages } from '../boxes/api/packages.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import { deletePersist, getPersist, importPersist, listProjects } from '../boxes/api/persist.js'
 import {
-  budgetSegments, bytes, mb, persistDaysLeft, sortBoxes, uptime, validPackage, validVersion,
+  applyBuildEvent, budgetSegments, buildNeedsReload, bytes, mb, mergeBuildRest, persistDaysLeft, sortBoxes,
+  uptime, validPackage, validVersion, verLabel,
 } from '../boxes/logic.js'
 import {
   Confirm, LoadError, PlacementTag, ProjectList, RuntimeStatus, RuntimeTag, StateDot, Unavailable, useLoad,
@@ -376,15 +379,21 @@ function PersistRetirement() {
 
 export function Images() {
   const { data, error, unavailable, reload } = useLoad(listImages, { every: 0 })
-  const building = !!data?.build?.running
+  const [bs, setBs] = useState(null)       // the build panel: logic.buildState
   const [dlg, setDlg] = useState(null)
 
-  // live on the vm-images topic when the host carries it; poll while a
-  // build runs either way
-  useEffect(() => followBuilds(() => reload()), [reload])
+  // seed from the REST read; the `vm-images` topic on the shared stream
+  // carries the rest (start, boot, log lines, done, resolved)
+  useEffect(() => { if (data) setBs((cur) => mergeBuildRest(cur, data.build)) }, [data])
+  useEffect(() => followBuilds((ev) => {
+    setBs((cur) => applyBuildEvent(cur, ev))
+    if (buildNeedsReload(ev)) reload()
+  }), [reload])
+  const building = !!bs?.running
+  // poll while a build runs, in case the stream is down
   useEffect(() => {
     if (!building) return undefined
-    const t = setInterval(reload, 3000)
+    const t = setInterval(reload, 5000)
     return () => clearInterval(t)
   }, [building, reload])
 
@@ -397,13 +406,7 @@ export function Images() {
       <BaseImage />
       {unavailable && <Unavailable what="The image manager" />}
       <LoadError error={error} />
-      {building && (
-        <div className="sbx-card bx-building">
-          <span className="run-dot running" aria-hidden="true" />
-          Building <b className="mono">{data.build.variant}</b>
-          <span className="dim"> — {data.build.phase || 'working'}</span>
-        </div>
-      )}
+      {bs && (bs.running || bs.last || bs.log.length > 0) && <BuildPanel bs={bs} />}
       <section className="sbx-sec">
         <div className="sbx-sec-head"><h3>Variants</h3>
           <span className="sec-count">{data?.variants.length ?? '…'}</span></div>
@@ -418,6 +421,8 @@ export function Images() {
         <p>A builder box (about 1 GB of RAM, counted against the budget) boots
           from <code>{dlg?.from}</code>, runs the recipe through the monitored proxy, records the
           process baseline, and freezes the result as a new version of <code>{dlg?.name}</code>.</p>
+        {(dlg?.layer_packages || []).length > 0 && (
+          <p>This layer installs: <span className="mono small">{dlg.layer_packages.join('  ')}</span></p>)}
         <p>Boxes already running keep the version they booted; each picks up the new one at its
           next boot. Used by: <ProjectList slugs={dlg?.used_by} empty="no project yet" />.</p>
       </Confirm>
@@ -425,23 +430,71 @@ export function Images() {
   )
 }
 
+// The running (or last) build: phase, box, and the builder's log lines. The
+// lines come from the builder guest: one text node.
+function BuildPanel({ bs }) {
+  return (
+    <section className="sbx-card bx-building-card">
+      <div className="bx-building">
+        {bs.running && <span className="run-dot running" aria-hidden="true" />}
+        {bs.running
+          ? <>Building <b className="mono">{bs.variant}</b>
+              <span className="dim"> — {bs.phase || 'working'}{bs.box ? ` in ${bs.box}` : ''}
+                {bs.mode ? ` · ${bs.mode}` : ''}</span></>
+          : bs.last
+            ? <>Last build of <b className="mono">{bs.last.variant}</b>{' '}
+                {bs.last.ok
+                  ? <Tag tone="done">built{bs.last.version != null ? ` ${verLabel(bs.last.version)}` : ''}</Tag>
+                  : <Tag tone="error">failed</Tag>}
+                {bs.last.error && <span className="error small"> {bs.last.error}</span>}</>
+            : <span className="dim">build log</span>}
+      </div>
+      {bs.resolved && (
+        <div className="dim small">package dry-run: {bs.resolved.count} resolved
+          {bs.resolved.error ? ` — ${bs.resolved.error}` : ''}</div>)}
+      {bs.log.length > 0 && (
+        <details open={bs.running}>
+          <summary className="small">log ({bs.log.length} line{bs.log.length === 1 ? '' : 's'}) —
+            written by the builder guest</summary>
+          <pre className="mono small bx-log-tail">{bs.log.join('\n')}</pre>
+        </details>
+      )}
+    </section>
+  )
+}
+
 function Variant({ v, building, onBuild }) {
   const versions = v.versions || []
+  const [docker, setDocker] = useState(null)
+  const loadDocker = (e) => {
+    if (!e.currentTarget.open || docker) return
+    variantDockerfile(v.name).then((r) => setDocker(r)).catch((err) => setDocker({ error: err }))
+  }
   return (
     <div className="sbx-card bx-variant">
       <div className="bx-variant-head">
         <b className="mono">{v.name}</b>
         {v.builtin && <Tag>built-in</Tag>}
+        {v.needs_build && <Tag tone="pending" title="its recipe changed since the active version was built">
+          needs a build</Tag>}
         <span className="dim small">from {v.from}</span>
         {v.min_mem_mb ? <span className="dim small">· needs ≥ {mb(v.min_mem_mb)}</span> : null}
         <span className="grow" />
         <Button variant="ghost" disabled={building} onClick={onBuild}>Build new version</Button>
       </div>
       <div className="small bx-used">used by: <ProjectList slugs={v.used_by} empty="no project" /></div>
+      {(v.layer_packages || []).length > 0 && (
+        <div className="small">this layer: <span className="mono">{v.layer_packages.join('  ')}</span></div>)}
       <details className="bx-recipe">
         <summary className="small">recipe
           {v.recipe_sha256 && <span className="dim mono"> · {String(v.recipe_sha256).slice(0, 12)}</span>}</summary>
         <pre className="mono small">{v.recipe || '(empty)'}</pre>
+      </details>
+      <details className="bx-recipe" onToggle={loadDocker}>
+        <summary className="small">Dockerfile <span className="dim">(the docker runtime's build)</span></summary>
+        {!docker && <div className="dim small">…</div>}
+        {docker?.error && <div className="error small">{docker.error.detail || String(docker.error)}</div>}
+        {docker?.dockerfile != null && <pre className="mono small">{docker.dockerfile}</pre>}
       </details>
       {versions.length === 0
         ? <div className="dim small">never built</div>
@@ -449,16 +502,16 @@ function Variant({ v, building, onBuild }) {
           <ul className="staged-list rev-list bx-versions">
             {versions.map((x) => (
               <li key={x.version}>
-                <span className="mono">{x.version}</span>
+                <span className="mono">{verLabel(x.version)}</span>
                 {x.active && <Tag tone="done">active</Tag>}
-                <Tag tone={x.status === 'failed' ? 'error' : x.status === 'built' ? undefined : 'running'}>
+                <Tag tone={x.status === 'failed' ? 'error' : x.status === 'built' || x.status === 'ready' ? undefined : 'running'}>
                   {x.status}</Tag>
                 <span className="dim small">on {x.base_version}</span>
                 <span className="dim small">{bytes(x.size_bytes)}</span>
                 <span className="dim small">{ts(x.built_at)}</span>
                 <span className="grow" />
                 {(x.in_use_by || []).length > 0 && (
-                  <span className="small">in use by <ProjectList slugs={x.in_use_by} /></span>)}
+                  <span className="small">in use by boxes <ProjectList slugs={x.in_use_by} /></span>)}
               </li>
             ))}
           </ul>
@@ -527,14 +580,15 @@ function AddPackages({ variants, onDone }) {
         manager: r.manager, package: r.package.trim(), version: r.version.trim() || null }))
       if (isNew) {
         await createVariant({ name: newName, from, packages: pkgs })
+        notify(`variant ${newName} created — build it to use it`)
       } else {
-        for (const p of pkgs) {
-          await requestPackage({ ...p, reason: reason.trim(), target_variant: target })
-        }
+        const r = await requestPackages({ packages: pkgs, reason: reason.trim(), target_variant: target })
+        const skipped = r.skipped.map((x) => `${x.package}: ${x.error}`)
+        notify(`${r.packages.length} package request(s) filed into ${r.target_variant || target}`
+          + ' — approve them in the Catalogue'
+          + (skipped.length ? `. Skipped: ${skipped.join('; ')}` : ''))
       }
       setRows([{ ...blank }]); setReason(''); setNewName('')
-      notify(isNew ? `variant ${newName} created — build it to use it`
-        : `${pkgs.length} package request(s) filed — approve them in the Catalogue`)
       onDone()
     } catch (err) { notifyError(err) }
     setBusy(false)
