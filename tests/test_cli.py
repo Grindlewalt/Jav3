@@ -2078,6 +2078,53 @@ async def test_tui_network_groups_by_project_with_allow_deny_and_baseline(cfg):
         assert await _until(pilot, lambda: (
             "PUT", "/api/egress/policy/demo",
             {"allow": ["demo.dev", "x.org"], "deny": ["tracker.example"]}) in _posts(seen))
+        # the no-project row is the Default profile, said as such (not a project)
+        sub = _text(scr.query_one("#sec-sub"))
+        assert "no project" in sub and "Default" in sub
+
+
+async def test_tui_network_allow_deny_a_host_and_promote(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause(0.3)
+        scr = await _screen(pilot, app, "/security network", "SecurityScreen")
+        assert await _until(pilot, lambda: any("⌂ site" in r for r in _rows(scr)))
+        # y on site's denied traffic: the project's own allow list
+        scr.select_key("e31")
+        await pilot.press("y")
+        assert await _modal(pilot, app, "Confirm")
+        assert "site" in app.screen.question and "evil.example" in app.screen.question
+        await pilot.press("y")
+        assert await _until(pilot, lambda: ("POST", "/api/egress/allow",
+                                            {"project": "site", "host": "evil.example"})
+                            in _posts(seen))
+        # n on demo's traffic: appended to demo's own deny list
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("e30")
+        await pilot.press("n")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: (
+            "PUT", "/api/egress/policy/demo",
+            {"deny": ["tracker.example", "pypi.org"]}) in _posts(seen))
+        # u on demo's policy row: a host, then a profile, then the promote route
+        assert await _until(pilot, lambda: app.screen is scr)
+        scr.select_key("Pdemo")
+        await pilot.press("u")
+        assert await _modal(pilot, app, "Picker")
+        assert [r[1] for r in app.screen.rows] == ["demo.dev", "tracker.example"]
+        await pilot.press("down", "enter")                    # tracker.example (deny)
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker"
+                            and app.screen.rows[0][0] == "own")
+        await pilot.press("enter")                            # its own profile
+        assert await _modal(pilot, app, "Confirm")
+        assert "deny" in app.screen.question and "Default" in app.screen.question
+        await pilot.press("y")
+        assert await _until(pilot, lambda: (
+            "POST", "/api/egress/policy/demo/promote",
+            {"host": "tracker.example", "list": "deny", "profile_id": None}) in _posts(seen))
 
 
 async def test_tui_persistent_tree_mismatch_stop_and_revoke(cfg):

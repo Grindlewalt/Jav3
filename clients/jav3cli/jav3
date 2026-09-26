@@ -2811,7 +2811,8 @@ def build_tui(base: str, token: str, **kw):
         if "project_allow" in p or "profile" in p:
             prof = p.get("profile") or {}
             allow, deny = _jlist(p.get("project_allow")), _jlist(p.get("project_deny"))
-            return (f"{head} [$text-muted]profile[/] [b]{_esc(prof.get('name') or '?')}[/] "
+            off = f" {RED} network off [/]" if prof.get("network_off") else ""
+            return (f"{head} [$text-muted]profile[/] [b]{_esc(prof.get('name') or '?')}[/]{off} "
                     f"[$text-muted]({_esc(prof.get('default') or '?')} by default) ·[/] "
                     f"[$success]allow {len(allow)}[/]"
                     f"{_esc(': ' + _short(', '.join(allow), 40)) if allow else ''} "
@@ -2900,7 +2901,9 @@ def build_tui(base: str, token: str, **kw):
         COUNTED = ("queue", "secrets")    # tabs whose count shows in the header
         FOOT = {"queue": "[$primary]y[/] approve  [$primary]n[/] deny  "
                          "[$primary]a[/] acknowledge",
-                "network": "[$primary]p[/] project  [$primary]e[/] edit allow/deny",
+                "network": "[$primary]p[/] project  [$primary]y[/] allow host  "
+                           "[$primary]n[/] deny host  [$primary]e[/] edit allow/deny  "
+                           "[$primary]u[/] promote to profile",
                 "logs": "[$primary]f[/] filter kind  [$primary]a[/] acknowledge",
                 "secrets": "[$primary]a[/] add  [$primary]h[/] hosts  "
                            "[$primary]v[/] new value  [$primary]d[/] delete",
@@ -2954,6 +2957,8 @@ def build_tui(base: str, token: str, **kw):
             Binding("s", "stop", show=False),
             Binding("e", "edit", show=False),
             Binding("b", "build", show=False),
+            Binding("u", "promote", show=False),
+            Binding("l", "logs", show=False),
             Binding("enter", "enter", show=False),
         ]
 
@@ -3152,9 +3157,9 @@ def build_tui(base: str, token: str, **kw):
                 if slug in policies:
                     out.append({"type": "policy", "key": f"P{slug}",
                                 "raw": {"slug": slug, "policy": policies[slug] or {}}})
-                elif slug == general:
+                elif slug == general or slug == IMAGE_BUILD:
                     out.append({"type": "group", "key": f"P{slug}",
-                                "raw": {"slug": "general (no project)"}})
+                                "raw": {"slug": _slug_says(slug)}})
                 evs = sorted(by.get(slug, []), key=lambda e: e.get("created_at") or "",
                              reverse=True)
                 out += [{"type": "net", "key": f"e{e.get('id')}", "raw": e,
@@ -3410,10 +3415,13 @@ def build_tui(base: str, token: str, **kw):
                 v = _jlist(v)
                 return _esc(", ".join(v)) if v else "[$text-muted]none[/]"
             return "\n".join([
-                "[$primary]e[/] edit this project's allow and deny lists", "",
+                "[$primary]e[/] edit this project's allow and deny lists   [$primary]u[/] "
+                "promote one of its hosts into a profile", "",
                 f"[b]⌂ {_esc(slug)}[/]  profile [b]{_esc(prof.get('name') or '?')}[/] "
                 f"[$text-muted](default: {_esc(prof.get('default') or '?')}; deny beats "
-                "allow)[/]",
+                "allow)[/]"
+                + (f"  {RED} network off: nothing leaves [/]" if prof.get("network_off")
+                   else ""),
                 f"[$success]project allow:[/] {ls(p.get('project_allow'))}",
                 f"[$error]project deny:[/]  {ls(p.get('project_deny'))}",
                 f"[$text-muted]profile baseline allow:[/] {ls(base.get('allow_hosts'))}",
@@ -3574,7 +3582,15 @@ def build_tui(base: str, token: str, **kw):
             where = (f"[b]⌂ {_esc(self.project)}[/]" if self.project
                      else "[b]all projects[/]")
             line = where
-            if pol and ("project_allow" in pol or "profile" in pol):
+            if not self.project and pol and "profile" in pol:
+                prof = pol.get("profile") or {}
+                line += ("  [$text-muted]grouped by project: each project's own allow and "
+                         "deny lists over its profile's baseline[/]\n[$text-muted]traffic "
+                         "with no project (the shared box outside a turn) follows[/] "
+                         f"[b]{_esc(prof.get('name') or '?')}[/] [$text-muted]("
+                         f"{_esc(prof.get('default') or '?')} by default); allowing it "
+                         "names a project[/]")
+            elif pol and ("project_allow" in pol or "profile" in pol):
                 prof = pol.get("profile") or {}
                 line += (f"  [$text-muted]profile[/] [b]{_esc(prof.get('name') or '?')}[/] "
                          f"[$text-muted]({_esc(prof.get('default') or '?')} by default) · "
@@ -3698,10 +3714,18 @@ def build_tui(base: str, token: str, **kw):
         def action_approve(self) -> None:
             if self.tab == "queue":
                 self._act(self._verdict(True))
+            elif self.tab == "network":
+                self._act(self._net_host(True))
 
         def action_deny(self) -> None:
             if self.tab == "queue":
                 self._act(self._verdict(False))
+            elif self.tab == "network":
+                self._act(self._net_host(False))
+
+        def action_promote(self) -> None:
+            if self.tab == "network":
+                self._act(self._promote())
 
         def action_a(self) -> None:
             if self.tab in ("queue", "logs"):
@@ -4146,6 +4170,98 @@ def build_tui(base: str, token: str, **kw):
                 self._fail("no project to put it in")
                 return None
             return await self.app.push_screen_wait(Picker(title, rows))
+
+        def _policy_of(self, slug: str) -> dict:
+            e = next((x for x in self.entries["network"] if x["type"] == "policy"
+                      and x["raw"]["slug"] == slug), None)
+            return (e["raw"].get("policy") or {}) if e else {}
+
+        async def _net_host(self, allow: bool) -> None:
+            """y / n on a traffic row: put its host on the project's OWN allow
+            (POST /api/egress/allow) or deny list (PUT the policy's deny)."""
+            e = self.selected()
+            if e is None or e["type"] != "net":
+                return
+            r = e["raw"]
+            host, slug = r.get("host") or "", r.get("project_slug") or self.GENERAL
+            if not host:
+                return
+            if slug == IMAGE_BUILD:
+                self._fail("image builds have a fixed policy: the registries only")
+                return
+            if slug == self.GENERAL:
+                slug = await self._pick_slug(
+                    f"{host} came with no project: {'allow' if allow else 'deny'} it for")
+                if slug is None:
+                    return
+            if allow:
+                if await self._confirm(
+                        f"Allow {host} for {slug}?",
+                        f"Adds exactly '{host}' to {slug}'s own allow list. Its profile's "
+                        "baseline is unchanged, and a deny on either list still wins."):
+                    await self._send("POST", "/api/egress/allow", f"allowed {host}",
+                                     json={"project": slug, "host": host})
+                return
+            pol = self._policy_of(slug)
+            if not pol:
+                try:
+                    pol = await self.app.api("GET", f"/api/egress/policy/{slug}") or {}
+                except CliError as err:
+                    self._fail(str(err))
+                    return
+            deny = _jlist(pol.get("project_deny"))
+            if host in deny:
+                self._fail(f"{host} is already on {slug}'s deny list")
+                return
+            if await self._confirm(
+                    f"Deny {host} for {slug}?",
+                    f"Adds '{host}' to {slug}'s own deny list (deny beats allow, the "
+                    "profile's lists included). Its other lists are unchanged."):
+                await self._send("PUT", f"/api/egress/policy/{slug}", f"denied {host}",
+                                 json={"deny": deny + [host]})
+
+        async def _promote(self) -> None:
+            """u on a project's policy row: move one host from its own list onto a
+            profile's list of the same kind (POST .../promote)."""
+            e = self.selected()
+            if e is None or e["type"] != "policy":
+                return
+            slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
+            rows = ([(f"allow\t{h}", h, "on its allow list")
+                     for h in _jlist(p.get("project_allow"))]
+                    + [(f"deny\t{h}", h, "on its deny list")
+                       for h in _jlist(p.get("project_deny"))])
+            if not rows:
+                self._fail(f"{slug} has no host of its own to promote")
+                return
+            pick = await self.app.push_screen_wait(Picker(
+                f"{slug}: which host goes up to a profile", rows))
+            if pick is None:
+                return
+            which, host = pick.split("\t", 1)
+            own = p.get("profile") or {}
+            prows = [("own", f"{own.get('name') or '?'} (its own profile)",
+                      "every project on it gets the host")]
+            prows += [(str(x.get("id")), x.get("name") or "?",
+                       f"{len(_jlist(x.get('projects')))} project(s)")
+                      for x in self.profiles if x.get("id") != own.get("id")]
+            pid = await self.app.push_screen_wait(Picker(f"Promote {host} into", prows))
+            if pid is None:
+                return
+            target = next((x for x in self.profiles if str(x.get("id")) == pid), None)
+            name = own.get("name") if pid == "own" else (target or {}).get("name") or pid
+            users = ", ".join(_jlist((target or next(
+                (x for x in self.profiles if x.get("id") == own.get("id")), {})
+            ).get("projects"))) or "no other project"
+            if await self._confirm(
+                    f"Promote {host} to {name}'s {which} list?",
+                    f"Moves '{host}' off {slug}'s own {which} list onto profile {name}'s: "
+                    f"every project on {name} ({users}) is then under it. A profile "
+                    "change; it is logged as profile_changed."):
+                await self._send("POST", f"/api/egress/policy/{slug}/promote",
+                                 f"promoted {host} to {name}",
+                                 json={"host": host, "list": which,
+                                       "profile_id": None if pid == "own" else int(pid)})
 
         def _profile(self) -> dict | None:
             e = self.selected()
