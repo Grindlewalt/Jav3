@@ -4,6 +4,7 @@ import {
   budgetSegments, connCheck, diffLines, filterCatalogue, flattenTree, groupPolicy,
   mergeProcs, navState, nestProcs, parseHosts, persistDaysLeft, profilePayload,
   sortBoxes, treeTotals, uptime, validPackage, validateProfile, variantUsers, blankProfile,
+  exposeChoices, exposeDefault, exposePayload,
 } from '../logic.js'
 
 let n = 0
@@ -189,6 +190,29 @@ t('persistDaysLeft and uptime', () => {
   assert.equal(persistDaysLeft({}, now), null)
   assert.equal(uptime(3725), '1h 2m')
   assert.equal(uptime(null), '–')
+})
+
+t('exposure: never wider than asked, lan only with a valid services address', () => {
+  assert.deepEqual(exposeChoices('none', '10.0.0.9'), ['none'])
+  assert.deepEqual(exposeChoices('host', '10.0.0.9'), ['none', 'loopback'])
+  assert.deepEqual(exposeChoices('lan', ''), ['none', 'loopback'])
+  assert.deepEqual(exposeChoices('lan', '10.0.0.9'), ['none', 'loopback', 'lan'])
+  assert.equal(exposeDefault('lan', ''), 'loopback')
+  assert.equal(exposeDefault('lan', '10.0.0.9'), 'lan')
+  assert.equal(exposeDefault('host', ''), 'loopback')
+  assert.equal(exposeDefault('none', 'x'), 'none')
+})
+
+t('exposePayload sends canonical binds only, drops closed and impossible ports', () => {
+  const ports = [{ port: 8080, expose: 'host' }, { port: 9000, expose: 'lan' }, { port: 22, expose: 'none' }]
+  assert.deepEqual(exposePayload({}, ports), [])
+  assert.deepEqual(exposePayload({ 9000: 'lan', 8080: 'loopback', 22: 'none' }, ports, '10.0.0.9'),
+    [{ port: 8080, bind: 'loopback' }, { port: 9000, bind: 'lan' }])
+  // no LAN address any more: a stale lan choice is not sent
+  assert.deepEqual(exposePayload({ 9000: 'lan' }, ports, ''), [])
+  // legacy values never go out
+  assert.deepEqual(exposePayload({ 8080: 'host' }, ports), [])
+  assert.deepEqual(exposePayload({ 22: 'loopback' }, ports), [])
 })
 
 console.log(`${n} passed`)

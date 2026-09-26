@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, EmptyState, Tag, Toggle } from '../components/index.js'
-import { notifyError } from '../notify.js'
+import { Button, EmptyState, Modal, Tag, Toggle } from '../components/index.js'
+import { notify, notifyError } from '../notify.js'
 import { ago } from '../format.js'
 import { followProcs, listProcesses } from '../boxes/api/procs.js'
-import { listServices, revokeService, startService, stopService } from '../boxes/api/services.js'
 import {
-  bytes, connCheck, flattenTree, mergeProcs, normBoxProcs, sortBoxes, treeTotals,
+  listServices, revokeService, serviceLogs, startService, stopService,
+} from '../boxes/api/services.js'
+import {
+  SERVICE_STATE_TONE, bytes, connCheck, flattenTree, mergeProcs, normBoxProcs, sortBoxes, treeTotals,
 } from '../boxes/logic.js'
 import { Confirm, LoadError, PlacementTag, Unavailable, useLoad } from '../boxes/ui.jsx'
 
@@ -26,6 +28,7 @@ export default function Persistent() {
   const svc = useLoad(() => listServices(), { every: 20000 })
   const [onlyOdd, setOnlyOdd] = useState(false)
   const [dlg, setDlg] = useState(null)
+  const [logs, setLogs] = useState(null)
 
   useEffect(() => followProcs((ev) => setData((prev) => mergeProcs(prev || [], ev))), [setData])
 
@@ -39,7 +42,11 @@ export default function Persistent() {
     try { await startService(s.id); svc.reload() } catch (e) { notifyError(e) }
   }
   async function revoke(s, del) {
-    try { await revokeService(s.id, del); setDlg(null); svc.reload() } catch (e) { notifyError(e) }
+    try {
+      const r = await revokeService(s.id, del)
+      if (r?.data_deleted) notify(`service ${s.name}: revoked, /srv data deleted`)
+      setDlg(null); svc.reload()
+    } catch (e) { notifyError(e) }
   }
 
   if (unavailable) return <div className="bx-page"><Unavailable what="The process view" /></div>
@@ -63,8 +70,9 @@ export default function Persistent() {
         <Toggle checked={onlyOdd} onChange={setOnlyOdd} label="only boxes with something unexpected"
                 onText="only unexpected" offText="every box" />
       </div>
-      <ServiceList services={svc.data?.services} onStop={stop} onStart={start}
-                   onRevoke={(x) => setDlg(x)} />
+      <ServiceList services={svc.data?.services} relays={svc.data?.relays} onStop={stop}
+                   onStart={start} onRevoke={(x) => setDlg(x)} onLogs={setLogs} />
+      <ServiceLogs s={logs} onClose={() => setLogs(null)} />
       {!data && !error && <div className="dim">…</div>}
       {data && boxes.length === 0 && <EmptyState pad>no box is reporting</EmptyState>}
       {boxes.filter((b) => !onlyOdd || treeTotals(b.tree).unexpected || treeTotals(b.tree).mismatches)
@@ -85,8 +93,10 @@ export default function Persistent() {
 }
 
 // Every approved service, running or not, with the placement it was
-// approved with (decision 0.1: shown wherever a service is listed).
-function ServiceList({ services, onStop, onStart, onRevoke }) {
+// approved with (decision 0.1: shown wherever a service is listed), what the
+// box last reported (or "unreported"), the error it gave, and each exposed
+// port's relay. Start/Stop follow desired_state: that is what the host acts on.
+function ServiceList({ services, relays, onStop, onStart, onRevoke, onLogs }) {
   const approved = (services || []).filter((s) => s.status === 'approved')
   if (!approved.length) return null
   return (
@@ -94,26 +104,63 @@ function ServiceList({ services, onStop, onStart, onRevoke }) {
       <div className="sbx-sec-head"><h3>Services</h3>
         <span className="sec-count">{approved.length}</span></div>
       <ul className="staged-list rev-list">
-        {approved.map((s) => (
-          <li key={s.id}>
-            <span className={`run-dot ${s.state === 'running' ? 'done' : s.state === 'failed' ? 'error' : ''}`}
-                  aria-hidden="true" />
-            <b className="mono">{s.name}</b>
-            <span className="dim small">#{s.id} · {s.project_slug}{s.box_id ? ` · ${s.box_id}` : ''}</span>
-            <PlacementTag placement={s.placement} />
-            <Tag tone={s.state === 'running' ? 'done' : s.state === 'failed' ? 'error'
-              : s.state === 'unreported' ? 'pending' : undefined}>{s.state}</Tag>
-            {(s.expose_ports || []).map((p) => (
-              <Tag key={p.port} title="exposed port">{p.port} → {p.bind === 'lan' ? 'LAN' : 'host'}</Tag>))}
-            <span className="grow" />
-            {s.state === 'running'
-              ? <Button variant="ghost" onClick={() => onStop(s)}>Stop</Button>
-              : <Button variant="ghost" onClick={() => onStart(s)}>Start</Button>}
-            <Button variant="ghost" danger onClick={() => onRevoke(s)}>Revoke</Button>
-          </li>
-        ))}
+        {approved.map((s) => {
+          const want = s.desired_state === 'running'
+          const rel = (relays || []).filter((r) => r.service_id === s.id)
+          return (
+            <li key={s.id} className="bx-svc-row">
+              <span className={`run-dot ${s.state === 'running' ? 'done' : s.state === 'failed' ? 'error' : ''}`}
+                    aria-hidden="true" />
+              <b className="mono">{s.name}</b>
+              <span className="dim small">#{s.id} · {s.project_slug}{s.box_id ? ` · ${s.box_id}` : ''}</span>
+              <PlacementTag placement={s.placement} />
+              <Tag tone={SERVICE_STATE_TONE[s.state]}
+                   title={s.last_reported_at ? `last reported ${s.last_reported_at}` : 'never reported'}>
+                {s.state || 'unreported'}</Tag>
+              {!want && s.state === 'running' && <Tag tone="pending">stopping</Tag>}
+              {(s.expose_ports || []).map((p) => {
+                const r = rel.find((x) => x.port === p.port)
+                const bad = r && (r.error || !r.listening)
+                return (
+                  <Tag key={p.port} tone={bad ? 'error' : undefined}
+                       title={r ? `${r.address || ''} · ${r.conns} conn(s) · ${bytes(r.bytes_out)}↑ ${bytes(r.bytes_in)}↓${r.error ? ` · ${r.error}` : ''}`
+                         : 'no relay open'}>
+                    {p.port} → {p.bind === 'lan' ? 'LAN' : 'loopback'}</Tag>
+                )
+              })}
+              <span className="grow" />
+              <Button variant="ghost" onClick={() => onLogs(s)}>Logs</Button>
+              {want
+                ? <Button variant="ghost" onClick={() => onStop(s)}>Stop</Button>
+                : <Button variant="ghost" onClick={() => onStart(s)}>Start</Button>}
+              <Button variant="ghost" danger onClick={() => onRevoke(s)}>Revoke</Button>
+              {s.error && <div className="error small bx-svc-err">{s.error}</div>}
+            </li>
+          )
+        })}
       </ul>
     </section>
+  )
+}
+
+// The service's journal from its box. Guest-written: one text node in a <pre>.
+function ServiceLogs({ s, onClose }) {
+  const [text, setText] = useState(null)
+  const [err, setErr] = useState(null)
+  useEffect(() => {
+    if (!s) return
+    setText(null); setErr(null)
+    serviceLogs(s.id, 300).then((r) => setText(r.text)).catch(setErr)
+  }, [s])
+  if (!s) return null
+  return (
+    <Modal open title={`Logs: ${s.name} (#${s.id})`} onClose={onClose} width={760}
+           footer={<Button variant="ghost" onClick={onClose}>Close</Button>}>
+      <div className="dim small">written by the guest — untrusted</div>
+      {err && <div className="error small">{err.detail || String(err)}</div>}
+      {text == null && !err && <div className="dim">…</div>}
+      {text != null && <pre className="mono small bx-logs">{text || '(empty)'}</pre>}
+    </Modal>
   )
 }
 
@@ -179,7 +226,7 @@ function ProcRow({ r, svc, onFlip, onStop, onRevoke }) {
         <span className="bx-actions">
           {svc && <>
             <PlacementTag placement={svc.placement} />
-            <Button variant="ghost" disabled={svc.state !== 'running'} onClick={() => onStop(svc)}>Stop</Button>
+            <Button variant="ghost" disabled={svc.desired_state !== 'running'} onClick={() => onStop(svc)}>Stop</Button>
             <Button variant="ghost" danger onClick={() => onRevoke(svc)}>Revoke</Button>
           </>}
         </span>

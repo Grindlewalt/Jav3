@@ -11,7 +11,9 @@ import { useAsk } from '../ask.jsx'
 import { ago } from '../format.js'
 import { approvePackage, rejectPackage } from './api/packages.js'
 import { approveService, getService, rejectService } from './api/services.js'
-import { diffLines, PLACEMENTS } from './logic.js'
+import {
+  diffLines, EXPOSE_LABEL, exposeChoices, exposeDefault, exposePayload, PLACEMENTS,
+} from './logic.js'
 import { ProjectList } from './ui.jsx'
 
 // ---- packages ------------------------------------------------------------------
@@ -89,21 +91,17 @@ export function usePackageReject(onDone) {
 
 // ---- services ------------------------------------------------------------------
 
-const EXPOSE = [
-  { value: 'none', label: 'not exposed' },
-  { value: 'host', label: 'this host only (loopback)' },
-  { value: 'lan', label: 'LAN (services address)' },
-]
-
 // The service request, in full: the definition, what changed since the
 // approved version, the ports and where each is exposed, and the REQUIRED
 // placement choice (preselected from the project's profile, changeable here,
-// stored on the service row).
-export function ServiceRequest({ s, lanIp, profilePlacement, onDone }) {
+// stored on the service row). `lan` is {ip, configured, error} from the
+// list response.
+export function ServiceRequest({ s, lan, profilePlacement, onDone }) {
+  const lanIp = lan?.ip || ''
   const [full, setFull] = useState(null)
   const [placement, setPlacement] = useState(s.placement || profilePlacement || '')
-  const [expose, setExpose] = useState(() => Object.fromEntries((s.ports || []).map((p) => [p.port,
-    p.expose === 'lan' && !lanIp ? 'host' : (p.expose || 'none')])))
+  const [expose, setExpose] = useState(() => Object.fromEntries((s.ports || []).map((p) =>
+    [p.port, exposeDefault(p.expose, lanIp)])))
   const [ack, setAck] = useState(false)
   const [busy, setBusy] = useState(false)
   const ask = useAsk()
@@ -114,9 +112,7 @@ export function ServiceRequest({ s, lanIp, profilePlacement, onDone }) {
   async function approve() {
     setBusy(true)
     try {
-      const ports = Object.entries(expose).filter(([, v]) => v !== 'none')
-        .map(([port, v]) => ({ port: Number(port), bind: v === 'lan' ? 'lan' : 'loopback' }))
-      await approveService(s.id, { placement, expose: ports })
+      await approveService(s.id, { placement, exposePorts: exposePayload(expose, s.ports, lanIp) })
       onDone()
     } catch (e) { notifyError(e) }
     setBusy(false)
@@ -175,11 +171,15 @@ export function ServiceRequest({ s, lanIp, profilePlacement, onDone }) {
                 ? ` · asked for ${p.expose}` : ''}</span>
               <Select aria-label={`expose port ${p.port}`} value={expose[p.port] || 'none'}
                       onChange={(e) => setExpose((x) => ({ ...x, [p.port]: e.target.value }))}
-                      options={EXPOSE.filter((o) => o.value !== 'lan' || lanIp)} />
+                      options={exposeChoices(p.expose, lanIp)
+                        .map((v) => ({ value: v, label: EXPOSE_LABEL[v] }))} />
             </div>
           ))}
-          {!lanIp && <div className="dim small">LAN exposure is unavailable: no services LAN
-            address is configured (<code>services_lan_ip</code>).</div>}
+          {!lanIp && (s.ports || []).some((p) => p.expose === 'lan') && (
+            <div className="dim small">LAN exposure is unavailable: {lan?.configured
+              ? <>the configured address <code>{lan.configured}</code> was refused
+                  {lan.error ? <> ({lan.error})</> : null}.</>
+              : <>no services LAN address is configured (<code>services_lan_ip</code>).</>}</div>)}
           {lanIp && Object.values(expose).includes('lan') && (
             <div className="warn small">LAN ports bind on {lanIp} only — never on Jav3's own address.</div>)}
         </div>

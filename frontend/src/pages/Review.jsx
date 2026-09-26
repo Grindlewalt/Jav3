@@ -46,7 +46,7 @@ export function ReviewQueue({ slug }) {
   // the boxes requests (WP3 services, WP5 packages). Either route may not
   // exist on this server yet: then the section simply never shows.
   const [svcReqs, setSvcReqs] = useState([])
-  const [lanIp, setLanIp] = useState('')
+  const [lan, setLan] = useState(null)       // {ip, configured, error}
   const [pkgReqs, setPkgReqs] = useState([])
   const [profiles, setProfiles] = useState([])
   const [variants, setVariants] = useState(null)
@@ -92,7 +92,8 @@ export function ReviewQueue({ slug }) {
 
   function loadBoxReqs() {
     listServices(slug || undefined).then((r) => {
-      setSvcReqs(r.services.filter((x) => x.status === 'pending')); setLanIp(r.lanIp)
+      setSvcReqs(r.services.filter((x) => x.status === 'pending'))
+      setLan({ ip: r.lanIp, configured: r.lanConfigured, error: r.lanError })
     }).catch(() => setSvcReqs([]))
     listPackages('pending').then((rows) =>
       setPkgReqs(slug ? rows.filter((r) => r.project_slug === slug) : rows))
@@ -247,7 +248,7 @@ export function ReviewQueue({ slug }) {
             <span className="sec-count">{svcReqs.length}</span>
           </div>
           {svcReqs.map((x) => (
-            <ServiceRequest key={x.id} s={x} lanIp={lanIp}
+            <ServiceRequest key={x.id} s={x} lan={lan}
                             profilePlacement={placementOf(x.project_slug)}
                             onDone={loadBoxReqs} />
           ))}

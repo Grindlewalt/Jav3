@@ -103,8 +103,16 @@ const S = {
       artifact_sha256: 'c0ffee00c0ffee00', placement: 'per_project', expose_ports: [],
       status: 'approved', desired_state: 'running', supersedes_id: null, box_id: 's-bravo',
       state: 'running', last_reported_at: now(), created_at: '2026-09-25 10:00:00' },
+    { id: 12, project_slug: 'bravo', name: 'mailer', description: 'digest mailer',
+      command: ['python3', 'mail.py'], workdir: '.', files: ['mail.py'], ports: [],
+      restart: 'on-failure', egress_hosts: ['smtp.example.org'], env: {}, reason: 'send the digest',
+      artifact_sha256: 'beef', placement: 'per_project', expose_ports: [], status: 'approved',
+      desired_state: 'running', supersedes_id: null, box_id: 's-bravo', state: 'failed',
+      error: 'exited 1: ModuleNotFoundError: smtplib2', last_reported_at: now(),
+      created_at: '2026-09-25 11:00:00' },
   ],
   lanIp: '',
+  lanConfigured: '192.168.1.250',
   profiles: [
     { id: 1, name: 'Default', builtin: true, default_verdict: 'deny', network_off: false,
       allow_hosts: ['pypi.org', 'files.pythonhosted.org'], deny_hosts: [], secrets: [],
@@ -180,6 +188,15 @@ function procs() {
   ]
 }
 
+function svc(id) { return S.services.find((x) => x.id === Number(id)) || fail(404, 'no such service') }
+function relays(sid = null) {
+  return S.services.filter((s) => s.status === 'approved' && (sid == null || s.id === sid))
+    .flatMap((s) => (s.expose_ports || []).map((e) => ({
+      service_id: s.id, port: e.port, bind: e.bind,
+      address: e.bind === 'lan' ? `${S.lanIp}:${e.port}` : `127.0.0.1:${e.port}`,
+      box_id: s.box_id, listening: s.state === 'running', conns: 1, bytes_in: 4100, bytes_out: 88000,
+      error: null })))
+}
 function box(id) { return S.boxes.find((b) => b.id === id) || fail(404, 'no such box') }
 function budget() {
   const used = S.boxes.reduce((n, b) => n + b.mem_mb, 0)
@@ -258,29 +275,52 @@ const routes = [
   }],
   ['POST', /^\/api\/packages\/(\d+)\/reject$/, ([id]) =>
     Object.assign(S.packages.find((x) => x.id === Number(id)), { status: 'rejected', decided_at: now() })],
-  ['GET', /^\/api\/services$/, (_, __, q) => ({ services_lan_ip: S.lanIp,
+  ['GET', /^\/api\/services$/, (_, __, q) => ({
+    services_lan_ip: S.lanIp, services_lan_ip_configured: S.lanConfigured,
+    lan_error: S.lanConfigured && !S.lanIp ? 'the address is not on any interface' : null,
+    relays: relays(),
     services: S.services.filter((s) => !q.get('project') || s.project_slug === q.get('project'))
       .map(({ diff, ...s }) => s) })],   // eslint-disable-line no-unused-vars
   ['GET', /^\/api\/services\/(\d+)$/, ([id]) => {
-    const s = S.services.find((x) => x.id === Number(id)) || fail(404, 'no such service')
-    return { ...s, diff: s.diff || null }
+    const s = svc(id)
+    return { ...s, diff: s.diff || null, relays: relays(s.id) }
+  }],
+  ['GET', /^\/api\/services\/(\d+)\/logs$/, ([id], _, q) => {
+    const s = svc(id)
+    const n = Number(q.get('lines')) || 200
+    const lines = [`-- jav3-svc-${s.id}.service --`, `${s.name}: started`,
+      '<script>alert("a guest wrote this")</script>', `${s.name}: listening`]
+    return { service_id: s.id, untrusted: true, text: lines.slice(-n).join('\n') }
   }],
   ['POST', /^\/api\/services\/(\d+)\/approve$/, ([id], b) => {
     if (!b.acknowledge) fail(400, 'acknowledge required')
     if (!b.placement) fail(422, 'placement required')
-    if ((b.expose_ports || []).some((p) => p.bind === 'lan') && !S.lanIp) fail(400, 'no services LAN IP')
-    const s = S.services.find((x) => x.id === Number(id))
+    if (!Array.isArray(b.expose_ports)) fail(422, 'expose_ports required')
+    const s = svc(id)
+    const asked = Object.fromEntries(s.ports.map((p) => [p.port, p.expose]))
+    for (const e of b.expose_ports) {
+      if (!['loopback', 'lan'].includes(e.bind)) fail(400, "expose_ports: bind is 'loopback' or 'lan'")
+      if (!asked[e.port] || asked[e.port] === 'none') fail(400, `expose_ports: port ${e.port} was not requested for exposure`)
+      if (e.bind === 'lan' && asked[e.port] !== 'lan') fail(400, `expose_ports: port ${e.port} was requested for the host only`)
+      if (e.bind === 'lan' && !S.lanIp) fail(409, 'expose_ports: no valid services_lan_ip')
+    }
+    if (s.supersedes_id) {
+      const old = S.services.find((x) => x.id === s.supersedes_id)
+      if (old) Object.assign(old, { status: 'superseded', box_id: null })
+    }
     Object.assign(s, { status: 'approved', placement: b.placement, expose_ports: b.expose_ports,
-      state: 'running', desired_state: 'running', decided_at: now() })
+      state: 'unreported', desired_state: 'running', box_id: `s-${s.project_slug}`, decided_at: now() })
     return s
   }],
-  ['POST', /^\/api\/services\/(\d+)\/reject$/, ([id]) =>
-    Object.assign(S.services.find((x) => x.id === Number(id)), { status: 'rejected' })],
+  ['POST', /^\/api\/services\/(\d+)\/reject$/, ([id], b) =>
+    Object.assign(svc(id), { status: 'rejected', decision_note: b.reason || null, decided_at: now() })],
   ['POST', /^\/api\/services\/(\d+)\/(start|stop)$/, ([id, v]) =>
-    Object.assign(S.services.find((x) => x.id === Number(id)),
+    Object.assign(svc(id),
       { state: v === 'start' ? 'running' : 'stopped', desired_state: v === 'start' ? 'running' : 'stopped' })],
-  ['POST', /^\/api\/services\/(\d+)\/revoke$/, ([id]) => {
-    S.services = S.services.filter((x) => x.id !== Number(id)); return { ok: true }
+  ['POST', /^\/api\/services\/(\d+)\/revoke$/, ([id], b) => {
+    if (!b.confirm) fail(400, 'confirm required')
+    const s = Object.assign(svc(id), { status: 'revoked', desired_state: 'stopped', state: 'stopped' })
+    return { ...s, data_deleted: !!b.delete_data }
   }],
   ['GET', /^\/api\/vm\/processes$/, () => ({ boxes: procs() })],
   ['GET', /^\/api\/profiles$/, () => ({ profiles: S.profiles })],

@@ -360,6 +360,44 @@ export function groupPolicy({ groups = [], profiles = [], projects = [], filter 
   return { projectGroups, profileGroups }
 }
 
+// ---- services ------------------------------------------------------------------
+
+// Where the operator may expose one requested port. The host binds no wider
+// than the agent asked (services.check_exposure): a port asked "none" cannot
+// be exposed at all, "host" only on loopback, "lan" on loopback or — only
+// while services_lan_ip is valid — the LAN. The values are the canonical
+// binds the approve route takes; "none" is the UI's "leave it closed".
+export const EXPOSE_LABEL = {
+  none: 'not exposed',
+  loopback: 'this host only (loopback)',
+  lan: 'LAN (services address)',
+}
+export function exposeChoices(asked, lanIp) {
+  if (asked === 'lan') return lanIp ? ['none', 'loopback', 'lan'] : ['none', 'loopback']
+  if (asked === 'host') return ['none', 'loopback']
+  return ['none']
+}
+// The starting choice: what the agent asked for, narrowed to what is possible.
+export function exposeDefault(asked, lanIp) {
+  const c = exposeChoices(asked, lanIp)
+  if (asked === 'lan' && c.includes('lan')) return 'lan'
+  return c.includes('loopback') ? 'loopback' : 'none'
+}
+// {port: choice} -> the approve body's expose_ports (REQUIRED, may be []).
+// Closed ports are left out; any stale choice outside the allowed set is too.
+export function exposePayload(choices, ports = null, lanIp = '') {
+  const asked = ports ? Object.fromEntries(ports.map((p) => [String(p.port), p.expose])) : null
+  return Object.entries(choices || {})
+    .filter(([port, bind]) => (bind === 'loopback' || bind === 'lan')
+      && (!asked || exposeChoices(asked[port], lanIp).includes(bind)))
+    .map(([port, bind]) => ({ port: Number(port), bind }))
+    .sort((a, b) => a.port - b.port)
+}
+
+export const SERVICE_STATE_TONE = {
+  running: 'done', stopped: undefined, failed: 'error', unreported: 'pending',
+}
+
 // ---- diffs -------------------------------------------------------------------
 
 // A unified diff, line by line, classed for colour. Rendered as text nodes.
