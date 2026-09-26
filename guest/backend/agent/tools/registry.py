@@ -7,6 +7,7 @@ loaded from the pushed tools/ dir and executed against the pushed workspace copy
 everything else (web, secrets, memory, git, spawn/deploy) sends a tool_broker_call
 over vsock so the host runs it behind every gate."""
 import asyncio
+import contextvars
 import importlib.util
 import inspect
 import json
@@ -23,6 +24,11 @@ HOST_CID = socket.VMADDR_CID_HOST          # 2
 IN_GUEST_TOOLS = frozenset({"read_file", "list_files", "search_codebase",
                             "crawl_codebase", "write_file", "edit_file",
                             "dashboard", "todo_update", "run_code"})
+
+# the model's id for the call being dispatched (set by loop.py around
+# dispatch). Forwarded on tool_broker_call so a host handler can name the call
+# the way the chat stream does — correlation only, the host trusts nothing by it.
+call_id = contextvars.ContextVar("jav3_registry_call_id", default=None)
 
 # handler modules are stateless and keyed by name, so this cache is safely shared
 # across turns; the per-turn state (specs, op_id, ...) lives in turnctx.
@@ -103,7 +109,8 @@ async def _broker_dispatch(name: str, args: dict) -> str:
     s.setblocking(False)
     try:
         req = {"op": "tool_broker_call", "op_id": turnctx.op_id.get(),
-               "op_token": turnctx.op_token.get(), "name": name, "args": args}
+               "op_token": turnctx.op_token.get(), "name": name, "args": args,
+               "call_id": call_id.get()}
         await loop.sock_sendall(s, (json.dumps(req) + "\n").encode())
         buf = b""
         while b"\n" not in buf:

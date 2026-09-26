@@ -971,6 +971,320 @@ class Command:
         self.busy_ok, self.takes_arg, self.leader = busy_ok, takes_arg, leader
 
 
+# --- /local: the agent's file and shell tools, run on this machine ----------------------
+#
+# `/local` makes the next new chat a local session: the model still runs through
+# the server (which keeps the key), but its local_* tools come back to THIS client
+# as `local_tool` events on the turn's stream, run here in the directory `jav3`
+# was launched from, and are answered with POST /api/chat/<id>/local_result.
+# Reads run at once; writes, edits and shell commands ask the operator first
+# (y once, a for the rest of the session, n no). Everything the server sends is a
+# request, never a command: arguments are checked here, errors come back as text,
+# and nothing runs without the approval callback saying so.
+
+LOCAL_OUT_CAP = 100_000            # chars of any one result sent back (server caps too)
+LOCAL_READ_MAX = 20 * 1024 * 1024  # bytes: a file bigger than this is not read whole
+LOCAL_SHELL_DEFAULT = 120
+LOCAL_SHELL_MAX = 600              # the server gives up on a call after 15 minutes
+LOCAL_LIST_MAX = 1000
+LOCAL_SEARCH_MAX = 200
+LOCAL_SEARCH_FILE_MAX = 2 * 1024 * 1024
+LOCAL_DIFF_LINES = 400
+LOCAL_SKIP_DIRS = frozenset({".git", ".hg", ".svn", "node_modules", "__pycache__",
+                             ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
+                             ".ruff_cache", ".next", ".cache", "dist", "build",
+                             ".idea", ".DS_Store"})
+
+
+class LocalError(Exception):
+    """A refusal or failure, returned to the model as the tool's error text."""
+
+
+def local_spec(cwd: str | os.PathLike | None = None) -> dict:
+    """Where this client runs — the `local` object a new /local chat is opened
+    with. The server puts it in the model's system prompt."""
+    shell = os.environ.get("SHELL") or ("cmd" if os.name == "nt" else "/bin/sh")
+    osname = platform.system() or os.name
+    if platform.release():
+        osname += f" {platform.release()}"
+    return {"cwd": str(Path(cwd or os.getcwd()).resolve()),
+            "hostname": socket.gethostname() or "localhost",
+            "os": osname, "shell": shell}
+
+
+class LocalExecutor:
+    """The six local_* tools against one working directory.
+
+    `approve(kind, summary)` is asked before every write ("write"), edit
+    ("edit") and command ("shell") and returns "yes", "always" (this kind, for
+    the rest of this executor's life) or "no"; it may be a coroutine function.
+    With no callback nothing that changes anything runs. Reads never ask."""
+
+    def __init__(self, cwd, approve=None, shell: str | None = None):
+        self.cwd = Path(cwd).expanduser().resolve()
+        self.approve = approve
+        self.shell = shell or os.environ.get("SHELL") or "/bin/sh"
+        self.always: set[str] = set()
+
+    async def run(self, name: str, args) -> tuple[bool, str]:
+        fn = {"local_read_file": self.read_file, "local_write_file": self.write_file,
+              "local_edit_file": self.edit_file, "local_list_files": self.list_files,
+              "local_search": self.search, "local_shell": self.shell_run}.get(name)
+        if fn is None:
+            return False, f"unknown local tool {name!r}"
+        if not isinstance(args, dict):
+            return False, "arguments must be an object"
+        try:
+            out = await fn(**args)
+        except TypeError as e:
+            return False, f"bad arguments for {name}: {e}"
+        except LocalError as e:
+            return False, str(e)
+        except (OSError, ValueError, UnicodeError) as e:
+            return False, f"{type(e).__name__}: {e}"
+        if len(out) > LOCAL_OUT_CAP:
+            out = out[:LOCAL_OUT_CAP] + f"\n…(cut at {LOCAL_OUT_CAP} characters)"
+        return True, out
+
+    # -- helpers -----------------------------------------------------------------------
+
+    def _path(self, p) -> Path:
+        if not isinstance(p, str) or not p.strip() or "\x00" in p:
+            raise LocalError("path must be a non-empty string")
+        q = Path(p.strip()).expanduser()
+        return (q if q.is_absolute() else self.cwd / q).resolve()
+
+    def _show(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.cwd))
+        except ValueError:
+            return str(path)
+
+    def _where(self, path: Path) -> str:
+        rel = self._show(path)
+        return rel if rel != str(path) else f"{path}  (outside {self.cwd})"
+
+    async def _ask(self, kind: str, summary: str) -> None:
+        if kind in self.always:
+            return
+        if self.approve is None:
+            raise LocalError(f"not approved: no one is here to approve a {kind}")
+        ans = self.approve(kind, summary)
+        if asyncio.iscoroutine(ans) or isinstance(ans, asyncio.Future):
+            ans = await ans
+        if ans == "always":
+            self.always.add(kind)
+        elif ans != "yes":
+            raise LocalError(f"the operator did not approve this {kind}. Do not retry "
+                             "it; say what you wanted to do and ask.")
+
+    @staticmethod
+    def _read_text(path: Path) -> str:
+        if not path.exists():
+            raise LocalError(f"no such file: {path}")
+        if path.is_dir():
+            raise LocalError(f"{path} is a directory — use local_list_files")
+        if path.stat().st_size > LOCAL_READ_MAX:
+            raise LocalError(f"{path} is over {LOCAL_READ_MAX // (1024 * 1024)} MB")
+        data = path.read_bytes()
+        if b"\x00" in data[:8192]:
+            raise LocalError(f"{path} looks binary; not reading it as text")
+        return data.decode("utf-8", "replace")
+
+    def _diff(self, path: Path, old: str, new: str) -> str:
+        import difflib
+        rel = self._show(path)
+        lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                          f"a/{rel}", f"b/{rel}", lineterm="", n=3))
+        if len(lines) > LOCAL_DIFF_LINES:
+            more = len(lines) - LOCAL_DIFF_LINES
+            lines = lines[:LOCAL_DIFF_LINES] + [f"… {more} more diff lines"]
+        return "\n".join(lines) or "(no change)"
+
+    # -- the tools -------------------------------------------------------------------
+
+    async def read_file(self, path, offset=1, limit=2000) -> str:
+        p = self._path(path)
+        text = await asyncio.to_thread(self._read_text, p)
+        lines = text.splitlines()
+        start = max(1, int(offset or 1))
+        count = max(1, min(int(limit or 2000), 5000))
+        chunk = lines[start - 1:start - 1 + count]
+        if not chunk:
+            return f"(no lines at {start}: the file has {len(lines)})" if lines else "(empty file)"
+        body = "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(chunk, start))
+        end = start + len(chunk) - 1
+        if end < len(lines):
+            body += f"\n… lines {start}-{end} of {len(lines)}; pass offset={end + 1} for more"
+        return body
+
+    async def write_file(self, path, content) -> str:
+        if not isinstance(content, str):
+            raise LocalError("content must be a string")
+        p = self._path(path)
+        if p.is_dir():
+            raise LocalError(f"{p} is a directory")
+        old = await asyncio.to_thread(self._read_text, p) if p.exists() else None
+        if old is None:
+            n = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
+            summary = (f"new file {self._where(p)} ({n} lines)\n"
+                       + self._diff(p, "", content))
+        else:
+            summary = f"overwrite {self._where(p)}\n" + self._diff(p, old, content)
+        await self._ask("write", summary)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(p.write_text, content, encoding="utf-8")
+        verb = "created" if old is None else "wrote"
+        return f"{verb} {self._show(p)} ({len(content.encode())} bytes)"
+
+    async def edit_file(self, path, find, replace, all=False) -> str:  # noqa: A002
+        if not isinstance(find, str) or not find:
+            raise LocalError("find must be non-empty text")
+        if not isinstance(replace, str):
+            raise LocalError("replace must be a string")
+        p = self._path(path)
+        old = await asyncio.to_thread(self._read_text, p)
+        n = old.count(find)
+        if n == 0:
+            raise LocalError(f"find text not found in {self._show(p)} — read the file and "
+                             "copy the exact text, whitespace included")
+        if n > 1 and not all:
+            raise LocalError(f"find text occurs {n} times in {self._show(p)}; add context "
+                             "so it is unique, or pass all: true")
+        new = old.replace(find, replace) if all else old.replace(find, replace, 1)
+        await self._ask("edit", f"edit {self._where(p)}\n" + self._diff(p, old, new))
+        await asyncio.to_thread(p.write_text, new, encoding="utf-8")
+        return f"edited {self._show(p)} ({n if all else 1} replacement{'s' if all and n > 1 else ''})"
+
+    def _walk(self, root: Path, depth: int) -> list[str]:
+        out: list[str] = []
+
+        def rec(d: Path, level: int) -> None:
+            try:
+                kids = sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            except OSError as e:
+                out.append(f"{'  ' * level}({e.strerror or e})")
+                return
+            for k in kids:
+                if len(out) >= LOCAL_LIST_MAX:
+                    return
+                if k.name in LOCAL_SKIP_DIRS:
+                    continue
+                isdir = k.is_dir() and not k.is_symlink()
+                out.append(f"{'  ' * level}{k.name}{'/' if isdir else ''}")
+                if isdir and level + 1 < depth:
+                    rec(k, level + 1)
+        rec(root, 0)
+        return out
+
+    async def list_files(self, path=".", depth=2) -> str:
+        p = self._path(path or ".")
+        if not p.is_dir():
+            raise LocalError(f"not a directory: {p}")
+        depth = max(1, min(int(depth or 2), 6))
+        rows = await asyncio.to_thread(self._walk, p, depth)
+        head = f"{p}/"
+        if not rows:
+            return head + "\n(empty)"
+        tail = (f"\n… stopped at {LOCAL_LIST_MAX} entries; list a subdirectory"
+                if len(rows) >= LOCAL_LIST_MAX else "")
+        return head + "\n" + "\n".join(rows) + tail
+
+    def _grep(self, root: Path, pat) -> list[str]:
+        hits: list[str] = []
+        files = [root] if root.is_file() else None
+
+        def each():
+            if files is not None:
+                yield from files
+                return
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = sorted(d for d in dirnames if d not in LOCAL_SKIP_DIRS)
+                for f in sorted(filenames):
+                    yield Path(dirpath) / f
+
+        for f in each():
+            try:
+                if f.is_symlink() or f.stat().st_size > LOCAL_SEARCH_FILE_MAX:
+                    continue
+                data = f.read_bytes()
+            except OSError:
+                continue
+            if b"\x00" in data[:8192]:
+                continue
+            for i, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+                if pat(line):
+                    hits.append(f"{self._show(f)}:{i}: {line.strip()[:300]}")
+                    if len(hits) >= LOCAL_SEARCH_MAX:
+                        return hits
+        return hits
+
+    async def search(self, query, path=".", regex=False) -> str:
+        import re
+        if not isinstance(query, str) or not query:
+            raise LocalError("query must be non-empty text")
+        p = self._path(path or ".")
+        if not p.exists():
+            raise LocalError(f"no such path: {p}")
+        if regex:
+            try:
+                rx = re.compile(query)
+            except re.error as e:
+                raise LocalError(f"bad regular expression: {e}")
+            pat = lambda s: rx.search(s) is not None   # noqa: E731
+        else:
+            q = query.lower()
+            pat = lambda s: q in s.lower()             # noqa: E731
+        hits = await asyncio.to_thread(self._grep, p, pat)
+        if not hits:
+            return f"no matches for {query!r} in {self._show(p) if p != self.cwd else '.'}"
+        more = (f"\n… stopped at {LOCAL_SEARCH_MAX} matches; narrow the query or path"
+                if len(hits) >= LOCAL_SEARCH_MAX else "")
+        return "\n".join(hits) + more
+
+    async def shell_run(self, command, timeout_seconds=LOCAL_SHELL_DEFAULT) -> str:
+        if not isinstance(command, str) or not command.strip():
+            raise LocalError("command must be non-empty text")
+        try:
+            timeout = max(1, min(int(timeout_seconds or LOCAL_SHELL_DEFAULT), LOCAL_SHELL_MAX))
+        except (TypeError, ValueError):
+            timeout = LOCAL_SHELL_DEFAULT
+        await self._ask("shell", f"$ {command}\n\n(in {self.cwd}, timeout {timeout}s)")
+        if os.name == "nt":
+            argv = ["cmd", "/c", command]
+            extra = {}
+        else:
+            argv = [self.shell, "-lc", command]
+            extra = {"start_new_session": True}    # so a timeout kills the whole tree
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=str(self.cwd), stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **extra)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            self._kill(proc)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), 5)
+            raise LocalError(f"timed out after {timeout}s (killed)")
+        except asyncio.CancelledError:
+            self._kill(proc)
+            raise
+        text = out.decode("utf-8", "replace")
+        if len(text) > LOCAL_OUT_CAP - 200:
+            keep = LOCAL_OUT_CAP - 200
+            text = f"…(first {len(text) - keep} characters cut)\n" + text[-keep:]
+        return f"exit {proc.returncode}\n{text}".rstrip()
+
+    @staticmethod
+    def _kill(proc) -> None:
+        import signal
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+
+
 def build_tui(base: str, token: str, **kw):
     """Define the Textual app (imported only when the TUI actually runs, so the
     plain commands work without Textual) and return an instance."""
@@ -1329,6 +1643,38 @@ def build_tui(base: str, token: str, **kw):
         def action_no(self) -> None:
             self.dismiss(False)
 
+    class LocalApprove(ModalScreen):
+        """/local: may this write, edit or command run on this machine?"""
+
+        BINDINGS = [Binding("y,enter", "answer('yes')", show=False),
+                    Binding("a", "answer('always')", show=False),
+                    Binding("n,escape", "answer('no')", show=False)]
+
+        def __init__(self, kind: str, summary: str) -> None:
+            super().__init__()
+            self.kind, self.summary = kind, summary
+
+        def compose(self) -> ComposeResult:
+            what = {"shell": "Run this command here?", "write": "Write this file?",
+                    "edit": "Make this edit?"}.get(self.kind, f"Allow this {self.kind}?")
+            lines = []
+            for ln in self.summary.splitlines():
+                style = ("$success" if ln.startswith("+") and not ln.startswith("+++")
+                         else "$error" if ln.startswith("-") and not ln.startswith("---")
+                         else "$text")
+                lines.append(f"[{style}]{_esc(ln)}[/]")
+            with Vertical(id="dialog"):
+                yield Static(f"[b]{_esc(what)}[/]  [$text-muted]the agent wants to "
+                             f"{_esc(self.kind)} on this machine[/]")
+                with VerticalScroll(id="approve-body"):
+                    yield Static("\n".join(lines))
+                yield Static(f"\n[$primary]y[/] yes   [$primary]a[/] always "
+                             f"({_esc(self.kind)}, this session)   "
+                             "[$text-muted]n / esc[/] no")
+
+        def action_answer(self, what: str) -> None:
+            self.dismiss(what)
+
     class Ask(ModalScreen):
         """One line of input; `secret` hides it (the login line is a credential)."""
 
@@ -1685,7 +2031,9 @@ def build_tui(base: str, token: str, **kw):
         #status { height: 1; margin: 0 0 0 0; }
         #status-left { width: 1fr; color: $text-muted; }
         #status-right { width: auto; color: $text-muted; }
-        Picker, Confirm, Ask, Help { align: center middle; background: $background 60%; }
+        Picker, Confirm, Ask, Help, LocalApprove { align: center middle;
+                                                   background: $background 60%; }
+        #approve-body { height: auto; max-height: 24; margin-top: 1; }
         #dialog { width: 72; max-width: 90%; height: auto; max-height: 80%;
                   background: $surface; padding: 1 2; border: none; }
         #dialog.small { width: 64; }
@@ -1737,6 +2085,8 @@ def build_tui(base: str, token: str, **kw):
             self.agent, self.model = agent, model
             self.shown_model: str | None = None
             self.ephemeral = False
+            self.local = False                         # /local: the next new chat runs here
+            self.local_execs: dict[int, LocalExecutor] = {}
             self.whoami = "?"
             self.logged_in: bool | None = None    # None = not checked yet
             self.notices: list[tuple[float, str, str]] = []   # (time, kind, text), newest first
@@ -2124,6 +2474,9 @@ def build_tui(base: str, token: str, **kw):
                 bits.append(f"[$text-muted]⌂ {_esc(proj)}[/]")
             if self.ephemeral:
                 bits.append("[$warning]temporary[/]")
+            here = (self.info or {}).get("local") if self.cid else None
+            if here or (self.local and self.cid is None):
+                bits.append(f"[$success]local {_esc((here or {}).get('cwd') or os.getcwd())}[/]")
             if self.attachments:
                 bits.append(f"[$accent]+{len(self.attachments)} attached[/]")
             self.query_one("#meta", Static).update("  ".join(bits))
@@ -2277,6 +2630,8 @@ def build_tui(base: str, token: str, **kw):
                     body["ephemeral"] = True
                 if self.orchestrator:
                     body["mode"] = "orchestrate"
+                if self.local:
+                    body["local"] = local_spec()
             if self.model:
                 body["model"] = self.model
             return body
@@ -2491,6 +2846,8 @@ def build_tui(base: str, token: str, **kw):
                 elif text.strip():
                     # sent from elsewhere (the web UI, another terminal)
                     await self.mount_log(UserMsg(QueuedMsg._markup(text, "↳ delivered mid-turn")))
+            elif t == "local_tool":
+                self.run_worker(self._local_tool(ev, turn.cid or self.cid), group="local")
             elif t == "final":
                 turn.done = True
                 await self._finish(ev.get("content") or "")
@@ -2504,6 +2861,38 @@ def build_tui(base: str, token: str, **kw):
             elif t == "idle":
                 return True
             return False
+
+        async def _local_tool(self, ev: dict, cid: int | None) -> None:
+            """Run one /local tool call here and send the answer back. The
+            executor is this chat's: made from the conversation's own record of
+            where it works, and only when that is this machine."""
+            if cid is None:
+                return
+            ex = self.local_execs.get(cid)
+            if ex is None:
+                try:
+                    here = (await self.api("GET", f"/api/conversations/{cid}/info")).get("local")
+                except CliError:
+                    here = None
+                me = socket.gethostname() or "localhost"
+                if here and here.get("hostname") == me and Path(here.get("cwd", "")).is_dir():
+                    async def approve(kind, summary):
+                        ans = await self.push_screen_wait(LocalApprove(kind, summary))
+                        # a dialog answered after the turn was stopped must not
+                        # run anything: nobody is waiting for the result
+                        live = self.turn is not None and self.turn.cid == cid
+                        return ans if live else "no"
+                    ex = self.local_execs[cid] = LocalExecutor(here["cwd"], approve)
+            if ex is None:
+                ok, result = False, ("this chat's local session is not on this computer "
+                                     f"({socket.gethostname()}), or its directory is gone")
+            else:
+                ok, result = await ex.run(ev.get("name", ""), ev.get("args") or {})
+            try:
+                await self.api("POST", f"/api/chat/{cid}/local_result",
+                               json={"id": str(ev.get("id", "")), "ok": ok, "result": result})
+            except CliError as e:
+                await self.note(f"local result not delivered: {e}", "warn")
 
         async def _close_seg(self) -> None:
             turn = self.turn
@@ -2980,6 +3369,8 @@ def build_tui(base: str, token: str, **kw):
                 "themes": Command(self.c_theme, "change the colours", "[name]",
                                   takes_arg=True, busy_ok=True, leader="t"),
                 "temp": Command(self.c_temp, "toggle temporary chats (nothing saved)"),
+                "local": Command(self.c_local, "toggle local chats (files and shell here, "
+                                 "in this directory)"),
                 "rename": Command(self.c_rename, "rename this chat", "[title]",
                                   takes_arg=True, leader="r"),
                 "star": Command(self.c_star, "star or unstar this chat"),
@@ -3248,6 +3639,16 @@ def build_tui(base: str, token: str, **kw):
                             "saved", severity="warning")
             else:
                 self.notify("temporary off")
+            self.refresh_chrome()
+
+        async def c_local(self, arg: str) -> None:
+            self.local = not self.local
+            if self.local:
+                await self.c_new()
+                self.notify(f"local: new chats work in {os.getcwd()} on this machine; "
+                            "writes and commands ask you first", severity="warning")
+            else:
+                self.notify("local off — new chats use the server's sandbox")
             self.refresh_chrome()
 
         async def c_rename(self, arg: str) -> None:

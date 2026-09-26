@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import autonomy, bus, compaction, gui, providers, runtime
+from . import autonomy, bus, compaction, gui, localexec, providers, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink
@@ -55,6 +55,10 @@ class ChatRequest(BaseModel):
     # model mid-thread is ordinary; omitted keeps the thread's pin, and a
     # thread with none follows the default.
     model: str | None = None
+    # /local (the terminal client): this NEW conversation's file and shell
+    # tools run on the client's machine — {cwd, hostname, os, shell}. Binds at
+    # creation like `agent`; localexec.py has the whole story.
+    local: dict | None = None
 
 
 def sse(event: dict) -> str:
@@ -320,7 +324,8 @@ async def conversation_info(conversation_id: int):
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT c.summary, c.model, c.agent_slug, p.slug AS project_slug "
+            "SELECT c.summary, c.model, c.agent_slug, c.local, "
+            "p.slug AS project_slug "
             "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id "
             "WHERE c.id = ?", (conversation_id,)) as cur:
             row = await cur.fetchone()
@@ -364,6 +369,7 @@ async def conversation_info(conversation_id: int):
             "cost_usd": round(sum(_cost_usd(m["ch"], m["cm"], m["o"], m["model"])
                                   for m in by_model), 6),
             "context": ctx,
+            "local": localexec.parse_spec(row["local"]),
             "files": [{"path": p, "writes": n} for p, n in files.items()]}
 
 
@@ -660,7 +666,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # project loaded.
         async with db.execute(
             "SELECT c.project_locked AS locked, c.agent_slug AS agent_slug, "
-            "c.model AS model, p.slug AS slug FROM conversations c "
+            "c.model AS model, c.local AS local, p.slug AS slug FROM conversations c "
             "LEFT JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL "
             "WHERE c.id = ?", (conversation_id,)) as cur:
             row = await cur.fetchone()
@@ -764,9 +770,19 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # where the load-bearing operating instruction lives ("Do not call
         # music_search first"), and dropping it entirely broke tool use on the local
         # tier. 240 chars keeps that line and still sheds ~60% of the block.
+        # /local: the operator's machine instead of the sandbox — its own
+        # toolset and a paragraph saying where the turn is (localexec.py)
+        local_spec = localexec.parse_spec(row["local"]) if row else None
+        if local_spec is not None:
+            entries = localexec.filter_entries(entries)
+            system_prompt = f"{system_prompt}\n\n{localexec.prompt_block(local_spec)}"
+        ltoken = runtime.local_turn.set(local_spec is not None)
         from .voice_text import LOCAL_NOTES_MAX
-        tools = openai_tool_specs(entries,
-                                  notes_max=LOCAL_NOTES_MAX if tools_only else None)
+        try:
+            tools = openai_tool_specs(
+                entries, notes_max=LOCAL_NOTES_MAX if tools_only else None)
+        finally:
+            runtime.local_turn.reset(ltoken)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it. The voice local
         # tier also gets past turns' TOOL work replayed: a 4B reading a history
@@ -980,6 +996,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         _active_turns.pop(conversation_id, None)
         _turn_actors.pop(conversation_id, None)
         _interrupt_notes.pop(conversation_id, None)   # stale note must not leak
+        # a /local call still waiting on the client dies with its turn (stop,
+        # revoke, barge-in all end here) instead of holding the guest's round
+        localexec.cancel_conversation(conversation_id)
         bus.close_job(chan)
 
 
@@ -1016,6 +1035,10 @@ async def resume_chat_stream(conversation_id: int):
         async def idle():
             yield sse({"type": "idle"})
         return StreamingResponse(idle(), media_type="text/event-stream")
+    # a /local call published before this client attached went to a stream
+    # that is gone; hand this one what is still waiting for an answer
+    for ev in localexec.pending_events(conversation_id):
+        bus.publish_to(q, ev)
     return _tail(conversation_id, q)
 
 
@@ -1025,6 +1048,27 @@ async def stop_chat_turn(conversation_id: int):
     the interruption and publishes a final event, so every attached tail
     (and the transcript) settles on its own — nothing else to clean up here."""
     return {"stopped": _stop(conversation_id)}
+
+
+class LocalResult(BaseModel):
+    id: str
+    ok: bool
+    result: str = ""
+
+
+@router.post("/chat/{conversation_id}/local_result")
+async def local_result(conversation_id: int, body: LocalResult,
+                       actor: dict = Depends(require_actor)):
+    """The /local client's answer to a `local_tool` event. 404 when nothing
+    waits under that id — answered already, timed out, stopped, or asked of a
+    different computer than this one (localexec.resolve)."""
+    text = body.result
+    if len(text) > localexec.RESULT_CAP:
+        text = text[:localexec.RESULT_CAP] + f"\n…(cut at {localexec.RESULT_CAP} characters)"
+    got = localexec.resolve(conversation_id, body.id, body.ok, text, actor_key(actor))
+    if got != "ok":
+        raise HTTPException(status_code=404, detail="no such pending local call")
+    return {"ok": True}
 
 
 def _stop(conversation_id: int) -> bool:
@@ -1070,6 +1114,12 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             pinned_model = providers.checked(body.model)
         except providers.ProviderError as e:
             raise HTTPException(status_code=400, detail=str(e)) from None
+    local_spec = None
+    if body.local is not None and body.conversation_id is None:
+        try:
+            local_spec = localexec.clean_spec(body.local)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
     db = await get_db()
     try:
         conversation_id = body.conversation_id
@@ -1092,7 +1142,11 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
                 from .agents_api import _read as read_agent_def
                 agent_def = read_agent_def(body.agent)     # 404s on an unknown slug
             mode = body.project_mode or ("pin" if body.project else "follow")
-            if (agent_def is not None and body.project_mode is None
+            if local_spec is not None:
+                # a local chat works in the client's directory, never in a
+                # project: pinned to none, so no project's tools or files
+                mode, body.project = "none", None
+            if (agent_def is not None and local_spec is None and body.project_mode is None
                     and not body.project):
                 # precedence: request > the definition's `project` > follow.
                 # An agent that lives in a project opens its threads there.
@@ -1126,6 +1180,8 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
                 ephemeral=body.ephemeral,
                 # which computer opened this thread (NULL = the operator)
                 device_id=device_id)
+            if local_spec is not None:
+                await _open_local(db, conversation_id, local_spec, actor)
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:
@@ -1164,6 +1220,25 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
     start_turn(conversation_id, ephemeral=body.ephemeral,
                user_msg=body.message, tab=body.tab, actor=actor_key(actor))
     return _tail(conversation_id, q)
+
+
+async def _open_local(db, conversation_id: int, spec: dict, actor: dict) -> None:
+    """Mark a new conversation local and say so in the security log: from here
+    its turns can ask a computer to write files and run commands (each one
+    approved at that computer's keyboard)."""
+    await db.execute("UPDATE conversations SET local = ? WHERE id = ?",
+                     (json.dumps(spec), conversation_id))
+    try:
+        from . import security
+        who = (f"device {actor.get('device_id')}" if actor.get("is_device")
+               else "the operator's session")
+        await security.raise_event(
+            db, kind="local_session", severity="info",
+            summary=(f"local chat #{conversation_id} opened on {spec['hostname']} "
+                     f"in {spec['cwd']}")[:300],
+            detail={"conversation_id": conversation_id, **spec, "actor": who})
+    except Exception:  # noqa: BLE001 — the audit line never blocks the chat
+        pass
 
 
 def start_turn(conversation_id: int, *, ephemeral: bool = False,

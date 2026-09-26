@@ -398,7 +398,7 @@ async def run_turn(
             parsed.append((tc, name, args))
             yield {"type": "tool", "id": tc["id"], "name": name, "args": args}
 
-        async def _run_one(name: str, args: dict) -> str:
+        async def _run_one(name: str, args: dict, call_id=None) -> str:
             blocked = _guard_blind_edit(conversation_id, name, args)
             if blocked is not None:
                 return blocked
@@ -411,7 +411,16 @@ async def run_turn(
                             "exact arguments this turn — the result is unchanged, "
                             "see above. Change the arguments or take a different "
                             "approach.")
-            result = await registry.dispatch(name, args)
+            # the call's id rides along to the broker (registry.call_id) so a
+            # host tool can name it the way the tool events do. getattr: a
+            # test may stand a bare module in for the registry
+            cv = getattr(registry, "call_id", None)
+            tok = cv.set(call_id) if cv is not None else None
+            try:
+                result = await registry.dispatch(name, args)
+            finally:
+                if tok is not None:
+                    cv.reset(tok)
             path = args.get("path")
             if (name in ("read_file", "write_file") and isinstance(path, str)
                     and not result.startswith("error:")):
@@ -423,9 +432,9 @@ async def run_turn(
         # assumed to write — fail closed — and keeps the serial path
         if len(parsed) > 1 and all(n in read_only for _, n, _ in parsed):
             results = await asyncio.gather(
-                *(_run_one(n, a) for _, n, a in parsed))
+                *(_run_one(n, a, tc.get("id")) for tc, n, a in parsed))
         else:
-            results = [await _run_one(n, a) for _, n, a in parsed]
+            results = [await _run_one(n, a, tc.get("id")) for tc, n, a in parsed]
 
         # DB writes + message appends stay sequential and ordered — the single
         # aiosqlite connection must never be used concurrently
