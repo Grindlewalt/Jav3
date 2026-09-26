@@ -40,7 +40,7 @@ fi
 
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
-FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT=""
+FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT="" PORT_OPT=""
 # $SUDO_USER is only meaningful when we are actually running under sudo. Taking
 # it unconditionally means a stale value inherited from the environment wins
 # over who we really are — which reported the wrong username inside a sandbox.
@@ -67,6 +67,9 @@ Options
   --state-dir <dir>    where durable state lives (default ~/.local/share/jarvis,
                        or JARVIS_STATE_DIR); a non-default one is written to
                        ~/.config/jarvis/env so the service uses it too
+  --port <n>           port the web UI listens on (default 8000, or
+                       JARVIS_LAN_PORT from ~/.config/jarvis/env); a non-default
+                       one is written there and into the systemd unit
   --no-build           skip the frontend build
   --no-image           skip building the guest golden image (slow, ~10 min)
   --force              overwrite existing local state during --from
@@ -83,6 +86,7 @@ while [ $# -gt 0 ]; do
     --user)       TARGET_USER="$2"; shift ;;
     --from)       FROM_HOST="$2"; shift ;;
     --state-dir)  STATE_DIR_OPT="$2"; shift ;;
+    --port)       PORT_OPT="$2"; shift ;;
     --no-build)   BUILD_FRONTEND=0 ;;
     --no-image)   BUILD_IMAGE=0 ;;
     --force)      FORCE=1 ;;
@@ -158,6 +162,17 @@ if [ -z "$STATE_DIR" ] && [ -f "$HOME/.config/jarvis/env" ]; then
 fi
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/jarvis}"
 STATE_DIR="${STATE_DIR/#\~/$HOME}"
+
+# The port, same precedence: --port, JARVIS_LAN_PORT (env, then env file), 8000.
+# backend/config.py's lan_port and the unit's --port must agree, so both are
+# written from this one value.
+PORT="$PORT_OPT"
+[ -n "$PORT" ] || PORT="${JARVIS_LAN_PORT:-}"
+if [ -z "$PORT" ] && [ -f "$HOME/.config/jarvis/env" ]; then
+  PORT="$(sed -n 's/^JARVIS_LAN_PORT=//p' "$HOME/.config/jarvis/env" | tail -1 | tr -d "\"'")"
+fi
+PORT="${PORT:-8000}"
+case "$PORT" in ''|*[!0-9]*) die "--port wants a number, got '$PORT'" ;; esac
 
 # Where the guest images resolve, exactly as the app resolves them (an existing
 # box may still run from the old in-checkout layout until migrate-state).
@@ -336,6 +351,21 @@ check_node_version() {
   fi
 }
 
+# Something else on our port makes the service crash-loop with "address already
+# in use" buried in the journal. Our own running service is not a conflict.
+check_port() {
+  have ss || return 0
+  if [ -z "$(ss -Hltn "sport = :$PORT" 2>/dev/null)" ]; then
+    ok "port $PORT is free"
+  elif systemctl --user is-active --quiet jarvis 2>/dev/null; then
+    ok "port $PORT is in use by the running jarvis.service"
+  else
+    bad "port $PORT is already taken by another program"
+    fix "pick a free one: bash ${REPO_DIR:-.}/scripts/install.sh --port 8780   (ss -ltnp shows who has $PORT)"
+    MISSING_USER+=("port")
+  fi
+}
+
 check_linger() {
   local l; l="$(loginctl show-user "$TARGET_USER" -p Linger --value 2>/dev/null || echo no)"
   if [ "$l" = yes ]; then
@@ -385,6 +415,7 @@ preflight() {
   check_packages
   check_node_version
   check_linger
+  check_port
   check_user_side
 }
 
@@ -621,6 +652,11 @@ user_phase() {
     echo "JARVIS_STATE_DIR=$STATE_DIR" >> "$HOME/.config/jarvis/env"
     ok "state dir $STATE_DIR recorded in ~/.config/jarvis/env"
   fi
+  if [ "$PORT" != 8000 ] && ! grep -qxF "JARVIS_LAN_PORT=$PORT" "$HOME/.config/jarvis/env"; then
+    sed -i '/^JARVIS_LAN_PORT=/d' "$HOME/.config/jarvis/env"
+    echo "JARVIS_LAN_PORT=$PORT" >> "$HOME/.config/jarvis/env"
+    ok "port $PORT recorded in ~/.config/jarvis/env"
+  fi
   if grep -q 'JARVIS_DEEPSEEK_API_KEY' "$HOME/.config/jarvis/env" 2>/dev/null; then
     ok "API key present in ~/.config/jarvis/env"
   fi
@@ -629,7 +665,7 @@ user_phase() {
   mkdir -p "$HOME/.config/systemd/user"
   # The unit hardcodes %h/jarvis; if the checkout lives elsewhere, rewrite the
   # paths rather than silently installing a unit that points at nothing.
-  sed "s#%h/jarvis#$REPO_DIR#g" scripts/jarvis.service \
+  sed -e "s#%h/jarvis#$REPO_DIR#g" -e "s#--port 8000#--port $PORT#" scripts/jarvis.service \
     > "$HOME/.config/systemd/user/jarvis.service"
   sed "s#%h/jarvis#$REPO_DIR#g" scripts/jarvis-backup.service \
     > "$HOME/.config/systemd/user/jarvis-backup.service"
@@ -688,8 +724,8 @@ verify() {
   systemctl --user restart jarvis || { warn "could not start jarvis.service"; return 1; }
   local i
   for i in $(seq 1 30); do
-    if curl -sf localhost:8000/api/health >/dev/null 2>&1; then
-      ok "health check passed — http://localhost:8000"
+    if curl -sf "localhost:$PORT/api/health" >/dev/null 2>&1; then
+      ok "health check passed — http://localhost:$PORT"
       return 0
     fi
     sleep 1
@@ -781,8 +817,11 @@ printf '  start:                systemctl --user restart jarvis\n'
 printf '  logs:                 journalctl --user -u jarvis -f\n'
 printf '  re-check:             bash %s/scripts/install.sh --check\n' "$REPO_DIR"
 
-if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ]; then
-  verify || true
-else
-  printf '\n%snot starting:%s root steps above are still outstanding.\n' "$YELLOW" "$OFF"
+# Start it either way. Without KVM/vsock no agent turn can run (there is no
+# host-side loop), but the web UI, logins, settings, projects and the TUI all
+# work, and a server that is up says so more usefully than one that is not.
+if [ ${#MISSING_ROOT[@]} -gt 0 ] || [ ${#BLOCKED[@]} -gt 0 ]; then
+  printf '\n%sstarting without a guest runtime:%s the web UI works, but agent turns\n' "$YELLOW" "$OFF"
+  printf '  will fail until the root steps above are done (then: systemctl --user restart jarvis).\n'
 fi
+verify || true
