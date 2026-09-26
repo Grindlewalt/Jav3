@@ -9,6 +9,7 @@ import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 import { useAsk } from '../ask.jsx'
 import ModelPicker from '../ModelPicker.jsx'
 import ChatGroups from '../ChatGroups.jsx'
+import { useSlash } from '../slash/useSlash.jsx'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
 // day — a handful per period nod to it (capped at 5) so it doesn't read as a
@@ -334,6 +335,7 @@ export default function Chat({
   // token/tool/tool_result fold into the streaming message's parts; final
   // swaps in the reply with the activity collapsed above it.
   function handleTurnEvent(ev) {
+    slash.onEvent(ev)
     if (ev.type === 'start') {
       liveId.current = ev.conversation_id
       // temporary: never adopt the id, or the chat becomes a saved one
@@ -494,7 +496,7 @@ export default function Chat({
           ephemeral: temporary,
           // only meaningful when the conversation is being created by this turn
           ...(conversationId ? {} : { project: pendingProject || null,
-                                      project_mode: pendingMode }) },
+                                      project_mode: pendingMode, ...slash.newChatFields }) },
         handleTurnEvent,
       )
       api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -562,6 +564,18 @@ export default function Chat({
     </label>
   )
 
+  const slash = useSlash({
+    input, setInput, busy, conversationId, turnId: () => conversationId ?? liveId.current,
+    conversations, projects, active, pendingProject, messages, setMessages,
+    temporary, setTemporary, send: (t) => send(false, t), newChat: newConversation,
+    openChat: openConversation, openList: () => setSideOpen(true), stop,
+    pickProject: (mode, slug) => (conversationId ? assignProject(mode, slug)
+      : (setPendingMode(mode), setPendingProject(slug || ''))),
+    rename: () => renameConversation(conversationId, openConvo?.summary),
+    deleteChat: () => deleteConversation(conversationId), refresh: refreshConvos,
+    refreshProjects: () => api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) }),
+  })
+
   return (
     <div className="chat-layout"
          onTouchStart={onEdgeTouchStart} onTouchMove={onEdgeTouchMove}>
@@ -625,7 +639,7 @@ export default function Chat({
           ) : (
             <div className="thread">
               {messages.map((m, i) => (
-                <div key={i} className={`msg ${m.role}`}>
+                <div key={i} className={`msg ${m.role}${m.midturn ? ` midturn ${m.midturn}` : ''}`}>
                   {m.role === 'assistant' ? <>
                     <div className={`msg-avatar ${m.streaming ? 'thinking' : ''}`} />
                     <MessageBody m={m} />
@@ -635,7 +649,7 @@ export default function Chat({
             </div>
           )}
         </div>
-        <form className="composer" onSubmit={(e) => { e.preventDefault(); send() }}>
+        <form className="composer" onSubmit={(e) => { e.preventDefault(); slash.submit() || send() }}>
           <div className="composer-glow" ref={glowRef} />
           {peakAsk && (
             <div className="peak-ask" role="alertdialog"
@@ -649,12 +663,14 @@ export default function Chat({
                 Send anyway</button>
             </div>
           )}
+          {slash.popup}
           <div className={`composer-inner${multiline ? ' multi' : ''}`}>
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
+                if (slash.onKeyDown(e)) return
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
               // a phone's bar is ~230px of text: the long form wrapped onto a

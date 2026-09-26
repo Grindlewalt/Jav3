@@ -1,0 +1,75 @@
+/* slash commands: the popup above the composer, and the mid-turn message
+   state. App tokens only, so both themes follow. */
+
+.slash-pop {
+  pointer-events: auto; position: relative;
+  max-width: 880px; margin: 0 auto 10px;
+  background: var(--glass); border: 1px solid var(--border);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border-radius: 14px; padding: 6px; box-shadow: var(--shadow-pop);
+  font-size: 13px; color: var(--text);
+  animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
+}
+.slash-list { max-height: min(42vh, 340px); overflow-y: auto; }
+.slash-row {
+  display: flex; width: 100%; align-items: baseline; gap: 10px;
+  background: none; color: var(--text); padding: 7px 10px; border-radius: 9px;
+  font-size: 13px; font-weight: 400; text-align: left;
+}
+.slash-row:hover:not(:disabled) { transform: none; filter: none; }
+/* the selected row is unmistakable: solid accent */
+.slash-row.sel { background: var(--accent); color: var(--accent-ink); }
+.slash-row.sel .slash-help, .slash-row.sel .slash-usage { color: var(--accent-ink); opacity: 0.8; }
+.slash-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600;
+  white-space: nowrap; flex-shrink: 0;
+}
+.slash-usage {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim); white-space: nowrap; flex-shrink: 0;
+}
+.slash-help {
+  color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-head {
+  display: flex; align-items: baseline; gap: 10px; padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--border); margin-bottom: 4px;
+}
+.slash-empty, .slash-note { padding: 8px 10px; color: var(--dim); }
+.slash-note.warn { color: var(--amber); }
+.slash-note.error { color: var(--red); }
+.slash-keys { padding: 6px 10px 2px; color: var(--dim); font-size: 11.5px; }
+.slash-next {
+  display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 10px;
+}
+.slash-next button { padding: 2px 9px; font-size: 12px; }
+
+.slash-dump textarea {
+  display: block; width: 100%; box-sizing: border-box; resize: vertical;
+  min-height: 140px; margin: 4px 0 8px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  font: inherit; line-height: 1.5;
+}
+.slash-dump textarea:focus { border-color: var(--accent); outline: none; }
+.slash-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.slash-actions .slash-keys { margin-right: auto; padding: 0 4px; }
+.slash-actions button { font-size: 12.5px; padding: 6px 12px; }
+
+/* a message typed while a turn runs: queued -> delivered */
+.msg.midturn { flex-wrap: wrap; }
+.msg.midturn::after {
+  flex-basis: 100%; text-align: right; font-size: 11.5px; color: var(--dim);
+  margin-top: 3px;
+}
+.msg.midturn.queued pre { opacity: 0.6; }
+.msg.midturn.queued::after { content: 'queued — reaches the agent at its next step'; }
+.msg.midturn.delivered::after { content: 'delivered'; color: var(--accent); }
+.msg.midturn.failed::after { content: 'not sent'; color: var(--red); }
+
+@media (max-width: 640px) {
+  .slash-help { display: none; }
+  .slash-row.sel .slash-help, .slash-head .slash-help { display: inline; }
+}
