@@ -12,6 +12,9 @@ parameters:
     task:
       type: string
       description: What the agent should do, in plain language.
+    model:
+      type: string
+      description: provider/model to run this agent on. ONLY when the operator explicitly said which model to use for this task — otherwise omit it and the agent uses its own or the default model. Never choose one yourself.
   required: [agent, task]
 ---
 Brief the agent like a smart colleague who just walked into the room — it has

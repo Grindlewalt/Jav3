@@ -4,10 +4,17 @@ from backend.db import get_db
 
 
 async def run(task: str, prompt: str, duplicate: bool = False,
-              label: str = "") -> str:
+              label: str = "", model: str | None = None) -> str:
     if not (task or "").strip() or not (prompt or "").strip():
         return ("error: spawn_temp_agent needs both a task and a role prompt "
                 "for the agent.")
+    if model:
+        # operator-named: refuse out loud rather than fall back to the default
+        from backend import providers
+        try:
+            model = providers.checked(model)
+        except providers.ProviderError as e:
+            return f"error: {e}. The agent was not started."
     b = current_budget()
     before = (b.input_tokens + b.output_tokens) if b else None
     # one hop deeper for the child's whole run, same fork-bomb fence as
@@ -15,7 +22,8 @@ async def run(task: str, prompt: str, duplicate: bool = False,
     depth_token = runtime.spawn_depth.set(runtime.spawn_depth.get() + 1)
     try:
         result = await agents_run.run_temp_agent_headless(
-            prompt, task, duplicate=bool(duplicate), label=label or "")
+            prompt, task, duplicate=bool(duplicate), label=label or "",
+            **({"model": model} if model else {}))
     finally:
         runtime.spawn_depth.reset(depth_token)
     db = await get_db()

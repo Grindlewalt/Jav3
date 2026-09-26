@@ -178,6 +178,12 @@ class Settings(BaseSettings):
     plan_attempts_max: int = 2
     plan_stall_seconds: int = 300
     plan_tick_seconds: float = 5.0
+    # An orchestrator conversation (POST /api/chat mode=orchestrate) spends
+    # most of its rounds waiting in plan_status, one round per wait — the chat
+    # cap would end a long plan's supervision halfway. The wait itself is
+    # capped at plan_status_max_wait seconds per round.
+    orchestrator_max_iterations: int = 150
+    plan_status_max_wait: int = 600
 
     # Delegation pressure: a long turn gets steered mid-flight. At
     # `delegate_nudge_round` a note pushes the model to hand remaining

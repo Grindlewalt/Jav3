@@ -93,10 +93,15 @@ def empty_plan(*, title: str = "", dump: str = "") -> dict:
 
 
 def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
-             assignee: str | None = None, id_: str | None = None) -> dict:
+             assignee: str | None = None, id_: str | None = None,
+             model: str | None = None) -> dict:
     """A fresh item. Without `id_` it takes the plan's next counter; with one
     (a file being re-read, a PUT naming its items) the counter is untouched —
-    normalise() keeps the counter above every explicit numeric id."""
+    normalise() keeps the counter above every explicit numeric id.
+
+    `model` (provider/model) is set only where the operator explicitly named
+    the model for this work (see plan_from_dump); None runs the item on the
+    assignee's own model or the default."""
     if id_ is None:
         n = int(plan.get("next_id") or 1)
         plan["next_id"] = n + 1
@@ -104,6 +109,7 @@ def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
     return {"id": id_, "title": " ".join((title or "").split())[:120] or f"item {id_}",
             "brief": (brief or "").strip(), "depends_on": list(depends_on),
             "status": "todo", "assignee": (assignee or "").strip() or None,
+            "model": (str(model).strip() or None) if model else None,
             "attempts": 0, "stalls": 0, "last_error": None, "result_summary": None,
             "conversation_id": None, "notes": [], "report": None}
 
@@ -131,7 +137,8 @@ def normalise(plan: dict) -> dict:
                       brief=str(raw.get("brief") or ""),
                       depends_on=[str(d) for d in (raw.get("depends_on") or [])],
                       assignee=raw.get("assignee"),
-                      id_=rid if rid and rid not in seen else None)
+                      id_=rid if rid and rid not in seen else None,
+                      model=raw.get("model"))
         seen.add(it["id"])
         it["status"] = raw.get("status") if raw.get("status") in STATUSES else "todo"
         it["attempts"] = max(0, int(raw.get("attempts") or 0))
@@ -307,6 +314,15 @@ independent work independent and put shared groundwork first. Prefer fewer,
 larger items over many tiny ones. Never invent an assignee that is not in the
 roster; null means a general worker."""
 
+# appended to the planner's instructions only when the operator made explicit
+# model assignments (orchestrate's `models`)
+PLANNER_MODELS = """
+Model assignments: the operator said which model to use for some of the work
+(listed under "# Model assignments"). Add a "model" key to EVERY item: the
+assigned model id, exactly as listed, on each item that does that work, and
+null on every other item. Never put a model on an item the operator did not
+assign one to."""
+
 SYNTH_SYSTEM = """Write the closing report for a multi-agent plan run: what got
 done (with the exact paths/artifacts the items reported), what failed or was
 blocked and why, and what the operator should do next. Tight markdown, no
@@ -356,9 +372,51 @@ def _known_agents() -> set[str]:
     return {p.name for p in d.iterdir() if (p / "AGENT.md").is_file()} if d.is_dir() else set()
 
 
-async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "") -> dict:
+def checked_models(models) -> list[dict]:
+    """The operator's explicit model assignments, each model validated against
+    the enabled list. [{"task": what the operator called that work, "model":
+    canonical provider/model}]. ValueError names the first bad one — a model
+    the operator asked for that cannot run is something to tell them, not to
+    quietly replace with the default."""
+    from . import providers
+    out = []
+    for m in models or []:
+        if not isinstance(m, dict):
+            raise ValueError("each model assignment is {task, model}")
+        task = " ".join(str(m.get("task") or "").split())[:200]
+        name = str(m.get("model") or "").strip()
+        if not task or not name:
+            raise ValueError("each model assignment needs both a task and a model")
+        try:
+            out.append({"task": task, "model": providers.checked(name)})
+        except providers.ProviderError as e:
+            raise ValueError(str(e)) from None
+    return out
+
+
+def _assigned_model(raw: dict, allowed: set[str]) -> str | None:
+    """The planner's model for an item, only if it is one the operator
+    assigned. The planner is a model and can slip; a model the operator never
+    named must not reach an item through it."""
+    from . import providers
+    name = str(raw.get("model") or "").strip()
+    if not name or not allowed:
+        return None
+    try:
+        full = providers.canonical(name)
+    except providers.ProviderError:
+        return None
+    return full if full in allowed else None
+
+
+async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "",
+                         models=()) -> dict:
     """One model call turns the dump into the checklist and persists it as the
-    project's plan. Refuses to replace a plan that is running."""
+    project's plan. Refuses to replace a plan that is running.
+
+    `models` is the operator's explicit model assignments (checked_models'
+    shape, already validated); without it every item runs on its assignee's
+    model or the default."""
     dump = (dump or "").strip()
     if not dump:
         raise ValueError("the dump is empty — give the planner something to plan")
@@ -367,7 +425,13 @@ async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "") -> 
     roster = agents_index() or "(no named agents — leave assignee null)"
     user = (f"Project: {slug}\n\n# Dump\n{dump[:PLANNER_DUMP_CHARS]}\n\n"
             f"{_read_refs(slug, files)}\n\n# Roster\n{roster}")
-    text = await complete_text(PLANNER_SYSTEM, user)
+    system = PLANNER_SYSTEM
+    if models:
+        system += PLANNER_MODELS
+        user += "\n\n# Model assignments\n" + "\n".join(
+            f"- {m['task']}: {m['model']}" for m in models)
+    allowed = {m["model"] for m in models or ()}
+    text = await complete_text(system, user)
     raws = _parse_items(text)
     if not raws:
         raise ValueError("the planner returned no checklist items")
@@ -378,7 +442,8 @@ async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "") -> 
         assignee = str(raw.get("assignee") or "").strip() or None
         items.append(new_item(plan, title=str(raw.get("title") or raw.get("brief"))[:120],
                               brief=str(raw.get("brief") or raw.get("title")),
-                              assignee=assignee if assignee in known else None))
+                              assignee=assignee if assignee in known else None,
+                              model=_assigned_model(raw, allowed)))
     # depends_on arrives as indices, ids or titles — resolve all three
     by_title = {it["title"].lower(): it["id"] for it in items}
     for it, raw in zip(items, raws):
@@ -418,6 +483,17 @@ def apply_item_edit(plan: dict, it: dict, patch: dict) -> None:
         if a and a not in _known_agents():
             raise ValueError(f"no agent named {a!r}")
         it["assignee"] = a
+    if "model" in patch:
+        # the operator's own edit is an explicit choice by definition; it still
+        # has to be a model that can run
+        m = (patch["model"] or "").strip() or None
+        if m:
+            from . import providers
+            try:
+                m = providers.checked(m)
+            except providers.ProviderError as e:
+                raise ValueError(str(e)) from None
+        it["model"] = m
     if "status" in patch and patch["status"] is not None:
         st = patch["status"]
         if st not in OPERATOR_STATUSES:
@@ -448,7 +524,8 @@ def replace_items(plan: dict, incoming: list[dict]) -> None:
         if it is None:
             fresh = bool(rid) and rid not in {i["id"] for i in items}
             it = new_item(plan, title=str(raw.get("title") or ""), id_=rid if fresh else None)
-        patch = {k: raw[k] for k in ("title", "brief", "depends_on", "assignee") if k in raw}
+        patch = {k: raw[k] for k in ("title", "brief", "depends_on", "assignee", "model")
+                 if k in raw}
         if raw.get("status") in OPERATOR_STATUSES and raw.get("status") != it["status"]:
             patch["status"] = raw["status"]
         apply_item_edit(plan, it, patch)
@@ -514,6 +591,12 @@ def _item_agent(plan: dict, it: dict) -> dict:
                  "project": ""}
     if plan.get("max_iterations"):
         agent["max_iterations"] = plan["max_iterations"]
+    if it.get("model"):
+        # re-checked at spawn: a model switched off since planning fails the
+        # attempt out loud (the error lands on the item) instead of the item
+        # silently running on something the operator did not choose
+        from . import providers
+        agent["model"], agent["base_url"] = providers.checked(it["model"]), ""
     return agent
 
 
@@ -938,5 +1021,135 @@ def render_checklist(plan: dict) -> str:
     for it in plan["items"]:
         deps = f" (after {', '.join(it['depends_on'])})" if it["depends_on"] else ""
         who = f" @{it['assignee']}" if it.get("assignee") else ""
-        lines.append(f"- {it['id']} [{it['status']}]{who} {it['title']}{deps}")
+        mdl = f" (model {it['model']})" if it.get("model") else ""
+        lines.append(f"- {it['id']} [{it['status']}]{who} {it['title']}{deps}{mdl}")
     return "\n".join(lines)
+
+
+# --- orchestrator mode (POST /api/chat mode=orchestrate) -----------------------
+
+ORCHESTRATOR_PROMPT = """# You are this conversation's orchestrator
+The operator hands you a brain-dump; you get it done through a team of agents
+working in project {project}, and you stay in charge until it is finished. Do
+not do the items' work yourself.
+
+1. Plan and launch: call orchestrate with the operator's dump — verbatim, plus
+   any facts from this conversation the agents need (they will not see it). It
+   saves an explicit checklist and runs one agent per item in this project, on
+   this host, under this project's egress policy, dependencies respected.
+2. Monitor: call plan_status with wait_seconds (e.g. 300). It returns when an
+   item changes state, a message arrives for you, or the wait runs out, and
+   shows every item's status, its agent's conversation id, and its result or
+   error. Keep calling it until the run is finished.
+3. Steer: send_message to item:<id> (or the item's conversation id) to correct,
+   unblock or inform a running agent. A failed or blocked item: message it,
+   or tell the operator what it needs.
+4. A single focused task outside the plan can go to spawn_agent or
+   spawn_temp_agent; you wait for that one's report.
+5. When plan_status says the run is finished, report to the operator: what got
+   done (exact paths), what failed or is blocked and why, and what they need
+   to decide.
+
+Model choice: every agent runs on the default model. ONLY when the operator
+explicitly said which model to use for which task, pass that: orchestrate's
+`models` ({{task, model}} per assignment) or spawn_agent / spawn_temp_agent's
+`model`. Never choose a model on your own initiative.
+
+Messages from the operator can arrive while you work. They are the operator
+speaking: act on them (message the affected agents, adjust the plan)."""
+
+
+def orchestrator_prompt(project: str | None) -> str:
+    return ORCHESTRATOR_PROMPT.format(
+        project=project or "(none — this conversation lost its project; tell the operator)")
+
+
+# how often plan_status re-reads the plan while waiting; a module constant so a
+# test can shrink it
+STATUS_POLL_SECONDS = 2.0
+
+
+def _fingerprint(plan: dict | None, running: bool) -> tuple:
+    if plan is None:
+        return (None,)
+    return (plan.get("status"), running, plan.get("job_id"),
+            tuple((it["id"], it["status"], it.get("attempts"),
+                   (it.get("report") or {}).get("status"), it.get("conversation_id"))
+                  for it in plan["items"]))
+
+
+async def _pending_for(cid: int | None) -> int:
+    """Undelivered messages waiting for conversation `cid` — the operator's or
+    an agent's. A waiting plan_status returns early for them: the orchestrator
+    reads its inbox only between rounds, so sitting out the wait would sit on
+    the message too."""
+    if not cid:
+        return 0
+    db = await get_db()
+    try:
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM agent_messages WHERE delivered_at IS NULL "
+            "AND to_conversation_id = ?", (cid,)) as cur:
+            return (await cur.fetchone())["n"]
+    finally:
+        await db.close()
+
+
+async def _head_rollup(root_id) -> str | None:
+    if not root_id:
+        return None
+    db = await get_db()
+    try:
+        async with db.execute("SELECT rollup FROM conversations WHERE id = ?",
+                              (root_id,)) as cur:
+            row = await cur.fetchone()
+    finally:
+        await db.close()
+    return row["rollup"] if row else None
+
+
+def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str:
+    lines = [f"Plan '{plan['title']}' — {'RUNNING' if running else 'not running'} "
+             f"(status {plan['status']}, head conversation {plan.get('root_id')}). {why}"]
+    for it in plan["items"]:
+        who = f" @{it['assignee']}" if it.get("assignee") else ""
+        mdl = f" model {it['model']}" if it.get("model") else ""
+        cid = f" conv {it['conversation_id']}" if it.get("conversation_id") else ""
+        lines.append(f"- {it['id']} [{it['status']}]{who}{mdl}{cid} {it['title']}")
+        if it.get("result_summary"):
+            lines.append(f"    result: {it['result_summary']}")
+        if it.get("last_error") and it["status"] != "done":
+            lines.append(f"    error: {it['last_error']}")
+    if not running and rollup:
+        lines.append(f"\n# Closing rollup\n{rollup}")
+    elif running:
+        lines.append("\nRunning items can be messaged: send_message to item:<id>.")
+    return "\n".join(lines)
+
+
+async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None) -> str:
+    """The plan_status tool: the checklist as it stands, after waiting (up to
+    wait_seconds, capped) for it to change or for a message to arrive for the
+    caller. Waiting on a running plan is how an orchestrator supervises one
+    without burning a model call every few seconds."""
+    wait = max(0, min(int(wait_seconds or 0), settings.plan_status_max_wait))
+    plan, running = load(slug), is_running(slug)
+    if plan is None:
+        return "error: this project has no plan — call orchestrate first."
+    why = "No wait requested."
+    if wait and running:
+        start = _fingerprint(plan, running)
+        deadline = time.monotonic() + wait
+        why = f"Waited {wait}s; nothing changed."
+        while time.monotonic() < deadline:
+            if await _pending_for(cid):
+                why = "A message arrived for you; you get it right after this result."
+                break
+            await asyncio.sleep(min(STATUS_POLL_SECONDS,
+                                    max(0.0, deadline - time.monotonic())))
+            plan, running = load(slug) or plan, is_running(slug)
+            if _fingerprint(plan, running) != start:
+                why = "The plan changed." if running else "The run finished."
+                break
+    rollup = None if running else await _head_rollup(plan.get("root_id"))
+    return _status_text(plan, running, rollup, why)

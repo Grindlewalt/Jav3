@@ -225,7 +225,11 @@ async def _open_run(db, agent: dict, task: str, active=_USE_DB, *,
         db, project=active, title=title, kind="agent", commit=False,
         parent=parent, job_id=job_id,
         # WHO this run is. A temp agent has no roster entry and gets None.
-        agent=agent.get("slug"))
+        agent=agent.get("slug"),
+        # WHAT it runs on, when that is a provider model (the definition's
+        # pin, or a spawn's explicit model) — the agents tree shows it. A
+        # local base_url endpoint is not a provider id, so it stays unset.
+        model=(agent.get("model") or None) if not agent.get("base_url") else None)
     await db.execute(
         "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
         (conversation_id, task))
@@ -277,13 +281,17 @@ def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
 
 async def run_temp_agent_headless(prompt: str, task: str, *,
                                   duplicate: bool = False, label: str = "",
-                                  active=_USE_DB, **hooks) -> dict:
+                                  active=_USE_DB, model: str | None = None,
+                                  **hooks) -> dict:
     """A disposable agent: no AGENT.md, no roster entry — a role prompt layered
     on Jav3's own context (full when duplicate, lean otherwise), run once and
     gone. What survives is the run's conversation row (Jobs view) and any
-    memory note the agent writes."""
-    return await _run_headless(_temp_agent_def(prompt, duplicate, label),
-                               task, active, **hooks)
+    memory note the agent writes. `model` (provider/model) as for
+    run_agent_headless."""
+    agent = _temp_agent_def(prompt, duplicate, label)
+    if model:
+        agent["model"] = model
+    return await _run_headless(agent, task, active, **hooks)
 
 
 def _internal_specs(names: tuple[str, ...]) -> list[dict]:
