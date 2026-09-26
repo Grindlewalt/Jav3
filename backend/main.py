@@ -72,6 +72,9 @@ async def lifespan(app: FastAPI):
         await egress_proxy.stop()
         await guest_shell.stop_unix_server()
         await vm.teardown()        # never leave a guest running past shutdown
+        if settings.vm_boxes_enabled:
+            from .vm import boxes
+            await boxes.stop_all()  # ...nor any other box
         if settings.vm_egress:
             await vm.net_down()
 

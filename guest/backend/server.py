@@ -15,6 +15,7 @@ import shutil
 import socket
 import tarfile
 
+from . import boxinfo
 from . import config as guest_config
 from . import persist, turnctx
 from .agent.loop import run_turn
@@ -78,6 +79,18 @@ async def _handle(loop, conn) -> None:
             return
         if mode == "persist_unmount":
             await send(await asyncio.to_thread(persist.unmount))
+            return
+        # process telemetry (WP4): the host polls every box for its process
+        # tree. procwatch.py ships in the package once WP4 lands; until then
+        # (or on a guest without it) the reply says so rather than failing.
+        if mode == "ps":
+            try:
+                from . import procwatch
+                snap = await asyncio.to_thread(procwatch.snapshot)
+                await send({"type": "ps", "ok": True, "snapshot": snap})
+            except Exception as e:  # noqa: BLE001 — a poll must never kill the server
+                await send({"type": "ps", "ok": False,
+                            "error": f"{type(e).__name__}: {e}"[:300]})
             return
         if mode == "pull":
             slug = spec.get("active_slug")
@@ -148,7 +161,10 @@ def _bring_up_egress_nic() -> None:
     netless guest has only lo -> no-op. Idempotent, best-effort, runs as root."""
     import os
     import subprocess
-    guest_ip, host_ip = "10.201.0.2", "10.201.0.1"
+    # box.json (multi-box mode) names this box's /30; absent, the shared
+    # guest's fixed 10.201.0.2/24 via 10.201.0.1 exactly as before
+    n = boxinfo.net()
+    guest_ip, host_ip, prefix = n["guest_ip"], n["gateway"], n["prefix"]
     nics = [n for n in sorted(os.listdir("/sys/class/net")) if n != "lo"]
     if not nics:
         return
@@ -156,19 +172,19 @@ def _bring_up_egress_nic() -> None:
     try:
         have = subprocess.run(["ip", "-o", "-4", "addr", "show", "dev", nic],
                               capture_output=True, text=True).stdout
-        if guest_ip not in have:
+        if f" {guest_ip}/" not in have:
             subprocess.run(["ip", "addr", "flush", "dev", nic], check=False)
-            subprocess.run(["ip", "addr", "add", f"{guest_ip}/24", "dev", nic],
+            subprocess.run(["ip", "addr", "add", f"{guest_ip}/{prefix}", "dev", nic],
                            check=False)
         subprocess.run(["ip", "link", "set", nic, "up"], check=False)
         subprocess.run(["ip", "route", "replace", "default", "via", host_ip,
                         "dev", nic], check=False)
         try:
             with open("/etc/resolv.conf", "w") as f:
-                f.write(f"nameserver {host_ip}\n")
+                f.write(f"nameserver {n['dns']}\n")
         except OSError:
             pass
-        print(f"GUEST-EGRESS-NIC: {nic} {guest_ip}/24 via {host_ip}", flush=True)
+        print(f"GUEST-EGRESS-NIC: {nic} {guest_ip}/{prefix} via {host_ip}", flush=True)
     except Exception as e:  # noqa: BLE001 — never let NIC setup crash the boot
         print(f"GUEST-EGRESS-NIC-ERROR: {type(e).__name__}: {e}", flush=True)
 
@@ -179,18 +195,20 @@ def _detect_egress_proxy() -> None:
     subprocess (pip/npm/curl/git via run_code) at the host proxy. A netless guest
     has only lo, so this stays unset and direct sockets fail closed as before."""
     import os
-    _bring_up_egress_nic()
+    n = boxinfo.net()
+    if boxinfo.load().get("runtime") != "docker":   # docker configures its own NIC
+        _bring_up_egress_nic()
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            probe.connect(("10.201.0.1", 9))     # no packet sent; resolves src addr
+            probe.connect((n["gateway"], 9))     # no packet sent; resolves src addr
             local = probe.getsockname()[0]
         finally:
             probe.close()
     except OSError:
         local = ""
     if local.startswith("10.201."):
-        proxy = "http://10.201.0.1:8443"
+        proxy = n["proxy"]
         os.environ["JARVIS_EGRESS_PROXY"] = proxy
         local = "localhost,127.0.0.1,::1"    # loopback stays in-guest, never proxied
         os.environ.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy,
@@ -204,10 +222,12 @@ def _detect_egress_proxy() -> None:
 async def serve() -> None:
     _detect_egress_proxy()
     loop = asyncio.get_running_loop()
-    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    s.bind((socket.VMADDR_CID_ANY, PORT))
-    s.listen(4)
-    s.setblocking(False)
+    # vsock ANY:5556, or a docker box's /run/jav3/5556.sock (box.json)
+    s = boxinfo.listen("runturn", PORT)
+    b = boxinfo.load()
+    if b:
+        print(f"GUEST-BOX: {b.get('id')} kind={b.get('kind')} "
+              f"runtime={b.get('runtime')}", flush=True)
     print(f"GUEST-RUNTURN-SERVER: listening on vsock :{PORT}", flush=True)
     # the operator co-working PTY listener runs alongside (best-effort: an old
     # golden image without shell.py just skips it, run-turn still serves)

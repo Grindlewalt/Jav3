@@ -182,11 +182,15 @@ async def _handle(loop, conn) -> None:
 
 async def serve() -> None:
     loop = asyncio.get_running_loop()
-    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((socket.VMADDR_CID_ANY, PORT))
-    s.listen(4)
-    s.setblocking(False)
+    from . import boxinfo
+    if boxinfo.unix_gateway():          # a docker box: /run/jav3/5557.sock
+        s = boxinfo.listen("shell", PORT)
+    else:
+        s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((socket.VMADDR_CID_ANY, PORT))
+        s.listen(4)
+        s.setblocking(False)
     print(f"GUEST-SHELL-SERVER: listening on vsock :{PORT}", flush=True)
     while True:
         conn, _ = await loop.sock_accept(s)

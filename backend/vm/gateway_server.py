@@ -19,7 +19,22 @@ from ..agent import budget as budget_mod
 from ..agent.budget import BudgetExceeded
 from ..agent.model import ModelError, PeakPricingConfirmationRequired, model
 from ..config import settings
-from . import broker
+from . import boxes, broker
+
+# kind -> fn(box) -> tar.gz bytes (WP3 registers "service", WP5 "builder").
+# shared/project get the turn package (guest_pkg). docs/boxes-contract.md D.
+_PACKAGE_BUILDERS: dict = {}
+# op -> async fn(loop, conn, req, box): kind-specific report ops (svc_report,
+# build_report) owned by WP3 / WP5. Gated by boxes.GATEWAY_OPS first.
+_OP_HANDLERS: dict = {}
+
+
+def register_package_builder(kind: str, fn) -> None:
+    _PACKAGE_BUILDERS[kind] = fn
+
+
+def register_op_handler(op: str, fn) -> None:
+    _OP_HANDLERS[op] = fn
 
 
 async def _send(loop, conn, obj: dict) -> None:
@@ -37,9 +52,19 @@ def _entitled(req: dict) -> bool:
     return broker.verify_token(req.get("op_id") or "", req.get("op_token"))
 
 
-async def _handle_model_call(loop, conn, req: dict) -> None:
+def _op_from_elsewhere(req: dict, box) -> bool:
+    """Multi-box: an op_id bound to one box (guest_turn) must arrive from it.
+    Tokens are per-turn secrets shipped only to that box, so this is a second
+    lock, not the first: a token that leaked into another box still fails."""
+    if box is None:
+        return False
+    bound = boxes.op_box(req.get("op_id") or "")
+    return bound is not None and bound != box.id
+
+
+async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
     op_id = req.get("op_id") or "vm-anon"
-    if not _entitled(req):
+    if not _entitled(req) or _op_from_elsewhere(req, box):
         await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
                                  "message": f"op_id {op_id!r} is not this caller's turn"})
         return
@@ -70,9 +95,10 @@ async def _handle_model_call(loop, conn, req: dict) -> None:
                                  "error": type(e).__name__, "message": str(e)})
 
 
-async def _handle_tool_broker_call(loop, conn, req: dict) -> None:
+async def _handle_tool_broker_call(loop, conn, req: dict, box=None) -> None:
     op_id = req.get("op_id") or "vm-anon"
-    if not _entitled(req) or broker.get_turn(op_id) is None:   # same pinning as model_call
+    if (not _entitled(req) or broker.get_turn(op_id) is None   # same pinning as model_call
+            or _op_from_elsewhere(req, box)):
         await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
                                  "message": f"op_id {op_id!r} is not this caller's turn"})
         return
@@ -84,9 +110,73 @@ async def _handle_tool_broker_call(loop, conn, req: dict) -> None:
     await _send(loop, conn, out)
 
 
-async def handle_conn(loop, conn) -> None:
+async def _handle_taint_note(loop, conn, req: dict, box=None) -> None:
+    """A guest-side tool (the WP5 screenshot tool) read untrusted content with
+    no broker hop, so the host could not see it: taint the turn as web_read
+    would. Only ever ADDS taint, and only for the caller's own turn."""
+    op_id = req.get("op_id") or ""
+    env = broker.get_turn(op_id)
+    if not _entitled(req) or env is None or _op_from_elsewhere(req, box):
+        await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
+                                 "message": f"op_id {op_id!r} is not this caller's turn"})
+        return
+    src = req.get("source")
+    src = src if isinstance(src, str) and len(src) <= 64 and src.isprintable() else "?"
+    newly = op_id not in broker._tainted
+    if newly:
+        # same order as broker_dispatch: /persist goes read-only BEFORE the
+        # guest is told the turn is tainted
+        from . import persist
+        broker.mark_tainted(op_id)
+        await persist.on_taint(env.active_project)
+    print(f"[gateway] taint_note op={op_id} source={src} newly={newly}")
+    await _send(loop, conn, {"type": "taint_noted", "tainted": True, "newly": newly})
+
+
+def _package_for(box) -> bytes | None:
+    """The guest package for the CALLER's kind, with its box.json. None =
+    this kind has no package (yet)."""
+    import io
+    import json as _json
+    import tarfile
+    from .guest_pkg import build_package_tar
+    if box is None:
+        return build_package_tar()           # flag off: today's package, unchanged
+    fn = _PACKAGE_BUILDERS.get(box.kind)
+    if fn is None and box.kind not in ("shared", "project"):
+        return None
+    raw = fn(box) if fn is not None else build_package_tar()
+    # append box.json: re-pack (a gz stream cannot be appended in place)
+    out = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as src, \
+            tarfile.open(fileobj=out, mode="w:gz") as dst:
+        for m in src.getmembers():
+            if m.name == "box.json":
+                continue                      # only the host's own identity
+            dst.addfile(m, src.extractfile(m) if m.isfile() else None)
+        data = _json.dumps(box.box_json(), indent=1).encode()
+        ti = tarfile.TarInfo("box.json")
+        ti.size, ti.mode = len(data), 0o644
+        dst.addfile(ti, io.BytesIO(data))
+    return out.getvalue()
+
+
+def _caller(peer_cid, box):
+    """(gated, box): whether kind gating applies, and the caller's box."""
+    if not settings.vm_boxes_enabled:
+        return False, None
+    return True, (box if box is not None else boxes.by_cid(peer_cid))
+
+
+async def handle_conn(loop, conn, *, peer_cid=None, box=None) -> None:
     """Serve one guest connection: read NDJSON requests, dispatch each. Exposed
-    (not underscored) so tests can drive it over an AF_UNIX socketpair."""
+    (not underscored) so tests can drive it over an AF_UNIX socketpair.
+
+    `peer_cid` is the vsock peer's CID from accept(); `box` is set instead by
+    a per-box unix listener (docker). With boxes enabled the caller's kind
+    decides which ops it may use (boxes.GATEWAY_OPS); an unknown caller may
+    only ping. With boxes off, nothing is gated: today's behaviour."""
+    gated, caller = _caller(peer_cid, box)
     try:
         buf = b""
         while True:
@@ -104,15 +194,28 @@ async def handle_conn(loop, conn) -> None:
                 await _send(loop, conn, {"type": "error", "error": "bad_json"})
                 continue
             op = req.get("op")
+            if gated and op != "ping" and (caller is None or not caller.may(op)):
+                who = caller.kind if caller is not None else f"unknown (cid {peer_cid})"
+                await _send(loop, conn, {"type": "error", "error": "op_not_allowed",
+                                         "message": f"{op!r} is not allowed from a {who} box"})
+                continue
             if op == "model_call":
-                await _handle_model_call(loop, conn, req)
+                await _handle_model_call(loop, conn, req, caller)
             elif op == "tool_broker_call":
-                await _handle_tool_broker_call(loop, conn, req)
+                await _handle_tool_broker_call(loop, conn, req, caller)
+            elif op == "taint_note":
+                await _handle_taint_note(loop, conn, req, caller)
             elif op == "get_guest_package":
                 import base64
-                from .guest_pkg import build_package_tar
-                tar = base64.b64encode(build_package_tar()).decode()
+                pkg = _package_for(caller)
+                if pkg is None:
+                    await _send(loop, conn, {"type": "error", "error": "no_package",
+                                             "message": f"no package for {caller.kind} boxes"})
+                    continue
+                tar = base64.b64encode(pkg).decode()
                 await _send(loop, conn, {"type": "guest_package", "tar_b64": tar})
+            elif op in _OP_HANDLERS and gated:
+                await _OP_HANDLERS[op](loop, conn, req, caller)
             elif op == "ping":
                 await _send(loop, conn, {"type": "pong"})
             else:
@@ -138,12 +241,13 @@ class VsockGateway:
         self.connections = 0            # guests seen — the lifecycle readiness signal
         self._sock: socket.socket | None = None
         self._task: asyncio.Task | None = None
+        self._unix: dict[str, asyncio.Task] = {}
 
     async def _serve(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
             try:
-                conn, _ = await loop.sock_accept(self._sock)
+                conn, peer = await loop.sock_accept(self._sock)
             except asyncio.CancelledError:
                 raise
             except OSError:
@@ -153,7 +257,10 @@ class VsockGateway:
                 continue
             conn.setblocking(False)
             self.connections += 1
-            asyncio.create_task(handle_conn(loop, conn))
+            # the peer's CID is the caller's identity (the guest cannot choose
+            # it: KVM assigns it from the -device vhost-vsock-pci guest-cid)
+            cid = peer[0] if isinstance(peer, tuple) and peer else None
+            asyncio.create_task(handle_conn(loop, conn, peer_cid=cid))
 
     async def start(self) -> None:
         try:
@@ -169,7 +276,44 @@ class VsockGateway:
         self.enabled = True
         self._task = asyncio.create_task(self._serve())
 
+    # --- per-box AF_UNIX listeners (docker boxes; docs/boxes-contract.md C) --
+    async def listen_unix(self, box) -> None:
+        """Listen on <vm_dir>/sock/<cid>/gateway.sock for ONE box. The listener is
+        the identity: every connection on it is that box, whatever it says."""
+        import os
+        path = box.transport.gateway_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(path))
+        os.chmod(path, 0o660)
+        s.listen(8)
+        s.setblocking(False)
+        loop = asyncio.get_running_loop()
+
+        async def serve():
+            try:
+                while True:
+                    try:
+                        conn, _ = await loop.sock_accept(s)
+                    except OSError:
+                        await asyncio.sleep(0.5)
+                        continue
+                    conn.setblocking(False)
+                    asyncio.create_task(handle_conn(loop, conn, box=box))
+            finally:
+                s.close()
+        await self.unlisten_unix(box.id)
+        self._unix[box.id] = asyncio.create_task(serve())
+
+    async def unlisten_unix(self, box_id: str) -> None:
+        t = self._unix.pop(box_id, None)
+        if t is not None:
+            t.cancel()
+
     async def stop(self) -> None:
+        for bid in list(self._unix):
+            await self.unlisten_unix(bid)
         if self._task:
             self._task.cancel()
         if self._sock:

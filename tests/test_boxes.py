@@ -26,7 +26,7 @@ def test_shared_box_matches_todays_constants(reg):
     assert (s.host_ip, s.guest_ip, s.prefix) == ("10.201.0.1", "10.201.0.2", 24)
     assert s.mac == "52:54:00:12:34:60"
     assert s.dir == settings.vm_dir and s.mem_mb == 768
-    assert boxes.by_cid(3) is s and boxes.by_host_ip("10.201.0.1") is s
+    assert boxes.by_cid(3).id == "shared" and boxes.by_host_ip("10.201.0.1").id == "shared"
 
 
 def test_project_box_addressing_and_lookup(reg):
@@ -180,3 +180,15 @@ def test_schema_contract(tmp_env):
         con.execute("INSERT INTO security_profiles (name, service_placement, box_runtime) "
                     "VALUES ('z', 'everywhere', 'kvm')")
     con.close()
+
+
+def test_controller_per_box(reg):
+    from backend.vm import lifecycle
+    assert boxes.controller(boxes.shared()) is lifecycle.vm
+    assert lifecycle.vm._dir == settings.vm_dir and lifecycle.vm._cid == 3
+    b = boxes.allocate("project", project="alpha")
+    ctl = boxes.controller(b)
+    assert isinstance(ctl, lifecycle.GuestVM) and ctl is boxes.controller(b)
+    assert ctl._dir == b.dir and ctl._cid == 10 and not ctl.running()
+    row = boxes.status_json(b)
+    assert row["state"] == "stopped" and row["net"]["tap"] == "jvtap10"

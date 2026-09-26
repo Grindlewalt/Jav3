@@ -24,7 +24,7 @@ Runtimes (`Box.runtime`, operator choice per profile, `box_runtime`):
              AF_VSOCK: the guest dials CID 2 : settings.vm_vsock_port, the host
              dials the box CID on 5556 (run-turn), 5557 (shell), 5558 (svcd).
     docker   a hardened container (WP8). The SAME protocol runs over per-box
-             AF_UNIX sockets in <box dir>/sock/, bind-mounted into the
+             AF_UNIX sockets in <vm_dir>/sock/<cid>/, bind-mounted into the
              container at /run/jav3. No TCP, never the docker socket.
 
 The transport seam (`Transport`) is the only place the two differ for the
@@ -146,7 +146,7 @@ class VsockTransport(Transport):
 
 
 class UnixTransport(Transport):
-    """Per-box AF_UNIX sockets in <box dir>/sock (host view) == /run/jav3
+    """Per-box AF_UNIX sockets in <vm_dir>/sock/<cid> (host view) == /run/jav3
     (container view). gateway.sock is the host's listener; <port>.sock are the
     guest's. The directory is the ONLY host path mounted into the container."""
     name = "unix"
@@ -154,7 +154,9 @@ class UnixTransport(Transport):
 
     @property
     def host_dir(self) -> Path:
-        return self.box.dir / "sock"
+        # short on purpose: sun_path is 108 bytes, and a long slug under
+        # <vm_dir>/boxes/<id>/ would not fit
+        return settings.vm_dir / "sock" / str(self.box.cid)
 
     def host_path(self, port: int | str) -> Path:
         return self.host_dir / f"{port}.sock"
@@ -338,14 +340,13 @@ class Registry:
 
     def __init__(self):
         self._boxes: dict[str, Box] = {}
-        self._shared: Box | None = None
         self._op_box: dict[str, str] = {}
 
     # lookup ---------------------------------------------------------------
     def shared(self) -> Box:
-        if self._shared is None:
-            self._shared = _shared_box()
-        return self._shared
+        """Built fresh from settings on every call: its fields are today's
+        settings, so nothing here can drift from what lifecycle.vm uses."""
+        return _shared_box()
 
     def all(self) -> list[Box]:
         return [self.shared(), *sorted(self._boxes.values(), key=lambda b: b.cid)]
@@ -480,7 +481,6 @@ class Registry:
     def reset(self) -> None:
         """Tests only: forget everything (settings may have changed)."""
         self._boxes.clear()
-        self._shared = None
         self._op_box.clear()
 
 
@@ -601,17 +601,18 @@ def image_path(box: Box) -> Path:
 
 
 def controller(box: Box):
+    """The box's runtime controller. The shared box's is ALWAYS the current
+    `lifecycle.vm` (never cached: callers and tests that swap it are obeyed)."""
+    if box.is_shared:
+        from . import lifecycle
+        return lifecycle.vm
     if box.ctl is None:
-        if box.is_shared:
-            from .lifecycle import vm
-            box.ctl = vm
-        else:
-            if box.runtime not in _DRIVERS:
-                if box.runtime == "kvm":
-                    from . import lifecycle  # noqa: F401 — registers 'kvm'
-                if box.runtime not in _DRIVERS:
-                    raise BoxError(f"runtime {box.runtime!r} is not available")
-            box.ctl = _DRIVERS[box.runtime](box)
+        if box.runtime not in _DRIVERS and box.runtime == "kvm":
+            import importlib                        # importing registers 'kvm'
+            importlib.import_module(".lifecycle", __package__)
+        if box.runtime not in _DRIVERS:
+            raise BoxError(f"runtime {box.runtime!r} is not available")
+        box.ctl = _DRIVERS[box.runtime](box)
     return box.ctl
 
 
@@ -658,6 +659,16 @@ async def destroy(box: Box, *, delete_data: bool = False) -> None:
             await fn(box)
     registry.release(box.id)
     shutil.rmtree(box.dir, ignore_errors=True)
+
+
+async def stop_all() -> None:
+    """App shutdown: stop every non-shared box (the shared one is lifecycle.vm's)."""
+    for box in list(registry.all()):
+        if not box.is_shared and box.ctl is not None:
+            try:
+                await box.ctl.teardown()
+            except Exception:  # noqa: BLE001 — shutdown stops the rest regardless
+                pass
 
 
 async def reap_idle() -> None:
@@ -711,7 +722,7 @@ _cpu_prev: dict[str, tuple[float, float]] = {}
 
 def status_json(box: Box) -> dict:
     """One /api/vm/boxes row (docs/boxes-contract.md, section E)."""
-    ctl = box.ctl if box.ctl is not None or not box.is_shared else controller(box)
+    ctl = controller(box) if box.is_shared else box.ctl
     running = bool(ctl and ctl.running())
     pid = getattr(ctl, "pid", None) if running else None
     st = _proc_stats(pid)

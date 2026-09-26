@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_user
+from .vm import boxes
 from .vm.lifecycle import VMError, vm
 
 router = APIRouter(prefix="/api/vm", tags=["vm"], dependencies=[Depends(require_user)])
@@ -62,3 +63,59 @@ async def rebuild(body: NukeBody):
     if not body.confirm:
         raise HTTPException(status_code=400, detail="rebuild requires confirm=true")
     return await vm.rebuild_image()
+
+
+# --- boxes (DESIGN-BOXES.md (e); docs/boxes-contract.md J) -------------------
+# The routes above stay as the shared box's aliases. These list and drive
+# every box. With boxes off the list is just the shared box.
+
+class DestroyBody(BaseModel):
+    confirm: bool = False
+    delete_data: bool = False
+
+
+def _box_or_404(box_id: str, *, allocate: bool = False):
+    b = boxes.get(box_id)
+    if b is None and allocate and boxes.enabled() and box_id.startswith("p-"):
+        try:
+            b = boxes.allocate("project", project=box_id[2:])
+        except boxes.BoxCapError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except boxes.BoxError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if b is None:
+        raise HTTPException(status_code=404, detail=f"no box {box_id!r}")
+    return b
+
+
+@router.get("/boxes")
+async def list_boxes():
+    return {"enabled": boxes.enabled(),
+            "boxes": [boxes.status_json(b) for b in boxes.all_boxes()],
+            "budget": boxes.budget()}
+
+
+@router.post("/boxes/{box_id}/start")
+async def start_box(box_id: str):
+    b = _box_or_404(box_id, allocate=True)
+    try:
+        await boxes.start(b)
+    except (VMError, boxes.BoxError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return boxes.status_json(b)
+
+
+@router.post("/boxes/{box_id}/stop")
+async def stop_box(box_id: str):
+    b = _box_or_404(box_id)
+    await boxes.stop(b)
+    return boxes.status_json(b)
+
+
+@router.post("/boxes/{box_id}/destroy")
+async def destroy_box(box_id: str, body: DestroyBody):
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="destroy requires confirm=true")
+    b = _box_or_404(box_id)
+    await boxes.destroy(b, delete_data=body.delete_data)
+    return {"ok": True}

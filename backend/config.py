@@ -367,7 +367,7 @@ class Settings(BaseSettings):
     # A lighter, weaker alternative to a KVM guest, chosen per profile
     # (`box_runtime`). OFF: a profile asking for docker gets a refusal, never a
     # silent kvm box. Same protocol as kvm over per-box AF_UNIX sockets
-    # (<box dir>/sock, mounted at /run/jav3); no TCP channel, never the docker
+    # (<vm_dir>/sock/<cid>, mounted at /run/jav3); no TCP channel, never the docker
     # socket. Hardening (rootless/userns-remap, cap-drop ALL, no-new-privileges,
     # seccomp, read-only rootfs, pids/memory limits) is in docs/boxes-contract.md.
     docker_enabled: bool = False

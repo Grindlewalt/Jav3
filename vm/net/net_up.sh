@@ -53,8 +53,20 @@ down() {
   ip link del "$TAP" 2>/dev/null || true
 }
 
+# Multi-box mode (vm_boxes_enabled): the same, with the set-pinned ruleset and
+# a resolver on every jvtap* (bind-dynamic picks up taps net_box.sh adds
+# later). The files are the checked-in ones; nothing the app writes is loaded.
+down_boxes() {
+  for dev in $(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -E '^jv(tap[1-9][0-9]*|br[0-9]+)$' || true); do
+    [[ "$dev" == jvtap* ]] && ip link del "$dev" 2>/dev/null || true
+  done
+  down
+}
+
 case "${1:-up}" in
   up) up ;;
   down) down ;;
-  *) echo "usage: $0 up|down" >&2; exit 1 ;;
+  up-boxes) NFT="$HERE/jarvis-egress-boxes.nft"; DNSCONF="$HERE/dnsmasq-egress-boxes.conf"; up ;;
+  down-boxes) down_boxes ;;
+  *) echo "usage: $0 up|down|up-boxes|down-boxes" >&2; exit 1 ;;
 esac

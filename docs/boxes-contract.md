@@ -45,7 +45,7 @@ project 10–49; service 50–89; builder 90–127. The slot names the tap and t
 /30, so the three identities never disagree.
 
 Box directory (non-shared): `overlay.qcow2`, `efi_vars_run.fd`, `qmp.sock`,
-`console.log`; docker boxes add `sock/` (section C).
+`console.log`; a docker box's sockets live in `<vm_dir>/sock/<cid>/` (section C).
 
 Caps (all reservations count, running or not; the shared box always counts):
 `vm_max_boxes` (4, includes shared), `vm_max_project_boxes` (1),
@@ -101,9 +101,9 @@ Errors: `boxes.BoxError`, `boxes.BoxCapError(BoxError)`.
 | runtime | transport | guest -> host | host -> guest | host identity of a caller |
 |---|---|---|---|---|
 | kvm | `VsockTransport` | AF_VSOCK CID 2 : `vm_vsock_port` (5555, baked in bootstrap) | AF_VSOCK box.cid : port | peer CID from `accept()` -> `boxes.by_cid` |
-| docker | `UnixTransport` | AF_UNIX `/run/jav3/gateway.sock` | AF_UNIX `<box.dir>/sock/<port>.sock` | which per-box listener accepted (`gateway.listen_unix(box)`) |
+| docker | `UnixTransport` | AF_UNIX `/run/jav3/gateway.sock` | AF_UNIX `<vm_dir>/sock/<cid>/<port>.sock` | which per-box listener accepted (`gateway.listen_unix(box)`) |
 
-`<box.dir>/sock/` is the only host path a docker box ever sees, mounted at
+`<vm_dir>/sock/<cid>/` (short: `sun_path` is 108 bytes) is the only host path a docker box ever sees, mounted at
 `/run/jav3`. No TCP channel. Never the docker socket.
 
 **box.json** (host-authored, shipped inside the guest package as
@@ -329,7 +329,7 @@ Behind `docker_enabled` and a profile's explicit `box_runtime: "docker"`.
 - `--cap-drop ALL`, `--security-opt no-new-privileges`, default seccomp profile
   (or stricter), `--read-only` rootfs, `--tmpfs /tmp:size=<docker_tmpfs_mb>m,noexec,nosuid,nodev`,
   `--pids-limit <docker_box_pids>`, `--memory <mem>m --memory-swap <mem>m`, `--cpus`.
-- Mounts: ONLY `<box.dir>/sock` -> `/run/jav3` and the workspace/`/srv` volume.
+- Mounts: ONLY `<vm_dir>/sock/<cid>` -> `/run/jav3` and the workspace/`/srv` volume.
   Never `/var/run/docker.sock`, never other host paths.
 - `--runtime runsc` when `docker_oci_runtime` is set and present.
 - Network: one internal network per box (bridge `jvbr<cid>`, subnet
@@ -352,3 +352,18 @@ Behind `docker_enabled` and a profile's explicit `box_runtime: "docker"`.
 | 6 | frontend |
 | 7 | clients/jav3cli/jav3 |
 | 8 | the docker runtime driver (registers via `boxes.register_runtime("docker", ...)`) |
+
+## N. WP1 implementation notes (as built)
+
+- The shared box, flag on, is pinned like every other box: it reaches only
+  10.201.0.1 (today, flag off, it can reach any host address on 53/8443).
+- Per-box taps get no tcpdump ring (RAM); the shared jvtap0 keeps its pcap.
+- Non-shared boxes get no DHCP; they configure from box.json. A guest that
+  keeps the literal 10.201.0.2 on a box tap is a spoofer and is dropped.
+- `/persist` is attached only in the shared box (it is being retired).
+- The operator shell (`guest_shell.py`) still reaches the shared box only.
+- Sudo: `net_box.sh` runs as `sudo -n bash <repo>/vm/net/net_box.sh <action> ...`.
+  A host without blanket NOPASSWD needs, for the app user:
+  `<user> ALL=(root) NOPASSWD: /usr/bin/bash <repo>/vm/net/net_box.sh *`
+  (plus the existing line for `net_up.sh`, which gains `up-boxes|down-boxes`).
+  sudo's env_reset strips JARVIS_*: everything the script needs is in argv.

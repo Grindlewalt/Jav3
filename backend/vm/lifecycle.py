@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from ..config import settings
+from . import boxes as _boxes_mod
 from .gateway_server import gateway
 from .persist import status as persist_status
 
@@ -78,7 +79,12 @@ _EXTERNAL_RE = re.compile(r"GUEST-NET-EXTERNAL-REACHABLE: (True|False)")
 
 
 class GuestVM:
-    def __init__(self):
+    """One KVM guest. `GuestVM()` is the shared box (module singleton `vm`,
+    today's files and constants); `GuestVM(box)` runs a non-shared box from
+    backend/vm/boxes.py in its own directory, CID, tap and MAC."""
+
+    def __init__(self, box=None):
+        self.box = box if box is not None and not box.is_shared else None
         self._proc: asyncio.subprocess.Process | None = None
         # lifecycle transitions (boot/teardown/reap) are serialized so the idle
         # reaper can never nuke a guest a turn is starting on, and two turns never
@@ -92,6 +98,35 @@ class GuestVM:
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
+
+    # --- per-box identity (None box = the shared guest, exactly as before) ----
+    @property
+    def _dir(self) -> Path:
+        return self.box.dir if self.box is not None else settings.vm_dir
+
+    @property
+    def _cid(self) -> int:
+        return self.box.cid if self.box is not None else settings.vm_guest_cid
+
+    def _console(self) -> Path:
+        return self._dir / "console.log"
+
+    # the controller interface boxes.py reads (docs/boxes-contract.md, B)
+    @property
+    def inflight(self) -> int:
+        return self._inflight
+
+    @property
+    def idle_since(self) -> float | None:
+        return self._idle_since
+
+    @property
+    def booted_at(self) -> float | None:
+        return self._booted_at
+
+    @property
+    def pid(self) -> int | None:
+        return self._proc.pid if self.running() else None
 
     def status(self) -> dict:
         age = int(time.monotonic() - self._booted_at) if self._booted_at else None
@@ -107,11 +142,21 @@ class GuestVM:
                 "persist": persist_status(),
                 **_image_meta()}
 
+    def _image(self) -> Path:
+        if self.box is None:
+            return _base_image()
+        from . import boxes
+        try:
+            return boxes.image_path(self.box)
+        except boxes.BoxError as e:
+            raise VMError(str(e))
+
     async def _build_overlay(self) -> None:
-        base = _base_image()
+        base = self._image()
         if not base.exists():
             raise VMError(f"no golden image {base.name} — run vm/build_base.sh on the Pi")
-        overlay = settings.vm_dir / "overlay.qcow2"
+        self._dir.mkdir(parents=True, exist_ok=True)
+        overlay = self._dir / "overlay.qcow2"
         overlay.unlink(missing_ok=True)
         proc = await asyncio.create_subprocess_exec(
             "qemu-img", "create", "-f", "qcow2", "-b", str(base), "-F", "qcow2",
@@ -126,7 +171,7 @@ class GuestVM:
         longer track — a guest orphaned across an app restart (setsid detaches it
         from the process group teardown kills). Without this, a reboot's fresh guest
         can't bind the CID and the host would keep talking to the stale one."""
-        overlay = str(settings.vm_dir / "overlay.qcow2")
+        overlay = str(self._dir / "overlay.qcow2")
         try:
             proc = await asyncio.create_subprocess_exec(
                 "pkill", "-9", "-f", overlay,
@@ -158,17 +203,20 @@ class GuestVM:
         """Bring the monitored-egress network up. Called ONCE from the app
         lifespan when vm_egress is on — before the proxy binds its host IP and
         before any guest boots."""
-        await self._net("up")
+        # multi-box mode loads the set-pinned ruleset + a resolver on jvtap*
+        await self._net("up-boxes" if settings.vm_boxes_enabled else "up")
 
     async def net_down(self) -> None:
-        await self._net("down")
+        await self._net("down-boxes" if settings.vm_boxes_enabled else "down")
 
     async def boot(self) -> None:
         if self.running():
             return
         await self._kill_orphans()
         await self._build_overlay()
-        _console_log().unlink(missing_ok=True)
+        self._console().unlink(missing_ok=True)
+        if self.box is not None:
+            await self._box_net_up()
         # the monitored-egress network (tap/nft/dnsmasq/proxy) is APP-lifecycle,
         # not per-boot — it's up before any guest and survives idle-scrub reboots,
         # so the proxy's host-IP binding never flaps mid-operation. run_vm.sh
@@ -181,6 +229,15 @@ class GuestVM:
                "JARVIS_VM_CPUS": str(settings.vm_cpus),
                "JARVIS_VM_CID": str(settings.vm_guest_cid),
                "JARVIS_VM_EGRESS": "1" if settings.vm_egress else "0"}
+        if self.box is not None:
+            # a non-shared box: its own dir, image path, CID, tap and MAC
+            env.update({"VM_DIR": str(self._dir),
+                        "JARVIS_VM_BASE": str(self._image()),
+                        "JARVIS_VM_MEM_MB": str(self.box.mem_mb),
+                        "JARVIS_VM_CPUS": str(self.box.cpus),
+                        "JARVIS_VM_CID": str(self.box.cid),
+                        "JARVIS_VM_TAP": self.box.tap,
+                        "JARVIS_VM_MAC": self.box.mac})
         self._proc = await asyncio.create_subprocess_exec(
             "bash", str(run_vm), env=env, preexec_fn=os.setsid,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -200,11 +257,34 @@ class GuestVM:
         self._proc = None
         self._booted_at = None
         await self._kill_orphans()
-        # QEMU is gone, so any /persist disk it had attached is closed
-        from . import persist
-        persist.forget()
+        if self.box is None:
+            # QEMU is gone, so any /persist disk it had attached is closed
+            from . import persist
+            persist.forget()
         for name in ("overlay.qcow2", "efi_vars_run.fd", "console.log", "qmp.sock"):
-            (settings.vm_dir / name).unlink(missing_ok=True)
+            (self._dir / name).unlink(missing_ok=True)
+        if self.box is not None:
+            await self._box_net_down()
+
+    async def _box_net_up(self) -> None:
+        """A non-shared box's network (tap + nft pins) and the box_up hooks
+        (WP2's proxy listener), BEFORE the guest boots. Any failure here
+        unwinds and refuses the boot: a box with a half-built boundary is
+        never started."""
+        from . import boxes, boxnet
+        try:
+            if settings.vm_egress:
+                await boxnet.add(self.box)
+            await boxes.box_up(self.box)
+        except Exception as e:
+            await self._box_net_down()
+            raise VMError(f"box {self.box.id} network failed: {e}")
+
+    async def _box_net_down(self) -> None:
+        from . import boxes, boxnet
+        if settings.vm_egress:
+            await boxnet.delete(self.box)
+        await boxes.box_down(self.box)
 
     async def nuke(self) -> None:
         async with self._lock:
@@ -292,7 +372,7 @@ class GuestVM:
             s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
+                    None, s.connect, (self._cid, GUEST_RUNTURN_PORT))
                 return
             except OSError:
                 await asyncio.sleep(1)
@@ -301,7 +381,8 @@ class GuestVM:
         raise VMError("guest run-turn server did not become ready in time")
 
     def _isolation(self) -> dict:
-        text = _console_log().read_text(errors="replace") if _console_log().exists() else ""
+        log = self._console()
+        text = log.read_text(errors="replace") if log.exists() else ""
         ifaces = _IFACES_RE.search(text)
         external = _EXTERNAL_RE.search(text)
         return {"interfaces": ifaces.group(1) if ifaces else None,
@@ -346,8 +427,9 @@ class GuestVM:
         return {"reply": final, "isolation": isolation}
 
 
-# module-level singleton, driven by the vm_api router
+# module-level singleton, driven by the vm_api router: the SHARED box
 vm = GuestVM()
+_boxes_mod.register_runtime("kvm", GuestVM)
 
 
 async def reaper_loop() -> None:
@@ -357,6 +439,8 @@ async def reaper_loop() -> None:
         try:
             await asyncio.sleep(settings.vm_reaper_interval_seconds)
             await vm.reap_if_idle()
+            if settings.vm_boxes_enabled:
+                await _boxes_mod.reap_idle()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a reaper hiccup must never kill the loop

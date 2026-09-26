@@ -14,7 +14,7 @@ import json
 import socket
 import traceback
 
-from ... import turnctx
+from ... import boxinfo, turnctx
 from ...config import settings
 from .. import imageresult
 
@@ -104,8 +104,11 @@ async def _local_dispatch(name: str, args: dict) -> str:
 
 async def _broker_dispatch(name: str, args: dict) -> str:
     loop = asyncio.get_running_loop()
-    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    await loop.run_in_executor(None, s.connect, (HOST_CID, turnctx.gateway_port.get()))
+    if boxinfo.unix_gateway():          # a docker box: per-box unix socket
+        s = await loop.run_in_executor(None, boxinfo.gateway_connect)
+    else:
+        s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        await loop.run_in_executor(None, s.connect, (HOST_CID, turnctx.gateway_port.get()))
     s.setblocking(False)
     try:
         req = {"op": "tool_broker_call", "op_id": turnctx.op_id.get(),

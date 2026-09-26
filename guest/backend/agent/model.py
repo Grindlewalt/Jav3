@@ -11,7 +11,7 @@ import asyncio
 import json
 import socket
 
-from .. import turnctx
+from .. import boxinfo, turnctx
 from .budget import BudgetExceeded
 
 HOST_CID = socket.VMADDR_CID_HOST          # 2 — the host, from inside the guest
@@ -25,11 +25,14 @@ class VsockModelClient:
     async def complete(self, messages, tools=None, conversation_id=None,
                        temperature=None, model_name=None, base_url=None):
         loop = asyncio.get_running_loop()
-        s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-        # blocking connect in an executor (works under any event loop, incl.
-        # uvloop whose sock_connect getaddrinfo-chokes on a vsock (cid,port))
-        await loop.run_in_executor(None, s.connect,
-                                   (HOST_CID, turnctx.gateway_port.get()))
+        if boxinfo.unix_gateway():      # a docker box: per-box unix socket
+            s = await loop.run_in_executor(None, boxinfo.gateway_connect)
+        else:
+            s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+            # blocking connect in an executor (works under any event loop, incl.
+            # uvloop whose sock_connect getaddrinfo-chokes on a vsock (cid,port))
+            await loop.run_in_executor(None, s.connect,
+                                       (HOST_CID, turnctx.gateway_port.get()))
         s.setblocking(False)
         req = {"op": "model_call", "op_id": turnctx.op_id.get(),
                "op_token": turnctx.op_token.get(), "messages": messages,

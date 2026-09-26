@@ -14,12 +14,12 @@ import asyncio
 import base64
 import json
 import secrets
-import socket
+import socket  # noqa: F401 -- tests patch gt.socket.socket
 
 from ..agent import budget as budget_mod
 from ..agent.budget import Budget
 from ..config import settings
-from . import broker, workspace_xfer
+from . import boxes, broker, workspace_xfer
 from . import persist as persist_mod
 
 GUEST_RUNTURN_PORT = 5556                   # must match jarvis_guest.server.PORT
@@ -90,6 +90,10 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
     top-level turn's op_id is fresh, and it inherits the operation's Budget if one
     is in scope (contextvar) so every turn in one operation meters into one Budget."""
     op_id = op_id or f"guest:{conversation_id}"
+    # which box runs this turn: the shared box unless boxes are enabled and
+    # the project's profile gives it its own. Resolved BEFORE anything is
+    # registered, so a refusal (BoxCapError) leaks no budget or token.
+    box = await boxes.for_project(active_slug)
     owns_budget = budget_mod.get(op_id) is None
     if owns_budget:
         # share the operation's Budget object if we're inside one (nested), else
@@ -108,7 +112,10 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
     op_token = secrets.token_urlsafe(24)
     broker.register_token(op_id, op_token)
     holds_ws = bool(push_workspace and active_slug)
-    want_persist = bool(persist and holds_ws
+    if boxes.enabled():
+        boxes.bind_op(op_id, box)          # the gateway refuses it from any other box
+    # /persist is a shared-box mechanism (retired in favour of service boxes)
+    want_persist = bool(persist and holds_ws and box.is_shared
                         and not (envelope is not None and envelope.ephemeral)
                         and await persist_mod.approved(active_slug))
     # first-in pushes a fresh copy; joiners reuse it (no await between check+set)
@@ -148,11 +155,11 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         # guest's write buffer comes back after the turn.
         spec["workspace_tar_b64"] = base64.b64encode(
             workspace_xfer.build_merged_tar(active_slug)).decode()
-    from .lifecycle import vm as guest_vm
+    guest_vm = boxes.controller(box)  # the shared box: lifecycle.vm, as before
     await guest_vm.acquire()          # boot + pin the guest for this turn's life
     persist_fact, persist_gen = None, 0
     loop = asyncio.get_running_loop()
-    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    s = None
     try:
         if want_persist:
             # attach + mount BEFORE the turn starts (the guest is pinned, so the
@@ -163,12 +170,10 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             if persist_fact:
                 persist_gen = persist_mod.generation()   # no await since attach
                 spec["persist"] = persist_fact
-        # blocking connect in an executor: uvloop's sock_connect runs getaddrinfo
-        # on the address and chokes on an AF_VSOCK (cid, port) tuple. Once
-        # connected, sock_sendall/sock_recv work fine under uvloop.
-        await loop.run_in_executor(
-            None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
-        s.setblocking(False)
+        # the box's transport: vsock (executor connect: uvloop's sock_connect
+        # chokes on an AF_VSOCK (cid, port) tuple) or a docker box's unix
+        # socket. Either way a connected non-blocking socket.
+        s = await box.transport.connect(GUEST_RUNTURN_PORT)
         await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
         buf = b""
         while True:
@@ -193,7 +198,8 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                 continue
             yield ev
     finally:
-        s.close()
+        if s is not None:
+            s.close()
         if holds_ws and release_workspace(active_slug) and not owns_ws:
             # last one out of a shared workspace, and the owner's turn-end pack
             # already happened (or never will): sweep the buffer home. Repeat
@@ -206,6 +212,8 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             # last one out unmounts + unplugs, while the guest is still pinned
             await persist_mod.release_for_turn(active_slug, persist_gen)
         guest_vm.release()
+        if boxes.enabled():
+            boxes.unbind_op(op_id)
         broker.release_token(op_id)
         if envelope is not None:
             broker.release_turn(op_id)
@@ -213,14 +221,12 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             budget_mod.release(op_id)
 
 
-async def _guest_rpc(spec: dict) -> dict | None:
-    """One short request/response to the guest run-turn server (prime / pull)."""
+async def _guest_rpc(spec: dict, box=None) -> dict | None:
+    """One short request/response to a box's run-turn server (prime / pull /
+    ps). `box` None = the shared box."""
     loop = asyncio.get_running_loop()
-    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    s = await (box or boxes.shared()).transport.connect(GUEST_RUNTURN_PORT)
     try:
-        await loop.run_in_executor(
-            None, s.connect, (settings.vm_guest_cid, GUEST_RUNTURN_PORT))
-        s.setblocking(False)
         await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
         buf = b""
         while b"\n" not in buf:
@@ -233,20 +239,41 @@ async def _guest_rpc(spec: dict) -> dict | None:
         s.close()
 
 
+async def _pinned_rpc(spec: dict, box) -> dict | None:
+    """prime/pull against a project box boot + pin it for the call (it may be
+    stopped or reaped between turns). The shared box keeps today's contract:
+    the caller's operation already has it up."""
+    if box.is_shared:
+        return await _guest_rpc(spec)
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    try:
+        return await _guest_rpc(spec, box)
+    finally:
+        ctl.release()
+
+
 async def prime_workspace(slug: str) -> None:
     """Push ONE fresh workspace copy for an operation whose turns will reuse it
     (orchestrator leaves fan out concurrently on one project — priming once up
     front avoids each leaf racing a fresh unpack of the shared guest dir).
     Callers hold the slug via acquire_workspace and prime only when first in."""
     tar_b64 = base64.b64encode(workspace_xfer.build_merged_tar(slug)).decode()
-    await _guest_rpc({"mode": "prime", "active_slug": slug,
-                      "workspace_tar_b64": tar_b64})
+    await _pinned_rpc({"mode": "prime", "active_slug": slug,
+                       "workspace_tar_b64": tar_b64}, await boxes.for_project(slug))
 
 
 async def pull_writes(slug: str) -> None:
     """Pull the operation's accumulated guest write buffer and apply it host-side
     (secret refusal + advisory diff gate) — the counterpart to prime_workspace."""
-    ev = await _guest_rpc({"mode": "pull", "active_slug": slug})
+    ev = await _pinned_rpc({"mode": "pull", "active_slug": slug},
+                           await boxes.for_project(slug))
     if ev and ev.get("type") == "staged":
         await workspace_xfer.apply_guest_writes(
             slug, base64.b64decode(ev.get("tar_b64") or ""))
+
+
+async def box_rpc(box, spec: dict) -> dict | None:
+    """Public one-shot RPC to a box's run-turn server, e.g. {"mode": "ps"}
+    (WP4's poller). Does not boot the box: a stopped box raises OSError."""
+    return await _guest_rpc(spec, box)
