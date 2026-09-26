@@ -1,4 +1,5 @@
 import { TAB_ID } from './tab'
+import { URL_TOPIC, subscribe } from './events.js'
 
 export async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -75,7 +76,13 @@ export async function tailStream(url, onEvent, signal) {
 // Auto-reconnects with a short backoff until the returned unsubscribe runs.
 // Transport errors are swallowed on purpose: a live feed is a convenience layer
 // over a REST seed, never the source of truth — a dropped socket just retries.
+//
+// The app's own long-lived feeds (security, agent notices, egress, gui) are
+// not opened here any more: they ride the one shared per-browser connection
+// (events.js), because a stream per feed per tab ran the browser out of
+// connections. Any other URL keeps its own stream, as before.
 export function subscribeSse(url, onEvent) {
+  if (URL_TOPIC[url]) return subscribe(URL_TOPIC[url], onEvent)
   const ctl = new AbortController()
   let stopped = false
   ;(async () => {

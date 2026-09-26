@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import agenttree, bus
+from . import sse as feeds
 from .agent.loop import db_tool_sink
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .vm.turn import run_agent_turn
@@ -678,22 +679,13 @@ async def list_agent_messages(limit: int = 50):
             "undelivered": sum(1 for r in rows if r["delivered_at"] is None)}
 
 
+def notice_feed():
+    """Completion notices as a feed, shared by /notices/stream and the
+    multiplexed /api/events (backend/sse.py)."""
+    return feeds.channel_subscription(NOTICE_CHAN, [{"type": "stream_open"}])
+
+
 @router.get("/notices/stream")
 async def notice_stream():
     """Completion notices for operator-started agent runs (see NOTICE_CHAN)."""
-    q = bus.subscribe(NOTICE_CHAN)
-
-    async def gen():
-        try:
-            yield sse({"type": "stream_open"})
-            while True:
-                try:
-                    yield sse(await asyncio.wait_for(q.get(), timeout=25))
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            bus.unsubscribe(NOTICE_CHAN, q)
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return feeds.sse_response(notice_feed())

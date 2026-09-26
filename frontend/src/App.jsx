@@ -4,7 +4,7 @@ import {
 import { createPortal } from 'react-dom'
 import { NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { api } from './api.js'
-import { streamUrl } from './tab.js'
+import { subscribe } from './events.js'
 import { useDismiss } from './useDismiss.js'
 import { setMediaHosts } from './mediaHosts.js'
 import Player from './Player.jsx'
@@ -209,7 +209,7 @@ function VmStatus() {
   )
 }
 
-// Jav3 -> browser bridge: one SSE subscription per tab (/api/gui/stream).
+// Jav3 -> browser bridge: the gui topic of the shared event stream.
 // Tools push actions here: open a URL (popup-blocked -> clickable toast),
 // play media in a floating dock, or nudge an open Workspace to reload its
 // layout. Fire-and-forget — a missed event only matters on-screen.
@@ -218,17 +218,16 @@ function GuiBridge() {
   const [player, setPlayer] = useState(null)   // {kind, src, title}
 
   useEffect(() => {
-    // the subscription carries this tab's id and name (src/tab.js), which is
-    // how a tool addresses ONE machine instead of every open tab
-    const es = new EventSource(streamUrl())
+    // the gui topic of the one shared per-browser connection (src/events.js);
+    // an event the host addressed to ONE machine (by this tab's id, src/tab.js)
+    // is only delivered in that tab
     const toast = (t) => {
       const id = Math.random().toString(36).slice(2)
       setToasts((ts) => [...ts, { id, ...t }])
       setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), 15000)
     }
-    es.onmessage = (m) => {
-      let ev
-      try { ev = JSON.parse(m.data) } catch { return }
+    return subscribe('gui', (ev) => {
+      if (!ev) return
       if (ev.type === 'open_url') {
         const w = window.open(ev.url, '_blank', 'noopener,noreferrer')
         if (!w) toast({ text: 'Jav3 wants to open', url: ev.url })
@@ -241,8 +240,7 @@ function GuiBridge() {
       } else if (ev.type === 'layout_changed') {
         window.dispatchEvent(new CustomEvent('jarvis-layout-changed', { detail: ev }))
       }
-    }
-    return () => es.close()
+    })
   }, [])
 
   return (

@@ -6,14 +6,10 @@ Two routers:
   /api/security — the persisted, acknowledgeable security-alert store.
 Both expose an SSE `/stream` fed from the in-process bus, mirroring the Runs tab.
 """
-import asyncio
-import json
-
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import bus, egress, egress_auto, secctx, security
+from . import egress, egress_auto, secctx, security, sse
 from .auth import require_user
 from .db import get_db
 
@@ -23,28 +19,15 @@ security_router = APIRouter(prefix="/api/security", tags=["security"],
                             dependencies=[Depends(require_user)])
 
 
-def _sse(d: dict) -> str:
-    return f"data: {json.dumps(d)}\n\n"
+def channel_feed(channel: str):
+    """The live feed for one channel, shared by its own /stream endpoint and
+    the multiplexed /api/events (backend/sse.py)."""
+    return sse.channel_subscription(
+        channel, [{"type": "stream_open", "channel": channel}])
 
 
 async def _channel_stream(channel: str):
-    queue = bus.subscribe(channel)
-
-    async def gen():
-        try:
-            yield _sse({"type": "stream_open", "channel": channel})
-            while True:
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=25)
-                    yield _sse(ev)
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"           # keep the connection warm
-        except asyncio.CancelledError:
-            pass
-        finally:
-            bus.unsubscribe(channel, queue)
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return sse.sse_response(channel_feed(channel))
 
 
 # --- egress: live feed -------------------------------------------------------

@@ -149,7 +149,7 @@ def test_the_stream_route_registers_and_forgets(tabs):
     """The registration is tied to the SSE subscription's lifetime, so a closed
     laptop stops being a place music can be sent."""
     import inspect
-    src = inspect.getsource(gui.gui_stream)
+    src = inspect.getsource(gui.tab_subscription)
     assert "register_tab" in src and "forget_tab" in src
 
 

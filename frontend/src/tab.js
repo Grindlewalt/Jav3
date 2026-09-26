@@ -66,7 +66,5 @@ export function tabName() {
   return read(localStorage, NAME_KEY) || guess()
 }
 
-export function streamUrl() {
-  return `/api/gui/stream?tab=${encodeURIComponent(TAB_ID)}`
-       + `&name=${encodeURIComponent(tabName())}`
-}
+// (The per-tab /api/gui/stream?tab=&name= this used to build is replaced by the
+// shared per-browser stream in events.js, which registers the tab by id+name.)

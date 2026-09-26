@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 
 from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, desk_api,
-               devices_api, egress_api,
+               devices_api, egress_api, events_api,
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
                notifications_api, plan_api, projects, providers, reviewer,
@@ -127,6 +127,7 @@ app.include_router(egress_api.router)
 app.include_router(egress_api.security_router)
 app.include_router(reviewer_api.router)
 app.include_router(gui.router)
+app.include_router(events_api.router)
 app.include_router(lan.router)
 app.include_router(guest_shell.router)
 app.include_router(media_api.router)

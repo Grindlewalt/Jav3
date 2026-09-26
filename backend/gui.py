@@ -7,13 +7,13 @@ only durable thing here is the workspace layout, which edits the same
 .workspace.json the board itself saves, so a change shows up live in an open
 tab AND on the next visit.
 """
-import asyncio
 import json
+import secrets
 import time
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from . import bus
 from .auth import require_user
@@ -38,15 +38,72 @@ GUI_CHAN = "gui"
 
 _tabs: dict[str, dict] = {}
 
+# Tabs no longer each hold a stream. A browser elects one leader tab that holds
+# the single multiplexed /api/events connection for every tab in it (six
+# connections per host over http, shared by all tabs — see backend/sse.py), so
+# one GUI queue can stand for several tabs. `conn` names such a shared queue:
+# the leader tells the host which tabs are alive behind it (set_conn_tabs), a
+# push addressed to one of them is stamped with the target, and the browser
+# delivers it only in that tab (frontend/src/events.js).
+_mux: dict[str, dict] = {}
 
-def register_tab(tab_id: str, name: str, queue) -> None:
+
+def register_tab(tab_id: str, name: str, queue, conn: str | None = None) -> None:
+    prev = _tabs.get(tab_id) or {}
+    now = time.time()
     _tabs[tab_id] = {"id": tab_id, "name": (name or "").strip()[:60] or "a tab",
-                     "queue": queue, "opened_at": time.time(),
-                     "last_seen": time.time()}
+                     "queue": queue, "conn": conn,
+                     "opened_at": prev.get("opened_at", now),
+                     "last_seen": prev.get("last_seen", now)}
 
 
-def forget_tab(tab_id: str) -> None:
+def forget_tab(tab_id: str, queue=None) -> None:
+    """Forget a tab — only if it is still registered on `queue` when one is
+    given. A tab that has moved (the browser's leader changed, so its events now
+    ride another connection) must not be dropped by the old one's cleanup."""
+    t = _tabs.get(tab_id)
+    if t is None or (queue is not None and t["queue"] is not queue):
+        return
     _tabs.pop(tab_id, None)
+
+
+def open_mux():
+    """A GUI subscription shared by the tabs of one browser: the `gui` topic of
+    /api/events. Tabs attach to it with set_conn_tabs."""
+    from .sse import Subscription
+    conn = secrets.token_urlsafe(9)
+    q = bus.subscribe(GUI_CHAN)
+    _mux[conn] = {"queue": q}
+
+    def close():
+        _mux.pop(conn, None)
+        for tid in [t["id"] for t in _tabs.values() if t.get("conn") == conn]:
+            forget_tab(tid, q)
+        bus.unsubscribe(GUI_CHAN, q)
+
+    return Subscription(q, [{"type": "stream_open", "channel": GUI_CHAN,
+                             "conn": conn}], close)
+
+
+def set_conn_tabs(conn: str, tabs_in: list[dict]) -> int | None:
+    """The leader's list of live tabs behind `conn`, as a whole (idempotent):
+    new ones are registered on its queue, missing ones forgotten. None if the
+    connection is gone (the leader will reconnect and resend)."""
+    m = _mux.get(conn)
+    if m is None:
+        return None
+    q = m["queue"]
+    want = {}
+    for t in tabs_in[:64]:
+        tid = str(t.get("id") or "").strip()[:64]
+        if tid:
+            want[tid] = str(t.get("name") or "")
+    for tid in [t["id"] for t in _tabs.values() if t.get("conn") == conn]:
+        if tid not in want:
+            forget_tab(tid, q)
+    for tid, name in want.items():
+        register_tab(tid, name, q, conn)
+    return len(want)
 
 
 def touch_tab(tab_id: str) -> None:
@@ -60,7 +117,7 @@ def touch_tab(tab_id: str) -> None:
 
 def tab_list() -> list[dict]:
     """Open tabs, most recently used first."""
-    return [{k: v for k, v in t.items() if k != "queue"}
+    return [{k: v for k, v in t.items() if k not in ("queue", "conn")}
             for t in sorted(_tabs.values(), key=lambda t: -t["last_seen"])]
 
 
@@ -123,9 +180,12 @@ def push(event: dict, tab: str | None = None) -> int:
         t = _tabs.get(tab)
         if not t:
             return 0
+        if t.get("conn"):
+            # a shared connection: the browser delivers it only in this tab
+            event = {**event, "_to_tab": tab}
         bus.publish_to(t["queue"], event)
         return 1
-    n = bus.subscriber_count(GUI_CHAN)
+    n = tabs()
     if n:
         bus.publish(GUI_CHAN, event)
     return n
@@ -133,8 +193,13 @@ def push(event: dict, tab: str | None = None) -> int:
 
 def tabs() -> int:
     """How many browser tabs are listening. Lets a tool decide whether the
-    in-page player is even a possible destination before choosing one."""
-    return bus.subscriber_count(GUI_CHAN)
+    in-page player is even a possible destination before choosing one. A
+    shared (multiplexed) subscription counts as the tabs behind it."""
+    n = bus.subscriber_count(GUI_CHAN)
+    for conn in _mux:
+        behind = sum(1 for t in _tabs.values() if t.get("conn") == conn)
+        n += max(behind, 1) - 1
+    return n
 
 
 # --- the in-page music player -------------------------------------------------
@@ -343,8 +408,22 @@ router = APIRouter(prefix="/api/gui", tags=["gui"],
                    dependencies=[Depends(require_user)])
 
 
-def _sse(data: dict) -> str:
-    return f"data: {json.dumps(data)}\n\n"
+def tab_subscription(tab: str = "", name: str = ""):
+    """One tab's own GUI feed (the per-tab /stream, and the fallback for a
+    browser without Web Locks / BroadcastChannel)."""
+    from .sse import Subscription
+    queue = bus.subscribe(GUI_CHAN)
+    tab_id = (tab or "").strip()[:64]
+    if tab_id:
+        register_tab(tab_id, name, queue)
+
+    def close():
+        bus.unsubscribe(GUI_CHAN, queue)
+        if tab_id:
+            forget_tab(tab_id, queue)
+
+    return Subscription(queue, [{"type": "stream_open", "channel": GUI_CHAN,
+                                 "tab": tab_id}], close)
 
 
 @router.get("/stream")
@@ -352,29 +431,21 @@ async def gui_stream(tab: str = "", name: str = ""):
     """One tab's subscription. `tab` is an id the tab keeps for its lifetime and
     `name` is what the operator would call that machine — both optional, so an
     older SPA still gets the broadcast behaviour it expects."""
-    queue = bus.subscribe(GUI_CHAN)
-    tab_id = (tab or "").strip()[:64]
-    if tab_id:
-        register_tab(tab_id, name, queue)
+    from .sse import sse_response
+    return sse_response(tab_subscription(tab, name))
 
-    async def gen():
-        try:
-            yield _sse({"type": "stream_open", "channel": GUI_CHAN,
-                        "tab": tab_id})
-            while True:
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=25)
-                    yield _sse(ev)
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            bus.unsubscribe(GUI_CHAN, queue)
-            if tab_id:
-                forget_tab(tab_id)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+class ConnTabs(BaseModel):
+    tabs: list[dict] = []
+
+
+@router.put("/conn/{conn}/tabs")
+async def gui_conn_tabs(conn: str, body: ConnTabs):
+    """The leader tab's list of the tabs it is carrying on /api/events."""
+    n = set_conn_tabs(conn, body.tabs)
+    if n is None:
+        raise HTTPException(status_code=404, detail="no such connection")
+    return {"tabs": n}
 
 
 @router.get("/tabs")
