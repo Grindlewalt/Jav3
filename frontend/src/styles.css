@@ -3987,3 +3987,23 @@ a:has(> .nav-dot) { position: relative; }
 .perm-mode { font-size: 12px; padding: 2px 6px; }
 .perm-rules { list-style: none; margin: 0; padding: 0; }
 .perm-rules li { gap: 10px; align-items: center; padding: 4px 0; border-top: 1px solid var(--border); }
+
+/* ---- chat list: Active group (ChatGroups.jsx) ----
+   A chat with something running: a live dot, the count of agents working
+   under it, and a "needs you" tag when a node waits on the operator. */
+.convo-active-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.convo-active-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green); animation: pulse 1.6s ease-in-out infinite;
+}
+.convo-active-dot.needs { background: var(--amber); }
+.convo-active-agents {
+  flex-shrink: 0; font-size: var(--fs-xs); color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 5px;
+}
+.convo-active-needs {
+  flex-shrink: 0; font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--amber);
+}
+@media (prefers-reduced-motion: reduce) { .convo-active-dot { animation: none; } }

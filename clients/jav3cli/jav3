@@ -6748,7 +6748,8 @@ def build_tui(base: str, token: str, **kw):
                                    busy_ok=True),
                 "detach": Command(self.c_detach, "drop pending !command output",
                                   busy_ok=True),
-                "web": Command(self.c_web, "open this chat in the browser", busy_ok=True,
+                "web": Command(self.c_web, "open this chat in the web app (Work)",
+                               busy_ok=True,
                                leader="w"),
                 "status": Command(self.c_status, "server, chat, model, usage", busy_ok=True,
                                   leader="s"),
@@ -7287,7 +7288,8 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_web(self, arg: str) -> None:
             import webbrowser
-            url = self.base + (f"/shell/c/{self.cid}" if self.cid else "/shell")
+            # /c/<id> opens that chat in the web app's Work page; / is Work
+            url = self.base + (f"/c/{self.cid}" if self.cid else "/")
             webbrowser.open(url)
             self.notify(f"opened {url}")
 

@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect } from 'react'
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import Login from './pages/Login.jsx'
 import Work from './work/Work.jsx'
 import NotFound from './pages/NotFound.jsx'
@@ -21,6 +21,14 @@ import NotFound from './pages/NotFound.jsx'
 // on idle rather than on mount so it cannot compete with the first paint, and
 // a browser without requestIdleCallback just gets a short timer.
 // first run only, so never prefetched
+function OpenChat() {
+  const { id } = useParams()
+  if (/^\d+$/.test(id || '')) {
+    try { localStorage.setItem('jarvis.chat.last', id) } catch { /* private mode */ }
+  }
+  return <Navigate to="/" replace />
+}
+
 const Setup = lazy(() => import('./pages/Setup.jsx'))
 // Agents is a layout route like Review: the shell + tab strip is the default
 // export, the definitions editor the index child, Skills and Outputs siblings.
@@ -109,6 +117,9 @@ export default function AppRoutes({ onLogin, onSetup, authed }) {
             the hop and a chat mid-stream is not torn down. */}
         <Route path="/" element={<Work />} />
         <Route path="/work" element={<Navigate to="/" replace />} />
+        {/* /c/<id>: open one chat in Work (the terminal client's /web). Chat
+            resumes the id stored under jarvis.chat.last on mount. */}
+        <Route path="/c/:id" element={<OpenChat />} />
         <Route path="/projects" element={<Work openProjects />} />
         <Route path="/projects/:slug" element={<Work />} />
         <Route path="/agents" element={<Agents />}>
