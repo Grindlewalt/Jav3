@@ -4,13 +4,19 @@
 
 export const VERBS = Object.freeze({
   open_tab: 'read', navigate: 'read', read_page: 'read', scroll: 'read',
-  screenshot_tab: 'read', close_tab: 'read', list_tabs: 'read',
-  click: 'act', type: 'act',
+  scroll_to_element: 'read', screenshot_tab: 'read', close_tab: 'read',
+  list_tabs: 'read', click: 'act', type: 'act',
 });
 const TAB_VERBS = new Set(Object.keys(VERBS).filter(v => v !== 'open_tab' && v !== 'list_tabs'));
+// Verbs whose `element` id comes from a browser_read_page of that tab: they
+// need a fresh all-frames read (enforced host-side, backend/browser.py).
+export const ELEMENT_VERBS = Object.freeze(['click', 'type', 'scroll_to_element']);
 export const TEXT_CAP = 2000;
 export const URL_CAP = 2000;
 export const PAGE_TEXT_CAP = 20000;
+export const WAIT_CAP_MS = 10000;         // bounded retry budget on read_page
+export const MAX_FRAME_INDEX = 999;
+export const MAX_ELEMENT_N = 100000;
 
 export class VerbError extends Error {}
 
@@ -49,6 +55,71 @@ export function isDenied(host, denyHosts) {
   return (denyHosts || []).some(d => String(d).toLowerCase().replace(/^\[|\]$/g, '') === h);
 }
 
+// An element id encodes the frame it lives in: "f<frameIndex>:<n>", where the
+// frame index comes from the last read_page of that tab and <n> is the
+// element's number within that frame. A bare integer means the top frame.
+// -> { frame, n, id } (canonical string) or throws VerbError.
+export function parseElementId(v) {
+  if (typeof v === 'number' && Number.isInteger(v) && !Number.isNaN(v)) {
+    if (v < 1 || v > MAX_ELEMENT_N) throw new VerbError(`element ${v} is out of range`);
+    return { frame: 0, n: v, id: `f0:${v}` };
+  }
+  if (typeof v === 'string') {
+    const m = /^f(\d{1,3}):(\d{1,6})$/.exec(v.trim());
+    if (m) {
+      const frame = Number(m[1]); const n = Number(m[2]);
+      if (frame > MAX_FRAME_INDEX) throw new VerbError(`frame index ${frame} is out of range`);
+      if (n < 1 || n > MAX_ELEMENT_N) throw new VerbError(`element ${n} is out of range`);
+      return { frame, n, id: `f${frame}:${n}` };
+    }
+  }
+  throw new VerbError('element must be an id from browser_read_page, e.g. "f0:12"');
+}
+
+// A tiny, deliberately conservative eTLD+1: enough to tell "same site" from
+// "cross-site" for the frame-consent rule. Not a full public-suffix list; it
+// errs toward asking (over-prompting) rather than silently acting.
+const MULTI_TLD = new Set([
+  'co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'me.uk', 'ltd.uk', 'plc.uk',
+  'co.jp', 'or.jp', 'ne.jp', 'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+  'co.nz', 'org.nz', 'com.br', 'com.cn', 'com.mx', 'com.sg', 'com.hk',
+  'com.tw', 'com.tr', 'co.in', 'co.kr', 'co.za', 'com.ar', 'com.ua',
+]);
+export function registrableDomain(host) {
+  let h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!h) return '';
+  if (h.includes(':')) return h;                       // IPv6 literal
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return h;      // IPv4 literal
+  const parts = h.split('.');
+  if (parts.length <= 2) return h;
+  if (MULTI_TLD.has(parts.slice(-2).join('.'))) return parts.slice(-3).join('.');
+  return parts.slice(-2).join('.');
+}
+
+export function sameSite(a, b) {
+  const ra = registrableDomain(a); const rb = registrableDomain(b);
+  return !!ra && !!rb && ra === rb;
+}
+
+// The consent rule for a cross-origin frame: reading is fine within an
+// already-consented top-level site, but clicking / typing into a frame whose
+// registrable domain differs from the top-level's needs that domain allowed
+// too. Returns true when the frame's own site must be consented separately.
+export function frameConsentNeeded(topHost, frameHost) {
+  if (!frameHost) return false;          // about:blank / srcdoc: part of the top page
+  if (!topHost) return true;
+  return !sameSite(topHost, frameHost);
+}
+
+// Popup adoption: a tab is adopted only when a Jav3-owned tab opened it. The
+// operator's own tabs (no opener, or an opener Jav3 does not own) are never
+// touched.
+export function shouldAdopt(openerTabId, ownTabIds, newTabId) {
+  const own = new Set(ownTabIds || []);
+  if (newTabId != null && own.has(newTabId)) return false;   // already ours
+  return openerTabId != null && own.has(openerTabId);
+}
+
 // -> cleaned params (unknown fields dropped) or throws VerbError
 export function validate(verb, params, { denyHosts = [] } = {}) {
   if (!Object.prototype.hasOwnProperty.call(VERBS, verb)) throw new VerbError(`unknown action ${JSON.stringify(verb)}`);
@@ -56,8 +127,18 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
   const p = {};
   if (TAB_VERBS.has(verb)) p.tab = int(params, 'tab', 1, 2 ** 31 - 1);
   if (verb === 'open_tab' || verb === 'navigate') p.url = checkUrl(params.url, denyHosts);
-  else if (verb === 'read_page') p.max_chars = int(params, 'max_chars', 500, PAGE_TEXT_CAP, 8000);
-  else if (verb === 'click' || verb === 'type') p.element = int(params, 'element', 1, 100000);
+  else if (verb === 'read_page') {
+    p.max_chars = int(params, 'max_chars', 500, PAGE_TEXT_CAP, 8000);
+    p.wait_ms = int(params, 'wait_ms', 0, WAIT_CAP_MS, 0);
+    if (params.min_elements !== undefined) p.min_elements = int(params, 'min_elements', 1, 300);
+    if (params.selector !== undefined) {
+      if (typeof params.selector !== 'string' || !params.selector.trim()) {
+        throw new VerbError('selector must be a non-empty CSS selector');
+      }
+      if (params.selector.length > 200) throw new VerbError('selector is too long');
+      p.selector = params.selector.trim();
+    }
+  } else if (ELEMENT_VERBS.includes(verb)) p.element = parseElementId(params.element).id;
   if (verb === 'type') {
     if (typeof params.text !== 'string' || !params.text) throw new VerbError('text is required');
     if (params.text.length > TEXT_CAP) throw new VerbError(`text is over ${TEXT_CAP} characters`);
@@ -104,8 +185,9 @@ export function siteKey(entry) {
 
 const DOING = {
   open_tab: 'opening', navigate: 'loading', read_page: 'reading', scroll: 'scrolling',
-  screenshot_tab: 'taking a screenshot of', close_tab: 'closing a tab on',
-  list_tabs: 'listing its tabs', click: 'clicking on', type: 'typing on',
+  scroll_to_element: 'scrolling to an element on', screenshot_tab: 'taking a screenshot of',
+  close_tab: 'closing a tab on', list_tabs: 'listing its tabs',
+  click: 'clicking on', type: 'typing on',
 };
 export function describe(verb, host) {
   const d = DOING[verb] || verb;

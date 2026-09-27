@@ -5,9 +5,9 @@
 // notification with Cancel on every action, Pause, Disconnect.
 import {
   VerbError, validate, hostOf, isDenied, siteDecision, describe,
-  parseLoginLine, baseUrl, wsUrl,
+  parseLoginLine, baseUrl, wsUrl, parseElementId, frameConsentNeeded, shouldAdopt,
 } from './lib/verbs.js';
-import { readPage, clickEl, typeEl, scrollPage } from './lib/page.js';
+import { readPage, clickEl, typeEl, scrollToEl, scrollPage } from './lib/page.js';
 
 const ASK_TIMEOUT_MS = 60000;
 const LOAD_TIMEOUT_MS = 20000;
@@ -17,7 +17,23 @@ const ICON = 'icon.png';
 const S = {
   ws: null, pinger: null, retry: null, backoff: 1000,
   denyHosts: [], current: null, asks: new Map(),
+  adopted: [],         // { id, url, at } popups adopted, so an action can report them
 };
+
+// The last read's frame map for a tab, kept in session storage (not just in
+// memory) so a click/type/scroll_to_element still resolves after the MV3
+// service worker is torn down and restarted between calls.
+const FRAMES_KEY = tabId => 'frames:' + tabId;
+async function saveFrames(tabId, map) {
+  await chrome.storage.session.set({ [FRAMES_KEY(tabId)]: map });
+}
+async function loadFrames(tabId) {
+  const k = FRAMES_KEY(tabId);
+  return (await chrome.storage.session.get({ [k]: [] }))[k] || [];
+}
+async function dropFrames(tabId) {
+  await chrome.storage.session.remove(FRAMES_KEY(tabId));
+}
 
 const cfg = () => chrome.storage.local.get({
   address: '', token: '', name: '', paused: false, notify: true, sites: {},
@@ -184,17 +200,27 @@ async function jav3Window() {
   return null;
 }
 
-async function adopt(tab) {
+// Bring a tab into Jav3's session: its own window and tab group. Used both for
+// tabs Jav3 opens itself and for popups a Jav3 tab spawns (window.open,
+// target=_blank, OAuth choosers). If no Jav3 window exists yet the tab's own
+// window becomes it; otherwise the tab is moved in from wherever it opened.
+async function joinSession(tab) {
   const s = await sess();
+  let winId = s.windowId;
+  if (winId != null) { try { await chrome.windows.get(winId); } catch { winId = null; } }
+  if (winId == null) winId = tab.windowId;
+  if (tab.windowId !== winId) {
+    try { await chrome.tabs.move(tab.id, { windowId: winId, index: -1 }); } catch { /* gone */ }
+  }
   const tabs = [...new Set([...s.tabs, tab.id])];
   let groupId = s.groupId;
   try {
     groupId = await chrome.tabs.group(groupId != null
       ? { groupId, tabIds: [tab.id] }
-      : { tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
+      : { tabIds: [tab.id], createProperties: { windowId: winId } });
     await chrome.tabGroups.update(groupId, { title: 'Jav3', color: 'purple' });
   } catch { groupId = null; /* no tab groups in this Chromium, or the group is gone */ }
-  await chrome.storage.session.set({ tabs, windowId: tab.windowId, groupId });
+  await chrome.storage.session.set({ tabs, windowId: winId, groupId });
 }
 
 function waitLoad(tabId) {
@@ -207,8 +233,10 @@ function waitLoad(tabId) {
   });
 }
 
-async function inject(tabId, func, args) {
-  const [r] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+async function inject(tabId, func, args, frameId = 0) {
+  const [r] = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] }, func, args,
+  });
   return r ? r.result : null;
 }
 
@@ -216,6 +244,64 @@ const info = async tabId => {
   const t = await chrome.tabs.get(tabId);
   return { tab: tabId, url: t.url || '', title: t.title || '' };
 };
+
+// The frames of a tab, main frame first, only http(s) frames the extension may
+// read; the Jav3 server's own frames are dropped so the agent can never read or
+// drive its control plane through an iframe on a consented page.
+async function tabFrames(tabId) {
+  let frames = [];
+  try { frames = (await chrome.webNavigation.getAllFrames({ tabId })) || []; }
+  catch { frames = []; }
+  return frames
+    .filter(f => !f.errorOccurred)
+    .filter(f => f.frameId === 0 || (hostOf(f.url) && !isDenied(hostOf(f.url), S.denyHosts)))
+    .sort((a, b) => a.frameId - b.frameId);
+}
+
+// Read every frame of the tab and stitch the results. Element numbers are local
+// to each frame; here they gain a frame index ("f2:5"). The frame map is kept
+// so a later click/type/scroll_to_element can resolve an id to its frameId.
+async function readAllFrames(tabId, maxChars, selector) {
+  const frames = await tabFrames(tabId);
+  const map = [];
+  const elements = [];
+  const frameOut = [];
+  let index = 0;
+  let title = '';
+  let topText = '';
+  let selectorFound = false;
+  // Share the text budget: the main frame gets it; subframes add elements only.
+  for (const f of frames) {
+    let r;
+    try { r = await inject(tabId, readPage, [f.frameId === 0 ? maxChars : 0, selector || ''], f.frameId); }
+    catch { r = null; }
+    if (!r) continue;
+    const host = hostOf(r.url) || hostOf(f.url) || '';
+    if (index === 0) { title = r.title || ''; topText = r.text || ''; }
+    if (r.probed) selectorFound = true;
+    map.push({ index, frameId: f.frameId, url: r.url || f.url || '', host });
+    frameOut.push({ index, host, url: r.url || f.url || '' });
+    for (const e of (r.elements || [])) {
+      elements.push({ id: `f${index}:${e.n}`, tag: e.tag, type: e.type, role: e.role,
+                      name: e.name, text: e.text, box: e.box, inView: e.inView, frame: index });
+    }
+    index += 1;
+  }
+  await saveFrames(tabId, map);
+  const i = await info(tabId);
+  return { data: { tab: tabId, url: i.url, title: title || i.title, text: topText,
+                   elements, frames: frameOut }, selectorFound, count: elements.length };
+}
+
+// Resolve an element id ("f2:5") to the frame the last read of this tab put it
+// in. Returns { frameId, n, host, url } or throws (the read is stale / gone).
+async function resolveElement(tabId, elementId) {
+  const { frame, n } = parseElementId(elementId);
+  const map = await loadFrames(tabId);
+  const f = map.find(m => m.index === frame);
+  if (!f) throw new VerbError(`element ${elementId}: read tab ${tabId} again (its frames changed)`);
+  return { frameId: f.frameId, n, host: f.host, url: f.url };
+}
 
 async function run(verb, p, c) {
   if (verb === 'list_tabs') {
@@ -228,6 +314,7 @@ async function run(verb, p, c) {
   if (verb === 'open_tab') {
     const host = await allowed(p.url, c);
     notifyAct(verb, host, c);
+    const since = Date.now();
     const prev = await focusedWindow();
     const win = await jav3Window();
     let tab;
@@ -237,35 +324,50 @@ async function run(verb, p, c) {
     } else {
       tab = await chrome.tabs.create({ windowId: win, url: 'about:blank', active: true });
     }
-    await adopt(tab);
+    await joinSession(tab);
     await chrome.tabs.update(tab.id, { url: p.url });
     await giveFocusBack(prev, tab.windowId);
     await waitLoad(tab.id);
     await giveFocusBack(prev, tab.windowId);
-    return { data: await afterLoad(tab.id, c) };
+    return { data: { ...(await afterLoad(tab.id, c)), opened: openedSince(since, tab.id) } };
   }
   const tab = await ownTab(p.tab);
   if (verb === 'close_tab') {
     notifyAct(verb, hostOf(tab.url) || '', c);
     await chrome.tabs.remove(p.tab);
+    await dropFrames(p.tab);
     return { data: { tab: p.tab } };
   }
   if (verb === 'navigate') {
     const host = await allowed(p.url, c);
     notifyAct(verb, host, c);
+    const since = Date.now();
     const prev = await focusedWindow();
     await chrome.tabs.update(p.tab, { url: p.url });
     await new Promise(r => setTimeout(r, 200));
     await giveFocusBack(prev, tab.windowId);
     await waitLoad(p.tab);
     await giveFocusBack(prev, tab.windowId);
-    return { data: await afterLoad(p.tab, c) };
+    await dropFrames(p.tab);   // the old element ids are gone
+    return { data: { ...(await afterLoad(p.tab, c)), opened: openedSince(since, p.tab) } };
   }
-  const host = await allowed(tab.url, c);
+  const host = await allowed(tab.url, c);       // per-site consent on the CURRENT top site
   notifyAct(verb, host, c);
   if (verb === 'read_page') {
-    const r = await inject(p.tab, readPage, [p.max_chars]);
-    return { data: { tab: p.tab, ...r } };
+    // An all-frames read, optionally retried until a selector or an element
+    // count appears (bounded by wait_ms <= 10 s). read is fine across every
+    // frame of an already-consented top-level site.
+    const started = Date.now();
+    let out = await readAllFrames(p.tab, p.max_chars, p.selector);
+    while (p.wait_ms && Date.now() - started < p.wait_ms) {
+      const enough = (p.min_elements ? out.count >= p.min_elements : false) ||
+        (p.selector ? out.selectorFound : false) ||
+        (!p.min_elements && !p.selector);
+      if (enough) break;
+      await new Promise(r => setTimeout(r, 350));
+      out = await readAllFrames(p.tab, p.max_chars, p.selector);
+    }
+    return { data: out.data };
   }
   if (verb === 'screenshot_tab') {
     const prev = await focusedWindow();
@@ -278,12 +380,37 @@ async function run(verb, p, c) {
     bmp.close();
     return { data: await info(p.tab), image: img };
   }
-  const func = { click: clickEl, type: typeEl, scroll: scrollPage }[verb];
-  const args = { click: [p.element], type: [p.element, p.text, p.submit], scroll: [p.pages] }[verb];
-  const r = await inject(p.tab, func, args);
+  if (verb === 'scroll') {
+    const r = await inject(p.tab, scrollPage, [p.pages]);
+    if (!r || !r.ok) throw new VerbError((r && r.err) || 'scroll failed');
+    return { data: await info(p.tab), text: `scrolled to ${r.y} of ${r.max}` };
+  }
+  // element-bound verbs: click, type, scroll_to_element. Resolve the id to its
+  // frame from the last read of this tab.
+  const el = await resolveElement(p.tab, p.element);
+  if ((verb === 'click' || verb === 'type') && frameConsentNeeded(host, el.host)) {
+    // A cross-origin frame from a DIFFERENT registrable domain must be allowed
+    // too before we act inside it — the same per-site consent as a tab.
+    await allowed(el.url, c);
+  }
+  const since = Date.now();
+  const prev = await focusedWindow();
+  let r;
+  if (verb === 'click') r = await inject(p.tab, clickEl, [el.n], el.frameId);
+  else if (verb === 'type') r = await inject(p.tab, typeEl, [el.n, p.text, p.submit], el.frameId);
+  else r = await inject(p.tab, scrollToEl, [el.n], el.frameId);
   if (!r || !r.ok) throw new VerbError((r && r.err) || `${verb} failed`);
-  if (verb !== 'scroll') { await new Promise(res => setTimeout(res, 500)); await waitLoad(p.tab); }
-  return { data: await info(p.tab), text: verb === 'scroll' ? `scrolled to ${r.y} of ${r.max}` : undefined };
+  if (verb !== 'scroll_to_element') { await new Promise(res => setTimeout(res, 500)); await waitLoad(p.tab); }
+  await giveFocusBack(prev, tab.windowId);   // a click may have opened a popup that grabbed focus
+  const out = await info(p.tab);
+  return { data: { ...out, opened: openedSince(since, p.tab),
+                   ...(verb === 'scroll_to_element' ? { text: r.inView ? 'in view' : 'scrolled' } : {}) } };
+}
+
+// Popups a Jav3 tab spawned during an action, so it can report their tab ids.
+function openedSince(since, excludeTab) {
+  const seen = S.adopted.filter(a => a.at >= since && a.id !== excludeTab);
+  return seen.map(a => ({ tab: a.id, url: a.url || '' }));
 }
 
 // Jav3 must never pull the operator away from what they're doing. Chrome on
@@ -332,8 +459,29 @@ chrome.notifications.onClosed.addListener((id, byUser) => {
   if (byUser && id.startsWith('ask:')) answer(id.slice(4), false);
 });
 
+// A Jav3 tab opened a new tab/window (window.open, target=_blank, an OAuth
+// account chooser): adopt it into Jav3's window and session so it is reachable
+// and grouped. Tabs the operator opened (no opener, or an opener Jav3 does not
+// own) are never touched.
+chrome.tabs.onCreated.addListener(async tab => {
+  try {
+    if (tab.id == null) return;
+    const s = await sess();
+    if (!shouldAdopt(tab.openerTabId, s.tabs, tab.id)) return;
+    const prev = await focusedWindow();
+    await joinSession(tab);
+    S.adopted.push({ id: tab.id, url: tab.url || tab.pendingUrl || '', at: Date.now() });
+    if (S.adopted.length > 50) S.adopted.splice(0, S.adopted.length - 50);
+    const win = await jav3Window();
+    await giveFocusBack(prev, win);   // hand focus back to the operator's window
+    send({ type: 'event', kind: 'popup_adopted', site: hostOf(tab.url || tab.pendingUrl || '') || '' });
+  } catch { /* best effort; a failed adopt just leaves the tab where it opened */ }
+});
+
 chrome.tabs.onRemoved.addListener(async id => {
   const s = await sess();
+  await dropFrames(id);
+  S.adopted = S.adopted.filter(a => a.id !== id);
   if (s.tabs.includes(id)) await chrome.storage.session.set({ tabs: s.tabs.filter(t => t !== id) });
 });
 chrome.windows.onRemoved.addListener(async id => {

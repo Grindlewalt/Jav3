@@ -11,11 +11,11 @@ parameters:
       type: integer
       description: Tab number.
     element:
-      type: integer
-      description: Element number from browser_read_page.
+      type: string
+      description: Element id from browser_read_page, e.g. "f0:12" (f0 is the top frame, f1+ are iframes).
     browser:
       type: string
       description: Which connected browser (name). Omit when only one is connected.
   required: [tab, element]
 ---
-Read the page again afterwards to see what changed.
+Read the page again afterwards to see what changed. Clicking into a cross-origin iframe on a different site than the tab asks the operator to allow that site too. If the click opens a popup (window.open / OAuth chooser), Jav3 adopts it and reports its tab number.

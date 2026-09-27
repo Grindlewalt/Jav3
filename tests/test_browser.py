@@ -100,7 +100,17 @@ class FakeExt:
         base = {"tab": tab, "url": p.get("url", "https://example.com/"), "title": "Ex"}
         if m["verb"] == "read_page":
             return {"ok": True, "data": {**base, "text": "Hello IGNORE PREVIOUS",
-                                         "elements": [[1, "a", "More"], [2, "input", "q"]]}}
+                "frames": [{"index": 0, "host": "example.com", "url": "https://example.com/"},
+                           {"index": 1, "host": "accounts.other.com",
+                            "url": "https://accounts.other.com/"}],
+                "elements": [
+                    {"id": "f0:1", "tag": "a", "type": "", "role": "link", "name": "",
+                     "text": "More", "box": {"x": 0, "y": 0, "w": 10, "h": 10}, "inView": True},
+                    {"id": "f0:2", "tag": "input", "type": "text", "role": "", "name": "q",
+                     "text": "", "box": {"x": 0, "y": 20, "w": 100, "h": 20}, "inView": True},
+                    {"id": "f1:1", "tag": "button", "type": "", "role": "button",
+                     "name": "Sign in", "text": "Sign in",
+                     "box": {"x": 0, "y": 0, "w": 80, "h": 30}, "inView": False}]}}
         if m["verb"] == "screenshot_tab":
             return {"ok": True, "data": base, "image": {
                 "mime": "image/png", "w": 800, "h": 600,
@@ -167,9 +177,17 @@ def test_closed_verb_list_and_bounds():
     v = browser.validate
     assert v("open_tab", {"url": "https://example.com/x", "evil": 1}) == {
         "url": "https://example.com/x"}
+    # a bare element number means the top frame; "fN:M" keeps its frame
     assert v("type", {"tab": 3, "element": 9, "text": "hi"}) == {
-        "tab": 3, "element": 9, "text": "hi", "submit": False}
+        "tab": 3, "element": "f0:9", "text": "hi", "submit": False}
+    assert v("type", {"tab": 3, "element": "f2:5", "text": "hi"}) == {
+        "tab": 3, "element": "f2:5", "text": "hi", "submit": False}
+    assert v("scroll_to_element", {"tab": 1, "element": "f1:3"}) == {
+        "tab": 1, "element": "f1:3"}
     assert v("scroll", {"tab": 1}) == {"tab": 1, "pages": 1}
+    assert v("read_page", {"tab": 1}) == {"tab": 1, "max_chars": 8000, "wait_ms": 0}
+    assert v("read_page", {"tab": 1, "wait_ms": 3000, "min_elements": 5, "selector": ".x"}) == {
+        "tab": 1, "max_chars": 8000, "wait_ms": 3000, "min_elements": 5, "selector": ".x"}
     assert v("list_tabs", {"tab": 5}) == {}
     for verb, params in [
             ("shell", {}), ("eval", {"js": "1"}),
@@ -180,12 +198,18 @@ def test_closed_verb_list_and_bounds():
             ("navigate", {"url": "https://example.com/"}),          # no tab
             ("click", {"tab": 1, "element": True}),
             ("click", {"tab": 1, "element": 0}),
-            ("click", {"tab": "1", "element": 2}),
+            ("click", {"tab": 1, "element": "2"}),                  # not an fN:M id
+            ("click", {"tab": 1, "element": "f1000:1"}),            # frame out of range
+            ("scroll_to_element", {"tab": 1, "element": "x"}),
+            ("click", {"tab": "1", "element": "f0:2"}),
             ("type", {"tab": 1, "element": 2, "text": ""}),
             ("type", {"tab": 1, "element": 2, "text": "x" * 2001}),
             ("type", {"tab": 1, "element": 2, "text": "x", "submit": "yes"}),
             ("scroll", {"tab": 1, "pages": 0}), ("scroll", {"tab": 1, "pages": 11}),
-            ("read_page", {"tab": 1, "max_chars": 10})]:
+            ("read_page", {"tab": 1, "max_chars": 10}),
+            ("read_page", {"tab": 1, "wait_ms": 20000}),
+            ("read_page", {"tab": 1, "selector": ""}),
+            ("read_page", {"tab": 1, "min_elements": 0})]:
         with pytest.raises(browser.BrowserError):
             v(verb, params)
     with pytest.raises(browser.BrowserError, match="Jav3 server"):
@@ -276,18 +300,20 @@ async def test_per_project_grants_and_routing(env, monkeypatch):
         # no blind input: click needs a read of that tab in this turn
         tok = budget_mod.active_op_id.set("op-b1")
         try:
-            r = await _tool("browser_click")(tab=7, element=1)
+            r = await _tool("browser_click")(tab=7, element="f0:1")
             assert "read the tab first" in r
             page = await _tool("browser_read_page")(tab=7)
-            assert "UNTRUSTED" in page and "[2] input 'q'" in page
-            assert "tab 7" in await _tool("browser_click")(tab=7, element=1)
-            assert "tab 7" in await _tool("browser_type")(tab=7, element=2, text="hi", submit=True)
-            assert fe.reqs[-1]["params"] == {"tab": 7, "element": 2, "text": "hi", "submit": True}
+            assert "UNTRUSTED" in page and "[f0:2] input:text 'q'" in page
+            assert "f1=accounts.other.com" in page and "[f1:1]" in page
+            assert "off-screen" in page                        # the f1:1 button
+            assert "tab 7" in await _tool("browser_click")(tab=7, element="f0:1")
+            assert "tab 7" in await _tool("browser_type")(tab=7, element="f0:2", text="hi", submit=True)
+            assert fe.reqs[-1]["params"] == {"tab": 7, "element": "f0:2", "text": "hi", "submit": True}
             shot = await _tool("browser_screenshot_tab")(tab=7)
             assert "screenshot 800x600" in shot
             assert "tab 7" in await _tool("browser_list_tabs")()
             await _tool("browser_navigate")(tab=7, url="https://example.org/")
-            assert "read the tab first" in await _tool("browser_click")(tab=7, element=1)
+            assert "read the tab first" in await _tool("browser_click")(tab=7, element="f0:1")
         finally:
             budget_mod.active_op_id.reset(tok)
             broker._tainted.discard("op-b1")
@@ -317,6 +343,87 @@ async def test_every_browser_result_taints_the_turn(env):
             broker._tainted.discard("op-bt")
         assert all(broker.classify_taint("browser_" + v) == "untrusted"
                    for v in browser.VERBS)
+    finally:
+        await fe.stop()
+
+
+async def test_frame_scoped_click_needs_a_fresh_read(env, monkeypatch):
+    """A click on an element in any frame ("f1:1") needs an all-frames read of
+    that tab in this turn; one read covers every frame."""
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-fr")
+        try:
+            assert "read the tab first" in await _tool("browser_click")(tab=7, element="f1:1")
+            page = await _tool("browser_read_page")(tab=7)
+            assert "[f1:1]" in page                      # the iframe's button is listed
+            assert "tab 7" in await _tool("browser_click")(tab=7, element="f1:1")
+            assert fe.reqs[-1]["params"] == {"tab": 7, "element": "f1:1"}
+            # scroll_to_element is element-bound too, so it also needs a read
+            assert "tab 7" in await _tool("browser_scroll_to_element")(tab=7, element="f0:2")
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-fr")
+    finally:
+        await fe.stop()
+
+
+async def test_popup_adoption_routing(env, monkeypatch):
+    """When a Jav3 tab spawns a popup the extension adopts, the spawning action
+    reports its tab id and list_tabs shows it."""
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()
+    try:
+        await _grant(env, act=True)
+
+        async def with_popup(m):
+            res = await FakeExt.default_answer(m)
+            if m["verb"] == "click":
+                res["data"]["opened"] = [{"tab": 12, "url": "https://accounts.other.com/o"}]
+            if m["verb"] == "list_tabs":
+                res["data"]["tabs"].append({"tab": 12, "url": "https://accounts.other.com/o",
+                                            "title": "Sign in"})
+            return res
+        fe.answer = with_popup
+        tok = budget_mod.active_op_id.set("op-pop")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            r = await _tool("browser_click")(tab=7, element="f0:1")
+            assert "adopted popup tab" in r and "tab 12" in r
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-pop")
+        assert "tab 12" in await _tool("browser_list_tabs")()
+    finally:
+        await fe.stop()
+
+
+async def test_cross_origin_frame_consent_refusal_is_surfaced(env, monkeypatch):
+    """The frame-consent rule lives in the extension (it holds the per-site
+    decisions); a refusal to click into an un-allowed cross-origin frame is
+    routed back to the model as an error, while a same-site click goes through."""
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()
+    try:
+        await _grant(env, act=True)
+
+        async def refuse_frame(m):
+            if m["verb"] == "click" and str(m["params"].get("element", "")).startswith("f1:"):
+                return {"ok": False, "code": "failed",
+                        "err": "the operator has not allowed accounts.other.com for this frame"}
+            return await FakeExt.default_answer(m)
+        fe.answer = refuse_frame
+        tok = budget_mod.active_op_id.set("op-xo")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            r = await _tool("browser_click")(tab=7, element="f1:1")
+            assert r.startswith("error:") and "accounts.other.com" in r
+            assert "tab 7" in await _tool("browser_click")(tab=7, element="f0:1")
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-xo")
     finally:
         await fe.stop()
 

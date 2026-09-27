@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jav3 Browser",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Lets your Jav3 server use this browser, in its own window, on sites you allow.",
   "minimum_chrome_version": "116",
   "background": {
@@ -21,6 +21,7 @@
     "tabs",
     "tabGroups",
     "scripting",
+    "webNavigation",
     "storage",
     "notifications",
     "alarms"

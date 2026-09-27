@@ -11,8 +11,8 @@ parameters:
       type: integer
       description: Tab number.
     element:
-      type: integer
-      description: Field number from browser_read_page.
+      type: string
+      description: Field id from browser_read_page, e.g. "f0:12" (f0 is the top frame, f1+ are iframes).
     text:
       type: string
       description: At most 2000 characters. Stored secrets are refused.
@@ -24,4 +24,4 @@ parameters:
       description: Which connected browser (name). Omit when only one is connected.
   required: [tab, element, text]
 ---
-Replaces the field's contents.
+Replaces the field's contents. Typing into a cross-origin iframe on a different site than the tab asks the operator to allow that site too.

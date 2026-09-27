@@ -150,6 +150,7 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               "browser_open_tab", "browser_navigate",
                               "browser_read_page", "browser_click",
                               "browser_type", "browser_scroll",
+                              "browser_scroll_to_element",
                               "browser_screenshot_tab", "browser_close_tab",
                               "browser_list_tabs",
                               # /local: files and command output from the
