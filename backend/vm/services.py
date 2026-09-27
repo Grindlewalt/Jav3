@@ -283,7 +283,10 @@ def _collect(root: Path, patterns: list[str]) -> list[tuple[str, Path]]:
                     raise ServiceError(f"files: {rel} resolves outside the project")
                 out[rel] = f
         if not matched:
-            raise ServiceError(f"files: {pat!r} matches nothing in the project")
+            raise ServiceError(
+                f"files: {pat!r} matches nothing in the project. Files written in "
+                "THIS turn are not in the project yet (writes land when the turn "
+                "ends): file the service request in your next turn")
     if len(out) > MAX_FILES:
         raise ServiceError(f"files: {len(out)} files, over the {MAX_FILES} cap")
     return sorted(out.items())

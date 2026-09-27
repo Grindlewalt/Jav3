@@ -24,4 +24,5 @@ async def run(name: str = "", command: list | None = None, files: list | None = 
     return (f"service request #{row['id']} '{row['name']}' filed for '{slug}' "
             f"(snapshot sha256 {row['artifact_sha256'][:12]}, placement proposed: "
             f"{row['placement']}).{sup} Nothing runs until the operator approves "
-            "it; check with service_status.")
+            "it; check with service_status. Changes still pending from THIS "
+            "turn (they land when it ends) are not in the snapshot.")
