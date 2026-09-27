@@ -31,7 +31,7 @@ import httpx
 
 from .. import egress, egress_auto, secrets as secrets_mod
 from .. import anomaly, security, websec
-from . import boxes
+from . import boxes, boxnet
 from ..config import settings
 from ..db import get_db
 
@@ -199,7 +199,7 @@ async def _nft_drop(host: str) -> None:
     for ip in ips:
         try:
             p = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "nft", "add", "element", "inet", "jarvis_vm", "cut_hosts",
+                "sudo", "-n", "nft", "add", "element", "inet", boxnet.nft_table(), "cut_hosts",
                 "{", ip, "}", stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             await p.wait()

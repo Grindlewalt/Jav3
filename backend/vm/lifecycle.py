@@ -184,14 +184,17 @@ class GuestVM:
         """Run net_up.sh up|down via passwordless sudo (Pi). Best-effort: a
         failure to bring the net up is logged to console but doesn't wedge boot —
         the guest then simply has no working egress (fails closed)."""
-        script = settings.base_dir / "vm" / "net" / "net_up.sh"
-        env = {**os.environ,
-               "JARVIS_VM_TAP": settings.vm_egress_tap,
-               "JARVIS_VM_HOST_IP": settings.vm_egress_host_ip,
-               "JARVIS_VM_PCAP": "1" if settings.vm_egress_pcap else "0"}
+        # argv, not env: sudo's env_reset strips JARVIS_*, and the script's
+        # defaults are the default install's live tap/table (e2e BUG-1)
+        from . import boxnet
+        try:
+            argv = boxnet.net_up_argv(action)
+        except ValueError as e:
+            print(f"[egress] net {action} refused: {e}")
+            return
         try:
             proc = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "bash", str(script), action, env=env,
+                *argv,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
             _, err = await proc.communicate()
             if proc.returncode:
@@ -229,6 +232,14 @@ class GuestVM:
                "JARVIS_VM_CPUS": str(settings.vm_cpus),
                "JARVIS_VM_CID": str(settings.vm_guest_cid),
                "JARVIS_VM_EGRESS": "1" if settings.vm_egress else "0"}
+        if settings.vm_egress and self.box is None:
+            # the shared box attaches to ITS tap (vm_egress_tap), never a
+            # hard-coded jvtap0 that may belong to another instance
+            from . import boxnet
+            try:
+                env["JARVIS_VM_TAP"] = boxnet.shared_net()["tap"]
+            except ValueError as e:
+                raise VMError(f"egress network misconfigured: {e}")
         if self.box is not None:
             # a non-shared box: its own dir, image path, CID, tap and MAC
             env.update({"VM_DIR": str(self._dir),

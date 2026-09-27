@@ -367,3 +367,12 @@ Behind `docker_enabled` and a profile's explicit `box_runtime: "docker"`.
   `<user> ALL=(root) NOPASSWD: /usr/bin/bash <repo>/vm/net/net_box.sh *`
   (plus the existing line for `net_up.sh`, which gains `up-boxes|down-boxes`).
   sudo's env_reset strips JARVIS_*: everything the script needs is in argv.
+- A second instance on one host (JARVIS_INSTANCE, or derived from a non-default
+  JARVIS_CONFIG_DIR): `net_up.sh <action> <jvtapN> <10.201.N.1> <0|1>
+  <jarvis_vm_NAME>` and `net_box.sh ... <jarvis_vm_NAME>` (needs the `*` form
+  of both sudoers lines). Its nft table, pid files, `/run` renders, dns log and
+  pcaps carry the name; it must move its shared box off jvtap0 / CID 3 (boot
+  refuses); `down-boxes` deletes only the taps in its own table's `guest_taps`.
+  Its dnsmasq answers on its shared tap only and serves no DHCP; its box taps
+  get DNS from the default install's `interface=jvtap*` resolver when one runs.
+  The default install passes the bare `net_up.sh <action>` as before.

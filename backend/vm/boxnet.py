@@ -21,7 +21,10 @@ Forwarding from guests is dropped outright: boxes cannot reach each other or
 the LAN; the host proxy is the only way out.
 """
 import asyncio
+import hashlib
+import re
 
+from .. import config
 from ..config import settings
 
 DNS_PORT = 53
@@ -102,16 +105,81 @@ table inet {table} {{
 """
 
 
+DEFAULT_TABLE = "jarvis_vm"
+_INSTANCE_RE = re.compile(r"^[a-z0-9]{1,12}$")
+_TAP_RE = re.compile(r"^jvtap(0|[1-9][0-9]{0,2})$")
+
+
+def instance() -> str:
+    """This install's host-network instance name: "" for the default install,
+    settings.instance when set, else a short hash of a non-default
+    JARVIS_CONFIG_DIR. Names the nft table, pid files, dns log and pcaps."""
+    name = (settings.instance or "").strip()
+    if name:
+        if not _INSTANCE_RE.match(name):
+            raise ValueError(f"JARVIS_INSTANCE {name!r}: 1-12 of [a-z0-9]")
+        return name
+    if config.CONFIG_DIR.resolve() != config.DEFAULT_CONFIG_DIR.resolve():
+        return hashlib.sha1(str(config.CONFIG_DIR.resolve()).encode()).hexdigest()[:8]
+    return ""
+
+
+def nft_table() -> str:
+    inst = instance()
+    return f"{DEFAULT_TABLE}_{inst}" if inst else DEFAULT_TABLE
+
+
+def shared_net() -> dict:
+    """The shared box's tap / host IP, checked. Raises ValueError when they do
+    not agree (jvtapN <-> 10.201.N.1), or when a named instance would take the
+    default install's jvtap0 / CID 3: that is how a second instance tore down
+    the live one's tap and tcpdump (e2e BUG-1)."""
+    tap = settings.vm_egress_tap
+    m = _TAP_RE.match(tap or "")
+    if not m or int(m.group(1)) > 254:
+        raise ValueError(f"vm_egress_tap {tap!r}: must be jvtapN, N in 0..254")
+    n = int(m.group(1))
+    if settings.vm_egress_host_ip != f"10.201.{n}.1":
+        raise ValueError(f"vm_egress_host_ip must be 10.201.{n}.1 for {tap}")
+    if instance() and (n == 0 or settings.vm_guest_cid == 3):
+        raise ValueError(
+            "a named instance must not use the default install's jvtap0 / CID 3: "
+            "set JARVIS_VM_EGRESS_TAP=jvtapN, JARVIS_VM_EGRESS_HOST_IP=10.201.N.1 "
+            "and JARVIS_VM_GUEST_CID")
+    return {"tap": tap, "host_ip": settings.vm_egress_host_ip}
+
+
+def net_up_argv(action: str) -> list[str]:
+    """The exact argv for `net_up.sh` under sudo. sudo's env_reset strips
+    JARVIS_*, so everything goes in argv, validated again by the script. The
+    default install with default values keeps the bare `net_up.sh <action>`
+    its existing sudoers line matches."""
+    if action not in ("up", "down", "up-boxes", "down-boxes"):
+        raise ValueError(action)
+    net = shared_net()
+    argv = ["sudo", "-n", "bash",
+            str(settings.base_dir / "vm" / "net" / "net_up.sh"), action]
+    extra = [net["tap"], net["host_ip"], "1" if settings.vm_egress_pcap else "0",
+             nft_table()]
+    if extra != ["jvtap0", "10.201.0.1", "1", DEFAULT_TABLE]:
+        argv += extra
+    return argv
+
+
 def _script():
     return settings.base_dir / "vm" / "net" / "net_box.sh"
 
 
 def net_box_argv(action: str, box) -> list[str]:
-    """The exact argv run under sudo (the sudoers line matches this shape)."""
+    """The exact argv run under sudo (the sudoers line matches this shape).
+    A named instance appends its nft table (env would be stripped by sudo)."""
     if action not in ("add", "del", "pin", "unpin"):
         raise ValueError(action)
-    return ["sudo", "-n", "bash", str(_script()), action, box.tap,
+    argv = ["sudo", "-n", "bash", str(_script()), action, box.tap,
             box.host_ip, box.guest_ip]
+    if nft_table() != DEFAULT_TABLE:
+        argv.append(nft_table())
+    return argv
 
 
 async def _run(action: str, box) -> None:
