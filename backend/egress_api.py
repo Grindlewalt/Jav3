@@ -234,7 +234,7 @@ class PolicyBody(BaseModel):
     allow: list[str] | None = None
     deny: list[str] | None = None
     # pre-profiles shape, still accepted while clients move over: the mode
-    # picks the builtin profile that reproduces it (egress.set_policy)
+    # picks the profile that reproduces it (egress.set_policy)
     mode: str | None = None
     inherit_general: bool = True
     hosts: list[str] | None = None

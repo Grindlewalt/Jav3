@@ -1,7 +1,10 @@
 """Admin CLI:
-  python -m backend.cli setup [--status | --add-user] [--username U --password-stdin]
+  python -m backend.cli setup [--status | --add-user | --profile-only]
+                             [--username U --password-stdin]
+                             [--network ask|allow|off] [--placement shared|vm|container]
+                             [--services] [--packages] [--change-profile] [--yes]
                              [--provider ID [--api-key-stdin] [--base-url URL]] [--no-test]
-                                                     # first-run setup (login + model provider)
+                                                     # first-run setup (login, provider, default profile)
   python -m backend.cli create-user <username> [password]  # omit it: hidden prompt
   python -m backend.cli guest-shell [project-slug]   # drop into the sandbox guest
   python -m backend.cli services-check               # probe the companion services
@@ -222,6 +225,74 @@ def _stdin_line(what: str) -> str:
     return line.rstrip("\r\n")
 
 
+def _pick(prompt: str, options: list[tuple[str, str]], default: str) -> str:
+    """Numbered choice; Enter takes `default`. options = [(value, label)]."""
+    for i, (v, label) in enumerate(options, 1):
+        print(f"   {i}) {label}" + ("   (default)" if v == default else ""))
+    while True:
+        pick = _ask("   choose a number: ", "")
+        if not pick:
+            return default
+        if pick.isdigit() and 1 <= int(pick) <= len(options):
+            return options[int(pick) - 1][0]
+        print("   not on the list")
+
+
+def _profile_step(a, *, interactive: bool, change: bool) -> dict | None:
+    """Ask (or take from the flags) the default profile's four answers.
+    Returns {choices, change} for _apply_profile, or None to keep the
+    existing default untouched."""
+    from . import setup_api
+    state = asyncio.run(setup_api.profile_state())
+    cur, opts = state["current"], state["options"]
+    print("\n3. Security profile for new projects")
+    if cur is not None:
+        print(f"   default profile: {cur['summary']}")
+        if not change and not (interactive and _yes("   change it?", False)):
+            print("   kept")
+            return None
+        change = True
+    flags = {"network": a.network, "placement": a.placement,
+             "services": a.services or None, "packages": a.packages or None}
+    choices = {**state["defaults"], **{k: v for k, v in flags.items() if v is not None}}
+    if interactive and not any(v is not None for v in flags.values()):
+        print("   network, when an agent reaches a new site:")
+        choices["network"] = _pick(prompt="", default="ask", options=[
+            ("ask", "ask me (deny until I approve it)"),
+            ("allow", "allow it"), ("off", "no network at all")])
+        where = [("shared", "the shared box")]
+        if opts["vm"]["available"]:
+            where.append(("vm", "each project in its own VM"))
+        if opts["container"]["available"]:
+            where.append(("container", "each project in its own container "
+                                       "(lighter, less isolated)"))
+        if len(where) > 1:
+            print("   where projects run:")
+            choices["placement"] = _pick(prompt="", options=where, default="shared")
+        else:
+            print("   projects run in the shared box (no KVM or Docker for "
+                  "their own)")
+        choices["services"] = _yes("   may agents request services?", False)
+        choices["packages"] = _yes("   may agents request packages?", False)
+    try:
+        choices = asyncio.run(setup_api.check_profile_choices(choices))
+    except setup_api.SetupError as e:
+        sys.exit(f"setup: {e.detail}")
+    return {"choices": choices, "change": change}
+
+
+def _apply_profile(prof: dict | None) -> None:
+    from . import setup_api
+    if prof is None:
+        return
+    try:
+        r = asyncio.run(setup_api.apply_profile(prof["choices"], change=prof["change"]))
+    except setup_api.SetupError as e:
+        print(f"profile not saved: {e.detail} (set it on the Profiles page)")
+        return
+    print(f"default profile {r['action']}: {r['summary']}")
+
+
 def setup_command(args: list[str]) -> None:
     """The TUI twin of the web /setup page: login, model provider, finish.
     Interactive on a terminal; scriptable with the flags (secrets on stdin,
@@ -241,6 +312,21 @@ def setup_command(args: list[str]) -> None:
                     help="add another login even though setup is done")
     ap.add_argument("--status", action="store_true",
                     help="print needed/done and the URLs; exit 0 iff needed")
+    # the default security profile (the one new projects use)
+    ap.add_argument("--network", choices=("ask", "allow", "off"),
+                    help="new sites: ask me (default), allow, or no network")
+    ap.add_argument("--placement", choices=("shared", "vm", "container"),
+                    help="where projects run (default: the shared box)")
+    ap.add_argument("--services", action="store_true",
+                    help="agents may request services")
+    ap.add_argument("--packages", action="store_true",
+                    help="agents may request packages")
+    ap.add_argument("--change-profile", action="store_true",
+                    help="re-apply the answers to an existing default profile")
+    ap.add_argument("--profile-only", action="store_true",
+                    help="only the profile step (works after setup is done)")
+    ap.add_argument("--yes", action="store_true",
+                    help="no questions: flags, else the safe defaults")
     a = ap.parse_args(args)
     tty = sys.stdin.isatty()
     scripted = a.password_stdin or a.api_key_stdin
@@ -252,6 +338,10 @@ def setup_command(args: list[str]) -> None:
         for url in server_urls():
             print(url)
         sys.exit(1 if exists else 0)
+    if a.profile_only:
+        prof = _profile_step(a, interactive=tty and not a.yes, change=True)
+        _apply_profile(prof)
+        return
     if exists and not a.add_user:
         print("setup is already done (a login exists). To add another login: "
               "python -m backend.cli setup --add-user", file=sys.stderr)
@@ -323,7 +413,11 @@ def setup_command(args: list[str]) -> None:
                     sys.exit("setup: provider test failed (nothing was created; "
                              "--no-test skips the check)")
 
-    # 3. finish
+    # 3. the default security profile (skipped by --add-user)
+    prof = None if a.add_user else _profile_step(
+        a, interactive=tty and not scripted and not a.yes, change=a.change_profile)
+
+    # 4. finish
     try:
         if exists:
             asyncio.run(add_user(username, password))
@@ -339,6 +433,8 @@ def setup_command(args: list[str]) -> None:
                                              if r.get("default") else ""))
         except SetupError as e:
             print(f"provider not saved: {e.detail} (add it in Settings)")
+    if prof is not None:
+        _apply_profile(prof)
     urls = server_urls()
     print("\nopen " + urls[0] + ("   (or " + ", ".join(urls[1:]) + ")"
                                   if len(urls) > 1 else ""))

@@ -214,7 +214,7 @@ def _row(r) -> dict:
 
 async def project_variant(db, slug: str | None) -> str:
     """The image variant a project's profile uses (projects.profile_id, else
-    the builtin Default, else 'main')."""
+    the marked default, else 'main')."""
     if slug:
         async with db.execute(
                 "SELECT sp.box_image FROM projects p JOIN security_profiles sp "
@@ -223,14 +223,14 @@ async def project_variant(db, slug: str | None) -> str:
         if r is not None and r[0]:
             return r[0]
     async with db.execute("SELECT box_image FROM security_profiles "
-                          "WHERE name = 'Default' AND builtin = 1") as cur:
+                          "WHERE is_default = 1") as cur:
         r = await cur.fetchone()
     return (r[0] if r is not None and r[0] else "main")
 
 
 async def project_allows_requests(db, slug: str | None) -> bool | None:
-    """The profile's allow_package_requests (None: no profiles table rows yet,
-    i.e. before WP2's migration; the caller treats that as allowed)."""
+    """The profile's allow_package_requests (the project's, else the marked
+    default's)."""
     row = None
     if slug:
         async with db.execute(
@@ -238,10 +238,10 @@ async def project_allows_requests(db, slug: str | None) -> bool | None:
                 "ON sp.id = p.profile_id WHERE p.slug = ?", (slug,)) as cur:
             row = await cur.fetchone()
     if row is None:
-        async with db.execute("SELECT allow_package_requests FROM security_profiles "
-                              "WHERE name = 'Default' AND builtin = 1") as cur:
-            row = await cur.fetchone()
-    return None if row is None else bool(row[0])
+        # the marked default; the first use creates it when setup did not
+        from . import profiles
+        return bool((await profiles.default(db))["allow_package_requests"])
+    return bool(row[0])
 
 
 async def variant_used_by(db, variant: str) -> dict:
@@ -253,7 +253,7 @@ async def variant_used_by(db, variant: str) -> dict:
     async with db.execute(
             "SELECT p.slug, COALESCE(sp.box_image, d.box_image, 'main') AS v "
             "FROM projects p LEFT JOIN security_profiles sp ON sp.id = p.profile_id "
-            "LEFT JOIN security_profiles d ON d.name = 'Default' AND d.builtin = 1 "
+            "LEFT JOIN security_profiles d ON d.is_default = 1 "
             "WHERE COALESCE(p.deleted_at, '') = '' ORDER BY p.slug") as cur:
         rows = [(r[0], r[1]) for r in await cur.fetchall()]
     direct = [s for s, v in rows if v == variant]

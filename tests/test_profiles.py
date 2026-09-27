@@ -1,7 +1,7 @@
 """WP2: security profiles and project-level policy (DESIGN-BOXES (c)/(d)).
 
 Decision order, the profiles API (cookie-only, placement/runtime defaults,
-builtins undeletable), profile_changed diffs, unattributed traffic under the
+the delete/rename/default rules), profile_changed diffs, unattributed traffic under the
 Default profile only, per-profile auto_handle in the reviewer and egress auto
 mode, the hard never-list, and the secret-grant rule on both the wire and the
 web path."""
@@ -39,7 +39,7 @@ async def add_project(db, slug, profile_name=None):
                      (slug, slug, f"/tmp/{slug}"))
     await db.commit()
     if profile_name:
-        p = await profiles.by_name(db, profile_name)
+        p = await profiles.legacy_profile(db, profile_name)
         await profiles.assign(db, slug, p["id"])
 
 
@@ -55,14 +55,17 @@ async def new_profile(db, **kw):
     return await profiles.create(db, body)
 
 
-# --- the builtins ----------------------------------------------------------------
+# --- the default and the legacy shapes ------------------------------------------------
 
-async def test_builtins_are_explicit_per_project_kvm(db):
+async def test_legacy_shapes_are_explicit_per_project_kvm(db):
+    for name in profiles.LEGACY_NAMES:
+        await profiles.legacy_profile(db, name)
     profs = {p["name"]: p for p in await profiles.list_all(db)}
-    assert set(profs) >= {"Default", "Scoped", "Open", "Offline"}
-    for name in profiles.BUILTIN_NAMES:
+    assert set(profs) == {"Default", "Scoped", "Open", "Offline"}
+    assert [n for n, p in profs.items() if p["is_default"]] == ["Default"]
+    for name in profiles.LEGACY_NAMES:
         p = profs[name]
-        assert p["builtin"] and p["service_placement"] == "per_project"
+        assert not p["builtin"] and p["service_placement"] == "per_project"
         assert p["box_runtime"] == "kvm"
     assert profs["Default"]["default_verdict"] == "deny"
     assert "pypi.org" in profs["Default"]["allow_hosts"]          # the old general seeds
@@ -238,20 +241,88 @@ async def test_edit_emits_profile_changed_with_diff(db):
     assert ev["severity"] == "critical"               # widened to allow-by-default
 
 
-async def test_builtins_cannot_be_deleted_or_renamed(db):
-    d = await profiles.by_name(db, "Default")
+async def test_default_cannot_be_deleted_until_another_is_marked(db):
+    d = await profiles.default(db)
     with pytest.raises(profiles.ProfileError) as e:
         await profiles.delete(db, d["id"])
-    assert e.value.status == 409
-    with pytest.raises(profiles.ProfileError):
-        await profiles.update(db, d["id"], {"name": "Other", "service_placement":
+    assert e.value.status == 409 and "make another profile the default" in str(e.value)
+    # but it can be renamed and edited like any other
+    await profiles.update(db, d["id"], {"name": "Home", "service_placement":
+                                        "per_project", "box_runtime": "kvm"})
+    assert (await profiles.default(db))["name"] == "Home"
+    other = await new_profile(db)
+    assert not other["is_default"]
+    await profiles.set_default(db, other["id"])
+    assert (await profiles.default(db))["id"] == other["id"]
+    ev = (await events(db, "profile_changed"))[-1]
+    assert ev["detail"]["action"] == "make_default"
+    assert ev["detail"]["from"]["name"] == "Home"
+    await profiles.delete(db, d["id"])                  # no longer the default
+    assert await profiles.get(db, d["id"]) is None
+
+
+async def test_exactly_one_default(db):
+    import aiosqlite
+    a = await new_profile(db, name="A")
+    # a profile made on an install with none: the safe default comes first
+    assert not a["is_default"] and (await profiles.default(db))["name"] == "Default"
+    b = await new_profile(db, name="B")
+    c = await profiles.create(db, {"name": "C", "service_placement": "shared",
+                                   "box_runtime": "kvm"}, make_default=True)
+    assert c["is_default"]
+    async with db.execute("SELECT name FROM security_profiles WHERE is_default = 1") as cur:
+        assert [r["name"] for r in await cur.fetchall()] == ["C"]
+    await profiles.set_default(db, b["id"])
+    async with db.execute("SELECT name FROM security_profiles WHERE is_default = 1") as cur:
+        assert [r["name"] for r in await cur.fetchall()] == ["B"]
+    # the schema refuses a second marked row outright
+    with pytest.raises(aiosqlite.IntegrityError):
+        await db.execute("UPDATE security_profiles SET is_default = 1 WHERE id = ?",
+                         (a["id"],))
+    await db.rollback()
+    with pytest.raises(profiles.ProfileError) as e:
+        await profiles.set_default(db, 9999)
+    assert e.value.status == 404
+
+
+async def test_create_rename_delete_rules(db):
+    await profiles.default(db)
+    p = await new_profile(db, name="Lab")
+    p = await profiles.update(db, p["id"], {"name": "Lab 2", "service_placement":
                                             "per_project", "box_runtime": "kvm"})
+    assert p["name"] == "Lab 2"
+    with pytest.raises(profiles.ProfileError) as e:
+        await new_profile(db, name="Lab 2")
+    assert e.value.status == 409                      # names stay unique
+    await add_project(db, "alpha")
+    await profiles.assign(db, "alpha", p["id"])
+    with pytest.raises(profiles.ProfileError) as e:
+        await profiles.delete(db, p["id"])
+    assert e.value.status == 409 and "alpha" in str(e.value)
+    await profiles.assign(db, "alpha", (await profiles.default(db))["id"])
+    assert (await profiles.delete(db, p["id"]))["ok"]
+
+
+async def test_unassigned_projects_follow_the_marked_default(db):
+    await add_project(db, "alpha")                    # profile_id NULL
+    assert (await profiles.for_slug(db, "alpha"))["name"] == "Default"
+    open_ = await profiles.create(db, {"name": "Wide", "default_verdict": "allow",
+                                       "service_placement": "per_project",
+                                       "box_runtime": "kvm"})
+    await profiles.set_default(db, open_["id"])
+    assert (await profiles.for_slug(db, "alpha"))["name"] == "Wide"
+    assert (await profiles.for_slug(db, None))["name"] == "Wide"
+    assert (await egress.decide(db, "alpha", "anything.dev"))[0] == "allow"
+    ev = (await events(db, "profile_changed"))[-1]
+    assert ev["detail"]["projects"] == ["alpha"] and ev["severity"] == "critical"
+    listed = {p["name"]: p["projects"] for p in await profiles.list_all(db)}
+    assert listed["Wide"] == ["alpha"] and listed["Default"] == []
 
 
 async def test_assign_emits_profile_changed_and_moves_the_verdicts(db):
     await add_project(db, "alpha")
     assert (await egress.decide(db, "alpha", "anything.dev"))[0] == "deny"
-    open_ = await profiles.by_name(db, "Open")
+    open_ = await profiles.legacy_profile(db, "Open")
     await profiles.assign(db, "alpha", open_["id"])
     assert (await egress.decide(db, "alpha", "anything.dev"))[0] == "allow"
     ev = (await events(db, "profile_changed"))[-1]
@@ -305,7 +376,7 @@ async def test_api_round_trip(tmp_env):
         assert r.status_code == 200 and r.json()["profile"]["name"] == "Lab"
         pol = (await c.get("/api/egress/policy/alpha")).json()
         assert pol["profile"] == {"id": lab["id"], "name": "Lab", "default": "deny",
-                                  "network_off": False, "builtin": False}
+                                  "network_off": False, "is_default": False}
         r = await c.put("/api/egress/policy/alpha", json={"allow": ["own.dev"],
                                                           "deny": ["lab.dev"]})
         assert r.status_code == 200
@@ -329,16 +400,28 @@ async def test_api_round_trip(tmp_env):
                        if p["id"] == lab["id"])
         assert "own.dev" in lab_row["allow_hosts"]
         assert (await c.delete(f"/api/profiles/{lab['id']}")).status_code == 409  # in use
-        assert (await c.delete(f"/api/profiles/{d['id']}")).status_code == 409    # builtin
+        r = await c.delete(f"/api/profiles/{d['id']}")
+        assert r.status_code == 409 and "default" in r.json()["detail"]      # the default
+        assert d["is_default"] and "builtin" not in d
         await c.put("/api/projects/alpha/profile", json={"profile_id": d["id"]})
         assert (await c.delete(f"/api/profiles/{lab['id']}")).status_code == 200
+        # Make default moves the mark; then the old default can go
+        plain = next(p for p in (await c.get("/api/profiles")).json()["profiles"]
+                     if p["name"] == "Plain")
+        r = await c.post(f"/api/profiles/{plain['id']}/default")
+        assert r.status_code == 200 and r.json()["is_default"] is True
+        rows = (await c.get("/api/profiles")).json()["profiles"]
+        assert [p["name"] for p in rows if p["is_default"]] == ["Plain"]
+        assert (await c.post("/api/profiles/9999/default")).status_code == 404
+        await c.put("/api/projects/alpha/profile", json={"profile_id": plain["id"]})
+        assert (await c.delete(f"/api/profiles/{d['id']}")).status_code == 200
         # an unattributed queue row needs a project on approval
         await egress.note_denied(conn, egress.GENERAL, "q.dev")
         pid = (await egress.list_pending(conn))[0]["id"]
         r = await c.post(f"/api/egress/pending/{pid}/approve")
         assert r.status_code == 409 and r.json()["detail"] == "needs_project"
         g = (await c.get("/api/egress/policy/__general__")).json()
-        assert g["profile"]["name"] == "Default" and g["source"] == "general"
+        assert g["profile"]["name"] == "Plain" and g["source"] == "general"
         assert (await c.put("/api/egress/policy/__general__", json={"allow": ["x.dev"]})
                 ).status_code == 400
         assert (await c.put("/api/egress/policy/__image_build__", json={"allow": ["x.dev"]})
@@ -488,5 +571,5 @@ async def test_proxy_injects_a_profile_granted_secret(db):
 
 
 async def test_seed_hosts_setting_is_the_default_profile_seed(db):
-    d = await profiles.by_name(db, "Default")
+    d = await profiles.default(db)
     assert sorted(set(settings.egress_seed_hosts)) == d["allow_hosts"]

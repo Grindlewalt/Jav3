@@ -543,7 +543,7 @@ def enabled() -> bool:
 
 async def project_profile(slug: str) -> dict | None:
     """The security profile row for a project (projects.profile_id, falling
-    back to the builtin named 'Default'), or None before WP2 has migrated."""
+    back to the one marked is_default, created on first use if none exists)."""
     from ..db import get_db
     db = await get_db()
     try:
@@ -552,9 +552,11 @@ async def project_profile(slug: str) -> dict | None:
                 "ON sp.id = p.profile_id WHERE p.slug = ?", (slug,)) as cur:
             row = await cur.fetchone()
         if row is None:
-            async with db.execute(
-                    "SELECT * FROM security_profiles WHERE name = 'Default' "
-                    "AND builtin = 1") as cur:
+            # the marked default; the first use creates it when setup did not
+            from .. import profiles
+            p = await profiles.default(db)
+            async with db.execute("SELECT * FROM security_profiles WHERE id = ?",
+                                  (p["id"],)) as cur:
                 row = await cur.fetchone()
         return dict(row) if row is not None else None
     finally:

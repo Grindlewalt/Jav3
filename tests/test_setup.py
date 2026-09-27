@@ -31,6 +31,24 @@ def _clean():
     auth._failures.clear()
 
 
+ONLY_SHARED = {"shared": {"available": True, "reason": None},
+               "vm": {"available": False, "reason": "no /dev/kvm on this host"},
+               "container": {"available": False, "reason": "docker runtime is off"}}
+ALL_WHERE = {k: {"available": True, "reason": None} for k in ONLY_SHARED}
+
+
+@pytest.fixture(autouse=True)
+def where(monkeypatch):
+    """Where projects can run: shared only, unless a test widens it (no real
+    /dev/kvm or docker probe in tests)."""
+    opts = {"v": ONLY_SHARED}
+
+    async def fake():
+        return opts["v"]
+    monkeypatch.setattr(setup_api, "where_options", fake)
+    return opts
+
+
 @pytest.fixture
 def no_providers(monkeypatch):
     """PR1 not merged: `from . import providers` fails."""
@@ -362,7 +380,7 @@ def test_cli_setup_interactive_menu(tmp_env, monkeypatch, no_providers):
     from backend import cli
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "password123")
     monkeypatch.setattr(setup_api, "_probe", None)   # must not be reached
-    code, out = _run_cli(monkeypatch, ["setup"], "op\n6\n\nn\n", tty=True)
+    code, out = _run_cli(monkeypatch, ["setup"], "op\n6\n\nn\n\n\n\n", tty=True)
     assert code == 0, out
     assert "1) DeepSeek" in out and "6) Ollama" in out
     assert asyncio.run(_count_users()) == 1
@@ -371,6 +389,139 @@ def test_cli_setup_interactive_menu(tmp_env, monkeypatch, no_providers):
 def test_cli_setup_interactive_skip_provider(tmp_env, monkeypatch, no_providers):
     from backend import cli
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "password123")
-    code, out = _run_cli(monkeypatch, ["setup"], "op\n0\n", tty=True)
+    code, out = _run_cli(monkeypatch, ["setup"], "op\n0\n\n\n\n", tty=True)
     assert code == 0, out
     assert not settings.secrets_path.exists()
+
+
+
+# ------------------------------------------------------- the profile step ---
+
+async def _default():
+    from backend import profiles
+    db = await get_db()
+    try:
+        p = await profiles.current_default(db)
+        async with db.execute("SELECT COUNT(*) FROM security_profiles") as cur:
+            n = (await cur.fetchone())[0]
+        return (None if p is None else {"name": p["name"],
+                                        **profiles.setup_choices(p)}), n
+    finally:
+        await db.close()
+
+
+SAFE = {"network": "ask", "placement": "shared", "services": False, "packages": False}
+
+
+def test_cli_setup_non_interactive_creates_the_safe_default(tmp_env, monkeypatch,
+                                                            no_providers):
+    code, out = _run_cli(monkeypatch, ["setup", "--username", "op", "--password-stdin",
+                                       "--provider", "none"], "password123\n")
+    assert code == 0, out
+    assert "default profile created" in out
+    assert asyncio.run(_default()) == ({"name": "Default", **SAFE}, 1)
+
+
+def test_cli_setup_flags_set_the_profile(tmp_env, monkeypatch, no_providers, where):
+    where["v"] = ALL_WHERE
+    code, out = _run_cli(monkeypatch, [
+        "setup", "--username", "op", "--password-stdin", "--provider", "none",
+        "--network", "off", "--placement", "container", "--services", "--packages"],
+        "password123\n")
+    assert code == 0, out
+    assert asyncio.run(_default()) == ({"name": "Default", "network": "off",
+                                        "placement": "container", "services": True,
+                                        "packages": True}, 1)
+
+
+def test_cli_setup_refuses_a_placement_this_host_cannot_run(tmp_env, monkeypatch,
+                                                            no_providers):
+    code, out = _run_cli(monkeypatch, ["setup", "--username", "op", "--password-stdin",
+                                       "--provider", "none", "--placement", "vm"],
+                         "password123\n")
+    assert code != 0
+    assert asyncio.run(_count_users()) == 0              # nothing half-done
+    assert asyncio.run(_default()) == (None, 0)
+
+
+def test_cli_setup_keeps_an_existing_default(tmp_env, monkeypatch, no_providers):
+    asyncio.run(init_db())
+    asyncio.run(setup_api.apply_profile({"network": "off"}))
+    code, out = _run_cli(monkeypatch, ["setup", "--username", "op", "--password-stdin",
+                                       "--provider", "none", "--yes"], "password123\n")
+    assert code == 0, out
+    assert "default profile: Default: network no network" in out and "kept" in out
+    assert asyncio.run(_default())[0]["network"] == "off"
+
+
+def test_cli_profile_only_changes_it_after_setup(tmp_env, monkeypatch, no_providers):
+    code, out = _run_cli(monkeypatch, ["setup", "--username", "op", "--password-stdin",
+                                       "--provider", "none"], "password123\n")
+    assert code == 0, out
+    code, out = _run_cli(monkeypatch, ["setup", "--profile-only", "--network", "allow",
+                                       "--yes"], "")
+    assert code == 0, out
+    assert "default profile changed" in out
+    assert asyncio.run(_default()) == ({"name": "Default", **SAFE, "network": "allow"}, 1)
+
+
+def test_cli_setup_interactive_profile_answers(tmp_env, monkeypatch, no_providers, where):
+    from backend import cli
+    where["v"] = {**ONLY_SHARED, "vm": {"available": True, "reason": None}}
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "password123")
+    # username, skip provider, network 2 (allow), placement 2 (own VM),
+    # services yes, packages no
+    code, out = _run_cli(monkeypatch, ["setup"], "op\n0\n2\n2\ny\nn\n", tty=True)
+    assert code == 0, out
+    assert "own container" not in out                    # docker is not offered
+    assert asyncio.run(_default()) == ({"name": "Default", "network": "allow",
+                                        "placement": "vm", "services": True,
+                                        "packages": False}, 1)
+
+
+async def test_web_profile_options_and_safe_default(client, no_providers):
+    r = await client.get("/api/setup/profile")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current"] is None and body["defaults"] == SAFE
+    assert body["options"]["vm"]["available"] is False
+    r = await client.post("/api/setup", json=GOOD)
+    assert r.status_code == 200, r.text
+    assert r.json()["profile"]["action"] == "created"
+    assert await _default() == ({"name": "Default", **SAFE}, 1)
+    assert (await client.get("/api/setup/profile")).status_code == 409   # door closed
+
+
+async def test_web_setup_sets_the_chosen_profile(client, no_providers, where):
+    where["v"] = ALL_WHERE
+    r = await client.post("/api/setup", json={**GOOD, "profile": {
+        "network": "off", "placement": "vm", "services": True, "packages": False}})
+    assert r.status_code == 200, r.text
+    assert await _default() == ({"name": "Default", "network": "off", "placement": "vm",
+                                 "services": True, "packages": False}, 1)
+
+
+async def test_web_setup_refuses_bad_profile_before_the_user(client, no_providers):
+    r = await client.post("/api/setup", json={**GOOD, "profile": {"placement": "container"}})
+    assert r.status_code == 400 and "container" in r.json()["detail"]
+    r = await client.post("/api/setup", json={**GOOD, "profile": {"network": "maybe"}})
+    assert r.status_code == 400
+    assert await _count_users() == 0 and await _default() == (None, 0)
+
+
+async def test_web_setup_keeps_an_existing_default_unless_asked(client, no_providers):
+    await setup_api.apply_profile({"network": "off"})     # e.g. created on first use
+    state = (await client.get("/api/setup/profile")).json()
+    assert state["current"]["choices"]["network"] == "off"
+    assert "no network" in state["current"]["summary"]
+    r = await client.post("/api/setup", json={**GOOD, "profile": {"network": "allow"}})
+    assert r.json()["profile"]["action"] == "kept"
+    assert (await _default())[0]["network"] == "off"
+
+
+async def test_web_setup_change_profile_rewrites_the_default(client, no_providers):
+    await setup_api.apply_profile({"network": "off"})
+    r = await client.post("/api/setup", json={**GOOD, "change_profile": True,
+                                              "profile": {"network": "allow"}})
+    assert r.json()["profile"]["action"] == "changed"
+    assert await _default() == ({"name": "Default", **SAFE, "network": "allow"}, 1)
