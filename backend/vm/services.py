@@ -48,6 +48,7 @@ import io
 import ipaddress
 import json
 import re
+import socket
 import tarfile
 import time
 from pathlib import Path, PurePosixPath
@@ -936,12 +937,89 @@ async def unplug(box: boxes.Box, name: str, timeout: float = 15.0) -> None:
 
 # --- svcd RPC ---------------------------------------------------------------------------
 
+class SockStream:
+    """reader/writer over a raw box socket (AF_VSOCK or AF_UNIX) with the
+    loop.sock_* calls. asyncio.open_connection(sock=<AF_VSOCK>) raises
+    `OSError: [Errno 92] Protocol not available` under uvloop (uvicorn's
+    default loop): its transport sets TCP-only socket options (e2e BUG-3).
+    One object serves as both halves, like a stream pair over one transport:
+    close() closes the socket for both directions."""
+    def __init__(self, sock, limit: int = 2 ** 27):
+        sock.setblocking(False)
+        self._s = sock
+        self._buf = b""
+        self._out = bytearray()
+        self._limit = limit
+        self._closed = False
+        self._reading = False
+
+    async def _recv(self, n: int) -> bytes:
+        if self._closed:
+            return b""
+        self._reading = True
+        try:
+            return await asyncio.get_running_loop().sock_recv(self._s, n)
+        finally:
+            self._reading = False
+            if self._closed:
+                self._release()
+
+    def _release(self) -> None:
+        try:
+            self._s.close()
+        except OSError:
+            pass
+
+    async def read(self, n: int = 65536) -> bytes:
+        if self._buf:
+            out, self._buf = self._buf[:n], self._buf[n:]
+            return out
+        return await self._recv(n)
+
+    async def readline(self) -> bytes:
+        while b"\n" not in self._buf:
+            if len(self._buf) > self._limit:
+                raise ValueError("line over the stream limit")
+            chunk = await self._recv(65536)
+            if not chunk:
+                line, self._buf = self._buf, b""
+                return line
+            self._buf += chunk
+        line, self._buf = self._buf.split(b"\n", 1)
+        return line + b"\n"
+
+    def write(self, data: bytes) -> None:
+        self._out += data
+
+    async def drain(self) -> None:
+        if self._out:
+            data, self._out = bytes(self._out), bytearray()
+            await asyncio.get_running_loop().sock_sendall(self._s, data)
+
+    def close(self) -> None:
+        # shutdown wakes a sock_recv pending in the other direction with EOF;
+        # the fd is closed only once no recv is registered on it (closing an
+        # fd the loop still watches is undefined under uvloop)
+        if not self._closed:
+            self._closed = True
+            try:
+                self._s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            if not self._reading:
+                self._release()
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+
 async def svcd_rpc(box: boxes.Box, req: dict, timeout: float = _RPC_TIMEOUT) -> dict:
     """One NDJSON request/response to the box's svcd (host-dialed, port 5558).
     The reply is guest-authored: callers treat every field as a claim."""
     async def _go() -> dict:
         sock = await box.transport.connect(boxes.PORT_SVCD)
-        reader, writer = await asyncio.open_connection(sock=sock, limit=2 ** 27)
+        reader = writer = SockStream(sock)
         try:
             writer.write((json.dumps(req) + "\n").encode())
             await writer.drain()
@@ -962,7 +1040,7 @@ async def open_tunnel(box: boxes.Box, port: int):
     through svcd (which only tunnels to ports the host exposed in its last
     apply). Used by portfwd's relays."""
     sock = await box.transport.connect(boxes.PORT_SVCD)
-    reader, writer = await asyncio.open_connection(sock=sock)
+    reader = writer = SockStream(sock)
     writer.write((json.dumps({"op": "tunnel", "port": int(port)}) + "\n").encode())
     await writer.drain()
     line = await asyncio.wait_for(reader.readline(), 10)
