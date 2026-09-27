@@ -155,10 +155,12 @@ async def test_migration_shape_and_event(db):
     detail = await profiles.migrate(db)
     profs = {p["name"]: p for p in await profiles.list_all(db)}
     assert profs["Default"]["allow_hosts"] == GENERAL_HOSTS
-    for name in profiles.BUILTIN_NAMES:
+    for name in profiles.LEGACY_NAMES:
         assert profs[name]["service_placement"] == "per_project"
         assert profs[name]["box_runtime"] == "kvm"
-        assert profs[name]["builtin"] and profs[name]["auto_handle"]
+        assert not profs[name]["builtin"] and profs[name]["auto_handle"]
+    # exactly one default, and it is the old shared baseline
+    assert [n for n, p in profs.items() if p["is_default"]] == ["Default"]
     async with db.execute("SELECT p.slug, sp.name FROM projects p JOIN security_profiles sp "
                           "ON sp.id = p.profile_id") as cur:
         assigned = {r["slug"]: r["name"] for r in await cur.fetchall()}
@@ -182,7 +184,7 @@ async def test_migration_shape_and_event(db):
         evs = [dict(r) for r in await cur.fetchall()]
     assert len(evs) == 1
     d = json.loads(evs[0]["detail"])
-    assert set(d["profiles"]) == set(profiles.BUILTIN_NAMES)
+    assert set(d["profiles"]) == set(profiles.LEGACY_NAMES)
     assert {p["slug"]: p["profile"] for p in d["projects"]}["vault"] == "Offline"
     # idempotent: a second run (and the lazy path) does nothing
     assert await profiles.migrate(db) is None
@@ -218,20 +220,105 @@ async def test_migration_is_one_transaction(db, monkeypatch):
     assert await profiles.migrate(db) is not None           # and it can run cleanly after
 
 
-async def test_fresh_install_migrates_to_seeded_default(db):
-    detail = await profiles.migrate(db)
-    assert detail["projects"] == [] and detail["default_allow_hosts"] > 0
+async def test_fresh_install_seeds_no_profile_and_first_use_creates_the_safe_default(db):
+    assert await profiles.migrate(db) is None                # nothing to migrate
+    async with db.execute("SELECT COUNT(*) AS n FROM security_profiles") as cur:
+        assert (await cur.fetchone())["n"] == 0              # zero built-ins
+    assert await profiles.current_default(db) is None
+    # the first use creates the safe default: ask me, shared box, no extras
     assert (await egress.decide(db, "anything", "pypi.org"))[0] == "allow"
     assert (await egress.decide(db, "anything", "evil.example"))[0] == "deny"
+    profs = await profiles.list_all(db)
+    assert len(profs) == 1 and profs[0]["is_default"] and profs[0]["name"] == "Default"
+    assert profiles.setup_choices(profs[0]) == {"network": "ask", "placement": "shared",
+                                                "services": False, "packages": False}
+    async with db.execute("SELECT triage_verdict FROM security_events "
+                          "WHERE kind = 'profile_changed'") as cur:
+        assert [r["triage_verdict"] for r in await cur.fetchall()] == ["flag"]
+
+
+async def test_only_the_legacy_profiles_in_use_are_created(db):
+    await db.execute("INSERT INTO projects(slug, name, path) VALUES ('p','p','/tmp/p')")
+    await db.execute("INSERT INTO egress_policy(project_slug, mode, inherit_general, hosts) "
+                     "VALUES ('p', 'denylist', 0, '[]')")
+    await db.commit()
+    detail = await profiles.migrate(db)
+    assert set(detail["profiles"]) == {"Default", "Open"}
+    assert (await profiles.for_slug(db, "p"))["name"] == "Open"
+    assert (await profiles.current_default(db))["name"] == "Default"
+
+
+async def _old_code_install(db):
+    """What the old migration left behind: four builtin=1 rows, no marked
+    default, projects pointing at them."""
+    for name, verdict, off in (("Default", "deny", 0), ("Scoped", "deny", 0),
+                               ("Open", "allow", 0), ("Offline", "deny", 1)):
+        await db.execute(
+            "INSERT INTO security_profiles(name, builtin, default_verdict, network_off, "
+            "auto_handle, service_placement, box_runtime) "
+            "VALUES (?, 1, ?, ?, 1, 'per_project', 'kvm')", (name, verdict, off))
+    await db.execute("INSERT INTO security_profiles(name, service_placement, box_runtime) "
+                     "VALUES ('Mine', 'shared', 'kvm')")
+    for slug, prof in (("a", "Open"), ("b", "Default"), ("c", "Mine")):
+        await db.execute("INSERT INTO projects(slug, name, path, profile_id) VALUES "
+                         "(?, ?, '/tmp/x', (SELECT id FROM security_profiles "
+                         "WHERE name = ?))", (slug, slug, prof))
+    await db.commit()
+
+
+async def test_old_builtins_are_kept_and_the_default_marked(db):
+    await _old_code_install(db)
+    assert await profiles.migrate(db) is None
+    profs = {p["name"]: p for p in await profiles.list_all(db)}
+    assert set(profs) == {"Default", "Scoped", "Open", "Offline", "Mine"}   # nothing deleted
+    assert not any(p["builtin"] for p in profs.values())                     # flag cleared
+    assert [n for n, p in profs.items() if p["is_default"]] == ["Default"]
+    assert profs["Open"]["projects"] == ["a"] and profs["Mine"]["projects"] == ["c"]
+    # the old builtins are ordinary now: renamable, and deletable when unused
+    await profiles.update(db, profs["Scoped"]["id"], {
+        "name": "Strict", "service_placement": "per_project", "box_runtime": "kvm"})
+    await profiles.delete(db, profs["Offline"]["id"])
+    assert await profiles.by_name(db, "Offline") is None
+    # idempotent
+    assert await profiles.migrate(db) is None
+    assert (await profiles.current_default(db))["name"] == "Default"
+
+
+async def test_old_install_without_a_row_named_default_marks_the_oldest(db):
+    await db.execute("INSERT INTO security_profiles(name, builtin, service_placement, "
+                     "box_runtime) VALUES ('A', 0, 'shared', 'kvm'), "
+                     "('B', 0, 'shared', 'kvm')")
+    await db.commit()
+    await profiles.migrate(db)
+    assert (await profiles.current_default(db))["name"] == "A"
 
 
 async def test_startup_call_site_migrates(tmp_env):
     await db_mod.init_db()
+    conn = await db_mod.get_db()
+    try:
+        await _old_code_install(conn)
+    finally:
+        await conn.close()
     await profiles.migrate_at_startup()
     conn = await db_mod.get_db()
     try:
         async with conn.execute("SELECT COUNT(*) AS n FROM security_profiles "
                                 "WHERE builtin = 1") as cur:
-            assert (await cur.fetchone())["n"] == 4
+            assert (await cur.fetchone())["n"] == 0
+        async with conn.execute("SELECT name FROM security_profiles "
+                                "WHERE is_default = 1") as cur:
+            assert [r["name"] for r in await cur.fetchall()] == ["Default"]
+    finally:
+        await conn.close()
+
+
+async def test_startup_on_a_fresh_install_creates_nothing(tmp_env):
+    await db_mod.init_db()
+    await profiles.migrate_at_startup()
+    conn = await db_mod.get_db()
+    try:
+        async with conn.execute("SELECT COUNT(*) AS n FROM security_profiles") as cur:
+            assert (await cur.fetchone())["n"] == 0
     finally:
         await conn.close()

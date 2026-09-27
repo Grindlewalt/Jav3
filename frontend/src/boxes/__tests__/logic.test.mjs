@@ -7,7 +7,7 @@ import {
   exposeChoices, exposeDefault, exposePayload, procsRefetch, boxTotals, boxIsOdd, normBoxProcs,
   normRuntimes, assignableProjects, packageReach, buildState, applyBuildEvent, mergeBuildRest,
   buildNeedsReload, verLabel, projectLabel, needsProject,
-  networkMode, withNetworkMode, newSitesText, runsIn, withRunsIn, runsInText,
+  networkMode, withNetworkMode, newSitesText, runsIn, withRunsIn, runsInText, deleteBlock,
 } from '../logic.js'
 
 let n = 0
@@ -215,8 +215,8 @@ t('runs in: one radio over separate_box + box_runtime', () => {
 
 t('projectPolicy: one row per project, profile + project lists merged with sources', () => {
   const profiles = [
-    { id: 1, name: 'Default', builtin: true, default_verdict: 'deny', network_off: false, projects: ['a', 'c'] },
-    { id: 2, name: 'Scoped', builtin: true, default_verdict: 'allow', network_off: true, projects: ['b'] },
+    { id: 1, name: 'Default', is_default: true, default_verdict: 'deny', network_off: false, projects: ['a', 'c'] },
+    { id: 2, name: 'Scoped', is_default: false, default_verdict: 'allow', network_off: true, projects: ['b'] },
   ]
   const groups = [
     { project: 'a', kind: 'project', profile: { id: 1, name: 'Default', default: 'deny' },
@@ -360,3 +360,10 @@ t('build panel: events fold into phase, log and result; REST keeps the finished 
 })
 
 console.log(`${n} passed`)
+
+t('deleteBlock: the default and in-use profiles cannot go, with a reason', () => {
+  assert.match(deleteBlock({ is_default: true, projects: [] }), /make another profile the default/)
+  assert.match(deleteBlock({ is_default: false, projects: ['a'] }), /used by 1 project: move it/)
+  assert.match(deleteBlock({ projects: ['a', 'b'] }), /used by 2 projects: move them/)
+  assert.equal(deleteBlock({ is_default: false, projects: [] }), null)
+})

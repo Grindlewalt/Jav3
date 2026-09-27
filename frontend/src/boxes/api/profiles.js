@@ -1,9 +1,10 @@
 // Security profiles (docs/boxes-api-final.md section 2, WP2). POST needs
-// service_placement + box_runtime (422 without); DELETE is 409 for a builtin
-// or a profile still in use; builtins may be edited but not renamed.
+// service_placement + box_runtime (422 without); DELETE is 409 for the default
+// (make another the default first) or a profile still in use. Every profile
+// can be renamed and edited; exactly one is the default (is_default).
 import { del, enc, get, post, put } from '../http.js'
 
-// -> [{id, name, builtin, default_verdict, network_off, allow_hosts,
+// -> [{id, name, is_default, default_verdict, network_off, allow_hosts,
 //     deny_hosts, secrets, auto_handle, separate_box, box_image, box_mem_mb,
 //     box_runtime, allow_services, allow_package_requests, service_placement,
 //     projects:[slugs]}]
@@ -14,6 +15,8 @@ export async function listProfiles() {
 export const createProfile = (body) => post('/api/profiles', body)
 export const updateProfile = (id, body) => put(`/api/profiles/${enc(id)}`, body)
 export const deleteProfile = (id) => del(`/api/profiles/${enc(id)}`)
+// mark it the default for new and unassigned projects -> the row
+export const makeDefaultProfile = (id) => post(`/api/profiles/${enc(id)}/default`, {})
 // -> {ok, project, profile:{id, name}}; 404 unknown project, 409 __image_build__
 export const assignProfile = (slug, profileId) =>
   put(`/api/projects/${enc(slug)}/profile`, { profile_id: profileId })

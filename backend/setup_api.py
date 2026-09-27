@@ -1,5 +1,14 @@
-"""First-run setup: create the operator's login and, optionally, connect a
-model provider — the web `/setup` page and `backend.cli setup` both land here.
+"""First-run setup: create the operator's login, optionally connect a model
+provider, and configure the default security profile (the one new projects
+use) — the web `/setup` page and `backend.cli setup` both land here.
+
+The profile step asks four things: network for new sites (ask me / allow /
+off), where projects run (the shared box; their own VM only when this host
+has KVM; their own container only when the Docker runtime is available), and
+whether agents may request services and packages. Left out, it creates the
+safe default (ask me, shared box, no services, no packages). When a default
+profile already exists it is shown and kept unless the caller asks to change
+it.
 
 Every route in this module is unauthenticated and exists only while the users
 table is empty. The moment a user exists, all of them refuse (409), so this is
@@ -319,7 +328,95 @@ def _refuse_cross_site(request: Request) -> None:
         raise HTTPException(status_code=415, detail="send JSON")
 
 
+# ---------------------------------------------------------- profile step ---
+
+SAFE_CHOICES = {"network": "ask", "placement": "shared", "services": False,
+                "packages": False}
+
+
+async def where_options() -> dict:
+    """Where projects can run on this host: {shared|vm|container: {available,
+    reason}}. The shared box is always offered; a project's own VM needs
+    /dev/kvm; its own container needs the Docker runtime (enabled and
+    reachable: backend.vm.docker_runtime.availability)."""
+    import os
+    vm = ({"available": True, "reason": None} if os.path.exists("/dev/kvm")
+          else {"available": False, "reason": "no /dev/kvm on this host"})
+    try:
+        from .vm import docker_runtime
+        d = await docker_runtime.availability()
+        container = {"available": bool(d.get("available")), "reason": d.get("reason")}
+    except Exception as e:                 # noqa: BLE001 - an option, never a failure
+        container = {"available": False, "reason": f"docker probe failed ({type(e).__name__})"}
+    return {"shared": {"available": True, "reason": None}, "vm": vm,
+            "container": container}
+
+
+async def check_profile_choices(choices: dict | None) -> dict:
+    """Normalise the profile answers (missing ones take the safe value) and
+    refuse a placement this host cannot run. Raises SetupError(400)."""
+    from . import profiles
+    c = {**SAFE_CHOICES, **{k: v for k, v in (choices or {}).items()
+                            if k in SAFE_CHOICES and v is not None}}
+    c["services"], c["packages"] = bool(c["services"]), bool(c["packages"])
+    try:
+        profiles.setup_fields(**c)
+    except profiles.ProfileError as e:
+        raise SetupError(400, str(e))
+    where = (await where_options())[c["placement"]]
+    if not where["available"]:
+        raise SetupError(400, f"projects cannot run in '{c['placement']}' here: "
+                              f"{where['reason'] or 'not available'}")
+    return c
+
+
+async def profile_state() -> dict:
+    """{current: {id, name, choices, summary} | None, options, defaults}."""
+    from . import profiles
+    db = await get_db()
+    try:
+        cur = await profiles.current_default(db)
+    finally:
+        await db.close()
+    return {"current": None if cur is None else {
+                "id": cur["id"], "name": cur["name"],
+                "choices": profiles.setup_choices(cur),
+                "summary": profiles.describe(cur)},
+            "options": await where_options(), "defaults": dict(SAFE_CHOICES)}
+
+
+async def apply_profile(choices: dict | None = None, *, change: bool = False,
+                        actor: str = "setup") -> dict:
+    """Create the default profile from `choices` (checked), or, when one
+    exists, keep it unless `change`. {action: created|changed|kept, profile:
+    {id, name}, summary}."""
+    from . import profiles
+    c = await check_profile_choices(choices)
+    db = await get_db()
+    try:
+        cur = await profiles.current_default(db)
+        if cur is not None and not change:
+            return {"action": "kept", "profile": {"id": cur["id"], "name": cur["name"]},
+                    "summary": profiles.describe(cur)}
+        try:
+            p = await profiles.configure_default(db, actor=actor, **c)
+        except profiles.ProfileError as e:
+            raise SetupError(e.status if e.status < 500 else 400, str(e))
+        return {"action": "changed" if cur is not None else "created",
+                "profile": {"id": p["id"], "name": p["name"]},
+                "summary": profiles.describe(p)}
+    finally:
+        await db.close()
+
+
 # ----------------------------------------------------------------- routes ---
+
+class ProfileChoices(BaseModel):
+    network: str | None = None          # ask | allow | off
+    placement: str | None = None        # shared | vm | container
+    services: bool | None = None
+    packages: bool | None = None
+
 
 class SetupRequest(BaseModel):
     username: str
@@ -327,6 +424,10 @@ class SetupRequest(BaseModel):
     provider: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    # the default security profile; left out = the safe default (or the
+    # existing default, kept). change_profile re-applies it to an existing one.
+    profile: ProfileChoices | None = None
+    change_profile: bool = False
 
 
 class TestRequest(BaseModel):
@@ -345,6 +446,13 @@ async def providers():
     if await users_exist():
         raise HTTPException(status_code=409, detail="setup is already done")
     return {"providers": catalogue()}
+
+
+@router.get("/profile")
+async def profile():
+    if await users_exist():
+        raise HTTPException(status_code=409, detail="setup is already done")
+    return await profile_state()
 
 
 @router.post("/test")
@@ -372,6 +480,8 @@ async def setup(body: SetupRequest, request: Request, response: Response):
         username = validate_credentials(body.username, body.password)
         if body.provider:
             check_provider(body.provider, body.api_key or "", body.base_url or "")
+        choices = await check_profile_choices(
+            body.profile.model_dump() if body.profile else None)
         user_id = await create_first_user(username, body.password)
     except SetupError as e:
         # only the closed door is charged: a too-short password is a typo,
@@ -388,5 +498,11 @@ async def setup(body: SetupRequest, request: Request, response: Response):
         except SetupError as e:
             # the login exists now; the key can be added from Settings
             provider = {"error": e.detail}
+    try:
+        prof = await apply_profile(choices, change=body.change_profile,
+                                   actor=username)
+    except SetupError as e:
+        # the login exists now; the profile can be set on the Profiles page
+        prof = {"error": e.detail}
     auth.set_session_cookie(response, user_id, username)
-    return {"ok": True, "username": username, "provider": provider}
+    return {"ok": True, "username": username, "provider": provider, "profile": prof}

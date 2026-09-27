@@ -430,7 +430,7 @@ export const validHost = (h) => HOST_RE.test(h)
 
 export function blankProfile() {
   return {
-    name: '', builtin: false, default_verdict: 'deny', network_off: false,
+    name: '', is_default: false, default_verdict: 'deny', network_off: false,
     allow_hosts: [], deny_hosts: [], secrets: [], auto_handle: false,
     separate_box: false, box_image: 'main', box_mem_mb: 768,
     box_runtime: 'kvm', service_placement: 'per_project',   // shared box; per-project services
@@ -507,7 +507,7 @@ export const IMAGE_BUILD = '__image_build__'
 // wins). Every project has a profile: one with none recorded is on Default.
 export function projectPolicy({ groups = [], profiles = [], projects = [], filter = '' }) {
   const names = Object.fromEntries(projects.map((p) => [p.slug, p.name]))
-  const isDefaultProf = (p) => !!p && p.builtin && /^default$/i.test(p.name || '')
+  const isDefaultProf = (p) => !!p && !!p.is_default
   const def = profiles.find(isDefaultProf)
   const hostOf = (x) => (typeof x === 'string' ? x : x?.host)
   const byProject = new Map()
@@ -644,4 +644,15 @@ export function persistDaysLeft(view, now = Date.now()) {
   const t = Date.parse(String(after).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(after) ? '' : 'Z'))
   if (Number.isNaN(t)) return null
   return Math.max(0, Math.ceil((t - now) / 86400000))
+}
+
+// Why a profile's Delete is disabled, or null when it may go: the default
+// (new and unassigned projects use it) until another is marked, and any
+// profile a project still uses. The server enforces both (409).
+export function deleteBlock(p) {
+  if (!p) return 'no profile'
+  if (p.is_default) return 'it is the default for new projects: make another profile the default first'
+  const used = (p.projects || []).length
+  if (used) return `used by ${used} project${used === 1 ? '' : 's'}: move ${used === 1 ? 'it' : 'them'} to another profile first`
+  return null
 }

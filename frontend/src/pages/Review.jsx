@@ -114,7 +114,7 @@ export function ReviewQueue({ slug }) {
   const rejectPkg = usePackageReject(loadBoxReqs)
   const placementOf = (proj) => {
     const p = profiles.find((x) => (x.projects || []).includes(proj))
-      || profiles.find((x) => x.builtin && /^default$/i.test(x.name))
+      || profiles.find((x) => x.is_default)
     return p?.service_placement || ''
   }
 

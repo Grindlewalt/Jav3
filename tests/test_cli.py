@@ -1275,7 +1275,7 @@ def _security_server(seen, token="sess"):
             own = [] if slug == "__general__" else ["x.org"]
             return httpx.Response(200, json={
                 "slug": slug, "profile": {"id": 1, "name": "Default", "default": "deny",
-                                          "network_off": False, "builtin": True},
+                                          "network_off": False, "is_default": True},
                 "project_allow": own, "project_deny": [],
                 "effective_allow": own + ["pypi.org"], "effective_deny": [],
                 "mode": "allowlist", "inherit_general": 1, "hosts": own,
@@ -1745,13 +1745,13 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
                                   "unit": "jav3-svc-9", "service_id": 9, "tag": "service",
                                   "rss": 30_000_000, "cpu_pct": 2.0, "started": "09:00",
                                   "conns": [conn_ok], "children": [child]}]}]}
-    profiles = [{"id": 1, "name": "Default", "builtin": 1, "default_verdict": "deny",
+    profiles = [{"id": 1, "name": "Default", "is_default": True, "default_verdict": "deny",
                  "network_off": 0, "allow_hosts": ["pypi.org"], "deny_hosts": ["bad.example"],
                  "secrets": [], "auto_handle": 1, "separate_box": 0, "box_image": "main",
                  "box_mem_mb": None, "box_runtime": "kvm", "allow_services": 1,
                  "allow_package_requests": 1, "service_placement": "per_project",
                  "projects": ["demo", "site"]},
-                {"id": 2, "name": "Sandboxed", "builtin": 0, "default_verdict": "deny",
+                {"id": 2, "name": "Sandboxed", "is_default": False, "default_verdict": "deny",
                  "network_off": 0, "allow_hosts": [], "deny_hosts": [], "secrets": ["TBA_KEY"],
                  "auto_handle": 0, "separate_box": 1, "box_image": "dev", "box_mem_mb": 768,
                  "box_runtime": "docker", "allow_services": 0, "allow_package_requests": 0,
@@ -1812,7 +1812,7 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
                 {"loc": ["body", "service_placement"], "msg": "Field required",
                  "type": "missing"}]})
         if method == "DELETE" and path == "/api/profiles/1":
-            return httpx.Response(409, json={"detail": "a builtin profile cannot be deleted"})
+            return httpx.Response(409, json={"detail": "the default profile cannot be deleted"})
         if method == "PUT" and path == "/api/projects/__image_build__/profile":
             return httpx.Response(409, json={"detail": "reserved"})
         if method == "POST" and path.startswith("/api/packages/") and path.endswith("/approve"):
@@ -1874,7 +1874,7 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
             return httpx.Response(200, json={
                 "slug": slug,
                 "profile": {"id": 1, "name": "Default", "default": "deny",
-                            "network_off": False, "builtin": True},
+                            "network_off": False, "is_default": True},
                 "project_allow": own[0], "project_deny": own[1],
                 "effective_allow": own[0] + ["pypi.org"],
                 "effective_deny": own[1] + ["bad.example"],
@@ -2260,7 +2260,7 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
         scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
         assert await _until(pilot, lambda: scr.loaded["profiles"] and len(_rows(scr)) == 2)
         rows = _rows(scr)
-        assert "Default" in rows[0] and "builtin" in rows[0] and "per_project" in rows[0]
+        assert "Default" in rows[0] and "default" in rows[0] and "per_project" in rows[0]
         assert "docker" in rows[1] and "less isolated" in rows[1]
         await pilot.press("down")
         d = _text(scr.query_one("#sec-detail"))
@@ -2322,12 +2322,12 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
         await pilot.press("y")
         assert await _until(pilot, lambda: ("PUT", "/api/projects/demo/profile",
                                             {"profile_id": 2}) in _posts(seen))
-        # builtins cannot be deleted; others after a Confirm
+        # the default cannot be deleted; others after a Confirm
         assert await _until(pilot, lambda: app.screen is scr)
         scr.select_key("R1")
         await pilot.press("d")
         await pilot.pause(0.2)
-        assert app.screen is scr and "builtin" in _text(scr.query_one("#sec-sub"))
+        assert app.screen is scr and "the default" in _text(scr.query_one("#sec-sub"))
         scr.select_key("R2")
         await pilot.press("d")
         assert await _modal(pilot, app, "Confirm")
@@ -2351,9 +2351,9 @@ async def test_tui_profiles_runtimes_weak_unavailable_and_server_refusals(cfg):
         await scr._send("POST", "/api/profiles", "x", json={"name": "Bad"})
         sub = _text(scr.query_one("#sec-sub"))
         assert "422" in sub and "service_placement: Field required" in sub
-        # a builtin's 409 from the server is shown as it came
+        # a 409 from the server is shown as it came
         await scr._send("DELETE", "/api/profiles/1", "x")
-        assert "a builtin profile cannot be deleted" in _text(scr.query_one("#sec-sub"))
+        assert "the default profile cannot be deleted" in _text(scr.query_one("#sec-sub"))
     # docker off on the host: greyed with its reason, and refused in the form
     seen = []
     app = jav3.build_tui("http://h:1", "session:sess",

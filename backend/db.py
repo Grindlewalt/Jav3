@@ -348,14 +348,16 @@ CREATE TABLE IF NOT EXISTS desk_shell_pending (
 -- Boxes themselves are RUNTIME state (backend/vm/boxes.py) and have no table.
 -- ===================================================================
 -- (d) Security profiles. A project points at one via projects.profile_id
--- (NULL = not yet migrated -> the builtin 'Default'). `service_placement` has
+-- (NULL = the profile marked is_default). `service_placement` has
 -- NO default on purpose (operator decision 0.1): a new profile must name one,
 -- so an INSERT that omits it fails. Builtins are migrated to 'per_project'
 -- explicitly by WP2's migration. JSON columns hold arrays of strings.
 CREATE TABLE IF NOT EXISTS security_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    builtin INTEGER NOT NULL DEFAULT 0,
+    builtin INTEGER NOT NULL DEFAULT 0,          -- legacy; no longer read (every profile is editable)
+    -- the ONE profile new/unassigned projects use (partial unique index below)
+    is_default INTEGER NOT NULL DEFAULT 0,
     default_verdict TEXT NOT NULL DEFAULT 'deny'
         CHECK (default_verdict IN ('deny', 'allow')),
     network_off INTEGER NOT NULL DEFAULT 0,
@@ -799,13 +801,21 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     exactly what it always did. Data migrations (profiles_migrated, hosts ->
     allow list) are WP2's, in one transaction of their own."""
     await _add_columns(db, "projects", (
-        # (d) the project's security profile; NULL = the builtin 'Default'
+        # (d) the project's security profile; NULL = the one marked is_default
         ("profile_id", "INTEGER REFERENCES security_profiles(id)"),
         # (a) /persist retirement (operator decision 0.3): when its data was
         # imported into the service box's /srv, and when the old disk goes
         ("persist_imported_at", "TEXT"),
         ("persist_delete_after", "TEXT"),
     ))
+    # (d) the marked default profile replaces the builtin named 'Default':
+    # at most one row carries it (the index); profiles.py keeps it at one
+    await _add_columns(db, "security_profiles", (
+        ("is_default", "INTEGER NOT NULL DEFAULT 0"),
+    ))
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_security_profiles_one_default "
+        "ON security_profiles(is_default) WHERE is_default = 1")
     # (c) project-level deny list beside the existing `hosts`. `hosts` stays
     # the allow list (allowlist mode) until WP2's migration moves it; renaming
     # it here would break egress.py, which WP1 does not own.

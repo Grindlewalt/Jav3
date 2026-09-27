@@ -226,7 +226,7 @@ async def get_mode(db: aiosqlite.Connection, slug: str | None = None) -> dict:
     The project's security profile gates it (DESIGN-BOXES (d)): a profile
     with `auto_handle` off never lets auto mode guess for its projects, even
     if the project or the global switch says on. With `auto_handle` on (all
-    four builtins, as migrated) the project value, else the global, decides —
+    migrated profiles and the setup default) the project value, else the global, decides —
     exactly the pre-profiles behaviour. Unattributed traffic is never guessed
     for: an auto-allow is scoped to one project and there is none."""
     glob = "on" if (await get_state(db, KEY)) == "on" else "off"

@@ -3,21 +3,24 @@ import { Button, EmptyState, Input, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import {
-  assignProfile, createProfile, deleteProfile, listProfiles, secretNames, updateProfile,
+  assignProfile, createProfile, deleteProfile, listProfiles, makeDefaultProfile, secretNames,
+  updateProfile,
 } from '../boxes/api/profiles.js'
 import { listImages } from '../boxes/api/images.js'
 import { listBoxes } from '../boxes/api/vms.js'
 import { listProjects } from '../boxes/api/persist.js'
 import {
-  assignableProjects, blankProfile, NETWORK_MODES, networkMode, newSitesText, parseHosts, PLACEMENTS,
+  assignableProjects, blankProfile, deleteBlock, NETWORK_MODES, networkMode, newSitesText, parseHosts, PLACEMENTS,
   profilePayload, RUNS_IN, runsIn, runsInText, validateProfile, withNetworkMode, withRunsIn,
 } from '../boxes/logic.js'
 import { LoadError, ProjectList, RuntimeStatus, Unavailable, useLoad } from '../boxes/ui.jsx'
 
 // Security > Profiles: a project's whole security posture in one named row —
 // which secrets it may have, how its egress is judged, whether its alerts are
-// auto-handled, and the box it runs in. Built-in profiles are read-only here
-// (duplicate one to change it). Every project has exactly one profile.
+// auto-handled, and the box it runs in. Every profile can be renamed, edited
+// and deleted, except the default (the one new and unassigned projects use;
+// "Make default" moves the mark) and one a project still uses. Every project
+// has exactly one profile. First-run setup creates the first default.
 //
 // A new profile starts on the shared box with per-project service boxes;
 // every choice is one radio (Network, Runs in) over the stored fields.
@@ -46,13 +49,22 @@ export default function Profiles() {
     listBoxes().then((r) => { setRuntimes(r.runtimes); setBudget(r.budget || null) }).catch(() => {})
   }, [])
 
-  // builtins cannot be deleted (409), nor can a profile a project still uses
-  // (409 "in use by"): move its projects first
+  // the default cannot be deleted (409), nor can a profile a project still
+  // uses (409 "in use by"): deleteBlock says why before the server has to
   async function remove(p) {
     if (!await ask.confirm(`Delete profile ${p.name}?`, {
       body: 'No project uses it. This cannot be undone.',
       confirmLabel: 'Delete', danger: true })) return
     try { await deleteProfile(p.id); pr.reload() } catch (e) { notifyError(e) }
+  }
+
+  async function makeDefault(p) {
+    if (!await ask.confirm(`Make ${p.name} the default?`, {
+      body: 'New projects, and every project without a profile of its own, will use it '
+        + `from their next turn: new sites ${newSitesText(p)}; runs in ${runsInText(p)}.`,
+      confirmLabel: 'Make default', danger: p.default_verdict === 'allow' && !p.network_off })) return
+    try { await makeDefaultProfile(p.id); notify(`${p.name} is now the default`); pr.reload() }
+    catch (e) { notifyError(e) }
   }
 
   if (pr.unavailable) return <div className="bx-page"><Unavailable what="Security profiles" /></div>
@@ -68,12 +80,12 @@ export default function Profiles() {
           </div>
         </div>
         {!pr.data && !pr.error && <div className="dim">…</div>}
-        {pr.data && list.length === 0 && <EmptyState>no profiles</EmptyState>}
+        {pr.data && list.length === 0 && <EmptyState>no profiles yet: the first project creates the default</EmptyState>}
         <ul className="staged-list rev-list bx-profiles">
           {list.map((p) => (
             <li key={p.id} className={editing?.id === p.id ? 'active' : ''}>
               <span className="bx-prof-main grow">
-                <span><b>{p.name}</b> {p.builtin && <Tag>built-in</Tag>}</span>
+                <span><b>{p.name}</b> {p.is_default && <Tag>default</Tag>}</span>
                 <span className="small">
                   New sites: {newSitesText(p)}
                   {' · '}{(p.allow_hosts || []).length} always allowed
@@ -85,15 +97,17 @@ export default function Profiles() {
                   {p.auto_handle ? ' · auto-handles alerts' : ''}
                 </span>
                 <span className="dim small">used by: <ProjectList slugs={p.projects} empty="no project" /></span>
+                {deleteBlock(p) && <span className="dim small">cannot delete: {deleteBlock(p)}</span>}
               </span>
               <Button variant="ghost" onClick={() => setEditing({ ...p })}>Edit</Button>
               <Button variant="ghost" onClick={() => setEditing({
-                ...p, id: null, builtin: false, name: `${p.name} copy`, projects: [] })}>
+                ...p, id: null, is_default: false, name: `${p.name} copy`, projects: [] })}>
                 Duplicate</Button>
-              {!p.builtin && (
-                <Button variant="ghost" danger disabled={(p.projects || []).length > 0}
-                        title={(p.projects || []).length ? 'move its projects to another profile first' : undefined}
-                        onClick={() => remove(p)}>Delete</Button>)}
+              {!p.is_default && (
+                <Button variant="ghost" onClick={() => makeDefault(p)}>Make default</Button>)}
+              <Button variant="ghost" danger disabled={!!deleteBlock(p)}
+                      title={deleteBlock(p) || undefined}
+                      onClick={() => remove(p)}>Delete</Button>
             </li>
           ))}
         </ul>
@@ -123,7 +137,6 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
   const [denyText, setDenyText] = useState((initial.deny_hosts || []).join('\n'))
   const [busy, setBusy] = useState(false)
   const [tried, setTried] = useState(false)
-  const builtin = !!initial.builtin     // editable, but its name is fixed (409)
   const isNew = initial.id == null
   const set = (k, v) => setP((x) => ({ ...x, [k]: v }))
   const patch = (o) => setP((x) => ({ ...x, ...o }))
@@ -166,10 +179,10 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
   return (
     <form className="sbx-card bx-form bx-prof-form" onSubmit={save}>
       <div className="sbx-sec-head">
-        <h3>{isNew ? 'New profile' : `Edit ${initial.name}`}{builtin ? ' (built-in: cannot be renamed or deleted)' : ''}</h3>
+        <h3>{isNew ? 'New profile' : `Edit ${initial.name}`}{initial.is_default ? ' (the default)' : ''}</h3>
       </div>
       <fieldset className="bx-fs">
-        <Input label="Name" value={p.name} error={show('name')} disabled={builtin}
+        <Input label="Name" value={p.name} error={show('name')}
                onChange={(e) => set('name', e.target.value)} />
 
         <div className="field">
@@ -293,7 +306,7 @@ function Assignments({ profiles, projects, onDone }) {
     for (const p of profiles) for (const s of p.projects || []) m[s] = p
     return m
   }, [profiles])
-  const def = profiles.find((p) => p.builtin && /^default$/i.test(p.name))
+  const def = profiles.find((p) => p.is_default)
   if (!projects.length || !profiles.length) return null
   async function change(slug, id) {
     const to = profiles.find((p) => String(p.id) === String(id))

@@ -12,7 +12,7 @@ its OWN allow and deny lists on top (`egress_policy.hosts` / `.deny_hosts`).
 Approvals, reviewer approvals and `allow_host` always write the PROJECT's own
 list, never a shared one; profile lists are edited only by the operator.
 The pre-profiles modes (allowlist / denylist / denyall, inherit_general) were
-migrated into the builtin profiles Default / Scoped / Open / Offline with
+migrated into the profiles Default / Scoped / Open / Offline with
 identical verdicts.
 
 A new/unapproved host under a deny-by-default profile is DENIED and queued —
@@ -181,7 +181,7 @@ async def get_policy(db: aiosqlite.Connection, slug: str | None) -> dict:
         hosts = list(IMAGE_BUILD_HOSTS)
         return {"slug": slug,
                 "profile": {"id": None, "name": "Image build", "default": "deny",
-                            "network_off": False, "builtin": True},
+                            "network_off": False, "is_default": False, "fixed": True},
                 "project_allow": [], "project_deny": [],
                 "effective_allow": hosts, "effective_deny": [],
                 "mode": "allowlist", "inherit_general": 0, "hosts": [],
@@ -193,11 +193,11 @@ async def get_policy(db: aiosqlite.Connection, slug: str | None) -> dict:
     eff_deny = _dedupe(p_deny + prof["deny_hosts"])
     default = "deny" if net_off else prof["default_verdict"]
     mode = "denyall" if net_off else ("denylist" if default == "allow" else "allowlist")
-    is_default = bool(prof["builtin"]) and prof["name"] == profiles.DEFAULT
+    is_default = bool(prof["is_default"])
     return {
         "slug": slug,
         "profile": {"id": prof["id"], "name": prof["name"], "default": default,
-                    "network_off": net_off, "builtin": bool(prof["builtin"])},
+                    "network_off": net_off, "is_default": is_default},
         "project_allow": p_allow, "project_deny": p_deny,
         "effective_allow": eff_allow, "effective_deny": eff_deny,
         # --- the pre-profiles view (read-only compatibility)
@@ -398,7 +398,8 @@ async def allow_host(db: aiosqlite.Connection, slug: str, host: str) -> dict:
 
 
 def _profile_ref(slug: str) -> int | str | None:
-    """'profile:<id>' -> id; GENERAL -> 'Default'; else None (a project)."""
+    """'profile:<id>' -> id; GENERAL -> 'Default' (the marked default); else
+    None (a project)."""
     if slug == GENERAL:
         return profiles.DEFAULT
     if slug.startswith("profile:"):
@@ -418,7 +419,7 @@ async def remove_host(db: aiosqlite.Connection, slug: str, host: str,
     col = "deny_hosts" if which == "deny" else "hosts"
     ref = _profile_ref(slug or "")
     if ref is not None:
-        prof = (await profiles.by_name(db, ref) if isinstance(ref, str)
+        prof = (await profiles.default(db) if isinstance(ref, str)
                 else await profiles.get(db, ref))
         if prof is None:
             return {"ok": False, "error": "no such profile"}
@@ -526,7 +527,7 @@ async def allowlist(db: aiosqlite.Connection) -> list[dict]:
                              "created_at": r["created_at"],
                              "expires_at": r["expires_at"]})
     for p in await profiles.list_all(db):
-        is_default = p["builtin"] and p["name"] == profiles.DEFAULT
+        is_default = p["is_default"]
         key = GENERAL if is_default else f"profile:{p['id']}"
         entries = [{"host": h, "source": ("seed" if is_default and h.lower() in seed
                                           else "reviewer" if (key, h) in reviewed
@@ -744,7 +745,7 @@ async def set_lists(db: aiosqlite.Connection, slug: str, *, allow: list[str] | N
 async def set_policy(db: aiosqlite.Connection, slug: str, *, mode: str = "allowlist",
                      inherit_general: bool = True, hosts: list[str] | None = None) -> dict:
     """The pre-profiles call, kept as a translation: the old mode picks the
-    builtin profile that reproduces it (allowlist+inherit -> Default,
+    profile that reproduces it (allowlist+inherit -> Default,
     allowlist -> Scoped, denylist -> Open, denyall -> Offline) and `hosts`
     becomes the project's own allow (allowlist) or deny list. A profile move is
     a `profile_changed` event."""
@@ -753,14 +754,14 @@ async def set_policy(db: aiosqlite.Connection, slug: str, *, mode: str = "allowl
     if is_reserved(slug):
         return {"ok": False, "error": RESERVED}
     name = profiles.legacy_profile_name(mode, inherit_general)
-    prof = await profiles.by_name(db, name)
+    prof = await profiles.legacy_profile(db, name)
     await profiles.assign(db, slug, prof["id"], require_project=False)
     allow, deny = profiles.legacy_lists(mode, sorted(hosts or []))
     await db.execute("UPDATE egress_policy SET hosts = ?, deny_hosts = ?, "
                      "updated_at = datetime('now') WHERE project_slug = ?",
                      (json.dumps(sorted(allow)), json.dumps(sorted(deny)), slug))
     await db.commit()
-    return {"ok": True, "slug": slug, "mode": mode, "profile": name}
+    return {"ok": True, "slug": slug, "mode": mode, "profile": prof["name"]}
 
 
 # --- auto-cut (called by backend/anomaly.py) ---------------------------------

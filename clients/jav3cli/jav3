@@ -3057,8 +3057,8 @@ def build_tui(base: str, token: str, **kw):
         def yn(k):
             return "yes" if p.get(k) else "no"
         return [
-            f"[b]{_esc(p.get('name') or '?')}[/]" + ("  [$text-muted]builtin[/]"
-                                                     if p.get("builtin") else ""),
+            f"[b]{_esc(p.get('name') or '?')}[/]" + ("  [$text-muted]default[/]"
+                                                     if p.get("is_default") else ""),
             f"box runtime: {_runtime_tag(p.get('box_runtime'))}   service placement: "
             f"[b]{_esc(p.get('service_placement') or 'NOT SET')}[/]",
             f"default verdict: [b]{_esc(p.get('default_verdict') or '?')}[/]   network off: "
@@ -3212,7 +3212,7 @@ def build_tui(base: str, token: str, **kw):
         p = e["raw"]
         projects = _jlist(p.get("projects"))
         return (f"[b]{_esc(p.get('name') or '?')}[/]"
-                + (" [$text-muted]builtin[/]" if p.get("builtin") else "")
+                + (" [$text-muted]default[/]" if p.get("is_default") else "")
                 + f"  {_runtime_tag(p.get('box_runtime'))} [$text-muted]· placement[/] "
                   f"{_esc(p.get('service_placement') or 'NOT SET')} [$text-muted]· "
                   f"{_esc(p.get('default_verdict') or '?')} by default"
@@ -3936,8 +3936,8 @@ def build_tui(base: str, token: str, **kw):
             p = e["raw"]
             keys = ("[$primary]p[/] assign to a project   [$primary]e[/] edit   "
                     "[$primary]a[/] new profile"
-                    + ("   [$text-muted]builtin: cannot be deleted[/]" if p.get("builtin")
-                       else "   [$primary]d[/] delete"))
+                    + ("   [$text-muted]the default: cannot be deleted[/]"
+                       if p.get("is_default") else "   [$primary]d[/] delete"))
             notes = _docker_notes(self.runtimes) if p.get("box_runtime") == "docker" else []
             return "\n".join([keys, ""] + _profile_lines(p) + ([""] + notes if notes else []))
 
@@ -4792,8 +4792,9 @@ def build_tui(base: str, token: str, **kw):
             p = self._profile()
             if p is None:
                 return
-            if p.get("builtin"):
-                self._fail(f"{p.get('name')} is builtin: it cannot be deleted")
+            if p.get("is_default"):
+                self._fail(f"{p.get('name')} is the default for new projects: make "
+                           "another profile the default first (web: Profiles)")
                 return
             users = ", ".join(_jlist(p.get("projects")))
             if await self._confirm(

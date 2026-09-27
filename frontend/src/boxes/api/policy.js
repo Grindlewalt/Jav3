@@ -2,7 +2,7 @@
 // (docs/boxes-api-final.md section 3, WP2).
 import { call, enc, get, post, put } from '../http.js'
 
-// -> {slug, profile:{id, name, default, network_off, builtin}, project_allow,
+// -> {slug, profile:{id, name, default, network_off, is_default}, project_allow,
 //     project_deny, effective_allow, effective_deny, source}
 // `__image_build__` answers the builders' fixed policy (source "fixed"),
 // which cannot be edited.
