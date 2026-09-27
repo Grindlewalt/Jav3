@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import stat
+import sys
 from pathlib import Path
 
 import httpx
@@ -2573,3 +2574,75 @@ async def test_tui_stop_project_uses_the_chats_project(cfg):
         app.dispatch("/stop-a")
         await pilot.pause(0.3)
         assert len(seen) == 2                    # no project: refused, nothing sent
+
+
+# --- /screenshot and the safe-save helpers ----------------------------------------------
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    h = tmp_path / "home"
+    h.mkdir()
+    monkeypatch.setenv("HOME", str(h))
+    return h
+
+
+def test_safe_output_dir_rules(home, tmp_path):
+    assert jav3.safe_output_dir("~/Pictures/jav3") == (home / "Pictures" / "jav3").resolve()
+    assert (home / "Pictures" / "jav3").is_dir()
+    out = tmp_path / "outside"
+    out.mkdir()
+    assert jav3.safe_output_dir(str(out)) == out.resolve()      # absolute + writable
+    with pytest.raises(jav3.CliError, match="outside your home"):
+        jav3.safe_output_dir("../outside", cwd=home)             # relative, escapes home
+    with pytest.raises(jav3.CliError, match="not a directory"):
+        jav3.safe_output_dir(str(tmp_path / "missing"))          # absolute, not there
+    with pytest.raises(jav3.CliError):
+        jav3.safe_output_dir("~/a\x00b")
+
+
+def test_safe_stem_and_write_new_never_overwrite(home, tmp_path):
+    assert jav3.safe_stem("../../etc/passwd", "d") == "passwd"
+    assert jav3.safe_stem(".hidden", "d") == "hidden"
+    assert jav3.safe_stem("a b;$(x)", "d") == "a-b-x"
+    assert jav3.safe_stem("", "d") == "d"
+    a = jav3.write_new(home, "shot", "txt", b"one")
+    b = jav3.write_new(home, "shot", "txt", b"two")
+    assert (a.name, b.name) == ("shot.txt", "shot-2.txt") and a.read_bytes() == b"one"
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    (home / "trap.txt").symlink_to(victim)
+    c = jav3.write_new(home, "trap", "txt", b"x")
+    assert c.name == "trap-2.txt" and victim.read_text() == "keep"
+
+
+def test_parse_shot_args():
+    assert jav3.parse_shot_args([]) == (None, None, None)
+    assert jav3.parse_shot_args(["x", "TXT", "~/d"]) == ("x", "txt", "~/d")
+    assert jav3.parse_shot_args(["x.png"]) == ("x", "png", None)
+    with pytest.raises(jav3.CliError):
+        jav3.parse_shot_args(["a", "b"])
+
+
+async def test_tui_screenshot_saves_svg_txt_and_sets_defaults(cfg, home, monkeypatch):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_fake_server([], []))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        await app.c_screenshot("snap")
+        pics = home / "Downloads"                   # no ~/Pictures here
+        assert (pics / "snap.svg").read_text().startswith("<svg")
+        await app.c_screenshot("snap txt")
+        assert (pics / "snap.txt").read_text().strip()
+        await app.c_screenshot("snap txt")
+        assert (pics / "snap-2.txt").exists()
+        await app.c_screenshot("default txt ~/shots")
+        st = json.loads((cfg / "tui.json").read_text())
+        assert st["screenshot_format"] == "txt"
+        assert st["screenshot_dir"] == str((home / "shots").resolve())
+        await app.c_screenshot("")
+        assert len(list((home / "shots").glob("jav3-*.txt"))) == 1
+        monkeypatch.setitem(sys.modules, "cairosvg", None)
+        with pytest.raises(jav3.CliError, match="cairosvg"):
+            await app.c_screenshot("p png")
+        with pytest.raises(jav3.CliError, match="usage"):
+            await app.c_screenshot("default gif")

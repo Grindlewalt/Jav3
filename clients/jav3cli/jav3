@@ -28,6 +28,7 @@ import io
 import json
 import os
 import platform
+import re
 import secrets
 import shlex
 import socket
@@ -6300,6 +6301,10 @@ def build_tui(base: str, token: str, **kw):
                 "copy": Command(self.c_copy, "copy the last reply", busy_ok=True, leader="y"),
                 "export": Command(self.c_export, "save this chat as markdown", "[file]",
                                   takes_arg=True, busy_ok=True, leader="x"),
+                "screenshot": Command(self.c_screenshot, "save a picture of this screen "
+                                      "(svg, txt, png); help · default <format> [dir]",
+                                      "[name] [format] [location]", takes_arg=True,
+                                      busy_ok=True),
                 "details": Command(self.c_details, "expand or collapse tool output (ctrl+o)",
                                    busy_ok=True),
                 "detach": Command(self.c_detach, "drop pending !command output",
@@ -6369,6 +6374,11 @@ def build_tui(base: str, token: str, **kw):
                         for cv in self.convs[:60]]
             if fn == self.c_theme:
                 return [(t, "") for t in sorted(self.available_themes)]
+            if fn == self.c_screenshot:
+                return [("help", "current default format and location"),
+                        ("default", "default <format> [location]"),
+                        ("svg", "colours, opens in a browser"), ("txt", "plain text"),
+                        ("png", "needs cairosvg")]
             if fn == self.c_login:
                 return [("password", "full access"), ("line", "chat only")]
             if fn == self.c_security:
@@ -6697,6 +6707,54 @@ def build_tui(base: str, token: str, **kw):
                                                     r.get("messages", [])))
             except OSError as e:     # a missing directory, no permission: not a crash
                 raise CliError(f"could not save {path}: {e.strerror or e}")
+            self.notify(f"saved {path}")
+
+        def _shot_defaults(self) -> tuple[str, str]:
+            st = self._load_settings()
+            fmt = st.get("screenshot_format")
+            loc = st.get("screenshot_dir")
+            return (fmt if fmt in SHOT_FORMATS else "svg",
+                    loc if isinstance(loc, str) and loc else str(default_shot_dir()))
+
+        def screen_text(self) -> str:
+            from rich.console import Console
+            w, h = self.size
+            console = Console(width=w, height=h, file=io.StringIO(), force_terminal=True,
+                              color_system="truecolor", record=True, legacy_windows=False)
+            console.print(self.screen._compositor.render_update(
+                full=True, screen_stack=self._background_screens))
+            return console.export_text()
+
+        async def c_screenshot(self, arg: str) -> None:
+            try:
+                toks = shlex.split(arg)
+            except ValueError:
+                toks = arg.split()
+            fmt0, loc0 = self._shot_defaults()
+            if toks[:1] == ["help"]:
+                await self.note(f"/screenshot [name] [format] [location] — default format "
+                                f"{fmt0}, location {loc0}. Formats: svg, txt, png (png "
+                                "needs cairosvg). /screenshot default <format> [location] "
+                                "changes them.")
+                return
+            if toks[:1] == ["default"]:
+                if len(toks) < 2 or toks[1].lower() not in SHOT_FORMATS or len(toks) > 3:
+                    raise CliError("usage: /screenshot default <svg|txt|png> [location]")
+                fmt = toks[1].lower()
+                loc = str(safe_output_dir(toks[2])) if len(toks) == 3 else loc0
+                self._save_settings(screenshot_format=fmt, screenshot_dir=loc)
+                self.notify(f"screenshots: {fmt} in {loc}")
+                return
+            name, fmt, loc = parse_shot_args(toks)
+            fmt = fmt or fmt0
+            directory = safe_output_dir(loc or loc0)
+            if fmt == "txt":
+                data = self.screen_text().encode("utf-8")
+            else:
+                svg = self.export_screenshot(title="Jav3")
+                data = svg_to_png(svg) if fmt == "png" else svg.encode("utf-8")
+            path = write_new(directory, safe_stem(name, time.strftime("jav3-%Y%m%d-%H%M%S")),
+                             fmt, data)
             self.notify(f"saved {path}")
 
         async def c_details(self, arg: str) -> None:
@@ -7043,6 +7101,107 @@ def transcript_markdown(title: str, messages: list[dict]) -> str:
             parts.append(f"- {icon} {title_}" + ("" if a.get("ok") else " (failed)"))
         parts.append((m.get("content") or "") + "\n")
     return "\n".join(parts)
+
+
+# --- saving files the operator asked for (/screenshot, /export) --------------------------
+#
+# Every file these write lands in a directory checked here, under a name made
+# here: path components in a typed name are dropped, an existing file is never
+# overwritten (-2, -3 … instead), and the file is created O_EXCL | O_NOFOLLOW so
+# a planted symlink cannot redirect the write.
+
+SHOT_FORMATS = ("svg", "txt", "png")
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def default_shot_dir() -> Path:
+    home = Path.home()
+    return home / "Pictures" / "jav3" if (home / "Pictures").is_dir() else home / "Downloads"
+
+
+def safe_output_dir(loc: str, cwd: Path | None = None) -> Path:
+    """The directory `loc` names, ready to write into. Inside the home directory
+    it is created when missing; outside it, only an absolute path to an existing,
+    writable directory is accepted."""
+    raw = os.path.expanduser((loc or "").strip())
+    if not raw or "\x00" in raw:
+        raise CliError("no location given")
+    p = Path(raw)
+    given_absolute = p.is_absolute()
+    if not given_absolute:
+        p = (cwd or Path.cwd()) / p
+    p = p.resolve()
+    home = Path.home().resolve()
+    if p != home and home not in p.parents:
+        if not given_absolute:
+            raise CliError(f"{loc} is outside your home directory — give an absolute "
+                           "path to a directory you can write to")
+        if not p.is_dir() or not os.access(p, os.W_OK):
+            raise CliError(f"{p} is not a directory you can write to")
+        return p
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise CliError(f"could not create {p}: {e.strerror or e}")
+    if not p.is_dir() or not os.access(p, os.W_OK):
+        raise CliError(f"{p} is not a directory you can write to")
+    return p
+
+
+def safe_stem(name: str | None, default: str) -> str:
+    """A file name stem from what was typed: its last path component only,
+    anything but letters, digits, . _ - folded to -, no leading dot."""
+    stem = _UNSAFE_NAME.sub("-", Path(name or "").name).strip(".-")[:80]
+    return stem or default
+
+
+def write_new(directory: Path, stem: str, ext: str, data: bytes) -> Path:
+    """Create directory/stem.ext, or stem-2.ext, stem-3.ext … if it exists."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for i in range(1, 1000):
+        path = directory / f"{stem}{'' if i == 1 else f'-{i}'}.{ext}"
+        try:
+            fd = os.open(path, flags, 0o644)
+        except FileExistsError:
+            continue
+        except OSError as e:
+            raise CliError(f"could not save {path}: {e.strerror or e}")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        return path
+    raise CliError(f"too many files named {stem} in {directory}")
+
+
+def svg_to_png(svg: str) -> bytes:
+    try:
+        import cairosvg
+    except ImportError:
+        raise CliError("png needs cairosvg (pip install cairosvg into jav3's Python) — "
+                       "svg and txt work without it")
+    return cairosvg.svg2png(bytestring=svg.encode("utf-8"))
+
+
+def parse_shot_args(toks: list[str]) -> tuple[str | None, str | None, str | None]:
+    """/screenshot [name] [format] [location], any order: a format word is the
+    format, a token that looks like a path (/ ~ .) the location, the rest the
+    name; a name ending in .svg/.txt/.png sets the format when none is given."""
+    name = fmt = loc = None
+    for t in toks:
+        if t.lower() in SHOT_FORMATS and fmt is None:
+            fmt = t.lower()
+        elif loc is None and (t.startswith(("~", ".", "/")) or os.sep in t):
+            loc = t
+        elif name is None:
+            name = t
+        else:
+            raise CliError(f"unexpected {t!r} — /screenshot [name] [format] [location]")
+    if name and fmt is None:
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if ext in SHOT_FORMATS:
+            fmt = ext
+    if name and fmt and name.lower().endswith("." + fmt):
+        name = name[:-len(fmt) - 1]
+    return name, fmt, loc
 
 
 def copy_to_clipboard(text: str, osc52=None) -> str:
