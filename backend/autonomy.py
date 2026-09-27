@@ -53,7 +53,7 @@ _GATED = {
     # is still more than file edits — gated tier
     "run_code",
 }
-_COMMIT = {"git_commit_request", "git_remote_request"}
+_COMMIT = {"git_commit_request", "git_remote_request", "git_push_request"}
 
 # Tools a subagent or team worker is NEVER handed, regardless of the autonomy
 # dial above: they never launch whole teams and never mint persistent

@@ -85,6 +85,7 @@ export function humanizeTool(name, args = {}) {
     case 'git_status': return ['branch', 'git status']
     case 'git_diff': return ['branch', 'git diff']
     case 'git_commit_request': return ['branch', `requesting commit: ${trunc(args.message, 50)}`]
+    case 'git_push_request': return ['branch', `requesting review: ${trunc(args.title, 50)}`]
     case 'dashboard': return ['chart', 'building dashboard']
     default: return ['tool', name]
   }

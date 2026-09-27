@@ -41,6 +41,7 @@ fi
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
 FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT=""
+DO_GITEA=1 GITEA_DRY=0
 # $SUDO_USER is only meaningful when we are actually running under sudo. Taking
 # it unconditionally means a stale value inherited from the environment wins
 # over who we really are — which reported the wrong username inside a sandbox.
@@ -69,6 +70,9 @@ Options
                        ~/.config/jarvis/env so the service uses it too
   --no-build           skip the frontend build
   --no-image           skip building the guest golden image (slow, ~10 min)
+  --no-gitea           skip the Gitea step (the host git server agents file pull
+                       requests to; add it later: python -m backend.cli gitea-setup)
+  --gitea-dry-run      print what the Gitea step would do, change nothing there
   --force              overwrite existing local state during --from
   --yes                do not prompt
   -h, --help           this text
@@ -86,6 +90,8 @@ while [ $# -gt 0 ]; do
     --no-build)   BUILD_FRONTEND=0 ;;
     --no-image)   BUILD_IMAGE=0 ;;
     --force)      FORCE=1 ;;
+    --no-gitea)   DO_GITEA=0 ;;
+    --gitea-dry-run) GITEA_DRY=1 ;;
     --yes|-y)     ASSUME_YES=1 ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
@@ -647,6 +653,26 @@ user_phase() {
   fi
 
   first_run_setup
+  gitea_step
+}
+
+# Gitea: the host git server agents file pull requests to (docs/gitea.md).
+# Optional, on by default. The pinned static binary is downloaded and its
+# sha256 checked by backend/gitea_setup.py — NEVER a package manager (the
+# pacman partial upgrade that broke node). Idempotent: a re-run keeps the
+# config, the accounts and still-valid tokens.
+gitea_step() {
+  if [ "$DO_GITEA" != 1 ]; then ok "Gitea skipped (--no-gitea)"; return 0; fi
+  step "gitea (host git server for agent pull requests)"
+  local args=()
+  [ "$GITEA_DRY" = 1 ] && args+=(--dry-run)
+  if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ] || [ ! -t 1 ]; then args+=(--yes); fi
+  if ! have systemctl; then
+    warn "no systemctl — skipping Gitea (needs a systemd --user service)"
+    return 0
+  fi
+  .venv/bin/python -m backend.cli gitea-setup ${args[@]+"${args[@]}"} \
+    || warn "Gitea setup did not finish — re-run: $REPO_DIR/.venv/bin/python -m backend.cli gitea-setup"
 }
 
 # The first login + model provider. Interactive on a terminal; otherwise (or

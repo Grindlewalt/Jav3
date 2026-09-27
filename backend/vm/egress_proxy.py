@@ -267,6 +267,12 @@ async def _authorize_target(host: str, port: str | None = None,
     """(verdict, reason, pinned ip). The pinned ip is set only for an allowed
     LAN-access target: the proxy must connect to exactly that address."""
     att = att or attribute()
+    # Always refused for every box, before any policy: the host's Gitea. Only
+    # the host pushes (as the bot, to agent/* branches); a box never talks to it.
+    from .. import gitea
+    why = gitea.egress_refusal(host, port)
+    if why:
+        return "deny", why, None
     db = await get_db()
     try:
         slug = att["project"] or egress.GENERAL

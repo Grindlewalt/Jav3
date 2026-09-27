@@ -17,6 +17,7 @@ import BrowserPanel from '../BrowserPanel.jsx'
 import DeskPanel from '../DeskPanel.jsx'
 import ProvidersPanel from '../ProvidersPanel.jsx'
 import PermissionRulesPanel from '../PermissionRulesPanel.jsx'
+import GiteaPanel from '../GiteaPanel.jsx'
 
 const mmss = (secs) => {
   const s = Math.max(0, Math.round(secs))
@@ -31,6 +32,7 @@ export default function Settings() {
       <DeskPanel />
       <BrowserPanel />
       <PermissionRulesPanel />
+      <GiteaPanel />
       <BackupPanel />
       <MusicPanel />
       <SessionPanel />

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import (agents_api, agents_run, artifacts_api, auth, backup, browser_api, chat, desk_api,
                devices_api, egress_api, events_api,
-               git_api, git_serve_api, gui, guest_shell, harness_api, lan, logs_api,
+               git_api, git_serve_api, gitea_api, gui, guest_shell, harness_api, lan, logs_api,
                media_api, memory_api,
                notifications_api, permissions_api, plan_api, projects, providers, reviewer,
                reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
@@ -135,6 +135,7 @@ app.include_router(runs_api.router)
 app.include_router(runs_api.jobs_router)
 app.include_router(git_api.router)
 app.include_router(git_serve_api.router)
+app.include_router(gitea_api.router)
 app.include_router(notifications_api.router)
 app.include_router(harness_api.router)
 app.include_router(permissions_api.router)

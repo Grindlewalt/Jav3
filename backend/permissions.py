@@ -40,7 +40,7 @@ MODES = ("yolo", "auto", "ask")
 DEFAULT_MODE = "yolo"
 
 IN_GUEST_GATED = frozenset({"write_file", "edit_file", "run_code"})
-GATED_TOOLS = IN_GUEST_GATED | {"git_commit_request", "git_remote_request",
+GATED_TOOLS = IN_GUEST_GATED | {"git_commit_request", "git_remote_request", "git_push_request",
                                 "service_request", "package_request"}
 GATE_OP = "permission_gate"          # the guest's "may this run?" broker call
 

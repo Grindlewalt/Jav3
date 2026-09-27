@@ -41,7 +41,9 @@ through one chokepoint (`apply_write`): path-guarded, secret-value writes hard
 refused, deterministic diff-gate scan as an advisory tripwire (flagged writes
 land but raise a security event). Git is the review/undo surface — the
 operator approves your `git_commit_request` before anything is committed or
-pushed.
+pushed. When the host runs Gitea, `git_push_request` puts your changes up as a
+pull request from a host-named `agent/*` branch; the operator merges or closes
+it. Never run `git push`/`git remote` yourself — the box has no credentials.
 
 ## secrets
 
