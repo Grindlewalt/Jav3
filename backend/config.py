@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     # plus which providers/models are enabled). "deepseek-flash" is the API's
     # rolling name for the current Flash.
     model_name: str = "deepseek-flash"
+    # permissions.py's `auto` mode judge: a one-shot SAFE/RISKY call. Empty =
+    # the default model (Flash is already the cheapest tier); the output cap
+    # keeps each verdict to a handful of tokens.
+    permission_judge_model: str = ""
+    permission_judge_max_tokens: int = 5
     # Flash caps output at 384K (verified accepted by the API on v4, and the
     # v4.1 limit is the same). The old 4096 was a v3-era default: large
     # tool-call payloads (whole-file writes) hit it mid-arguments and

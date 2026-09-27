@@ -8,6 +8,7 @@ import { isPhone, useIsPhone } from '../breakpoints.js'
 import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
 import { useAsk } from '../ask.jsx'
 import ModelPicker from '../ModelPicker.jsx'
+import { AskPanel, PermissionModeSelect, useOperatorAsks, usePermissionMode } from '../AskUser.jsx'
 import ChatGroups from '../ChatGroups.jsx'
 import { useSlash } from '../slash/useSlash.jsx'
 
@@ -198,6 +199,8 @@ export default function Chat({
   // blocking dialogs, so confirm() returns false without ever showing and
   // every send silently bounced back into the bar.
   const [peakAsk, setPeakAsk] = useState(null)
+  const asks = useOperatorAsks(conversationId)   // ask_user / permission asks
+  const [permMode, setPermMode] = usePermissionMode(conversationId)
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
   const [sideOpen, setSideOpen] = useState(() => {
@@ -336,6 +339,7 @@ export default function Chat({
   // swaps in the reply with the activity collapsed above it.
   function handleTurnEvent(ev) {
     slash.onEvent(ev)
+    asks.onEvent(ev)
     if (ev.type === 'start') {
       liveId.current = ev.conversation_id
       // temporary: never adopt the id, or the chat becomes a saved one
@@ -496,7 +500,8 @@ export default function Chat({
           ephemeral: temporary,
           // only meaningful when the conversation is being created by this turn
           ...(conversationId ? {} : { project: pendingProject || null,
-                                      project_mode: pendingMode, ...slash.newChatFields }) },
+                                      project_mode: pendingMode, ...slash.newChatFields,
+                                      permission_mode: permMode }) },
         handleTurnEvent,
       )
       api('/api/conversations').then((r) => setConversations(r.conversations))
@@ -619,6 +624,7 @@ export default function Chat({
                   chat can't retroactively not exist, and a disabled switch
                   read as broken while crowding the phone toolbar. */}
               {!conversationId && tempSwitch}
+              <PermissionModeSelect cid={conversationId} value={permMode} onChange={setPermMode} />
               {toolbarExtra}
             </div>
           </div>
@@ -649,6 +655,7 @@ export default function Chat({
             </div>
           )}
         </div>
+        <AskPanel asks={asks} cid={liveId.current ?? conversationId} />
         <form className="composer" onSubmit={(e) => { e.preventDefault(); slash.submit() || send() }}>
           <div className="composer-glow" ref={glowRef} />
           {peakAsk && (

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
 import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
 import { useAsk } from './ask.jsx'
+import { AskPanel, PermissionModeSelect, useOperatorAsks, usePermissionMode } from './AskUser.jsx'
 import Button from './components/Button.jsx'
 import Menu, { MenuItem, MenuSep } from './components/Menu.jsx'
 import Tag from './components/Tag.jsx'
@@ -35,6 +36,8 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
   const bottomRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
   const ask = useAsk()
+  const asks = useOperatorAsks(cid)          // ask_user / permission asks
+  const [permMode, setPermMode] = usePermissionMode(cid)
 
   useEffect(() => () => tailAbort.current?.abort(), [])
   const reported = useRef(false)
@@ -50,6 +53,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
 
   // shared by the live POST stream and a resumed background-turn tail
   function handleTurnEvent(ev) {
+    asks.onEvent(ev)
     if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
       setMessages((m) => {
         const copy = [...m]
@@ -171,7 +175,8 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
         // ignores it on an existing one, and 404s an unknown slug)
         { message: text, conversation_id: cid, confirm_peak: confirmPeak,
           project: wasNew && projectSlug ? projectSlug : undefined,
-          agent: wasNew && newAs ? newAs : undefined },
+          agent: wasNew && newAs ? newAs : undefined,
+          permission_mode: wasNew ? permMode : undefined },
         (ev) => {
           if (ev.type === 'start') {
             setCid(ev.conversation_id)
@@ -215,6 +220,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
           {whoName}</Tag>
         <span className="grow ellipsis dim">
           {current ? (current.summary || `#${current.id}`) : 'new chat'}</span>
+        <PermissionModeSelect cid={cid} value={permMode} onChange={setPermMode} />
         <Menu floating open={newMenu} onClose={() => setNewMenu(false)} width={260} className="cb-new-menu"
               label="start a new chat as"
               trigger={(
@@ -259,6 +265,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
         ))}
         <div ref={bottomRef} />
       </div>
+      <AskPanel asks={asks} cid={cid} compact />
       {peakAsk && (
         <div className="peak-ask compact" role="alertdialog"
              aria-label="peak pricing confirmation">

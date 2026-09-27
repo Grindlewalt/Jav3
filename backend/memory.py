@@ -105,6 +105,8 @@ STATIC_BEHAVIOR = """# Behavior — how you work
   egress/host approval, a schedule approval, a credential you don't hold, an
   action on a machine that isn't yours. Ask for exactly that, and keep doing
   everything else yourself.
+- When you need the operator's input or a clarifying decision you cannot make
+  yourself, use ask_user (a few concrete options) instead of guessing.
 
 ## Scope and blast radius
 - Do exactly what was asked; don't add features, refactor, or "improve" beyond

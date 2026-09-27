@@ -29,6 +29,9 @@ _READ = {
     # in .plan.json; withholding it would leave the runner unable to check the
     # item off, so it is offered at every level (backend/plan.py)
     "plan_report",
+    # a blocking question to the operator (backend/operator_ask.py): it changes
+    # nothing, and a restricted project needs clarifying most of all
+    "ask_user",
 }
 _STAGE = {
     "write_file", "edit_file", "dashboard", "crawl_codebase", "journal_update",

@@ -16,6 +16,7 @@ import BackupPanel from '../BackupPanel.jsx'
 import BrowserPanel from '../BrowserPanel.jsx'
 import DeskPanel from '../DeskPanel.jsx'
 import ProvidersPanel from '../ProvidersPanel.jsx'
+import PermissionRulesPanel from '../PermissionRulesPanel.jsx'
 
 const mmss = (secs) => {
   const s = Math.max(0, Math.round(secs))
@@ -29,6 +30,7 @@ export default function Settings() {
       <DevicesPanel />
       <DeskPanel />
       <BrowserPanel />
+      <PermissionRulesPanel />
       <BackupPanel />
       <MusicPanel />
       <SessionPanel />

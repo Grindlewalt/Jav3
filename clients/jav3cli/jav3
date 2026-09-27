@@ -1556,6 +1556,11 @@ def build_tui(base: str, token: str, **kw):
                 event.prevent_default()
                 app.popup_key(key)
                 return
+            if key == "shift+tab":
+                event.stop()
+                event.prevent_default()
+                app.cycle_permission()
+                return
             if key == "left" and not self.text:
                 event.stop()
                 event.prevent_default()
@@ -1828,6 +1833,190 @@ def build_tui(base: str, token: str, **kw):
         def action_answer(self, what: str) -> None:
             if time.monotonic() - self.opened >= self.GRACE:
                 self.dismiss(what)
+
+    class AskUser(ModalScreen):
+        """ask_user / a permission ask (backend/operator_ask.py): the agent's
+        questions, one at a time. ↑ ↓ move, 1-5 pick, space toggles (multi),
+        typing goes to the free-text last option (and picks it), enter
+        confirms and moves on, esc skips the whole ask. Dismisses with a list
+        of {selected, text} answers, None (skipped) or "gone" (answered or
+        closed elsewhere: ask_done)."""
+
+        BINDINGS = [Binding("escape", "skip", show=False)]
+        GRACE = 0.6      # opens mid-turn while the operator may be typing
+        AUTO_FOCUS = None    # open on the options, not the free-text line
+        DEFAULT_CSS = """
+        AskUser { align: center middle; background: $background 60%; }
+        #ask-opts { margin-top: 1; }
+        #ask-text { margin-top: 1; }
+        #ask-foot { margin-top: 1; }
+        """
+
+        def __init__(self, ev: dict) -> None:
+            super().__init__()
+            self.ev = ev
+            self.qs = [q for q in ev.get("questions") or [] if isinstance(q, dict)]
+            self.free_label = ev.get("free_text_label") or "Type something…"
+            self.i, self.answers = 0, []
+            self.opened = time.monotonic()
+            self._reset()
+
+        def _reset(self) -> None:
+            self.cur, self.sel = 0, set()
+
+        @property
+        def q(self) -> dict:
+            return self.qs[self.i]
+
+        @property
+        def opts(self) -> list:
+            return [str(o) for o in self.q.get("options") or []]
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="dialog"):
+                yield Static("", id="ask-head")
+                yield Static("", id="ask-opts")
+                yield Input(placeholder=self.free_label, id="ask-text")
+                yield Static("", id="ask-foot")
+
+        def on_mount(self) -> None:
+            if not self.qs:
+                self.dismiss(None)
+                return
+            self._draw()
+            self.set_focus(None)
+            self.call_after_refresh(self.set_focus, None)
+
+        def _text(self) -> str:
+            return self.query_one("#ask-text", Input).value.strip()
+
+        @staticmethod
+        def markup(ev: dict, qs: list, i: int, cur: int, sel: set, typed: str,
+                   free_label: str) -> tuple[str, str]:
+            """(head, options) markup for question i; pure, for tests."""
+            q = qs[i]
+            opts = [str(o) for o in q.get("options") or []]
+            multi = bool(q.get("multi_select"))
+            if ev.get("kind") == "permission":
+                who = "[$warning b]Permission[/]"
+                if ev.get("reason"):
+                    who += f"  [$text-muted]{_esc(str(ev['reason']))}[/]"
+            else:
+                who = "[$accent b]The agent asks[/]"
+            if len(qs) > 1:
+                who += f"  [$text-muted]{i + 1}/{len(qs)}[/]"
+            head = f"{who}\n[b]{_esc(str(q.get('question') or ''))}[/]"
+            if ev.get("detail"):
+                head += f"\n[$text-muted]{_esc(_short(str(ev['detail']), 600))}[/]"
+            rows = []
+            for j, label in enumerate(opts + [free_label]):
+                on = (j in sel) if j < len(opts) else bool(typed)
+                box = (("[x]" if on else "[ ]") if multi else ("(•)" if on else "( )"))
+                num = f"{j + 1}." if j < len(opts) else "  "
+                text = _esc(label) if j < len(opts) else f"[i]{_esc(label)}[/]"
+                line = f"{num} {box} {text}"
+                rows.append(f"[reverse]{line}[/]" if j == cur else line)
+            return head, "\n".join(rows)
+
+        def _draw(self) -> None:
+            head, rows = self.markup(self.ev, self.qs, self.i, self.cur, self.sel,
+                                     self._text(), self.free_label)
+            self.query_one("#ask-head", Static).update(head)
+            self.query_one("#ask-opts", Static).update(rows)
+            multi = bool(self.q.get("multi_select"))
+            self.query_one("#ask-foot", Static).update(
+                "[$text-muted]↑↓ move · 1-5 pick" + (" · space toggles" if multi else "")
+                + " · type to answer in your own words · enter confirms · esc skips[/]")
+
+        def _free_row(self) -> int:
+            return len(self.opts)
+
+        def _pick(self, j: int) -> None:
+            if j >= len(self.opts):
+                return
+            if self.q.get("multi_select"):
+                self.sel ^= {j}
+            else:
+                self.sel = {j}
+                self.query_one("#ask-text", Input).value = ""
+            self.cur = j
+
+        def _move(self, d: int) -> None:
+            self.cur = max(0, min(self._free_row(), self.cur + d))
+            inp = self.query_one("#ask-text", Input)
+            if self.cur == self._free_row():
+                inp.focus()
+            elif inp.has_focus:
+                self.set_focus(None)
+
+        def _confirm(self) -> None:
+            if time.monotonic() - self.opened < self.GRACE:
+                return
+            typed = self._text()
+            if not self.sel and not typed:
+                if self.cur < len(self.opts):
+                    self.sel = {self.cur}
+                else:
+                    self.query_one("#ask-text", Input).focus()
+                    return
+            self.answers.append({"selected": [self.opts[j] for j in sorted(self.sel)],
+                                 "text": typed or None})
+            if self.i + 1 >= len(self.qs):
+                self.dismiss(self.answers)
+                return
+            self.i += 1
+            self._reset()
+            inp = self.query_one("#ask-text", Input)
+            inp.value = ""
+            self.set_focus(None)
+            self._draw()
+
+        def on_key(self, event) -> None:
+            key = event.key
+            typing = self.query_one("#ask-text", Input).has_focus
+            if key in ("up", "down"):
+                event.stop()
+                self._move(-1 if key == "up" else 1)
+            elif key == "enter" and not typing:
+                event.stop()
+                self._confirm()
+            elif typing:
+                return
+            elif key.isdigit() and 1 <= int(key) <= len(self.opts):
+                event.stop()
+                self._pick(int(key) - 1)
+            elif key == "space":
+                event.stop()
+                if self.cur < len(self.opts):
+                    self._pick(self.cur)
+                else:
+                    self.query_one("#ask-text", Input).focus()
+            elif event.is_printable and event.character:
+                # typing jumps to the free-text option and picks it
+                event.stop()
+                inp = self.query_one("#ask-text", Input)
+                self.cur = self._free_row()
+                inp.focus()
+                inp.insert_text_at_cursor(event.character)
+            else:
+                return
+            self._draw()
+
+        @on(Input.Changed, "#ask-text")
+        def _typed(self, ev) -> None:
+            if ev.value.strip() and not self.q.get("multi_select"):
+                self.sel = set()
+            if ev.value.strip():
+                self.cur = self._free_row()
+            self._draw()
+
+        @on(Input.Submitted, "#ask-text")
+        def _submitted(self, ev) -> None:
+            ev.stop()
+            self._confirm()
+
+        def action_skip(self) -> None:
+            self.dismiss(None)
 
     class Ask(ModalScreen):
         """One line of input; `secret` hides it (the login line is a credential)."""
@@ -3041,13 +3230,15 @@ def build_tui(base: str, token: str, **kw):
         next, ← previous, 1-6 jump, ↑↓ select (detail below), esc back. Plain
         keys only (Terminal.app: no shift+arrows)."""
 
-        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles")
+        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules")
         LABELS = {"queue": "Queue", "network": "Network", "logs": "Logs",
-                  "secrets": "Secrets", "persistent": "Persistent", "profiles": "Profiles"}
+                  "secrets": "Secrets", "persistent": "Persistent", "profiles": "Profiles",
+                  "rules": "Rules"}
         EMPTY = {"queue": "nothing waits on you", "network": "no egress traffic yet",
                  "logs": "no security events", "secrets": "no secrets saved — a adds one",
                  "persistent": "no persistent processes or services reported",
-                 "profiles": "no profiles — a creates one"}
+                 "profiles": "no profiles — a creates one",
+                 "rules": "no always-allow rules (permission asks add them)"}
         COUNTED = ("queue", "secrets")    # tabs whose count shows in the header
         FOOT = {"queue": "[$primary]y[/] approve  [$primary]n[/] deny  "
                          "[$primary]a[/] acknowledge",
@@ -3060,7 +3251,8 @@ def build_tui(base: str, token: str, **kw):
                 "persistent": "[$primary]enter[/] open  [$primary]s[/] stop / start service  "
                               "[$primary]l[/] service logs  [$primary]d[/] revoke service",
                 "profiles": "[$primary]a[/] new  [$primary]e[/] edit  [$primary]p[/] assign "
-                            "to project  [$primary]d[/] delete"}
+                            "to project  [$primary]d[/] delete",
+                "rules": "[$primary]d[/] revoke the always-allow rule"}
         POLL_SECONDS = 4.0
         LIMIT = 200
         GENERAL = "__general__"          # egress.py's shared baseline policy row
@@ -3091,6 +3283,7 @@ def build_tui(base: str, token: str, **kw):
             Binding("4", "jump(3)", show=False),
             Binding("5", "jump(4)", show=False),
             Binding("6", "jump(5)", show=False),
+            Binding("7", "jump(6)", show=False),
             Binding("up,k", "move(-1)", show=False),
             Binding("down,j", "move(1)", show=False),
             Binding("pageup", "page(-1)", show=False),
@@ -3326,6 +3519,31 @@ def build_tui(base: str, token: str, **kw):
             out.sort(key=lambda x: (x["ts"], x["raw"].get("id") or 0), reverse=True)
             return out
 
+        async def _load_rules(self):
+            # permissions.py's "Yes, always allow this and similar" rules
+            rules = await self._get("rules", "rules", "/api/permissions/rules", "rules",
+                                    quiet404=True)
+            if rules is None:
+                return None
+            return [{"type": "rule", "key": f"r{r.get('id')}", "ts": r.get("created_at"),
+                     "raw": r} for r in rules]
+
+        def _detail_rule(self, e) -> str:
+            r = e["raw"]
+            return (f"[b]{_esc(str(r.get('tool')))}[/] calls starting "
+                    f"[b]{_esc(str(r.get('prefix')))}[/] run without asking in "
+                    f"{_esc(_slug_says(r.get('project_slug') or None))}.\n"
+                    "Added from a permission ask (auto / ask mode). "
+                    "[$primary]d[/] revokes it.")
+
+        async def _delete_rule(self) -> None:
+            e = self.selected()
+            if e is None or e["type"] != "rule":
+                return
+            r = e["raw"]
+            await self._send("DELETE", f"/api/permissions/rules/{r.get('id')}",
+                             f"revoked {r.get('tool')}: {r.get('prefix')}")
+
         async def _load_secrets(self):
             # GET /api/secrets is names, last-4 and bound hosts; it never
             # carries a value. Keep the name and hosts only.
@@ -3422,6 +3640,10 @@ def build_tui(base: str, token: str, **kw):
         def row_markup(e: dict, all_projects: bool = True) -> str:
             r, ts = e["raw"], (e.get("ts") or "")[5:16]
             t = e["type"]
+            if t == "rule":
+                return (f"[$accent b]RULE[/] [$text-muted]{ts}[/] "
+                        f"[b]{_esc(str(r.get('tool')))}[/] {_esc(str(r.get('prefix')))} "
+                        f"[$text-muted]in {_esc(_slug_says(r.get('project_slug') or None))}[/]")
             if t == "egress":
                 flag = " [$error b]⚑ flagged[/]" if r.get("triage_verdict") == "flag" else ""
                 return (f"[$warning b]HOST[/] [$text-muted]{ts}[/] "
@@ -3791,6 +4013,9 @@ def build_tui(base: str, token: str, **kw):
             elif self.tab == "profiles":
                 bits.append("[$text-muted]a profile is a project's security baseline: "
                             "network, secrets by name, box runtime, service placement[/]")
+            elif self.tab == "rules":
+                bits.append("[$text-muted]\"always allow\" answers to permission asks: one "
+                            "tool and one command or path prefix per project[/]")
             elif self.tab != "secrets":
                 bits.append(self.vms_sub())
             else:
@@ -4030,6 +4255,8 @@ def build_tui(base: str, token: str, **kw):
                 self._act(self._revoke_service())
             elif self.tab == "profiles":
                 self._act(self._delete_profile())
+            elif self.tab == "rules":
+                self._act(self._delete_rule())
 
         # -- actions ------------------------------------------------------------------
 
@@ -5481,6 +5708,7 @@ def build_tui(base: str, token: str, **kw):
                 bits.append(f"[$text-muted]⌂ {_esc(proj)}[/]")
             if self.ephemeral:
                 bits.append("[$warning]temporary[/]")
+            bits.append(self._perm_label())
             here = self._here()
             if here:
                 bits.append(f"[$success]local {_esc(here.get('cwd') or os.getcwd())}[/]")
@@ -5644,6 +5872,8 @@ def build_tui(base: str, token: str, **kw):
                     body["mode"] = "orchestrate"
                 if self.local:
                     body["local"] = local_spec()
+            if self.cid is None and self.perm_mode != "yolo":
+                body["permission_mode"] = self.perm_mode
             if self.model:
                 body["model"] = self.model
             return body
@@ -5867,6 +6097,10 @@ def build_tui(base: str, token: str, **kw):
                     await self.mount_log(UserMsg(QueuedMsg._markup(text, "↳ delivered mid-turn")))
             elif t == "local_tool":
                 self.run_worker(self._local_tool(ev, turn.cid or self.cid), group="local")
+            elif t == "ask_user":
+                self.run_worker(self._ask_user(ev, turn.cid or self.cid), group="ask")
+            elif t == "ask_done":
+                self._ask_gone(ev.get("id"))
             elif t == "final":
                 turn.done = True
                 await self._finish(ev.get("content") or "")
@@ -5912,6 +6146,80 @@ def build_tui(base: str, token: str, **kw):
                                json={"id": str(ev.get("id", "")), "ok": ok, "result": result})
             except CliError as e:
                 await self.note(f"local result not delivered: {e}", "warn")
+
+        # permission modes (backend/permissions.py): shift+tab cycles, stored per
+        # conversation; a chat not created yet sends it with its first message
+        PERM_MODES = ("yolo", "auto", "ask")
+        PERM_HINT = {"yolo": "everything runs in the VM without asking",
+                     "auto": "a cheap judge reviews each write/run; risky ones ask you",
+                     "ask": "every write/run asks you first"}
+        perm_mode = "yolo"
+
+        def _perm_label(self) -> str:
+            col = {"yolo": "$text-muted", "auto": "$accent", "ask": "$warning"}[self.perm_mode]
+            return f"[{col}]⏵ {self.perm_mode}[/]"
+
+        def cycle_permission(self) -> None:
+            modes = self.PERM_MODES
+            self.perm_mode = modes[(modes.index(self.perm_mode) + 1) % len(modes)]
+            self.refresh_chrome()
+            self.run_worker(self._save_perm_mode(self.cid, self.perm_mode), group="perm")
+
+        async def _save_perm_mode(self, cid, mode: str) -> None:
+            if cid is not None and not self.ephemeral:
+                try:
+                    await self.api("PUT", f"/api/chat/{cid}/permission_mode",
+                                   json={"mode": mode})
+                except CliError as e:
+                    await self.note(f"permission mode not saved: {e}", "error")
+                    return
+            await self.note(f"permissions: {mode} — {self.PERM_HINT[mode]}")
+
+        async def _load_perm_mode(self, cid: int) -> None:
+            try:
+                r = await self.api("GET", f"/api/chat/{cid}/permission_mode")
+            except CliError:
+                return                  # an older server: the default holds
+            if self.cid == cid and r.get("mode") in self.PERM_MODES:
+                self.perm_mode = r["mode"]
+                self.refresh_chrome()
+
+        async def _ask_user(self, ev: dict, cid: int | None) -> None:
+            """ask_user / a permission ask: show the dialog once per ask id and
+            POST the answer to the conversation this view is on (the asker or
+            an ancestor that showed it)."""
+            aid = ev.get("id")
+            asks = self.__dict__.setdefault("_asks", {})
+            if cid is None or not aid or aid in asks:
+                return
+            asks[aid] = None
+            try:
+                if ev.get("conversation_id") not in (None, cid):
+                    await self.note(f"? agent #{ev['conversation_id']} is asking you")
+                scr = AskUser(ev)
+                asks[aid] = scr
+                self.bell()
+                res = await self.push_screen_wait(scr)
+                if res == "gone":
+                    return
+                body = ({"id": aid, "skipped": True} if res is None
+                        else {"id": aid, "answers": res})
+                try:
+                    await self.api("POST", f"/api/chat/{cid}/answer", json=body)
+                except CliError as e:
+                    await self.note(f"answer not delivered: {e}", "error")
+            finally:
+                asks[aid] = False
+
+        def _ask_gone(self, aid) -> None:
+            """ask_done: answered elsewhere (the web, another view), timed out
+            or stopped; close our copy if it is still open."""
+            scr = self.__dict__.get("_asks", {}).get(aid)
+            if scr:
+                try:
+                    scr.dismiss("gone")
+                except Exception:  # noqa: BLE001 — already closing
+                    pass
 
         async def local_approve(self, kind: str, summary: str):
             """yes / always / no (None: closed with ctrl+c) from the operator."""
@@ -6617,6 +6925,7 @@ def build_tui(base: str, token: str, **kw):
             self.project = meta.get("project_slug") or None
             self.project_mode = "pin" if self.project else None
             self.todos, self.last_reply = [], ""
+            self.run_worker(self._load_perm_mode(cid), group="perm")
             await self.clear_log()
             msgs = [m for m in r.get("messages", []) if m.get("role") in ("user", "assistant")]
             if len(msgs) > 60:

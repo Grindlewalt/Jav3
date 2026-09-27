@@ -3967,3 +3967,23 @@ a:has(> .nav-dot) { position: relative; }
 .work-wh-sub { color: var(--dim); font-weight: 400; }
 .work-stop { font-size: 11px; }
 .work-stop-note { white-space: nowrap; align-self: center; }
+/* ask_user / permission asks (AskUser.jsx) */
+.ask-card { margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--accent, #7aa2f7);
+  border-radius: 10px; background: var(--panel); outline: none; }
+.ask-card.perm { border-color: var(--amber); }
+.ask-card:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #7aa2f7) 35%, transparent); }
+.ask-card.compact { font-size: 12.5px; padding: 8px 10px; }
+.ask-head { font-size: 12.5px; margin-bottom: 4px; }
+.ask-q { font-weight: 600; margin-bottom: 6px; }
+.ask-detail { max-height: 160px; overflow: auto; font-size: 12px; margin: 0 0 6px;
+  white-space: pre-wrap; word-break: break-word; }
+.ask-opts { list-style: none; margin: 0; padding: 0; }
+.ask-opts li { display: flex; gap: 8px; align-items: center; padding: 4px 6px;
+  border-radius: 6px; cursor: pointer; }
+.ask-opts li.cur { background: color-mix(in srgb, var(--accent, #7aa2f7) 18%, transparent); }
+.ask-opts input { min-width: 0; }
+.ask-mark { width: 1.2em; text-align: center; }
+.ask-actions { margin-top: 8px; gap: 8px; align-items: center; font-size: 12px; }
+.perm-mode { font-size: 12px; padding: 2px 6px; }
+.perm-rules { list-style: none; margin: 0; padding: 0; }
+.perm-rules li { gap: 10px; align-items: center; padding: 4px 0; border-top: 1px solid var(--border); }

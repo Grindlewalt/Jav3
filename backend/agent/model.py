@@ -199,6 +199,7 @@ class ModelClient:
         model_name: str | None = None,
         base_url: str | None = None,
         key: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[dict]:
         """Stream {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} with any DSML
@@ -230,6 +231,11 @@ class ModelClient:
             payload["max_tokens"] = settings.voice_local_max_tokens
             if settings.voice_local_presence_penalty:
                 payload["presence_penalty"] = settings.voice_local_presence_penalty
+        if max_tokens:
+            # a caller-set output cap (the permission judge wants one word)
+            key_name = ("max_completion_tokens" if "max_completion_tokens" in payload
+                        else "max_tokens")
+            payload[key_name] = max_tokens
 
         # Transient failures (connect errors, 5xx) retry with backoff — but only
         # while nothing has streamed to the caller yet (adapters.retrying).
@@ -388,6 +394,7 @@ class ModelGateway:
         model_name: str | None = None,
         base_url: str | None = None,
         op_id: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} (+ an opaque
@@ -428,7 +435,8 @@ class ModelGateway:
                 base += "/v1"          # ollama's OpenAI-compatible surface
             stream = self.transport.complete(
                 messages, tools=tools, temperature=temperature,
-                model_name=route.model, base_url=base, key=route.key)
+                model_name=route.model, base_url=base, key=route.key,
+                **({"max_tokens": max_tokens} if max_tokens else {}))
 
         final: dict | None = None
         try:

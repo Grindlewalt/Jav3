@@ -51,6 +51,17 @@ CREATE TABLE IF NOT EXISTS conversations (
     rollup TEXT,
     job_id TEXT
 );
+-- permissions.py "Yes, always allow this and similar": one exact tool plus a
+-- normalised argument prefix, per project ('' = no project). Revocable in
+-- Settings and /security.
+CREATE TABLE IF NOT EXISTS permission_rules (
+    id INTEGER PRIMARY KEY,
+    project_slug TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (project_slug, tool, prefix)
+);
 -- Sidebar folders for chats. A chat is in at most one (conversations.folder_id,
 -- added in init_db); deleting a folder unfiles its chats, never deletes them.
 -- position is the operator's order; ties fall back to id.
@@ -687,7 +698,10 @@ async def init_db() -> None:
                           # the node was asked to do. NULL = never named (the
                           # naming call failed, or the node's plan item title
                           # already says it).
-                          ("title", "TEXT")):
+                          ("title", "TEXT"),
+                          # permissions.py: yolo | auto | ask. NULL follows
+                          # the parent chain, then yolo (today's behaviour).
+                          ("permission_mode", "TEXT")):
             if col not in ccols:
                 await db.execute(f"ALTER TABLE conversations ADD COLUMN {col} {decl}")
         await db.execute(

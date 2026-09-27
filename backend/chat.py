@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, providers, runtime
+from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, providers, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink
@@ -59,6 +59,9 @@ class ChatRequest(BaseModel):
     # tools run on the client's machine — {cwd, hostname, os, shell}. Binds at
     # creation like `agent`; localexec.py has the whole story.
     local: dict | None = None
+    # permissions.py: yolo | auto | ask for this conversation (new or existing);
+    # omitted keeps what the conversation has
+    permission_mode: Literal["yolo", "auto", "ask"] | None = None
     # "orchestrate" opens this NEW conversation as an orchestrator: it breaks
     # the operator's dump into a checklist run by a team of agents in
     # `project` (required), monitors and messages them, and reports. Binds at
@@ -1042,6 +1045,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # a /local call still waiting on the client dies with its turn (stop,
         # revoke, barge-in all end here) instead of holding the guest's round
         localexec.cancel_conversation(conversation_id)
+        operator_ask.cancel_conversation(conversation_id)
         bus.close_job(chan)
 
 
@@ -1098,6 +1102,8 @@ async def resume_chat_stream(conversation_id: int):
     # that is gone; hand this one what is still waiting for an answer
     for ev in localexec.pending_events(conversation_id):
         bus.publish_to(q, ev)
+    for ev in operator_ask.pending_events(conversation_id):
+        bus.publish_to(q, ev)
     return _tail(conversation_id, q)
 
 
@@ -1119,6 +1125,8 @@ async def _stream_node(cid: int) -> StreamingResponse:
     chan = vm_turn.node_chan(cid)
     q = bus.subscribe(chan)
     if cid in vm_turn.live_nodes():
+        for ev in operator_ask.pending_events(cid):
+            bus.publish_to(q, ev)
         return _tail(cid, q, chan)
     bus.unsubscribe(chan, q)
     db = await get_db()
@@ -1427,6 +1435,27 @@ async def local_result(conversation_id: int, body: LocalResult,
     return {"ok": True}
 
 
+class AskAnswer(BaseModel):
+    id: str
+    answers: list | None = None
+    skipped: bool = False
+
+
+@router.post("/chat/{conversation_id}/answer")
+async def answer_ask(conversation_id: int, body: AskAnswer,
+                     actor: dict = Depends(require_actor)):
+    """The operator's answer to an `ask_user` event (operator_ask.py): posted
+    to the asking conversation or to an ancestor that showed it. 404 when
+    nothing waits under that id; 422 when the answers do not fit the
+    questions."""
+    got = operator_ask.answer(conversation_id, body.id, body.answers, body.skipped)
+    if got == "missing":
+        raise HTTPException(status_code=404, detail="no such pending question")
+    if got == "invalid":
+        raise HTTPException(status_code=422, detail="answers do not match the questions")
+    return {"ok": True}
+
+
 def _stop(conversation_id: int) -> bool:
     task = _active_turns.get(conversation_id)
     if task is None or task.done():
@@ -1643,6 +1672,9 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
                 mode=body.mode)
             if local_spec is not None:
                 await _open_local(db, conversation_id, local_spec, actor)
+            if body.permission_mode:
+                await permissions.set_mode(db, conversation_id, body.permission_mode)
+                await db.commit()
             if body.confirm_peak:
                 confirm_peak(conversation_id)
         else:
@@ -1652,6 +1684,9 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
                 existing = await cur.fetchone()
                 if not existing:
                     raise HTTPException(status_code=404, detail="no such conversation")
+            if body.permission_mode:
+                await permissions.set_mode(db, conversation_id, body.permission_mode)
+                await db.commit()
             # Peak-cost gate for an existing conversation: confirmation is
             # keyed to its id, so it can (and must) be checked after lookup.
             if body.confirm_peak:

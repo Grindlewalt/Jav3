@@ -60,8 +60,18 @@ def read_only_names(entries=None) -> frozenset[str]:
     return turnctx.read_only.get()
 
 
+# in-guest tools the conversation's permission mode may hold for the operator
+# (backend/permissions.py): the host decides, over the broker, before they run
+GATED_IN_GUEST = frozenset({"write_file", "edit_file", "run_code"})
+PERMISSION_GATE = "permission_gate"
+
+
 async def dispatch(name: str, args: dict) -> str:
     if name in IN_GUEST_TOOLS:
+        if name in GATED_IN_GUEST:
+            verdict = await _broker_dispatch(PERMISSION_GATE, {"tool": name, "args": args})
+            if verdict != "allow":
+                return verdict
         return await _local_dispatch(name, args)
     return await _broker_dispatch(name, args)
 

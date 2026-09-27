@@ -244,6 +244,16 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
     try:
         # tier-4 hook (pre-dispatch): policy / deterministic diff-gate on
         # (name, args, env) — halt-for-human or reject goes here.
+        # The conversation's permission mode (permissions.py) is the first:
+        # the guest asks it before an in-guest write/run (GATE_OP), and a
+        # brokered write-type tool passes it here.
+        from .. import permissions
+        if name == permissions.GATE_OP:
+            return {"result": await permissions.gate_from_guest(args),
+                    "taint": "trusted"}
+        blocked = await permissions.gate(name, args)
+        if blocked is not None:
+            return {"result": blocked, "taint": "trusted"}
         result = await registry.dispatch(name, args)
         result, img = imageresult.split(result)
         # tier-4 (post-dispatch): stamp taint into the ledger, and mark a
