@@ -447,3 +447,19 @@ async def test_unparsed_tool_markup_is_retried_not_final(tmp_env, monkeypatch):
     assert "tool-call markup" in model.seen[1]
     assert dispatched == ["probe"]
     assert events[-1] == {"type": "final", "content": "done"}
+
+
+async def test_note_after_a_screenshot_does_not_crash(tmp_env, monkeypatch):
+    """2026-09-27: a screenshot, then a failed call — the "that call failed"
+    note was appended (str) to the screenshot's user message (a list):
+    TypeError: can only concatenate list (not "str") to list."""
+    from backend.agent import loop as loop_mod
+    msgs = [{"role": "tool", "tool_call_id": "a", "content": "error: nope"},
+            {"role": "user", "content": [{"type": "text", "text": "screenshot"},
+                                         {"type": "image_url", "image_url": {"url": "x"}}]}]
+    loop_mod._steer(msgs, 0, 10, 1, False, False)
+    assert "system note" in msgs[0]["content"]           # next to the failed call
+    assert isinstance(msgs[1]["content"], list)          # the image message untouched
+    only_image = [{"role": "user", "content": [{"type": "text", "text": "s"}]}]
+    loop_mod._note(only_image, "\n\n[n]")
+    assert only_image[0]["content"][-1] == {"type": "text", "text": "[n]"}

@@ -235,6 +235,21 @@ async def _force_conclusion(messages: list[dict], conversation_id: int,
                "point me at where the answer lives)"}
 
 
+def _note(messages: list[dict], text: str) -> None:
+    """Append a system note to the latest TOOL result (next to the call it is
+    about). A screenshot's user message can follow that result, and its content
+    is a list: appending a str to messages[-1] there crashed the turn with
+    "can only concatenate list (not "str") to list" (2026-09-27)."""
+    k = next((j for j in range(len(messages) - 1, -1, -1)
+              if messages[j].get("role") == "tool"), len(messages) - 1)
+    content = messages[k].get("content")
+    if isinstance(content, list):
+        content = content + [{"type": "text", "text": text.strip()}]
+    else:
+        content = (content or "") + text
+    messages[k] = {**messages[k], "content": content}
+
+
 def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
            can_delegate: bool, has_todo: bool = False) -> bool:
     """Mid-flight nudges appended to the last tool result (adjacent to the
@@ -248,56 +263,56 @@ def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
     noted = False
     if err_streak >= settings.dead_end_force_answer:
         force = noted = True
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {err_streak} consecutive tool "
-                        "calls failed or returned nothing — tools are now "
-                        "disabled. Summarize what you tried, what failed, "
-                        "and what you could not determine. If the thing "
-                        "you're looking for may simply not exist, say so.]"}
+        _note(messages,
+            f"\n\n[system note: {err_streak} consecutive tool "
+            "calls failed or returned nothing — tools are now "
+            "disabled. Summarize what you tried, what failed, "
+            "and what you could not determine. If the thing "
+            "you're looking for may simply not exist, say so.]")
     elif err_streak >= settings.dead_end_error_streak:
         noted = True
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {err_streak} consecutive tool "
-                        "calls failed or returned nothing. Diagnose why "
-                        "before retrying: change strategy, delegate "
-                        "(research / spawn_agent), or report honestly what "
-                        "can't be found. Do not repeat similar calls.]"}
+        _note(messages,
+            f"\n\n[system note: {err_streak} consecutive tool "
+            "calls failed or returned nothing. Diagnose why "
+            "before retrying: change strategy, delegate "
+            "(research / spawn_agent), or report honestly what "
+            "can't be found. Do not repeat similar calls.]")
     elif err_streak == 1:
         # first failure of a streak: one cheap line so the next call is a
         # deliberate correction, not a shrug-and-move-on
         noted = True
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        "\n\n[system note: that call failed or returned "
-                        "nothing. Read the message above and make ONE "
-                        "deliberate adjustment (path, arguments, or approach) "
-                        "toward the same goal — don't repeat the call "
-                        "unchanged and don't move on as if it succeeded.]"}
+        _note(messages,
+            "\n\n[system note: that call failed or returned "
+            "nothing. Read the message above and make ONE "
+            "deliberate adjustment (path, arguments, or approach) "
+            "toward the same goal — don't repeat the call "
+            "unchanged and don't move on as if it succeeded.]")
 
     if i + 1 == settings.delegate_nudge_round and can_delegate:
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {i + 1} tool rounds used of "
-                        f"{n_iter}. If substantial gathering or multi-step "
-                        "work remains, STOP hand-rolling calls: hand web "
-                        "gathering to the research tool in one call, hand "
-                        "subtasks to spawn_agent or a deploy_agents team, "
-                        "and keep a todo_update "
-                        "plan so you execute in a straight line.]"}
+        _note(messages,
+            f"\n\n[system note: {i + 1} tool rounds used of "
+            f"{n_iter}. If substantial gathering or multi-step "
+            "work remains, STOP hand-rolling calls: hand web "
+            "gathering to the research tool in one call, hand "
+            "subtasks to spawn_agent or a deploy_agents team, "
+            "and keep a todo_update "
+            "plan so you execute in a straight line.]")
     elif i + 1 == (n_iter * 2) // 3:
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
-                        "used — start concluding. Finish the current step, "
-                        "then answer with what you have and say plainly "
-                        "what you could not determine.]"}
+        _note(messages,
+            f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
+            "used — start concluding. Finish the current step, "
+            "then answer with what you have and say plainly "
+            "what you could not determine.]")
     elif (not noted and has_todo and settings.plan_recheck_every
           and (i + 1) % settings.plan_recheck_every == 0):
         # periodic progress check against the model's own plan; suppressed on
         # rounds that already carry a note so nudges never stack
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        "\n\n[system note: progress check — against your "
-                        "todo plan: mark finished items done (todo_update) "
-                        "and make the next call serve the next open item. If "
-                        "what you've learned changed the plan, revise it "
-                        "first, then continue.]"}
+        _note(messages,
+            "\n\n[system note: progress check — against your "
+            "todo plan: mark finished items done (todo_update) "
+            "and make the next call serve the next open item. If "
+            "what you've learned changed the plan, revise it "
+            "first, then continue.]")
     return force
 
 
@@ -513,12 +528,12 @@ async def run_turn(
         if (has_research and not web_nudged
                 and web_calls >= settings.web_handroll_nudge > 0):
             web_nudged = True
-            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                            f"\n\n[system note: {web_calls} hand-rolled web "
-                            "calls this turn. If more gathering remains, hand "
-                            "the remainder to the research tool in ONE call "
-                            "and continue from its report instead of reading "
-                            "pages yourself.]"}
+            _note(messages,
+                f"\n\n[system note: {web_calls} hand-rolled web "
+                "calls this turn. If more gathering remains, hand "
+                "the remainder to the research tool in ONE call "
+                "and continue from its report instead of reading "
+                "pages yourself.]")
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}
