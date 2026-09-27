@@ -5,7 +5,10 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
+import re
 import stat
+import sys
 from pathlib import Path
 
 import httpx
@@ -1568,7 +1571,7 @@ async def test_tui_export_to_a_missing_dir_and_a_missing_editor_are_errors(cfg, 
         await pilot.pause(0.3)
         app.cid = 5
         app.dispatch("/export /nonexistent-qa-dir/x.md")
-        assert await _until(pilot, lambda: any("could not save" in _text(n)
+        assert await _until(pilot, lambda: any("not a directory" in _text(n)
                                                for n in app.query("Note")))
         monkeypatch.setenv("EDITOR", "/nonexistent-qa-editor")
         monkeypatch.setattr(app, "suspend", _cl.nullcontext)     # headless: no terminal
@@ -2519,3 +2522,326 @@ async def test_tui_boxes_surfaces_locked_for_a_chat_only_login(cfg):
         guarded = ("/api/services", "/api/packages", "/api/vm", "/api/profiles",
                    "/api/egress", "/api/projects", "/api/security", "/api/secrets")
         assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
+
+
+# --- /stop-all, /stop-a -----------------------------------------------------------------
+
+def _stop_server(seen, count=3):
+    base = _fake_server([], []).handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ("/api/chat/stop-all", "/api/chat/stop-project"):
+            body = json.loads(request.content or b"{}")
+            seen.append((request.url.path, body))
+            return httpx.Response(200, json={"count": count, "conversations": [1, 2],
+                                             "plans": ["alpha"] * (count > 2),
+                                             "dry_run": body.get("dry_run", False)})
+        return base(request)
+    return httpx.MockTransport(handler)
+
+
+async def test_tui_stop_all_counts_confirms_then_stops(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_stop_server(seen))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/stop-all")
+        assert await _modal(pilot, app, "Confirm")
+        assert seen == [("/api/chat/stop-all", {"dry_run": True})]
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert len(seen) == 1                    # declined: nothing stopped
+        app.dispatch("/stop-all")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: len(seen) == 3)
+        assert seen[-1] == ("/api/chat/stop-all", {})
+
+
+async def test_tui_stop_project_uses_the_chats_project(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_stop_server(seen))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.project, app.project_mode = "alpha", "pin"
+        app.dispatch("/stop-project")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: len(seen) == 2)
+        assert seen == [("/api/chat/stop-project", {"project": "alpha", "dry_run": True}),
+                        ("/api/chat/stop-project", {"project": "alpha"})]
+        app.project, app.project_mode = None, "none"
+        app.dispatch("/stop-a")
+        await pilot.pause(0.3)
+        assert len(seen) == 2                    # no project: refused, nothing sent
+
+
+# --- /screenshot and the safe-save helpers ----------------------------------------------
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    h = tmp_path / "home"
+    h.mkdir()
+    monkeypatch.setenv("HOME", str(h))
+    return h
+
+
+def test_safe_output_dir_rules(home, tmp_path):
+    assert jav3.safe_output_dir("~/Pictures/jav3") == (home / "Pictures" / "jav3").resolve()
+    assert (home / "Pictures" / "jav3").is_dir()
+    out = tmp_path / "outside"
+    out.mkdir()
+    assert jav3.safe_output_dir(str(out)) == out.resolve()      # absolute + writable
+    with pytest.raises(jav3.CliError, match="outside your home"):
+        jav3.safe_output_dir("../outside", cwd=home)             # relative, escapes home
+    with pytest.raises(jav3.CliError, match="not a directory"):
+        jav3.safe_output_dir(str(tmp_path / "missing"))          # absolute, not there
+    with pytest.raises(jav3.CliError):
+        jav3.safe_output_dir("~/a\x00b")
+
+
+def test_safe_stem_and_write_new_never_overwrite(home, tmp_path):
+    assert jav3.safe_stem("../../etc/passwd", "d") == "passwd"
+    assert jav3.safe_stem(".hidden", "d") == "hidden"
+    assert jav3.safe_stem("a b;$(x)", "d") == "a-b-x"
+    assert jav3.safe_stem("", "d") == "d"
+    a = jav3.write_new(home, "shot", "txt", b"one")
+    b = jav3.write_new(home, "shot", "txt", b"two")
+    assert (a.name, b.name) == ("shot.txt", "shot-2.txt") and a.read_bytes() == b"one"
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    (home / "trap.txt").symlink_to(victim)
+    c = jav3.write_new(home, "trap", "txt", b"x")
+    assert c.name == "trap-2.txt" and victim.read_text() == "keep"
+
+
+def test_parse_shot_args():
+    assert jav3.parse_shot_args([]) == (None, None, None)
+    assert jav3.parse_shot_args(["x", "TXT", "~/d"]) == ("x", "txt", "~/d")
+    assert jav3.parse_shot_args(["x.png"]) == ("x", "png", None)
+    with pytest.raises(jav3.CliError):
+        jav3.parse_shot_args(["a", "b"])
+
+
+async def test_tui_screenshot_saves_svg_txt_and_sets_defaults(cfg, home, monkeypatch):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_fake_server([], []))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        await app.c_screenshot("snap")
+        pics = home / "Downloads"                   # no ~/Pictures here
+        assert (pics / "snap.svg").read_text().startswith("<svg")
+        await app.c_screenshot("snap txt")
+        assert (pics / "snap.txt").read_text().strip()
+        await app.c_screenshot("snap txt")
+        assert (pics / "snap-2.txt").exists()
+        await app.c_screenshot("default txt ~/shots")
+        st = json.loads((cfg / "tui.json").read_text())
+        assert st["screenshot_format"] == "txt"
+        assert st["screenshot_dir"] == str((home / "shots").resolve())
+        await app.c_screenshot("")
+        assert len(list((home / "shots").glob("jav3-*.txt"))) == 1
+        monkeypatch.setitem(sys.modules, "cairosvg", None)
+        with pytest.raises(jav3.CliError, match="cairosvg"):
+            await app.c_screenshot("p png")
+        with pytest.raises(jav3.CliError, match="usage"):
+            await app.c_screenshot("default gif")
+
+
+# --- themes: validation, import, export, create -----------------------------------------
+
+GOOD_THEME = {"name": "My theme", "dark": False, "primary": "#112233", "background": "white"}
+
+
+def test_validate_theme_accepts_and_normalises():
+    clean = jav3.validate_theme(GOOD_THEME)
+    assert clean == {"name": "My theme", "dark": False, "primary": "#112233",
+                     "background": "#ffffff"}
+    assert jav3.validate_theme({"name": "x", "primary": "#ABCDEF"})["dark"] is True
+
+
+@pytest.mark.parametrize("obj, msg", [
+    ([], "one JSON object"),
+    ("x", "one JSON object"),
+    ({**GOOD_THEME, "css": "x"}, "unknown key"),
+    ({**GOOD_THEME, "__class__": 1}, "unknown key"),
+    ({**GOOD_THEME, "variables": {"a": "b"}}, "unknown key"),
+    ({**GOOD_THEME, "name": "../../etc/passwd"}, "'name'"),
+    ({**GOOD_THEME, "name": "a/b"}, "'name'"),
+    ({**GOOD_THEME, "name": "..\\\\x"}, "'name'"),
+    ({**GOOD_THEME, "name": "[b red]x[/]"}, "'name'"),
+    ({**GOOD_THEME, "name": "x\x1b[2Jy"}, "'name'"),
+    ({**GOOD_THEME, "name": "x\ny"}, "'name'"),
+    ({**GOOD_THEME, "name": ""}, "'name'"),
+    ({**GOOD_THEME, "name": "a" * 41}, "'name'"),
+    ({**GOOD_THEME, "name": " lead"}, "'name'"),
+    ({**GOOD_THEME, "name": 5}, "'name'"),
+    ({**GOOD_THEME, "name": "nord"}, "taken"),
+    ({**GOOD_THEME, "name": "Create"}, "taken"),
+    ({**GOOD_THEME, "dark": "yes"}, "'dark'"),
+    ({**GOOD_THEME, "dark": 1}, "'dark'"),
+    ({**GOOD_THEME, "primary": "#12345"}, "'primary'"),
+    ({**GOOD_THEME, "primary": "#1234567"}, "'primary'"),
+    ({**GOOD_THEME, "primary": "rgb(1,2,3)"}, "'primary'"),
+    ({**GOOD_THEME, "primary": "#123456;x"}, "'primary'"),
+    ({**GOOD_THEME, "primary": ["#123456"]}, "'primary'"),
+    ({**GOOD_THEME, "accent": "$primary"}, "'accent'"),
+    ({"name": "x", "background": "#000000"}, "'primary' is required"),
+])
+def test_validate_theme_refuses(obj, msg):
+    with pytest.raises(jav3.ThemeError, match=re.escape(msg)):
+        jav3.validate_theme(obj, {"nord"})
+
+
+def test_theme_error_never_echoes_markup_or_escapes():
+    with pytest.raises(jav3.ThemeError) as e:
+        jav3.validate_theme({**GOOD_THEME, "[b]\x1b[31mevil": 1})
+    assert "\x1b" not in str(e.value) and "[b]" not in str(e.value)
+
+
+def _write(tmp_path, name, content):
+    f = tmp_path / name
+    f.write_bytes(content if isinstance(content, bytes) else content.encode())
+    return f
+
+
+def test_read_theme_file_malicious_corpus(tmp_path):
+    ok = _write(tmp_path, "ok.json", json.dumps(GOOD_THEME))
+    assert jav3.read_theme_file(ok) == GOOD_THEME
+    bad = {
+        "huge.json": json.dumps({**GOOD_THEME, "pad": "x" * 20000}),
+        "notjson.json": "name: x\nprimary: '#112233'",          # YAML is not JSON
+        "pickle.json": b"\x80\x04\x95",
+        "latin1.json": b'{"name": "\xff"}',
+        "dupe.json": '{"name": "a", "name": "b", "primary": "#112233"}',
+        "deep.json": "[" * 5000 + "]" * 5000,
+        "nan.json": "{\"name\": \"x\", \"primary\": NaN",
+    }
+    for name, content in bad.items():
+        with pytest.raises(jav3.ThemeError):
+            jav3.validate_theme(jav3.read_theme_file(_write(tmp_path, name, content)))
+    link = tmp_path / "link.json"
+    link.symlink_to(ok)
+    with pytest.raises(jav3.ThemeError, match="symlink"):
+        jav3.read_theme_file(link)
+    with pytest.raises(jav3.ThemeError, match="regular file"):
+        jav3.read_theme_file(tmp_path)
+    os.mkfifo(tmp_path / "fifo.json")
+    with pytest.raises(jav3.ThemeError, match="regular file"):
+        jav3.read_theme_file(tmp_path / "fifo.json")          # does not hang
+
+
+def test_import_theme_stores_a_sanitised_copy(cfg, tmp_path):
+    src = _write(tmp_path, "..%2f..%2fevil name.json",
+                 json.dumps({**GOOD_THEME, "name": "Neat-1 x"}, indent=8))
+    clean, dest = jav3.import_theme(str(src))
+    assert dest == cfg / "themes" / "neat-1-x.json"
+    assert json.loads(dest.read_text()) == clean
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    with pytest.raises(jav3.ThemeError, match="exists"):
+        jav3.import_theme(str(src))                       # never replaced silently
+    # a stored file that no longer validates is skipped at startup, with a reason
+    (cfg / "themes" / "bad.json").write_text('{"name": "b", "primary": "red", "x": 1}')
+    themes, errors = jav3.load_custom_themes()
+    assert [t["name"] for t in themes] == ["Neat-1 x"] and "bad.json" in errors[0]
+
+
+async def test_tui_themes_list_import_export_create(cfg, home, tmp_path):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_fake_server([], []))
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause(0.3)
+        names = app.theme_names()
+        assert "jav3" in names and "jav3-amber" in names and "jav3-light" in names
+        assert "catppuccin-frappe" not in names and "solarized-dark" not in names
+        assert len([n for n in names if n in jav3.THEME_KEEP]) <= 12
+        src = _write(tmp_path, "t.json", json.dumps(GOOD_THEME))
+        await app.c_theme(f"import {src}")
+        assert app.theme == "My theme"
+        assert (cfg / "themes" / "my-theme.json").exists()
+        await app.c_theme("export ~/out")
+        out = json.loads((home / "out" / "My-theme.json").read_text())
+        assert out["name"] == "My theme" and out["primary"] == "#112233"
+        await app.c_theme("nord")
+        await app.c_theme("export ~/out/n.json")
+        assert json.loads((home / "out" / "n.json").read_text())["name"] == "nord-copy"
+        with pytest.raises(jav3.CliError, match="usage"):
+            await app.c_theme("import")
+        app.dispatch("/theme create")
+        assert await _modal(pilot, app, "ThemeEditor")
+        ed = app.screen
+        ed.query_one("#th-primary").value = "#ff0000"
+        await pilot.pause(0.1)
+        assert app.theme == jav3.THEME_PREVIEW              # live preview
+        ed.query_one("#th-name").value = "nord"
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+        assert "taken" in _text(ed.query_one("#dialog-hint"))
+        ed.query_one("#th-name").value = "Red one"
+        await pilot.press("ctrl+s")
+        assert await _until(pilot, lambda: app.theme == "Red one")
+        assert jav3.THEME_PREVIEW not in app.available_themes
+        assert json.loads((cfg / "themes" / "red-one.json").read_text())["primary"] == "#ff0000"
+        app.dispatch("/theme create")
+        assert await _modal(pilot, app, "ThemeEditor")
+        app.screen.query_one("#th-primary").value = "#00ff00"
+        await pilot.pause(0.1)
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: app.theme == "Red one")
+
+
+# --- /export [location], /export default <location> -------------------------------------
+
+async def test_tui_export_locations_default_and_no_overwrite(cfg, home, monkeypatch):
+    pytest.importorskip("textual")
+    monkeypatch.chdir(home)
+    msgs = {"messages": [{"role": "user", "content": "hi"},
+                         {"role": "assistant", "content": "hello"}]}
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([], msgs))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.cid = 5
+        await app.c_export("")                                   # default: the cwd
+        assert "hello" in (home / "jav3-5.md").read_text()
+        await app.c_export("")
+        assert (home / "jav3-5-2.md").exists()                   # never overwritten
+        await app.c_export("~/notes/chat.md")
+        assert (home / "notes" / "chat.md").exists()
+        await app.c_export("default ~/exports")
+        assert json.loads((cfg / "tui.json").read_text())["export_dir"] == \
+            str((home / "exports").resolve())
+        await app.c_export("")
+        assert (home / "exports" / "jav3-5.md").exists()
+        with pytest.raises(jav3.CliError, match="outside your home"):
+            await app.c_export("../../x")
+
+
+async def test_tui_new_commands_complete_and_are_in_help(cfg):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_fake_server([], []))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("/", "s", "t", "o", "p", "-", "a")
+        await pilot.pause(0.1)
+        assert app.popup_items[0] == ("cmd", "stop-a")        # exact name first
+        assert ("cmd", "stop-all") in app.popup_items
+        app.editor.text = "/theme "
+        await pilot.pause(0.1)
+        assert [v for _, v in app.popup_items[:3]] == ["create", "export", "import"]
+        app.editor.text = "/screenshot "
+        await pilot.pause(0.1)
+        assert ("arg", "default") in app.popup_items
+        app.editor.text = "/export "
+        await pilot.pause(0.1)
+        assert app.popup_items == [("arg", "default")]
+        app.editor.text = ""
+        names = dict(app.unique_commands())
+        for n in ("stop-all", "stop-a", "screenshot", "themes", "export"):
+            assert n in names
+        assert app.commands["stop-project"] is app.commands["stop-a"]
+        app.dispatch("/help")
+        assert await _modal(pilot, app, "Help")
+        md = app.screen.text
+        assert "/stop-all" in md and "/screenshot" in md and "/theme create" in md
