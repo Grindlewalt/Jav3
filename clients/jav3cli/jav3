@@ -1888,6 +1888,101 @@ def build_tui(base: str, token: str, **kw):
         def action_close(self) -> None:
             self.dismiss(None)
 
+    class ThemeEditor(ModalScreen):
+        """/theme create: a name, dark or light, and the colour fields, with the
+        whole app previewing the theme as it is typed. ctrl+s saves."""
+
+        BINDINGS = [Binding("escape", "cancel", show=False),
+                    Binding("ctrl+s", "save", show=False)]
+
+        def __init__(self, base: dict, reserved) -> None:
+            super().__init__()
+            self.base, self.reserved = base, reserved
+
+        def compose(self) -> ComposeResult:
+            from textual.widgets import Switch
+            with Vertical(id="dialog", classes="wide"):
+                with Horizontal(id="dialog-head"):
+                    yield Static("[b]New theme[/]", id="dialog-title")
+                    yield Static("[$text-muted]ctrl+s save · esc cancel[/]", id="dialog-esc")
+                with VerticalScroll(id="view-body"):
+                    with Horizontal(classes="th-row"):
+                        yield Static("name", classes="th-label")
+                        yield Input(value=self.base.get("name", ""), placeholder="My theme",
+                                    max_length=40, id="th-name", compact=True)
+                    with Horizontal(classes="th-row"):
+                        yield Static("dark", classes="th-label")
+                        yield Switch(value=bool(self.base.get("dark", True)), id="th-dark")
+                    for k in THEME_COLOURS:
+                        with Horizontal(classes="th-row"):
+                            yield Static(k, classes="th-label")
+                            yield Input(value=self.base.get(k, ""), placeholder="#rrggbb",
+                                        max_length=7, id=f"th-{k}", compact=True)
+                            yield Static("", id=f"sw-{k}", classes="th-swatch")
+                yield Static("", id="dialog-hint")
+
+        def on_mount(self) -> None:
+            self.before = self.app.theme
+            self.query_one("#th-name", Input).focus()
+            self.preview()
+
+        def values(self) -> dict:
+            from textual.widgets import Switch
+            d = {"name": self.query_one("#th-name", Input).value.strip(),
+                 "dark": self.query_one("#th-dark", Switch).value}
+            for k in THEME_COLOURS:
+                v = self.query_one(f"#th-{k}", Input).value.strip()
+                if v:
+                    d[k] = v
+            return d
+
+        def hint(self, text: str, error: bool = False) -> None:
+            self.query_one("#dialog-hint", Static).update(
+                f"[{'$error' if error else '$text-muted'}]{_esc(text)}[/]")
+
+        def preview(self) -> None:
+            d = self.values()
+            for k in THEME_COLOURS:
+                v = d.get(k, "")
+                v = NAMED_COLOURS.get(v.lower(), v)
+                sw = self.query_one(f"#sw-{k}", Static)
+                sw.update(f"[on {v}]      [/]" if _HEX.fullmatch(v) else
+                          ("" if not v else "[$error]✗[/]"))
+            try:
+                clean = validate_theme({**d, "name": "preview"})
+            except ThemeError as e:
+                self.hint(str(e), True)
+                return
+            self.app.register_theme(Theme(**{**clean, "name": THEME_PREVIEW}))
+            self.app.theme = THEME_PREVIEW
+            self.hint("previewing — ctrl+s saves to " + str(themes_dir()))
+
+        def on_input_changed(self, event) -> None:
+            self.preview()
+
+        def on_switch_changed(self, event) -> None:
+            self.preview()
+
+        def _restore(self) -> None:
+            if self.app.theme == THEME_PREVIEW:
+                self.app.theme = self.before
+            self.app.unregister_theme(THEME_PREVIEW)
+
+        def action_cancel(self) -> None:
+            self._restore()
+            self.dismiss(None)
+
+        def action_save(self) -> None:
+            try:
+                clean = validate_theme(self.values(), self.reserved)
+                save_theme(clean)
+            except ThemeError as e:
+                self.hint(str(e), True)
+                return
+            self.app.register_theme(Theme(**clean))
+            self._restore()
+            self.dismiss(clean["name"])
+
     class ServiceApprove(ModalScreen):
         """A service request's review: the definition and its diff, then two
         explicit choices. Placement: 1 per_service · 2 per_project · 3 shared,
@@ -4913,6 +5008,11 @@ def build_tui(base: str, token: str, **kw):
         #choices { height: auto; max-height: 20; border: none; background: $surface; }
         #choices:focus { border: none; }
         #dialog-hint { margin-top: 1; }
+        .th-row { height: 1; margin-bottom: 1; }
+        .th-label { width: 12; }
+        .th-row Input { width: 12; }
+        .th-row Switch { height: 1; border: none; padding: 0; width: 8; }
+        .th-swatch { width: 8; margin-left: 2; }
         #answer { border: none; background: $panel; margin: 1 0; }
         UserMsg.pending { color: $text-muted; border-left: thick $panel-lighten-2; }
         UserMsg.failed { border-left: thick $error; }
@@ -5037,6 +5137,18 @@ def build_tui(base: str, token: str, **kw):
                 surface="#161a20" if truecolor else "#262626",
                 panel="#1e232b" if truecolor else "#3a3a3a",
                 warning="#ffaf00", error="#ff6b6b", success="#5fd787", dark=True))
+            for spec in jav3_theme_specs(truecolor):
+                self.register_theme(Theme(**spec))
+            for name in list(self.available_themes):
+                if name not in THEME_KEEP and name != "jav3" and name not in JAV3_THEMES:
+                    self.unregister_theme(name)
+            self.builtin_themes = {n.lower() for n in self.available_themes} | {
+                THEME_PREVIEW}
+            customs, errors = load_custom_themes(self.builtin_themes)
+            for clean in customs:
+                self.register_theme(Theme(**clean))
+            for e in errors:
+                self.push_notice(e, "warn")
             settings = self._load_settings()
             self.theme = settings.get("theme") if settings.get("theme") in \
                 self.available_themes else "jav3"
@@ -6282,7 +6394,9 @@ def build_tui(base: str, token: str, **kw):
                 "project": Command(self.c_project, "pin this chat to a project (or make "
                                    "a new one)", "[slug|none|follow]", takes_arg=True,
                                    leader="p"),
-                "themes": Command(self.c_theme, "change the colours", "[name]",
+                "themes": Command(self.c_theme, "change the colours; create, export, "
+                                  "import custom themes", "[name|create|export [path]|"
+                                  "import <path>]",
                                   takes_arg=True, busy_ok=True, leader="t"),
                 "temp": Command(self.c_temp, "toggle temporary chats (nothing saved)"),
                 "local": Command(self.c_local, "toggle local chats (files and shell here, "
@@ -6373,7 +6487,10 @@ def build_tui(base: str, token: str, **kw):
                 return [(str(cv["id"]), _short(cv.get("summary") or "(untitled)", 60))
                         for cv in self.convs[:60]]
             if fn == self.c_theme:
-                return [(t, "") for t in sorted(self.available_themes)]
+                return [("create", "new theme, with live preview"),
+                        ("export", "export [path] — the current theme as JSON"),
+                        ("import", "import <path> — a .json theme")] + [
+                    (t, "") for t in self.theme_names()]
             if fn == self.c_screenshot:
                 return [("help", "current default format and location"),
                         ("default", "default <format> [location]"),
@@ -6586,15 +6703,66 @@ def build_tui(base: str, token: str, **kw):
                          "follow": "project: follows whatever is loaded"}[mode])
             self.refresh_chrome()
 
+        def theme_names(self) -> list[str]:
+            return sorted(t for t in self.available_themes if t != THEME_PREVIEW)
+
+        def current_theme_dict(self) -> dict:
+            from textual.color import Color
+            t = self.current_theme
+            d = {"name": t.name, "dark": bool(t.dark)}
+            for k in THEME_COLOURS:
+                v = getattr(t, k, None)
+                if v:
+                    try:
+                        d[k] = Color.parse(v).hex[:7].lower()
+                    except Exception:
+                        pass
+            return d
+
         async def c_theme(self, arg: str) -> None:
+            word, _, rest = arg.partition(" ")
+            rest = rest.strip()
+            if word == "create":
+                base = self.current_theme_dict()
+                base["name"] = ""
+                name = await self.push_screen_wait(ThemeEditor(base, self.builtin_themes))
+                if name:
+                    self.theme = name
+                    self._save_settings(theme=name)
+                    self.notify(f"theme {name} saved in {themes_dir()}")
+                return
+            if word == "export":
+                d = self.current_theme_dict()
+                if d["name"].lower() in self.builtin_themes:
+                    d["name"] = (d["name"][:35] + "-copy")
+                d = validate_theme(d)
+                loc = rest or str(Path.home() / "Downloads")
+                stem = safe_stem(d["name"], "theme")
+                if loc.lower().endswith(".json"):
+                    stem = safe_stem(Path(loc).name[:-5], stem)
+                    loc = str(Path(loc).parent)
+                path = write_new(safe_output_dir(loc), stem, "json",
+                                 (json.dumps(d, indent=2) + "\n").encode())
+                self.notify(f"theme {d['name']} exported to {path}")
+                return
+            if word == "import":
+                if not rest:
+                    raise CliError("usage: /theme import <path to a .json theme>")
+                clean, path = import_theme(rest, self.builtin_themes)
+                self.register_theme(Theme(**clean))
+                self.theme = clean["name"]
+                self._save_settings(theme=clean["name"])
+                self.notify(f"theme {clean['name']} imported to {path} — the source file "
+                            "can be deleted")
+                return
             if not arg:
                 before = self.theme
-                rows = [(t, t, "") for t in sorted(self.available_themes)]
+                rows = [(t, t, "") for t in self.theme_names()]
                 arg = await self.pick("Themes", rows, before) or ""
                 if not arg:
                     return
-            if arg not in self.available_themes:
-                raise CliError(f"no theme {arg!r}")
+            if arg not in self.available_themes or arg == THEME_PREVIEW:
+                raise CliError(f"no theme {arg!r} — /theme lists them")
             self.theme = arg
             self._save_settings(theme=arg)
 
@@ -7202,6 +7370,221 @@ def parse_shot_args(toks: list[str]) -> tuple[str | None, str | None, str | None
     if name and fmt and name.lower().endswith("." + fmt):
         name = name[:-len(fmt) - 1]
     return name, fmt, loc
+
+
+# --- themes -----------------------------------------------------------------------------
+#
+# The built-in list is cut to themes that look clearly different; Jav3 adds a
+# few of its own, each with a 256-colour variant for Terminal.app. Custom
+# themes are JSON files under ~/.config/jav3/themes/, written only by jav3
+# itself (/theme create, /theme import) and re-validated on every start.
+# A theme file is data from somewhere else: it is read with O_NOFOLLOW, capped
+# at 16 KB, parsed with json.loads only, and must match a strict schema; the
+# stored copy is re-serialised from the validated values under a file name
+# made from the validated theme name, never from the source path.
+
+THEME_KEEP = ("textual-dark", "textual-light", "nord", "gruvbox", "dracula", "tokyo-night",
+              "monokai", "flexoki", "catppuccin-mocha", "rose-pine-dawn", "ansi-dark",
+              "ansi-light")
+THEME_COLOURS = ("primary", "secondary", "accent", "foreground", "background", "surface",
+                 "panel", "boost", "warning", "error", "success")
+THEME_MAX_BYTES = 16 * 1024
+THEME_MAX_FILES = 200
+THEME_WORDS = ("create", "export", "import")        # /theme sub-commands, never theme names
+THEME_PREVIEW = "jav3-preview"
+_THEME_NAME = re.compile(r"[A-Za-z0-9 _-]{1,40}")
+_HEX = re.compile(r"#[0-9a-fA-F]{6}")
+NAMED_COLOURS = {"black": "#000000", "white": "#ffffff", "red": "#ff0000",
+                 "green": "#008000", "blue": "#0000ff", "yellow": "#ffff00",
+                 "cyan": "#00ffff", "magenta": "#ff00ff", "gray": "#808080",
+                 "grey": "#808080", "orange": "#ffa500"}
+
+# name -> colours; a (truecolor, 256-colour) pair where the near-blacks would
+# otherwise round to the same black. 256-colour values sit on the xterm cube.
+JAV3_THEMES = {
+    "jav3-light": dict(primary="#005faf", secondary="#870087", accent="#af5f00",
+                       foreground="#000000", background="#ffffff", surface="#eeeeee",
+                       panel="#d0d0d0", warning="#875f00", error="#d70000",
+                       success="#005f00", dark=False),
+    "jav3-amber": dict(primary="#ffaf00", secondary="#d78700", accent="#ffd787",
+                       foreground="#ffaf00", background=("#0c0900", "#121212"),
+                       surface=("#1a1406", "#262626"), panel=("#2a200a", "#3a3a3a"),
+                       warning="#ffff5f", error="#ff5f5f", success="#d7d75f", dark=True),
+    "jav3-solarized": dict(primary="#0087d7", secondary="#5f5faf", accent="#00afaf",
+                           foreground="#a8a8a8", background=("#002b36", "#1c1c1c"),
+                           surface=("#073642", "#262626"), panel=("#0b4250", "#3a3a3a"),
+                           warning="#af8700", error="#d75f5f", success="#87af00",
+                           dark=True),
+    "jav3-forest": dict(primary="#87af5f", secondary="#5f8787", accent="#d7af5f",
+                        foreground="#d7d7af", background=("#0f1a12", "#121212"),
+                        surface=("#16241a", "#262626"), panel=("#1f3324", "#3a3a3a"),
+                        warning="#d7af00", error="#d75f5f", success="#87d75f", dark=True),
+}
+
+
+class ThemeError(CliError):
+    pass
+
+
+def jav3_theme_specs(truecolor: bool) -> list[dict]:
+    out = []
+    for name, spec in JAV3_THEMES.items():
+        d = {"name": name}
+        for k, v in spec.items():
+            d[k] = (v[0] if truecolor else v[1]) if isinstance(v, tuple) else v
+        out.append(d)
+    return out
+
+
+def _plain(s: str, n: int = 30) -> str:
+    """Something from a file, safe to put in a message: no markup, no escapes."""
+    return re.sub(r"[^A-Za-z0-9._-]", "?", str(s))[:n]
+
+
+def validate_theme(obj, reserved=()) -> dict:
+    """A theme file's content, checked: exactly the known keys, a plain name,
+    #rrggbb (or a few named) colours, a boolean `dark`. Returns a clean copy."""
+    if not isinstance(obj, dict):
+        raise ThemeError("a theme file must be one JSON object")
+    allowed = {"name", "dark", *THEME_COLOURS}
+    extra = sorted(str(k) for k in obj if k not in allowed)
+    if extra:
+        raise ThemeError(f"unknown key {_plain(extra[0])!r} — allowed: name, dark, "
+                         + ", ".join(THEME_COLOURS))
+    name = obj.get("name")
+    if not isinstance(name, str) or not _THEME_NAME.fullmatch(name) \
+            or name.strip() != name:
+        raise ThemeError("'name' must be 1-40 letters, digits, spaces, _ or - "
+                         "(no leading or trailing space)")
+    if name.lower() in reserved or name.lower() in THEME_WORDS:
+        raise ThemeError(f"{name!r} is taken by a built-in theme or command — pick "
+                         "another name")
+    out: dict = {"name": name, "dark": True}
+    if "dark" in obj:
+        if type(obj["dark"]) is not bool:
+            raise ThemeError("'dark' must be true or false")
+        out["dark"] = obj["dark"]
+    for k in THEME_COLOURS:
+        if k not in obj:
+            continue
+        v = obj[k]
+        if isinstance(v, str) and _HEX.fullmatch(v):
+            out[k] = v.lower()
+        elif isinstance(v, str) and v.lower() in NAMED_COLOURS:
+            out[k] = NAMED_COLOURS[v.lower()]
+        else:
+            raise ThemeError(f"{k!r} must be #rrggbb or one of: "
+                             + ", ".join(sorted(NAMED_COLOURS)))
+    if "primary" not in out:
+        raise ThemeError("'primary' is required")
+    return out
+
+
+def _no_duplicate_keys(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError(f"duplicate key {_plain(k)!r}")
+        d[k] = v
+    return d
+
+
+def read_theme_file(path) -> object:
+    """Parse a theme file: not a symlink, a regular file, at most 16 KB,
+    UTF-8, JSON (json.loads, duplicate keys refused). Returns the parsed value."""
+    import errno
+    label = _plain(Path(path).name, 60)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ThemeError(f"{label} is a symlink — give the file itself")
+        raise ThemeError(f"could not open {label}: {e.strerror or e}")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ThemeError(f"{label} is not a regular file")
+        if st.st_size > THEME_MAX_BYTES:
+            raise ThemeError(f"{label} is bigger than {THEME_MAX_BYTES // 1024} KB")
+        chunks, got = [], 0
+        while got <= THEME_MAX_BYTES:
+            b = os.read(fd, THEME_MAX_BYTES + 1 - got)
+            if not b:
+                break
+            chunks.append(b)
+            got += len(b)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > THEME_MAX_BYTES:
+        raise ThemeError(f"{label} is bigger than {THEME_MAX_BYTES // 1024} KB")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ThemeError(f"{label} is not UTF-8 text")
+    try:
+        return json.loads(text, object_pairs_hook=_no_duplicate_keys)
+    except RecursionError:
+        raise ThemeError(f"{label} is nested too deeply")
+    except ValueError as e:
+        raise ThemeError(f"{label} is not valid JSON ({_plain(e, 60).replace('?', ' ')})")
+
+
+def themes_dir() -> Path:
+    return config_dir() / "themes"
+
+
+def theme_filename(name: str) -> str:
+    return re.sub(r"[^a-z0-9_-]", "-", name.lower()) + ".json"
+
+
+def save_theme(clean: dict) -> Path:
+    """Store a validated theme; never replaces one that is there."""
+    d = themes_dir()
+    if d.is_symlink():
+        raise ThemeError(f"{d} is a symlink — refusing to write through it")
+    try:
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as e:
+        raise ThemeError(f"could not create {d}: {e.strerror or e}")
+    path = d / theme_filename(clean["name"])
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        raise ThemeError(f"a theme named {clean['name']!r} exists ({path}) — delete it "
+                         "or pick another name")
+    except OSError as e:
+        raise ThemeError(f"could not save {path}: {e.strerror or e}")
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(clean, indent=2) + "\n")
+    return path
+
+
+def import_theme(src: str, reserved=()) -> tuple[dict, Path]:
+    clean = validate_theme(read_theme_file(Path(os.path.expanduser(src))), reserved)
+    return clean, save_theme(clean)
+
+
+def load_custom_themes(reserved=()) -> tuple[list[dict], list[str]]:
+    """Every stored custom theme that still validates, and why the rest do not."""
+    d = themes_dir()
+    if not d.is_dir() or d.is_symlink():
+        return [], []
+    themes, errors, seen = [], [], set(reserved)
+    for f in sorted(d.glob("*.json"))[:THEME_MAX_FILES]:
+        try:
+            clean = validate_theme(read_theme_file(f), reserved)
+        except ThemeError as e:
+            errors.append(f"theme {_plain(f.name, 60)} skipped: {e}")
+            continue
+        if clean["name"].lower() in seen:
+            errors.append(f"theme {_plain(f.name, 60)} skipped: duplicate name")
+            continue
+        seen.add(clean["name"].lower())
+        themes.append(clean)
+    return themes, errors
 
 
 def copy_to_clipboard(text: str, osc52=None) -> str:

@@ -5,6 +5,8 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -2646,3 +2648,145 @@ async def test_tui_screenshot_saves_svg_txt_and_sets_defaults(cfg, home, monkeyp
             await app.c_screenshot("p png")
         with pytest.raises(jav3.CliError, match="usage"):
             await app.c_screenshot("default gif")
+
+
+# --- themes: validation, import, export, create -----------------------------------------
+
+GOOD_THEME = {"name": "My theme", "dark": False, "primary": "#112233", "background": "white"}
+
+
+def test_validate_theme_accepts_and_normalises():
+    clean = jav3.validate_theme(GOOD_THEME)
+    assert clean == {"name": "My theme", "dark": False, "primary": "#112233",
+                     "background": "#ffffff"}
+    assert jav3.validate_theme({"name": "x", "primary": "#ABCDEF"})["dark"] is True
+
+
+@pytest.mark.parametrize("obj, msg", [
+    ([], "one JSON object"),
+    ("x", "one JSON object"),
+    ({**GOOD_THEME, "css": "x"}, "unknown key"),
+    ({**GOOD_THEME, "__class__": 1}, "unknown key"),
+    ({**GOOD_THEME, "variables": {"a": "b"}}, "unknown key"),
+    ({**GOOD_THEME, "name": "../../etc/passwd"}, "'name'"),
+    ({**GOOD_THEME, "name": "a/b"}, "'name'"),
+    ({**GOOD_THEME, "name": "..\\\\x"}, "'name'"),
+    ({**GOOD_THEME, "name": "[b red]x[/]"}, "'name'"),
+    ({**GOOD_THEME, "name": "x\x1b[2Jy"}, "'name'"),
+    ({**GOOD_THEME, "name": "x\ny"}, "'name'"),
+    ({**GOOD_THEME, "name": ""}, "'name'"),
+    ({**GOOD_THEME, "name": "a" * 41}, "'name'"),
+    ({**GOOD_THEME, "name": " lead"}, "'name'"),
+    ({**GOOD_THEME, "name": 5}, "'name'"),
+    ({**GOOD_THEME, "name": "nord"}, "taken"),
+    ({**GOOD_THEME, "name": "Create"}, "taken"),
+    ({**GOOD_THEME, "dark": "yes"}, "'dark'"),
+    ({**GOOD_THEME, "dark": 1}, "'dark'"),
+    ({**GOOD_THEME, "primary": "#12345"}, "'primary'"),
+    ({**GOOD_THEME, "primary": "#1234567"}, "'primary'"),
+    ({**GOOD_THEME, "primary": "rgb(1,2,3)"}, "'primary'"),
+    ({**GOOD_THEME, "primary": "#123456;x"}, "'primary'"),
+    ({**GOOD_THEME, "primary": ["#123456"]}, "'primary'"),
+    ({**GOOD_THEME, "accent": "$primary"}, "'accent'"),
+    ({"name": "x", "background": "#000000"}, "'primary' is required"),
+])
+def test_validate_theme_refuses(obj, msg):
+    with pytest.raises(jav3.ThemeError, match=re.escape(msg)):
+        jav3.validate_theme(obj, {"nord"})
+
+
+def test_theme_error_never_echoes_markup_or_escapes():
+    with pytest.raises(jav3.ThemeError) as e:
+        jav3.validate_theme({**GOOD_THEME, "[b]\x1b[31mevil": 1})
+    assert "\x1b" not in str(e.value) and "[b]" not in str(e.value)
+
+
+def _write(tmp_path, name, content):
+    f = tmp_path / name
+    f.write_bytes(content if isinstance(content, bytes) else content.encode())
+    return f
+
+
+def test_read_theme_file_malicious_corpus(tmp_path):
+    ok = _write(tmp_path, "ok.json", json.dumps(GOOD_THEME))
+    assert jav3.read_theme_file(ok) == GOOD_THEME
+    bad = {
+        "huge.json": json.dumps({**GOOD_THEME, "pad": "x" * 20000}),
+        "notjson.json": "name: x\nprimary: '#112233'",          # YAML is not JSON
+        "pickle.json": b"\x80\x04\x95",
+        "latin1.json": b'{"name": "\xff"}',
+        "dupe.json": '{"name": "a", "name": "b", "primary": "#112233"}',
+        "deep.json": "[" * 5000 + "]" * 5000,
+        "nan.json": "{\"name\": \"x\", \"primary\": NaN",
+    }
+    for name, content in bad.items():
+        with pytest.raises(jav3.ThemeError):
+            jav3.validate_theme(jav3.read_theme_file(_write(tmp_path, name, content)))
+    link = tmp_path / "link.json"
+    link.symlink_to(ok)
+    with pytest.raises(jav3.ThemeError, match="symlink"):
+        jav3.read_theme_file(link)
+    with pytest.raises(jav3.ThemeError, match="regular file"):
+        jav3.read_theme_file(tmp_path)
+    os.mkfifo(tmp_path / "fifo.json")
+    with pytest.raises(jav3.ThemeError, match="regular file"):
+        jav3.read_theme_file(tmp_path / "fifo.json")          # does not hang
+
+
+def test_import_theme_stores_a_sanitised_copy(cfg, tmp_path):
+    src = _write(tmp_path, "..%2f..%2fevil name.json",
+                 json.dumps({**GOOD_THEME, "name": "Neat-1 x"}, indent=8))
+    clean, dest = jav3.import_theme(str(src))
+    assert dest == cfg / "themes" / "neat-1-x.json"
+    assert json.loads(dest.read_text()) == clean
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    with pytest.raises(jav3.ThemeError, match="exists"):
+        jav3.import_theme(str(src))                       # never replaced silently
+    # a stored file that no longer validates is skipped at startup, with a reason
+    (cfg / "themes" / "bad.json").write_text('{"name": "b", "primary": "red", "x": 1}')
+    themes, errors = jav3.load_custom_themes()
+    assert [t["name"] for t in themes] == ["Neat-1 x"] and "bad.json" in errors[0]
+
+
+async def test_tui_themes_list_import_export_create(cfg, home, tmp_path):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_fake_server([], []))
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause(0.3)
+        names = app.theme_names()
+        assert "jav3" in names and "jav3-amber" in names and "jav3-light" in names
+        assert "catppuccin-frappe" not in names and "solarized-dark" not in names
+        assert len([n for n in names if n in jav3.THEME_KEEP]) <= 12
+        src = _write(tmp_path, "t.json", json.dumps(GOOD_THEME))
+        await app.c_theme(f"import {src}")
+        assert app.theme == "My theme"
+        assert (cfg / "themes" / "my-theme.json").exists()
+        await app.c_theme("export ~/out")
+        out = json.loads((home / "out" / "My-theme.json").read_text())
+        assert out["name"] == "My theme" and out["primary"] == "#112233"
+        await app.c_theme("nord")
+        await app.c_theme("export ~/out/n.json")
+        assert json.loads((home / "out" / "n.json").read_text())["name"] == "nord-copy"
+        with pytest.raises(jav3.CliError, match="usage"):
+            await app.c_theme("import")
+        app.dispatch("/theme create")
+        assert await _modal(pilot, app, "ThemeEditor")
+        ed = app.screen
+        ed.query_one("#th-primary").value = "#ff0000"
+        await pilot.pause(0.1)
+        assert app.theme == jav3.THEME_PREVIEW              # live preview
+        ed.query_one("#th-name").value = "nord"
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+        assert "taken" in _text(ed.query_one("#dialog-hint"))
+        ed.query_one("#th-name").value = "Red one"
+        await pilot.press("ctrl+s")
+        assert await _until(pilot, lambda: app.theme == "Red one")
+        assert jav3.THEME_PREVIEW not in app.available_themes
+        assert json.loads((cfg / "themes" / "red-one.json").read_text())["primary"] == "#ff0000"
+        app.dispatch("/theme create")
+        assert await _modal(pilot, app, "ThemeEditor")
+        app.screen.query_one("#th-primary").value = "#00ff00"
+        await pilot.pause(0.1)
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: app.theme == "Red one")
