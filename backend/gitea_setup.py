@@ -331,12 +331,12 @@ def ensure_service(plan: Plan, p) -> None:
     raise SystemExit(f"gitea-setup: Gitea did not come up — journalctl --user -u {unit_name()}")
 
 
-def set_env(plan: Plan, values: dict[str, str]) -> None:
+def set_env(plan: Plan, values: dict[str, str], what: str = "Gitea") -> None:
     lines = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
     keep = [ln for ln in lines if ln.split("=", 1)[0] not in values]
     new = keep + [f"{k}={v}" for k, v in values.items()]
     if new == lines:
-        print(f"  ok    {ENV_FILE} has the Gitea settings")
+        print(f"  ok    {ENV_FILE} has the {what} settings")
         return
     plan.say(f"record {', '.join(values)} in {ENV_FILE}")
     if not plan.dry:

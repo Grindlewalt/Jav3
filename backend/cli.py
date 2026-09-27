@@ -11,6 +11,7 @@
   python -m backend.cli restore [REMOTE] [--to DIR] [--secrets|--no-secrets] [--force]
   python -m backend.cli gitea-setup [--dry-run] [--user U] [--port N] [--password-stdin]
                                    [--reset-password] [--yes]  # install/configure Gitea
+  python -m backend.cli docker-setup [--dry-run] [--rebuild] [--yes]  # build + enable Docker boxes
   python -m backend.cli import-skill <folder|https-git-url[#subdir]|clawhub:slug> [--name N] [--replace]
 """
 import asyncio
@@ -173,6 +174,9 @@ def main() -> None:
     elif len(sys.argv) >= 2 and sys.argv[1] == "gitea-setup":
         from . import gitea_setup
         gitea_setup.run(sys.argv[2:])
+    elif len(sys.argv) >= 2 and sys.argv[1] == "docker-setup":
+        from . import docker_setup
+        sys.exit(docker_setup.run(sys.argv[2:]))
     elif len(sys.argv) >= 2 and sys.argv[1] == "import-skill":
         import_skill_command(sys.argv[2:])
     elif len(sys.argv) >= 2 and sys.argv[1] in ("migrate-state", "backup", "restore"):

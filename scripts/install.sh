@@ -41,7 +41,7 @@ fi
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
 FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT=""
-DO_GITEA=1 GITEA_DRY=0
+DO_GITEA=1 GITEA_DRY=0 DO_DOCKER=1
 # $SUDO_USER is only meaningful when we are actually running under sudo. Taking
 # it unconditionally means a stale value inherited from the environment wins
 # over who we really are — which reported the wrong username inside a sandbox.
@@ -73,6 +73,7 @@ Options
   --no-gitea           skip the Gitea step (the host git server agents file pull
                        requests to; add it later: python -m backend.cli gitea-setup)
   --gitea-dry-run      print what the Gitea step would do, change nothing there
+  --no-docker          skip the Docker boxes step (add it later: python -m backend.cli docker-setup)
   --force              overwrite existing local state during --from
   --yes                do not prompt
   -h, --help           this text
@@ -91,6 +92,7 @@ while [ $# -gt 0 ]; do
     --no-image)   BUILD_IMAGE=0 ;;
     --force)      FORCE=1 ;;
     --no-gitea)   DO_GITEA=0 ;;
+    --no-docker)  DO_DOCKER=0 ;;
     --gitea-dry-run) GITEA_DRY=1 ;;
     --yes|-y)     ASSUME_YES=1 ;;
     -h|--help)    usage; exit 0 ;;
@@ -654,6 +656,22 @@ user_phase() {
 
   first_run_setup
   gitea_step
+  docker_step
+}
+
+# Docker boxes: the lighter box runtime (docs/docker-runtime.md). Optional and
+# automatic: when Docker is already installed and usable, the box image is
+# built and the runtime switched on; otherwise it says what to do and moves on.
+# Docker itself is never installed from here (no package manager: see Gitea).
+docker_step() {
+  if [ "$DO_DOCKER" != 1 ]; then ok "Docker boxes skipped (--no-docker)"; return 0; fi
+  step "docker boxes (optional, lighter than VMs)"
+  if ! have docker; then
+    ok "Docker not installed — skipping. Later: install Docker, then run $REPO_DIR/.venv/bin/python -m backend.cli docker-setup"
+    return 0
+  fi
+  .venv/bin/python -m backend.cli docker-setup --yes \
+    || warn "Docker boxes not set up — fix the line above, then re-run: $REPO_DIR/.venv/bin/python -m backend.cli docker-setup"
 }
 
 # Gitea: the host git server agents file pull requests to (docs/gitea.md).
