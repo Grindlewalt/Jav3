@@ -12,7 +12,7 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, chat, desk_a
                devices_api, egress_api, events_api,
                git_api, git_serve_api, gui, guest_shell, lan, logs_api,
                media_api, memory_api,
-               notifications_api, plan_api, projects, providers, reviewer,
+               notifications_api, permissions_api, plan_api, projects, providers, reviewer,
                reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
                vm_api, voice_api, workspace, secrets)
 from . import procview_api   # WP4
@@ -134,6 +134,7 @@ app.include_router(runs_api.jobs_router)
 app.include_router(git_api.router)
 app.include_router(git_serve_api.router)
 app.include_router(notifications_api.router)
+app.include_router(permissions_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)
 app.include_router(providers.router)

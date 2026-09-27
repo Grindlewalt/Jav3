@@ -1555,6 +1555,11 @@ def build_tui(base: str, token: str, **kw):
                 event.prevent_default()
                 app.popup_key(key)
                 return
+            if key == "shift+tab":
+                event.stop()
+                event.prevent_default()
+                app.cycle_permission()
+                return
             if key == "left" and not self.text:
                 event.stop()
                 event.prevent_default()
@@ -3129,13 +3134,15 @@ def build_tui(base: str, token: str, **kw):
         next, ← previous, 1-6 jump, ↑↓ select (detail below), esc back. Plain
         keys only (Terminal.app: no shift+arrows)."""
 
-        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles")
+        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules")
         LABELS = {"queue": "Queue", "network": "Network", "logs": "Logs",
-                  "secrets": "Secrets", "persistent": "Persistent", "profiles": "Profiles"}
+                  "secrets": "Secrets", "persistent": "Persistent", "profiles": "Profiles",
+                  "rules": "Rules"}
         EMPTY = {"queue": "nothing waits on you", "network": "no egress traffic yet",
                  "logs": "no security events", "secrets": "no secrets saved — a adds one",
                  "persistent": "no persistent processes or services reported",
-                 "profiles": "no profiles — a creates one"}
+                 "profiles": "no profiles — a creates one",
+                 "rules": "no always-allow rules (permission asks add them)"}
         COUNTED = ("queue", "secrets")    # tabs whose count shows in the header
         FOOT = {"queue": "[$primary]y[/] approve  [$primary]n[/] deny  "
                          "[$primary]a[/] acknowledge",
@@ -3148,7 +3155,8 @@ def build_tui(base: str, token: str, **kw):
                 "persistent": "[$primary]enter[/] open  [$primary]s[/] stop / start service  "
                               "[$primary]l[/] service logs  [$primary]d[/] revoke service",
                 "profiles": "[$primary]a[/] new  [$primary]e[/] edit  [$primary]p[/] assign "
-                            "to project  [$primary]d[/] delete"}
+                            "to project  [$primary]d[/] delete",
+                "rules": "[$primary]d[/] revoke the always-allow rule"}
         POLL_SECONDS = 4.0
         LIMIT = 200
         GENERAL = "__general__"          # egress.py's shared baseline policy row
@@ -3179,6 +3187,7 @@ def build_tui(base: str, token: str, **kw):
             Binding("4", "jump(3)", show=False),
             Binding("5", "jump(4)", show=False),
             Binding("6", "jump(5)", show=False),
+            Binding("7", "jump(6)", show=False),
             Binding("up,k", "move(-1)", show=False),
             Binding("down,j", "move(1)", show=False),
             Binding("pageup", "page(-1)", show=False),
@@ -3414,6 +3423,31 @@ def build_tui(base: str, token: str, **kw):
             out.sort(key=lambda x: (x["ts"], x["raw"].get("id") or 0), reverse=True)
             return out
 
+        async def _load_rules(self):
+            # permissions.py's "Yes, always allow this and similar" rules
+            rules = await self._get("rules", "rules", "/api/permissions/rules", "rules",
+                                    quiet404=True)
+            if rules is None:
+                return None
+            return [{"type": "rule", "key": f"r{r.get('id')}", "ts": r.get("created_at"),
+                     "raw": r} for r in rules]
+
+        def _detail_rule(self, e) -> str:
+            r = e["raw"]
+            return (f"[b]{_esc(str(r.get('tool')))}[/] calls starting "
+                    f"[b]{_esc(str(r.get('prefix')))}[/] run without asking in "
+                    f"{_esc(_slug_says(r.get('project_slug') or None))}.\n"
+                    "Added from a permission ask (auto / ask mode). "
+                    "[$primary]d[/] revokes it.")
+
+        async def _delete_rule(self) -> None:
+            e = self.selected()
+            if e is None or e["type"] != "rule":
+                return
+            r = e["raw"]
+            await self._send("DELETE", f"/api/permissions/rules/{r.get('id')}",
+                             f"revoked {r.get('tool')}: {r.get('prefix')}")
+
         async def _load_secrets(self):
             # GET /api/secrets is names, last-4 and bound hosts; it never
             # carries a value. Keep the name and hosts only.
@@ -3510,6 +3544,10 @@ def build_tui(base: str, token: str, **kw):
         def row_markup(e: dict, all_projects: bool = True) -> str:
             r, ts = e["raw"], (e.get("ts") or "")[5:16]
             t = e["type"]
+            if t == "rule":
+                return (f"[$accent b]RULE[/] [$text-muted]{ts}[/] "
+                        f"[b]{_esc(str(r.get('tool')))}[/] {_esc(str(r.get('prefix')))} "
+                        f"[$text-muted]in {_esc(_slug_says(r.get('project_slug') or None))}[/]")
             if t == "egress":
                 flag = " [$error b]⚑ flagged[/]" if r.get("triage_verdict") == "flag" else ""
                 return (f"[$warning b]HOST[/] [$text-muted]{ts}[/] "
@@ -3879,6 +3917,9 @@ def build_tui(base: str, token: str, **kw):
             elif self.tab == "profiles":
                 bits.append("[$text-muted]a profile is a project's security baseline: "
                             "network, secrets by name, box runtime, service placement[/]")
+            elif self.tab == "rules":
+                bits.append("[$text-muted]\"always allow\" answers to permission asks: one "
+                            "tool and one command or path prefix per project[/]")
             elif self.tab != "secrets":
                 bits.append(self.vms_sub())
             else:
@@ -4118,6 +4159,8 @@ def build_tui(base: str, token: str, **kw):
                 self._act(self._revoke_service())
             elif self.tab == "profiles":
                 self._act(self._delete_profile())
+            elif self.tab == "rules":
+                self._act(self._delete_rule())
 
         # -- actions ------------------------------------------------------------------
 
@@ -5552,6 +5595,7 @@ def build_tui(base: str, token: str, **kw):
                 bits.append(f"[$text-muted]⌂ {_esc(proj)}[/]")
             if self.ephemeral:
                 bits.append("[$warning]temporary[/]")
+            bits.append(self._perm_label())
             here = self._here()
             if here:
                 bits.append(f"[$success]local {_esc(here.get('cwd') or os.getcwd())}[/]")
@@ -5715,6 +5759,8 @@ def build_tui(base: str, token: str, **kw):
                     body["mode"] = "orchestrate"
                 if self.local:
                     body["local"] = local_spec()
+            if self.cid is None and self.perm_mode != "yolo":
+                body["permission_mode"] = self.perm_mode
             if self.model:
                 body["model"] = self.model
             return body
@@ -5987,6 +6033,43 @@ def build_tui(base: str, token: str, **kw):
                                json={"id": str(ev.get("id", "")), "ok": ok, "result": result})
             except CliError as e:
                 await self.note(f"local result not delivered: {e}", "warn")
+
+        # permission modes (backend/permissions.py): shift+tab cycles, stored per
+        # conversation; a chat not created yet sends it with its first message
+        PERM_MODES = ("yolo", "auto", "ask")
+        PERM_HINT = {"yolo": "everything runs in the VM without asking",
+                     "auto": "a cheap judge reviews each write/run; risky ones ask you",
+                     "ask": "every write/run asks you first"}
+        perm_mode = "yolo"
+
+        def _perm_label(self) -> str:
+            col = {"yolo": "$text-muted", "auto": "$accent", "ask": "$warning"}[self.perm_mode]
+            return f"[{col}]⏵ {self.perm_mode}[/]"
+
+        def cycle_permission(self) -> None:
+            modes = self.PERM_MODES
+            self.perm_mode = modes[(modes.index(self.perm_mode) + 1) % len(modes)]
+            self.refresh_chrome()
+            self.run_worker(self._save_perm_mode(self.cid, self.perm_mode), group="perm")
+
+        async def _save_perm_mode(self, cid, mode: str) -> None:
+            if cid is not None and not self.ephemeral:
+                try:
+                    await self.api("PUT", f"/api/chat/{cid}/permission_mode",
+                                   json={"mode": mode})
+                except CliError as e:
+                    await self.note(f"permission mode not saved: {e}", "error")
+                    return
+            await self.note(f"permissions: {mode} — {self.PERM_HINT[mode]}")
+
+        async def _load_perm_mode(self, cid: int) -> None:
+            try:
+                r = await self.api("GET", f"/api/chat/{cid}/permission_mode")
+            except CliError:
+                return                  # an older server: the default holds
+            if self.cid == cid and r.get("mode") in self.PERM_MODES:
+                self.perm_mode = r["mode"]
+                self.refresh_chrome()
 
         async def _ask_user(self, ev: dict, cid: int | None) -> None:
             """ask_user / a permission ask: show the dialog once per ask id and
@@ -6698,6 +6781,7 @@ def build_tui(base: str, token: str, **kw):
             self.project = meta.get("project_slug") or None
             self.project_mode = "pin" if self.project else None
             self.todos, self.last_reply = [], ""
+            self.run_worker(self._load_perm_mode(cid), group="perm")
             await self.clear_log()
             msgs = [m for m in r.get("messages", []) if m.get("role") in ("user", "assistant")]
             if len(msgs) > 60:

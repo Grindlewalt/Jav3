@@ -105,3 +105,74 @@ async def test_enter_takes_the_cursor_row():
     assert got == [{"id": "ask_1", "answers": [
         {"selected": ["Postgres"], "text": None},
         {"selected": ["api"], "text": None}]}]
+
+
+async def test_shift_tab_cycles_permission_mode_and_permission_ask():
+    posted, puts, answers = [], [], []
+    always = "Yes, always allow this and similar commands (run_code: npm test)"
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/auth/me":
+            return httpx.Response(200, json={"username": "op", "access": "chat"})
+        if path == "/api/chat/options":
+            return httpx.Response(200, json={"default": "deepseek/deepseek-flash",
+                                             "models": [], "projects": [], "agents": []})
+        if path == "/api/conversations":
+            return httpx.Response(200, json={"conversations": []})
+        if path.endswith("/info"):
+            return httpx.Response(200, json={"title": "t", "files": []})
+        if path == "/api/chat/4/permission_mode" and request.method == "PUT":
+            puts.append(json.loads(request.content))
+            return httpx.Response(200, json={"mode": puts[-1]["mode"], "explicit": True})
+        if path == "/api/chat":
+            posted.append(json.loads(request.content))
+            evs = [{"type": "start", "conversation_id": 4},
+                   {"type": "ask_user", "id": "ask_p", "conversation_id": 4,
+                    "kind": "permission", "tool": "run_code", "reason": "judged risky",
+                    "detail": "npm test", "free_text_label": "No, tell the agent what to do instead",
+                    "questions": [{"question": "Run in the VM: npm test",
+                                   "options": ["Yes", always], "multi_select": False}]},
+                   {"type": "final", "content": "ok", "conversation_id": 4}]
+            body = "".join(f"data: {json.dumps(ev)}\n\n" for ev in evs)
+            return httpx.Response(200, text=body,
+                                  headers={"content-type": "text/event-stream"})
+        if path == "/api/chat/4/answer":
+            answers.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(404, json={"detail": "nope"})
+
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=httpx.MockTransport(handler))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        assert app.perm_mode == "yolo"
+        await pilot.press("shift+tab")
+        await pilot.pause(0.05)
+        assert app.perm_mode == "auto" and puts == []        # no chat yet: nothing saved
+        app.editor.text = "test it"
+        await pilot.press("enter")
+        for _ in range(60):
+            await pilot.pause(0.05)
+            if type(app.screen).__name__ == "AskUser":
+                break
+        scr = app.screen
+        assert type(scr).__name__ == "AskUser"
+        type(scr).GRACE = 0
+        head, rows = scr.markup(scr.ev, scr.qs, 0, 0, set(), "", scr.free_label)
+        assert "Permission" in head and "judged risky" in head and "npm test" in head
+        assert "No, tell the agent" in rows
+        await pilot.press("2")
+        await pilot.press("enter")
+        for _ in range(60):
+            await pilot.pause(0.05)
+            if answers:
+                break
+        await pilot.pause(0.2)
+        await pilot.press("shift+tab")
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if puts:
+                break
+    assert posted[0]["permission_mode"] == "auto"
+    assert answers == [{"id": "ask_p", "answers": [{"selected": [always], "text": None}]}]
+    assert puts == [{"mode": "ask"}]
