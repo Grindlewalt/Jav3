@@ -61,7 +61,8 @@ class VsockModelClient:
                 elif kind == "error":
                     if ev.get("error") == "BudgetExceeded":
                         raise BudgetExceeded(ev.get("message", ""))
-                    raise ModelError(ev.get("message", ""))
+                    raise ModelError(f"{ev.get('error') or 'error'}: "
+                                     f"{ev.get('message') or '(no detail)'}")
         finally:
             s.close()
 

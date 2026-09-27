@@ -91,8 +91,10 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
         await _send(loop, conn, {"type": "error",
                                  "error": type(e).__name__, "message": str(e)})
     except Exception as e:  # noqa: BLE001 — one bad call must not kill the server
+        # str() of a timeout or a dropped stream is often "", which reached the
+        # operator as "ModelError: " with no clue (2026-09-27)
         await _send(loop, conn, {"type": "error",
-                                 "error": type(e).__name__, "message": str(e)})
+                                 "error": type(e).__name__, "message": str(e) or repr(e)})
 
 
 async def _handle_tool_broker_call(loop, conn, req: dict, box=None) -> None:
