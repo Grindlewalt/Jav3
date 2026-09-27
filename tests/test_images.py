@@ -265,6 +265,17 @@ async def test_build_failure_keeps_old_version(db, monkeypatch):
     assert not list(settings.vm_dir.glob("*.part"))
     async with db.execute("SELECT status FROM image_versions WHERE variant='tools'") as c:
         assert (await c.fetchone())[0] == "failed"
+    # a page opened later still sees why it failed
+    lb = next(v for v in (await images.list_images(db))["variants"]
+              if v["name"] == "tools")["last_build"]
+    assert lb["ok"] is False and "integrity" in lb["error"] and lb["version"] == 1
+    assert lb["log_tail"] == ["hello"] and lb["finished_at"]
+    assert images._last_build({"version": 2, "status": "built", "built_at": "t",
+                               "build_log": "a\nERROR: guest line"})["error"] is None
+    long = {"version": 3, "status": "failed", "built_at": "t",
+            "build_log": "\n".join(str(i) for i in range(500)) + "\nERROR: boom"}
+    lb = images._last_build(long)
+    assert lb["error"] == "boom" and len(lb["log_tail"]) == 200 and lb["log_tail"][-1] == "499"
     b = boxes.allocate("project", project="p1", variant="tools")
     assert images.resolve_image(b) is None
 

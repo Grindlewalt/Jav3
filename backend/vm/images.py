@@ -852,6 +852,28 @@ builder = Builder()
 
 # --- API views -------------------------------------------------------------------
 
+LAST_BUILD_LINES = 200
+
+
+def _last_build(r: dict | None) -> dict | None:
+    """The most recent finished build of a variant, from its version row (so it
+    survives a restart): {ok, error, finished_at, log_tail: [<= 200 lines]}.
+    The log lines are untrusted guest output."""
+    if r is None:
+        return None
+    log, err = r.get("build_log") or "", None
+    ok = r["status"] == "built"
+    if not ok:
+        # build() appends "\nERROR: <err>" to a failed build's log. Only a
+        # failed row is parsed, so a guest line cannot forge an error on a good one.
+        if "\nERROR: " in log:
+            log, err = log.rsplit("\nERROR: ", 1)
+        err = err or "build failed"
+    lines = log.splitlines()
+    return {"version": r["version"], "ok": ok, "error": err,
+            "finished_at": r["built_at"], "log_tail": lines[-LAST_BUILD_LINES:]}
+
+
 async def list_images(db) -> dict:
     from .. import packages
     info = await sync_variants(db)
@@ -875,13 +897,15 @@ async def list_images(db) -> dict:
                          "recipe_sha256": r["recipe_sha256"],
                          "in_use_by": sorted(set(ids))})
         active = next((r for r in vers if r["active"]), None)
+        done = next((r for r in vers if r["status"] in ("built", "failed")), None)
         out.append({"name": name, "from": v["from"], "builtin": v["builtin"],
                     "recipe": render_recipe({**v["own"], "packages": v["effective"]}),
                     "recipe_sha256": v["sha"], "min_mem_mb": v["min_mem_mb"],
                     "layer_packages": [_pin(p) for p in v["layer"]],
                     "needs_build": bool(v["layer"]) and (active is None or
                                                          active["recipe_sha256"] != v["sha"]),
-                    "used_by": used["all"], "versions": rows})
+                    "used_by": used["all"], "versions": rows,
+                    "last_build": _last_build(done)})
     return {"variants": out, "build": builder.state()}
 
 

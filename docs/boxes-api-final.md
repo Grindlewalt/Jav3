@@ -203,9 +203,15 @@ A row is:
   ```
   {variants: [{name, from, builtin, recipe, recipe_sha256, min_mem_mb, layer_packages,
                needs_build, used_by: [slugs], versions: [{version, base_version,
-               size_bytes, built_at, status, active, recipe_sha256, in_use_by: [box ids]}]}],
+               size_bytes, built_at, status, active, recipe_sha256, in_use_by: [box ids]}],
+               last_build: {version, ok, error: str|null, finished_at, log_tail: [str]} | null}],
    build: {running, variant, mode, phase, log_tail: [str]}}
   ```
+  `build` is the build in progress (its last 20 lines). `last_build` is the
+  variant's most recent FINISHED build (built or failed), read from its version
+  row, so it survives the page being opened later and a restart: `error` says
+  why it failed, and `log_tail` holds up to the last 200 log lines (untrusted
+  text). `null` until the variant has finished a build.
 - `POST /api/vm/images {name, from, packages: [{manager, package, version}]}` returns
   `{name, from, recipe_sha256, ...}`.
 - `POST /api/vm/images/{variant}/build {confirm: true}` returns `{started: true, variant}`.
