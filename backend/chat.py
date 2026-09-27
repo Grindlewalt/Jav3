@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, providers, runtime
+from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, providers, runtime
 from .agent import budget
 from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
 from .agent.loop import db_tool_sink
@@ -1042,6 +1042,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # a /local call still waiting on the client dies with its turn (stop,
         # revoke, barge-in all end here) instead of holding the guest's round
         localexec.cancel_conversation(conversation_id)
+        operator_ask.cancel_conversation(conversation_id)
         bus.close_job(chan)
 
 
@@ -1098,6 +1099,8 @@ async def resume_chat_stream(conversation_id: int):
     # that is gone; hand this one what is still waiting for an answer
     for ev in localexec.pending_events(conversation_id):
         bus.publish_to(q, ev)
+    for ev in operator_ask.pending_events(conversation_id):
+        bus.publish_to(q, ev)
     return _tail(conversation_id, q)
 
 
@@ -1119,6 +1122,8 @@ async def _stream_node(cid: int) -> StreamingResponse:
     chan = vm_turn.node_chan(cid)
     q = bus.subscribe(chan)
     if cid in vm_turn.live_nodes():
+        for ev in operator_ask.pending_events(cid):
+            bus.publish_to(q, ev)
         return _tail(cid, q, chan)
     bus.unsubscribe(chan, q)
     db = await get_db()
@@ -1424,6 +1429,27 @@ async def local_result(conversation_id: int, body: LocalResult,
     got = localexec.resolve(conversation_id, body.id, body.ok, text, actor_key(actor))
     if got != "ok":
         raise HTTPException(status_code=404, detail="no such pending local call")
+    return {"ok": True}
+
+
+class AskAnswer(BaseModel):
+    id: str
+    answers: list | None = None
+    skipped: bool = False
+
+
+@router.post("/chat/{conversation_id}/answer")
+async def answer_ask(conversation_id: int, body: AskAnswer,
+                     actor: dict = Depends(require_actor)):
+    """The operator's answer to an `ask_user` event (operator_ask.py): posted
+    to the asking conversation or to an ancestor that showed it. 404 when
+    nothing waits under that id; 422 when the answers do not fit the
+    questions."""
+    got = operator_ask.answer(conversation_id, body.id, body.answers, body.skipped)
+    if got == "missing":
+        raise HTTPException(status_code=404, detail="no such pending question")
+    if got == "invalid":
+        raise HTTPException(status_code=422, detail="answers do not match the questions")
     return {"ok": True}
 
 

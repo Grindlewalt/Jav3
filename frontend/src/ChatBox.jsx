@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
 import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
 import { useAsk } from './ask.jsx'
+import { AskPanel, useOperatorAsks } from './AskUser.jsx'
 import Button from './components/Button.jsx'
 import Menu, { MenuItem, MenuSep } from './components/Menu.jsx'
 import Tag from './components/Tag.jsx'
@@ -32,6 +33,7 @@ export default function ChatBox({ projectSlug }) {
   const bottomRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
   const ask = useAsk()
+  const asks = useOperatorAsks(cid)          // ask_user / permission asks
 
   useEffect(() => () => tailAbort.current?.abort(), [])
   // the roster for the picker; failure just leaves it Jav3-only
@@ -41,6 +43,7 @@ export default function ChatBox({ projectSlug }) {
 
   // shared by the live POST stream and a resumed background-turn tail
   function handleTurnEvent(ev) {
+    asks.onEvent(ev)
     if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
       setMessages((m) => {
         const copy = [...m]
@@ -247,6 +250,7 @@ export default function ChatBox({ projectSlug }) {
         ))}
         <div ref={bottomRef} />
       </div>
+      <AskPanel asks={asks} cid={cid} compact />
       {peakAsk && (
         <div className="peak-ask compact" role="alertdialog"
              aria-label="peak pricing confirmation">

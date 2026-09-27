@@ -97,9 +97,11 @@ async def notifications():
     sched = await _schedules_pending()
     sec = await _security_pending()
     shell = await _desk_pending()
+    from . import operator_ask
+    asks = operator_ask.pending_list()      # ask_user / permission asks
     return {
-        "count": (len(git) + len(sched) + len(shell)
+        "count": (len(git) + len(sched) + len(shell) + len(asks)
                   + sec["alerts"] + sec["egress_pending"]),
-        "git": git, "schedules": sched, "desk_shell": shell,
+        "git": git, "schedules": sched, "desk_shell": shell, "asks": asks,
         "alerts": sec["alerts"], "egress_pending": sec["egress_pending"],
     }

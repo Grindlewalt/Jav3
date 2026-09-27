@@ -211,6 +211,12 @@ async def collect_needs(db, plans: Plans) -> dict[int, str]:
         add(cid, 0, f"waiting on your answer: {p.event['name']}"
                     + (f" {' '.join(str(what).split())}" if what else ""))
 
+    # ask_user / a permission ask (operator_ask.py): parked on the operator
+    from . import operator_ask
+    for a in operator_ask.pending_list():
+        add(a["conversation_id"], 0, ("waiting on your answer: " if a["kind"] != "permission"
+                                      else "waiting on your permission: ") + a["question"])
+
     _plan_needs(plans, add)
 
     async with db.execute(
