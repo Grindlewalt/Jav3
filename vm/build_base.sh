@@ -127,6 +127,23 @@ ${pkg_yaml}write_files:
       StandardError=journal+console
       [Install]
       WantedBy=multi-user.target
+  # Finishes the removal below AFTER cloud-init has exited: started (never
+  # enabled) from runcmd, ordered Before=cloud-final so systemd stops it --
+  # running ExecStop -- only once cloud-final is down, at the provisioning
+  # poweroff. Purging cloud-init while it runs killed the build before; leaving
+  # it with unmet Depends made every later `apt-get install` exit 100 (e2e
+  # BUG-9). It prints JAV3-DPKG-OK / JAV3-DPKG-BROKEN for step [4/5].
+  - path: /etc/systemd/system/jav3-finish-purge.service
+    content: |
+      [Unit]
+      Description=Jav3: purge cloud-init at the provisioning poweroff
+      Before=cloud-final.service
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      TimeoutStopSec=300
+      ExecStart=/bin/true
+      ExecStop=/bin/sh -c 'dpkg --purge --force-depends cloud-init >/dev/console 2>&1; if apt-get check >/dev/console 2>&1; then echo JAV3-DPKG-OK >/dev/console; else echo JAV3-DPKG-BROKEN >/dev/console; fi; rm -f /etc/systemd/system/jav3-finish-purge.service'
 runcmd:
   - systemctl disable systemd-networkd-wait-online.service || true
   - systemctl mask systemd-networkd-wait-online.service || true
@@ -136,8 +153,12 @@ runcmd:
   # dpkg --force-depends, NOT apt: cloud-init hard-depends on ssh-import-id ->
   # openssh-client, so an apt purge removes cloud-init out from under this
   # very provisioning run (it died pre-poweroff and the build hung). dpkg
-  # leaves cloud-init installed with an unmet dep record nothing ever reads.
+  # leaves cloud-init installed with an unmet dep record -- which apt DOES
+  # read (every later install exits 100), so jav3-finish-purge removes
+  # cloud-init itself at the poweroff, once it has finished running.
   - dpkg --purge --force-depends openssh-server openssh-sftp-server openssh-client ssh-import-id socat tcpdump netcat-openbsd || true
+  - systemctl daemon-reload
+  - systemctl start --no-block jav3-finish-purge.service
   - systemctl enable jarvis-guest.service
   - /usr/local/sbin/jav3-baseline || true
   - rm -f /usr/local/sbin/jav3-baseline
@@ -171,6 +192,10 @@ timeout 1800 "$QEMU_BIN" \
 echo "== [4/5] verify provisioning =="
 grep -q 'provisioning complete\|jarvis-provisioned\|reached target.*Power-Off\|Power down' provision-console.log \
   || { echo "provisioning may have failed — see $VM_DIR/provision-console.log" >&2; exit 1; }
+# not fatal: the image builder repairs a leftover cloud-init record itself
+# (backend/vm/builder_guest.repair_dpkg), but say so
+grep -q 'JAV3-DPKG-OK' provision-console.log \
+  || echo "WARNING: cloud-init purge not confirmed (no JAV3-DPKG-OK in provision-console.log); apt layers repair it at build time" >&2
 
 echo "== [5/5] freeze read-only golden image =="
 mv base-work.qcow2 "$BASE"

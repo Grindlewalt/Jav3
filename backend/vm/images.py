@@ -737,7 +737,7 @@ class Builder:
             try:
                 if layer:
                     report = await self._run_box(job)
-                    err = None if report.get("ok") else (_s(report.get("error"), 500) or "build failed")
+                    err = None if report.get("ok") else (_s_tail(report.get("error"), 2000) or "build failed")
                     if not err and not report.get("_clean_poweroff"):
                         err = "the builder did not power off cleanly; layer discarded"
                     part = Path(report["_part"]) if report.get("_part") else None
@@ -778,7 +778,7 @@ class Builder:
                 await security.raise_event(
                     db, kind="image_variant_built", severity="warn" if err else "info",
                     summary=(f"image variant `{variant}` v{version} "
-                             f"{'FAILED: ' + err[:200] if err else 'built'} "
+                             f"{'FAILED: ' + _s_tail(err, 300) if err else 'built'} "
                              f"(used by: {', '.join(used['all']) or 'none'})"),
                     detail={"variant": variant, "version": version, "ok": not err,
                             "base_version": base_version, "recipe_sha256": info["sha"],
@@ -813,6 +813,16 @@ def _s(v, n: int) -> str | None:
     if not isinstance(v, str):
         return None
     return "".join(ch for ch in v if ch.isprintable())[:n] or None
+
+
+def _s_tail(v, n: int) -> str | None:
+    """_s for an error: apt/dpkg print the root cause LAST, so a long one keeps
+    its head (what failed) and its tail (why), not just the head (e2e BUG-9)."""
+    t = _s(v, 1 << 20)
+    if t is None or len(t) <= n:
+        return t
+    head = min(200, n // 4)
+    return t[:head] + " [...] " + t[-(n - head - 7):]
 
 
 def _sanitize_baseline(bl) -> dict:
