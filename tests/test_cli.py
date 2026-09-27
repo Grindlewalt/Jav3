@@ -2846,3 +2846,28 @@ async def test_tui_new_commands_complete_and_are_in_help(cfg):
         assert await _modal(pilot, app, "Help")
         md = app.screen.text
         assert "/stop-all" in md and "/screenshot" in md and "/theme create" in md
+
+
+async def test_history_recall_does_not_trap_arrows_in_the_slash_menu(cfg):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_fake_server([], []))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.history[:] = ["first message", "/models", "last message"]
+        await pilot.press("up")                      # last message
+        await pilot.press("up")                      # /models: recalled, no menu
+        await pilot.pause(0.1)
+        assert app.editor.text == "/models" and not app.popup_open()
+        await pilot.press("up")                      # still walks history
+        await pilot.pause(0.1)
+        assert app.editor.text == "first message"
+        await pilot.press("down", "down", "down")
+        await pilot.pause(0.1)
+        # typing reopens the menu; ↑ at its top goes back into history
+        app.editor.text = ""
+        await pilot.press("/", "m")
+        await pilot.pause(0.1)
+        assert app.popup_open()
+        await pilot.press("up")
+        await pilot.pause(0.1)
+        assert not app.popup_open() and app.editor.text == "last message"

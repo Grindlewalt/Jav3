@@ -5578,6 +5578,11 @@ def build_tui(base: str, token: str, **kw):
             else:
                 self.hist_pos = pos
                 ed.text = self.history[pos]
+            # text recalled from history must not open the slash menu, or the
+            # next arrow key drives the menu instead of walking history; it
+            # opens again as soon as the operator types (the text then differs)
+            self._hist_text = ed.text
+            self.hide_popup()
             ed.move_cursor(ed.document.end)
             return True
 
@@ -6423,6 +6428,9 @@ def build_tui(base: str, token: str, **kw):
             ed = self.editor
             text = ed.text
             pop = self.query_one("#popup", OptionList)
+            if self.hist_pos is not None and text == getattr(self, "_hist_text", None):
+                pop.display = False
+                return
             items: list[tuple[str, str, str]] = []     # (kind, value, label markup)
             if text.startswith("/") and "\n" not in text:
                 if " " not in text:
@@ -6484,7 +6492,12 @@ def build_tui(base: str, token: str, **kw):
             if key == "escape":
                 self.hide_popup()
             elif key == "up":
-                pop.action_cursor_up()
+                # at the top of the menu, ↑ keeps going: back into history
+                if not pop.option_count or (pop.highlighted or 0) == 0:
+                    self.hide_popup()
+                    self.history_step(-1)
+                else:
+                    pop.action_cursor_up()
             elif key == "down":
                 pop.action_cursor_down()
             elif key in ("tab", "enter"):
