@@ -1,0 +1,6 @@
+{
+  "name": "jav3-browser",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/verbs.test.mjs" }
+}
