@@ -9,6 +9,8 @@
   python -m backend.cli migrate-state [--to DIR]     # move checkout state to the state dir
   python -m backend.cli backup [--if-configured]     # rclone the state to the remote
   python -m backend.cli restore [REMOTE] [--to DIR] [--secrets|--no-secrets] [--force]
+  python -m backend.cli gitea-setup [--dry-run] [--user U] [--port N] [--password-stdin]
+                                   [--reset-password] [--yes]  # install/configure Gitea
   python -m backend.cli import-skill <folder|https-git-url[#subdir]|clawhub:slug> [--name N] [--replace]
 """
 import asyncio
@@ -168,6 +170,9 @@ def main() -> None:
         services_check()
     elif len(sys.argv) >= 2 and sys.argv[1] == "paths":
         paths(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif len(sys.argv) >= 2 and sys.argv[1] == "gitea-setup":
+        from . import gitea_setup
+        gitea_setup.run(sys.argv[2:])
     elif len(sys.argv) >= 2 and sys.argv[1] == "import-skill":
         import_skill_command(sys.argv[2:])
     elif len(sys.argv) >= 2 and sys.argv[1] in ("migrate-state", "backup", "restore"):

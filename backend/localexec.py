@@ -62,7 +62,7 @@ _SANDBOX_TOOLS = frozenset({"read_file", "write_file", "edit_file", "list_files"
                             "search_codebase", "crawl_codebase", "run_code",
                             "dashboard", "todo_update", "load_project",
                             "workspace_panel", "journal_update", "git_status",
-                            "git_diff", "git_commit_request", "git_remote_request",
+                            "git_diff", "git_commit_request", "git_remote_request", "git_push_request",
                             "deploy_agents", "orchestrate", "research",
                             # a child turn runs in the guest with the sandbox
                             # tools and would report guest paths as if local

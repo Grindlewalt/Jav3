@@ -218,3 +218,31 @@ async def test_api_round_trip(tmp_env):
         assert r.status_code == 200 and r.json()["allow"] == ["10.0.0.60:8123"]
         ev = (await c.get("/api/security/events")).json()["events"]
         assert any(e["kind"] == "lan_access_changed" for e in ev)
+
+
+# --- the host's Gitea is always refused -------------------------------------------
+
+async def test_gitea_always_refused(db, monkeypatch):
+    """Boxes never reach the host's Gitea: by its LAN IP (the host itself), by
+    its configured name on any port, or on loopback — even with LAN access on
+    and a range covering the host, and even for a name on the domain allowlist."""
+    from backend import egress
+    from backend.config import settings
+    monkeypatch.setattr(settings, "gitea_url", "http://gitbox.lan:3000")
+    monkeypatch.setattr(settings, "gitea_port", 3000)
+    monkeypatch.setitem(DNS, "gitbox.lan", ["93.184.216.40"])   # even a public answer
+    assert (await lanaccess.set_(db, "home", enabled=True, allow=["10.0.0.0/24"]))["ok"]
+    await egress.allow_host(db, "home", "gitbox.lan")
+    for host, port in ((HOST_IP, "3000"), ("gitbox.lan", "3000"), ("gitbox.lan", "443"),
+                       ("127.0.0.1", "3000"), ("localhost", "3000"), ("10.201.0.1", "3000")):
+        v, reason, pin = await ep._authorize_target(host, port, _att())
+        assert v == "deny" and pin is None, (host, port, reason)
+    v, reason, _ = await ep._authorize_target(HOST_IP, "3000", _att())
+    assert "Gitea" in reason
+    v, reason, _ = await ep._authorize_target("gitbox.lan", "443", _att())
+    assert "Gitea" in reason
+    # a shared box and a service get the same refusal
+    for att in (_att(None, "shared"), _att("home", "service")):
+        assert (await ep._authorize_target("gitbox.lan", "3000", att))[0] == "deny"
+    # other LAN hosts on the same port are not caught by the Gitea rule
+    assert (await ep._authorize_target("10.0.0.60", "3000", _att()))[0] == "allow"

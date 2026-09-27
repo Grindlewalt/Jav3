@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS fetched_urls (
 CREATE TABLE IF NOT EXISTS git_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_slug TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'commit',      -- commit | remote (connect+push)
+    kind TEXT NOT NULL DEFAULT 'commit',      -- commit | remote (connect+push) | push (Gitea PR)
     message TEXT NOT NULL,           -- commit message, or the remote URL
     paths TEXT,                      -- JSON array or NULL = all changes
     status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
@@ -604,6 +604,12 @@ async def init_db() -> None:
             # agents tree can show that node as waiting on the operator. NULL
             # for a request filed over HTTP, or one from before this column.
             await db.execute("ALTER TABLE git_requests ADD COLUMN conversation_id INTEGER")
+        # kind 'push' (backend/gitea.py): the agent's branch + Gitea pull
+        # request it opened, and a diff summary for the Review Center
+        for col, typ in (("branch", "TEXT"), ("pr_number", "INTEGER"),
+                         ("pr_url", "TEXT"), ("summary", "TEXT")):
+            if col not in gcols:
+                await db.execute(f"ALTER TABLE git_requests ADD COLUMN {col} {typ}")
         # triage reviewer verdict columns on the two queue tables
         for table in ("egress_pending", "security_events"):
             async with db.execute(f"PRAGMA table_info({table})") as cur:

@@ -116,6 +116,22 @@ class Settings(BaseSettings):
     # The committer email on every commit Jav3 makes in a project repo.
     git_author_email: str = "jav3@localhost"
 
+    # Gitea on the host (backend/gitea.py, docs/gitea.md): a systemd --user
+    # service from the pinned static binary, SQLite, HTTP only. OFF until
+    # `python -m backend.cli gitea-setup` (or the installer) has run; off means
+    # every git path behaves exactly as without it. The API is always called
+    # host-side on 127.0.0.1:<gitea_port>; gitea_url is the address the
+    # operator's browser uses for links (empty = http://<first LAN IP>:<port>).
+    gitea_enabled: bool = False
+    gitea_port: int = 3000
+    gitea_url: str = ""
+    gitea_owner: str = ""            # the operator's Gitea username (= Jav3's)
+    gitea_bot_user: str = "jav3-agent"
+    gitea_dir: Path | None = None    # default <state_dir>/gitea
+    # 0600 files next to the env file; read host-side only, never in a box
+    gitea_admin_token_path: Path = CONFIG_DIR / "gitea-admin.token"
+    gitea_bot_token_path: Path = CONFIG_DIR / "gitea-bot.token"
+
     # Operator API keys the agent uses by {{secret:NAME}} placeholder but
     # never sees (backend/secrets.py). Lives next to the env file.
     secrets_path: Path = CONFIG_DIR / "secrets.json"
@@ -693,6 +709,8 @@ class Settings(BaseSettings):
             self.db_path = self.data_dir / "jarvis.db"
         if "vm_dir" not in explicit or self.vm_dir is None:
             self.vm_dir = self.data_dir / "vm"
+        if "gitea_dir" not in explicit or self.gitea_dir is None:
+            self.gitea_dir = root / "gitea"
         return self
 
     @property

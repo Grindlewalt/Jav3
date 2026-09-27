@@ -561,7 +561,7 @@ ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files"
                             "todo_update", "deploy_agents"})
 
 # a turn that used any of these did real project work — journal-worthy
-_JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request"})
+_JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request", "git_push_request"})
 
 
 async def _link_tool_calls(db, conversation_id: int, before_id: int | None,

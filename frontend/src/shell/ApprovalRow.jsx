@@ -50,15 +50,21 @@ export default function ApprovalRow({ a, acting, onDecide, onReview }) {
     return (
       <div className="sh-approval" role="group" aria-label="git request">
         <div className="sh-approval-what">
-          <span className="sh-approval-kind">{a.git_kind === 'remote' ? 'Push' : 'Commit'}</span>
+          <span className="sh-approval-kind">
+            {a.git_kind === 'remote' ? 'Push' : a.git_kind === 'push' ? 'Pull request' : 'Commit'}</span>
           <span className="sh-approval-main sh-clamp" title={a.message}>{subject}</span>
           {body && <span className="sh-approval-note sh-clamp">{body}</span>}
           <span className="sh-approval-note">
             {a.git_kind === 'remote' ? 'connect this remote and push'
-              : files?.length ? `${files.length} file${files.length > 1 ? 's' : ''}`
-                : 'all changes'}</span>
+              : a.git_kind === 'push'
+                ? `${a.branch} → main${a.summary ? ` · ${a.summary.split('\n').pop()}` : ''}`
+                : files?.length ? `${files.length} file${files.length > 1 ? 's' : ''}`
+                  : 'all changes'}</span>
         </div>
         <div className="sh-approval-acts">
+          {a.git_kind === 'push' && a.pr_url && (
+            <a className="sh-approval-note" href={a.pr_url} target="_blank"
+               rel="noreferrer">Open in Gitea ↗</a>)}
           {onReview && <Button variant="ghost" onClick={() => onReview(a)}>Review</Button>}
           <Button disabled={busy} onClick={() => onDecide(a, 'approve')}>Approve</Button>
           <Button variant="ghost" danger disabled={busy}

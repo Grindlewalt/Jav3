@@ -24,7 +24,7 @@ from .tools import registry
 # what it changed, so eviction never touches them (reads are disposable,
 # writes are load-bearing).
 WRITE_PINNED = frozenset({"write_file", "edit_file", "journal_update",
-                          "memory_write", "git_commit_request",
+                          "memory_write", "git_commit_request", "git_push_request",
                           "create_agent", "schedule_update", "run_code"})
 
 # Delegation tools whose successful results carry a trust note: the observed
