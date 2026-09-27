@@ -340,3 +340,17 @@ async def test_naming_failure_is_silent(client, monkeypatch):
             assert (await cur.fetchone())["title"] is None
     finally:
         await db.close()
+
+
+# --- GET /api/chat/running (the web sidebar's Active group) -------------------------
+
+async def test_running_lists_in_flight_conversations_only(client):
+    a = await _conv(title="streaming")
+    await _conv(title="idle")
+    r = await client.get("/api/chat/running")
+    assert r.status_code == 200 and r.json() == {"running": []}
+    chat_mod._active_turns[a] = object()
+    try:
+        assert (await client.get("/api/chat/running")).json() == {"running": [a]}
+    finally:
+        chat_mod._active_turns.pop(a, None)

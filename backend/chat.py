@@ -1343,6 +1343,15 @@ async def _tree_groups(db, roots: list[int], live: set[int], needs: dict,
     return out
 
 
+@router.get("/chat/running")
+async def running_ids():
+    """Ids of every conversation with a loop in flight right now, and nothing
+    else: no DB read, so the web sidebar's Active group can poll it cheaply.
+    GET /api/chat/agents?scope=active leaves out a plain chat whose own turn
+    is streaming (it is not agent work); this is how the sidebar sees those."""
+    return {"running": sorted(_running_loops())}
+
+
 @router.get("/chat/agents")
 async def agents_tree(scope: Literal["active", "finished", "all"] = "active",
                       limit: int = agenttree.FINISHED_DEFAULT, offset: int = 0):
