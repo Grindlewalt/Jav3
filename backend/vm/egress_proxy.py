@@ -157,9 +157,21 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
 IMAGE_BUILD_SLUG = egress.IMAGE_BUILD
 
 
+def _service_id(att: dict, host: str) -> int | None:
+    """The service a service-box connection belongs to. A per_service box has
+    one; a per_project / shared box hosts several, so it is the one whose
+    approved egress_hosts list this host (or the box's only service), never
+    left null when it can be known (e2e BUG-7)."""
+    if att.get("service_id") is not None or att.get("kind") != "service":
+        return att.get("service_id")
+    from . import services
+    return services.service_for_host(att["box_id"], host)
+
+
 async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None = None):
     att = att or attribute()
     slug = att["project"]
+    service_id = _service_id(att, host)
     db = await get_db()
     try:
         await egress.record_event(db, slug=slug, host=host, method=method,
@@ -167,9 +179,13 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
                                   reason=reason, op_id=att["op_id"],
                                   conversation_id=att["conversation_id"],
                                   peer_ip=att["peer_ip"], peer_port=att["peer_port"],
-                                  box_id=att["box_id"], service_id=att["service_id"])
-        # service traffic never trains a queue: widening is editing the service
-        if verdict == "deny" and att["kind"] not in ("service", "builder"):
+                                  box_id=att["box_id"], service_id=service_id)
+        # service traffic never trains a queue: widening is editing the service.
+        # Only an UNDECIDED host is queued: one on a project/profile deny list,
+        # an offline profile, a cut or the SSRF floor already has its answer
+        # (e2e BUG-5: explicitly denied hosts showed up in pending)
+        if (verdict == "deny" and reason == egress.NOT_LISTED
+                and att["kind"] not in ("service", "builder")):
             await egress.note_denied(db, slug or egress.GENERAL, host,
                                      box_id=att["box_id"])
         if verdict == "allow":
@@ -183,7 +199,7 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
                 await egress.record_event(db, slug=slug, host=host, verdict="cut",
                                           reason=f"auto-cut: {a['kind']}", op_id=att["op_id"],
                                           peer_ip=att["peer_ip"], peer_port=att["peer_port"],
-                                          box_id=att["box_id"], service_id=att["service_id"])
+                                          box_id=att["box_id"], service_id=service_id)
     finally:
         await db.close()
 

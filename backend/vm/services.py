@@ -1416,6 +1416,18 @@ def egress_allowed_hosts(box_id: str) -> dict[str, list[int]]:
     return dict(_box_egress.get(box_id, {}))
 
 
+def service_for_host(box_id: str | None, host: str) -> int | None:
+    """Which running service in this box a connection to `host` is for: the
+    lowest id whose approved egress_hosts match it, else the box's only
+    service. None when it cannot be told (several services, none listed it)."""
+    allowed = _box_egress.get(box_id or "") or {}
+    sids = sorted({i for h, ids in allowed.items() if _host_match(host, [h]) for i in ids})
+    if sids:
+        return sids[0]
+    every = {i for ids in allowed.values() for i in ids}
+    return next(iter(every)) if len(every) == 1 else None
+
+
 async def egress_decide(box_id: str, host: str) -> dict:
     """The verdict for one connection from a service box. Deny-by-default,
     whatever the profile says: allowed only if some running service in the
