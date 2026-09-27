@@ -4,7 +4,9 @@ the browser_* tool handlers — scope, per-project grants, the closed verb list,
 read-before-act, pause/cancel, taint, routing and the extension zip."""
 import asyncio
 import base64
+import io
 import json
+import zipfile
 
 import httpx
 import pytest
@@ -356,3 +358,10 @@ async def test_pause_cancel_and_stop(env):
         await fe.stop()
 
 
+
+async def test_extension_zip_is_served(env):
+    r = await env["op"].get("/cli/jav3-browser.zip")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    assert "jav3-browser/manifest.json" in names and "jav3-browser/lib/verbs.js" in names
+    assert not any("/test/" in n for n in names)
