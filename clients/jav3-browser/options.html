@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Jav3 Browser settings</title><link rel="stylesheet" href="style.css">
+<style>body { max-width: 560px; margin: 0 auto; padding: 24px 16px; }</style></head>
+<body>
+  <h1>Jav3 Browser</h1>
+  <p class="mute">Jav3 works only in its own window and only on sites you allow. Nothing happens until the
+    operator also grants this browser to a project in Jav3 → Settings → Browser use.</p>
+
+  <h2>Pair</h2>
+  <p class="mute" id="pairState"></p>
+  <label class="mute" for="line">Paste the line from Jav3 → Settings → Add computer</label>
+  <input type="text" id="line" placeholder="address=jav3.local:8000 code=…" autocomplete="off" spellcheck="false">
+  <div class="row">
+    <input type="text" id="name" placeholder="name for this browser (e.g. brave-laptop)" style="flex:1">
+    <button id="pair" class="primary">Pair</button>
+  </div>
+  <div id="pairMsg" class="mute"></div>
+
+  <h2>Notifications</h2>
+  <label class="row"><input type="checkbox" id="notify"> Show a notification (with Cancel) every time Jav3 acts</label>
+  <p class="mute">Site questions ("Allow Jav3 on example.com?") are always shown.</p>
+
+  <h2>Pre-allowed sites</h2>
+  <p class="mute">One per line: <code>example.com</code> or <code>*.example.com</code>. Prefix with <code>!</code> to block a site.
+    Anything not listed is asked about on first use.</p>
+  <textarea id="sites" rows="8" spellcheck="false"></textarea>
+  <div class="row"><button id="saveSites" class="primary">Save sites</button><span id="sitesMsg" class="mute"></span></div>
+  <script type="module" src="options.js"></script>
+</body></html>

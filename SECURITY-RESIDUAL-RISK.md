@@ -410,6 +410,48 @@ a watched, policy-gated, cuttable pipe to the internet.
     Screens are an injection channel exactly like `web_read` text, and are
     treated the same way.
 
+18. **Browser use, `jav3-browser` (2026-09-26).** A Chromium extension
+    (`clients/jav3-browser`) holds one outbound WebSocket to `/api/browser/ws`
+    with a `browser`-scoped device token sent in the first frame (a browser
+    WebSocket cannot set a header; a URL token gets logged). The route is
+    exempt from the cookie same-origin gate because it never reads the cookie
+    the extension's socket carries. Host-side `browser_*` tools route through
+    `backend/browser.py`. What is closed: the token opens only that socket
+    (chat, the desk socket and every Settings route refuse it; desk and CLI
+    tokens are refused there). Grants are per browser AND per project (Read;
+    Act = click/type), cookie-only, none by default; Stop removes them all.
+    The extension acts only in tabs it opened, in its own unfocused window,
+    never the operator's; the first action on each new site waits for the
+    operator's Allow (60 s, silence = no); every action raises a notification
+    with Cancel, which aborts it and pauses access; Pause and Disconnect sit in
+    the popup. Verbs are a closed list validated on both sides; click/type need
+    a read of that tab from this turn; one action at a time, 5/s; URLs and
+    typed text carrying a stored secret's value are refused, as are the Jav3
+    server's own hosts, non-http(s) URLs, `user:pass@` URLs, and password/file
+    fields. Every result taints the turn like `web_read`; every action is
+    audited (typed text as length + digest). What deliberately remains:
+    - **It is the operator's browser, outside the egress proxy.** On an
+      allowed site the agent acts with the operator's cookies and sessions,
+      and a navigation is an unmetered request from the operator's network.
+      A tainted turn can still navigate to an allowed site with data in the
+      URL; only stored secret values are caught. Per-site consent is the
+      boundary: allow sites where acting as you is acceptable.
+    - **Pages are an injection channel into a turn that can act.** Act on a
+      project is trust in the model against whatever those pages say, as with
+      desk Input. Clicks are not individually approved (the notification is
+      notice, not a gate; it can be turned off).
+    - **Consent is by hostname, not by page.** A site allowed once stays
+      allowed until forgotten in the popup; `*.example.com` covers every
+      subdomain. A redirect to a new host is asked about on the next action,
+      not before the load.
+    - **Trust in the extension's code.** Loaded unpacked in developer mode,
+      it is not signed and updates only when re-loaded; `<all_urls>` host
+      access is needed to read any allowed site. A tampered folder is a
+      browser-wide compromise — install it from your own server's zip.
+    - **Synthetic input.** Clicks and typing are DOM events (`isTrusted`
+      false), not OS input: some sites ignore them, and no debugger
+      permission is taken to do better.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -437,6 +479,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Host-side project runner | Critical | Medium | Executes on the host by design; same-origin gated and audited per run. Existence is the operator's decision. |
 | Backup contents and destination | High | Medium | DB snapshot (incl. bcrypt hashes) uploaded unencrypted; secrets only through rclone crypt; destination changes raise a security event; rclone binary constrained; git hooks never restored. |
 | Computer use (`jav3-desk`) | Critical | **Medium** | Desk-scoped token, server-side per-computer grants under a client ceiling (shell off until allowed at the keyboard), screenshot-before-input, rate limits, audit, taint with shell falling back to asking. Residual = on-screen prompt injection steering granted Input, and Input reaching a terminal. |
+| Browser use (`jav3-browser`) | Critical | **Medium** | Browser-scoped token (first-frame, socket only), per-browser per-project Read/Act grants (none by default), own unfocused window and own tabs only, per-site consent in the extension, action notification with Cancel, Pause, closed verb list checked both sides, read-before-act, secret-value and Jav3-host refusals, taint like web_read, audit. Residual = acting with the operator's sessions on allowed sites outside the egress proxy, page prompt injection steering granted Act, host-level (not page-level) consent. |
 | `/local` chats (agent file + shell tools on the `jav3` client's machine) | Critical | **Medium** | Opt-in per chat at the client; the server can only ask over the turn's stream, the client executes. Writes, edits and commands wait for y / a (always, per kind, this session) / n at that keyboard; reads never ask and may reach any path the operator's user can. Only the actor that opened the chat may answer a call; unanswered calls time out (15 min) and die with stop; args carrying a stored secret are refused; results are capped, secret-scrubbed and taint the turn. Residual = a prompt-injected turn reading local files the operator never meant to share (they go to the model provider), and "always" for shell turning every later command in that session into an unattended one. |
 | Process telemetry is guest-reported (Security > Persistent, boxes flag) | Medium | **Medium** | The process tree, socket owners and per-socket byte counters come from inside the guest (`procwatch`), so the guest can lie. The host treats every field as untrusted. Replies are capped at 8 MiB with a 3 s timeout. It keeps at most 2048 processes, 4096 sockets and 64 connections per process. Strings are clipped, and control and bidi characters are replaced. ppid cycles cannot hang the tree builder. A box raises at most 10 alerts an hour, and each (exe, unit) alerts once per boot. Host truth comes from the host's own kernel: an established connection from the guest IP that no reported process owns for two polls, or byte counts more than 5% (+64 KiB) apart, raise `proc_report_mismatch`. Proxy `egress_events` (peer_port) give host names, and relay counters give inbound bytes. "Not OS" means not in the image's baseline (exe, unit) set; when no baseline is recorded, a small built-in set is used instead. Residual: a root implant with no network traffic, or one reusing a baseline (exe, unit), can hide from the tree. Short connections that open and close between polls are named but never flagged. Without iproute2 on the host (or on a non-Linux dev machine), the host-truth checks are skipped and connections show as unverified. |
 | Single-process assumption | Medium | Low | In-memory codes/throttle/turns; `--workers 1` + startup refusal of WEB_CONCURRENCY > 1. |

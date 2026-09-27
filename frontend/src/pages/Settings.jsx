@@ -13,6 +13,7 @@ import { useAuth } from '../auth.jsx'
 import { Button, Card, EmptyState, Input, Tag } from '../components/index.js'
 import Page from '../components/Page.jsx'
 import BackupPanel from '../BackupPanel.jsx'
+import BrowserPanel from '../BrowserPanel.jsx'
 import DeskPanel from '../DeskPanel.jsx'
 import ProvidersPanel from '../ProvidersPanel.jsx'
 
@@ -27,6 +28,7 @@ export default function Settings() {
       <ProvidersPanel />
       <DevicesPanel />
       <DeskPanel />
+      <BrowserPanel />
       <BackupPanel />
       <MusicPanel />
       <SessionPanel />

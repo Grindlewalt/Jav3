@@ -13,10 +13,12 @@ Routers:
                  yet; throttled), whoami and revoke-self (device bearer).
 - `cli_router`   the CLI and its installer, as unauthenticated static files.
 """
+import io
 import ipaddress
 import json
 import re
 import time
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -35,6 +37,7 @@ cli_router = APIRouter(prefix="/cli", tags=["devices"])
 
 CLI_DIR = Path(__file__).resolve().parent.parent / "clients" / "jav3cli"
 DESK_CLIENT = Path(__file__).resolve().parent.parent / "clients" / "jav3-desk" / "jav3-desk"
+BROWSER_EXT = Path(__file__).resolve().parent.parent / "clients" / "jav3-browser"
 _NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 _BAD_CODE = ("invalid or expired login code — generate a new one in "
              "Settings → Add computer")
@@ -194,10 +197,10 @@ class RedeemBody(BaseModel):
     hostname: str = Field("", max_length=256)
     platform: str = Field("", max_length=256)
     # what the token will be for: `jav3` asks for cli (the default), `jav3-desk`
-    # for desk. Letting the client choose is safe because neither widens the
-    # other: a desk token reaches nothing but its socket, and a desk does
-    # nothing until the operator grants it in Settings.
-    scope: str = Field("cli", pattern="^(cli|desk)$")
+    # for desk, the browser extension for browser. Letting the client choose is safe because neither widens the
+    # other: a desk/browser token reaches nothing but its own socket, and
+    # does nothing until the operator grants it in Settings.
+    scope: str = Field("cli", pattern="^(cli|desk|browser)$")
 
 
 MAX_LOGIN_BODY = 4096
@@ -304,6 +307,22 @@ async def cli_file():
 async def desk_client_file():
     """The computer-use client, one file (clients/jav3-desk)."""
     return PlainTextResponse(DESK_CLIENT.read_text(), media_type="text/x-python")
+
+
+@cli_router.get("/jav3-browser.zip")
+async def browser_extension_zip():
+    """The browser extension (clients/jav3-browser) as a zip to unpack and load
+    with chrome://extensions → Load unpacked. Tests and the node package file
+    stay out; nothing in it is per-server (pairing is pasted in its options)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(BROWSER_EXT.rglob("*")):
+            rel = f.relative_to(BROWSER_EXT).as_posix()
+            if (f.is_file() and not rel.startswith("test/") and rel != "package.json"
+                    and not any(part.startswith(".") for part in rel.split("/"))):
+                z.write(f, "jav3-browser/" + rel)
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="jav3-browser.zip"'})
 
 
 @cli_router.get("/install.sh")

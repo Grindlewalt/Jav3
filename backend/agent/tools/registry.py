@@ -192,6 +192,11 @@ def _requirements_met(entry: dict) -> bool:
         from ... import desk
         if not desk.offered():
             return False
+    if entry.get("requires_browser") is True:
+        # tools/browser_*: only while a jav3-browser extension is connected
+        from ... import browser
+        if not browser.offered():
+            return False
     if entry.get("requires_local") is True:
         # the /local tools (tools/local_*): only a turn of a local chat is
         # handed these, never a project turn, an agent run or a schedule

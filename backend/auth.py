@@ -146,7 +146,10 @@ _UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 # cookie from an earlier install must not wedge it, and setup_api refuses a
 # browser-declared cross-site request itself), the CLI files, and git-over-HTTP
 # (Basic auth). Exact paths only: /api/setup/<anything> is not exempt.
-_ORIGIN_EXEMPT_EXACT = {"/api/devices/login", "/api/setup"}
+# /api/browser/ws authenticates by a token in its first frame and never reads
+# the cookie, which the extension's socket carries from a chrome-extension://
+# origin whenever the operator is logged in to Jav3 in that browser.
+_ORIGIN_EXEMPT_EXACT = {"/api/devices/login", "/api/setup", "/api/browser/ws"}
 _ORIGIN_EXEMPT_PREFIX = ("/cli/", "/git/")
 
 
@@ -341,7 +344,7 @@ async def require_actor(request: Request) -> dict:
     actor = await require_any_actor(request)
     if actor.get("is_device") and actor.get("scope") != "cli":
         raise HTTPException(status_code=403,
-                            detail="this token is scoped to computer use, not chat")
+                            detail=f"this token is scoped to {actor.get('scope')}, not chat")
     return actor
 
 

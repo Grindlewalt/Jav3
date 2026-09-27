@@ -19,6 +19,9 @@ Every token has a SCOPE, fixed at minting:
          /api/desk/ws, refused by `require_actor`. A leaked CLI token must not
          be able to pose as a desk and feed forged screenshots into a turn,
          and a desk token must not be able to drive chat.
+- `browser` the browser extension (`clients/jav3-browser`): accepted ONLY on
+         /api/browser/ws (backend/browser.py), refused by `require_actor` and
+         on the desk socket, exactly like `desk`.
 Neither is accepted on the sensitive control-plane routers (secrets, vm,
 egress, desk grants, …), which stay cookie-only.
 """
@@ -29,7 +32,7 @@ from .config import settings
 from .db import get_db
 
 PREFIX = "jvd_"
-SCOPES = ("cli", "desk")
+SCOPES = ("cli", "desk", "browser")
 # last_used_at is written at most this often: verify runs on every CLI
 # request, and the idle clock only needs minute resolution.
 TOUCH_EVERY_SECONDS = 60

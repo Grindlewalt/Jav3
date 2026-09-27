@@ -145,6 +145,13 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               "desk_screenshot", "desk_click", "desk_move",
                               "desk_scroll", "desk_type", "desk_key",
                               "desk_open", "desk_shell",
+                              # the operator's browser (jav3-browser): pages
+                              # are web content, exactly like web_read
+                              "browser_open_tab", "browser_navigate",
+                              "browser_read_page", "browser_click",
+                              "browser_type", "browser_scroll",
+                              "browser_screenshot_tab", "browser_close_tab",
+                              "browser_list_tabs",
                               # /local: files and command output from the
                               # operator's own machine — a cloned repo's README
                               # is as attacker-authorable as a web page
