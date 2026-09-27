@@ -16,7 +16,7 @@ export const WINDOW_TYPES = {
   context: { title: 'Context', label: 'Context files — load into Jav3' },
   agent: { title: 'Agent', label: 'Run an agent' },
   research: { title: 'Research', label: 'Research bots — live' },
-  chat: { title: 'Chat', label: 'Chat — Jav3 or an agent, on this project' },
+  chat: { title: 'Chat', label: 'Chat — any conversation, any project' },
   review: { title: 'Security', label: 'Security — approvals & alerts' },
   network: { title: 'Network', label: 'Network — egress & host approvals' },
   secrets: { title: 'Secrets', label: 'Secrets — key grants for this project' },

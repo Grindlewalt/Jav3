@@ -9,13 +9,16 @@ import EmptyState from './components/EmptyState.jsx'
 
 // Compact chat, embeddable anywhere (board panel). When projectSlug is set,
 // conversations are filtered to that project and new ones are linked to it.
+// `initialId` opens that conversation on mount ('new': a fresh chat) instead
+// of the running / latest one; `onOpened(id | 'new')` reports each switch, so
+// a Work window can remember which conversation it holds.
 //
 // A thread can run AS an agent (its AGENT.md prompt leads, its skills are its
 // own) — an agent thread is still a chat, so it keeps history, compaction,
 // detach/re-attach and stop. Identity binds at creation, like the project pin:
 // the "+ new" menu picks who the NEXT thread runs as, and an open thread shows
 // the identity it was created with.
-export default function ChatBox({ projectSlug }) {
+export default function ChatBox({ projectSlug, initialId, onOpened }) {
   const [convos, setConvos] = useState([])
   const [cid, setCid] = useState(null)
   const [agents, setAgents] = useState([])
@@ -34,6 +37,12 @@ export default function ChatBox({ projectSlug }) {
   const ask = useAsk()
 
   useEffect(() => () => tailAbort.current?.abort(), [])
+  const reported = useRef(false)
+  useEffect(() => {
+    // not the mount's null: that is "not open yet", not the operator's choice
+    if (!reported.current) { reported.current = true; if (!cid) return }
+    onOpened?.(cid ?? 'new')
+  }, [cid]) // eslint-disable-line
   // the roster for the picker; failure just leaves it Jav3-only
   useEffect(() => {
     api('/api/agents').then((r) => setAgents(r.agents)).catch(() => {})
@@ -69,7 +78,10 @@ export default function ChatBox({ projectSlug }) {
     // off — a running turn always wins, else the project's latest chat —
     // instead of amnesia into "new chat" while work continues server-side
     refresh().then((list) => {
+      if (initialId === 'new') return
+      if (initialId && list.some((c) => c.id === initialId)) { open(initialId); return }
       const running = list.find((c) => c.running)
+
       const target = running || (projectSlug ? list[0] : null)
       if (target) open(target.id)
     }).catch(() => {})

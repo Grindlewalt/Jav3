@@ -21,9 +21,18 @@ import TodoPanel from '../panels/TodoPanel.jsx'
 
 // A window's body: the card component with the props the board always gave
 // it (slug, project, refreshProject, state, setState, onToggleExpand).
+// A chat window holds any conversation: state.chatProject (a slug, or null
+// for no project; absent = the window's project) and state.conversation (an
+// id, or 'new').
 export default function WindowBody(props) {
   switch (props.type) {
-    case 'chat': return <ChatBox projectSlug={props.slug} />
+    case 'chat': {
+      const { chatProject, conversation } = props.state || {}
+      const slug = chatProject === undefined ? props.slug : chatProject || undefined
+      return <ChatBox key={slug || ''} projectSlug={slug} initialId={conversation}
+                      onOpened={(c) => props.setState({ conversation: c })} />
+    }
+
     case 'journal': return <JournalPanel {...props} />
     case 'editor': return <EditorPanel {...props} />
     case 'renderer': return <RendererPanel {...props} />

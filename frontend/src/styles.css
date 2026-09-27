@@ -3964,3 +3964,4 @@ a:has(> .nav-dot) { position: relative; }
 }
 .work-mintab:hover:not(:disabled) { color: var(--text); transform: none; filter: none; }
 
+.work-wh-sub { color: var(--dim); font-weight: 400; }

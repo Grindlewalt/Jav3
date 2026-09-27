@@ -227,12 +227,14 @@ export default function Work({ openProjects = false }) {
     setPicker((p) => (p && p.mode === mode && p.target === target && p.dir === dir ? null
       : { mode, target, dir, anchor: r ? { left: r.left, right: r.right, bottom: r.bottom } : null }))
   }, [])
-  const onPick = (type) => {
+  // `extra`: { project } for another project's window, { state } to start
+  // it with (a chat window's conversation)
+  const onPick = (type, extra = {}) => {
     const p = picker
     if (!p || !boardRef.current) return
     const next = p.mode === 'switch'
-      ? update((b) => switchCard(b, p.target, type))
-      : update((b) => addCard(b, type, p.target || b.focus, p.dir))
+      ? update((b) => switchCard(b, p.target, type, extra))
+      : update((b) => addCard(b, type, p.target || b.focus, p.dir, extra))
     if (next && phone) setTab(next.focus)
   }
 
@@ -343,7 +345,17 @@ export default function Work({ openProjects = false }) {
     ? board.maximized : null
   const single = phone || !!maxId
   const shownId = phone ? tab : maxId
-  const stateOf = (id) => board?.panels.find((p) => p.id === id)?.state
+  const panelOf = (id) => board?.panels.find((p) => p.id === id)
+  const stateOf = (id) => panelOf(id)?.state
+  // what a header says after the card's title: whose it is, when not the chat's
+  const subOf = (leaf) => {
+    const p = panelOf(leaf.id)
+    if (leaf.type === 'chat' && p?.state && 'chatProject' in p.state) {
+      const c = p.state.chatProject
+      return c === null ? 'no project' : c !== board.slug ? c : ''
+    }
+    return p?.project && p.project !== board.slug ? p.project : ''
+  }
 
   const plus = (
     <button type="button" className={`work-plus${picker?.mode === 'add' ? ' on' : ''}`}
@@ -378,6 +390,8 @@ export default function Work({ openProjects = false }) {
           const place = hidden && !phone && !min ? r : null
           return (
             <WindowFrame key={leaf.id} leaf={leaf} slug={board.slug}
+                         other={leaf.type === 'chat' ? null : (panelOf(leaf.id)?.project || null)}
+                         sub={subOf(leaf)}
                          x={full ? 0 : r?.x} y={full ? 0 : r?.y}
                          w={full ? 1 : r?.w} h={full ? 1 : r?.h}
                          hidden={hidden} keep={!!place} phone={phone}
@@ -446,11 +460,23 @@ export default function Work({ openProjects = false }) {
 // geometry. Keyed by id and never moved in the React tree, so a split or a
 // close elsewhere never remounts it (a running terminal or stream survives).
 const WindowFrame = memo(function WindowFrame({
-  leaf, slug, x, y, w, h, hidden, keep, phone, maximized, focused, project, refreshProject, state,
+  leaf, slug, other, sub, x, y, w, h, hidden, keep, phone, maximized, focused, project, refreshProject, state,
   onFocus, onClose, onToggleMax, onMinimize, onSetState, onPicker,
 }) {
   const id = leaf.id
   const def = WINDOW_TYPES[leaf.type]
+  // another project's window: its own project object
+  const [otherObj, setOtherObj] = useState(null)
+  const [otherGen, setOtherGen] = useState(0)
+  useEffect(() => {
+    if (!other || other === slug) return undefined
+    let live = true
+    api(`/api/projects/${encodeURIComponent(other)}`)
+      .then((p) => { if (live) setOtherObj(p) }).catch(() => {})
+    return () => { live = false }
+  }, [other, slug, otherGen])
+  const foreign = !!other && other !== slug
+  const refreshOther = useCallback(() => { setOtherGen((g) => g + 1); return Promise.resolve() }, [])
   const setState = useCallback((patch) => onSetState(id, patch), [id, onSetState])
   const toggle = useCallback(() => { if (!phone) onToggleMax(id) }, [id, phone, onToggleMax])
   const style = hidden && !keep ? { display: 'none' }
@@ -467,7 +493,7 @@ const WindowFrame = memo(function WindowFrame({
                 title="switch this window to another card"
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => onPicker(e, 'switch', id)}>
-          <span>{def?.title || leaf.type}</span>
+          <span>{def?.title || leaf.type}{sub && <span className="work-wh-sub"> · {sub}</span>}</span>
           <span className="work-caret" aria-hidden="true">▾</span>
         </button>
         <span className="grow" />
@@ -490,11 +516,15 @@ const WindowFrame = memo(function WindowFrame({
                 onClick={() => onClose(id)}>×</button>
       </header>
       <div className="window-body work-wb">
-        <ErrorBoundary resetKey={`${leaf.type}:${slug}`}>
+        <ErrorBoundary resetKey={`${leaf.type}:${foreign ? other : slug}`}>
           <Suspense fallback={<div className="route-pending" aria-busy="true" />}>
-            <WindowBody type={leaf.type} slug={slug} project={project}
-                        refreshProject={refreshProject} state={state || EMPTY}
-                        setState={setState} onToggleExpand={toggle} />
+            {foreign && !otherObj ? <div className="route-pending" aria-busy="true" /> : (
+              <WindowBody type={leaf.type} slug={foreign ? other : slug}
+                          project={foreign ? otherObj : project}
+                          refreshProject={foreign ? refreshOther : refreshProject}
+                          state={state || EMPTY}
+                          setState={setState} onToggleExpand={toggle} />
+            )}
           </Suspense>
         </ErrorBoundary>
       </div>
@@ -566,18 +596,60 @@ function WindowPicker({
 }) {
   const [q, setQ] = useState('')
   const [sel, setSel] = useState(0)
+  // a second page of the menu: 'chat' (a conversation), 'proj' (which other
+  // project), 'projwin' (that project's windows)
+  const [step, setStep] = useState(null)
+  const [convos, setConvos] = useState(null)
   const ref = useDismiss(true, onClose)
   const listRef = useRef(null)
   const needle = q.trim().toLowerCase()
-  const types = full ? [] : project
-    ? Object.entries(WINDOW_TYPES)
-      .filter(([k, v]) => !needle || `${k} ${v.label}`.toLowerCase().includes(needle))
-      .map(([k, v]) => ({ key: k, text: v.label, run: () => onPick(k) }))
-    : projects
-      .filter((p) => !needle || `${p.slug} ${p.name}`.toLowerCase().includes(needle))
-      .map((p) => ({ key: p.slug, text: p.name || p.slug, run: () => onPickProject(p.slug) }))
-  const rows = [...types, { key: '__projects', text: 'Projects…', run: onProjects, foot: true }]
-  const pick = (r) => { onClose(); r.run() }
+  const go = (s) => { setStep(s); setQ(''); setSel(0) }
+  useEffect(() => {
+    if (step?.kind !== 'chat' || convos) return
+    api('/api/conversations').then((r) => setConvos(r.conversations || []))
+      .catch(() => setConvos([]))
+  }, [step, convos])
+  const name = (slug) => projects.find((p) => p.slug === slug)?.name || slug
+  const mine = [...projects].sort((a, b) => (b.slug === project) - (a.slug === project))
+  const winRows = (slug, skip) => Object.entries(WINDOW_TYPES)
+    .filter(([k]) => !skip.includes(k))
+    .map(([k, v]) => ({ key: k, text: v.label, run: () => onPick(k, slug ? { project: slug } : {}) }))
+  let all
+  if (full) all = []
+  else if (!project) {
+    all = projects.map((p) => ({ key: p.slug, text: p.name || p.slug, run: () => onPickProject(p.slug) }))
+  } else if (!step) {
+    all = [
+      { key: '__chat', text: 'Chat… — any conversation, any project', stay: true,
+        run: () => go({ kind: 'chat' }) },
+      { key: 'review', text: WINDOW_TYPES.review.label, run: () => onPick('review') },
+      ...winRows(null, ['chat', 'review']),
+      { key: '__other', text: 'Another project’s windows…', stay: true, run: () => go({ kind: 'proj' }) },
+    ]
+  } else if (step.kind === 'chat') {
+    all = [
+      ...mine.map((p) => ({ key: `new:${p.slug}`, text: `New chat in ${p.name || p.slug}`,
+        run: () => onPick('chat', { state: { chatProject: p.slug, conversation: 'new' } }) })),
+      { key: 'new:', text: 'New chat, no project',
+        run: () => onPick('chat', { state: { chatProject: null, conversation: 'new' } }) },
+      ...(convos || []).map((c) => ({
+        key: `c${c.id}`, text: c.summary || `#${c.id}`,
+        sub: c.project_slug ? (c.project_name || c.project_slug) : 'no project',
+        run: () => onPick('chat', { state: { chatProject: c.project_slug || null, conversation: c.id } }),
+      })),
+    ]
+  } else if (step.kind === 'proj') {
+    all = projects.filter((p) => p.slug !== project).map((p) => ({
+      key: `p:${p.slug}`, text: p.name || p.slug, stay: true,
+      run: () => go({ kind: 'projwin', slug: p.slug }) }))
+  } else {
+    all = winRows(step.slug, ['chat'])
+  }
+  const types = all.filter((r) => !needle || `${r.key} ${r.text} ${r.sub || ''}`.toLowerCase().includes(needle))
+  const rows = [...types, step
+    ? { key: '__back', text: '← Back', run: () => go(null), stay: true, foot: true }
+    : { key: '__projects', text: 'Projects…', run: onProjects, foot: true }]
+  const pick = (r) => { if (!r.stay) onClose(); r.run() }
 
   const [pos, setPos] = useState(null)
   useLayoutEffect(() => {
@@ -594,7 +666,7 @@ function WindowPicker({
   }, [anchor, ref])
   useEffect(() => {
     if (pos) ref.current?.querySelector('input')?.focus()
-  }, [pos, ref])
+  }, [pos, ref, step])
   useLayoutEffect(() => {
     listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
   }, [sel, q])
@@ -610,6 +682,7 @@ function WindowPicker({
                        + (r.foot ? ' foot' : '')}
             onMouseEnter={() => setSel(i)} onClick={() => pick(r)}>
       <span className="grow">{r.text}</span>
+      {r.sub && <span className="dim small">{r.sub}</span>}
       {r.key === current && <span className="dim small">current</span>}
     </button>
   )
@@ -624,8 +697,13 @@ function WindowPicker({
       {full && <div className="work-picker-note">{MAX_PANELS} windows is the most: close or
         minimize one, or switch one with its header ▾.</div>}
 
+      {step?.kind === 'chat' && !convos && <div className="work-picker-note dim">loading chats…</div>}
+      {step?.kind === 'projwin' && <div className="work-picker-note dim">
+        {name(step.slug)}’s windows</div>}
       <input className="work-picker-q" value={q}
-             placeholder={project ? 'Open a window…' : 'Pick a project…'}
+             placeholder={!project ? 'Pick a project…' : step?.kind === 'chat' ? 'Find a chat…'
+               : step?.kind === 'proj' ? 'Pick a project…' : 'Open a window…'}
+
              aria-label={project ? 'search windows' : 'search projects'} onKeyDown={onKey}
              onChange={(e) => { setQ(e.target.value); setSel(0) }} />
       <div className="work-picker-list" role="listbox" ref={listRef}>
