@@ -9,6 +9,7 @@ is what M3+ tools plug into. Yields SSE-ready events:
 import asyncio
 import base64
 import json
+import re
 from collections import OrderedDict
 from typing import AsyncIterator
 
@@ -16,7 +17,7 @@ from ..config import settings
 from ..memory import standing_rules_tail
 from . import imageresult
 from .budget import BudgetExceeded
-from .model import has_dsml_markup, model
+from .model import model
 from .tools import registry
 
 # Tools that mutate durable state: their results are the model's record of
@@ -179,6 +180,15 @@ def _assemble_messages(system_prompt: str, history: list[dict],
                 break
     return messages, tools, rules, can_delegate
 
+
+# DeepSeek tool-call markup left in a reply's text (the gateway's DSML recovery
+# could not parse it). Here, not in model.py: the guest ships this loop with its
+# own thin model shim. '｜' is U+FF5C.
+_TOOL_MARKUP = re.compile(r"<｜+\s*DSML\s*｜+")
+
+
+def has_tool_markup(content: str) -> bool:
+    return bool(content) and _TOOL_MARKUP.search(content) is not None
 
 async def _force_conclusion(messages: list[dict], conversation_id: int,
                             model_name: str | None, base_url: str | None,
@@ -366,7 +376,7 @@ async def run_turn(
             # tool-call markup the gateway could not parse is a harness fault,
             # not an answer: ending the turn on it voided every item of a plan
             # run (plan_report never ran). Ask for the call again, twice at most.
-            if call_tools and markup_retries < 2 and has_dsml_markup(content):
+            if call_tools and markup_retries < 2 and has_tool_markup(content):
                 markup_retries += 1
                 messages.append({"role": "assistant", "content": content})
                 messages.append({"role": "user", "content": (

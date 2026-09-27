@@ -234,7 +234,8 @@ def test_dsml_tool_call_recovery():
 def test_dsml_v41_spacing_and_json_params():
     # V4.1 Flash puts a space after the bars; every item of the 2026-09-27
     # benchmark-game plan run died because the regex required none
-    from backend.agent.model import dsml_prose, has_dsml_markup, parse_dsml_tool_calls
+    from backend.agent.loop import has_tool_markup
+    from backend.agent.model import dsml_prose, parse_dsml_tool_calls
     import json as _j
     c = ('Let me check the tests.\n\n'
          '<｜｜DSML｜｜ calls>\n'
@@ -250,7 +251,7 @@ def test_dsml_v41_spacing_and_json_params():
         "command": "node --test 2>&1 | tail -5", "timeout": 120,
         "paths": ["a", "b"], "n": "42"}
     assert dsml_prose(c) == "Let me check the tests."
-    assert has_dsml_markup(c) and not has_dsml_markup("DSML is a word")
+    assert has_tool_markup(c) and not has_tool_markup("DSML is a word")
 
 
 def test_dsml_slashless_close_recovers_truncated_does_not():

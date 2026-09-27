@@ -89,10 +89,6 @@ def dsml_prose(content: str) -> str:
     return (content[:m.start()] if m else content).strip()
 
 
-def has_dsml_markup(content: str) -> bool:
-    return bool(content) and _DSML_START.search(content) is not None
-
-
 class PeakPricingConfirmationRequired(Exception):
     """Raised when a call lands inside a peak-pricing window and the user
     hasn't confirmed they want to pay 2x for this conversation recently."""
