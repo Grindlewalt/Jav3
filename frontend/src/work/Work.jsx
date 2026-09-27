@@ -7,6 +7,7 @@ import { api } from '../api.js'
 import { useIsPhone } from '../breakpoints.js'
 import { useDismiss } from '../useDismiss.js'
 import ErrorBoundary from '../ErrorBoundary.jsx'
+import Menu, { MenuItem } from '../components/Menu.jsx'
 import Chat from '../pages/Chat.jsx'
 import { WorkContext } from './context.js'
 import {
@@ -437,7 +438,7 @@ export default function Work({ openProjects = false }) {
           </div>
         )}
         <Chat controlRef={chatCtl} onProjectChange={onProjectChange}
-              toolbarExtra={phone ? null : plus}
+              toolbarExtra={<><StopMenu project={project} />{phone ? null : plus}</>}
               beside={beside} />
         {picker && (
           <WindowPicker anchor={picker.anchor} project={project} projects={projects}
@@ -716,7 +717,51 @@ function WindowPicker({
     </div>, document.body)
 }
 
+// The chat toolbar's stop menu: every running turn, or this project's.
+// POST /api/chat/stop-all and /api/chat/stop-project {project}; a server
+// without the routes (404) says so instead of failing silently.
+function StopMenu({ project }) {
+  const [open, setOpen] = useState(false)
+  const [note, setNote] = useState('')
+  const timer = useRef(null)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  const say = (t) => {
+    setNote(t)
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => setNote(''), 4000)
+  }
+  const run = async (path, body) => {
+    setOpen(false)
+    try {
+      const r = await api(path, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+      const n = r?.stopped ?? r?.count
+      say(typeof n === 'number' ? `stopped ${n}` : 'stopped')
+    } catch (e) {
+      say(e?.status === 404 || e?.status === 405 ? 'stop: not on this server yet'
+        : `stop failed${typeof e?.detail === 'string' ? `: ${e.detail}` : ''}`)
+    }
+  }
+  return (
+    <>
+      {note && <span className="dim small work-stop-note" role="status">{note}</span>}
+      <Menu floating open={open} onClose={() => setOpen(false)} width={230} label="stop turns"
+            trigger={(
+              <button type="button" className="work-plus work-stop" aria-haspopup="menu"
+                      aria-expanded={open} title="stop running turns"
+                      onClick={() => setOpen((o) => !o)}>■ ▾</button>
+            )}>
+        <MenuItem danger onClick={() => run('/api/chat/stop-all')}>Stop all turns</MenuItem>
+        <MenuItem danger disabled={!project}
+                  sub={project ? undefined : 'no project on this chat'}
+                  onClick={() => run('/api/chat/stop-project', { project })}>
+          Stop all in this project</MenuItem>
+      </Menu>
+    </>
+  )
+}
+
 // Projects… — the old Projects page (create, rename, delete, restore,
+
 // import), whole, in a sheet over Work. Opening a project from it lands on
 // /projects/:slug, which Work turns into the chat's project.
 // Not useDismiss: the page's row menus and its ask() dialogs are portalled to

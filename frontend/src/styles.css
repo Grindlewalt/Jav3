@@ -3965,3 +3965,5 @@ a:has(> .nav-dot) { position: relative; }
 .work-mintab:hover:not(:disabled) { color: var(--text); transform: none; filter: none; }
 
 .work-wh-sub { color: var(--dim); font-weight: 400; }
+.work-stop { font-size: 11px; }
+.work-stop-note { white-space: nowrap; align-self: center; }
