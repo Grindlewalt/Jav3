@@ -261,6 +261,13 @@ class Box:
                         "guest_ip": self.guest_ip}}
 
 
+def ram_cost(mem_mb: int, runtime: str = "kvm") -> int:
+    """What a box really costs the host: guest RAM plus, for a KVM box, the
+    measured QEMU + firmware overhead (two 64 MB pflash images and QEMU itself:
+    a `-m 384` box ran at 528 MB RSS on the Pi, e2e BUG-12). Pure."""
+    return int(mem_mb) + (settings.vm_kvm_box_overhead_mb if runtime == "kvm" else 0)
+
+
 def addressing(cid: int) -> dict:
     """tap / host_ip / guest_ip / prefix / mac for a non-shared slot. Pure."""
     if not 4 <= cid <= 254:
@@ -395,13 +402,15 @@ class Registry:
     # caps ------------------------------------------------------------------
     def budget(self) -> dict:
         boxes = self.all()
-        return {"ram_mb_used": sum(b.mem_mb for b in boxes),
+        return {"ram_mb_used": sum(ram_cost(b.mem_mb, b.runtime) for b in boxes),
                 "ram_mb_cap": settings.vm_guest_ram_budget_mb,
+                "ram_mb_overhead_per_kvm_box": settings.vm_kvm_box_overhead_mb,
                 "boxes": len(boxes), "boxes_cap": settings.vm_max_boxes,
                 "project_boxes": sum(b.kind == "project" for b in boxes),
                 "project_boxes_cap": settings.vm_max_project_boxes}
 
-    def _check_caps(self, kind: str, mem_mb: int) -> None:
+    def _check_caps(self, kind: str, mem_mb: int, runtime: str = "kvm") -> None:
+        mem_mb = ram_cost(mem_mb, runtime)
         b = self.budget()
         if b["boxes"] + 1 > settings.vm_max_boxes:
             raise BoxCapError(f"box cap reached ({b['boxes']}/{settings.vm_max_boxes})")
@@ -441,7 +450,7 @@ class Registry:
             mem = max(mem, mem_floor(variant))
         if runtime == "docker":
             mem = int(mem_mb or settings.docker_box_mem_mb)
-        self._check_caps(kind, mem)
+        self._check_caps(kind, mem, runtime)
         used = {b.cid for b in self.all()}
         cid = next((c for c in _cid_range(kind) if c not in used), None)
         if cid is None:

@@ -49,7 +49,9 @@ Box directory (non-shared): `overlay.qcow2`, `efi_vars_run.fd`, `qmp.sock`,
 
 Caps (all reservations count, running or not; the shared box always counts):
 `vm_max_boxes` (4, includes shared), `vm_max_project_boxes` (1),
-`vm_guest_ram_budget_mb` (2250). Defaults per kind: shared `vm_memory_mb`
+`vm_guest_ram_budget_mb` (2400), which counts each box's real cost: `mem_mb`
+plus `vm_kvm_box_overhead_mb` (144, QEMU + firmware, measured) per KVM box
+(`budget.ram_mb_overhead_per_kvm_box`). Defaults per kind: shared `vm_memory_mb`
 768, project `vm_project_box_mem_mb` 768 (profile `box_mem_mb` overrides),
 service 384, builder 1024; variant `desktop` is floored at
 `vm_desktop_min_mem_mb` 1280, which the budget then keeps from running beside

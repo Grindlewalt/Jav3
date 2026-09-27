@@ -355,7 +355,13 @@ class Settings(BaseSettings):
     # squeezed in. `vm_max_boxes` counts every box including the shared one.
     vm_max_boxes: int = 4
     vm_max_project_boxes: int = 1        # extra project turn boxes at a time
-    vm_guest_ram_budget_mb: int = 2250   # sum of mem_mb over all allocated boxes
+    # The budget counts REAL cost: mem_mb plus vm_kvm_box_overhead_mb per KVM
+    # box (QEMU + two 64 MB pflash images; 125-145 MB measured on the Pi 4, so
+    # a 512 MB box is ~530 MB RSS warm). Shared 768 + project 768 + service
+    # 384 = 1920 guest MB = 2352 real, which 2400 fits; before the overhead
+    # counted, the 2250 budget let ~2.8 GB real through.
+    vm_guest_ram_budget_mb: int = 2400
+    vm_kvm_box_overhead_mb: int = 144
     vm_project_box_mem_mb: int = 768     # profile box_mem_mb overrides
     vm_service_box_mem_mb: int = 384
     vm_service_box_cpus: int = 1

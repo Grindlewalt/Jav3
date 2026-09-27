@@ -15,6 +15,7 @@ def reg(tmp_env, monkeypatch):
     monkeypatch.setattr(settings, "vm_max_boxes", 4)
     monkeypatch.setattr(settings, "vm_max_project_boxes", 1)
     monkeypatch.setattr(settings, "vm_guest_ram_budget_mb", 2250)
+    monkeypatch.setattr(settings, "vm_kvm_box_overhead_mb", 0)   # mem_mb logic; overhead below
     boxes.registry.reset()
     yield boxes.registry
     boxes.registry.reset()
@@ -71,6 +72,20 @@ def test_caps_ram_budget(reg, monkeypatch):
         boxes.allocate("project", project="b")      # + 768 > 2250
     boxes.allocate("service", project="a")          # 384 fits: 1920
     assert boxes.budget()["ram_mb_used"] == 1920
+
+
+def test_ram_budget_counts_kvm_overhead(reg, monkeypatch):
+    # e2e BUG-12: a KVM box costs mem_mb + ~144 MB of QEMU/firmware
+    monkeypatch.setattr(settings, "vm_kvm_box_overhead_mb", 144)
+    monkeypatch.setattr(settings, "vm_guest_ram_budget_mb", 2300)
+    boxes.allocate("project", project="a")          # (768+144) * 2 = 1824
+    assert boxes.budget()["ram_mb_used"] == 1824
+    with pytest.raises(boxes.BoxCapError, match="RAM"):
+        boxes.allocate("service", project="a")      # + 384 + 144 > 2300
+    monkeypatch.setattr(settings, "vm_guest_ram_budget_mb", 2400)   # the default
+    boxes.allocate("service", project="a")          # 2352 fits
+    assert boxes.budget()["ram_mb_overhead_per_kvm_box"] == 144
+    assert boxes.ram_cost(512, "docker") == 512
 
 
 def test_caps_box_count(reg, monkeypatch):

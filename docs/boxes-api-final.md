@@ -23,7 +23,7 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
           net: {tap, host_ip, guest_ip},
           state: "running"|"stopped", rss_bytes, cpu_pct, uptime_s, inflight,
           disk: {overlay_bytes, data_bytes}}],
- budget: {ram_mb_used, ram_mb_cap, boxes, boxes_cap, project_boxes, project_boxes_cap},
+ budget: {ram_mb_used, ram_mb_cap, ram_mb_overhead_per_kvm_box, boxes, boxes_cap, project_boxes, project_boxes_cap},
  runtimes: {kvm:    {available: bool, reason: str|null},
             docker: {available: bool, reason: str|null, rootless, userns, gvisor,
                      seccomp, weak, warnings: [str]}}}
