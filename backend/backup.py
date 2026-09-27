@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_user
-from .config import has_state, settings
+from .config import ENV_FILE, has_state, settings
 from .statemigrate import integrity_ok, service_busy, snapshot_db
 
 # The file-tree state dirs, by their name on the remote.
@@ -184,7 +184,7 @@ def _crypt_target(cfg: dict, rclone: str) -> tuple[str, dict]:
 
 def _secret_files() -> dict[str, Path]:
     """Backup name -> live path of everything secret."""
-    return {"env": Path(os.path.expanduser("~/.config/jarvis/env")),
+    return {"env": ENV_FILE,
             "secrets.json": settings.secrets_path,
             "jwt_secret": settings.data_dir / "jwt_secret"}
 
