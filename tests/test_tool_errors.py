@@ -66,7 +66,7 @@ async def test_read_file_slice_coerces_digit_strings(client):
 
 
 async def test_read_file_whole_overflow_throws_not_truncates(client, monkeypatch):
-    monkeypatch.setattr(settings, "tool_result_max_chars", 120)
+    monkeypatch.setattr(settings, "read_file_max_chars", 120)
     (_project() / "big.txt").write_text("\n".join("x" * 10 for _ in range(30)) + "\n")
     out = await registry.dispatch("read_file", {"path": "big.txt"})
     assert out.startswith("error: big.txt is 30 lines / 330 chars — too big to return whole")

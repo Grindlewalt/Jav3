@@ -243,6 +243,10 @@ class Settings(BaseSettings):
     # is `keep_recent` rounds old, replace anything bigger than `evict_chars`
     # with a one-line stub (the model can re-call the tool if it still needs it).
     tool_result_max_chars: int = 12_000
+    # read_file gets its own, larger whole-file cap: coding agents bounced
+    # off 12k repeatedly (a 14k-char source file is normal). Above this it
+    # still asks for a slice.
+    read_file_max_chars: int = 48_000
     tool_result_evict_chars: int = 4_000
     tool_result_keep_recent: int = 2
     # How many recent screenshots stay in-context as real image blocks; older

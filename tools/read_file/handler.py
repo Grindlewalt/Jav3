@@ -58,7 +58,7 @@ async def run(path: str, offset=None, limit=None) -> str:
     if not text:
         return note + "(empty file)"
 
-    cap = settings.tool_result_max_chars
+    cap = settings.read_file_max_chars
     lines = text.splitlines()
     total = len(lines)
 
