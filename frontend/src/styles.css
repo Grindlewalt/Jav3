@@ -3987,3 +3987,28 @@ a:has(> .nav-dot) { position: relative; }
 .perm-mode { font-size: 12px; padding: 2px 6px; }
 .perm-rules { list-style: none; margin: 0; padding: 0; }
 .perm-rules li { gap: 10px; align-items: center; padding: 4px 0; border-top: 1px solid var(--border); }
+
+/* Work chat: /shell's inline approvals and its Runs view, brought into the
+   main chat (pages/Chat.jsx). The rows themselves are the shell's .sh-approval. */
+.chat-approvals { display: flex; flex-direction: column; gap: var(--sp-3);
+  margin: 0 0 22px; }
+.chat-empty .chat-approvals { width: min(640px, 100%); margin: 18px auto 0;
+  text-align: left; }
+.chat-layout .messages[hidden] { display: none; }
+.chat-runs-view { flex: 1; min-height: 0; overflow-y: auto; display: flex;
+  flex-direction: column; width: 100%; max-width: 880px; margin: 0 auto;
+  padding: 8px 24px calc(124px + var(--sab)); box-sizing: border-box; }
+.chat-runs-toggle {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  background: transparent; color: var(--dim); border: 1px solid transparent;
+  border-radius: var(--radius-pill); padding: var(--pad-row-sm);
+  font-size: var(--fs-sm); font-weight: 500; white-space: nowrap;
+}
+.chat-runs-toggle:hover:not(:disabled), .chat-runs-toggle.on {
+  color: var(--text); border-color: var(--border);
+  background: color-mix(in srgb, var(--panel-2) 60%, transparent);
+  filter: none; transform: none;
+}
+.chat-runs-count { min-width: 16px; padding: 0 5px; border-radius: var(--radius-pill);
+  background: var(--accent); color: var(--bg); font-size: var(--fs-xs);
+  line-height: 16px; text-align: center; }
