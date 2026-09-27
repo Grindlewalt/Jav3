@@ -3935,6 +3935,10 @@ a:has(> .nav-dot) { position: relative; }
 .bx-hosts { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
 .bx-hosts .tag { margin-left: 0; }
 .net-allow.net-deny .net-host { color: var(--red); }
+.net-allow.net-overruled .net-host { text-decoration: line-through; opacity: .7; }
+.net-auto-mark { font-size: .85em; opacity: .8; }
+.net-order { margin: 0 0 var(--sp-5); max-width: 70ch; }
+.bx-indent { padding-left: var(--sp-8); }
 .net-group-head > button.link { margin-left: var(--sp-6); font-weight: 400; font-size: var(--fs-sm); }
 
 /* Work: a maximized window has the whole Work area (Work.jsx .work-max);

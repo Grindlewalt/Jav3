@@ -390,20 +390,23 @@ def diff(old: dict, new: dict) -> dict:
 
 
 def validate(body: dict, *, current: dict | None = None) -> dict:
-    """A full, normalized profile from a create/edit body. `service_placement`
-    and `box_runtime` must be in the body itself on create AND edit (operator
-    decision 0.1: never inferred, never defaulted)."""
-    for req in ("service_placement", "box_runtime"):
-        if body.get(req) in (None, ""):
-            raise ProfileError(
-                f"{req} is required (no default)" + (
-                    "; PUT takes the full row, the same body as POST"
-                    if current is not None else ""), status=422)
+    """A full, normalized profile from a create/edit body. On create, a body
+    without `service_placement` / `box_runtime` gets the defaults a new
+    profile has in the form: per_project services on the shared box (runtime
+    kvm, which only matters once `separate_box` is set). An edit (PUT takes
+    the full row, the same body as POST) must still name both."""
+    if current is not None:
+        for req in ("service_placement", "box_runtime"):
+            if body.get(req) in (None, ""):
+                raise ProfileError(
+                    f"{req} is required; PUT takes the full row, the same body as POST",
+                    status=422)
     base = dict(current or {})
     p = {**{"default_verdict": "deny", "network_off": False, "allow_hosts": [],
             "deny_hosts": [], "secrets": [], "auto_handle": False,
             "separate_box": False, "box_image": "main", "box_mem_mb": None,
-            "allow_services": False, "allow_package_requests": False}, **base}
+            "allow_services": False, "allow_package_requests": False,
+            "service_placement": "per_project", "box_runtime": "kvm"}, **base}
     for f in FIELDS:
         if f in body and body[f] is not None:
             p[f] = body[f]

@@ -5,7 +5,7 @@ same-origin gated like every control-plane state change. Every write is a
 `profile_changed` security event carrying a field diff.
 
   GET    /api/profiles                  {profiles:[row + projects:[slugs]]}
-  POST   /api/profiles                  create; service_placement + box_runtime REQUIRED (422)
+  POST   /api/profiles                  create; service_placement/box_runtime default per_project/kvm
   PUT    /api/profiles/{id}             edit;   service_placement + box_runtime REQUIRED (422)
   DELETE /api/profiles/{id}             builtins 409; in-use 409
   PUT    /api/projects/{slug}/profile   {profile_id}

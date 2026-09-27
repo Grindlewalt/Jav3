@@ -9,7 +9,8 @@ import { listImages } from '../boxes/api/images.js'
 import { listBoxes } from '../boxes/api/vms.js'
 import { listProjects } from '../boxes/api/persist.js'
 import {
-  assignableProjects, blankProfile, parseHosts, PLACEMENTS, profilePayload, RUNTIMES, validateProfile,
+  assignableProjects, blankProfile, NETWORK_MODES, networkMode, newSitesText, parseHosts, PLACEMENTS,
+  profilePayload, RUNS_IN, runsIn, runsInText, validateProfile, withNetworkMode, withRunsIn,
 } from '../boxes/logic.js'
 import { LoadError, ProjectList, RuntimeStatus, Unavailable, useLoad } from '../boxes/ui.jsx'
 
@@ -18,10 +19,10 @@ import { LoadError, ProjectList, RuntimeStatus, Unavailable, useLoad } from '../
 // auto-handled, and the box it runs in. Built-in profiles are read-only here
 // (duplicate one to change it). Every project has exactly one profile.
 //
-// Placement and runtime have NO default for a new profile (operator decision
-// 0.1 and the docker addendum): the form will not save until both are picked.
+// A new profile starts on the shared box with per-project service boxes;
+// every choice is one radio (Network, Runs in) over the stored fields.
 
-const NEVER_AUTO = 'Never auto-handled, whatever this says: service_* and svc_unreported, '
+const NEVER_AUTO = 'service_* and svc_unreported, '
   + 'package_* and image_variant_built, unexpected_process and proc_report_mismatch, '
   + 'profile_changed and profiles_migrated, docker_weak_isolation / docker_hardening_refused / '
   + 'docker_socket_refused, persist_imported and persist_disk_deleted, plus egress_anomaly, '
@@ -34,6 +35,7 @@ export default function Profiles() {
   const [variants, setVariants] = useState(['main', 'dev', 'desktop'])
   const [projects, setProjects] = useState([])
   const [runtimes, setRuntimes] = useState(null)
+  const [budget, setBudget] = useState(null)
   const ask = useAsk()
 
   useEffect(() => {
@@ -41,7 +43,7 @@ export default function Profiles() {
     listImages().then((r) => { if (r.variants.length) setVariants(r.variants.map((v) => v.name)) })
       .catch(() => {})
     listProjects().then((ps) => setProjects(assignableProjects(ps))).catch(() => {})
-    listBoxes().then((r) => setRuntimes(r.runtimes)).catch(() => {})
+    listBoxes().then((r) => { setRuntimes(r.runtimes); setBudget(r.budget || null) }).catch(() => {})
   }, [])
 
   // builtins cannot be deleted (409), nor can a profile a project still uses
@@ -72,22 +74,22 @@ export default function Profiles() {
             <li key={p.id} className={editing?.id === p.id ? 'active' : ''}>
               <span className="bx-prof-main grow">
                 <span><b>{p.name}</b> {p.builtin && <Tag>built-in</Tag>}</span>
-                <span className="dim small">
-                  {p.network_off ? 'network off' : `default ${p.default_verdict}`}
-                  {' · '}{(p.allow_hosts || []).length} allowed · {(p.deny_hosts || []).length} denied
-                  {' · '}{(p.secrets || []).length} secret(s)
-                  {p.auto_handle ? ' · auto-handle' : ''}
-                  {' · '}{p.separate_box ? `own ${p.box_runtime} box (${p.box_image}, ${p.box_mem_mb || '?'} MB)` : 'shared box'}
-                  {' · services '}{String(p.service_placement || '?').replace('_', ' ')}
+                <span className="small">
+                  New sites: {newSitesText(p)}
+                  {' · '}{(p.allow_hosts || []).length} always allowed
+                  {' · '}{(p.deny_hosts || []).length} blocked
                 </span>
-                <span className="small">projects: <ProjectList slugs={p.projects} empty="none" /></span>
+                <span className="small">
+                  Secrets: {(p.secrets || []).length ? p.secrets.join(', ') : 'none'}
+                  {' · '}Runs in: {runsInText(p)}
+                  {p.auto_handle ? ' · auto-handles alerts' : ''}
+                </span>
+                <span className="dim small">used by: <ProjectList slugs={p.projects} empty="no project" /></span>
               </span>
               <Button variant="ghost" onClick={() => setEditing({ ...p })}>Edit</Button>
               <Button variant="ghost" onClick={() => setEditing({
-                // placement and runtime are picked again: a copy is a new
-                // profile, and new profiles have no default for either
-                ...p, id: null, builtin: false, name: `${p.name} copy`, projects: [],
-                service_placement: '', box_runtime: '' })}>Duplicate</Button>
+                ...p, id: null, builtin: false, name: `${p.name} copy`, projects: [] })}>
+                Duplicate</Button>
               {!p.builtin && (
                 <Button variant="ghost" danger disabled={(p.projects || []).length > 0}
                         title={(p.projects || []).length ? 'move its projects to another profile first' : undefined}
@@ -99,7 +101,7 @@ export default function Profiles() {
 
       {editing && (
         <ProfileForm key={editing.id ?? 'new'} initial={editing} secrets={secrets} variants={variants}
-                     runtimes={runtimes}
+                     runtimes={runtimes} budget={budget}
                      names={list.filter((p) => p.id !== editing.id).map((p) => p.name)}
                      onCancel={() => setEditing(null)}
                      onSaved={() => { setEditing(null); pr.reload() }} />
@@ -110,8 +112,13 @@ export default function Profiles() {
   )
 }
 
-function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, onSaved }) {
-  const [p, setP] = useState(initial)
+function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCancel, onSaved }) {
+  const [p, setP] = useState({
+    ...initial,
+    // an old row may carry neither: the same defaults a new profile gets
+    service_placement: initial.service_placement || 'per_project',
+    box_runtime: initial.box_runtime || 'kvm',
+  })
   const [allowText, setAllowText] = useState((initial.allow_hosts || []).join('\n'))
   const [denyText, setDenyText] = useState((initial.deny_hosts || []).join('\n'))
   const [busy, setBusy] = useState(false)
@@ -119,6 +126,7 @@ function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, on
   const builtin = !!initial.builtin     // editable, but its name is fixed (409)
   const isNew = initial.id == null
   const set = (k, v) => setP((x) => ({ ...x, [k]: v }))
+  const patch = (o) => setP((x) => ({ ...x, ...o }))
   const full = { ...p, allow_hosts: parseHosts(allowText), deny_hosts: parseHosts(denyText) }
   const errs = validateProfile(full, { names })
   const ok = Object.keys(errs).length === 0
@@ -126,6 +134,8 @@ function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, on
   // secret names known to the server, plus any the profile names that were
   // since deleted (so they can be seen and unticked)
   const secretList = [...new Set([...secrets, ...(p.secrets || [])])].sort()
+  const net = networkMode(p)
+  const where = runsIn(p)
 
   async function save(e) {
     e.preventDefault()
@@ -146,7 +156,12 @@ function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, on
     <input type="radio" name={name} value={value} checked={cur === value}
            disabled={off} onChange={() => onPick(value)} />
   )
-  const dockerOff = runtimes && !runtimes.docker.available
+  // why a "Runs in" choice cannot be picked on this server (null = it can)
+  const unavailable = (v) => {
+    if (!runtimes || v === 'shared') return null
+    const rt = v === 'container' ? runtimes.docker : runtimes.kvm
+    return rt && !rt.available ? (rt.reason || 'not available on this server') : null
+  }
 
   return (
     <form className="sbx-card bx-form bx-prof-form" onSubmit={save}>
@@ -156,6 +171,26 @@ function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, on
       <fieldset className="bx-fs">
         <Input label="Name" value={p.name} error={show('name')} disabled={builtin}
                onChange={(e) => set('name', e.target.value)} />
+
+        <div className="field">
+          <span>Network</span>
+          <div className="bx-radios">
+            {NETWORK_MODES.map((o) => (
+              <label key={o.value} className="check-row" title={o.hint}>
+                {radio('network', o.value, net, (v) => patch(withNetworkMode(v)))}
+                <span>{o.label}</span>
+              </label>
+            ))}
+          </div>
+          <span className="field-hint">{NETWORK_MODES.find((o) => o.value === net)?.hint}</span>
+        </div>
+        <div className="bx-two">
+          <Input textarea label="Always allow (one site per line)" rows={4} spellCheck={false}
+                 value={allowText} onChange={(e) => setAllowText(e.target.value)} />
+          <Input textarea label="Always block (wins)" rows={4} spellCheck={false}
+                 value={denyText} onChange={(e) => setDenyText(e.target.value)} />
+        </div>
+        {show('hosts') && <span className="error small">{errs.hosts}</span>}
 
         <div className="field">
           <span>Secrets it can have <span className="dim small">(names only — values never leave the host)</span></span>
@@ -173,71 +208,50 @@ function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, on
         </div>
 
         <div className="field">
-          <span>Network</span>
-          <label className="check-row">
-            <input type="checkbox" checked={!!p.network_off} onChange={(e) => set('network_off', e.target.checked)} />
-            <span>Network off — no egress at all, whatever the lists say</span>
-          </label>
+          <span>Runs in</span>
           <div className="bx-radios">
-            <span className="small">A host on neither list is</span>
-            <label className="check-row">{radio('verdict', 'deny', p.default_verdict, (v) => set('default_verdict', v))}
-              <span>denied (asks you)</span></label>
-            <label className="check-row">{radio('verdict', 'allow', p.default_verdict, (v) => set('default_verdict', v))}
-              <span>allowed</span></label>
+            {RUNS_IN.map((o) => {
+              const why = unavailable(o.value)
+              return (
+                <label key={o.value} className={`check-row${why ? ' bx-runtime-off' : ''}`}
+                       title={why ? `unavailable: ${why}` : o.hint}>
+                  {radio('runsin', o.value, where, (v) => patch(withRunsIn(v)), !!why && where !== o.value)}
+                  <span>{o.label}</span>
+                </label>
+              )
+            })}
           </div>
+          <span className="field-hint">{RUNS_IN.find((o) => o.value === where)?.hint}
+            {RUNS_IN.filter((o) => unavailable(o.value)).map((o) => (
+              <span key={o.value} className="dim"> · {o.label} unavailable: {unavailable(o.value)}</span>))}
+          </span>
+          {where === 'container' && runtimes && <RuntimeStatus runtimes={runtimes} compact />}
+          {show('box_runtime') && <span className="error small">{errs.box_runtime}</span>}
         </div>
-        <div className="bx-two">
-          <Input textarea label="Allow list (one host per line)" rows={4} spellCheck={false}
-                 value={allowText} onChange={(e) => setAllowText(e.target.value)} />
-          <Input textarea label="Deny list — beats every allow" rows={4} spellCheck={false}
-                 value={denyText} onChange={(e) => setDenyText(e.target.value)} />
-        </div>
-        {show('hosts') && <span className="error small">{errs.hosts}</span>}
+        {where !== 'shared' && (
+          <>
+            <div className="row">
+              <Select label="Image" value={p.box_image || 'main'}
+                      onChange={(e) => set('box_image', e.target.value)}
+                      options={[...new Set([...variants, p.box_image || 'main'])]} />
+              <Input label="Memory (MB)" type="number" min={256} step={64} value={p.box_mem_mb ?? ''}
+                     error={show('box_mem_mb')} onChange={(e) => set('box_mem_mb', e.target.value)} />
+            </div>
+            {budget?.ram_mb_cap && (
+              <span className="field-hint">Every box together may use about {budget.ram_mb_cap} MB
+                {budget.host_ram_mb ? ` (this host has ${budget.host_ram_mb} MB)` : ''}.
+                {' '}<code>desktop</code> needs at least 1280 MB.</span>)}
+          </>
+        )}
 
         <div className="field">
           <label className="check-row">
-            <input type="checkbox" checked={!!p.auto_handle} onChange={(e) => set('auto_handle', e.target.checked)} />
-            <span>Auto-handle all alerts for its projects</span>
-          </label>
-          <span className="field-hint">{NEVER_AUTO}</span>
-          <label className="check-row">
             <input type="checkbox" checked={!!p.allow_services} onChange={(e) => set('allow_services', e.target.checked)} />
-            <span>The agent may file service requests</span>
+            <span>Agent may request services</span>
           </label>
-          <label className="check-row">
-            <input type="checkbox" checked={!!p.allow_package_requests}
-                   onChange={(e) => set('allow_package_requests', e.target.checked)} />
-            <span>The agent may file package requests</span>
-          </label>
-        </div>
-
-        <div className="bx-boxsec">
-          <div className="small"><b>Box</b></div>
-          <label className="check-row">
-            <input type="checkbox" checked={!!p.separate_box} onChange={(e) => set('separate_box', e.target.checked)} />
-            <span>Separate box — each project gets its own box instead of the shared one</span>
-          </label>
-          <div className="field">
-            <span>Box runtime <span className="dim small">(required)</span></span>
-            <div className="bx-radios">
-              {RUNTIMES.map((o) => {
-                const off = o.value === 'docker' ? dockerOff : (runtimes && !runtimes.kvm.available)
-                const why = o.value === 'docker' ? runtimes?.docker.reason : runtimes?.kvm.reason
-                return (
-                  <label key={o.value} className={`check-row${off ? ' bx-runtime-off' : ''}`}>
-                    {radio('runtime', o.value, p.box_runtime, (v) => set('box_runtime', v), off)}
-                    <span>{o.label} <span className="dim small">— {o.hint}</span>
-                      {off && <span className="dim small"> · unavailable{why ? `: ${why}` : ''}</span>}</span>
-                  </label>
-                )
-              })}
-            </div>
-            {p.box_runtime === 'docker' && runtimes && <RuntimeStatus runtimes={runtimes} compact />}
-            {show('box_runtime') && <span className="error small">{errs.box_runtime}</span>}
-          </div>
-          <div className="field">
-            <span>Service placement <span className="dim small">(required)</span></span>
-            <div className="bx-radios col">
+          {p.allow_services && (
+            <div className="bx-radios col bx-indent">
+              <span className="small">each service runs in</span>
               {PLACEMENTS.map((o) => (
                 <label key={o.value} className="check-row">
                   {radio('placement', o.value, p.service_placement, (v) => set('service_placement', v))}
@@ -245,17 +259,21 @@ function ProfileForm({ initial, secrets, variants, runtimes, names, onCancel, on
                 </label>
               ))}
             </div>
-            {show('service_placement') && <span className="error small">{errs.service_placement}</span>}
-          </div>
-          <div className="row">
-            <Select label="Box image variant" value={p.box_image || 'main'}
-                    onChange={(e) => set('box_image', e.target.value)}
-                    options={[...new Set([...variants, p.box_image || 'main'])]} />
-            <Input label="Box memory (MB)" type="number" min={256} step={64} value={p.box_mem_mb ?? ''}
-                   error={show('box_mem_mb')} onChange={(e) => set('box_mem_mb', e.target.value)} />
-          </div>
-          <span className="field-hint">Host is a 4 GB Pi: the guest budget is about 2.2 GB for every
-            box together. <code>desktop</code> needs at least 1280 MB.</span>
+          )}
+          {show('service_placement') && <span className="error small">{errs.service_placement}</span>}
+          <label className="check-row">
+            <input type="checkbox" checked={!!p.allow_package_requests}
+                   onChange={(e) => set('allow_package_requests', e.target.checked)} />
+            <span>Agent may request packages</span>
+          </label>
+          <label className="check-row">
+            <input type="checkbox" checked={!!p.auto_handle} onChange={(e) => set('auto_handle', e.target.checked)} />
+            <span>Auto-handle alerts</span>
+          </label>
+          <details className="field-hint">
+            <summary>which alerts are never auto-handled</summary>
+            {NEVER_AUTO}
+          </details>
         </div>
       </fieldset>
       <div className="row">
@@ -282,8 +300,8 @@ function Assignments({ profiles, projects, onDone }) {
     if (!to) return
     if (!await ask.confirm(`Move ${slug} to ${to.name}?`, {
       body: `From its next turn: secrets ${(to.secrets || []).join(', ') || 'none'}; `
-        + `${to.network_off ? 'no network' : `unlisted hosts ${to.default_verdict === 'allow' ? 'ALLOWED' : 'denied'}`}; `
-        + `${to.separate_box ? `its own ${to.box_runtime} box` : 'the shared box'}.`,
+        + `new sites: ${to.default_verdict === 'allow' && !to.network_off ? 'ALLOWED' : newSitesText(to)}; `
+        + `runs in: ${runsInText(to)}.`,
       confirmLabel: 'Move', danger: to.default_verdict === 'allow' })) return
     try { await assignProfile(slug, to.id); onDone() } catch (e) { notifyError(e) }
   }

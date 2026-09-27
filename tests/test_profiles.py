@@ -1,6 +1,6 @@
 """WP2: security profiles and project-level policy (DESIGN-BOXES (c)/(d)).
 
-Decision order, the profiles API (cookie-only, required placement/runtime,
+Decision order, the profiles API (cookie-only, placement/runtime defaults,
 builtins undeletable), profile_changed diffs, unattributed traffic under the
 Default profile only, per-profile auto_handle in the reviewer and egress auto
 mode, the hard never-list, and the secret-grant rule on both the wire and the
@@ -212,13 +212,14 @@ async def test_service_egress_is_its_approved_hosts_minus_deny_lists(db):
 
 # --- profiles CRUD + events ---------------------------------------------------------
 
-async def test_create_requires_placement_and_runtime(db):
-    for missing in ("service_placement", "box_runtime"):
-        body = {"name": "P", "service_placement": "shared", "box_runtime": "kvm"}
-        body.pop(missing)
-        with pytest.raises(profiles.ProfileError) as e:
-            await profiles.create(db, body)
-        assert e.value.status == 422
+async def test_create_defaults_placement_and_runtime(db):
+    # a new profile defaults to the shared box with per-project services
+    p = await profiles.create(db, {"name": "P"})
+    assert p["service_placement"] == "per_project" and p["box_runtime"] == "kvm"
+    assert p["separate_box"] is False
+    q = await profiles.create(db, {"name": "Q", "service_placement": "shared",
+                                   "separate_box": True, "box_runtime": "docker"})
+    assert q["service_placement"] == "shared" and q["box_runtime"] == "docker"
     with pytest.raises(profiles.ProfileError):
         await profiles.create(db, {"name": "P", "service_placement": "nope",
                                    "box_runtime": "kvm"})
@@ -281,9 +282,11 @@ async def test_api_round_trip(tmp_env):
         assert "alpha" in d["projects"] and d["service_placement"] == "per_project"
         assert d["box_runtime"] == "kvm"
         base = {"name": "Lab", "default_verdict": "deny", "allow_hosts": ["lab.dev"]}
-        assert (await c.post("/api/profiles", json=base)).status_code == 422
-        assert (await c.post("/api/profiles", json={**base, "box_runtime": "kvm"})
-                ).status_code == 422
+        # create fills placement/runtime with the form's defaults
+        r = await c.post("/api/profiles", json={**base, "name": "Plain"})
+        assert r.status_code == 200, r.text
+        assert r.json()["service_placement"] == "per_project"
+        assert r.json()["box_runtime"] == "kvm"
         r = await c.post("/api/profiles", json={**base, "box_runtime": "kvm",
                                                 "service_placement": "per_service"})
         assert r.status_code == 200, r.text
