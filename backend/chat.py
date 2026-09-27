@@ -747,6 +747,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # voice block's reasoning) and, below, the tool to watch one
         orchestrating = bool(row and row["mode"] == "orchestrate")
         if orchestrating:
+            # its turn lasts the whole run (it waits in plan_status); the plan's
+            # token checkpoint is the brake, not a hard cap mid-supervision
+            the_budget.max_input = the_budget.max_output = 10**15
             from .plan import orchestrator_prompt
             system_prompt = f"{system_prompt}\n\n{orchestrator_prompt(active)}"
         # tool subsetting: with no project loaded, project-scoped run/git/

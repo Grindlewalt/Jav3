@@ -70,7 +70,8 @@ async def make_plan(slug: str, body: PlanRequest):
     if in_peak_window() and not body.confirm_peak:
         raise HTTPException(status_code=409, detail="peak_confirmation_required")
     try:
-        plan = await plan_mod.plan_from_dump(slug, body.dump, body.files, title=body.title)
+        plan = await plan_mod.plan_from_dump(slug, body.dump, body.files, title=body.title,
+                                             operator=True)
     except SecretLeakError as e:
         raise HTTPException(status_code=400, detail=f"refused: {e}")
     except ValueError as e:
@@ -161,7 +162,7 @@ async def run_plan(slug: str, body: RunRequest):
     if in_peak_window() and not body.confirm_peak:
         raise HTTPException(status_code=409, detail="peak_confirmation_required")
     try:
-        started = await plan_mod.start_run(slug, peak=body.confirm_peak)
+        started = await plan_mod.start_run(slug, peak=body.confirm_peak, resume=True)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {**started, **_out(slug, plan_mod.load(slug))}

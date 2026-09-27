@@ -11,7 +11,7 @@ import { notifyError } from './notify.js'
 const TONE = { todo: 'pending', running: 'running', blocked: 'untrusted',
                done: 'done', failed: 'error', skipped: undefined }
 const PLAN_TONE = { draft: undefined, running: 'running', done: 'done',
-                    failed: 'error', stopped: 'pending' }
+                    failed: 'error', stopped: 'pending', paused: 'untrusted' }
 
 export default function PlanPanel({ slug, state, setState }) {
   const [plan, setPlan] = useState(null)
@@ -89,8 +89,16 @@ export default function PlanPanel({ slug, state, setState }) {
             <Tag tone={PLAN_TONE[plan.status]}>{plan.status}</Tag>
             {running
               ? <Button variant="ghost" onClick={stop} disabled={busy}>Stop</Button>
-              : <Button onClick={() => run()} disabled={busy || !todo}>Run</Button>}
+              : <Button onClick={() => run()} disabled={busy || !todo}>
+                  {plan.status === 'paused' ? 'Resume' : 'Run'}</Button>}
           </div>
+          {plan.status === 'paused' && (
+            <div className="small plan-paused">
+              Paused for your review at {(plan.tokens_used || 0).toLocaleString()} tokens:
+              every running turn finished and nothing new started. Look it over, then
+              Resume; it pauses again after the same amount of new work.
+            </div>
+          )}
           <ul className="plan-list grow-scroll">
             {plan.items.map((it, i) => (
               <PlanItem key={it.id} it={it} index={i} count={plan.items.length}

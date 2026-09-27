@@ -716,3 +716,44 @@ async def test_status_is_compact_and_item_gives_detail(client, tmp_env):
     one = await plan_mod.status(SLUG, item="i22")
     assert "# Brief" in one and "x" * 2000 in one
     assert (await plan_mod.status(SLUG, item="i99")).startswith("error:")
+
+
+async def test_token_checkpoint_pauses_after_turns_finish(client, tmp_env, monkeypatch):
+    """No hard budget: past the checkpoint nothing new starts, the running turn
+    finishes, the run pauses, and only the operator resumes it."""
+    from backend.agent import budget as budget_mod
+    monkeypatch.setattr(settings, "plan_pause_tokens", 1000)
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"}],
+               max_concurrent=1)
+    seen: dict = {}
+
+    async def heavy(cid, attempt, text):
+        budget_mod.current().add({"prompt_tokens": 900, "completion_tokens": 200})
+        await _report(cid, "done", "spent a lot")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn",
+                        _scripted({"i1": heavy, "i2": heavy}, seen))
+
+    async def no_synth(system, user, temperature=0.3):
+        raise AssertionError("a paused run must not call the model for a rollup")
+    monkeypatch.setattr(plan_mod, "complete_text", no_synth)
+
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    p = plan_mod.load(SLUG)
+    items = _by_id(p)
+    assert p["status"] == "paused" and p["tokens_used"] == 1100
+    assert items["i1"]["status"] == "done" and items["i2"]["status"] == "todo"
+    assert "i2" not in seen                                  # nothing new started
+    # the orchestrator cannot relaunch it...
+    out = await plan_mod.fix(SLUG, action="edit", item="i2", guidance="go")
+    assert "only the operator" in out
+    assert "PAUSED" in await plan_mod.status(SLUG)
+    # ...the operator can, and the next checkpoint moves up
+    monkeypatch.setattr(settings, "plan_pause_tokens", 10_000)
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    p = plan_mod.load(SLUG)
+    assert _by_id(p)["i2"]["status"] == "done" and p["pause_at"] == 11_100

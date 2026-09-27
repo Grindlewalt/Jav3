@@ -201,6 +201,11 @@ class Settings(BaseSettings):
     # a plan item builds a whole slice of a project; 12 rounds went entirely on
     # recon in the 2026-09-27 Voxelcraft run (every item "ran out of budget")
     plan_item_max_iterations: int = 60
+    # plan runs have NO hard token budget (a 1M-output cap killed five items
+    # mid-work, 2026-09-27). Instead, every plan_pause_tokens (in + out, over the
+    # plan's whole life, across relaunches) the run stops starting items, lets
+    # running turns finish, and pauses until the operator resumes it.
+    plan_pause_tokens: int = 100_000_000
     recent_message_limit: int = 40
 
     # The explicit orchestrator (backend/plan.py): how many checklist items run

@@ -98,7 +98,8 @@ def empty_plan(*, title: str = "", dump: str = "") -> dict:
             "job_id": None, "root_id": None, "next_id": 1,
             "attempts_max": settings.plan_attempts_max,
             "max_concurrent": settings.plan_max_concurrent,
-            "max_iterations": 0, "items": []}
+            "max_iterations": 0, "items": [],
+            "tokens_used": 0, "pause_at": settings.plan_pause_tokens, "paused_reason": None}
 
 
 def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
@@ -134,7 +135,9 @@ def normalise(plan: dict) -> dict:
     plan["max_concurrent"] = max(1, min(int(plan.get("max_concurrent") or 1),
                                         MAX_CONCURRENT_CAP))
     plan["max_iterations"] = max(0, int(plan.get("max_iterations") or 0))
-    if plan.get("status") not in ("draft", "running", "done", "failed", "stopped"):
+    plan["tokens_used"] = max(0, int(plan.get("tokens_used") or 0))
+    plan["pause_at"] = max(1, int(plan.get("pause_at") or settings.plan_pause_tokens))
+    if plan.get("status") not in ("draft", "running", "done", "failed", "stopped", "paused"):
         plan["status"] = "draft"
     raws = [r for r in list(plan.get("items") or [])[:MAX_ITEMS] if isinstance(r, dict)]
     # ids like i7 must never be reissued: the counter sits above every explicit one
@@ -432,7 +435,7 @@ def _assigned_model(raw: dict, allowed: set[str]) -> str | None:
 
 
 async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "",
-                         models=()) -> dict:
+                         models=(), operator: bool = False) -> dict:
     """One model call turns the dump into the checklist and persists it as the
     project's plan. Refuses to replace a plan that is running.
 
@@ -444,6 +447,11 @@ async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "",
         raise ValueError("the dump is empty — give the planner something to plan")
     if is_running(slug):
         raise RuntimeError("a plan run is in progress — stop it before re-planning")
+    old = load(slug)
+    if old is not None and old.get("status") == "paused" and not operator:
+        raise RuntimeError(f"the plan is paused for the operator's review at "
+                           f"{old['tokens_used']:,} tokens — only the operator can "
+                           "resume or replace it; tell them")
     roster = agents_index() or "(no named agents — leave assignee null)"
     user = (f"Project: {slug}\n\n# Dump\n{dump[:PLANNER_DUMP_CHARS]}\n\n"
             f"{_read_refs(slug, files)}\n\n# Roster\n{roster}")
@@ -760,7 +768,7 @@ async def _open_head(slug: str, plan: dict, job_id: str) -> tuple[int, str | Non
     return root_id, owner
 
 
-async def start_run(slug: str, *, peak: bool = False) -> dict:
+async def start_run(slug: str, *, peak: bool = False, resume: bool = False) -> dict:
     """Launch the runner as a detached task. Returns {job_id, root_id}. Raises
     RuntimeError when a run is already live or there is nothing to run."""
     if is_running(slug):
@@ -768,6 +776,16 @@ async def start_run(slug: str, *, peak: bool = False) -> dict:
     plan = load(slug)
     if plan is None:
         raise RuntimeError("this project has no plan yet")
+    if plan.get("status") == "paused":
+        if not resume:
+            raise RuntimeError(
+                f"paused for the operator's review at {plan['tokens_used']:,} tokens "
+                "(the checkpoint is every "
+                f"{settings.plan_pause_tokens:,}) — only the operator can resume it")
+        async with edit(slug) as p:                  # the next checkpoint
+            p["pause_at"] = p["tokens_used"] + settings.plan_pause_tokens
+            p["paused_reason"] = None
+            p["status"] = "stopped"
     # "running" with no live task is a run the process lost (a restart): _drive
     # puts those back to todo, so they count as work here
     if not any(it["status"] in ("todo", "running") for it in plan["items"]):
@@ -802,7 +820,8 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
     for every item, and finishes with a rollup whatever happened."""
     plan = load(slug)
     title = plan["title"] if plan else "Plan"
-    budget = budget_mod.Budget(settings.max_op_input_tokens, settings.max_op_output_tokens)
+    # no hard cap: the plan pauses at its token checkpoint instead (_drive)
+    budget = budget_mod.Budget(10**15, 10**15)
     budget_mod.register(job_id, budget)
     optok = budget_mod.active_op_id.set(job_id)
     ptoken = runtime.active_project.set(slug)
@@ -821,10 +840,17 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
     status, rollup = "failed", ""
     try:
         async with orchestrator.job_workspace(slug, top_level=True):
-            status = await _drive(slug, job_id, root_id)
+            status = await _drive(slug, job_id, root_id, budget)
         bus.publish(job_id, {"type": "node_status", "node_id": root_id,
                              "status": "summarizing"})
-        rollup = await _synthesize(slug, status)
+        if status == "paused":
+            # no model call: the operator looks first
+            p = load(slug) or {}
+            rollup = (f"Paused at {p.get('tokens_used', 0):,} tokens, the review checkpoint "
+                      f"(every {settings.plan_pause_tokens:,}). Every running turn finished; "
+                      "no new item was started. Resume from the plan panel.")
+        else:
+            rollup = await _synthesize(slug, status)
     except asyncio.CancelledError:
         status = "stopped"
         rollup = await _synthesize(slug, status)
@@ -837,7 +863,7 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
             async with _lock(slug):
                 p = load(slug)
                 if p is not None:
-                    p["status"] = status
+                    p["status"] = status     # "paused" included: resume needs the operator
                     for it in p["items"]:
                         if it["status"] == "running":     # stopped mid-flight
                             it["status"] = "todo"
@@ -869,14 +895,16 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
             "usage": budget.summary()}
 
 
-async def _drive(slug: str, job_id: str, root_id: int) -> str:
+async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
     """The monitoring loop: spawn what is ready, settle what finished, block
     what cannot run, nudge and re-drive what stalled, honour operator edits.
     Returns the run's final status."""
     tasks: dict[str, asyncio.Task] = {}
     meta: dict[str, dict] = {}
     spawned = 0
+    pausing = False
     async with edit(slug) as plan:
+        base_tokens = plan.get("tokens_used", 0)     # earlier runs of this plan
         _driving.add(slug)
         _drive_began.add(slug)
         plan["status"], plan["job_id"], plan["root_id"] = "running", job_id, root_id
@@ -929,8 +957,24 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
                     it["history"] = it["history"][-HISTORY_KEEP:]
                     it["status"] = "todo" if it["stalls"] <= 1 else "failed"
                     _emit_item(job_id, it)
+                # the review checkpoint: past it, start nothing new, let what is
+                # running finish its turn, then pause for the operator
+                if budget is not None:
+                    plan["tokens_used"] = base_tokens + budget.input_tokens + budget.output_tokens
+                if not pausing and plan["tokens_used"] >= plan.get("pause_at", settings.plan_pause_tokens):
+                    pausing = True
+                    plan["paused_reason"] = (f"token checkpoint: {plan['tokens_used']:,} ≥ "
+                                             f"{plan['pause_at']:,}")
+                    bus.publish(job_id, {"type": "node_status", "node_id": root_id,
+                                         "status": "pausing"})
+                if pausing:
+                    if not tasks:
+                        _driving.discard(slug)
+                        plan["status"] = "paused"
+                        await _notify_paused(slug, plan)
+                        return "paused"
                 # spawn what is ready, within the concurrency and spawn caps
-                while len(tasks) < plan["max_concurrent"] and spawned < MAX_SPAWNS:
+                while not pausing and len(tasks) < plan["max_concurrent"] and spawned < MAX_SPAWNS:
                     nxt = next((it for it in ready(plan) if it["id"] not in tasks), None)
                     if nxt is None:
                         break
@@ -945,7 +989,7 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
                         _run_item(slug, job_id, root_id, plan, nxt, deps, m))
                     spawned += 1
                     _emit_item(job_id, nxt)
-                if not tasks and (finished(plan) or spawned >= MAX_SPAWNS):
+                if not pausing and not tasks and (finished(plan) or spawned >= MAX_SPAWNS):
                     _driving.discard(slug)          # decided under the lock
                     if spawned >= MAX_SPAWNS and ready(plan):
                         for it in ready(plan):
@@ -967,6 +1011,24 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
             _live_items.pop(m.get("cid"), None)
         if tasks:
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+
+async def _notify_paused(slug: str, plan: dict) -> None:
+    """The operator's bell: the plan stopped at its checkpoint and waits."""
+    from . import security
+    try:
+        db = await get_db()
+        try:
+            await security.raise_event(
+                db, kind="plan_paused", severity="warn", project=slug,
+                summary=(f"Plan '{plan['title'][:60]}' paused at "
+                         f"{plan['tokens_used']:,} tokens for your review"),
+                detail={"tokens_used": plan["tokens_used"], "pause_at": plan["pause_at"],
+                        "root_id": plan.get("root_id")})
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — a failed bell must not wedge the pause
+        pass
 
 
 async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
@@ -1138,7 +1200,9 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
    - Items blocked only because a dependency failed restart by themselves
      once that dependency is fixed.
    plan_fix restarts the run if it had stopped. Keep going until every item is
-   done or skipped. Go to the operator ONLY for what agents cannot do at all:
+   done or skipped. Exception: every {pause_tokens} tokens the run PAUSES for the
+   operator's review (running turns finish, nothing new starts). Then report
+   where it stands and stop; only the operator resumes it. Go to the operator ONLY for what agents cannot do at all:
    a credential or account, money, a decision that is genuinely theirs.
 5. A single focused task outside the plan can go to spawn_agent or
    spawn_temp_agent; you wait for that one's report.
@@ -1157,6 +1221,7 @@ speaking: act on them (message the affected agents, adjust the plan)."""
 
 def orchestrator_prompt(project: str | None) -> str:
     return ORCHESTRATOR_PROMPT.format(
+        pause_tokens=f"{settings.plan_pause_tokens:,}",
         project=project or "(none — this conversation lost its project; tell the operator)")
 
 
@@ -1333,7 +1398,13 @@ def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str
     tally = ", ".join(f"{n} {st}" for st, n in counts.items())
     lines = [f"Plan '{plan['title']}' — {'RUNNING' if running else 'not running'} "
              f"(status {plan['status']}, head conversation {plan.get('root_id')}). {why}",
-             f"Items: {tally}. Full detail of one item: plan_status item=<id>."]
+             f"Items: {tally}. Tokens so far {plan.get('tokens_used', 0):,}; review "
+             f"checkpoint at {plan.get('pause_at', 0):,}. Full detail of one item: "
+             "plan_status item=<id>."]
+    if plan.get("status") == "paused":
+        lines.append("PAUSED for the operator's review (" + (plan.get("paused_reason") or
+                     "token checkpoint") + "). Only the operator can resume it: tell them "
+                     "what state the plan is in and stop; plan_fix cannot relaunch it.")
     for it in plan["items"]:
         who = f" @{it['assignee']}" if it.get("assignee") else ""
         mdl = f" model {it['model']}" if it.get("model") else ""
