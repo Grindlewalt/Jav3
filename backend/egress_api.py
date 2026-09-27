@@ -193,7 +193,7 @@ async def revoke(body: RevokeBody):
 
 
 @router.post("/auto/{aid}/promote")
-async def promote(aid: int):
+async def promote_auto(aid: int):
     db = await get_db()
     try:
         res = await egress.promote_auto(db, aid)
@@ -275,7 +275,7 @@ class PromoteBody(BaseModel):
 
 
 @router.post("/policy/{slug}/promote")
-async def promote(slug: str, body: PromoteBody, user: dict = Depends(require_user)):
+async def promote_to_profile(slug: str, body: PromoteBody, user: dict = Depends(require_user)):
     """Move a host from the project's own list onto a profile's (one call; a
     `profile_changed` event)."""
     db = await get_db()
