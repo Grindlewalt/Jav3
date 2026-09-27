@@ -71,6 +71,9 @@ MAX_ATTEMPTS_CAP = 5
 PLANNER_DUMP_CHARS = 40_000
 PLANNER_FILE_CHARS = 12_000
 SUMMARY_CHARS = 2_000
+HISTORY_KEEP = 4          # earlier attempts' outcomes a retry is shown
+GUIDANCE_KEEP = 6         # orchestrator guidance entries kept per item
+MAX_FIXES = 4             # orchestrator re-dispatches per item (plan_fix retry)
 
 _locks: dict[str, asyncio.Lock] = {}
 _runs: dict[str, asyncio.Task] = {}          # project slug -> the detached runner
@@ -111,7 +114,8 @@ def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
             "status": "todo", "assignee": (assignee or "").strip() or None,
             "model": (str(model).strip() or None) if model else None,
             "attempts": 0, "stalls": 0, "last_error": None, "result_summary": None,
-            "conversation_id": None, "notes": [], "report": None}
+            "conversation_id": None, "notes": [], "report": None,
+            "history": [], "guidance": [], "fixes": 0}
 
 
 def normalise(plan: dict) -> dict:
@@ -148,6 +152,9 @@ def normalise(plan: dict) -> dict:
         it["conversation_id"] = raw.get("conversation_id") or None
         it["notes"] = [n for n in (raw.get("notes") or []) if isinstance(n, dict)]
         it["report"] = raw.get("report") if isinstance(raw.get("report"), dict) else None
+        it["history"] = [h for h in (raw.get("history") or []) if isinstance(h, dict)][-HISTORY_KEEP:]
+        it["guidance"] = [str(g) for g in (raw.get("guidance") or []) if g][-GUIDANCE_KEEP:]
+        it["fixes"] = max(0, int(raw.get("fixes") or 0))
         items.append(it)
     ids = {i["id"] for i in items}
     for it in items:
@@ -312,7 +319,13 @@ Reply with ONLY a JSON array, no prose, no markdown fence:
 Rules: 3 to 12 items. Items with no dependency run in PARALLEL, so keep
 independent work independent and put shared groundwork first. Prefer fewer,
 larger items over many tiny ones. Never invent an assignee that is not in the
-roster; null means a general worker."""
+roster; null means a general worker.
+
+Write every brief for an agent that must FINISH on its own: name the files it
+owns, the command that proves it works (a test, a run, a build) and what done
+looks like. A root item gates everything after it, so keep roots small and
+certain. Tell items that depend on unfinished work to stub or build what they
+need rather than wait for it."""
 
 # appended to the planner's instructions only when the operator made explicit
 # model assignments (orchestrate's `models`)
@@ -541,14 +554,37 @@ def replace_items(plan: dict, incoming: list[dict]) -> None:
 ITEM_PROMPT = """You are one worker on a team of agents executing an explicit
 plan for this project. You get exactly one checklist item. Do it completely,
 stay inside it, coordinate with teammates by message when your work touches
-theirs, and report the outcome with plan_report before you stop."""
+theirs, and report the outcome with plan_report before you stop.
 
-REPORT_RULES = """# Reporting — required
+You are expected to push through problems, not describe them. Every obstacle
+is yours to remove: a failing test is a bug to fix, a missing file is one to
+write, a missing helper from another item is a stub to create (tell its owner),
+an unclear spec is an assumption to make and state in one line. Diagnosing a
+problem and then stopping is a failed item. Keep acting until the proof (the
+test, the run, the build) passes."""
+
+REPORT_RULES = """# Keep moving
+- Work in small verified steps: write, run, read the output, fix, run again.
+- When something fails, fix it and re-run. Try another approach after two
+  identical failures; never stop at "the cause is X".
+- Something you need does not exist yet (a teammate's module, a fixture, a
+  config)? Build the smallest working version yourself, mark it as a stub in
+  a comment, message its owner, and carry on.
+- A tool that misbehaves on valid input is a harness fault: report it with
+  report_harness_fault, route around it, keep going.
+- "blocked" is ONLY for what an agent cannot do at all: a credential or
+  account, a paid service, a decision only the operator can make. Everything
+  else you solve.
+
+# Reporting — required
 When the item is finished, call plan_report with status "done" and a summary
-(what you did, the exact file paths, what the items after you need to know).
-If you cannot finish: plan_report with status "failed" (something went wrong
-that a retry could fix — say what) or "blocked" (needs the operator — say what).
-A final reply without a plan_report call counts as a failed attempt.
+(what you did, the exact file paths, the command that proves it and its real
+output, what the items after you need to know).
+Running out of room before you finish: plan_report with status "failed" and
+say exactly what works, what is left and the next step, so the retry picks up
+there instead of starting over. "blocked" is for operator-only needs (say what).
+Report as soon as the proof passes; a final reply without a plan_report call
+counts as a failed attempt and throws your work's summary away.
 
 # Teammates
 The other items of this plan are separate agents. They start as their
@@ -575,9 +611,18 @@ def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
         parts.append("\n# Notes teammates left for you")
         parts += [f"- from {n.get('from', 'a teammate')}: {n.get('body', '')}"
                   for n in it["notes"]]
-    if it.get("attempts", 0) > 1 and it.get("last_error"):
-        parts.append(f"\n# Previous attempt\nAttempt {it['attempts'] - 1} ended with: "
-                     f"{it['last_error']}\nFix the cause; do not repeat it.")
+    if it.get("guidance"):
+        parts.append("\n# Orchestrator guidance (follow this)")
+        parts += [f"- {g}" for g in it["guidance"]]
+    if it.get("history"):
+        parts.append("\n# Earlier attempts at this item\nThe files they wrote are still in the "
+                     "project: check what exists, CONTINUE from there, and fix what stopped "
+                     "them. Do not start over, and do not repeat what failed.")
+        for h in it["history"]:
+            line = f"- attempt {h.get('attempt')}: {h.get('outcome')} — {h.get('error') or ''}"
+            if h.get("progress"):
+                line += f"\n  got to: {h['progress']}"
+            parts.append(line)
     parts.append("\n" + REPORT_RULES)
     return "\n".join(parts)
 
@@ -862,6 +907,11 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
                     _live_items.pop(m.get("cid"), None)
                     it["stalls"] += 1
                     it["last_error"] = "stalled: no tool call or message for too long"
+                    it.setdefault("history", []).append(
+                        {"attempt": it["attempts"], "outcome": "stalled",
+                         "error": it["last_error"], "progress": "",
+                         "conversation_id": m.get("cid"), "at": _now()})
+                    it["history"] = it["history"][-HISTORY_KEEP:]
                     it["status"] = "todo" if it["stalls"] <= 1 else "failed"
                     _emit_item(job_id, it)
                 # spawn what is ready, within the concurrency and spawn caps
@@ -960,6 +1010,13 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
             status, err, summary = "failed", "no structured completion report (plan_report was not called)", None
     if status in ("failed", "blocked"):
         err = err or summary or "the agent reported no reason"
+        # what this attempt got to, so the next one continues instead of
+        # starting over (the tail of its reply when it never reported)
+        got = (summary or "").strip() or " ".join(final.split())[-SUMMARY_CHARS // 2:]
+        it.setdefault("history", []).append(
+            {"attempt": it["attempts"], "outcome": status, "error": err[:500],
+             "progress": got[:SUMMARY_CHARS // 2], "conversation_id": cid, "at": _now()})
+        it["history"] = it["history"][-HISTORY_KEEP:]
     if status == "failed" and it["attempts"] < plan["attempts_max"]:
         it["status"] = "todo"               # retried on the next tick
     else:
@@ -986,9 +1043,11 @@ async def _nudge(root_id: int, it: dict, m: dict) -> None:
     try:
         await agentmsg.send(
             db, sender_cid=root_id, to=str(m["cid"]),
-            body=(f"[plan] item {it['id']} has been quiet for a while. If you are stuck, "
-                  "call plan_report with status \"blocked\" and say what you need; "
-                  "otherwise keep going and call plan_report when the item is done."))
+            body=(f"[plan] item {it['id']} has been quiet for a while. Take the next "
+                  "concrete step now: run the check, fix what it shows, or build what is "
+                  "missing. Only if you need something only the operator can give, call "
+                  "plan_report with status \"blocked\" and say what; otherwise keep going "
+                  "and call plan_report when the item is done."))
     except Exception:  # noqa: BLE001 — a failed nudge is not a failed item
         pass
     finally:
@@ -1036,8 +1095,10 @@ def render_checklist(plan: dict) -> str:
 
 ORCHESTRATOR_PROMPT = """# You are this conversation's orchestrator
 The operator hands you a brain-dump; you get it done through a team of agents
-working in project {project}, and you stay in charge until it is finished. Do
-not do the items' work yourself.
+working in project {project}, and you stay in charge until it is DONE. Your
+job is to keep the work moving: a failure or a block is a problem for you to
+solve, not a result to report. Do not do the items' work yourself; you may make
+a small unblocking fix directly (a missing stub, a name clash, a wrong path).
 
 1. Plan and launch: call orchestrate with the operator's dump — verbatim, plus
    any facts from this conversation the agents need (they will not see it). It
@@ -1047,14 +1108,26 @@ not do the items' work yourself.
    item changes state, a message arrives for you, or the wait runs out, and
    shows every item's status, its agent's conversation id, and its result or
    error. Keep calling it until the run is finished.
-3. Steer: send_message to item:<id> (or the item's conversation id) to correct,
-   unblock or inform a running agent. A failed or blocked item: message it,
-   or tell the operator what it needs.
-4. A single focused task outside the plan can go to spawn_agent or
+3. Steer running items: send_message to item:<id> (or its conversation id) to
+   correct, unblock or inform it the moment you see it drift.
+4. Fix every failed or blocked item, right away, with plan_fix:
+   - Read why it stopped (plan_status shows the error and how far it got;
+     read the files it wrote if that helps). Work out the actual cause.
+   - retry with guidance that removes that cause: the concrete fix, the file
+     to create, the assumption to make, the approach to switch to. A bare
+     retry with no new information fails the same way.
+   - edit the brief when the brief was wrong, add an item for missing
+     groundwork, split an item that was too big, or skip one that is moot.
+   - Items blocked only because a dependency failed restart by themselves
+     once that dependency is fixed.
+   plan_fix restarts the run if it had stopped. Keep going until every item is
+   done or skipped. Go to the operator ONLY for what agents cannot do at all:
+   a credential or account, money, a decision that is genuinely theirs.
+5. A single focused task outside the plan can go to spawn_agent or
    spawn_temp_agent; you wait for that one's report.
-5. When plan_status says the run is finished, report to the operator: what got
-   done (exact paths), what failed or is blocked and why, and what they need
-   to decide.
+6. When everything is done, report to the operator: what got done (exact
+   paths and the proof it works), what you had to fix along the way, and any
+   decision that is theirs.
 
 Model choice: every agent runs on the default model. ONLY when the operator
 explicitly said which model to use for which task, pass that: orchestrate's
@@ -1069,6 +1142,99 @@ def orchestrator_prompt(project: str | None) -> str:
     return ORCHESTRATOR_PROMPT.format(
         project=project or "(none — this conversation lost its project; tell the operator)")
 
+
+
+FIX_ACTIONS = ("retry", "edit", "add", "skip")
+
+
+async def fix(slug: str, *, action: str, item: str | None = None,
+              guidance: str = "", title: str = "", brief: str = "",
+              depends_on=None, run: bool = True) -> str:
+    """The plan_fix tool: an orchestrator repairs its own plan instead of
+    handing failures to the operator. retry = back to todo with guidance the
+    next attempt reads (and its earlier attempts' history); edit = new
+    title/brief/dependencies; add = a new item; skip = settle a moot item.
+    Items the runner blocked behind a fixed dependency are released, and a
+    stopped run is relaunched when there is work to do."""
+    if action not in FIX_ACTIONS:
+        return f"error: action must be one of {', '.join(FIX_ACTIONS)}"
+    guidance = " ".join((guidance or "").split())[:SUMMARY_CHARS]
+    try:
+        async with edit(slug) as plan:
+            idx = index(plan)
+            if action == "add":
+                if not (title or brief):
+                    return "error: add needs a title and a brief"
+                deps = [str(d) for d in (depends_on or [])]
+                bad = [d for d in deps if d not in idx]
+                if bad:
+                    return f"error: no item {', '.join(bad)} to depend on"
+                if len(plan["items"]) >= MAX_ITEMS:
+                    return f"error: the plan already has {MAX_ITEMS} items"
+                it = new_item(plan, title=title or brief[:80], brief=brief, depends_on=deps)
+                if guidance:
+                    it["guidance"] = [guidance]
+                plan["items"].append(it)
+                what = f"added {it['id']}"
+            else:
+                it = idx.get(str(item or ""))
+                if it is None:
+                    known = ", ".join(idx) or "none"
+                    return f"error: no item {item!r} (items: {known})"
+                if it["status"] == "running" and action != "edit":
+                    return (f"error: {it['id']} is running — send_message to item:{it['id']} "
+                            "to steer it, or wait for it to finish")
+                if action == "retry":
+                    if it["status"] == "done":
+                        return f"error: {it['id']} is done; add a follow-up item instead"
+                    if it.get("fixes", 0) >= MAX_FIXES:
+                        return (f"error: {it['id']} has been re-dispatched {MAX_FIXES} times. "
+                                "Change the approach: edit its brief, split it with add, "
+                                "or skip it and cover the gap another way")
+                    if not guidance:
+                        return ("error: retry needs guidance — what the next attempt must "
+                                "do differently (a bare retry fails the same way)")
+                    it["fixes"] = it.get("fixes", 0) + 1
+                    it["guidance"] = (it.get("guidance", []) + [guidance])[-GUIDANCE_KEEP:]
+                    it["status"], it["report"], it["attempts"], it["stalls"] = "todo", None, 0, 0
+                    what = f"{it['id']} back to todo (re-dispatch {it['fixes']}/{MAX_FIXES})"
+                elif action == "edit":
+                    patch = {k: v for k, v in (("title", title), ("brief", brief)) if v}
+                    if depends_on is not None:
+                        bad = [str(d) for d in depends_on if str(d) not in idx]
+                        if bad:
+                            return f"error: no item {', '.join(bad)} to depend on"
+                        patch["depends_on"] = [str(d) for d in depends_on]
+                    if not patch and not guidance:
+                        return "error: edit needs a title, brief, depends_on or guidance"
+                    apply_item_edit(plan, it, patch)
+                    if guidance:
+                        it["guidance"] = (it.get("guidance", []) + [guidance])[-GUIDANCE_KEEP:]
+                    what = f"{it['id']} edited"
+                else:                                   # skip
+                    it["status"], it["last_error"] = "skipped", guidance or "skipped by the orchestrator"
+                    what = f"{it['id']} skipped"
+            _break_cycles(plan["items"])                # an edited depends_on may loop
+            released = release_blocked(plan)
+            job_id = plan.get("job_id") if is_running(slug) else None
+            has_work = any(i["status"] == "todo" for i in plan["items"])
+    except LookupError:
+        return "error: this project has no plan — call orchestrate first"
+    if job_id:
+        for r in released:
+            _emit_item(job_id, r)
+    note = f" Released: {', '.join(r['id'] for r in released)}." if released else ""
+    if is_running(slug):
+        return f"{what}.{note} The live run picks it up on its next tick."
+    if not run or not has_work:
+        return f"{what}.{note} The run is not running" + (
+            "; nothing is ready to run." if not has_work else "; pass run=true to relaunch.")
+    try:
+        started = await start_run(slug)
+    except RuntimeError as e:
+        return f"{what}.{note} Could not relaunch: {e}"
+    return (f"{what}.{note} Relaunched the run (head conversation {started['root_id']}); "
+            "follow it with plan_status.")
 
 # how often plan_status re-reads the plan while waiting; a module constant so a
 # test can shrink it

@@ -261,6 +261,18 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB, *,
 TEMP_LEAN_EXCLUDE = ("soul.md", "standing-memory", "user.md",
                      "all-projects.md", "agents-index", "secrets-index")
 
+# Appended to every headless run (plan items, spawn_agent, temp agents,
+# schedules): nobody is watching these turns live, so an agent that stops at
+# a diagnosis wastes the whole run (the 2026-09-27 benchmark-game plan).
+DELEGATED_DRIVE = """# Working unattended
+Nobody is watching this run, so nobody will unblock you: you finish the task
+or you hand back exactly how far you got. Push through obstacles yourself — a
+failing check is a bug to fix and re-run, a missing file or helper is one to
+write (a stub is fine; say so), an ambiguity is an assumption to make and state.
+After two identical failures, switch approach. Stopping at "the cause is X" is
+not a result. Only a credential, money, or a decision that is the operator's
+is a reason to stop; name it precisely when it is."""
+
 TEMP_REPORT_BACK = """# Temporary agent
 You exist only for this task; when you finish you are gone, and only two
 things survive you: the memory note you write and the final report you
@@ -347,6 +359,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         cidtoken = runtime.conversation_id.set(conversation_id)
         confirm_peak(conversation_id)
         system_prompt = await _agent_system_prompt(db, agent, active=active)
+        system_prompt = f"{system_prompt}\n\n{DELEGATED_DRIVE}"
         tools = _agent_tools(agent, await _project_autonomy(db, active))
         if extra_tools:
             tools = tools + _internal_specs(extra_tools)

@@ -788,12 +788,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             excluded = agent_exclusions(agent_def)
             entries = [e for e in entries if e["name"] not in excluded]
         if orchestrating and any(e["name"] == "orchestrate" for e in entries):
-            # plan_status is `enabled: false` (an ordinary chat that launches a
+            # plan_status / plan_fix are `enabled: false` (an ordinary chat that launches a
             # plan is told not to wait on it); an orchestrator's whole job is
             # to. Granted only where orchestrate itself survived the project's
             # autonomy dial — watching a plan it may not start is pointless.
             entries = entries + [{**e, "enabled": True} for e in load_registry()
-                                 if e["name"] == "plan_status"]
+                                 if e["name"] in ("plan_status", "plan_fix")]
         # ...and a shortened Notes body. NOT zero: the first line of a body is
         # where the load-bearing operating instruction lives ("Do not call
         # music_search first"), and dropping it entirely broke tool use on the local

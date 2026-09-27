@@ -34,7 +34,10 @@ MAX_FANOUT = 6     # children per decomposing node
 
 SUBAGENT_PROMPT = """You are a subagent with one narrow job: do exactly the task
 you are given, using only the tools provided, and report a concise result. Stay
-strictly on task; do not attempt anything outside it."""
+strictly on task; do not attempt anything outside it. Within it, push through:
+fix what fails and re-check, build the small missing piece you need, make and
+state an assumption rather than stall. Report what works, with proof, and
+precisely what is left if you could not finish."""
 
 
 class _Budget:

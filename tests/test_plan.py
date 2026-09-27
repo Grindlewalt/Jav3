@@ -289,7 +289,8 @@ async def test_runner_checks_items_off_retries_and_blocks(client, tmp_env, monke
     assert "i4 failed" in items["i5"]["last_error"]
     # what the briefs carried: the dependency's result, and the retry's reason
     assert "dug at code/ground.py" in seen["i2"][0]
-    assert "Previous attempt" in seen["i2"][1] and "wet" in seen["i2"][1]
+    assert "Earlier attempts" in seen["i2"][1] and "wet" in seen["i2"][1]
+    assert items["i2"]["history"][0]["outcome"] == "failed"
     assert "item:" in seen["i1"][0] and "plan_report" in seen["i1"][0]
 
     db = await get_db()
@@ -586,3 +587,69 @@ async def test_orchestrate_tool_plans_and_starts(client, monkeypatch):
         assert out.startswith("error:") and "incognito" in out and len(started) == 1
     finally:
         runtime.active_project.reset(tok)
+
+
+# --- plan_fix: the orchestrator repairs its own plan ---------------------------
+
+async def test_fix_retries_with_guidance_and_relaunches(client, tmp_env, monkeypatch):
+    await _put(client, [{"title": "root", "brief": "r"},
+                        {"title": "leaf", "brief": "l", "depends_on": ["i1"]}],
+               attempts_max=1, max_concurrent=2)
+    seen: dict = {}
+
+    async def i1(cid, attempt, text):
+        if "use the stub" not in text:
+            await _report(cid, "failed", "fixture.json missing; wrote half the loader")
+            return "failed"
+        await _report(cid, "done", "loader works")
+        return "ok"
+
+    async def i2(cid, attempt, text):
+        await _report(cid, "done", "leaf built")
+        return "ok"
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted({"i1": i1, "i2": i2}, seen))
+
+    async def fake_synth(system, user, temperature=0.3):
+        return "ROLLUP"
+    monkeypatch.setattr(plan_mod, "complete_text", fake_synth)
+
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    items = _by_id(plan_mod.load(SLUG))
+    assert items["i1"]["status"] == "failed" and items["i2"]["status"] == "blocked"
+
+    # a bare retry is refused: it would fail the same way
+    assert (await plan_mod.fix(SLUG, action="retry", item="i1")).startswith("error:")
+    out = await plan_mod.fix(SLUG, action="retry", item="i1",
+                             guidance="create fixture.json yourself and use the stub")
+    assert "Relaunched" in out and "i2" in out            # the blocked leaf is released
+    await _wait_run()
+    items = _by_id(plan_mod.load(SLUG))
+    assert items["i1"]["status"] == "done" and items["i2"]["status"] == "done"
+    assert items["i1"]["fixes"] == 1
+    retry_text = seen["i1"][-1]
+    assert "Orchestrator guidance" in retry_text and "use the stub" in retry_text
+    assert "Earlier attempts" in retry_text and "half the loader" in retry_text
+
+
+async def test_fix_edit_add_skip_and_cap(client, tmp_env, monkeypatch):
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"}])
+    out = await plan_mod.fix(SLUG, action="add", title="stub the api", brief="write api.js",
+                             depends_on=["i1"], run=False)
+    assert out.startswith("added i3")
+    assert (await plan_mod.fix(SLUG, action="add", title="x", depends_on=["i9"],
+                               run=False)).startswith("error:")
+    assert "edited" in await plan_mod.fix(SLUG, action="edit", item="i2", brief="better",
+                                          run=False)
+    assert "skipped" in await plan_mod.fix(SLUG, action="skip", item="i1",
+                                           guidance="moot", run=False)
+    items = _by_id(plan_mod.load(SLUG))
+    assert items["i2"]["brief"] == "better" and items["i1"]["status"] == "skipped"
+    assert items["i3"]["depends_on"] == ["i1"]
+    for n in range(plan_mod.MAX_FIXES):
+        await plan_mod.fix(SLUG, action="retry", item="i2", guidance=f"try {n}", run=False)
+    capped = await plan_mod.fix(SLUG, action="retry", item="i2", guidance="again", run=False)
+    assert capped.startswith("error:") and "Change the approach" in capped
+    assert (await plan_mod.fix(SLUG, action="nope")).startswith("error:")

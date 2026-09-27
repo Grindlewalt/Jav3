@@ -373,7 +373,7 @@ async def test_an_orchestrator_turn_gets_its_prompt_tools_and_cap(client, monkey
     await _settle(chat_mod, cid)
     assert "orchestrator" in seen["prompt"] and f"project {SLUG}" in seen["prompt"]
     names = {t["function"]["name"] for t in seen["kw"]["tool_specs"]}
-    assert {"orchestrate", "plan_status", "send_message", "spawn_agent"} <= names
+    assert {"orchestrate", "plan_status", "plan_fix", "send_message", "spawn_agent"} <= names
     assert seen["kw"]["max_iterations"] == settings.orchestrator_max_iterations
     db = await get_db()
     try:
