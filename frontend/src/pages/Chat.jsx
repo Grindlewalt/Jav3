@@ -200,11 +200,6 @@ export default function Chat({
   // Doesn't repaint the GUI — the toolbar switch and the composer placeholder
   // carry it.
   const [temporary, setTemporary] = useState(false)
-  // draft parked on a peak-pricing 409 until the operator answers in-page.
-  // This must NOT be window.confirm: the iOS home-screen app suppresses
-  // blocking dialogs, so confirm() returns false without ever showing and
-  // every send silently bounced back into the bar.
-  const [peakAsk, setPeakAsk] = useState(null)
   // the multi-agent jobs this chat launched (/messages `jobs`), and whether
   // the Runs view is standing in for the transcript
   const [chatJobs, setChatJobs] = useState([])
@@ -385,7 +380,6 @@ export default function Chat({
   async function openConversation(id, { resume = false } = {}) {
     tailAbort.current?.abort()
     setTemporary(false)   // saved chats always persist
-    setPeakAsk(null)
     if (!resume) closeSideOnPhone()
     setConversationId(id)
     setChatJobs([])
@@ -417,7 +411,6 @@ export default function Chat({
   function newConversation() {
     tailAbort.current?.abort()
     setBusy(false)
-    setPeakAsk(null)
     closeSideOnPhone()
     setConversationId(null)
     setMessages([])
@@ -498,7 +491,7 @@ export default function Chat({
     try { await api(`/api/chat/${id}/stop`, { method: 'POST' }) } catch { /* already done */ }
   }
 
-  async function send(confirmPeak = false, resend = null) {
+  async function send(resend = null) {
     const text = (resend ?? input).trim()
     if (!text || busy) return
     // the orb is on screen only while the chat is empty — grab where it is
@@ -512,7 +505,7 @@ export default function Chat({
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
       await chatStream(
-        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
+        { message: text, conversation_id: conversationId,
           ephemeral: temporary,
           // only meaningful when the conversation is being created by this turn
           ...(conversationId ? {} : { project: pendingProject || null,
@@ -529,14 +522,9 @@ export default function Chat({
           .then((r) => setChatJobs(r.jobs || [])).catch(() => {})
       }
     } catch (err) {
-      // drop the two optimistic messages; a peak-retry re-adds them
+      // drop the two optimistic messages
       setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the confirmed retry re-sends the
-        // parked draft from scratch
-        setPeakAsk(text)
-      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+      if (err.status === 409 && err.detail === 'turn_in_progress') {
         setInput(text)
         setMessages((m) => [...m, { role: 'error',
           content: 'a turn is still running in this chat — wait for it to finish' }])
@@ -626,7 +614,7 @@ export default function Chat({
   const slash = useSlash({
     input, setInput, busy, conversationId, turnId: () => conversationId ?? liveId.current,
     conversations, projects, active, pendingProject, messages, setMessages,
-    temporary, setTemporary, send: (t) => send(false, t), newChat: newConversation,
+    temporary, setTemporary, send: (t) => send(t), newChat: newConversation,
     openChat: openConversation, openList: () => setSideOpen(true), stop,
     pickProject: (mode, slug) => (conversationId ? assignProject(mode, slug)
       : (setPendingMode(mode), setPendingProject(slug || ''))),
@@ -739,18 +727,6 @@ export default function Chat({
         <AskPanel asks={asks} cid={liveId.current ?? conversationId} />
         <form className="composer" onSubmit={(e) => { e.preventDefault(); slash.submit() || send() }}>
           <div className="composer-glow" ref={glowRef} />
-          {peakAsk && (
-            <div className="peak-ask" role="alertdialog"
-                 aria-label="peak pricing confirmation">
-              <span className="grow">Peak pricing right now — this reply costs 2×.</span>
-              <button type="button" className="ghost"
-                      onClick={() => { setInput(peakAsk); setPeakAsk(null) }}>
-                Cancel</button>
-              <button type="button"
-                      onClick={() => { const t = peakAsk; setPeakAsk(null); send(true, t) }}>
-                Send anyway</button>
-            </div>
-          )}
           {slash.popup}
           <div className={`composer-inner${multiline ? ' multi' : ''}`}>
             <textarea

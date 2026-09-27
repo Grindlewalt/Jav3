@@ -31,8 +31,7 @@ async def run(dump: str, files: list[str] | None = None, run: bool = True,
                    "and press Run there.")
         return "\n".join(out)
     try:
-        # peak is the launching turn's decision: it already passed the gate
-        started = await plan_mod.start_run(slug, peak=True)
+        started = await plan_mod.start_run(slug)
     except RuntimeError as e:
         out.append(f"Not started: {e}")
         return "\n".join(out)

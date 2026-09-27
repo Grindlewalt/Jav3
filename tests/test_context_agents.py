@@ -82,7 +82,7 @@ async def test_context_only_when_active(client):
 
 async def test_agent_run_creates_findable_conversation(client):
     await client.post("/api/agents", json={"name": "Scout"})
-    # peak gate may or may not be active; pass confirm to be safe. The model
+    # an old client's confirm_peak is accepted and ignored. The model
     # call will fail without a key, but the conversation + streaming wiring
     # is what we assert, and errors come back as SSE, not a 500.
     async with client.stream("POST", "/api/agents/scout/run",

@@ -25,7 +25,7 @@ async def run(brief: str, title: str = "") -> str:
         job_id = uuid.uuid4().hex
         leaf_tools = openai_tool_specs(
             [e for e in load_registry() if e["name"] not in NON_DELEGABLE])
-        r = await run_job(job_id, brief, slug, peak=True, leaf_tools=leaf_tools,
+        r = await run_job(job_id, brief, slug, leaf_tools=leaf_tools,
                           title=(title or brief)[:60])
         return (f"Agent team finished (job {job_id}); node rollups staged "
                 f"under runs/{job_id}/ for review.\n\nRollup:\n{r['rollup']}")

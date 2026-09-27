@@ -1,6 +1,6 @@
 """The local fast tier: voice turns route to the operator's ollama, escalate
 to DeepSeek only by [ESCALATE] + spoken permission (or the smart-model
-keyword), and the peak gate never fires for local inference."""
+keyword)."""
 import asyncio
 
 import pytest
@@ -154,21 +154,6 @@ async def test_escalation_declined(seeded, monkeypatch):
     assert voice.ESCALATE_DROPPED in texts
 
 
-async def test_local_turns_skip_peak_gate(seeded, monkeypatch):
-    from backend import chat as chat_mod, voice
-    local_tier(monkeypatch)
-    session, out = make_session(monkeypatch)   # in_peak_window -> False here
-    monkeypatch.setattr(voice, "in_peak_window", lambda: True)  # force peak ON
-    turn, calls = capturing_turn([([], "Cheap and local, any hour.")])
-    monkeypatch.setattr(chat_mod, "guest_turn", turn)
-
-    await session._on_transcript("quick one, what's two plus two")
-    await settle(session)
-    # no CONFIRM_PEAK detour — the local turn just ran
-    assert calls and calls[0]["model_name"] == "llama3.1:8b"
-    assert session.pending_peak is None
-
-
 async def test_confirm_state_survives_ask_playback(seeded, monkeypatch):
     """Acking the spoken ask's audio must not flip a confirm state back to
     listening (the pre-existing _maybe_idle stomp)."""
@@ -195,13 +180,12 @@ async def test_flash_switch_sends_every_turn_to_deepseek(seeded, monkeypatch):
     """The /voice page's switch, not a spoken keyword: with a local tier
     configured, "Flash" routes straight to DeepSeek and no escalation question
     can happen — that is the point of choosing it before you start talking."""
-    from backend import chat as chat_mod, voice
+    from backend import chat as chat_mod
     from backend.voice_text import LOCAL_PROMPT
     local_tier(monkeypatch)
     session, out = make_session(monkeypatch)
     turn, calls = capturing_turn([([], "On it.")])
     monkeypatch.setattr(chat_mod, "guest_turn", turn)
-    monkeypatch.setattr(voice, "in_peak_window", lambda: False)
 
     await session.on_browser_json({"type": "tier", "value": "smart"})
     await session._on_transcript("plan my week")

@@ -335,7 +335,7 @@ async def test_funnel_streams_job(client, monkeypatch):
         return {"root_id": 1, "rollup": "done", "doc_path": None}
 
     monkeypatch.setattr(runs_api.orchestrator, "run_job", fake_run_job)
-    # confirm_peak so the test doesn't 409 when run during a peak-pricing window
+    # confirm_peak is ignored now; an old client sending it must not 422
     r = await client.post("/api/runs/funnel",
                           json={"brief": "map the repo", "confirm_peak": True})
     assert r.status_code == 200

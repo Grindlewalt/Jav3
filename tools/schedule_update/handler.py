@@ -3,7 +3,7 @@
 Creation is a PROPOSAL: the row lands paused with pending_approval=1, the
 bell surfaces it, and only the operator's resume/pause click settles it. The
 tool has no enable action on purpose: a schedule is standing autonomous
-execution (headless, peak pricing auto-confirmed), so a compromised turn must
+execution (headless, no one to ask), so a compromised turn must
 never be able to grant itself recurring runs. disable/delete only shrink
 autonomy — delete is further limited to still-pending proposals, so operator
 automations can't be removed from inside a turn."""

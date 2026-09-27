@@ -265,23 +265,3 @@ def test_dsml_slashless_close_recovers_truncated_does_not():
     # cut off mid-argument: a half-written file must not be written
     assert parse_dsml_tool_calls(head + '<｜｜DSML｜｜ parameter name="content" '
                                         'string="true">x = ') == []
-
-
-def test_peak_gate_spares_a_running_turn_and_explains_itself(monkeypatch):
-    # 2026-09-27: a turn begun at 17:58 died at 18:00:11 as a blank "ModelError: "
-    from backend.agent import model as m
-    monkeypatch.setattr(m, "in_peak_window", lambda *a, **k: True)
-    m._peak_confirmations.pop(4242, None)
-    try:
-        m.check_peak_gate(4242)
-        raise AssertionError("an unconfirmed new turn in peak must be asked")
-    except m.PeakPricingConfirmationRequired as e:
-        assert "peak pricing" in str(e)
-    m.hold_turn(4242)
-    m.check_peak_gate(4242)                  # the running turn carries on
-    m.release_turn(4242)
-    try:
-        m.check_peak_gate(4242)
-        raise AssertionError("released: the next turn is asked again")
-    except m.PeakPricingConfirmationRequired:
-        pass

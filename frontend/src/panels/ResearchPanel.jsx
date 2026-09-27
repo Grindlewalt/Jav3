@@ -21,18 +21,17 @@ export default function ResearchPanel({ slug, state, setState }) {
   const [open, setOpen] = useState({})      // id -> rollup expanded
   const [busy, setBusy] = useState(false)
   const [doc, setDoc] = useState(null)
-  const [peakAsk, setPeakAsk] = useState(null)   // in-page; iOS eats confirm()
   const topic = state.topic || ''
   const angles = state.angles || 4
 
   const upNode = (id, patch) =>
     setNodes((n) => ({ ...n, [id]: { ...(n[id] || {}), ...patch } }))
 
-  async function run(confirmPeak = false) {
+  async function run() {
     if (!topic.trim() || busy) return
     setBusy(true); setNodes({}); setOrder([]); setOpen({}); setDoc(null)
     try {
-      await chatStream({ topic, angles: Number(angles) || 4, confirm_peak: confirmPeak,
+      await chatStream({ topic, angles: Number(angles) || 4,
                          project: slug }, (ev) => {
         if (ev.type === 'node_spawned') {
           upNode(ev.node_id, { id: ev.node_id, parent: ev.parent_id, kind: ev.kind,
@@ -47,25 +46,13 @@ export default function ResearchPanel({ slug, state, setState }) {
       }, '/api/runs/research')
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (err) {
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        setPeakAsk(true)
-      } else notifyError(err)
+      notifyError(err)
     }
     setBusy(false)
   }
 
   return (
     <div className="pane-col">
-      {peakAsk && (
-        <div className="peak-ask compact" role="alertdialog"
-             aria-label="peak pricing confirmation">
-          <span className="grow">Peak pricing right now — this research costs 2×.</span>
-          <button type="button" className="ghost"
-                  onClick={() => setPeakAsk(null)}>Cancel</button>
-          <button type="button"
-                  onClick={() => { setPeakAsk(null); run(true) }}>Research anyway</button>
-        </div>
-      )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); run() }}>
         <input className="grow" placeholder="research topic…" value={topic}
                onChange={(e) => setState({ topic: e.target.value })} />

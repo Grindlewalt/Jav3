@@ -516,40 +516,28 @@ class Renderer:
 
 
 def run_turn(c: httpx.Client, message: str, conversation_id: int | None,
-             project: str | None, out=sys.stdout, confirm=input) -> int | None:
+             project: str | None, out=sys.stdout) -> int | None:
     """POST one chat turn and render it. Returns the conversation id."""
     body: dict = {"message": message, "conversation_id": conversation_id}
     if project and conversation_id is None:
         body["project"] = project
-    for _ in range(2):
-        with c.stream("POST", "/api/chat", json=body) as r:
-            if r.status_code == 409:
-                r.read()
-                if _detail(r) == "peak_confirmation_required" and not body.get("confirm_peak"):
-                    try:
-                        ans = confirm("Peak-pricing window — send anyway? [y/N] ")
-                    except EOFError:         # a pipe with nothing left to answer
-                        ans = ""
-                    if ans.strip().lower().startswith("y"):
-                        body["confirm_peak"] = True
-                        continue
-                    raise CliError("not sent: peak-pricing window (each reply costs 2× now) "
-                                   "and no yes was given")
-                raise CliError(f"server said 409: {_detail(r)}")
-            if r.status_code >= 400:
-                r.read()
-                _check(r)
-            rend = Renderer(out)
-            header = r.headers.get("x-conversation-id")
-            if header and header.isdigit():
-                rend.conversation_id = int(header)
-            for ev in iter_sse(r.iter_lines()):
-                if rend.feed(ev):
-                    break
-            if rend.error:
-                raise CliError(rend.error)
-            return rend.conversation_id or conversation_id
-    raise CliError("not sent")
+    with c.stream("POST", "/api/chat", json=body) as r:
+        if r.status_code == 409:
+            r.read()
+            raise CliError(f"server said 409: {_detail(r)}")
+        if r.status_code >= 400:
+            r.read()
+            _check(r)
+        rend = Renderer(out)
+        header = r.headers.get("x-conversation-id")
+        if header and header.isdigit():
+            rend.conversation_id = int(header)
+        for ev in iter_sse(r.iter_lines()):
+            if rend.feed(ev):
+                break
+        if rend.error:
+            raise CliError(rend.error)
+        return rend.conversation_id or conversation_id
 
 
 EXIT_WORDS = ("exit", "quit", "/exit", "/quit")
@@ -571,7 +559,7 @@ def cmd_chat(args, out=sys.stdout, read=input) -> int:
     with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
         try:
             if args.message:
-                run_turn(c, " ".join(args.message), None, args.project, out, read)
+                run_turn(c, " ".join(args.message), None, args.project, out)
                 return 0
             cid = None
             while True:
@@ -584,7 +572,7 @@ def cmd_chat(args, out=sys.stdout, read=input) -> int:
                     return 0
                 if not msg.strip():
                     continue
-                cid = run_turn(c, msg, cid, args.project, out, read)
+                cid = run_turn(c, msg, cid, args.project, out)
         except httpx.HTTPError as e:
             raise CliError(f"connection to {base} failed: {e}")
         except KeyboardInterrupt:
@@ -5936,33 +5924,23 @@ def build_tui(base: str, token: str, **kw):
                 self.send(self.queue.pop(0))
 
         async def _post(self, body: dict) -> None:
-            for _ in range(2):
-                async with self.client.stream("POST", "/api/chat", json=body) as r:
-                    if r.status_code == 409:
-                        await r.aread()
-                        why = _detail(r)
-                        if why == "peak_confirmation_required" and not body.get("confirm_peak"):
-                            if await self.push_screen_wait(Confirm(
-                                    "Peak pricing right now", "This reply costs 2×. "
-                                    "Send anyway?", grace=0.6)):
-                                body["confirm_peak"] = True
-                                continue
-                            await self.note("not sent")
-                            return
-                        if why == "turn_in_progress":
-                            raise CliError("a turn is still running in this chat — wait, "
-                                           "or /stop it")
-                        raise CliError(f"server said 409: {why}")
-                    if r.is_redirect:
-                        raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
-                    if r.status_code == 401:
-                        self._login_lost()
-                        raise NotLoggedIn(SESSION_LOST)
-                    if r.status_code >= 400:
-                        await r.aread()
-                        raise CliError(f"server said {r.status_code}: {_detail(r)}")
-                    await self._consume(r.aiter_lines())
-                    return
+            async with self.client.stream("POST", "/api/chat", json=body) as r:
+                if r.status_code == 409:
+                    await r.aread()
+                    why = _detail(r)
+                    if why == "turn_in_progress":
+                        raise CliError("a turn is still running in this chat — wait, "
+                                       "or /stop it")
+                    raise CliError(f"server said 409: {why}")
+                if r.is_redirect:
+                    raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
+                if r.status_code == 401:
+                    self._login_lost()
+                    raise NotLoggedIn(SESSION_LOST)
+                if r.status_code >= 400:
+                    await r.aread()
+                    raise CliError(f"server said {r.status_code}: {_detail(r)}")
+                await self._consume(r.aiter_lines())
 
         async def _consume(self, lines) -> bool:
             """Render a stream; True if it carried anything but `idle`."""
@@ -8015,21 +7993,7 @@ def cmd_tui(args) -> int:
     return 0
 
 
-def _ask_tty(question: str) -> str:
-    """-p's peak question: stdout is the reply (maybe a file) and stdin may be a
-    pipe already read to the end, so ask on the terminal itself; no terminal
-    reads as no."""
-    try:
-        # two handles: a text-mode "r+" on a tty is refused as unseekable
-        with open("/dev/tty", "w") as out, open("/dev/tty") as inp:
-            out.write(question)
-            out.flush()
-            return inp.readline()
-    except OSError:
-        return ""
-
-
-def cmd_print(args, out=sys.stdout, confirm=_ask_tty) -> int:
+def cmd_print(args, out=sys.stdout) -> int:
     """`jav3 -p message` (or a pipe): one turn, plain text, for scripts."""
     msg = " ".join(args.prompt or [])
     if not sys.stdin.isatty():
@@ -8040,7 +8004,7 @@ def cmd_print(args, out=sys.stdout, confirm=_ask_tty) -> int:
     base, token = _session(args)
     with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
         try:
-            run_turn(c, msg, getattr(args, "resume", None), args.project, out, confirm)
+            run_turn(c, msg, getattr(args, "resume", None), args.project, out)
         except httpx.HTTPError as e:
             raise CliError(f"connection to {base} failed: {e}")
     return 0

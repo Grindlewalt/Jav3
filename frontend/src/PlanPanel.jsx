@@ -19,7 +19,6 @@ export default function PlanPanel({ slug, state, setState }) {
   const [agents, setAgents] = useState([])
   const [busy, setBusy] = useState(false)
   const [newTitle, setNewTitle] = useState('')
-  const [peakAsk, setPeakAsk] = useState(null)   // 'plan' | 'run'; in-page, iOS eats confirm()
   const dump = state.dump || ''
 
   const take = (r) => { setPlan(r.plan); setRunning(r.running) }
@@ -42,25 +41,24 @@ export default function PlanPanel({ slug, state, setState }) {
     return () => es.close()
   }, [plan?.root_id, running]) // eslint-disable-line
 
-  async function call(path, options, onPeak) {
+  async function call(path, options) {
     setBusy(true)
     try {
       take(await api(`/api/projects/${slug}/plan${path}`, options))
       return true
     } catch (err) {
-      if (err.status === 409 && err.detail === 'peak_confirmation_required' && onPeak) setPeakAsk(onPeak)
-      else notifyError(err)
+      notifyError(err)
       return false
     } finally { setBusy(false) }
   }
-  const post = (path, body, onPeak) =>
-    call(path, { method: 'POST', body: JSON.stringify(body || {}) }, onPeak)
+  const post = (path, body) =>
+    call(path, { method: 'POST', body: JSON.stringify(body || {}) })
   const patch = (id, body) =>
     call(`/items/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
   const remove = (id) => call(`/items/${id}`, { method: 'DELETE' })
 
-  const makePlan = (confirm = false) => post('', { dump, confirm_peak: confirm }, 'plan')
-  const run = (confirm = false) => post('/run', { confirm_peak: confirm }, 'run')
+  const makePlan = () => post('', { dump })
+  const run = () => post('/run', {})
   const stop = () => post('/stop')
   const todo = plan?.items.filter((it) => it.status === 'todo').length || 0
 
@@ -72,15 +70,6 @@ export default function PlanPanel({ slug, state, setState }) {
                onChange={(e) => setState({ dump: e.target.value })} />
         <Button type="submit" disabled={busy || running || !dump.trim()}>Plan</Button>
       </form>
-      {peakAsk && (
-        <div className="peak-ask compact" role="alertdialog" aria-label="peak pricing confirmation">
-          <span className="grow">Peak pricing right now — this costs 2×.</span>
-          <Button variant="ghost" onClick={() => setPeakAsk(null)}>Cancel</Button>
-          <Button onClick={() => { const w = peakAsk; setPeakAsk(null); (w === 'run' ? run : makePlan)(true) }}>
-            {peakAsk === 'run' ? 'Run anyway' : 'Plan anyway'}
-          </Button>
-        </div>
-      )}
       {!plan && <EmptyState pad>no plan yet — dump the ask above and press Plan</EmptyState>}
       {plan && (
         <>

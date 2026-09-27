@@ -866,8 +866,8 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
     `kind` tags the node for the run tree (chat/head/leader/subagent/scout/reader/
     agent/scheduled). `title` is stored verbatim as the summary (callers format
     their own prefixes). Pass commit=False when the caller adds a first message in
-    the same transaction and commits itself. Follow-ups (peak confirmation, the
-    opening user message) are the caller's, using the returned id.
+    the same transaction and commits itself. Follow-ups (the opening user
+    message) are the caller's, using the returned id.
 
     `locked` pins the binding: the turn uses this project (or no project at all,
     if `project` is None) instead of following whatever is loaded globally.

@@ -1550,17 +1550,18 @@ async def test_tui_brackets_in_titles_and_tool_args_do_not_crash(cfg):
         assert "test [ -f x" in _text(app.query("ToolView").last().query_one("#head"))
 
 
-def test_print_mode_peak_without_an_answer_is_not_sent():
-    """jav3 -p in the peak window with stdin a pipe (read to the end already)
-    died with an EOFError traceback; now it is a plain `not sent`."""
-    def handler(request):
-        return httpx.Response(409, json={"detail": "peak_confirmation_required"})
+def test_print_mode_409_is_a_plain_error_and_sends_no_peak_flag():
+    """The peak-pricing gate is gone: -p never prompts, never retries, and the
+    body carries no confirm_peak. A 409 (a busy chat) is one plain error."""
+    bodies = []
 
-    def no_tty(question):
-        raise EOFError
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(409, json={"detail": "turn_in_progress"})
     with httpx.Client(base_url="http://h:1", transport=httpx.MockTransport(handler)) as c:
-        with pytest.raises(jav3.CliError, match="not sent"):
-            jav3.run_turn(c, "hi", None, None, io.StringIO(), no_tty)
+        with pytest.raises(jav3.CliError, match="409: turn_in_progress"):
+            jav3.run_turn(c, "hi", None, None, io.StringIO())
+    assert len(bodies) == 1 and "confirm_peak" not in bodies[0]
 
 
 async def test_tui_export_to_a_missing_dir_and_a_missing_editor_are_errors(cfg, monkeypatch):

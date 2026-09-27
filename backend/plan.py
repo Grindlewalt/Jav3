@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from . import bus, orchestrator, runtime, writes
 from .agent import budget as budget_mod
 from .agent.budget import BudgetExceeded
-from .agent.model import complete_text, confirm_peak
+from .agent.model import complete_text
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import agents_index
@@ -768,7 +768,7 @@ async def _open_head(slug: str, plan: dict, job_id: str) -> tuple[int, str | Non
     return root_id, owner
 
 
-async def start_run(slug: str, *, peak: bool = False, resume: bool = False) -> dict:
+async def start_run(slug: str, *, resume: bool = False) -> dict:
     """Launch the runner as a detached task. Returns {job_id, root_id}. Raises
     RuntimeError when a run is already live or there is nothing to run."""
     if is_running(slug):
@@ -793,7 +793,7 @@ async def start_run(slug: str, *, peak: bool = False, resume: bool = False) -> d
     job_id = uuid.uuid4().hex
     root_id, owner = await _open_head(slug, plan, job_id)
     task = asyncio.create_task(run_plan(slug, job_id=job_id, root_id=root_id,
-                                        peak=peak, owner=owner))
+                                        owner=owner))
     _runs[slug] = task
 
     def _done(t: asyncio.Task) -> None:
@@ -813,7 +813,7 @@ def stop_run(slug: str) -> bool:
     return True
 
 
-async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
+async def run_plan(slug: str, *, job_id: str, root_id: int,
                    owner: str | None = None) -> dict:
     """The whole run, start to rollup. Owns its Budget (a plan run is an
     operation of its own even when a chat's tool started it), pins the project
@@ -829,8 +829,6 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
     wtoken = runtime.web_session.set(f"job:{job_id}")
     # items sit one hop under the plan: they may spawn helpers, helpers may not
     dtoken = runtime.spawn_depth.set(1)
-    if peak:
-        confirm_peak(root_id)
     bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": root_id,
                          "agent_slug": owner})
     bus.publish(job_id, {"type": "node_spawned", "node_id": root_id, "parent_id": None,
