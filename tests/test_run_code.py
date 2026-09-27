@@ -127,3 +127,21 @@ async def test_protected_paths_never_captured(tmp_env, monkeypatch, tmp_path):
     assert "exit 0" in out
     assert "kept 1 changed file(s): fine.txt" in out
     assert ".git" not in out.split("kept 1")[1].splitlines()[0]
+
+
+async def test_sees_this_turns_pending_writes(tmp_env, monkeypatch, tmp_path):
+    """write_file buffers into .staging/; run_code must see those files
+    (2026-09-27: `node --test tests/x.test.mjs` found nothing) without
+    re-capturing them as its own artifacts."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    ws = tmp_path / "proj"
+    (ws / "old.txt").write_text("stale")
+    (ws / ".staging" / "tests").mkdir(parents=True)
+    (ws / ".staging" / "tests" / "new.txt").write_text("fresh")
+    (ws / ".staging" / "old.txt").write_text("edited")
+
+    out = await registry.dispatch("run_code", {"command": "cat tests/new.txt old.txt"})
+    assert "freshedited" in out
+    assert "kept" not in out          # synced files are not the run's artifacts

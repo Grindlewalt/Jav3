@@ -81,6 +81,28 @@ def _snapshot(root) -> dict:
     return snap
 
 
+def _sync_overlay(root) -> None:
+    """Lay this turn's pending writes (write_file/edit_file buffer them in
+    `.staging/`) over the workspace copy, so the code sees the files the agent
+    just wrote. Without it `node --test tests/new.test.mjs` said the file did
+    not exist (2026-09-27 plan run) and agents went digging in .staging by hand.
+    Runs before the `before` snapshot, so synced files are not re-captured; the
+    overlay itself is untouched and still what the turn-end pack ships."""
+    overlay = root / ".staging"
+    if not overlay.is_dir():
+        return
+    for src in overlay.rglob("*"):
+        if not src.is_file() or src.is_symlink():
+            continue
+        dest = root / src.relative_to(overlay)
+        if dest.is_symlink() or dest.is_dir():
+            continue
+        data = src.read_bytes()
+        if dest.is_file() and dest.read_bytes() == data:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+
 async def _capture_artifacts(root, before: dict, slug: str) -> tuple[list[str], list[str]]:
     """Capture files the run created/changed. Returns (captured, skipped)."""
     captured, skipped, total = [], [], 0
@@ -116,6 +138,7 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
     if slug:
         cwd = settings.projects_dir / slug
         cwd.mkdir(parents=True, exist_ok=True)
+        _sync_overlay(cwd)
         before = _snapshot(cwd)
     else:
         cwd = settings.projects_dir / "_scratch"
