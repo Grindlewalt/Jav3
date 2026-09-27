@@ -10,7 +10,8 @@ from pydantic import BaseModel
 
 from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, providers, runtime
 from .agent import budget
-from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
+from .agent.model import (confirm_peak, hold_turn, in_peak_window, model,
+                          peak_confirmed, release_turn)
 from .agent.loop import db_tool_sink
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
 from .auth import require_actor
@@ -665,6 +666,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     db = None
     tools_before = None      # set once the turn's tool_calls high-water mark is known
     late: list[str] = []     # operator messages the turn closed on without reading
+    hold_turn(conversation_id)       # a started turn outlives a peak window opening
     try:
         # inside the try: if the connect fails, the finally must still evict
         # _active_turns and close the bus channel or the conversation bricks
@@ -979,6 +981,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             err["undelivered"] = late
         bus.publish(chan, err)
     finally:
+        release_turn(conversation_id)
         # normally already closed above; this covers a path that raised
         # before reaching the close (the rows then wait for the next turn)
         agentmsg.forget_operator_inbox(conversation_id)

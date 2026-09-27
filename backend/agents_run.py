@@ -18,7 +18,8 @@ from pydantic import BaseModel
 from . import agenttree, bus
 from . import sse as feeds
 from .agent.loop import db_tool_sink
-from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
+from .agent.model import (confirm_peak, hold_turn, in_peak_window, model,
+                          peak_confirmed, release_turn)
 from .vm.turn import run_agent_turn
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .agents_api import _read
@@ -367,6 +368,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
         final_content = ""
+        hold_turn(conversation_id)     # released below: an hour-long run outlives the TTL
         try:
             async for event in run_agent_turn(conversation_id, system_prompt, history,
                                               tools=tools, model_name=mdl,
@@ -379,6 +381,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
                 if event["type"] == "final":
                     final_content = event["content"]
         finally:
+            release_turn(conversation_id)
             runtime.conversation_id.reset(cidtoken)
             runtime.active_project.reset(ptoken)
             runtime.web_session.reset(wtoken)

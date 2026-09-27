@@ -128,9 +128,34 @@ def peak_confirmed(conversation_id: int) -> bool:
     return ts is not None and time.time() - ts < settings.peak_confirm_ttl_minutes * 60
 
 
+# conversations with a turn in flight. The gate asks BEFORE a turn starts; a
+# turn already running is not killed when a peak window opens (or its
+# confirmation's TTL lapses) mid-turn: at 18:00:11 on 2026-09-27 an
+# orchestrator turn begun at 17:58 died on its next model call as a blank
+# "ModelError: ".
+_live_turns: dict[int, int] = {}
+
+
+def hold_turn(conversation_id: int | None) -> None:
+    if conversation_id is not None:
+        _live_turns[conversation_id] = _live_turns.get(conversation_id, 0) + 1
+
+
+def release_turn(conversation_id: int | None) -> None:
+    n = _live_turns.get(conversation_id, 0) - 1
+    if n > 0:
+        _live_turns[conversation_id] = n
+    else:
+        _live_turns.pop(conversation_id, None)
+
+
 def check_peak_gate(conversation_id: int) -> None:
-    if in_peak_window() and not peak_confirmed(conversation_id):
-        raise PeakPricingConfirmationRequired()
+    if in_peak_window() and not peak_confirmed(conversation_id) \
+            and not _live_turns.get(conversation_id):
+        raise PeakPricingConfirmationRequired(
+            "DeepSeek peak pricing is on (" + ", ".join(settings.peak_windows)
+            + " server time, about 2x): confirm peak pricing for this conversation "
+            "to continue")
 
 
 CAPTURE_STATE_KEY = "capture_context"
