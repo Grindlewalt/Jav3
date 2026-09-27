@@ -71,7 +71,7 @@ export default function Shell() {
   const [chatJobs, setChatJobs] = useState([])   // jobs this chat launched (/messages)
 
   const chat = useChatStream()
-  const { messages, busy, peakAsk, setPeakAsk, openThread, stopTurn, runTurn,
+  const { messages, busy, openThread, stopTurn, runTurn,
           handleTurnEvent } = chat
   const liveId = useRef(null)      // id of the turn in flight (a temp chat never adopts it)
   const adopted = useRef(null)     // id a live send just put in the URL — don't reopen it
@@ -103,7 +103,6 @@ export default function Shell() {
   useEffect(() => {
     if (cid != null && cid === adopted.current) return
     adopted.current = null
-    setPeakAsk(null)
     setTemporary(false)
     setThreadAgent(null)
     setChatJobs([])
@@ -111,7 +110,7 @@ export default function Shell() {
     openThread(cid, { onTailDone: refreshSide })
       .then((r) => { if (r) { setThreadAgent(r.agent_slug || null); setChatJobs(r.jobs || []) } })
       .catch(notifyError)
-  }, [cid, openThread, refreshSide, setPeakAsk])
+  }, [cid, openThread, refreshSide])
 
   // arriving at a fresh chat resets its choices — except the agent a "new chat
   // as…" asked for on the way here
@@ -218,12 +217,12 @@ export default function Shell() {
     handleTurnEvent(ev)
   }
 
-  async function send(confirmPeak = false, resend = null) {
-    const text = (resend ?? input).trim()
+  async function send() {
+    const text = input.trim()
     if (!text || busy) return
-    if (!resend) setInput('')
+    setInput('')
     const body = {
-      message: text, conversation_id: cid, confirm_peak: confirmPeak,
+      message: text, conversation_id: cid,
       ephemeral: fresh && temporary,
       // only meaningful when this turn creates the conversation. The shell
       // has two scopes, not three: pinned to the project in the URL, or to no
@@ -299,9 +298,6 @@ export default function Shell() {
                     onReview={() => openDock('git')} />
         <Composer value={input} onChange={setInput} onSend={() => send()}
                   busy={busy} onStop={stop}
-                  peakAsk={peakAsk}
-                  onPeakCancel={() => { setInput(peakAsk); setPeakAsk(null) }}
-                  onPeakConfirm={() => { const t = peakAsk; setPeakAsk(null); send(true, t) }}
                   fresh={fresh} agents={agents} agentSlug={agentSlug}
                   agentName={agentName} onPickAgent={setNewAs}
                   onNewAs={(s) => newChat(s)}

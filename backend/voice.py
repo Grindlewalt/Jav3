@@ -10,11 +10,10 @@ conversational state machine:
   SPEAKING       TTS chunks queued/streaming (the turn may still be running)
   BARGE_PENDING  the browser's local VAD paused playback; awaiting the
                  sidecar's transcript verdict (empty = false alarm, resume)
-  CONFIRM_PEAK   the peak-pricing question was spoken; next utterance is the
-                 yes/no answer (channel plumbing — not persisted)
+  CONFIRM_ESCALATE  "send it up?" was spoken; next utterance is the yes/no
+                 answer (channel plumbing — not persisted)
 
-Turns are ordinary chat turns: the session inserts the user row, runs the
-same peak gate as POST /api/chat, and calls chat.start_turn — persistence,
+Turns are ordinary chat turns: the session inserts the user row and calls chat.start_turn — persistence,
 budget, project pinning and compaction are all the chat path's. The bus
 channel is subscribed BEFORE the turn starts (the existing discipline) and a
 separate pump task feeds the sidecar so the bus consumer never blocks on
@@ -53,7 +52,6 @@ from datetime import datetime, time as dtime
 import websockets
 
 from . import bus, chat, runtime
-from .agent.model import confirm_peak, in_peak_window, peak_confirmed
 from .agent.tools.registry import dispatch as tool_dispatch
 from .config import settings
 from .db import get_db, get_state, open_conversation, set_state
@@ -73,9 +71,8 @@ LISTENING = "listening"
 THINKING = "thinking"
 SPEAKING = "speaking"
 BARGE_PENDING = "barge_pending"
-CONFIRM_PEAK = "confirm_peak"
 CONFIRM_ESCALATE = "confirm_escalate"
-CONFIRM_STATES = (CONFIRM_PEAK, CONFIRM_ESCALATE)
+CONFIRM_STATES = (CONFIRM_ESCALATE,)
 ASLEEP = "asleep"          # wake-word standby: mic flows, words are ignored
 
 AFFIRMATIVE = ("yes", "yeah", "yep", "sure", "go ahead", "continue",
@@ -200,8 +197,6 @@ GREETING_NOTE = (
     "don't quote raw text verbatim. If there's nothing below, just greet "
     "them and ask what they need.]\n\n{briefing}")
 
-PEAK_ASK = "Heads up: peak pricing is in effect. Should I continue?"
-PEAK_DROPPED = "Okay, I'll hold off. Say it again later if you want it."
 ESCALATE_ASK = "Want me to send it up?"
 ESCALATE_DROPPED = "Okay, leaving it."
 BUSY_LINE = "One second, I'm still working on that. I'll take this next."
@@ -367,7 +362,6 @@ class VoiceSession:
         self.order: list[int] = []          # emit order, current turn only
         self.barge_pos: tuple[int, int] | None = None
 
-        self.pending_peak: dict | None = None    # {text, smart, insert}
         self.pending_escalate: str | None = None  # utterance awaiting send-up
         self.wake_enabled = False        # sidecar armed a wake word
         self._sleep_task: asyncio.Task | None = None
@@ -695,10 +689,7 @@ class VoiceSession:
         if self.state in CONFIRM_STATES:
             # if the ask's audio was still playing, the answer moots it
             await self._send_json({"type": "stop_playback"})
-            if self.state == CONFIRM_PEAK:
-                await self._on_peak_answer(text)
-            else:
-                await self._on_escalate_answer(text)
+            await self._on_escalate_answer(text)
             return
 
         await self._route_speech(text, barge_pos=None)
@@ -858,14 +849,6 @@ class VoiceSession:
                 self.queued.append(text)
                 await self._send_json({"type": "queued", "text": text})
                 await self._speak_system(BUSY_LINE)
-                return
-            # local inference is free at any hour — only DeepSeek is gated
-            if not local and in_peak_window() and not peak_confirmed(self.cid):
-                self.pending_peak = {"text": text, "smart": smart,
-                                     "insert": insert}
-                self.state = CONFIRM_PEAK
-                await self._push_state()
-                await self._speak_system(PEAK_ASK)
                 return
             if insert:
                 await db.execute(
@@ -1178,19 +1161,6 @@ class VoiceSession:
                                "result": str(result)[:200]})
 
     # ---- plumbing --------------------------------------------------------------
-
-    async def _on_peak_answer(self, text: str) -> None:
-        pending, self.pending_peak = self.pending_peak, None
-        lowered = text.lower()
-        if any(a in lowered for a in AFFIRMATIVE):
-            confirm_peak(self.cid)
-            self.state = LISTENING
-            await self._begin_turn(pending["text"], smart=pending["smart"],
-                                   insert=pending["insert"])
-        else:
-            self.state = LISTENING
-            await self._push_state()
-            await self._speak_system(PEAK_DROPPED)
 
     async def _ensure_conversation(self, db, first_text: str) -> None:
         if self.cid is not None:

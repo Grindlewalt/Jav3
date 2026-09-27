@@ -568,8 +568,8 @@ async def test_orchestrate_tool_plans_and_starts(client, monkeypatch):
     monkeypatch.setattr(plan_mod, "complete_text", fake_complete)
     started = []
 
-    async def fake_start(slug, *, peak=False):
-        started.append((slug, peak))
+    async def fake_start(slug):
+        started.append(slug)
         return {"job_id": "j", "root_id": 7}
     monkeypatch.setattr(plan_mod, "start_run", fake_start)
 
@@ -578,7 +578,7 @@ async def test_orchestrate_tool_plans_and_starts(client, monkeypatch):
         out = await mod.run(dump="do one then two", run=False)
         assert "2 items" in out and "- i2 [todo] two (after i1)" in out and not started
         out = await mod.run(dump="do one then two")
-        assert started == [(SLUG, True)] and "head conversation 7" in out
+        assert started == [SLUG] and "head conversation 7" in out
         etok = runtime.ephemeral.set(True)
         try:
             out = await mod.run(dump="do it quietly")

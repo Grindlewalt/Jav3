@@ -171,8 +171,7 @@ class Settings(BaseSettings):
     # Per-model prices come from the provider catalogue (providers_catalog
     # .json, or ~/.config/jarvis/providers.json to override one). These flat
     # per-1M USD rates only price a ledger row whose model the catalogue has
-    # never heard of. DeepSeek's peak hours are double; the peak gate in
-    # agent/model.py asks before spending in them.
+    # never heard of.
     price_cache_hit_per_m: float = 0.003
     price_cache_miss_per_m: float = 0.15
     price_output_per_m: float = 0.60
@@ -202,11 +201,6 @@ class Settings(BaseSettings):
     # sidecar) live on. Each service URL below that is left unset is derived
     # from it; an explicitly set per-service URL always wins.
     services_host: str = "localhost"
-
-    # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
-    peak_windows: list[str] = ["18:00-21:00", "23:00-03:00"]
-    # How long a user's "yes, use the API" answer stays valid.
-    peak_confirm_ttl_minutes: int = 60
 
     # Backstop for the main/chat loop. Subagents get a much tighter cap below:
     # a research subagent reading 1-3 sources needs a handful of rounds, not 60
@@ -481,7 +475,7 @@ class Settings(BaseSettings):
     voice_max_workers: int = 3          # backgrounded twins per voice session
     # Local fast tier: when set (e.g. "llama3.1:8b"), voice turns run on this
     # ollama model by default — conversational stuff, media control, quick
-    # questions stay on the operator's own GPUs with no API cost or peak gate.
+    # questions stay on the operator's own GPUs with no API cost.
     # The model escalates to DeepSeek only by [ESCALATE] + spoken permission,
     # or immediately when the operator says "smart model" / "deepseek".
     # Empty string = every voice turn runs on DeepSeek as before.

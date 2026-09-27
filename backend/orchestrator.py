@@ -22,7 +22,7 @@ from .agent import budget as budget_mod
 from .agent.agent import Agent
 from .agent.loop import db_tool_sink
 from .vm.turn import run_agent_turn
-from .agent.model import complete_text, confirm_peak
+from .agent.model import complete_text
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import assemble_system_prompt
@@ -119,7 +119,7 @@ async def _node_context(kind: str, project: str, parent_summary: str) -> str:
 
 
 async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str,
-                   depth: int, budget: _Budget, leaf_tools, peak: bool,
+                   depth: int, budget: _Budget, leaf_tools,
                    parent_summary: str = "") -> dict:
     """Run one node. Returns {"cid","kind","output","rollup"}."""
     try:
@@ -138,8 +138,6 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
                         break
                     child_cid = await _open_child(db, cid, job_id, project,
                                                   st["kind"], st["title"])
-                    if peak:
-                        confirm_peak(child_cid)
                     bus.publish(job_id, {
                         "type": "node_spawned", "node_id": child_cid, "parent_id": cid,
                         "kind": st["kind"], "title": st["title"], "depth": depth + 1})
@@ -150,7 +148,7 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             results = await asyncio.gather(*[
                 run_node(job_id=job_id, cid=ccid, kind=st["kind"], brief=st["title"],
                          project=project, depth=depth + 1, budget=budget,
-                         leaf_tools=leaf_tools, peak=peak, parent_summary=brief)
+                         leaf_tools=leaf_tools, parent_summary=brief)
                 for ccid, st in children], return_exceptions=True)
             child_outputs = [r["output"] for r in results if isinstance(r, dict)]
             child_rollups = [r["rollup"] for r in results if isinstance(r, dict)]
@@ -247,7 +245,7 @@ async def job_workspace(project: str | None, *, top_level: bool):
             guest_vm.release()
 
 
-async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
+async def run_job(job_id: str, brief: str, project: str, *,
                   leaf_tools=None, title: str = "") -> dict:
     """Open the head node, run the tree, publish job lifecycle events. Returns
     {"root_id","rollup","usage"}."""
@@ -274,8 +272,6 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
         bus.close_job(job_id)
         raise
 
-    if peak:
-        confirm_peak(root_id)
     bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": root_id,
                          "agent_slug": owner})
     bus.publish(job_id, {
@@ -309,7 +305,7 @@ async def run_job(job_id: str, brief: str, project: str, *, peak: bool = False,
         async with job_workspace(project, top_level=optok is not None):
             result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
                                     project=project, depth=0, budget=ncap,
-                                    leaf_tools=leaf_tools, peak=peak)
+                                    leaf_tools=leaf_tools)
     finally:
         runtime.web_session.reset(wtoken)
         if optok is not None:

@@ -3,7 +3,7 @@ import { api, chatStream, tailStream } from './api.js'
 import { applyTurnEvent, finishTurn } from './ToolActivity.jsx'
 
 // One chat turn, wherever a chat is rendered: the transcript, the busy flag,
-// the parked peak-pricing draft and the resume-tail's AbortController.
+// and the resume-tail's AbortController.
 //
 // Ported from the unmerged v1 consolidation branch (c8a4087), where it was
 // written to fold the Chat page's and the ChatBox panel's copied turn
@@ -17,11 +17,6 @@ import { applyTurnEvent, finishTurn } from './ToolActivity.jsx'
 export function useChatStream() {
   const [messages, setMessages] = useState([])
   const [busy, setBusy] = useState(false)
-  // draft parked on a peak-pricing 409 until the operator answers in-page.
-  // This must NOT be window.confirm: the iOS home-screen app suppresses
-  // blocking dialogs, so confirm() returns false without ever showing and
-  // every send silently bounced back into the bar.
-  const [peakAsk, setPeakAsk] = useState(null)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
   const openSeq = useRef(0)        // which openThread call is the current one
 
@@ -62,7 +57,6 @@ export function useChatStream() {
   // call was superseded by a later open.
   const openThread = useCallback(async (id, { onEvent, onTailDone } = {}) => {
     tailAbort.current?.abort()
-    setPeakAsk(null)
     // a slow transcript fetch for the chat the operator already left must not
     // land over the one they switched to
     const mine = ++openSeq.current
@@ -104,7 +98,7 @@ export function useChatStream() {
   //
   // The optimistic pair (the user's line + the assistant placeholder) goes in
   // before the request and comes back out on any failure; `onRestoreDraft` puts
-  // the text back in the composer, which every failure but the peak gate wants.
+  // the text back in the composer.
   const runTurn = useCallback(async ({
     text, body, url, onEvent, onDone, onRestoreDraft,
   }) => {
@@ -123,14 +117,9 @@ export function useChatStream() {
       if (here()) onDone?.()
     } catch (err) {
       if (!here()) return
-      // drop the two optimistic messages; a peak-retry re-adds them
+      // drop the two optimistic messages
       setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the confirmed retry re-sends the
-        // parked draft from scratch
-        setPeakAsk(text)
-      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+      if (err.status === 409 && err.detail === 'turn_in_progress') {
         onRestoreDraft?.(text)
         setMessages((m) => [...m, { role: 'error',
           content: 'a turn is still running in this chat — wait for it to finish' }])
@@ -143,7 +132,7 @@ export function useChatStream() {
   }, [handleTurnEvent])
 
   return {
-    messages, setMessages, busy, setBusy, peakAsk, setPeakAsk,
+    messages, setMessages, busy, setBusy,
     handleTurnEvent, openThread, abortTail, stopTurn, runTurn,
   }
 }

@@ -49,7 +49,7 @@ function AgentPicker({ fresh, agents, agentSlug, agentName, onPick, onNewAs }) {
 }
 
 export default function Composer({
-  value, onChange, onSend, busy, onStop, peakAsk, onPeakCancel, onPeakConfirm,
+  value, onChange, onSend, busy, onStop,
   fresh, agents, agentSlug, agentName, onPickAgent, onNewAs,
   temporary, onTemporary, history,
 }) {
@@ -86,13 +86,6 @@ export default function Composer({
   const who = agentSlug ? agentName(agentSlug) : 'Jav3'
   return (
     <form className="sh-composer" onSubmit={(e) => { e.preventDefault(); if (!busy) onSend() }}>
-      {peakAsk && (
-        <div className="peak-ask" role="alertdialog" aria-label="peak pricing confirmation">
-          <span className="grow">Peak pricing right now — this reply costs 2×.</span>
-          <button type="button" className="ghost" onClick={onPeakCancel}>Cancel</button>
-          <button type="button" onClick={onPeakConfirm}>Send anyway</button>
-        </div>
-      )}
       <div className="sh-box">
         <div className="sh-input">
           <span className="sh-caret" aria-hidden="true">›</span>

@@ -8,7 +8,7 @@ import Md from '../Md.jsx'
 
 // Heartbeats: "run X every day at 8am" / "every 6 hours". A schedule runs
 // either a defined agent or a plain Jav3 prompt, headless, in an optional
-// project's context. Peak pricing is auto-confirmed for scheduled runs.
+// project's context.
 const BLANK = {
   name: '', kind: 'jarvis', agent_slug: '', project_slug: '',
   task: '', cadence_kind: 'daily', daily_at: '09:00', interval_minutes: 360,

@@ -193,7 +193,7 @@ export function AgentDefinitions() {
   // A run is detached server-side: this only starts it and holds its id for
   // Stop. It is deliberately not watchRun()-registered, so the completion
   // notice toasts; the transcript is on the Outputs tab.
-  async function start(task, confirmPeak = false) {
+  async function start(task) {
     const slug = agent.slug
     if (!task) {
       task = (await ask.prompt('Task', '', { confirmLabel: 'Run' }) || '').trim()
@@ -202,7 +202,7 @@ export function AgentDefinitions() {
     }
     setRun({ slug, id: null })
     try {
-      await chatStream({ task, confirm_peak: confirmPeak }, (ev) => {
+      await chatStream({ task }, (ev) => {
         if (ev.type === 'start') {
           setRun({ slug, id: ev.conversation_id })
           loadLast(slug)
@@ -211,11 +211,6 @@ export function AgentDefinitions() {
       }, `/api/agents/${slug}/run`)
     } catch (err) {
       setRun(null)
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        if (await ask.confirm('Peak pricing window — run anyway?',
-                              { confirmLabel: 'Run' })) return start(task, true)
-        return
-      }
       notifyError(err)
     }
     setRun(null)

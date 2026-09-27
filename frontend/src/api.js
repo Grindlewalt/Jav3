@@ -42,7 +42,7 @@ async function readSse(res, onEvent) {
 }
 
 // POST /api/chat and invoke onEvent for each SSE event. Throws ApiError on
-// non-200 (409 peak_confirmation_required included) before any event fires.
+// non-200 before any event fires.
 //
 // Every turn carries this tab's id. That is what lets a tool put music or a
 // video on the machine the operator is actually sitting at instead of every

@@ -4,7 +4,7 @@ the shared-budget-across-agents invariant, and the dedup helpers. The transport
 is scripted, so none of this needs a DeepSeek key.
 
 If one of these breaks, a later phase changed a load-bearing seam: the host
-nucleus (key/budget/peak/ledger) must stay above the ModelClient transport, and
+nucleus (key/budget/ledger) must stay above the ModelClient transport, and
 one Budget must stay shared across every agent in an operation."""
 import asyncio
 
@@ -15,7 +15,7 @@ from backend.agent import budget as budget_mod
 from backend.agent.budget import Budget, BudgetExceeded
 from backend.agent.loop import db_tool_sink
 from backend.agent.model import (Model, ModelClient, ModelError, ModelGateway,
-                                 PeakPricingConfirmationRequired, complete_text,
+                                 complete_text,
                                  model)
 from backend.db import get_db, init_db, open_conversation
 
@@ -84,14 +84,15 @@ async def test_gateway_refuses_when_budget_spent(monkeypatch):
     assert spy["called"] is False       # refused before any network I/O
 
 
-async def test_gateway_peak_gate_before_network(monkeypatch):
+async def test_gateway_has_no_peak_gate(monkeypatch):
+    """The peak-pricing gate is gone: an unconfirmed DeepSeek call with a
+    conversation id goes straight to the transport, whatever the hour."""
     import backend.agent.model as model_mod
-    monkeypatch.setattr(model_mod, "in_peak_window", lambda *a, **k: True)
+    assert not hasattr(model_mod, "PeakPricingConfirmationRequired")
     spy = _script_transport(monkeypatch)
-    with pytest.raises(PeakPricingConfirmationRequired):
-        await _drain(ModelGateway(api_key="k").complete(
-            [{"role": "user", "content": "x"}], conversation_id=999))
-    assert spy["called"] is False
+    await _drain(ModelGateway(api_key="k").complete(
+        [{"role": "user", "content": "x"}], conversation_id=999))
+    assert spy["called"] is True
 
 
 async def test_gateway_requires_key_for_default_endpoint(monkeypatch):

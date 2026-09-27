@@ -438,9 +438,14 @@ async def test_chat_pins_and_reports_the_resolved_model(client, monkeypatch):
         await task
 
 
-async def test_peak_gate_skips_other_providers(client, monkeypatch):
+async def test_no_peak_gate_deepseek_runs_at_any_hour(client, monkeypatch):
+    """The peak-pricing gate was removed (2026-09-27): a DeepSeek turn in what
+    used to be a peak window (18:00-21:00, 23:00-03:00) just runs — no 409 —
+    and an old client still sending confirm_peak is accepted and ignored."""
     from backend import chat as chat_mod
-    monkeypatch.setattr(chat_mod, "in_peak_window", lambda *a, **k: True)
+    from backend.agent import model as model_mod
+    assert not hasattr(settings, "peak_windows")
+    assert not hasattr(model_mod, "check_peak_gate")
 
     async def fake_turn(cid, system_prompt, history, tools=None, **kw):
         yield {"type": "final", "content": "ok"}
@@ -451,7 +456,20 @@ async def test_peak_gate_skips_other_providers(client, monkeypatch):
     monkeypatch.setattr(chat_mod, "guest_turn", fake_turn)
     monkeypatch.setattr(chat_mod, "_name_conversation", no_naming)
     r = await client.post("/api/chat", json={"message": "hi"})
-    assert r.status_code == 409                       # deepseek default: gated
+    assert r.status_code == 200                       # deepseek default: not gated
+    for task in list(chat_mod._active_turns.values()):
+        await task
+    r = await client.post("/api/chat", json={"message": "hi", "confirm_peak": True})
+    assert r.status_code == 200                       # the old flag: no 422
+    for task in list(chat_mod._active_turns.values()):
+        await task
+    cid = next(json.loads(line[5:]) for line in r.text.splitlines()
+               if line.startswith("data:") and '"start"' in line)["conversation_id"]
+    r = await client.post("/api/chat", json={"message": "again", "confirm_peak": False,
+                                             "conversation_id": cid})
+    assert r.status_code == 200                       # an existing chat: no 409 either
+    for task in list(chat_mod._active_turns.values()):
+        await task
     providers.set_key("openai", OPENAI_KEY)
     providers.update_model("openai", "gpt-4.1", enabled=True)
     r = await client.post("/api/chat", json={"message": "hi", "model": "openai/gpt-4.1"})

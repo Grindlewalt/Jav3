@@ -2,9 +2,7 @@
 
 A schedule is 'do this task every day at 08:00' or 'every 6 hours'. A single
 background loop (started in the app lifespan) wakes each minute, runs anything
-due, records the result, and reschedules. Runs are headless — peak pricing is
-auto-confirmed because the operator set the schedule up deliberately and isn't
-there to answer a prompt.
+due, records the result, and reschedules. Runs are headless.
 """
 import asyncio
 import datetime as dt
@@ -15,7 +13,6 @@ from pydantic import BaseModel
 from .agent.loop import db_tool_sink
 from .vm.turn import run_agent_turn
 from . import providers
-from .agent.model import confirm_peak
 from .agents_run import run_agent_headless
 from .auth import require_user
 from .db import get_db, open_conversation
@@ -316,7 +313,6 @@ async def _run_jarvis_headless(task: str, project_slug: str | None,
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
             (conversation_id, task))
         await db.commit()
-        confirm_peak(conversation_id)
         active = project_slug if project_slug else None
         system_prompt = await assemble_system_prompt(db, active=active)
         # own fetch-ledger scope per run — a daily schedule re-reads the same

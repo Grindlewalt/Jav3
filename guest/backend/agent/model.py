@@ -1,7 +1,7 @@
 """Guest-side `model` shim. loop.py imports `model` and calls
 `model.complete(...)`; in the guest that dials the host gateway over vsock
-(guest -> host, CID 2) and relays its streamed events. The DeepSeek key, peak
-gate, budget metering, and DSML recovery all stay host-side in the gateway — this
+(guest -> host, CID 2) and relays its streamed events. The DeepSeek key,
+budget metering, and DSML recovery all stay host-side in the gateway — this
 is a thin relay that attaches the turn's op_id and re-raises a budget/model stop.
 
 The op_id and gateway port are read from `turnctx` (task-local), not instance

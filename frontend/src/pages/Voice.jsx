@@ -16,7 +16,6 @@ const STATE_LABEL = {
   thinking: 'thinking…',
   speaking: 'speaking',
   barge_pending: 'you were saying?',
-  confirm_peak: 'confirm?',
   confirm_escalate: 'send it up?',
   asleep: 'say “hey Jav3”',
   offline: 'voicebox offline',

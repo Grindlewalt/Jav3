@@ -10,8 +10,7 @@ from pydantic import BaseModel
 
 from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, providers, runtime
 from .agent import budget
-from .agent.model import (confirm_peak, hold_turn, in_peak_window, model,
-                          peak_confirmed, release_turn)
+from .agent.model import model
 from .agent.loop import db_tool_sink
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
 from .auth import require_actor
@@ -32,7 +31,7 @@ router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_a
 class ChatRequest(BaseModel):
     message: str
     conversation_id: int | None = None
-    confirm_peak: bool = False
+    confirm_peak: bool = False   # ignored; accepted so old clients don't 422
     # "temporary chat" in the GUI: persist nothing, memory writes go to a temp dir
     ephemeral: bool = False
     # pin a NEW conversation to this project (workspace chat panels pass their
@@ -666,7 +665,6 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     db = None
     tools_before = None      # set once the turn's tool_calls high-water mark is known
     late: list[str] = []     # operator messages the turn closed on without reading
-    hold_turn(conversation_id)       # a started turn outlives a peak window opening
     try:
         # inside the try: if the connect fails, the finally must still evict
         # _active_turns and close the bus channel or the conversation bricks
@@ -981,7 +979,6 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             err["undelivered"] = late
         bus.publish(chan, err)
     finally:
-        release_turn(conversation_id)
         # normally already closed above; this covers a path that raised
         # before reaching the close (the rows then wait for the next turn)
         agentmsg.forget_operator_inbox(conversation_id)
@@ -1613,14 +1610,6 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
         if conversation_id is not None and conversation_id in _active_turns:
             raise HTTPException(status_code=409, detail="turn_in_progress")
         if conversation_id is None:
-            # Peak-cost gate (spec §4) BEFORE the conversation exists: the old
-            # order created the row first, so this 409 left an orphan,
-            # blank-rendering conversation behind (and the retry opened a
-            # fresh one — twin entries in the sidebar). DeepSeek hours only.
-            if (in_peak_window() and not body.confirm_peak
-                    and providers.peak_priced(pinned_model)):
-                raise HTTPException(status_code=409,
-                                    detail="peak_confirmation_required")
             # identity is validated here, not in the detached turn: a typo'd
             # slug is a 404 on the POST the operator can see, not an error
             # event on a conversation that already exists
@@ -1690,8 +1679,6 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             if body.permission_mode:
                 await permissions.set_mode(db, conversation_id, body.permission_mode)
                 await db.commit()
-            if body.confirm_peak:
-                confirm_peak(conversation_id)
         else:
             async with db.execute(
                 "SELECT model FROM conversations WHERE id = ?", (conversation_id,)
@@ -1702,17 +1689,6 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             if body.permission_mode:
                 await permissions.set_mode(db, conversation_id, body.permission_mode)
                 await db.commit()
-            # Peak-cost gate for an existing conversation: confirmation is
-            # keyed to its id, so it can (and must) be checked after lookup.
-            if body.confirm_peak:
-                confirm_peak(conversation_id)
-            if (in_peak_window() and not peak_confirmed(conversation_id)
-                    and providers.peak_priced(pinned_model or existing["model"])):
-                raise HTTPException(
-                    status_code=409,
-                    detail="peak_confirmation_required",
-                    headers={"X-Conversation-Id": str(conversation_id)},
-                )
 
         if pinned_model:
             await db.execute("UPDATE conversations SET model = ? WHERE id = ?",
@@ -1761,7 +1737,7 @@ def start_turn(conversation_id: int, *, ephemeral: bool = False,
                actor: str | None = None) -> asyncio.Task:
     """Launch a chat turn as a detached task. The one shared seam between the
     HTTP endpoint above and the voice orchestrator: the caller has already
-    inserted the user message row, run the peak gate, and (if it wants the
+    inserted the user message row and (if it wants the
     early events) subscribed to the conversation's bus channel."""
     task = asyncio.create_task(
         _run_chat_turn(conversation_id, ephemeral, user_msg, tab, voice=voice,

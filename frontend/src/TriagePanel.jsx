@@ -75,7 +75,7 @@ export default function TriagePanel() {
                 onText="Auto" offText="Manual"
                 title={s.enabled
                   ? 'sweeps unreviewed queue items on its own every few '
-                    + 'minutes — never during peak pricing'
+                    + 'minutes'
                   : 'nothing is swept on its own — use Review now'} />
         {/* "clear" only when nothing is waiting on anyone: an item the
             reviewer flagged is reviewed, but it is not clear — it is waiting

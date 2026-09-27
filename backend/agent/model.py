@@ -1,11 +1,9 @@
 """The single model choke point: every LLM call goes through Model.complete,
-and the peak-cost gate lives in front of it. `providers.resolve` routes each
+and the gateway (key policy, budget, ledger) lives in front of it. `providers.resolve` routes each
 call — `provider/model` -> endpoint, key, wire kind — and the non-OpenAI
 wire formats live in adapters.py."""
 import json
 import re
-import time
-from datetime import datetime, time as dtime
 from typing import AsyncIterator
 
 from ..config import settings
@@ -89,75 +87,6 @@ def dsml_prose(content: str) -> str:
     return (content[:m.start()] if m else content).strip()
 
 
-class PeakPricingConfirmationRequired(Exception):
-    """Raised when a call lands inside a peak-pricing window and the user
-    hasn't confirmed they want to pay 2x for this conversation recently."""
-
-
-def _parse_window(spec: str) -> tuple[dtime, dtime]:
-    start_s, end_s = spec.split("-")
-    h1, m1 = (int(x) for x in start_s.split(":"))
-    h2, m2 = (int(x) for x in end_s.split(":"))
-    return dtime(h1, m1), dtime(h2, m2)
-
-
-def in_peak_window(now: datetime | None = None, windows: list[str] | None = None) -> bool:
-    now = now or datetime.now()
-    t = now.time()
-    for spec in windows if windows is not None else settings.peak_windows:
-        start, end = _parse_window(spec)
-        if start <= end:
-            if start <= t < end:
-                return True
-        else:  # crosses midnight, e.g. 23:00-03:00
-            if t >= start or t < end:
-                return True
-    return False
-
-
-# conversation_id -> unix time the user last confirmed peak usage
-_peak_confirmations: dict[int, float] = {}
-
-
-def confirm_peak(conversation_id: int) -> None:
-    _peak_confirmations[conversation_id] = time.time()
-
-
-def peak_confirmed(conversation_id: int) -> bool:
-    ts = _peak_confirmations.get(conversation_id)
-    return ts is not None and time.time() - ts < settings.peak_confirm_ttl_minutes * 60
-
-
-# conversations with a turn in flight. The gate asks BEFORE a turn starts; a
-# turn already running is not killed when a peak window opens (or its
-# confirmation's TTL lapses) mid-turn: at 18:00:11 on 2026-09-27 an
-# orchestrator turn begun at 17:58 died on its next model call as a blank
-# "ModelError: ".
-_live_turns: dict[int, int] = {}
-
-
-def hold_turn(conversation_id: int | None) -> None:
-    if conversation_id is not None:
-        _live_turns[conversation_id] = _live_turns.get(conversation_id, 0) + 1
-
-
-def release_turn(conversation_id: int | None) -> None:
-    n = _live_turns.get(conversation_id, 0) - 1
-    if n > 0:
-        _live_turns[conversation_id] = n
-    else:
-        _live_turns.pop(conversation_id, None)
-
-
-def check_peak_gate(conversation_id: int) -> None:
-    if in_peak_window() and not peak_confirmed(conversation_id) \
-            and not _live_turns.get(conversation_id):
-        raise PeakPricingConfirmationRequired(
-            "DeepSeek peak pricing is on (" + ", ".join(settings.peak_windows)
-            + " server time, about 2x): confirm peak pricing for this conversation "
-            "to continue")
-
-
 CAPTURE_STATE_KEY = "capture_context"
 
 
@@ -234,7 +163,7 @@ class ModelClient:
     """Pure transport to an OpenAI-compatible chat-completions endpoint (every
     provider of kind openai/ollama — DeepSeek, OpenAI, OpenRouter, Groq, ...):
     it builds the request, streams it (with retry + DSML recovery), and yields
-    events. It holds NO key policy, budget, peak gate, or ledger — those are the
+    events. It holds NO key policy, budget, or ledger — those are the
     host nucleus (ModelGateway). The auth key is passed in per call, so this
     layer can run keyless when a gateway drives it (the VM-inversion seam).
     Per-provider request shape (output cap, sampling) comes from the read-only
@@ -426,8 +355,8 @@ def _cache_weight(route) -> float | None:
 
 class ModelGateway:
     """The host nucleus in front of the transport: the one place that holds the
-    API-key policy, routes a call to its provider, enforces the peak-pricing
-    gate, meters the shared token Budget, and writes the model_calls ledger.
+    API-key policy, routes a call to its provider, meters the shared token Budget,
+    and writes the model_calls ledger.
     `complete(...)` keeps the exact public contract every caller relies on
     (token events, then one message event). Wrapping the transport this way is
     the seam the VM inversion splits along — the transport can move guest-side
@@ -453,7 +382,7 @@ class ModelGateway:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} (+ an opaque
         `provider_blocks` for adapters that need replay state). Raises
-        PeakPricingConfirmationRequired / BudgetExceeded / ModelError before any
+        BudgetExceeded / ModelError before any
         network I/O.
 
         model_name is `provider/model` (a bare id runs on the default model's
@@ -468,10 +397,6 @@ class ModelGateway:
             route = providers.resolve(model_name, base_url, deepseek_key=self.api_key)
         except providers.ProviderError as e:
             raise ModelError(str(e)) from None
-        # the peak gate prices DEEPSEEK hours — other providers (and a local
-        # ollama) cost the same at any hour, so only DeepSeek calls are gated
-        if conversation_id is not None and route.is_deepseek:
-            check_peak_gate(conversation_id)
         budget = budget_mod.get(op_id) if op_id else budget_mod.current()
         if budget is not None and budget.over():
             raise budget_mod.BudgetExceeded(

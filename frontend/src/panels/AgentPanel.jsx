@@ -16,7 +16,6 @@ export default function AgentPanel({ slug, state, setState }) {
   const [task, setTask] = useState('')
   const [log, setLog] = useState([])
   const [busy, setBusy] = useState(false)
-  const [peakAsk, setPeakAsk] = useState(null)   // in-page; iOS eats confirm()
   const [runId, setRunId] = useState(null)       // the in-flight run, for Stop
   const bottomRef = useRef(null)
   const unwatch = useRef(null)
@@ -32,13 +31,13 @@ export default function AgentPanel({ slug, state, setState }) {
     if (box) box.scrollTop = box.scrollHeight
   }, [log])
 
-  async function run(confirmPeak = false) {
+  async function run() {
     if (!which || !task.trim() || busy) return
     setBusy(true)
     setLog((l) => [...l, { role: 'task', text: task }, { role: 'out', text: '' }])
     try {
       await chatStream(
-        { task, confirm_peak: confirmPeak, project: slug }, (ev) => {
+        { task, project: slug }, (ev) => {
           if (ev.type === 'start') {
             setRunId(ev.conversation_id)
             unwatch.current?.()
@@ -57,9 +56,7 @@ export default function AgentPanel({ slug, state, setState }) {
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (err) {
       setLog((l) => l.slice(0, -2))
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        setPeakAsk(true)
-      } else setLog((l) => [...l, { role: 'err', text: err.detail || String(err) }])
+      setLog((l) => [...l, { role: 'err', text: err.detail || String(err) }])
     }
     setRunId(null)
     setBusy(false)
@@ -93,16 +90,6 @@ export default function AgentPanel({ slug, state, setState }) {
         ))}
         <div ref={bottomRef} />
       </div>
-      {peakAsk && (
-        <div className="peak-ask compact" role="alertdialog"
-             aria-label="peak pricing confirmation">
-          <span className="grow">Peak pricing right now — running this agent costs 2×.</span>
-          <button type="button" className="ghost"
-                  onClick={() => setPeakAsk(null)}>Cancel</button>
-          <button type="button"
-                  onClick={() => { setPeakAsk(null); run(true) }}>Run anyway</button>
-        </div>
-      )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); run() }}>
         <textarea className="grow" rows={2} value={task} placeholder="task for the agent…"
                   onChange={(e) => setTask(e.target.value)}

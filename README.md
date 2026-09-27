@@ -134,7 +134,7 @@ there are no model mocks, so full-flow tests hit the real API).
 
 Config via env or `~/.config/jarvis/env`, prefix `JARVIS_` (see
 `backend/config.py`). Notable flags: `JARVIS_VM_EGRESS` (monitored egress, off by
-default → the guest is netless), `JARVIS_PEAK_WINDOWS` (peak-pricing gate),
+default → the guest is netless),
 `JARVIS_VOICE_ENABLED`.
 
 ## Third-party
