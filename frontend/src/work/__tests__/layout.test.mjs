@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   addCard, close, closeCard, classicBoard, fromSaved, geometry, leaves, makeLeaf,
   neighbor, patchCardState, reconcile, resize, split, switchCard, toSaved, treeFromLegacy,
+  MAX_PANELS, canAdd, cycleFocus, focusToward, minimizeCard, moveCard, restoreCard, visibleIds,
 } from '../layout.js'
 
 let n = 0
@@ -71,10 +72,10 @@ t('neighbor', () => {
 })
 
 t('board ops: add, switch, close, state', () => {
-  let b = classicBoard()
+  let b = closeCard(classicBoard(), 'p2')
   b = addCard(b, 'terminal', 'p3', 'col')
   const term = b.focus
-  assert.equal(types(b.root), 'chat,board,git,terminal,network')
+  assert.equal(types(b.root), 'chat,git,terminal,network')
   assert.ok(b.panels.some((p) => p.id === term && p.type === 'terminal'))
   b = patchCardState(b, term, { cwd: '/x' })
   assert.deepEqual(b.panels.find((p) => p.id === term).state, { cwd: '/x' })
@@ -82,9 +83,9 @@ t('board ops: add, switch, close, state', () => {
   assert.ok(!b.panels.some((p) => p.id === term), 'old card gone')
   assert.deepEqual(b.panels.find((p) => p.id === b.focus).state, {})
   b = closeCard(b, b.focus)
-  assert.equal(types(b.root), 'chat,board,git,network')
-  assert.equal(b.panels.length, 4)
-  for (const id of ['p1', 'p2', 'p3', 'p4']) b = closeCard(b, id)
+  assert.equal(types(b.root), 'chat,git,network')
+  assert.equal(b.panels.length, 3)
+  for (const id of ['p1', 'p3', 'p4']) b = closeCard(b, id)
   assert.equal(b.root, null); assert.equal(b.focus, null); assert.equal(b.panels.length, 0)
 })
 
@@ -175,4 +176,65 @@ t('v2 with every card closed stays empty', () => {
   assert.equal(board.root, null)
 })
 
+t('at most MAX_PANELS cards; addCard on a full board is a no-op', () => {
+  let b = classicBoard()
+  assert.equal(MAX_PANELS, 4)
+  assert.equal(canAdd(b), false)
+  assert.equal(addCard(b, 'todos'), b)
+  b = closeCard(b, 'p2')
+  assert.ok(canAdd(b))
+  b = addCard(b, 'chat', 'p1', 'row', { project: 'other', state: { conversation: 7 } })
+  const p = b.panels.at(-1)
+  assert.equal(p.project, 'other'); assert.equal(p.state.conversation, 7)
+  assert.equal(canAdd(b), false)
+})
+
+t('minimize: the rest share the space; restore brings the old size back', () => {
+  let b = classicBoard()
+  b = minimizeCard(b, 'p1')
+  assert.deepEqual(b.minimized, ['p1'])
+  assert.notEqual(b.focus, 'p1')
+  const g = geometry(b.root, b.minimized)
+  assert.equal(g.leaves.p1, undefined)
+  near(g.leaves.p2.x, 0); near(g.leaves.p2.w, 0.29 / 0.64)
+  assert.equal(g.dividers.length, 2)
+  assert.deepEqual(visibleIds(b), ['p2', 'p3', 'p4'])
+  b = restoreCard(b, 'p1')
+  assert.deepEqual(b.minimized, []); assert.equal(b.focus, 'p1')
+  near(geometry(b.root).leaves.p1.w, 0.36)
+})
+
+t('a divider across a minimized card resizes the two visible sides', () => {
+  let b = classicBoard()
+  b = minimizeCard(b, 'p2')
+  const d = geometry(b.root, b.minimized).dividers.find((x) => x.dir === 'row')
+  assert.equal(d.index, 0); assert.equal(d.next, 2); near(d.scale, 0.71)
+  const r = resize(b.root, d.splitId, d.index, 0.1 * d.scale, 0.05, d.next)
+  near(r.sizes[0], 0.36 + 0.071); near(r.sizes[1], 0.29); near(sum(r.sizes), 1)
+})
+
+t('Tab cycles the cards on show; Tab+arrow and Shift+arrow go by geometry', () => {
+  let b = { ...classicBoard(), focus: 'p4' }
+  b = cycleFocus(b); assert.equal(b.focus, 'p1')
+  b = cycleFocus(b, -1); assert.equal(b.focus, 'p4')
+  b = minimizeCard(b, 'p2')
+  b = { ...b, focus: 'p1' }
+  b = cycleFocus(b); assert.equal(b.focus, 'p3')
+  b = focusToward(b, 'down'); assert.equal(b.focus, 'p4')
+  b = focusToward(b, 'left'); assert.equal(b.focus, 'p1')
+  b = moveCard(b, 'right')               // p1 swaps with the git/network column's top
+  assert.equal(types(b.root), 'git,board,chat,network')
+  assert.equal(b.focus, 'p1')
+  near(geometry(b.root).leaves.p1.y, 0); near(geometry(b.root).leaves.p3.w, 0.36)
+  assert.equal(moveCard(b, 'up'), b)
+})
+
+t('minimized round-trips through the saved file; close drops it', () => {
+  let b = minimizeCard(classicBoard(), 'p3')
+  const { board } = fromSaved(JSON.parse(JSON.stringify(toSaved(b))))
+  assert.deepEqual(board.minimized, ['p3'])
+  assert.deepEqual(closeCard(board, 'p3').minimized, [])
+})
+
 console.log(`${n} passed`)
+

@@ -10,8 +10,9 @@ import ErrorBoundary from '../ErrorBoundary.jsx'
 import Chat from '../pages/Chat.jsx'
 import { WorkContext } from './context.js'
 import {
-  addCard, closeCard, findLeaf, findSplit, fromSaved, geometry, leaves, patchCardState,
-  resize, switchCard, toSaved,
+  MAX_PANELS, addCard, canAdd, closeCard, cycleFocus, findLeaf, findSplit, focusToward,
+  fromSaved, geometry, leaves, minimizeCard, moveCard, patchCardState, resize, restoreCard,
+  switchCard, toSaved,
 } from './layout.js'
 import { ALIASES, WINDOW_TYPES, isWindowType } from './types.js'
 
@@ -41,6 +42,15 @@ const WIN_MIN = 280      // px the windows area keeps
 const SPLIT_KEY = 'jav3.work.split'
 const known = (t) => isWindowType(t)
 const pct = (v) => `${(v * 100).toFixed(4)}%`
+const ARROWS = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' }
+const NOT_TEXT = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file'])
+// is the keyboard busy typing somewhere (so Tab and the arrows are the field's)?
+function typing(el) {
+  if (!el || el === document.body) return false
+  if (el.isContentEditable || el.closest?.('.xterm, .cm-editor, [role="dialog"], [role="menu"]')) return true
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true
+  return el.tagName === 'INPUT' && !NOT_TEXT.has((el.type || '').toLowerCase())
+}
 
 function readSplit() {
   try {
@@ -181,6 +191,8 @@ export default function Work({ openProjects = false }) {
   const toggleMax = useCallback((id) => {
     update((b) => ({ ...b, focus: id, maximized: b.maximized === id ? null : id }))
   }, [update])
+  const minimize = useCallback((id) => { update((b) => minimizeCard(b, id)) }, [update])
+  const restore = useCallback((id) => { update((b) => restoreCard(b, id)) }, [update])
   const setCardState = useCallback((id, patch) => {
     update((b) => patchCardState(b, id, patch))
   }, [update])
@@ -189,12 +201,13 @@ export default function Work({ openProjects = false }) {
     const type = ALIASES[type0] || type0
     if (!isWindowType(type) || !boardRef.current) return null
     const b0 = boardRef.current
-    const hit = b0.panels.find((p) => p.type === type)
+    const hit = b0.panels.find((p) => p.type === type && !p.project)
+    if (!hit && !canAdd(b0)) return null            // MAX_PANELS open already
     // `slug` is not card state: a window is always on the chat's project
     const { slug: _slug, ...patch } = props || {}
     const next = update((b) => {
       let n = hit
-        ? { ...b, focus: hit.id, maximized: b.maximized && b.maximized !== hit.id ? null : b.maximized }
+        ? { ...restoreCard(b, hit.id), maximized: b.maximized && b.maximized !== hit.id ? null : b.maximized }
         : addCard(b, type, b.focus, 'row')
       if (Object.keys(patch).length) n = patchCardState(n, n.focus, patch)
       return n
@@ -236,6 +249,57 @@ export default function Work({ openProjects = false }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // Panels from the keyboard, when it is not busy in a text field:
+  //   Tab / Shift+Tab (tap)   focus the next / previous window
+  //   hold Tab + arrow        focus the window that way
+  //   Shift+← / Shift+→       swap the focused window with its neighbour
+  //   Escape                  un-maximize
+  useEffect(() => {
+    let held = null                                  // { used, shift } while Tab is down
+    const busy = () => typing(document.activeElement)
+      || !!document.querySelector('.work-sheet-scrim, .work-picker')
+    const onDown = (e) => {
+      const b = boardRef.current
+      if (!b?.root || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return
+      if (e.key === 'Tab') {
+        if (!held && (e.repeat || busy())) return
+        e.preventDefault()
+        if (!held) held = { used: false, shift: e.shiftKey }
+        return
+      }
+      const dir = ARROWS[e.key]
+      if (dir && held) {
+        e.preventDefault()
+        held.used = true
+        update((x) => focusToward(x, dir))
+        return
+      }
+      if (busy()) return
+      if (e.shiftKey && (dir === 'left' || dir === 'right')) {
+        e.preventDefault()
+        update((x) => moveCard(x, dir))
+      } else if (e.key === 'Escape' && b.maximized) {
+        e.preventDefault()
+        update((x) => ({ ...x, maximized: null }))
+      }
+    }
+    const onUp = (e) => {
+      if (e.key !== 'Tab' || !held) return
+      const h = held
+      held = null
+      if (!h.used) update((x) => cycleFocus(x, h.shift ? -1 : 1))
+    }
+    const reset = () => { held = null }
+    window.addEventListener('keydown', onDown)
+    window.addEventListener('keyup', onUp)
+    window.addEventListener('blur', reset)
+    return () => {
+      window.removeEventListener('keydown', onDown)
+      window.removeEventListener('keyup', onUp)
+      window.removeEventListener('blur', reset)
+    }
+  }, [update])
+
   // ---- the chat | windows divider ----
   const onChatDivider = (e) => {
     if (e.button !== 0) return
@@ -266,7 +330,9 @@ export default function Work({ openProjects = false }) {
 
   // ---- render ----
   const all = leaves(board?.root)
-  const geo = useMemo(() => geometry(board?.root), [board?.root])
+  const minimized = board?.minimized || EMPTY_LIST
+  const geo = useMemo(() => geometry(board?.root, minimized), [board?.root, minimized])
+  const minLeaves = phone ? [] : all.filter((l) => minimized.includes(l.id))
   const stageRef = useRef(null)
   const phoneWin = phone && tab !== 'chat' && all.some((l) => l.id === tab)
   const showWindows = phone ? phoneWin : all.length > 0
@@ -294,22 +360,33 @@ export default function Work({ openProjects = false }) {
       {!phone && !maxId && <div className="work-div-chat" role="separator" aria-orientation="vertical"
                       title="drag to resize" onPointerDown={onChatDivider}
                       onDoubleClick={() => setSplit(0.5)} />}
+      {minLeaves.length > 0 && (
+        <div className="work-minbar" aria-label="minimized windows">
+          {minLeaves.map((l) => (
+            <button key={l.id} type="button" className="work-mintab" title="restore"
+                    onClick={() => restore(l.id)}>
+              {WINDOW_TYPES[l.type]?.title || l.type}</button>
+          ))}
+        </div>
+      )}
       <div className="work-stage" ref={stageRef}>
         {board && projectObj && all.map((leaf) => {
           const r = geo.leaves[leaf.id]
-          const hidden = single && leaf.id !== shownId
+          const min = !phone && !r
+          const hidden = min || (single && leaf.id !== shownId)
           const full = single && !hidden
-          const place = hidden && !phone ? r : null
+          const place = hidden && !phone && !min ? r : null
           return (
             <WindowFrame key={leaf.id} leaf={leaf} slug={board.slug}
-                         x={full ? 0 : r.x} y={full ? 0 : r.y}
-                         w={full ? 1 : r.w} h={full ? 1 : r.h}
+                         x={full ? 0 : r?.x} y={full ? 0 : r?.y}
+                         w={full ? 1 : r?.w} h={full ? 1 : r?.h}
                          hidden={hidden} keep={!!place} phone={phone}
                          maximized={board.maximized === leaf.id}
                          focused={board.focus === leaf.id}
                          project={projectObj} refreshProject={refreshProject}
                          state={stateOf(leaf.id)}
                          onFocus={focusWin} onClose={closeWindow} onToggleMax={toggleMax}
+                         onMinimize={minimize}
                          onSetState={setCardState} onPicker={openPicker} />
           )
         })}
@@ -351,6 +428,7 @@ export default function Work({ openProjects = false }) {
         {picker && (
           <WindowPicker anchor={picker.anchor} project={project} projects={projects}
                         label={picker.mode === 'switch' ? 'Switch this window' : 'Open a window'}
+                        full={picker.mode !== 'switch' && !!board && !canAdd(board)}
                         current={picker.mode === 'switch'
                           ? findLeaf(board?.root, picker.target)?.type : undefined}
                         ready={!!board}
@@ -369,7 +447,7 @@ export default function Work({ openProjects = false }) {
 // close elsewhere never remounts it (a running terminal or stream survives).
 const WindowFrame = memo(function WindowFrame({
   leaf, slug, x, y, w, h, hidden, keep, phone, maximized, focused, project, refreshProject, state,
-  onFocus, onClose, onToggleMax, onSetState, onPicker,
+  onFocus, onClose, onToggleMax, onMinimize, onSetState, onPicker,
 }) {
   const id = leaf.id
   const def = WINDOW_TYPES[leaf.type]
@@ -400,6 +478,9 @@ const WindowFrame = memo(function WindowFrame({
           <button type="button" className="work-wh-btn" title="split down"
                   aria-label="split down" onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => onPicker(e, 'split', id, 'col')}>⊟</button>
+          <button type="button" className="work-wh-btn" title="minimize"
+                  aria-label="minimize" onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => onMinimize(id)}>–</button>
           <button type="button" className="work-wh-btn"
                   aria-label={maximized ? 'restore' : 'maximize'}
                   title={maximized ? 'restore (double-click the header)' : 'maximize (double-click the header)'}
@@ -422,6 +503,7 @@ const WindowFrame = memo(function WindowFrame({
 })
 
 const EMPTY = Object.freeze({})
+const EMPTY_LIST = Object.freeze([])
 
 // A draggable boundary between two children of a split. The drag resizes
 // from the tree as it was at pointerdown (layout.resize), so it never drifts.
@@ -437,15 +519,17 @@ function Divider({ d, stageRef, boardRef, update }) {
     const stage = stageRef.current?.getBoundingClientRect()
     if (!stage || !boardRef.current) return
     const span = (row ? s.w * stage.width : s.h * stage.height) || 1
-    const min = (row ? MIN_W : MIN_H) / span
+    const scale = d.scale || 1          // the visible children's share of the split
+    const min = ((row ? MIN_W : MIN_H) / span) * scale
+    const next = d.next ?? d.index + 1
     const start = row ? e.clientX : e.clientY
     const startRoot = boardRef.current.root
     const el = e.currentTarget
     el.setPointerCapture?.(e.pointerId)
     document.body.classList.add(row ? 'work-dragging-col' : 'work-dragging-row')
     const move = (ev) => {
-      const delta = ((row ? ev.clientX : ev.clientY) - start) / span
-      update((b) => ({ ...b, root: resize(startRoot, d.splitId, d.index, delta, min) }))
+      const delta = (((row ? ev.clientX : ev.clientY) - start) / span) * scale
+      update((b) => ({ ...b, root: resize(startRoot, d.splitId, d.index, delta, min, next) }))
     }
     const up = () => {
       el.removeEventListener('pointermove', move)
@@ -466,8 +550,9 @@ function Divider({ d, stageRef, boardRef, update }) {
            update((b) => {
              const node = findSplit(b.root, d.splitId)
              if (!node) return b
-             const half = (node.sizes[d.index] + node.sizes[d.index + 1]) / 2
-             return { ...b, root: resize(b.root, d.splitId, d.index, half - node.sizes[d.index], 0) }
+             const next = d.next ?? d.index + 1
+             const half = (node.sizes[d.index] + node.sizes[next]) / 2
+             return { ...b, root: resize(b.root, d.splitId, d.index, half - node.sizes[d.index], 0, next) }
            })
          }} />
   )
@@ -477,14 +562,14 @@ function Divider({ d, stageRef, boardRef, update }) {
 // + Enter to pick, Escape or a click outside to close. With no project on the
 // chat it offers the projects instead: the windows are a project's.
 function WindowPicker({
-  anchor, label, current, project, projects, ready, onPick, onClose, onPickProject, onProjects,
+  anchor, label, current, project, projects, ready, full, onPick, onClose, onPickProject, onProjects,
 }) {
   const [q, setQ] = useState('')
   const [sel, setSel] = useState(0)
   const ref = useDismiss(true, onClose)
   const listRef = useRef(null)
   const needle = q.trim().toLowerCase()
-  const types = project
+  const types = full ? [] : project
     ? Object.entries(WINDOW_TYPES)
       .filter(([k, v]) => !needle || `${k} ${v.label}`.toLowerCase().includes(needle))
       .map(([k, v]) => ({ key: k, text: v.label, run: () => onPick(k) }))
@@ -536,13 +621,17 @@ function WindowPicker({
           its windows open beside the chat.</div>
       )}
       {project && !ready && <div className="work-picker-note dim">loading {project}…</div>}
+      {full && <div className="work-picker-note">{MAX_PANELS} windows is the most: close or
+        minimize one, or switch one with its header ▾.</div>}
+
       <input className="work-picker-q" value={q}
              placeholder={project ? 'Open a window…' : 'Pick a project…'}
              aria-label={project ? 'search windows' : 'search projects'} onKeyDown={onKey}
              onChange={(e) => { setQ(e.target.value); setSel(0) }} />
       <div className="work-picker-list" role="listbox" ref={listRef}>
         {types.map(row)}
-        {!types.length && <div className="dim small work-picker-none">
+        {!types.length && !full && <div
+ className="dim small work-picker-none">
           {project ? 'no window matches' : 'no project matches'}</div>}
       </div>
       <div className="work-picker-foot">{row(rows.at(-1), rows.length - 1)}</div>

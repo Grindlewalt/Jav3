@@ -8,18 +8,23 @@
 //   sizes  one fraction per child, summing to 1
 //
 // The board in memory:
-//   { root, focus, maximized, panels: [{ id, type, state, ...extra }] }
+//   { root, focus, maximized, minimized, panels: [{ id, type, state, ...extra }] }
+// `minimized` lists cards collapsed to the strip above the windows: they keep
+// their leaf (and so their size) in the tree, and geometry() lays the rest out
+// as if they were not there. At most MAX_PANELS cards (addCard refuses more).
+// A panel may carry `project`: a card of another project than the board's.
 // `panels` is the same list the board has always saved (and the agent's
 // workspace_panel tool edits server-side); the tree only says where each
 // panel sits. A panel's `state` is its card's own state (setState), as before.
 //
 // Saved (PUT /api/projects/{slug}/layout):
-//   { v: 2, panels, tree, focus, maximized }
+//   { v: 2, panels, tree, focus, maximized, minimized }
 // Each saved panel still carries x/y/w/h/z, computed from the tree at a
 // nominal board size, so the backend's tool (which tiles and appends by those
 // numbers) and an older client both keep working on a v2 file.
 
 export const VERSION = 2
+export const MAX_PANELS = 4
 export const isSplit = (n) => !!(n && Array.isArray(n.children))
 
 let seq = 0
@@ -134,17 +139,19 @@ export function replace(root, id, leaf) {
 // fraction of that split). Both children keep at least `min`. Call it on the
 // tree as it was when the drag started, with the drag's total delta, so a
 // drag never accumulates rounding.
-export function resize(root, splitId, index, delta, min = 0.05) {
+// `next` is the child on the other side of the boundary: index + 1, unless
+// minimized children between the two are out of the layout.
+export function resize(root, splitId, index, delta, min = 0.05, next = index + 1) {
   const rec = (node) => {
     if (!isSplit(node)) return node
     if (node.id !== splitId) return { ...node, children: node.children.map(rec) }
-    if (index < 0 || index >= node.children.length - 1) return node
-    const a = node.sizes[index], b = node.sizes[index + 1]
+    if (index < 0 || next <= index || next >= node.children.length) return node
+    const a = node.sizes[index], b = node.sizes[next]
     const m = Math.min(min, (a + b) / 2)
     const na = Math.max(m, Math.min(a + b - m, a + delta))
     const sizes = [...node.sizes]
     sizes[index] = na
-    sizes[index + 1] = a + b - na
+    sizes[next] = a + b - na
     return { ...node, sizes }
   }
   return root ? rec(root) : root
@@ -152,20 +159,30 @@ export function resize(root, splitId, index, delta, min = 0.05) {
 
 // Where everything is, in fractions of the board (0..1 on both axes):
 //   leaves    { [id]: { x, y, w, h } }
-//   dividers  [{ splitId, index, dir, pos, split: {x,y,w,h} }]
-export function geometry(root) {
+//   dividers  [{ splitId, index, next, scale, dir, pos, split: {x,y,w,h} }]
+// `hidden` (ids: the minimized cards) are left out and the rest share their
+// space in proportion. A divider sits between children `index` and `next` of
+// its split; `scale` is the share of the split those visible children hold,
+// so a drag of d (a fraction of the split on screen) is resize(.., d * scale).
+export function geometry(root, hidden = []) {
   const out = { leaves: {}, dividers: [] }
+  const gone = new Set(hidden)
+  const shown = (n) => (isSplit(n) ? n.children.some(shown) : !gone.has(n.id))
   const rec = (node, r) => {
-    if (!isSplit(node)) { out.leaves[node.id] = r; return }
+    if (!isSplit(node)) { if (!gone.has(node.id)) out.leaves[node.id] = r; return }
     const row = node.dir === 'row'
     let at = row ? r.x : r.y
     const span = row ? r.w : r.h
-    node.children.forEach((c, i) => {
-      const len = span * node.sizes[i]
+    const vis = node.children.map((c, i) => i).filter((i) => shown(node.children[i]))
+    const scale = vis.reduce((a, i) => a + node.sizes[i], 0) || 1
+    vis.forEach((i, k) => {
+      const len = span * node.sizes[i] / scale
+      const c = node.children[i]
       rec(c, row ? { x: at, y: r.y, w: len, h: r.h } : { x: r.x, y: at, w: r.w, h: len })
       at += len
-      if (i < node.children.length - 1) {
-        out.dividers.push({ splitId: node.id, index: i, dir: node.dir, pos: at, split: r })
+      if (k < vis.length - 1) {
+        out.dividers.push({ splitId: node.id, index: i, next: vis[k + 1], scale,
+                            dir: node.dir, pos: at, split: r })
       }
     })
   }
@@ -174,8 +191,8 @@ export function geometry(root) {
 }
 
 // The card next to `id` across an edge ('left' | 'right' | 'up' | 'down').
-export function neighbor(root, id, direction) {
-  const { leaves: g } = geometry(root)
+export function neighbor(root, id, direction, hidden = []) {
+  const { leaves: g } = geometry(root, hidden)
   const r = g[id]
   if (!r) return null
   const eps = 1e-6
@@ -212,12 +229,12 @@ export function classicBoard() {
   ]
   const [a, b, c, d] = panels.map((p) => makeLeaf(p.type, p.id))
   return { root: row([a, b, col([c, d], [0.54, 0.46])], [0.36, 0.29, 0.35]),
-           focus: 'p1', maximized: null, panels }
+           focus: 'p1', maximized: null, minimized: [], panels }
 }
 
 // A fresh project on the Work page: no windows. The chat is the main area,
 // and the first window the operator opens splits in to its right.
-export const emptyBoard = () => ({ root: null, focus: null, maximized: null, panels: [] })
+export const emptyBoard = () => ({ root: null, focus: null, maximized: null, minimized: [], panels: [] })
 
 // The fixed default every board got before it was fitted. A saved layout that
 // is still exactly this was never arranged by anyone (the autosave persisted
@@ -314,6 +331,8 @@ export function fromSaved(raw, known = () => true,
         panels: panels.filter((p) => ids.has(p.id)),
         focus: ids.has(src.focus) ? src.focus : (leaves(root)[0]?.id ?? null),
         maximized: ids.has(src.maximized) ? src.maximized : null,
+        minimized: (Array.isArray(src.minimized) ? src.minimized : [])
+          .filter((id, i, a) => ids.has(id) && a.indexOf(id) === i),
       },
     }
   }
@@ -323,7 +342,7 @@ export function fromSaved(raw, known = () => true,
   const root = treeFromLegacy(kept)
   // the panel on top (highest z) was the one last touched: focus it
   const top = [...kept].sort((a, b) => num(b.z, 0) - num(a.z, 0))[0]
-  return { converted: true, board: { root, panels: kept, focus: top.id, maximized: null } }
+  return { converted: true, board: { root, panels: kept, focus: top.id, maximized: null, minimized: [] } }
 }
 
 function cleanTree(n) {
@@ -362,18 +381,26 @@ export function toSaved(board) {
     tree: board.root || null,
     focus: board.focus || null,
     maximized: board.maximized || null,
+    minimized: board.minimized || [],
   }
 }
 
 // ---- board operations (return a new board) ----------------------------------
 
-// Add a card of `type` beside `target` (default: the focused card).
-export function addCard(board, type, target = board.focus, dir = 'row') {
+export const canAdd = (board) => !!board && board.panels.length < MAX_PANELS
+const mins = (board) => board?.minimized || []
+
+// Add a card of `type` beside `target` (default: the focused card). `extra`
+// goes on the panel entry ({ project } for another project's card, { state }).
+// A full board (MAX_PANELS) comes back unchanged.
+export function addCard(board, type, target = board.focus, dir = 'row', extra = {}) {
+  if (!canAdd(board)) return board
   const leaf = makeLeaf(type)
+  const at = mins(board).includes(target) ? visibleIds(board).at(-1) : target
   return {
     ...board,
-    root: split(board.root, target, leaf, dir),
-    panels: [...board.panels, { id: leaf.id, type, state: {} }],
+    root: split(board.root, at, leaf, dir),
+    panels: [...board.panels, { id: leaf.id, type, state: {}, ...extra }],
     focus: leaf.id,
     maximized: null,
   }
@@ -381,33 +408,94 @@ export function addCard(board, type, target = board.focus, dir = 'row') {
 
 // Turn the card `id` into a `type` card in the same place. It is a new card
 // (new id, empty state): the old card's state belonged to the old type.
-export function switchCard(board, id, type) {
+export function switchCard(board, id, type, extra = {}) {
   if (!findLeaf(board.root, id)) return board
   const leaf = makeLeaf(type)
   return {
     ...board,
     root: replace(board.root, id, leaf),
-    panels: board.panels.map((p) => (p.id === id ? { id: leaf.id, type, state: {} } : p)),
+    panels: board.panels.map((p) => (p.id === id ? { id: leaf.id, type, state: {}, ...extra } : p)),
+    minimized: mins(board).filter((m) => m !== id),
     focus: leaf.id,
     maximized: board.maximized === id ? leaf.id : board.maximized,
   }
 }
 
 // Close a card; focus moves to the one that took its space.
+const nextFocus = (board, id) => {
+  const h = mins(board)
+  return neighbor(board.root, id, 'left', h) || neighbor(board.root, id, 'up', h)
+    || neighbor(board.root, id, 'right', h) || neighbor(board.root, id, 'down', h)
+}
+
 export function closeCard(board, id) {
   if (!findLeaf(board.root, id)) return board
-  const next = board.focus === id
-    ? (neighbor(board.root, id, 'left') || neighbor(board.root, id, 'up')
-      || neighbor(board.root, id, 'right') || neighbor(board.root, id, 'down'))
-    : board.focus
+  const next = board.focus === id ? nextFocus(board, id) : board.focus
   const root = close(board.root, id)
+  const minimized = mins(board).filter((m) => m !== id)
   return {
-    ...board, root,
+    ...board, root, minimized,
     panels: board.panels.filter((p) => p.id !== id),
-    focus: next || leaves(root)[0]?.id || null,
+    focus: next || leaves(root).find((l) => !minimized.includes(l.id))?.id || null,
     maximized: board.maximized === id ? null : board.maximized,
   }
 }
+
+// The cards on show (not minimized), in reading order.
+export const visibleIds = (board) =>
+  leaves(board?.root).map((l) => l.id).filter((id) => !mins(board).includes(id))
+
+// Collapse a card to the strip; its leaf (and so its size) stays in the tree.
+export function minimizeCard(board, id) {
+  if (!findLeaf(board.root, id) || mins(board).includes(id)) return board
+  const focus = board.focus === id ? nextFocus(board, id) : board.focus
+  return {
+    ...board,
+    minimized: [...mins(board), id],
+    focus: focus || null,
+    maximized: board.maximized === id ? null : board.maximized,
+  }
+}
+
+// Back from the strip, at the size it had, and focused.
+export function restoreCard(board, id) {
+  if (!findLeaf(board.root, id)) return board
+  return { ...board, minimized: mins(board).filter((m) => m !== id), focus: id }
+}
+
+// Tab: the next (step 1) or previous (-1) card on show, wrapping.
+export function cycleFocus(board, step = 1) {
+  const ids = visibleIds(board)
+  if (!ids.length) return board
+  const i = ids.indexOf(board.focus)
+  const focus = i < 0 ? ids[step > 0 ? 0 : ids.length - 1]
+    : ids[(i + step + ids.length) % ids.length]
+  return focus === board.focus ? board : { ...board, focus }
+}
+
+// Tab+arrow: the card across that edge of the focused one.
+export function focusToward(board, direction) {
+  const id = board.focus && neighbor(board.root, board.focus, direction, mins(board))
+  return id ? { ...board, focus: id } : board
+}
+
+// Swap two cards' places; each takes the other's slot (and its size).
+export function swapLeaves(root, a, b) {
+  const la = findLeaf(root, a), lb = findLeaf(root, b)
+  if (!la || !lb || a === b) return root
+  const rec = (node) => {
+    if (!isSplit(node)) return node.id === a ? lb : node.id === b ? la : node
+    return { ...node, children: node.children.map(rec) }
+  }
+  return rec(root)
+}
+
+// Shift+arrow: swap the focused card with its neighbour that way.
+export function moveCard(board, direction, id = board.focus) {
+  const other = id && neighbor(board.root, id, direction, mins(board))
+  return other ? { ...board, root: swapLeaves(board.root, id, other) } : board
+}
+
 
 export function patchCardState(board, id, patch) {
   return {
