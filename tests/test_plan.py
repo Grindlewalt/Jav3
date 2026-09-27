@@ -429,6 +429,48 @@ async def test_siblings_talk_by_item_id_and_leave_notes(client, monkeypatch):
     assert "item:i1" not in roster[0], "the roster excludes the sender itself"
 
 
+async def test_the_roster_teaches_item_addresses_for_siblings_that_are_not_live(
+        client, monkeypatch):
+    """The send_message discovery gap that made a plan item conclude it had
+    nobody to talk to.
+
+    A plan spawns items as their dependencies clear, so when one item asks "who
+    can I reach?" its siblings are usually NOT co-live — the live-turn roster
+    shows only whatever happens to be running (often just the operator's chat).
+    `item:<id>` reaches them anyway (running -> delivered; todo -> a note), so
+    the roster must list every sibling item's address from the plan file, not
+    only the live envelopes."""
+    from backend.db import open_conversation
+    await _put(client, [{"title": "groundwork", "brief": "g"},
+                        {"title": "build on it", "brief": "b", "depends_on": ["i1"]},
+                        {"title": "and more", "brief": "m", "depends_on": ["i1"]}])
+    db = await get_db()
+    try:
+        # only i1 is live; i2 and i3 have not started (they depend on i1) and so
+        # are absent from the broker registry entirely
+        cid = await open_conversation(db, project=SLUG, title="[item i1]", kind="agent")
+        plan_mod._live_items[cid] = {"project": SLUG, "item_id": "i1",
+                                     "title": "groundwork"}
+        try:
+            env = broker.TurnEnvelope(op_id=f"t:{cid}", conversation_id=cid,
+                                      active_project=SLUG)
+            broker.register_turn(env)
+            try:
+                out = await agentmsg.send(db, sender_cid=cid, to="?", body="anyone?")
+            finally:
+                broker.release_turn(env.op_id)
+        finally:
+            plan_mod._live_items.pop(cid, None)
+    finally:
+        await db.close()
+    err = out["error"]
+    assert "item:i2" in err and "item:i3" in err, (
+        "a not-yet-live sibling has no address in the roster, so the model "
+        f"cannot learn to reach it: {err}")
+    assert "[todo]" in err, "the roster shows each item's status"
+    assert "item:i1" not in err, "the sender's own item is excluded"
+
+
 async def test_stop_and_operator_edits_while_running(client, monkeypatch):
     await _put(client, [{"title": "forever", "brief": "f"}, {"title": "also forever", "brief": "g"}],
                max_concurrent=2)

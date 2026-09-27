@@ -272,6 +272,41 @@ def format_peers(peers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+async def _plan_siblings(db, sender_cid: int) -> list[dict]:
+    """The sender's plan checklist, minus its own item — the addresses a plan
+    item most needs and the live-turn roster cannot show.
+
+    `live_peers` only ever lists turns IN FLIGHT, but a plan spawns its items as
+    their dependencies clear, so at any instant most siblings are either not yet
+    started or already finished — absent from the live registry even though
+    `item:<id>` still reaches them (a running one is delivered to; a todo one
+    gets a note). Reading the plan file closes that gap: the model learns every
+    item's address regardless of who happens to be live this second. Empty when
+    the sender is not a plan item, or its project has no plan."""
+    from . import plan as plan_mod
+    my = plan_mod.live_item(sender_cid)
+    if my is None:
+        return []                         # not a plan item: nothing to list
+    plan = plan_mod.load(my["project"])
+    if plan is None:
+        return []
+    return [{"item_id": it["id"], "title": it["title"], "status": it["status"]}
+            for it in plan["items"] if it["id"] != my["item_id"]]
+
+
+def format_plan_siblings(items: list[dict]) -> str:
+    """The plan's item addresses. Every id is reachable by item:<id>: a running
+    item receives the message now, one that has not started keeps it as a note."""
+    if not items:
+        return ""
+    lines = ["\nItems in this plan — address any by item:<id> (a running item "
+             "gets it now; a todo item that has not started keeps it as a note "
+             "it reads when it begins, so do not wait for a reply):"]
+    for it in items:
+        lines.append(f"  item:{it['item_id']} [{it['status']}] {it['title']}")
+    return "\n".join(lines)
+
+
 async def _sender(db, cid: int) -> dict:
     rows = await _describe(db, [cid])
     r = rows.get(cid) or {}
@@ -302,9 +337,17 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
     if len(body) > MAX_BODY:
         body = body[:MAX_BODY] + f"\n...(truncated at {MAX_BODY} chars)"
     peers = await live_peers(db, exclude_cid=sender_cid)
+
+    async def roster() -> str:
+        # the addresses to teach on a miss: the turns live right now, PLUS (for
+        # a plan item) every sibling item's item:<id> — those are reachable even
+        # when not co-live, and the live roster alone never shows them, which is
+        # how a plan item concluded it had nobody to talk to.
+        return ("Running turns you can reach right now:\n" + format_peers(peers)
+                + format_plan_siblings(await _plan_siblings(db, sender_cid)))
+
     if not addr or addr in ("?", "list", "who"):
-        return {"error": "send_message needs an address. Running turns you can "
-                         "reach right now:\n" + format_peers(peers)}
+        return {"error": "send_message needs an address. " + await roster()}
 
     to_cid, to_slug = None, None
     if addr.startswith("item:"):
@@ -318,8 +361,7 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
             why = await plan_mod.leave_note(me["project"], item_id, sender=me["label"],
                                             body=body)
             if why:
-                return {"error": f"cannot reach item {item_id!r}: {why}. Running turns "
-                                 f"you can reach right now:\n" + format_peers(peers)}
+                return {"error": f"cannot reach item {item_id!r}: {why}. " + await roster()}
             return {"id": None, "to_cid": None, "to_slug": None, "running": [],
                     "note_for": item_id}
         if to_cid == sender_cid:
@@ -330,8 +372,7 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
         if to_cid == sender_cid:
             return {"error": "that address is this turn — you cannot message yourself."}
         if not await _describe(db, [to_cid]):
-            return {"error": f"no conversation {to_cid}. Running turns you can "
-                             f"reach right now:\n" + format_peers(peers)}
+            return {"error": f"no conversation {to_cid}. " + await roster()}
         if await _is_incognito(db, to_cid):
             # `live_peers` already hides incognito turns, so this is only
             # reachable by naming the id directly — but "accept, promise, then
@@ -344,8 +385,7 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
         to_slug = addr
         if not _agent_exists(to_slug) and not any(p["agent"] == to_slug for p in peers):
             return {"error": f"no agent '{to_slug}' — it is not in the roster and "
-                             f"no running turn answers to it. Running turns you "
-                             f"can reach right now:\n" + format_peers(peers)}
+                             f"no running turn answers to it. " + await roster()}
 
     me = await _sender(db, sender_cid)
     cur = await db.execute(

@@ -491,6 +491,23 @@ CREATE TABLE IF NOT EXISTS image_versions (
     built_at TEXT,
     UNIQUE(variant, version)
 );
+-- Agent-filed reports that the HARNESS itself misbehaved (report_harness_fault):
+-- a tool that errored on input the agent believed valid, or a documented
+-- capability that did not do what it says. TEMPORARY diagnostic surface for the
+-- dsh-bridge work — one row per report, mirrored to a low-severity security
+-- event so the operator sees it in the Review Center; GET /api/harness_faults
+-- lists them.
+CREATE TABLE IF NOT EXISTS harness_faults (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER,             -- the turn that hit it (may be gone later; not an FK)
+    project TEXT,                        -- the turn's project, for grouping
+    tool TEXT,                           -- the tool/capability the agent was using
+    tried TEXT NOT NULL,                 -- what_i_tried: tool + intent
+    went_wrong TEXT NOT NULL,            -- what_went_wrong: the harness's fault
+    expected TEXT,                       -- what_i_expected
+    severity TEXT NOT NULL DEFAULT 'low',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

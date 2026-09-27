@@ -551,11 +551,14 @@ that a retry could fix — say what) or "blocked" (needs the operator — say wh
 A final reply without a plan_report call counts as a failed attempt.
 
 # Teammates
-Other items of this plan run in parallel as separate agents. send_message with
-to="?" lists them; address one as item:<id> (for example to="item:i2"). Say so
+The other items of this plan are separate agents. They start as their
+dependencies clear, so a sibling you want may not be running at the same instant
+as you — address it by item:<id> anyway (for example to="item:i2"): a running
+item gets the message now, and one that has not started keeps it as a note it
+reads when it begins, so don't wait for a reply. send_message to="?" lists the
+plan's item:<id> addresses (running or not) alongside whoever is live. Say so
 before you touch files another item owns; ask when only a teammate knows the
-answer; a message to an item that has not started yet is kept and shown to it
-when it starts. Messages to you arrive between your reasoning rounds."""
+answer. Messages to you arrive between your reasoning rounds."""
 
 
 def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
