@@ -294,6 +294,31 @@ CREATE TABLE IF NOT EXISTS desk_actions (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_desk_actions_device ON desk_actions(device_id, id);
+-- Browser use (backend/browser.py). Grants per browser token AND per project
+-- ('' = chats with no project, '*' = every project), set ONLY from Settings.
+-- act (click/type) implies read.
+CREATE TABLE IF NOT EXISTS browser_grants (
+    device_id INTEGER NOT NULL REFERENCES device_tokens(id) ON DELETE CASCADE,
+    project TEXT NOT NULL DEFAULT '',
+    read INTEGER NOT NULL DEFAULT 0,
+    act INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (device_id, project)
+);
+-- one row per browser action; typed text as length + sha256, never the text
+CREATE TABLE IF NOT EXISTS browser_actions (
+    id INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL,
+    verb TEXT NOT NULL,
+    params TEXT,
+    project TEXT,
+    conversation_id INTEGER,
+    op_id TEXT,
+    ok INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_browser_actions_device ON browser_actions(device_id, id);
 -- shell commands waiting on the operator (allow once / always / deny)
 CREATE TABLE IF NOT EXISTS desk_shell_pending (
     id INTEGER PRIMARY KEY,
