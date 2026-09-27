@@ -194,10 +194,10 @@ class RedeemBody(BaseModel):
     hostname: str = Field("", max_length=256)
     platform: str = Field("", max_length=256)
     # what the token will be for: `jav3` asks for cli (the default), `jav3-desk`
-    # for desk. Letting the client choose is safe because neither widens the
-    # other: a desk token reaches nothing but its socket, and a desk does
-    # nothing until the operator grants it in Settings.
-    scope: str = Field("cli", pattern="^(cli|desk)$")
+    # for desk, the browser extension for browser. Letting the client choose is safe because neither widens the
+    # other: a desk/browser token reaches nothing but its own socket, and
+    # does nothing until the operator grants it in Settings.
+    scope: str = Field("cli", pattern="^(cli|desk|browser)$")
 
 
 MAX_LOGIN_BODY = 4096

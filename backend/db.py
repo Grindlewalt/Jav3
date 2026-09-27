@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     last_used_at TEXT,
     revoked INTEGER NOT NULL DEFAULT 0,
     -- what the token may reach: 'cli' (chat, via auth.require_actor) or
-    -- 'desk' (only /api/desk/ws, backend/desk.py). Neither reaches the other.
+    -- 'desk' (only /api/desk/ws, backend/desk.py) or 'browser' (only
+    -- /api/browser/ws, backend/browser.py). None reaches another.
     scope TEXT NOT NULL DEFAULT 'cli'
 );
 CREATE TABLE IF NOT EXISTS projects (

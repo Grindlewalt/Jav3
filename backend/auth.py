@@ -341,7 +341,7 @@ async def require_actor(request: Request) -> dict:
     actor = await require_any_actor(request)
     if actor.get("is_device") and actor.get("scope") != "cli":
         raise HTTPException(status_code=403,
-                            detail="this token is scoped to computer use, not chat")
+                            detail=f"this token is scoped to {actor.get('scope')}, not chat")
     return actor
 
 
