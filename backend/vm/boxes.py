@@ -601,9 +601,30 @@ async def for_project(slug: str | None) -> Box:
     prof = await project_profile(slug)
     if not prof or not prof.get("separate_box"):
         return registry.shared()
-    return registry.allocate(
-        "project", project=slug, variant=prof.get("box_image") or "main",
-        mem_mb=prof.get("box_mem_mb"), runtime=prof.get("box_runtime") or "kvm")
+    # an idle project box holding the only slot (or the RAM) gives way to a
+    # turn that needs one: it is disposable, exactly what the idle reaper
+    # would do a few minutes later
+    for _ in range(settings.vm_max_boxes + 1):
+        try:
+            return registry.allocate(
+                "project", project=slug, variant=prof.get("box_image") or "main",
+                mem_mb=prof.get("box_mem_mb"), runtime=prof.get("box_runtime") or "kvm")
+        except BoxCapError:
+            victim = idle_project_box(exclude=f"p-{slug}")
+            if victim is None:
+                raise
+            await destroy(victim)
+    raise BoxCapError("no box could be freed")
+
+
+def idle_project_box(exclude: str | None = None) -> Box | None:
+    """The longest-idle project box with no turn bound or in flight, or None."""
+    bound = set(registry._op_box.values())
+    cands = [b for b in registry.all()
+             if b.kind == "project" and b.id != exclude and b.id not in bound
+             and (b.ctl is None or getattr(b.ctl, "inflight", 0) == 0)]
+    cands.sort(key=lambda b: getattr(b.ctl, "idle_since", None) or 0.0)
+    return cands[0] if cands else None
 
 
 # --- runtime drivers + hooks ----------------------------------------------------
