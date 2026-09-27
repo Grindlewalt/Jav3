@@ -100,7 +100,10 @@ export default function Work({ openProjects = false }) {
       if (projectRef.current !== slug) return
       const { board: b, converted } = fromSaved(r.layout, known, { legacyDrop: ['chat'] })
       skipSave.current = !converted       // a converted old board saves as v2 once
-      setBoard({ ...b, slug })
+      // maximize is a moment, not a layout: a board never opens maximized
+      // (a saved one used to come back with the chat gone and every other
+      // window hidden, which read as a broken board)
+      setBoard({ ...b, maximized: null, slug })
     }).catch(() => {
       if (projectRef.current !== slug) return
       skipSave.current = true
@@ -267,8 +270,13 @@ export default function Work({ openProjects = false }) {
   const stageRef = useRef(null)
   const phoneWin = phone && tab !== 'chat' && all.some((l) => l.id === tab)
   const showWindows = phone ? phoneWin : all.length > 0
-  const single = phone || !!board?.maximized
-  const shownId = phone ? tab : board?.maximized
+  // maximized: that window has the whole Work area, chat included (.work-max
+  // hides <main>); the others keep their place, invisible, so a terminal or an
+  // iframe is never squeezed to 0x0 and back
+  const maxId = !phone && board?.maximized && all.some((l) => l.id === board.maximized)
+    ? board.maximized : null
+  const single = phone || !!maxId
+  const shownId = phone ? tab : maxId
   const stateOf = (id) => board?.panels.find((p) => p.id === id)?.state
 
   const plus = (
@@ -282,8 +290,8 @@ export default function Work({ openProjects = false }) {
   const beside = (
     <div ref={layoutRef}
          className={`work-windows${showWindows ? '' : ' hidden'}${phone ? ' phone' : ''}`}
-         style={phone ? undefined : { flexBasis: pct(split) }}>
-      {!phone && <div className="work-div-chat" role="separator" aria-orientation="vertical"
+         style={phone || maxId ? undefined : { flexBasis: pct(split) }}>
+      {!phone && !maxId && <div className="work-div-chat" role="separator" aria-orientation="vertical"
                       title="drag to resize" onPointerDown={onChatDivider}
                       onDoubleClick={() => setSplit(0.5)} />}
       <div className="work-stage" ref={stageRef}>
@@ -291,11 +299,12 @@ export default function Work({ openProjects = false }) {
           const r = geo.leaves[leaf.id]
           const hidden = single && leaf.id !== shownId
           const full = single && !hidden
+          const place = hidden && !phone ? r : null
           return (
             <WindowFrame key={leaf.id} leaf={leaf} slug={board.slug}
                          x={full ? 0 : r.x} y={full ? 0 : r.y}
                          w={full ? 1 : r.w} h={full ? 1 : r.h}
-                         hidden={hidden} phone={phone}
+                         hidden={hidden} keep={!!place} phone={phone}
                          maximized={board.maximized === leaf.id}
                          focused={board.focus === leaf.id}
                          project={projectObj} refreshProject={refreshProject}
@@ -314,7 +323,8 @@ export default function Work({ openProjects = false }) {
 
   return (
     <WorkContext.Provider value={workCtx}>
-      <div className={`work${phone ? ' work-phone' : ''}${phoneWin ? ' work-show-window' : ''}`}>
+      <div className={`work${phone ? ' work-phone' : ''}${phoneWin ? ' work-show-window' : ''}`
+                      + (maxId ? ' work-max' : '')}>
         {phone && (
           <div className="work-tabs" role="tablist" aria-label="Chat and windows">
             <div className={`work-tab${!phoneWin ? ' on' : ''}`}>
@@ -358,16 +368,18 @@ export default function Work({ openProjects = false }) {
 // geometry. Keyed by id and never moved in the React tree, so a split or a
 // close elsewhere never remounts it (a running terminal or stream survives).
 const WindowFrame = memo(function WindowFrame({
-  leaf, slug, x, y, w, h, hidden, phone, maximized, focused, project, refreshProject, state,
+  leaf, slug, x, y, w, h, hidden, keep, phone, maximized, focused, project, refreshProject, state,
   onFocus, onClose, onToggleMax, onSetState, onPicker,
 }) {
   const id = leaf.id
   const def = WINDOW_TYPES[leaf.type]
   const setState = useCallback((patch) => onSetState(id, patch), [id, onSetState])
   const toggle = useCallback(() => { if (!phone) onToggleMax(id) }, [id, phone, onToggleMax])
-  const style = hidden ? { display: 'none' } : { left: pct(x), top: pct(y), width: pct(w), height: pct(h) }
+  const style = hidden && !keep ? { display: 'none' }
+    : { left: pct(x), top: pct(y), width: pct(w), height: pct(h) }
   return (
-    <section className={`work-win${focused ? ' focused' : ''}${maximized ? ' max' : ''}`}
+    <section className={`work-win${focused ? ' focused' : ''}${maximized ? ' max' : ''}`
+                        + (hidden && keep ? ' behind' : '')} aria-hidden={hidden || undefined}
              style={style} aria-label={def?.title || leaf.type}
              onPointerDownCapture={() => onFocus(id)} onFocusCapture={() => onFocus(id)}>
       <header className="work-wh" onDoubleClick={(e) => {

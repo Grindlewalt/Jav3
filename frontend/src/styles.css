@@ -3936,3 +3936,10 @@ a:has(> .nav-dot) { position: relative; }
 .bx-hosts .tag { margin-left: 0; }
 .net-allow.net-deny .net-host { color: var(--red); }
 .net-group-head > button.link { margin-left: var(--sp-6); font-weight: 400; font-size: var(--fs-sm); }
+
+/* Work: a maximized window has the whole Work area (Work.jsx .work-max);
+   the other windows stay laid out underneath, invisible */
+.work-max > .chat-layout > main { display: none; }
+.work-max .work-windows { flex: 1 1 auto; border-left: 0; }
+.work-win.behind { visibility: hidden; pointer-events: none; }
+.work-win.max { z-index: 4; }
