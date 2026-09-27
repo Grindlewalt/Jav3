@@ -7,7 +7,7 @@ Every string that came from a guest (process names, command lines, service
 logs, build log lines) is untrusted: render it as a text node, never as HTML.
 
 Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
-`procs`, `vm-images`, `vm-boxes`, plus the existing `security` and `egress`.
+`procs`, `vm-images`, `vm-boxes`, `services`, plus the existing `security` and `egress`.
 
 ---
 
@@ -163,6 +163,16 @@ A row is:
 - `POST /api/services/{id}/revoke {confirm: true, delete_data: bool}` returns
   the row plus `data_deleted`.
 - `GET /api/services/{id}/logs?lines=` returns `{service_id, untrusted: true, text}`.
+- SSE topic `services` (refetch `GET /api/services` on any of them):
+  - `{type: "stream_open"}` on every (re)connect.
+  - `{type: "service_changed", service_id, project, status, desired_state}`: a
+    definition was filed, approved (and the one it supersedes), rejected,
+    started or stopped, or revoked.
+  - `{type: "service_state", service_id, state, error}`: the host's view of a
+    unit changed (`running|stopped|failed|unreported`). Published on a change
+    only, not on every supervision ping.
+  The web UI's service lists (Persistent, Review) follow this topic with a
+  60 s fallback poll.
 - A stopped service's `egress_hosts` are closed. Egress is allowed only while
   its `desired_state` is `running`.
 

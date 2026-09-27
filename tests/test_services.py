@@ -537,6 +537,40 @@ async def test_unreported_box_alerts_once_and_restarts(client, monkeypatch):
     assert (await services.get(sid))["last_reported_at"]
 
 
+async def test_services_topic_publishes_changes_not_pings(client, monkeypatch):
+    from backend import bus, events_api
+    assert "services" in events_api.TOPICS
+    rt = Runtime(monkeypatch)
+    q = bus.subscribe(services.BUS_CHAN)
+    try:
+        def drain():
+            out = []
+            while not q.empty():
+                out.append(q.get_nowait())
+            return out
+        sid = (await services.file_request("demo", _req()))["id"]
+        await services.approve(sid, placement="per_project", expose_ports=[])
+        ev = drain()
+        assert [(e["type"], e["status"]) for e in ev] == [("service_changed", "pending"),
+                                                           ("service_changed", "approved")]
+        assert ev[0]["service_id"] == sid and ev[0]["project"] == "demo"
+        await services.reconcile_box("s-demo")
+        assert {"type": "service_state", "service_id": sid, "state": "running",
+                "error": None} in drain()
+        rt.units = {str(sid): {"active": "active", "result": "success"}}
+        await services.check_box("s-demo")            # same state: nothing published
+        await services.check_box("s-demo")
+        assert drain() == []
+        rt.units = {str(sid): {"active": "failed", "result": "exit-code"}}
+        await services.check_box("s-demo")
+        assert [e["state"] for e in drain()] == ["failed"]
+        await services.set_desired(sid, "stopped")
+        assert [(e["type"], e["desired_state"]) for e in drain()
+                if e["type"] == "service_changed"] == [("service_changed", "stopped")]
+    finally:
+        bus.unsubscribe(services.BUS_CHAN, q)
+
+
 async def test_logs_are_scrubbed(client, monkeypatch):
     rt = Runtime(monkeypatch)
     val = _set_secret()

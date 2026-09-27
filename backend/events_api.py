@@ -45,6 +45,9 @@ TOPICS: dict[str, tuple[Callable[[Request], dict], Callable[[], sse.Subscription
     "vm-images": (require_user, lambda: channel_feed("vm-images")),
     # WP1: {"type":"box_up"|"box_down","box":Box.to_json()} (VM manager refresh)
     "vm-boxes": (require_user, lambda: channel_feed("vm-boxes")),
+    # WP3: {"type":"service_changed"|"service_state","service_id",...}
+    # (vm/services.py): the service lists refetch on either
+    "services": (require_user, lambda: channel_feed("services")),
 }
 
 

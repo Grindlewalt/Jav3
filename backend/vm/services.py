@@ -365,6 +365,35 @@ _JSON_COLS = {"command": [], "files": [], "ports": [], "egress_hosts": [],
 # runtime truth per service id (not persisted: a restart re-derives it)
 _runtime: dict[int, dict] = {}
 
+# the `services` topic on /api/events (the lists refetch on either event):
+#   {"type": "service_changed", service_id, project, status, desired_state}
+#       a definition was filed, approved, rejected, started/stopped or revoked
+#   {"type": "service_state", service_id, state, error}
+#       the host's view of a unit changed (running/stopped/failed/unreported)
+BUS_CHAN = "services"
+
+
+def _publish(ev: dict) -> None:
+    from .. import bus
+    bus.publish(BUS_CHAN, ev)
+
+
+def _changed(row: dict | None) -> None:
+    if row:
+        _publish({"type": "service_changed", "service_id": row["id"],
+                  "project": row["project_slug"], "status": row["status"],
+                  "desired_state": row["desired_state"]})
+
+
+def _set_runtime(sid: int, state: str, error: str | None = None) -> None:
+    """Record a unit's state; publish only a change (the pinger runs every few
+    seconds and must not flood the stream)."""
+    new = {"state": state, "error": error}
+    if _runtime.get(sid) != new:
+        _runtime[sid] = new
+        _publish({"type": "service_state", "service_id": sid, "state": state,
+                  "error": error})
+
 
 def _decode(row) -> dict:
     d = dict(row)
@@ -521,6 +550,7 @@ async def file_request(slug: str, args: dict, *, conversation_id: int | None = N
                          "artifact_sha256": sha, "files": len(manifest),
                          "ports": canon["ports"], "egress_hosts": canon["egress_hosts"],
                          "placement": placement, "supersedes_id": supersedes})
+    _changed(row)
     return row
 
 
@@ -612,9 +642,9 @@ async def approve(sid: int, *, placement: str, expose_ports: list,
                          "artifact_sha256": row["artifact_sha256"],
                          "egress_hosts": row["egress_hosts"],
                          "superseded": old["id"] if old else None})
-    from .. import bus
-    bus.publish(BUS_CHAN, {"type": "service_approved", "service": row_json(row)})
+    _changed(row)
     if old is not None:
+        _changed({**old, "status": "superseded", "desired_state": "stopped"})
         _kick(box_id_of(old))
     _kick(box_id_of(row))
     return row
@@ -639,6 +669,7 @@ async def reject(sid: int, reason: str = "", by: str = "operator") -> dict:
     await _event("service_rejected", severity="info", project=row["project_slug"],
                  summary=f"{by} rejected service '{row['name']}' (#{sid})",
                  detail={"service_id": sid, "by": by, "reason": row["decision_note"]})
+    _changed(row)
     return row
 
 
@@ -660,6 +691,7 @@ async def set_desired(sid: int, state: str, by: str = "operator") -> dict:
         raise ServiceError("no such service", 404)
     if cur.rowcount != 1:
         raise ServiceError(f"service #{sid} is {row['status']}, not approved", 409)
+    _changed(row)
     _kick(box_id_of(row))
     return row
 
@@ -711,7 +743,9 @@ async def revoke(sid: int, *, delete_data: bool = False, by: str = "operator") -
                          + (f"; box {bid} destroyed" if bid else ""),
                  detail={"service_id": sid, "by": by, "box_id": bid,
                          "delete_data": bool(delete_data), "data_deleted": deleted})
-    return {**(await get(sid)), "data_deleted": deleted}
+    out = await get(sid)
+    _changed(out)
+    return {**out, "data_deleted": deleted}
 
 
 def _tar_texts(data: bytes | None) -> dict[str, str | None]:
@@ -770,9 +804,6 @@ async def diff(sid: int) -> str | None:
 
 
 # --- boxes, disks --------------------------------------------------------------------
-
-BUS_CHAN = "services"
-
 
 def box_id_of(row: dict) -> str:
     return boxes.box_id_for("service", project=row["project_slug"],
@@ -1128,7 +1159,7 @@ async def reconcile_box(box_id: str) -> None:
             box = box or _box_for(wanted[0])
         except boxes.BoxError as e:
             for r in wanted:
-                _runtime[r["id"]] = {"state": "failed", "error": str(e)}
+                _set_runtime(r["id"], "failed", str(e))
             await _event("box_cap_refused", severity="info",
                          project=wanted[0]["project_slug"],
                          summary=f"service box {box_id} not started: {e}")
@@ -1137,8 +1168,7 @@ async def reconcile_box(box_id: str) -> None:
             await _bring_up(box, wanted)
         except Exception as e:  # noqa: BLE001 — recorded; the pinger retries
             for r in wanted:
-                _runtime[r["id"]] = {"state": "failed",
-                                     "error": f"{type(e).__name__}: {e}"[:300]}
+                _set_runtime(r["id"], "failed", f"{type(e).__name__}: {e}"[:300])
             print(f"[services] bring-up {box_id}: {e}")
 
 
@@ -1194,8 +1224,8 @@ async def _apply(box: boxes.Box, wanted: list[dict]) -> None:
     errors = r.get("errors") if isinstance(r.get("errors"), dict) else {}
     for s in wanted:
         err = errors.get(str(s["id"]))
-        _runtime[s["id"]] = {"state": "failed" if err else "running",
-                             "error": str(err)[:300] if err else None}
+        _set_runtime(s["id"], "failed" if err else "running",
+                     str(err)[:300] if err else None)
     eg: dict[str, list[int]] = {}
     for s in wanted:
         for h in s["egress_hosts"]:
@@ -1257,8 +1287,7 @@ async def check_box(box_id: str) -> None:
         units = r.get("units") if isinstance(r.get("units"), dict) else {}
         for s in wanted:
             st = _unit_state(units.get(str(s["id"])))
-            _runtime[s["id"]] = {"state": st,
-                                 "error": None if st != "failed" else "unit failed"}
+            _set_runtime(s["id"], st, None if st != "failed" else "unit failed")
         await _mark_reported([s["id"] for s in wanted])
         h.update(misses=0, alerted=False)
         return
@@ -1266,7 +1295,7 @@ async def check_box(box_id: str) -> None:
     if h["misses"] < _UNREPORTED_AFTER:
         return
     for s in wanted:
-        _runtime[s["id"]] = {"state": "unreported", "error": "svcd not answering"}
+        _set_runtime(s["id"], "unreported", "svcd not answering")
     if not h["alerted"]:
         h["alerted"] = True
         await _event("svc_unreported", project=box.project,

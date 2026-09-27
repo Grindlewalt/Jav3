@@ -1,5 +1,14 @@
 // Service boxes (docs/boxes-api-final.md section 4, WP3).
-import { call, enc, get, post, qs } from '../http.js'
+import { call, enc, follow, get, post, qs } from '../http.js'
+
+// Live: topic `services` on the ONE shared /api/events stream.
+// {type: "service_changed", service_id, project, status, desired_state} or
+// {type: "service_state", service_id, state, error}, plus the feed's
+// stream_open on every (re)connect. Each is a cue to refetch listServices.
+export const followServices = (fn) => follow('services', fn)
+
+// The fallback poll beside the topic (a dropped stream, a missed event).
+export const SERVICES_POLL_MS = 60000
 
 // a POST with no body at all (start/stop take none)
 const call0 = (path) => call(path, { method: 'POST' })

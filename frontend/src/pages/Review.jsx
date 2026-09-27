@@ -11,7 +11,7 @@ import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
 import Button from '../components/Button.jsx'
-import { listServices } from '../boxes/api/services.js'
+import { SERVICES_POLL_MS, followServices, listServices } from '../boxes/api/services.js'
 import { listPackages } from '../boxes/api/packages.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import { listImages } from '../boxes/api/images.js'
@@ -92,11 +92,17 @@ export function ReviewQueue({ slug }) {
     }).catch(() => {})
   }
 
-  function loadBoxReqs() {
+  function loadSvcReqs() {
     listServices(slug || undefined).then((r) => {
       setSvcReqs(r.services.filter((x) => x.status === 'pending'))
       setLan({ ip: r.lanIp, configured: r.lanConfigured, error: r.lanError })
     }).catch(() => setSvcReqs([]))
+  }
+  function loadBoxReqs() {
+    loadSvcReqs()
+    loadPkgReqs()
+  }
+  function loadPkgReqs() {
     listPackages('pending').then((rows) =>
       setPkgReqs(slug ? rows.filter((r) => r.project_slug === slug) : rows))
       .catch(() => setPkgReqs([]))
@@ -115,14 +121,22 @@ export function ReviewQueue({ slug }) {
   const key = slugs ? slugs.join(',') : ''
   useEffect(() => {
     if (!slugs) return
+    // service requests ride topic `services` (below) with a slow fallback
+    // poll; everything else keeps the 12 s refresh
     const refresh = () => {
-      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadBoxReqs()
+      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadPkgReqs()
     }
     refresh()
+    loadSvcReqs()
     const t = setInterval(refresh, 12000)
-    const h = () => refresh()
+    const tSvc = setInterval(loadSvcReqs, SERVICES_POLL_MS)
+    const stopSvc = followServices(() => loadSvcReqs())
+    const h = () => { refresh(); loadSvcReqs() }
     window.addEventListener('jarvis-files-changed', h)
-    return () => { clearInterval(t); window.removeEventListener('jarvis-files-changed', h) }
+    return () => {
+      clearInterval(t); clearInterval(tSvc); stopSvc()
+      window.removeEventListener('jarvis-files-changed', h)
+    }
   }, [key]) // eslint-disable-line
 
   // live security alerts prepend as they fire

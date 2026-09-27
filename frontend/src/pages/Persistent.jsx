@@ -4,7 +4,7 @@ import { notify, notifyError } from '../notify.js'
 import { ago } from '../format.js'
 import { followProcs, listProcesses } from '../boxes/api/procs.js'
 import {
-  listServices, revokeService, serviceLogs, startService, stopService,
+  SERVICES_POLL_MS, followServices, listServices, revokeService, serviceLogs, startService, stopService,
 } from '../boxes/api/services.js'
 import {
   SERVICE_STATE_TONE, boxIsOdd, boxTotals, bytes, connCheck, flattenTree, mergeProcs, normBoxProcs,
@@ -26,7 +26,10 @@ const TAG_TONE = { service: 'done', unexpected: 'error', run_code: 'running' }
 export default function Persistent() {
   const { data, error, unavailable, setData, reload } = useLoad(
     () => listProcesses().then((r) => ({ enabled: r.enabled, boxes: sortBoxes(r.boxes.map(normBoxProcs)) })))
-  const svc = useLoad(() => listServices(), { every: 20000 })
+  // topic `services` drives it; the slow poll only covers a dropped stream
+  const svc = useLoad(() => listServices(), { every: SERVICES_POLL_MS })
+  const svcReload = svc.reload
+  useEffect(() => followServices(() => svcReload()), [svcReload])
   const [onlyOdd, setOnlyOdd] = useState(false)
   const [dlg, setDlg] = useState(null)
   const [logs, setLogs] = useState(null)
