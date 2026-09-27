@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import socket
+import subprocess
 import time
 from pathlib import Path
 
@@ -172,12 +173,16 @@ class GuestVM:
         from the process group teardown kills). Without this, a reboot's fresh guest
         can't bind the CID and the host would keep talking to the stale one."""
         overlay = str(self._dir / "overlay.qcow2")
+        # a blocking run in a thread, bounded: under the stdlib asyncio loop at
+        # shutdown the child watcher may never deliver pkill's exit, and
+        # `await proc.wait()` hung forever on a <defunct> child (e2e BUG-4)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "pkill", "-9", "-f", overlay,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await proc.wait()
-        except (FileNotFoundError, OSError):
+            await asyncio.wait_for(asyncio.to_thread(
+                subprocess.run, ["pkill", "-9", "-f", overlay],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10), 15)
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired,
+                asyncio.TimeoutError):
             pass
 
     async def _net(self, action: str) -> None:
@@ -193,12 +198,16 @@ class GuestVM:
             print(f"[egress] net {action} refused: {e}")
             return
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            _, err = await proc.communicate()
-            if proc.returncode:
-                print(f"[egress] net {action} failed: {err.decode(errors='replace')[:300]}")
+            # thread + timeout, like _kill_orphans: net down runs at shutdown,
+            # where an awaited child exit may never be delivered (e2e BUG-4)
+            r = await asyncio.to_thread(
+                subprocess.run, argv, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, timeout=120)
+            if r.returncode:
+                print(f"[egress] net {action} failed: "
+                      f"{r.stderr.decode(errors='replace')[:300]}")
+        except subprocess.TimeoutExpired:
+            print(f"[egress] net {action} timed out")
         except (FileNotFoundError, OSError) as e:
             print(f"[egress] net {action} unavailable: {e}")
 
