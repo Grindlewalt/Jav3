@@ -9,7 +9,7 @@ Both expose an SSE `/stream` fed from the in-process bus, mirroring the Runs tab
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from . import egress, egress_auto, secctx, security, sse
+from . import egress, egress_auto, lanaccess, secctx, security, sse
 from .auth import require_user
 from .db import get_db
 
@@ -284,6 +284,40 @@ async def promote_to_profile(slug: str, body: PromoteBody, user: dict = Depends(
             db, slug, body.host, body.profile_id,
             which="deny" if body.list == "deny" else "allow",
             actor=str(user.get("username") or "operator"))
+    finally:
+        await db.close()
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+# --- egress: per-project LAN access (backend/lanaccess.py) -----------------
+
+class LanBody(BaseModel):
+    # either may be omitted to leave it as it is
+    enabled: bool | None = None
+    allow: list[str] | None = None
+
+
+@router.get("/lan/{slug}")
+async def get_lan(slug: str):
+    """{enabled, allow, host_ips}: OFF by default. host_ips are the addresses
+    that are never reachable (the Jav3 host), shown so a CIDR that covers the
+    host reads as carved out."""
+    db = await get_db()
+    try:
+        cfg = await lanaccess.get(db, slug)
+    finally:
+        await db.close()
+    return {"slug": slug, **cfg, "host_ips": sorted(lanaccess.host_ips())}
+
+
+@router.put("/lan/{slug}")
+async def put_lan(slug: str, body: LanBody, user: dict = Depends(require_user)):
+    db = await get_db()
+    try:
+        res = await lanaccess.set_(db, slug, enabled=body.enabled, allow=body.allow,
+                                   actor=str(user.get("username") or "operator"))
     finally:
         await db.close()
     if not res.get("ok"):

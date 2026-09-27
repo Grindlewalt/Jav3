@@ -7,8 +7,8 @@ import { Link } from 'react-router-dom'
 import { Button, EmptyState, Input, Select, Tag, Toggle } from '../components/index.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import {
-  allowHost, allowlist, approvePending, getPolicy, promoteAuto, promoteToProfile, putPolicy,
-  rejectPending, revokeAllow,
+  allowHost, allowlist, approvePending, getLan, getPolicy, promoteAuto, promoteToProfile,
+  putLan, putPolicy, rejectPending, revokeAllow,
 } from '../boxes/api/policy.js'
 import {
   GENERAL, groupPolicy, IMAGE_BUILD, needsProject, parseHosts, projectLabel,
@@ -541,6 +541,62 @@ function PolicyEditor({ slug }) {
   )
 }
 
+// ---- per-project LAN access -------------------------------------------------
+// Box -> LAN only, through the host proxy: the guest still has no route to the
+// LAN. Entries are RFC1918 CIDRs, addresses or names, optionally :port. The
+// Jav3 host, loopback, link-local/metadata and the box network are refused at
+// save and again at connect, even inside a listed range.
+function LanAccess({ slug }) {
+  const [lan, setLan] = useState(null)
+  const [text, setText] = useState('')
+  const [status, setStatus] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  function load() {
+    getLan(slug).then((l) => { setLan(l); setText(l.allow.join('\n')) })
+      .catch(() => setLan(null))
+  }
+  useEffect(() => { load() }, [slug]) // eslint-disable-line
+
+  async function send(change) {
+    setBusy(true)
+    try {
+      await putLan(slug, change)
+      setStatus('saved'); setTimeout(() => setStatus(''), 1500); load()
+    } catch (err) { notifyError(err) }
+    setBusy(false)
+  }
+
+  if (!lan || slug === GENERAL || slug === IMAGE_BUILD) return null
+  return (
+    <div className="sbx-card">
+      <div className="sbx-sec-head"><h3>LAN access</h3>
+        <span className="dim small">{status}</span></div>
+      <div className="net-policy">
+        <Toggle checked={lan.enabled} disabled={busy} label="LAN access"
+                onText="On: this project's boxes may reach the devices listed below"
+                offText="Off"
+                onChange={(on) => send({ enabled: on, allow: parseHosts(text) })} />
+        {!lan.enabled && (
+          <div className="dim small">Off: boxes in this project cannot reach any
+            private or LAN address (NAS, Home Assistant, router).</div>)}
+        <Input textarea label="Allowed LAN targets (one per line: 10.0.0.0/24, 10.0.0.60:8123, nas.lan)"
+               className="md-editor" rows={4} spellCheck={false} value={text}
+               onChange={(e) => setText(e.target.value)} />
+        <div className="row">
+          <span className="dim small grow">
+            Never reachable, even inside a listed range: this server
+            {lan.hostIps.length > 0 && <> ({lan.hostIps.join(', ')})</>}, loopback,
+            link-local / cloud metadata and the box network.
+          </span>
+          <Button disabled={busy} onClick={() => send({ allow: parseHosts(text) })}>
+            {busy ? 'Saving…' : 'Save LAN list'}</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---- per-project secret grants ----------------------------------------------
 function Grants({ slug }) {
   const [grants, setGrants] = useState([])
@@ -634,6 +690,7 @@ export function NetworkPanel({ slug }) {
       <Decisions feed={feed.slice(0, 60)} names={{}} onChanged={bump} />
       <PolicyLists project={slug} names={{}} projects={[]} tick={tick} onChanged={bump} />
       <PolicyEditor slug={slug} />
+      <LanAccess slug={slug} />
       <Grants slug={slug} />
     </div>
   )
@@ -677,8 +734,9 @@ export default function Network() {
 
       {filter ? (
         <details className="net-sec net-more">
-          <summary>Policy and secret grants for {names[filter] || filter}</summary>
+          <summary>Policy, LAN access and secret grants for {names[filter] || filter}</summary>
           <PolicyEditor slug={filter} />
+          <LanAccess slug={filter} />
           <Grants slug={filter} />
         </details>
       ) : (

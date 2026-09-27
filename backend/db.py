@@ -805,6 +805,10 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     # it here would break egress.py, which WP1 does not own.
     await _add_columns(db, "egress_policy", (
         ("deny_hosts", "TEXT NOT NULL DEFAULT '[]'"),
+        # per-project LAN access (backend/lanaccess.py): OFF by default, and
+        # a JSON list of RFC1918 CIDRs / hosts / host:port the box may reach
+        ("lan_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("lan_allow", "TEXT NOT NULL DEFAULT '[]'"),
     ))
     # (b)/(proxy attribution) the guest end of each proxied connection and
     # which box it came from, so the process view can join a proxy row to a

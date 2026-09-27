@@ -9,7 +9,9 @@ route off-box. For each request the proxy:
      shared box by the turn driving it (egress.current_context); the guest
      end (peer ip/port) and box/service id go on every egress_events row,
   2. resolves the target host and applies the per-project policy
-     (egress.decide -> allow | deny | cut),
+     (egress.decide -> allow | deny | cut); a project with LAN access on
+     has its RFC1918 targets judged by lanaccess.decide instead, and the
+     proxy dials the exact address it judged (backend/lanaccess.py),
   3. injects {{secret:X}} the project is *granted* to use (Layer 2 on the wire —
      the guest never holds the key),
   4. forwards it, meters bytes, records the event (live feed + volume baseline),
@@ -30,7 +32,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .. import egress, egress_auto, secrets as secrets_mod
-from .. import anomaly, security, websec
+from .. import anomaly, lanaccess, security, websec
 from . import boxes, boxnet
 from ..config import settings
 from ..db import get_db
@@ -64,7 +66,8 @@ def parse_target(head: bytes) -> tuple[str, str, str] | None:
     return None
 
 
-async def inject_secrets(db, slug: str | None, host: str, text: str) -> tuple[str, list[str]]:
+async def inject_secrets(db, slug: str | None, host: str, text: str, *,
+                         bound_only: bool = False) -> tuple[str, list[str]]:
     """Replace {{secret:X}} in an outbound request with the real value, but ONLY
     if (a) a project owns the request, (b) that project is granted the secret, and
     (c) the secret's host binding — when set — covers the destination host. A
@@ -89,6 +92,10 @@ async def inject_secrets(db, slug: str | None, host: str, text: str) -> tuple[st
         # deliberately diverges from the WEB path, where substitute_url refuses
         # unbound secrets outright.
         bound = secrets_mod.hosts_for(name)  # respect an explicit host binding, if any
+        # a LAN-access target (bound_only) gets ONLY a key bound to it: an
+        # unbound grant must not spray onto every device on the LAN
+        if bound_only and not bound:
+            return False
         if bound and not secrets_mod._host_allowed(host, bound):
             return False
         return True
@@ -225,10 +232,47 @@ async def _nft_drop(host: str) -> None:
 
 async def _authorize(host: str, port: str | None = None,
                      att: dict | None = None) -> tuple[str, str]:
+    verdict, reason, _pin = await _authorize_target(host, port, att)
+    return verdict, reason
+
+
+def _port_int(port) -> int | None:
+    try:
+        return int(port) if port is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _lan_verdict(db, slug: str, host: str, port,
+                       att: dict) -> tuple[str, str, str | None] | None:
+    """Per-project LAN access (backend/lanaccess.py). Only a project box or a
+    shared-box turn attributed to a project with LAN access ON takes this
+    path, and only for a target that resolves to a non-public address;
+    everything else returns None and is judged exactly as before. The host
+    resolves the name ONCE here and the caller dials the pinned address."""
+    if att["kind"] not in ("project", "shared") or egress.is_unattributed(att["project"]):
+        return None
+    cfg = await lanaccess.get(db, slug)
+    if not cfg["enabled"]:
+        return None
+    ips = await asyncio.get_running_loop().run_in_executor(
+        None, lanaccess._resolve4, egress._norm(host))
+    if not ips or not lanaccess.is_lan_target(ips):
+        return None
+    return await lanaccess.decide(db, slug, host, _port_int(port), ips)
+
+
+async def _authorize_target(host: str, port: str | None = None,
+                            att: dict | None = None) -> tuple[str, str, str | None]:
+    """(verdict, reason, pinned ip). The pinned ip is set only for an allowed
+    LAN-access target: the proxy must connect to exactly that address."""
     att = att or attribute()
     db = await get_db()
     try:
         slug = att["project"] or egress.GENERAL
+        lan = await _lan_verdict(db, slug, host, port, att)
+        if lan is not None:
+            return lan
         if att["kind"] == "service":
             # deny-by-default on the approved service's hosts; never auto mode
             verdict, reason = await egress.decide_service(db, att["project"],
@@ -255,8 +299,8 @@ async def _authorize(host: str, port: str | None = None,
             await asyncio.get_running_loop().run_in_executor(
                 None, websec.is_safe_url, f"http://{host}")
         except websec.UnsafeURL as e:
-            return "deny", f"blocked non-public target: {e}"
-    return verdict, reason
+            return "deny", f"blocked non-public target: {e}", None
+    return verdict, reason, None
 
 
 # (box_id, guest source port) -> CONNECT host, for tunnels open right now. The
@@ -298,14 +342,15 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> int:
 async def _handle_connect(host, port, cr, cw, att: dict | None = None):
     """HTTPS: tunnel, observing host + byte volume; policy/cut enforced up front."""
     att = att or attribute()
-    verdict, reason = await _authorize(host, port, att)
+    verdict, reason, pin = await _authorize_target(host, port, att)
     if verdict != "allow":
         cw.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
         await cw.drain(); cw.close()
         await _record(host, "CONNECT", None, 0, 0, verdict, reason, att)
         return
     try:
-        orr, orw = await asyncio.open_connection(host, int(port))
+        # a LAN-access target dials the address it was judged on (pin)
+        orr, orw = await asyncio.open_connection(pin or host, int(port))
     except OSError as e:
         cw.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
         await cw.drain(); cw.close()
@@ -326,7 +371,7 @@ async def _handle_connect(host, port, cr, cw, att: dict | None = None):
 async def _handle_http(method, host, port, head, cr, cw, att: dict | None = None):
     """HTTP: full interception — policy, secret injection, forward, meter."""
     att = att or attribute()
-    verdict, reason = await _authorize(host, port, att)
+    verdict, reason, pin = await _authorize_target(host, port, att)
     if verdict != "allow":
         cw.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
         await cw.drain(); cw.close()
@@ -345,17 +390,19 @@ async def _handle_http(method, host, port, head, cr, cw, att: dict | None = None
     db = await get_db()
     try:
         raw = (head + body).decode("latin-1")
-        injected, _refused = await inject_secrets(db, inject_slug, host, raw)
+        injected, _refused = await inject_secrets(db, inject_slug, host, raw,
+                                                  bound_only=bool(pin))
         # the forwarded URL is rebuilt from the request line, NOT from
         # `injected` — inject into the path separately or a query-string key
         # (the common ?api_key=... shape) forwards as the literal placeholder.
         # `path` (placeholder intact) is what gets logged; only `send_path`
         # carries the real value, and only onto the wire.
         path = _request_path(head)
-        send_path, _ = await inject_secrets(db, inject_slug, host, path)
+        send_path, _ = await inject_secrets(db, inject_slug, host, path,
+                                          bound_only=bool(pin))
     finally:
         await db.close()
-    url = f"http://{host}:{port}{send_path}"
+    url = f"http://{pin or host}:{port}{send_path}"
     hdr_block = injected.split("\r\n\r\n", 1)[0]
     # hop-by-hop + length/host headers are recomputed by httpx from the (possibly
     # injection-resized) body and target URL; forwarding the stale originals would
@@ -368,6 +415,9 @@ async def _handle_http(method, host, port, head, cr, cw, att: dict | None = None
             k, v = ln.split(":", 1)
             if k.lower() not in _drop:
                 headers[k.strip()] = v.strip()
+    if pin:
+        # dialled by address: the device still sees the name it was asked for
+        headers["Host"] = host if str(port) == "80" else f"{host}:{port}"
     send_body = injected.split("\r\n\r\n", 1)[1].encode("latin-1") if "\r\n\r\n" in injected else b""
     bo = len(injected)
     bi = 0
