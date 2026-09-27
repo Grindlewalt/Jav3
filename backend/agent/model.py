@@ -33,11 +33,20 @@ def _is_voice_local(name: str, base: str) -> bool:
 # TEXT instead of the structured tool_calls field, so the serving layer doesn't
 # parse them and they arrive as garbage content (the tool never runs). Recover
 # them: parse the markup back into tool_calls. The '｜' below is U+FF5C.
+# V4.1 puts a space after the bars (`<｜｜DSML｜｜ invoke`); V4 did not. Missing
+# that space failed every item of the 2026-09-27 benchmark-game plan run: the
+# markup was taken as a final answer and plan_report never ran.
 _DSML_MARK = "DSML"
+_B = r"｜+\s*DSML\s*｜+\s*"          # the <｜｜DSML｜｜ > tag prefix, any spacing
+# the close is sometimes written without its slash (`<｜｜DSML｜｜ invoke>`); a
+# call with no close at all was cut off mid-argument and is NOT recovered (a
+# truncated write_file must not run) — the loop asks for it again instead
 _DSML_INVOKE = re.compile(
-    r'<｜｜DSML｜｜invoke name="([^"]+)">(.*?)</｜｜DSML｜｜invoke>', re.S)
+    rf'<{_B}invoke\s+name="([^"]+)"\s*>(.*?)<\s*/?\s*{_B}invoke\s*>', re.S)
 _DSML_PARAM = re.compile(
-    r'<｜｜DSML｜｜parameter name="([^"]+)"[^>]*>(.*?)</｜｜DSML｜｜parameter>', re.S)
+    rf'<{_B}parameter\s+name="([^"]+)"([^>]*)>(.*?)</{_B}parameter\s*>', re.S)
+_DSML_START = re.compile(rf'<{_B}')
+_DSML_NONSTRING = re.compile(r'string\s*=\s*"false"')
 
 
 def _coerce(v: str):
@@ -49,15 +58,39 @@ def _coerce(v: str):
     return v
 
 
+def _dsml_value(attrs: str, v: str):
+    """string="true" is the raw text; string="false" is a JSON value (numbers,
+    booleans, arrays, objects); no attribute (V4) gets the old light coercion."""
+    if _DSML_NONSTRING.search(attrs):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return _coerce(v)
+    if "string" in attrs:
+        return v
+    return _coerce(v)
+
+
 def parse_dsml_tool_calls(content: str) -> list[dict]:
     """Recover tool calls the model emitted as text markup instead of structured
     fields. Returns [] if there are none."""
     calls = []
     for i, m in enumerate(_DSML_INVOKE.finditer(content)):
-        args = {p.group(1): _coerce(p.group(2)) for p in _DSML_PARAM.finditer(m.group(2))}
+        args = {p.group(1): _dsml_value(p.group(2), p.group(3))
+                for p in _DSML_PARAM.finditer(m.group(2))}
         calls.append({"id": f"dsml_{i}", "type": "function",
                       "function": {"name": m.group(1), "arguments": json.dumps(args)}})
     return calls
+
+
+def dsml_prose(content: str) -> str:
+    """The prose the model wrote before its tool-call markup ("Let me check X.")."""
+    m = _DSML_START.search(content)
+    return (content[:m.start()] if m else content).strip()
+
+
+def has_dsml_markup(content: str) -> bool:
+    return bool(content) and _DSML_START.search(content) is not None
 
 
 class PeakPricingConfirmationRequired(Exception):
@@ -255,7 +288,7 @@ class ModelClient:
             recovered = parse_dsml_tool_calls(content)
             if recovered:
                 tcs = recovered
-                content = ""   # the markup was the tool call, not a message
+                content = dsml_prose(content)   # the markup was the tool call
         yield {"type": "message", "content": content, "tool_calls": tcs,
                "usage": raw["usage"]}
 

@@ -410,3 +410,40 @@ async def test_success_resets_streak(tmp_env, monkeypatch):
     assert not any("Diagnose why" in m for m in seen[5])
     # ...and the note appears once the fresh streak reaches 3 at round 6
     assert any("Diagnose why" in m for m in seen[6])
+
+class _MarkupThenCall:
+    """First reply: unparseable tool-call markup as text. Then a real call,
+    then an answer."""
+    def __init__(self):
+        self.seen = []
+
+    async def complete(self, messages, tools=None, **kw):
+        self.seen.append(messages[-1]["content"])
+        n = len(self.seen)
+        if n == 1:
+            yield {"type": "message", "tool_calls": [], "usage": None,
+                   "content": '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="probe" oops'}
+        elif n == 2:
+            yield {"type": "message", "content": "", "usage": None, "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "probe", "arguments": '{"q": "a"}'}}]}
+        else:
+            yield {"type": "message", "content": "done", "tool_calls": [],
+                   "usage": None}
+
+
+async def test_unparsed_tool_markup_is_retried_not_final(tmp_env, monkeypatch):
+    """2026-09-27 plan run: markup the gateway could not parse ended the turn
+    as its 'answer'. It must be sent back as a retry instead."""
+    await init_db()
+    dispatched = []
+
+    async def dispatch(name, args):
+        dispatched.append(name)
+        return "ok"
+
+    model = _MarkupThenCall()
+    events, _ = await _run(monkeypatch, model, dispatch)
+    assert "tool-call markup" in model.seen[1]
+    assert dispatched == ["probe"]
+    assert events[-1] == {"type": "final", "content": "done"}

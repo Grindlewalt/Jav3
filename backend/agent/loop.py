@@ -16,7 +16,7 @@ from ..config import settings
 from ..memory import standing_rules_tail
 from . import imageresult
 from .budget import BudgetExceeded
-from .model import model
+from .model import has_dsml_markup, model
 from .tools import registry
 
 # Tools that mutate durable state: their results are the model's record of
@@ -332,6 +332,7 @@ async def run_turn(
     # (name, canonical args) -> tool_msgs entry, for duplicate read-only calls.
     # Cleared whenever a mutating tool runs — state may have changed under it.
     seen_calls: dict[tuple, dict] = {}
+    markup_retries = 0           # tool-call markup that arrived as unparsed text
     for i in range(n_iter):
         # mail check. i == 0 was drained into `history` above; from here a
         # message arriving mid-turn becomes its own user message, so it reads as
@@ -362,6 +363,17 @@ async def run_turn(
         assert final is not None
         if not final["tool_calls"]:
             content = final["content"] or ""
+            # tool-call markup the gateway could not parse is a harness fault,
+            # not an answer: ending the turn on it voided every item of a plan
+            # run (plan_report never ran). Ask for the call again, twice at most.
+            if call_tools and markup_retries < 2 and has_dsml_markup(content):
+                markup_retries += 1
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content": (
+                    "Harness note: your last reply contained tool-call markup "
+                    "as plain text, so nothing ran. Make the call again through "
+                    "the tool-calling interface, not as text.")})
+                continue
             # Self-check: a no-tools pass reliably obeys the operator's rules
             # (tools are what break adherence), so it cleans up anything the
             # tool-laden turn let slip. General — it checks against whatever

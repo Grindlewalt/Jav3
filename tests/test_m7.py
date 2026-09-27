@@ -229,3 +229,38 @@ def test_dsml_tool_call_recovery():
     assert calls[0]["function"]["name"] == "read_file"
     assert _j.loads(calls[0]["function"]["arguments"]) == {"path": "README.md"}
     assert parse_dsml_tool_calls("just normal text") == []
+
+
+def test_dsml_v41_spacing_and_json_params():
+    # V4.1 Flash puts a space after the bars; every item of the 2026-09-27
+    # benchmark-game plan run died because the regex required none
+    from backend.agent.model import dsml_prose, has_dsml_markup, parse_dsml_tool_calls
+    import json as _j
+    c = ('Let me check the tests.\n\n'
+         '<｜｜DSML｜｜ calls>\n'
+         '<｜｜DSML｜｜ invoke name="run_code">\n'
+         '<｜｜DSML｜｜ parameter name="command" string="true">node --test 2>&1 | tail -5</｜｜DSML｜｜ parameter>\n'
+         '<｜｜DSML｜｜ parameter name="timeout" string="false">120</｜｜DSML｜｜ parameter>\n'
+         '<｜｜DSML｜｜ parameter name="paths" string="false">["a", "b"]</｜｜DSML｜｜ parameter>\n'
+         '<｜｜DSML｜｜ parameter name="n" string="true">42</｜｜DSML｜｜ parameter>\n'
+         '</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+    calls = parse_dsml_tool_calls(c)
+    assert [x["function"]["name"] for x in calls] == ["run_code"]
+    assert _j.loads(calls[0]["function"]["arguments"]) == {
+        "command": "node --test 2>&1 | tail -5", "timeout": 120,
+        "paths": ["a", "b"], "n": "42"}
+    assert dsml_prose(c) == "Let me check the tests."
+    assert has_dsml_markup(c) and not has_dsml_markup("DSML is a word")
+
+
+def test_dsml_slashless_close_recovers_truncated_does_not():
+    from backend.agent.model import parse_dsml_tool_calls
+    P = '<｜｜DSML｜｜ parameter name="{}" string="true">{}</｜｜DSML｜｜ parameter>\n'
+    head = '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="write_file">\n'
+    whole = head + P.format("content", "x = 1") + P.format("path", "a.js")
+    # closes written without their slash (real reply, 2026-09-27)
+    calls = parse_dsml_tool_calls(whole + '<｜｜DSML｜｜ invoke>\n<｜｜DSML｜｜ calls>')
+    assert [c["function"]["name"] for c in calls] == ["write_file"]
+    # cut off mid-argument: a half-written file must not be written
+    assert parse_dsml_tool_calls(head + '<｜｜DSML｜｜ parameter name="content" '
+                                        'string="true">x = ') == []
