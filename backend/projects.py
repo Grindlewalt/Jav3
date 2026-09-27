@@ -422,6 +422,12 @@ async def purge_project(slug: str):
                                 detail="soft-delete first — purge only empties the bin")
         pid = row["id"]
         await db.execute("UPDATE conversations SET project_id = NULL WHERE project_id = ?", (pid,))
+        # the legacy `runs` table (older installs only; nothing writes it now)
+        # holds a NOT NULL project FK that made purge fail on old projects
+        async with db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'") as cur:
+            if await cur.fetchone():
+                await db.execute("DELETE FROM runs WHERE project_id = ?", (pid,))
         await db.execute("DELETE FROM projects WHERE id = ?", (pid,))
         await db.commit()
         await refresh_all_projects(db)
