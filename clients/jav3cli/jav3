@@ -6123,6 +6123,8 @@ def build_tui(base: str, token: str, **kw):
                         if name.startswith(q):
                             items.append(("cmd", name, f"[b]/{name}[/] "
                                           f"[$text-muted]{_esc(cmd.usage)}  {_esc(cmd.help)}[/]"))
+                    # an exact name first: /stop-a must not complete to /stop-all
+                    items.sort(key=lambda it: it[1] != q)
                 else:
                     head, _, arg = text.partition(" ")
                     for value, meta in self.arg_options(head[1:].lower()):
@@ -6410,7 +6412,8 @@ def build_tui(base: str, token: str, **kw):
                 "stop-all": Command(self.c_stop_all, "stop every running turn you may stop "
                                     "(asks first)", busy_ok=True),
                 "stop-a": Command(self.c_stop_project, "stop every running turn in this "
-                                  "chat's project, agents included (asks first)", "[project]",
+                                  "chat's project, agents included (asks first; alias "
+                                  "/stop-project)", "[project]",
                                   takes_arg=True, busy_ok=True),
                 "copy": Command(self.c_copy, "copy the last reply", busy_ok=True, leader="y"),
                 "export": Command(self.c_export, "save this chat as markdown (default "
@@ -6553,6 +6556,11 @@ def build_tui(base: str, token: str, **kw):
                          ("ctrl+b", "notifications sidebar (● n = unread)"),
                          ("in a picker", "↑↓ enter esc · t or any letter filters"),
                          ("exit · quit", "alone on the prompt: quit"),
+                         ("/theme create", "tab next field · ctrl+s save · esc cancel "
+                                           "(the previous theme comes back)"),
+                         ("custom themes", f"{themes_dir()} — /theme import copies a "
+                                           ".json there, checked on every start"),
+                         ("/screenshot help", "the default format and folder"),
                          ("ctrl+o", "expand / collapse tool output (or click a tool)"),
                          ("ctrl+g", "edit the prompt in $EDITOR"),
                          ("pgup / pgdn", "scroll the transcript"),

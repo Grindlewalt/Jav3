@@ -2816,3 +2816,32 @@ async def test_tui_export_locations_default_and_no_overwrite(cfg, home, monkeypa
         assert (home / "exports" / "jav3-5.md").exists()
         with pytest.raises(jav3.CliError, match="outside your home"):
             await app.c_export("../../x")
+
+
+async def test_tui_new_commands_complete_and_are_in_help(cfg):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_fake_server([], []))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("/", "s", "t", "o", "p", "-", "a")
+        await pilot.pause(0.1)
+        assert app.popup_items[0] == ("cmd", "stop-a")        # exact name first
+        assert ("cmd", "stop-all") in app.popup_items
+        app.editor.text = "/theme "
+        await pilot.pause(0.1)
+        assert [v for _, v in app.popup_items[:3]] == ["create", "export", "import"]
+        app.editor.text = "/screenshot "
+        await pilot.pause(0.1)
+        assert ("arg", "default") in app.popup_items
+        app.editor.text = "/export "
+        await pilot.pause(0.1)
+        assert app.popup_items == [("arg", "default")]
+        app.editor.text = ""
+        names = dict(app.unique_commands())
+        for n in ("stop-all", "stop-a", "screenshot", "themes", "export"):
+            assert n in names
+        assert app.commands["stop-project"] is app.commands["stop-a"]
+        app.dispatch("/help")
+        assert await _modal(pilot, app, "Help")
+        md = app.screen.text
+        assert "/stop-all" in md and "/screenshot" in md and "/theme create" in md
