@@ -296,7 +296,8 @@ children:[...]}]}]}`. Streams on `/api/events` channel `procs`.
   box_image, box_mem_mb, box_runtime, allow_services, allow_package_requests,
   service_placement, projects:[slugs]}]}`
 - `POST /api/profiles` (all fields; `service_placement` and `box_runtime`
-  REQUIRED, 422 without), `PUT /api/profiles/{id}`, `DELETE /api/profiles/{id}`
+  REQUIRED, 422 without), `PUT /api/profiles/{id}` (the full row, the same
+  body as POST; a partial body is 422, never merged), `DELETE /api/profiles/{id}`
   (builtins 409).
 - `PUT /api/projects/{slug}/profile {profile_id}`.
 

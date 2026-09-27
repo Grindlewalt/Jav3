@@ -289,8 +289,10 @@ async def test_api_round_trip(tmp_env):
         assert r.status_code == 200, r.text
         lab = r.json()
         # an edit must name both again: no silent default
-        assert (await c.put(f"/api/profiles/{lab['id']}", json={"auto_handle": True})
-                ).status_code == 422
+        r = await c.put(f"/api/profiles/{lab['id']}", json={"auto_handle": True})
+        assert r.status_code == 422
+        # e2e BUG-10: full-row PUT is the contract; the refusal says so
+        assert "full row" in r.text
         r = await c.put(f"/api/profiles/{lab['id']}",
                         json={"auto_handle": True, "service_placement": "shared",
                               "box_runtime": "kvm"})
