@@ -2871,3 +2871,22 @@ async def test_history_recall_does_not_trap_arrows_in_the_slash_menu(cfg):
         await pilot.press("up")
         await pilot.pause(0.1)
         assert not app.popup_open() and app.editor.text == "last message"
+
+
+async def test_agents_reload_after_close_does_not_crash():
+    """A reload whose fetch finished after the operator left the Agents screen
+    crashed the whole app: NoMatches("No nodes match '#ag-head'")."""
+    nodes = [{"id": 10, "parent_id": None, "kind": "orchestrator", "title": "Ship it",
+              "agent_slug": None, "project": "demo", "model": None, "running": True,
+              "started_at": "2026-09-25T10:00:00"}]
+    srv = _LiveServer(nodes=nodes, messages={})
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.press("left")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
+        scr = app.screen
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
+        await scr._reload_safe()                    # the late result: dropped, no crash
+        await pilot.pause(0.1)
+        assert app.is_running

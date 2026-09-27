@@ -2595,13 +2595,13 @@ def build_tui(base: str, token: str, **kw):
 
         def on_mount(self) -> None:
             self.render_chrome()
-            self.run_worker(self.reload(), group="ag-reload", exclusive=True)
+            self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
             self.set_interval(2, self._auto_reload)
             self.set_interval(0.15, self.spin)
 
         def _auto_reload(self) -> None:
             if self.mode == "active":
-                self.run_worker(self.reload(), group="ag-reload", exclusive=True)
+                self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
 
         @property
         def tree(self) -> AgentTree:
@@ -2613,6 +2613,17 @@ def build_tui(base: str, token: str, **kw):
             nodes = data.get("nodes") if isinstance(data, dict) else None
             nodes = nodes if isinstance(nodes, list) else []
             return nodes, (data.get("total") if isinstance(data, dict) else None)
+
+        async def _reload_safe(self) -> None:
+            # the fetch is slow; the operator may close the screen meanwhile, and
+            # then its widgets are gone ("No nodes match '#ag-head'" crashed the
+            # whole app). A result for a closed screen is simply dropped.
+            from textual.css.query import NoMatches
+            try:
+                await self.reload()
+            except NoMatches:
+                if self.is_attached:
+                    raise
 
         async def reload(self) -> None:
             try:
