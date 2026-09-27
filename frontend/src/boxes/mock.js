@@ -553,7 +553,7 @@ const routes = [
   ['POST', /^\/api\/egress\/pending\/(\d+)\/reject$/, () => ({ ok: true })],
   ['POST', /^\/api\/egress\/allow$/, (_, b) => {
     if (!b.project || b.project === '__general__') {
-      fail(400, 'this request came from the shared box with no project attached: choose the project it belongs to')
+      fail(409, 'needs_project')
     }
     const pol = S.policy[b.project] || (S.policy[b.project] = { allow: [], deny: [] })
     pol.allow = [...new Set([...pol.allow, b.host])]

@@ -218,6 +218,9 @@ async def allow(body: AllowBody):
         res = await egress.allow_host(db, body.project, body.host)
     finally:
         await db.close()
+    if not res.get("ok") and res.get("needs_project"):
+        # same answer as the pending-approve route: the caller names a project
+        raise HTTPException(status_code=409, detail="needs_project")
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res["error"])
     return res

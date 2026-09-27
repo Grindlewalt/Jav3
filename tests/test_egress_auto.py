@@ -455,5 +455,11 @@ async def test_api_round_trip(tmp_env):
         assert r.status_code == 404
         r = await c.post("/api/egress/allow", json={"project": "proj", "host": "odd.example"})
         assert r.status_code == 200
+        for proj in ("", egress.GENERAL):          # unattributed: same answer as approve
+            r = await c.post("/api/egress/allow", json={"project": proj, "host": "odd.example"})
+            assert r.status_code == 409 and r.json()["detail"] == "needs_project"
+        r = await c.post("/api/egress/allow", json={"project": "__image_build__",
+                                                    "host": "odd.example"})
+        assert r.status_code == 400
         assert (await c.get("/api/egress/summary")).json()["waiting"] == 0
     await conn.close()

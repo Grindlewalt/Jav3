@@ -55,5 +55,5 @@ export const approvePending = (id, project = null) =>
   post(`/api/egress/pending/${enc(id)}/approve`, project ? { project } : {})
 export const rejectPending = (id) => call(`/api/egress/pending/${enc(id)}/reject`, { method: 'POST' })
 // Allow a host that is not waiting (an auto-deny). -> {ok, host, added_to};
-// a project is required (needs_project otherwise).
+// a project is required (409 {"detail":"needs_project"} otherwise).
 export const allowHost = (project, host) => post('/api/egress/allow', { project, host })

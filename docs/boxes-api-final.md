@@ -108,7 +108,8 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
 - `POST /api/egress/allowlist/revoke {project, host, id?, list: "allow"|"deny"}`
 - `POST /api/egress/allow {project, host}` returns `{ok, host, added_to}`. It
   writes the project's own allow list. With no project (or `__general__`) it
-  gives 400; `__image_build__` gives 400.
+  gives 409 `{"detail": "needs_project"}`, the same answer as the pending
+  approve below. `__image_build__` or no host gives 400.
 - `POST /api/egress/auto/{id}/promote` turns a live auto-mode guess into a
   standing allow entry (404 for an unknown or expired id).
 - `GET /api/egress/pending?project=` is unchanged. `POST /api/egress/pending/{id}/reject`
