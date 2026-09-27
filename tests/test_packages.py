@@ -325,7 +325,7 @@ async def test_api_flow(client, db, monkeypatch):
     body = r.json()
     assert body["card"].startswith("installs into `main` — used by: c, d")
     assert set(body["variant_used_by"]) >= {"a", "b", "c", "d"}
-    assert started == ["main"]
+    assert started == ["main"] and body["build_started"] is True
     r = await client.get("/api/packages?status=approved")
     assert [p["id"] for p in r.json()["packages"]] == [pid]
     r = await client.get("/api/vm/images")
@@ -365,3 +365,30 @@ async def test_api_flow(client, db, monkeypatch):
                                                    "packages": [{"manager": "pip",
                                                                  "package": "a;b"}]})
     assert r.status_code == 400
+
+
+async def test_approve_build_started_false_while_builder_busy(client, db, monkeypatch):
+    """build_started is true only when the call started a build: a busy
+    builder (or build=false) answers false and nothing is queued."""
+    from backend import packages_api
+    from backend.vm import images
+    await client.post("/api/auth/login", json={"username": "operator", "password": "hunter2"})
+    started = []
+    monkeypatch.setattr(packages_api, "_start_build", lambda v: started.append(v))
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    ids = []
+    for name in ("jq", "ffmpeg"):
+        r = await client.post("/api/packages", json={"manager": "apt", "package": name,
+                                                      "reason": "x", "target_variant": "main"})
+        ids.append(r.json()["id"])
+        await packages.set_resolution(db, ids[-1], resolved_version="1", integrity="sha256:ab")
+    await images.builder.lock.acquire()
+    try:
+        r = await client.post(f"/api/packages/{ids[0]}/approve", json={"acknowledge": True})
+        assert r.status_code == 200 and r.json()["build_started"] is False
+    finally:
+        images.builder.lock.release()
+    r = await client.post(f"/api/packages/{ids[1]}/approve",
+                          json={"acknowledge": True, "build": False})
+    assert r.json()["build_started"] is False
+    assert started == []

@@ -545,7 +545,7 @@ const routes = [
     return { ok: true }
   }],
   ['POST', /^\/api\/egress\/pending\/(\d+)\/approve$/, (_, b) => {
-    if (!b.project) fail(409, 'this request came from the shared box with no project attached: choose the project it belongs to')
+    if (!b.project) fail(409, 'needs_project')
     const pol = S.policy[b.project] || (S.policy[b.project] = { allow: [], deny: [] })
     pol.allow = [...new Set([...pol.allow, 'mock.example'])]
     return { ok: true }

@@ -79,7 +79,7 @@ async def approve(pid: int, body: ApproveBody | None = None):
     finally:
         await db.close()
     if not res.get("ok") and res.get("needs_project"):
-        raise HTTPException(status_code=409, detail=res["error"])
+        raise HTTPException(status_code=409, detail="needs_project")
     return res
 
 

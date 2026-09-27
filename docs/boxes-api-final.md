@@ -58,8 +58,13 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
 
 - `POST /api/profiles` takes every field. `service_placement` and `box_runtime`
   are REQUIRED (422 without them). It returns the row.
-- `PUT /api/profiles/{id}` takes a partial body and returns the row.
-- `DELETE /api/profiles/{id}`: a builtin gives 409.
+- `PUT /api/profiles/{id}` takes the full row, the same body as `POST` (send
+  every field). `service_placement` and `box_runtime` are REQUIRED here too
+  (422 without them: never inferred from the stored row). It returns the row.
+  Renaming a builtin, or taking a name that already exists, gives 409.
+- `DELETE /api/profiles/{id}` returns `{ok: true}`. It gives 409 for a builtin,
+  and 409 while any project still uses the profile (the detail names them:
+  move them to another profile first). 404 for an unknown id.
 - `PUT /api/projects/{slug}/profile {profile_id}` returns
   `{ok, project, profile: {id, name}}`. It gives 404 for an unknown project and
   409 for `__image_build__`.
@@ -76,11 +81,22 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
   The last five keys are the read-only view from before profiles.
   `slug = "__image_build__"` returns the fixed builder policy:
   `profile.name "Image build"`, `source "fixed"`, and the registry hosts in `effective_allow`.
+  `slug = "__general__"` answers too: the view unattributed (shared-box, no
+  project) traffic is judged by, i.e. the Default profile with empty project
+  lists, `source "general"`. Otherwise `source` is `"project"`, or `"general"`
+  for a project on the Default profile with no lists of its own.
 - `PUT /api/egress/policy/{slug} {allow?: [], deny?: []}` replaces the project's
-  own lists. The legacy body `{mode, inherit_general, hosts}` is still accepted.
-  It is refused for `__general__` (edit the Default profile) and for `__image_build__`.
+  own lists and returns `{ok: true, ...the GET view}`. The legacy body
+  `{mode, inherit_general, hosts}` is still accepted. Refusals are 400 with the
+  reason as `detail`: `__general__` (the unattributed list is the Default
+  profile's: edit the profile), `__image_build__` (fixed), and a bad host.
 - `POST /api/egress/policy/{slug}/promote {host, profile_id?: null, list: "allow"|"deny"}`
-  copies a host into a profile. `null` means the project's own profile.
+  MOVES a host onto a profile's list of the same kind: it is added to the
+  profile (a `profile_changed` event) and REMOVED from the project's own list,
+  so it lives in one place. `null` means the project's own profile. It returns
+  `{ok, host, list, profile: {id, name}, removed_from_project: bool}`. Errors
+  are 400 with the reason as `detail`: no host, `__general__` as the slug,
+  no such profile, or a host the profile refuses.
 - `GET /api/egress/allowlist` returns `{groups: [...]}`, with project groups first and then profile groups:
   ```
   {project: <slug> | "__general__" | "profile:<id>", kind: "project"|"profile",
@@ -91,8 +107,18 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
   ```
 - `POST /api/egress/allowlist/revoke {project, host, id?, list: "allow"|"deny"}`
 - `POST /api/egress/allow {project, host}` returns `{ok, host, added_to}`. It
-  returns `needs_project: true` when there is no project.
-- `GET /api/egress/pending?project=` is unchanged. `POST /api/egress/pending/{id}/approve|reject` and `/pending/bulk` are unchanged.
+  writes the project's own allow list. With no project (or `__general__`) it
+  gives 400; `__image_build__` gives 400.
+- `POST /api/egress/auto/{id}/promote` turns a live auto-mode guess into a
+  standing allow entry (404 for an unknown or expired id).
+- `GET /api/egress/pending?project=` is unchanged. `POST /api/egress/pending/{id}/reject`
+  and `/pending/bulk` are unchanged.
+- `POST /api/egress/pending/{id}/approve {project?}` returns `{ok, host, added_to}`.
+  An approval always writes a project's own list, so a row queued by
+  unattributed traffic (`project_slug "__general__"`) needs `{project: <slug>}`,
+  and the row is re-homed to that project. Without one it gives
+  409 `{"detail": "needs_project"}`: ask for the project up front. 404 for an
+  unknown id.
 - Egress events and the `egress` SSE topic now carry `box_id` and `service_id`.
   Builder traffic shows as project `__image_build__`. It is never queued, so it
   never appears in pending.
@@ -103,7 +129,14 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
 
 ```
 {services: [row], services_lan_ip: "" | "<ip>", services_lan_ip_configured: str,
- lan_error: str|null, relays: [...]}
+ lan_error: str|null, relays: [relay]}
+```
+
+A relay (one exposed port, host side) is:
+
+```
+{service_id, port, bind: "loopback"|"lan", address: str|null, box_id, listening: bool,
+ conns, bytes_in, bytes_out, error: str|null}
 ```
 
 A row is:
@@ -135,7 +168,10 @@ A row is:
 `/persist` retirement:
 
 - `GET /api/projects/{slug}/persist` returns
-  `{..., retired: true, imported_at, delete_after, import: {state: "pending"|"done"|"failed", ...} | null}`.
+  `{..., retired: true, imported_at, delete_after, import: <import> | null}`, where
+  `<import>` is `{state: "pending"|"done"|"failed", disk, by, bytes?, sha256?, error?: str|null}`.
+  `error` can be set while `state` is still `pending` (the copy failed and is
+  retried at the service box's next boot). `failed` is final (the old disk is gone).
 - `POST /api/projects/{slug}/persist/import {confirm: true}`
 - `PUT /api/projects/{slug}/persist {approved: false, delete_disk: true}` works.
   `{approved: true}` gives 409, because approvals are frozen.
@@ -157,7 +193,11 @@ A row is:
   It returns `{packages: [rows], skipped: [{package, error}], target_variant}`.
 - `POST /api/packages/resolve` runs a dry-run for every pending row (in a builder box).
 - `POST /api/packages/{id}/approve {acknowledge: true, target_variant?, build?: true}`
-  returns the row plus `{variant_used_by, build_started}`.
+  returns the row plus `{variant_used_by, card, build_started}`. `build_started`
+  is true only when this call started a build of `target_variant`. It is false
+  when `build` was false, boxes are disabled, or the builder was already busy.
+  Nothing is queued then: build the variant from `/vms` once the running build
+  ends (the variant shows `needs_build`).
 - `POST /api/packages/{id}/reject {reason}` and `POST /api/packages/{id}/remove`.
 - `GET /api/vm/images` returns:
   ```
@@ -169,8 +209,16 @@ A row is:
 - `POST /api/vm/images {name, from, packages: [{manager, package, version}]}` returns
   `{name, from, recipe_sha256, ...}`.
 - `POST /api/vm/images/{variant}/build {confirm: true}` returns `{started: true, variant}`.
+  409 when the builder is busy or boxes are disabled, 404 for an unknown variant.
 - `GET /api/vm/images/{variant}/dockerfile` returns `{variant, recipe_sha256, dockerfile}`.
-- SSE topic `vm-images` sends `{type: "image_build", phase: "boot"|"run"|"log"|"poweroff"|..., variant, box?, line?}`.
+- SSE topic `vm-images` sends `{type: "image_build", phase, ...}`. The phases:
+  - `start` `{variant, version}`: a build began.
+  - `boot` `{variant, box}`: the builder box is booting (builds and resolves).
+  - `log` `{variant, line}`: one build log line (untrusted text).
+  - `done` `{variant, version, ok, error: str|null}`: a build ended. Refetch `GET /api/vm/images`.
+  - `resolved` `{count, error: str|null}`: a dry-run resolve ended. Refetch `GET /api/packages`.
+  The `build.phase` field of `GET /api/vm/images` can also read `run` or
+  `poweroff`. Those are not published as events.
 
 ## 6. Processes (WP4)
 

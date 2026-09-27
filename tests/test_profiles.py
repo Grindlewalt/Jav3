@@ -330,7 +330,14 @@ async def test_api_round_trip(tmp_env):
         # an unattributed queue row needs a project on approval
         await egress.note_denied(conn, egress.GENERAL, "q.dev")
         pid = (await egress.list_pending(conn))[0]["id"]
-        assert (await c.post(f"/api/egress/pending/{pid}/approve")).status_code == 409
+        r = await c.post(f"/api/egress/pending/{pid}/approve")
+        assert r.status_code == 409 and r.json()["detail"] == "needs_project"
+        g = (await c.get("/api/egress/policy/__general__")).json()
+        assert g["profile"]["name"] == "Default" and g["source"] == "general"
+        assert (await c.put("/api/egress/policy/__general__", json={"allow": ["x.dev"]})
+                ).status_code == 400
+        assert (await c.put("/api/egress/policy/__image_build__", json={"allow": ["x.dev"]})
+                ).status_code == 400
         r = await c.post(f"/api/egress/pending/{pid}/approve", json={"project": "alpha"})
         assert r.status_code == 200 and r.json()["added_to"] == "alpha"
     await conn.close()

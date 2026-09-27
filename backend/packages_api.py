@@ -167,11 +167,16 @@ async def approve(pkg_id: int, body: ApproveBody):
         used = await packages.variant_used_by(db, row["target_variant"])
     finally:
         await db.close()
-    if body.build and settings.vm_boxes_enabled:
+    # build_started: true only when THIS call started a build. False when
+    # build=false, boxes are off, or the builder is already busy (nothing is
+    # queued: build the variant from /vms once the running build ends).
+    started = bool(body.build and settings.vm_boxes_enabled
+                   and not images.builder.lock.locked())
+    if started:
         _start_build(row["target_variant"])
     return {**row, "variant_used_by": used["all"],
             "card": packages.approval_card(row, used),
-            "build_started": bool(body.build and settings.vm_boxes_enabled)}
+            "build_started": started}
 
 
 @router.post("/{pkg_id}/reject")
