@@ -32,6 +32,10 @@ _READ = {
     # a blocking question to the operator (backend/operator_ask.py): it changes
     # nothing, and a restricted project needs clarifying most of all
     "ask_user",
+    # reporting a harness fault writes only a host-side diagnostic row + alert,
+    # never a project file — offer it at every level, including read_only, so a
+    # restricted turn can still flag a broken capability
+    "report_harness_fault",
 }
 _STAGE = {
     "write_file", "edit_file", "dashboard", "crawl_codebase", "journal_update",
