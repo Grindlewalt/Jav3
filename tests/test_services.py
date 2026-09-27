@@ -289,7 +289,8 @@ def test_snapshot_refuses_secrets_symlinks_and_misses(tmp_env):
     with pytest.raises(services.ServiceError, match="symlink"):
         services.snapshot("demo", ["app/**"])
     (p / "app" / "link").unlink()
-    with pytest.raises(services.ServiceError, match="matches nothing"):
+    # e2e BUG-6: same-turn writes land at turn end; the error says what to do
+    with pytest.raises(services.ServiceError, match="matches nothing.*next turn"):
         services.snapshot("demo", ["nope/*.py"])
 
 

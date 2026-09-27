@@ -1,7 +1,7 @@
 ---
 name: service_request
 description: Request a long-running service (a server, worker or bot) for the project that keeps running after this turn. This only FILES the request; nothing starts until the operator approves it. The operator reviews a content-hashed snapshot of the named files, the exact argv, env, ports and egress hosts.
-when_to_use: Only when something genuinely has to persist between turns (a dev server the operator wants to keep, a bot, a scheduled worker). Not for one-off runs (use run_code). Write and test the code first; the snapshot is taken from the project's files as they are now.
+when_to_use: Only when something genuinely has to persist between turns (a dev server the operator wants to keep, a bot, a scheduled worker). Not for one-off runs (use run_code). Write and test the code first; the snapshot is taken from the project's files as the host has them now, which does NOT include files written or changed in the current turn (they land when the turn ends), so file the request in the turn AFTER the one that wrote the files.
 enabled: true
 requires_project: true
 parameters:

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Per-box network for multi-box mode (vm_boxes_enabled; backend/vm/boxnet.py).
-# Run by the app via `sudo -n bash net_box.sh <action> <ifname> <host_ip> <guest_ip>`.
+# Run by the app via `sudo -n bash net_box.sh <action> <ifname> <host_ip> <guest_ip> [table]`
+# ([table] = a named instance's jarvis_vm_<name>; sudo strips env, so it is argv).
 #
 #   add   <jvtapN> <10.201.N.1> <10.201.N.2>   create the tap (owned by the app
 #                                              user) and pin it in the nft sets
@@ -15,13 +16,12 @@
 # The sets live in `table inet jarvis_vm`, loaded by `net_up.sh up-boxes`.
 set -euo pipefail
 
-ACTION="${1:-}"; IFN="${2:-}"; HOST_IP="${3:-}"; GUEST_IP="${4:-}"
-TABLE="${JARVIS_NFT_TABLE:-jarvis_vm}"
+ACTION="${1:-}"; IFN="${2:-}"; HOST_IP="${3:-}"; GUEST_IP="${4:-}"; TABLE="${5:-jarvis_vm}"
 OWNER="${JARVIS_VM_USER:-${SUDO_USER:-$(id -un)}}"
 
 die() { echo "net_box.sh: $*" >&2; exit 2; }
 
-[[ "$TABLE" =~ ^jarvis_vm[a-z0-9_]{0,16}$ ]] || die "bad table"
+[[ "$TABLE" =~ ^jarvis_vm(_[a-z0-9]{1,12})?$ ]] || die "bad table"
 [[ "$OWNER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "bad owner"
 case "$ACTION" in
   add|del) [[ "$IFN" =~ ^jvtap([0-9]{1,3})$ ]] || die "bad tap name" ;;

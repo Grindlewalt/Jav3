@@ -31,7 +31,7 @@ import httpx
 
 from .. import egress, egress_auto, secrets as secrets_mod
 from .. import anomaly, security, websec
-from . import boxes
+from . import boxes, boxnet
 from ..config import settings
 from ..db import get_db
 
@@ -157,9 +157,21 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
 IMAGE_BUILD_SLUG = egress.IMAGE_BUILD
 
 
+def _service_id(att: dict, host: str) -> int | None:
+    """The service a service-box connection belongs to. A per_service box has
+    one; a per_project / shared box hosts several, so it is the one whose
+    approved egress_hosts list this host (or the box's only service), never
+    left null when it can be known (e2e BUG-7)."""
+    if att.get("service_id") is not None or att.get("kind") != "service":
+        return att.get("service_id")
+    from . import services
+    return services.service_for_host(att["box_id"], host)
+
+
 async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None = None):
     att = att or attribute()
     slug = att["project"]
+    service_id = _service_id(att, host)
     db = await get_db()
     try:
         await egress.record_event(db, slug=slug, host=host, method=method,
@@ -167,9 +179,13 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
                                   reason=reason, op_id=att["op_id"],
                                   conversation_id=att["conversation_id"],
                                   peer_ip=att["peer_ip"], peer_port=att["peer_port"],
-                                  box_id=att["box_id"], service_id=att["service_id"])
-        # service traffic never trains a queue: widening is editing the service
-        if verdict == "deny" and att["kind"] not in ("service", "builder"):
+                                  box_id=att["box_id"], service_id=service_id)
+        # service traffic never trains a queue: widening is editing the service.
+        # Only an UNDECIDED host is queued: one on a project/profile deny list,
+        # an offline profile, a cut or the SSRF floor already has its answer
+        # (e2e BUG-5: explicitly denied hosts showed up in pending)
+        if (verdict == "deny" and reason == egress.NOT_LISTED
+                and att["kind"] not in ("service", "builder")):
             await egress.note_denied(db, slug or egress.GENERAL, host,
                                      box_id=att["box_id"])
         if verdict == "allow":
@@ -183,7 +199,7 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
                 await egress.record_event(db, slug=slug, host=host, verdict="cut",
                                           reason=f"auto-cut: {a['kind']}", op_id=att["op_id"],
                                           peer_ip=att["peer_ip"], peer_port=att["peer_port"],
-                                          box_id=att["box_id"], service_id=att["service_id"])
+                                          box_id=att["box_id"], service_id=service_id)
     finally:
         await db.close()
 
@@ -199,7 +215,7 @@ async def _nft_drop(host: str) -> None:
     for ip in ips:
         try:
             p = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "nft", "add", "element", "inet", "jarvis_vm", "cut_hosts",
+                "sudo", "-n", "nft", "add", "element", "inet", boxnet.nft_table(), "cut_hosts",
                 "{", ip, "}", stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             await p.wait()
@@ -243,6 +259,22 @@ async def _authorize(host: str, port: str | None = None,
     return verdict, reason
 
 
+# (box_id, guest source port) -> CONNECT host, for tunnels open right now. The
+# process view names a live proxied connection from this; the egress_events
+# row only lands when the tunnel closes (e2e: `host` was null while it ran).
+_LIVE: dict[tuple[str, int], str] = {}
+
+
+def live_connections(box_id: str) -> list[dict]:
+    return [{"peer_port": p, "host": h} for (b, p), h in list(_LIVE.items())
+            if b == box_id]
+
+
+def _register_live_source() -> None:
+    from . import procview
+    procview.register_live_source(live_connections)
+
+
 async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> int:
     total = 0
     try:
@@ -281,7 +313,13 @@ async def _handle_connect(host, port, cr, cw, att: dict | None = None):
         return
     cw.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
     await cw.drain()
-    up, down = await asyncio.gather(_pipe(cr, orw), _pipe(orr, cw))
+    key = (att.get("box_id") or boxes.SHARED_ID, att.get("peer_port"))
+    if isinstance(key[1], int):
+        _LIVE[key] = host
+    try:
+        up, down = await asyncio.gather(_pipe(cr, orw), _pipe(orr, cw))
+    finally:
+        _LIVE.pop(key, None)
     await _record(host, "CONNECT", None, up, down, "allow", reason, att)
 
 
@@ -488,3 +526,9 @@ async def _box_hook(event: str, box) -> None:
 
 
 boxes.add_hook(_box_hook)
+
+
+try:
+    _register_live_source()
+except Exception:  # noqa: BLE001 - the view then names a tunnel when it closes
+    pass

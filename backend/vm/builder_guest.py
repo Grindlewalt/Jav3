@@ -69,8 +69,40 @@ def run(argv, *, env=None, timeout=1800, check=True) -> subprocess.CompletedProc
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if check and p.returncode != 0:
         raise RuntimeError(f"{argv[0]} {argv[1] if len(argv) > 1 else ''} exited "
-                           f"{p.returncode}: {p.stdout[-800:]}")
+                           f"{p.returncode}: {p.stdout[-ERR_TAIL:]}")
     return p
+
+
+# apt/dpkg put the root cause ("X : Depends: Y but it is not going to be
+# installed") at the END of their output, so errors keep their tail
+ERR_TAIL = 1600
+ERR_MAX = 2000
+
+
+def clip_error(text: str) -> str:
+    """Head (what failed) + tail (why), never just the head."""
+    if len(text) <= ERR_MAX:
+        return text
+    return text[:300] + " [...] " + text[-(ERR_MAX - 307):]
+
+
+# Base images up to v4 purged netcat-openbsd, ssh-import-id and openssh-client
+# with `dpkg --force-depends` (vm/build_base.sh), leaving cloud-init with unmet
+# Depends: every `apt-get install` then exits 100 (e2e BUG-9). The guest never
+# runs cloud-init after provisioning, so the repair is to finish that removal.
+# NOT `apt-get -f install`: that would "fix" it by reinstalling the network
+# tools the image removed on purpose.
+BROKEN_BY_BASE = ("cloud-init",)
+
+
+def repair_dpkg(env: dict) -> None:
+    if run(["apt-get", "check"], env=env, check=False).returncode == 0:
+        return
+    for pkg in BROKEN_BY_BASE:
+        if run(["dpkg", "-s", pkg], check=False).returncode == 0:
+            log(f"dpkg: purging {pkg} (unmet dependencies left by the base image)")
+            run(["dpkg", "--purge", "--force-depends", pkg], env=env, check=False)
+    run(["apt-get", "check"], env=env)
 
 
 # --- network -----------------------------------------------------------------
@@ -252,6 +284,7 @@ def main() -> None:
         env = net_up(box.get("net") or {})
         log(f"{job['mode']} {job['variant']} v{job.get('version')}")
         run(["apt-get", "update"], env=env)
+        repair_dpkg(env)
         if job["mode"] == "resolve":
             res = []
             for it in job.get("items") or []:
@@ -282,7 +315,7 @@ def main() -> None:
                           baseline_sha256=hashlib.sha256(
                               json.dumps(bl, sort_keys=True).encode()).hexdigest())
     except Exception as e:  # noqa: BLE001
-        result.update(ok=False, error=f"{type(e).__name__}: {e}"[:800])
+        result.update(ok=False, error=clip_error(f"{type(e).__name__}: {e}"))
     report(result)
     subprocess.run(["sync"], check=False)
     subprocess.run(["systemctl", "poweroff"], check=False)

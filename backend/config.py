@@ -10,6 +10,32 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parent.parent
 log = logging.getLogger(__name__)
 
+# Where the env file, secrets.json, providers.json and backup.json live. Read
+# from the process environment only (it has to be known BEFORE the env file is
+# read), so a second instance on the same user account gets its own key and
+# secrets instead of sharing the first one's.
+#
+# A checkout installed as a named instance remembers it in <repo>/.jarvis-instance
+# (one line, JARVIS_CONFIG_DIR=<dir>), so a plain `.venv/bin/python -m
+# backend.cli ...` run from it targets that instance, not the default one. The
+# environment still wins.
+def _instance_config_dir() -> str | None:
+    try:
+        for line in (BASE_DIR / ".jarvis-instance").read_text().splitlines():
+            k, _, v = line.partition("=")
+            if k.strip() == "JARVIS_CONFIG_DIR" and v.strip():
+                return v.strip()
+    except OSError:
+        pass
+    return None
+
+
+DEFAULT_CONFIG_DIR = Path(os.path.expanduser("~/.config/jarvis"))
+CONFIG_DIR = Path(os.path.expanduser(
+    os.environ.get("JARVIS_CONFIG_DIR") or _instance_config_dir()
+    or str(DEFAULT_CONFIG_DIR)))
+ENV_FILE = CONFIG_DIR / "env"
+
 # The durable-state dirs a pre-state-dir install kept at the repo root. skills/
 # is left out of the "has content" probe on purpose: the repo ships skills there,
 # so a fresh checkout would always look like a legacy install.
@@ -34,7 +60,7 @@ def has_state(root: Path) -> bool:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="JARVIS_",
-        env_file=os.path.expanduser("~/.config/jarvis/env"),
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -92,7 +118,7 @@ class Settings(BaseSettings):
 
     # Operator API keys the agent uses by {{secret:NAME}} placeholder but
     # never sees (backend/secrets.py). Lives next to the env file.
-    secrets_path: Path = Path(os.path.expanduser("~/.config/jarvis/secrets.json"))
+    secrets_path: Path = CONFIG_DIR / "secrets.json"
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -334,7 +360,13 @@ class Settings(BaseSettings):
     # squeezed in. `vm_max_boxes` counts every box including the shared one.
     vm_max_boxes: int = 4
     vm_max_project_boxes: int = 1        # extra project turn boxes at a time
-    vm_guest_ram_budget_mb: int = 2250   # sum of mem_mb over all allocated boxes
+    # The budget counts REAL cost: mem_mb plus vm_kvm_box_overhead_mb per KVM
+    # box (QEMU + two 64 MB pflash images; 125-145 MB measured on the Pi 4, so
+    # a 512 MB box is ~530 MB RSS warm). Shared 768 + project 768 + service
+    # 384 = 1920 guest MB = 2352 real, which 2400 fits; before the overhead
+    # counted, the 2250 budget let ~2.8 GB real through.
+    vm_guest_ram_budget_mb: int = 2400
+    vm_kvm_box_overhead_mb: int = 144
     vm_project_box_mem_mb: int = 768     # profile box_mem_mb overrides
     vm_service_box_mem_mb: int = 384
     vm_service_box_cpus: int = 1
@@ -525,6 +557,14 @@ class Settings(BaseSettings):
     vm_egress_host_ip: str = "10.201.0.1"     # host side of the point-to-point
     vm_egress_proxy_port: int = 8443          # host TLS-terminating forward proxy
     vm_egress_pcap: bool = True               # tcpdump ring buffer on the tap
+    # Names this install's host network objects (nft table jarvis_vm_<name>,
+    # pid files, dns log, pcap prefix) so a second instance on the same host
+    # never loads, flushes or tears down the first one's. "" = derived: empty
+    # (the plain names) for the default config dir, else a short hash of
+    # JARVIS_CONFIG_DIR. A named instance must also move its shared box off
+    # jvtap0 / CID 3 (vm_egress_tap=jvtapN, vm_egress_host_ip=10.201.N.1,
+    # vm_guest_cid): boot refuses otherwise (backend/vm/boxnet.py).
+    instance: str = ""
     # NOTE: the guest IP (10.201.0.2), DNS port, and the RFC1918 LAN-denied
     # ranges are FIXED constants baked into vm/net/jarvis-egress.nft,
     # vm/net/dnsmasq-egress.conf and guest/backend/server.py — they are not

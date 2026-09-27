@@ -395,7 +395,10 @@ def validate(body: dict, *, current: dict | None = None) -> dict:
     decision 0.1: never inferred, never defaulted)."""
     for req in ("service_placement", "box_runtime"):
         if body.get(req) in (None, ""):
-            raise ProfileError(f"{req} is required (no default)", status=422)
+            raise ProfileError(
+                f"{req} is required (no default)" + (
+                    "; PUT takes the full row, the same body as POST"
+                    if current is not None else ""), status=422)
     base = dict(current or {})
     p = {**{"default_verdict": "deny", "network_off": False, "allow_hosts": [],
             "deny_hosts": [], "secrets": [], "auto_handle": False,

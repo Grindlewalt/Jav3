@@ -392,3 +392,21 @@ async def test_approve_build_started_false_while_builder_busy(client, db, monkey
                           json={"acknowledge": True, "build": False})
     assert r.json()["build_started"] is False
     assert started == []
+
+
+async def test_decisions_record_the_username(client, db, monkeypatch):
+    # e2e minor: package decisions said "operator"; services record the user
+    await db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                     ("grant", hash_password("pw12345678")))
+    await db.commit()
+    r = await client.post("/api/auth/login", json={"username": "grant",
+                                                    "password": "pw12345678"})
+    assert r.status_code == 200
+    seen = []
+
+    async def reject(db, pkg_id, reason=None, decided_by="operator"):
+        seen.append(decided_by)
+        return {"ok": True}
+    monkeypatch.setattr(packages, "reject", reject)
+    r = await client.post("/api/packages/1/reject", json={"reason": "no"})
+    assert r.status_code == 200 and seen == ["grant"]

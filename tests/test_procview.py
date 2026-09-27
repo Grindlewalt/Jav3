@@ -579,3 +579,12 @@ async def test_box_down_hook_drops_state_and_never_raises(reg):
     await procview._box_hook("box_down", _box())
     assert "p-alpha" not in procview._state
     await procview._box_hook("box_up", None)      # hostile/odd input: no raise
+
+
+def test_builtin_baseline_covers_unattended_upgrades():
+    # e2e BUG-8: stock Debian's shutdown helper alerted on every box boot
+    b = procview.BUILTIN
+    assert b.matches("/usr/share/unattended-upgrades/unattended-upgrade-shutdown",
+                     "unattended-upgrades.service")
+    assert b.matches("/usr/bin/python3", "apt-daily-upgrade.service")
+    assert not b.matches("/tmp/implant", "evil.service")

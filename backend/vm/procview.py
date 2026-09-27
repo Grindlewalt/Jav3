@@ -90,6 +90,12 @@ BUILTIN_BASELINE: tuple[tuple[str, str], ...] = (
     ("/sbin/agetty", "*getty@*.service"),
     ("*", "cloud-*.service"),
     ("*", "rsyslog.service"),
+    # stock Debian: unattended-upgrades' shutdown helper runs on every boot
+    # (e2e BUG-8: an unexpected_process per boot, CRITICAL on service boxes);
+    # the apt-daily timers start it too. Exact unit names, no wider glob.
+    ("*", "unattended-upgrades.service"),
+    ("*", "apt-daily.service"),
+    ("*", "apt-daily-upgrade.service"),
 )
 
 

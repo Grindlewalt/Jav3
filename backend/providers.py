@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .config import settings
+from .config import ENV_FILE, settings
 
 CATALOG_PATH = Path(__file__).with_name("providers_catalog.json")
 KINDS = ("openai", "anthropic", "google", "ollama")
@@ -200,7 +200,13 @@ def _enabled(st: dict, pid: str) -> bool:
 
 
 def _base(st: dict, p: dict) -> str:
-    return (_pstate(st, p["id"]).get("base_url") or p["base_url"]).rstrip("/")
+    # an explicit JARVIS_DEEPSEEK_BASE_URL routes the out-of-the-box provider
+    # (a test instance's fake model, a regional endpoint); a Settings override
+    # still wins over both
+    default = p["base_url"]
+    if p["id"] == "deepseek" and settings.deepseek_base_url:
+        default = settings.deepseek_base_url
+    return (_pstate(st, p["id"]).get("base_url") or default).rstrip("/")
 
 
 def enabled_base_urls() -> list[str]:
@@ -667,7 +673,7 @@ def resolve(model_name: str | None, base_url: str | None = None,
     missing = None
     if needs_key(p) and not key:
         missing = ("DEEPSEEK_API_KEY is not set (Settings → Providers, or "
-                   "~/.config/jarvis/env JARVIS_DEEPSEEK_API_KEY=...)"
+                   f"{ENV_FILE} JARVIS_DEEPSEEK_API_KEY=...)"
                    if pid == "deepseek" else
                    f"no API key for provider {pid} (Settings → Providers)")
     return Route(pid, p["kind"], base, mid, f"{pid}/{mid}", key or "local",

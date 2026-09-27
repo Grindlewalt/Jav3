@@ -211,6 +211,8 @@ class Box:
     placement: str | None = None           # service boxes: per_service|per_project|shared
     allocated_at: float = field(default_factory=time.time)
     ctl: Any = field(default=None, repr=False, compare=False)
+    # (variant, version) the running guest booted on; None until a boot
+    booted_image: tuple[str, int | None] | None = field(default=None, compare=False)
 
     @property
     def transport(self) -> Transport:
@@ -259,6 +261,13 @@ class Box:
                 "mem_mb": self.mem_mb,
                 "net": {"tap": self.tap, "host_ip": self.host_ip,
                         "guest_ip": self.guest_ip}}
+
+
+def ram_cost(mem_mb: int, runtime: str = "kvm") -> int:
+    """What a box really costs the host: guest RAM plus, for a KVM box, the
+    measured QEMU + firmware overhead (two 64 MB pflash images and QEMU itself:
+    a `-m 384` box ran at 528 MB RSS on the Pi, e2e BUG-12). Pure."""
+    return int(mem_mb) + (settings.vm_kvm_box_overhead_mb if runtime == "kvm" else 0)
 
 
 def addressing(cid: int) -> dict:
@@ -395,13 +404,15 @@ class Registry:
     # caps ------------------------------------------------------------------
     def budget(self) -> dict:
         boxes = self.all()
-        return {"ram_mb_used": sum(b.mem_mb for b in boxes),
+        return {"ram_mb_used": sum(ram_cost(b.mem_mb, b.runtime) for b in boxes),
                 "ram_mb_cap": settings.vm_guest_ram_budget_mb,
+                "ram_mb_overhead_per_kvm_box": settings.vm_kvm_box_overhead_mb,
                 "boxes": len(boxes), "boxes_cap": settings.vm_max_boxes,
                 "project_boxes": sum(b.kind == "project" for b in boxes),
                 "project_boxes_cap": settings.vm_max_project_boxes}
 
-    def _check_caps(self, kind: str, mem_mb: int) -> None:
+    def _check_caps(self, kind: str, mem_mb: int, runtime: str = "kvm") -> None:
+        mem_mb = ram_cost(mem_mb, runtime)
         b = self.budget()
         if b["boxes"] + 1 > settings.vm_max_boxes:
             raise BoxCapError(f"box cap reached ({b['boxes']}/{settings.vm_max_boxes})")
@@ -441,7 +452,7 @@ class Registry:
             mem = max(mem, mem_floor(variant))
         if runtime == "docker":
             mem = int(mem_mb or settings.docker_box_mem_mb)
-        self._check_caps(kind, mem)
+        self._check_caps(kind, mem, runtime)
         used = {b.cid for b in self.all()}
         cid = next((c for c in _cid_range(kind) if c not in used), None)
         if cid is None:
@@ -540,6 +551,38 @@ async def project_profile(slug: str) -> dict | None:
         await db.close()
 
 
+def image_version(variant: str, pinned=None) -> int | None:
+    """The version a box of `variant` boots on now: the pinned one, else the
+    variant's active built version (None for a variant with no built layer,
+    e.g. main on the base)."""
+    if pinned is not None and str(pinned).lstrip("v").isdigit():
+        return int(str(pinned).lstrip("v"))
+    try:
+        from . import images
+        return images.active_version(variant)
+    except Exception:  # noqa: BLE001 - a status field, never a failure
+        return None
+
+
+def follow_profile_image(box: Box, variant: str | None) -> bool:
+    """A project box follows its profile's `box_image` (e2e BUG-11: a changed
+    image was ignored until the box was destroyed). A STOPPED box switches in
+    place (its overlay is rebuilt at every boot anyway); a running one keeps
+    its image until it stops, and its row says restart_needed. A variant whose
+    RAM floor the box does not meet needs a destroy (the budget decides).
+    Returns True when the box now has that variant."""
+    variant = variant or "main"
+    if box.kind != "project" or box.image[0] == variant:
+        return True
+    ctl = box.ctl
+    if ctl is not None and ctl.running():
+        return False
+    if box.runtime == "kvm" and mem_floor(variant) > box.mem_mb:
+        return False
+    box.image = (variant, None)
+    return True
+
+
 async def for_project(slug: str | None) -> Box:
     """The box a turn of project `slug` runs in.
 
@@ -551,13 +594,37 @@ async def for_project(slug: str | None) -> Box:
         return registry.shared()
     existing = registry.get(f"p-{slug}") if _SLUG_RE.match(slug) else None
     if existing is not None:
+        prof = await project_profile(slug)
+        if prof and prof.get("separate_box"):
+            follow_profile_image(existing, prof.get("box_image"))
         return existing
     prof = await project_profile(slug)
     if not prof or not prof.get("separate_box"):
         return registry.shared()
-    return registry.allocate(
-        "project", project=slug, variant=prof.get("box_image") or "main",
-        mem_mb=prof.get("box_mem_mb"), runtime=prof.get("box_runtime") or "kvm")
+    # an idle project box holding the only slot (or the RAM) gives way to a
+    # turn that needs one: it is disposable, exactly what the idle reaper
+    # would do a few minutes later
+    for _ in range(settings.vm_max_boxes + 1):
+        try:
+            return registry.allocate(
+                "project", project=slug, variant=prof.get("box_image") or "main",
+                mem_mb=prof.get("box_mem_mb"), runtime=prof.get("box_runtime") or "kvm")
+        except BoxCapError:
+            victim = idle_project_box(exclude=f"p-{slug}")
+            if victim is None:
+                raise
+            await destroy(victim)
+    raise BoxCapError("no box could be freed")
+
+
+def idle_project_box(exclude: str | None = None) -> Box | None:
+    """The longest-idle project box with no turn bound or in flight, or None."""
+    bound = set(registry._op_box.values())
+    cands = [b for b in registry.all()
+             if b.kind == "project" and b.id != exclude and b.id not in bound
+             and (b.ctl is None or getattr(b.ctl, "inflight", 0) == 0)]
+    cands.sort(key=lambda b: getattr(b.ctl, "idle_since", None) or 0.0)
+    return cands[0] if cands else None
 
 
 # --- runtime drivers + hooks ----------------------------------------------------
@@ -791,7 +858,15 @@ def status_json(box: Box) -> dict:
         if prev and now > prev[0]:
             cpu_pct = round(100 * (st["cpu_s"] - prev[1]) / (now - prev[0]), 1)
     booted = getattr(ctl, "booted_at", None) if ctl else None
-    return {**box.to_json(),
+    row = box.to_json()
+    # the version it runs (running) or would boot (stopped); e2e BUG-11 had
+    # it null always
+    target = (box.image[0], image_version(box.image[0], box.image[1]))
+    now = box.booted_image if running and box.booted_image else target
+    row["image"] = {"variant": now[0], "version": now[1]}
+    return {**row,
+            "restart_needed": bool(running and box.booted_image
+                                   and box.booted_image != target),
             "state": "running" if running else "stopped",
             "rss_bytes": st["rss_bytes"], "cpu_pct": cpu_pct,
             "uptime_s": int(time.monotonic() - booted) if running and booted else None,

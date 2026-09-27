@@ -109,10 +109,24 @@ async def runtimes() -> dict:
                        "seccomp": None, "weak": None, "warnings": []}}
 
 
+async def _box_row(b) -> dict:
+    row = boxes.status_json(b)
+    row["image_pending"] = None
+    if b.kind == "project":
+        # the profile's box_image changed under an allocated box: a stopped
+        # box picks it up at its next start, a running one after a restart
+        prof = await boxes.project_profile(b.project) or {}
+        want = prof.get("box_image") or "main"
+        if prof.get("separate_box") and want != b.image[0]:
+            row["image_pending"] = want
+            row["restart_needed"] = True
+    return row
+
+
 @router.get("/boxes")
 async def list_boxes():
     return {"enabled": boxes.enabled(),
-            "boxes": [boxes.status_json(b) for b in boxes.all_boxes()],
+            "boxes": [await _box_row(b) for b in boxes.all_boxes()],
             "budget": boxes.budget(),
             "runtimes": await runtimes()}
 
@@ -121,6 +135,10 @@ async def _warm_project_box(box_id: str):
     """Operator warm-up of p-<slug> before its first turn: allocated with the
     project's profile (image, memory, runtime), exactly as the turn would."""
     b = boxes.get(box_id)
+    if b is not None and b.kind == "project":
+        prof = await boxes.project_profile(b.project) or {}
+        if prof.get("separate_box"):
+            boxes.follow_profile_image(b, prof.get("box_image"))
     if b is not None or not boxes.enabled() or not box_id.startswith("p-"):
         return _box_or_404(box_id)
     prof = await boxes.project_profile(box_id[2:]) or {}
@@ -142,14 +160,14 @@ async def start_box(box_id: str):
         await boxes.start(b)
     except (VMError, boxes.BoxError) as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return boxes.status_json(b)
+    return await _box_row(b)
 
 
 @router.post("/boxes/{box_id}/stop")
 async def stop_box(box_id: str):
     b = _box_or_404(box_id)
     await boxes.stop(b)
-    return boxes.status_json(b)
+    return await _box_row(b)
 
 
 @router.post("/boxes/{box_id}/destroy")
