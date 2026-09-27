@@ -259,6 +259,22 @@ async def _authorize(host: str, port: str | None = None,
     return verdict, reason
 
 
+# (box_id, guest source port) -> CONNECT host, for tunnels open right now. The
+# process view names a live proxied connection from this; the egress_events
+# row only lands when the tunnel closes (e2e: `host` was null while it ran).
+_LIVE: dict[tuple[str, int], str] = {}
+
+
+def live_connections(box_id: str) -> list[dict]:
+    return [{"peer_port": p, "host": h} for (b, p), h in list(_LIVE.items())
+            if b == box_id]
+
+
+def _register_live_source() -> None:
+    from . import procview
+    procview.register_live_source(live_connections)
+
+
 async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> int:
     total = 0
     try:
@@ -297,7 +313,13 @@ async def _handle_connect(host, port, cr, cw, att: dict | None = None):
         return
     cw.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
     await cw.drain()
-    up, down = await asyncio.gather(_pipe(cr, orw), _pipe(orr, cw))
+    key = (att.get("box_id") or boxes.SHARED_ID, att.get("peer_port"))
+    if isinstance(key[1], int):
+        _LIVE[key] = host
+    try:
+        up, down = await asyncio.gather(_pipe(cr, orw), _pipe(orr, cw))
+    finally:
+        _LIVE.pop(key, None)
     await _record(host, "CONNECT", None, up, down, "allow", reason, att)
 
 
@@ -504,3 +526,9 @@ async def _box_hook(event: str, box) -> None:
 
 
 boxes.add_hook(_box_hook)
+
+
+try:
+    _register_live_source()
+except Exception:  # noqa: BLE001 - the view then names a tunnel when it closes
+    pass

@@ -63,3 +63,17 @@ async def test_per_project_service_events_carry_service_id(on, monkeypatch):
     # one service in the box: even a denied host is attributed to it
     monkeypatch.setitem(services._box_egress, box.id, {"example.com": [3]})
     assert services.service_for_host(box.id, "wikipedia.org") == 3
+
+
+async def test_live_tunnel_names_the_process_view_host(on, monkeypatch):
+    # e2e minor: a proxied connection had host null in the process view until
+    # its tunnel closed; the proxy now serves the CONNECT host while it is open
+    from backend.vm import egress_proxy, procview
+    box = boxes.allocate("project", project="boxa")
+    monkeypatch.setitem(egress_proxy._LIVE, (box.id, 40123), "speed.cloudflare.com")
+
+    class NoDb:
+        def execute(self, *a):
+            raise RuntimeError("no db")
+    names = await procview._hostnames(NoDb(), box)
+    assert names == {40123: "speed.cloudflare.com"}
