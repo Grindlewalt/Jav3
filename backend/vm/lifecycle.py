@@ -226,6 +226,9 @@ class GuestVM:
             return
         await self._kill_orphans()
         await self._build_overlay()
+        if self.box is not None:
+            self.box.booted_image = (self.box.image[0], _boxes_mod.image_version(
+                self.box.image[0], self.box.image[1]))
         self._console().unlink(missing_ok=True)
         if self.box is not None:
             await self._box_net_up()

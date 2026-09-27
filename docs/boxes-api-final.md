@@ -22,7 +22,9 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
           image: {variant, version}, mem_mb,
           net: {tap, host_ip, guest_ip},
           state: "running"|"stopped", rss_bytes, cpu_pct, uptime_s, inflight,
-          disk: {overlay_bytes, data_bytes}}],
+          disk: {overlay_bytes, data_bytes},
+          restart_needed: bool,       # running on an older image than it would boot now
+          image_pending: str|null}],  # project box: the profile's new box_image, not yet applied
  budget: {ram_mb_used, ram_mb_cap, ram_mb_overhead_per_kvm_box, boxes, boxes_cap, project_boxes, project_boxes_cap},
  runtimes: {kvm:    {available: bool, reason: str|null},
             docker: {available: bool, reason: str|null, rootless, userns, gvisor,
@@ -30,6 +32,10 @@ Live updates: `GET /api/events?topics=<comma list>` (SSE). Box topics:
 ```
 
 - Flag off: `boxes` is just the shared box.
+- `image.version` is the version a running box booted on, or the one a stopped
+  box would boot (null: no built layer, e.g. `main` on the base). A project box
+  follows its profile's `box_image` at its next start (stop/start is enough);
+  a variant whose RAM floor the box does not meet still needs a destroy.
 - Grey out docker in a profile's runtime picker when `runtimes.docker.available`
   is false, and show `reason`. When `weak` is true, show `warnings`: a docker
   box would run without a user namespace.

@@ -211,6 +211,8 @@ class Box:
     placement: str | None = None           # service boxes: per_service|per_project|shared
     allocated_at: float = field(default_factory=time.time)
     ctl: Any = field(default=None, repr=False, compare=False)
+    # (variant, version) the running guest booted on; None until a boot
+    booted_image: tuple[str, int | None] | None = field(default=None, compare=False)
 
     @property
     def transport(self) -> Transport:
@@ -549,6 +551,38 @@ async def project_profile(slug: str) -> dict | None:
         await db.close()
 
 
+def image_version(variant: str, pinned=None) -> int | None:
+    """The version a box of `variant` boots on now: the pinned one, else the
+    variant's active built version (None for a variant with no built layer,
+    e.g. main on the base)."""
+    if pinned is not None and str(pinned).lstrip("v").isdigit():
+        return int(str(pinned).lstrip("v"))
+    try:
+        from . import images
+        return images.active_version(variant)
+    except Exception:  # noqa: BLE001 - a status field, never a failure
+        return None
+
+
+def follow_profile_image(box: Box, variant: str | None) -> bool:
+    """A project box follows its profile's `box_image` (e2e BUG-11: a changed
+    image was ignored until the box was destroyed). A STOPPED box switches in
+    place (its overlay is rebuilt at every boot anyway); a running one keeps
+    its image until it stops, and its row says restart_needed. A variant whose
+    RAM floor the box does not meet needs a destroy (the budget decides).
+    Returns True when the box now has that variant."""
+    variant = variant or "main"
+    if box.kind != "project" or box.image[0] == variant:
+        return True
+    ctl = box.ctl
+    if ctl is not None and ctl.running():
+        return False
+    if box.runtime == "kvm" and mem_floor(variant) > box.mem_mb:
+        return False
+    box.image = (variant, None)
+    return True
+
+
 async def for_project(slug: str | None) -> Box:
     """The box a turn of project `slug` runs in.
 
@@ -560,6 +594,9 @@ async def for_project(slug: str | None) -> Box:
         return registry.shared()
     existing = registry.get(f"p-{slug}") if _SLUG_RE.match(slug) else None
     if existing is not None:
+        prof = await project_profile(slug)
+        if prof and prof.get("separate_box"):
+            follow_profile_image(existing, prof.get("box_image"))
         return existing
     prof = await project_profile(slug)
     if not prof or not prof.get("separate_box"):
@@ -800,7 +837,15 @@ def status_json(box: Box) -> dict:
         if prev and now > prev[0]:
             cpu_pct = round(100 * (st["cpu_s"] - prev[1]) / (now - prev[0]), 1)
     booted = getattr(ctl, "booted_at", None) if ctl else None
-    return {**box.to_json(),
+    row = box.to_json()
+    # the version it runs (running) or would boot (stopped); e2e BUG-11 had
+    # it null always
+    target = (box.image[0], image_version(box.image[0], box.image[1]))
+    now = box.booted_image if running and box.booted_image else target
+    row["image"] = {"variant": now[0], "version": now[1]}
+    return {**row,
+            "restart_needed": bool(running and box.booted_image
+                                   and box.booted_image != target),
             "state": "running" if running else "stopped",
             "rss_bytes": st["rss_bytes"], "cpu_pct": cpu_pct,
             "uptime_s": int(time.monotonic() - booted) if running and booted else None,

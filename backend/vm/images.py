@@ -439,6 +439,18 @@ def _base() -> Path:
     return _base_image()
 
 
+def active_version(variant: str) -> int | None:
+    """The variant's active built version, or None."""
+    try:
+        with _db_sync() as c:
+            row = c.execute("SELECT version FROM image_versions WHERE variant = ? "
+                            "AND status = 'built' AND active = 1 "
+                            "ORDER BY version DESC LIMIT 1", (variant,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row is not None else None
+
+
 def resolve_image(box) -> Path | None:
     """boxes.add_image_resolver hook: the qcow2 a box's overlay backs on.
 
