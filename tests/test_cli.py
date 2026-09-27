@@ -1571,7 +1571,7 @@ async def test_tui_export_to_a_missing_dir_and_a_missing_editor_are_errors(cfg, 
         await pilot.pause(0.3)
         app.cid = 5
         app.dispatch("/export /nonexistent-qa-dir/x.md")
-        assert await _until(pilot, lambda: any("could not save" in _text(n)
+        assert await _until(pilot, lambda: any("not a directory" in _text(n)
                                                for n in app.query("Note")))
         monkeypatch.setenv("EDITOR", "/nonexistent-qa-editor")
         monkeypatch.setattr(app, "suspend", _cl.nullcontext)     # headless: no terminal
@@ -2790,3 +2790,29 @@ async def test_tui_themes_list_import_export_create(cfg, home, tmp_path):
         await pilot.pause(0.1)
         await pilot.press("escape")
         assert await _until(pilot, lambda: app.theme == "Red one")
+
+
+# --- /export [location], /export default <location> -------------------------------------
+
+async def test_tui_export_locations_default_and_no_overwrite(cfg, home, monkeypatch):
+    pytest.importorskip("textual")
+    monkeypatch.chdir(home)
+    msgs = {"messages": [{"role": "user", "content": "hi"},
+                         {"role": "assistant", "content": "hello"}]}
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_conv_server([], msgs))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.cid = 5
+        await app.c_export("")                                   # default: the cwd
+        assert "hello" in (home / "jav3-5.md").read_text()
+        await app.c_export("")
+        assert (home / "jav3-5-2.md").exists()                   # never overwritten
+        await app.c_export("~/notes/chat.md")
+        assert (home / "notes" / "chat.md").exists()
+        await app.c_export("default ~/exports")
+        assert json.loads((cfg / "tui.json").read_text())["export_dir"] == \
+            str((home / "exports").resolve())
+        await app.c_export("")
+        assert (home / "exports" / "jav3-5.md").exists()
+        with pytest.raises(jav3.CliError, match="outside your home"):
+            await app.c_export("../../x")

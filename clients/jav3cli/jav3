@@ -6413,7 +6413,8 @@ def build_tui(base: str, token: str, **kw):
                                   "chat's project, agents included (asks first)", "[project]",
                                   takes_arg=True, busy_ok=True),
                 "copy": Command(self.c_copy, "copy the last reply", busy_ok=True, leader="y"),
-                "export": Command(self.c_export, "save this chat as markdown", "[file]",
+                "export": Command(self.c_export, "save this chat as markdown (default "
+                                  "<location> sets where)", "[location|default <location>]",
                                   takes_arg=True, busy_ok=True, leader="x"),
                 "screenshot": Command(self.c_screenshot, "save a picture of this screen "
                                       "(svg, txt, png); help · default <format> [dir]",
@@ -6491,6 +6492,8 @@ def build_tui(base: str, token: str, **kw):
                         ("export", "export [path] — the current theme as JSON"),
                         ("import", "import <path> — a .json theme")] + [
                     (t, "") for t in self.theme_names()]
+            if fn == self.c_export:
+                return [("default", "default <location> — where /export saves")]
             if fn == self.c_screenshot:
                 return [("help", "current default format and location"),
                         ("default", "default <format> [location]"),
@@ -6865,16 +6868,35 @@ def build_tui(base: str, token: str, **kw):
             how = copy_to_clipboard(self.last_reply, osc52=self.copy_to_clipboard)
             self.notify(f"copied the last reply ({how})")
 
+        def _export_default(self) -> str:
+            loc = self._load_settings().get("export_dir")
+            return loc if isinstance(loc, str) and loc else os.getcwd()
+
         async def c_export(self, arg: str) -> None:
+            """/export [location]: a directory, or a file path ending in .md;
+            /export default <location> sets where a bare /export saves."""
+            word, _, rest = arg.partition(" ")
+            if word == "default":
+                rest = rest.strip()
+                if not rest:
+                    await self.note(f"/export saves to {self._export_default()} — "
+                                    "/export default <location> changes it")
+                    return
+                loc = str(safe_output_dir(rest))
+                self._save_settings(export_dir=loc)
+                self.notify(f"exports: {loc}")
+                return
             if self.cid is None:
                 raise CliError("no chat to export")
+            loc, stem = arg.strip() or self._export_default(), f"jav3-{self.cid}"
+            if loc.lower().endswith(".md"):
+                stem = safe_stem(Path(loc).name[:-3], stem)
+                loc = str(Path(loc).parent)
+            directory = safe_output_dir(loc)
             r = await self.api("GET", f"/api/conversations/{self.cid}/messages")
-            path = Path(os.path.expanduser(arg or f"jav3-{self.cid}.md"))
-            try:
-                path.write_text(transcript_markdown(self.title_text or f"Jav3 chat #{self.cid}",
-                                                    r.get("messages", [])))
-            except OSError as e:     # a missing directory, no permission: not a crash
-                raise CliError(f"could not save {path}: {e.strerror or e}")
+            text = transcript_markdown(self.title_text or f"Jav3 chat #{self.cid}",
+                                       r.get("messages", []))
+            path = write_new(directory, stem, "md", text.encode("utf-8"))
             self.notify(f"saved {path}")
 
         def _shot_defaults(self) -> tuple[str, str]:
