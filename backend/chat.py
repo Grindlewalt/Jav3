@@ -1459,6 +1459,93 @@ def stop_actor_turns(key: str) -> int:
     return sum(_stop(cid) for cid, who in list(_turn_actors.items()) if who == key)
 
 
+# Bulk stop (/stop-all and /stop-project in the jav3 TUI). A device token stops
+# only the chat turns it started itself; the operator's session (full access)
+# stops every chat turn, interactive agent run and plan runner. Stopping a
+# parent turn cancels what it is awaiting (its agents), and each cancelled task
+# settles its own transcript exactly as the single /stop does.
+class BulkStop(BaseModel):
+    dry_run: bool = False
+
+
+class ProjectStop(BulkStop):
+    project: str
+
+
+_PROJECT_TREE_SQL = """
+WITH RECURSIVE tree(id) AS (
+    SELECT c.id FROM conversations c JOIN projects p ON p.id = c.project_id
+    WHERE p.slug = ?
+    UNION
+    SELECT c.id FROM conversations c JOIN tree t ON c.parent_conversation_id = t.id
+)
+SELECT id FROM tree
+"""
+
+
+def _stoppable(actor: dict, only: set[int] | None = None,
+               slug: str | None = None) -> tuple[list[int], list[int], list[str]]:
+    """(chat turns, agent runs, plan slugs) this actor may stop, optionally
+    limited to the conversations in `only` and the plan of `slug`."""
+    from . import agents_run
+    from . import plan as plan_mod
+    full = not actor.get("is_device")
+    key = actor_key(actor)
+    turns = sorted(cid for cid, t in list(_active_turns.items())
+                   if not t.done() and (only is None or cid in only)
+                   and (full or _turn_actors.get(cid) == key))
+    if not full:
+        return turns, [], []
+    runs = sorted(cid for cid, t in list(agents_run._active_runs.items())
+                  if not t.done() and (only is None or cid in only) and cid not in turns)
+    plans = sorted(s for s, t in list(plan_mod._runs.items())
+                   if not t.done() and (slug is None or s == slug))
+    return turns, runs, plans
+
+
+def _bulk_stop(targets, dry_run: bool) -> dict:
+    turns, runs, plans = targets
+    if not dry_run:
+        from . import agents_run
+        from . import plan as plan_mod
+        for cid in turns:
+            _stop(cid)
+        for cid in runs:
+            t = agents_run._active_runs.get(cid)
+            if t is not None and not t.done():
+                t.cancel()
+        for s in plans:
+            plan_mod.stop_run(s)
+    return {"count": len(turns) + len(runs) + len(plans), "dry_run": dry_run,
+            "conversations": turns + runs, "plans": plans}
+
+
+@router.post("/chat/stop-all")
+async def stop_all_turns(body: BulkStop | None = None,
+                         actor: dict = Depends(require_actor)):
+    """Stop every running turn the caller may stop (a device: its own chat
+    turns; the operator: everything). dry_run only counts."""
+    body = body or BulkStop()
+    return _bulk_stop(_stoppable(actor), body.dry_run)
+
+
+@router.post("/chat/stop-project")
+async def stop_project_turns(body: ProjectStop, actor: dict = Depends(require_actor)):
+    """Stop every running turn in one project: chats in it and everything
+    descended from them (agents, orchestrations, job nodes), plus its plan
+    runner (full access). Same actor rule as stop-all."""
+    db = await get_db()
+    try:
+        async with db.execute("SELECT 1 FROM projects WHERE slug = ?", (body.project,)) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="no such project")
+        async with db.execute(_PROJECT_TREE_SQL, (body.project,)) as cur:
+            ids = {r["id"] for r in await cur.fetchall()}
+    finally:
+        await db.close()
+    return _bulk_stop(_stoppable(actor, ids, body.project), body.dry_run)
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
     # the router already depends on require_actor; FastAPI caches it per

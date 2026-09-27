@@ -6292,6 +6292,11 @@ def build_tui(base: str, token: str, **kw):
                 "delete": Command(self.c_delete, "delete this chat (asks first)"),
                 "retry": Command(self.c_retry, "send your last message again"),
                 "stop": Command(self.c_stop, "stop the running turn", busy_ok=True),
+                "stop-all": Command(self.c_stop_all, "stop every running turn you may stop "
+                                    "(asks first)", busy_ok=True),
+                "stop-a": Command(self.c_stop_project, "stop every running turn in this "
+                                  "chat's project, agents included (asks first)", "[project]",
+                                  takes_arg=True, busy_ok=True),
                 "copy": Command(self.c_copy, "copy the last reply", busy_ok=True, leader="y"),
                 "export": Command(self.c_export, "save this chat as markdown", "[file]",
                                   takes_arg=True, busy_ok=True, leader="x"),
@@ -6330,7 +6335,8 @@ def build_tui(base: str, token: str, **kw):
                                 ("clear", "new"), ("tools", "details"),
                                 ("providers", "provider"),
                                 ("orchestrate", "orchestration"),
-                                ("review", "security")):
+                                ("review", "security"),
+                                ("stop-project", "stop-a")):
                 c[alias] = c[name]
             return c
 
@@ -6356,7 +6362,7 @@ def build_tui(base: str, token: str, **kw):
                 return ([("none", "no project: files go to the chat's artifacts"),
                          ("follow", "whatever project is loaded")]
                         + [(p["slug"], p.get("name", "")) for p in o.get("projects", [])])
-            if fn == self.c_orchestrate:
+            if fn in (self.c_orchestrate, self.c_stop_project):
                 return [(p["slug"], p.get("name", "")) for p in o.get("projects", [])]
             if fn == self.c_sessions:
                 return [(str(cv["id"]), _short(cv.get("summary") or "(untitled)", 60))
@@ -6645,6 +6651,35 @@ def build_tui(base: str, token: str, **kw):
                 self.notify("nothing is running")
                 return
             self.interrupt()
+
+        async def _bulk_stop(self, path: str, body: dict, what: str) -> None:
+            d = await self.api("POST", path, json={**body, "dry_run": True})
+            n = int(d.get("count") or 0)
+            if not n:
+                self.notify(f"nothing is running {what}")
+                return
+            plans = d.get("plans") or []
+            detail = (f"{len(d.get('conversations') or [])} turn(s)"
+                      + (f" and {len(plans)} plan run(s)" if plans else "")
+                      + ". Each stops where it is; its transcript keeps what it did.")
+            if not await self.push_screen_wait(Confirm(
+                    f"Stop {n} running turn{'s' * (n != 1)} {what}?", detail)):
+                return
+            d = await self.api("POST", path, json=body)
+            mine = self.turn.cid if self.turn and self.turn.cid else self.cid
+            if self.busy and mine in (d.get("conversations") or []):
+                self.interrupt()
+            self.notify(f"stopped {d.get('count', 0)}")
+
+        async def c_stop_all(self, arg: str) -> None:
+            await self._bulk_stop("/api/chat/stop-all", {}, "anywhere")
+
+        async def c_stop_project(self, arg: str) -> None:
+            slug = arg or self._project_label()
+            if not slug or slug == "no project":
+                raise CliError("this chat has no project — /stop-a <project>")
+            await self._bulk_stop("/api/chat/stop-project", {"project": slug},
+                                  f"in {slug}")
 
         async def c_copy(self, arg: str) -> None:
             if not self.last_reply:

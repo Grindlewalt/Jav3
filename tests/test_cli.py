@@ -2519,3 +2519,57 @@ async def test_tui_boxes_surfaces_locked_for_a_chat_only_login(cfg):
         guarded = ("/api/services", "/api/packages", "/api/vm", "/api/profiles",
                    "/api/egress", "/api/projects", "/api/security", "/api/secrets")
         assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
+
+
+# --- /stop-all, /stop-a -----------------------------------------------------------------
+
+def _stop_server(seen, count=3):
+    base = _fake_server([], []).handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ("/api/chat/stop-all", "/api/chat/stop-project"):
+            body = json.loads(request.content or b"{}")
+            seen.append((request.url.path, body))
+            return httpx.Response(200, json={"count": count, "conversations": [1, 2],
+                                             "plans": ["alpha"] * (count > 2),
+                                             "dry_run": body.get("dry_run", False)})
+        return base(request)
+    return httpx.MockTransport(handler)
+
+
+async def test_tui_stop_all_counts_confirms_then_stops(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_stop_server(seen))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/stop-all")
+        assert await _modal(pilot, app, "Confirm")
+        assert seen == [("/api/chat/stop-all", {"dry_run": True})]
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert len(seen) == 1                    # declined: nothing stopped
+        app.dispatch("/stop-all")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: len(seen) == 3)
+        assert seen[-1] == ("/api/chat/stop-all", {})
+
+
+async def test_tui_stop_project_uses_the_chats_project(cfg):
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_stop_server(seen))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.project, app.project_mode = "alpha", "pin"
+        app.dispatch("/stop-project")
+        assert await _modal(pilot, app, "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: len(seen) == 2)
+        assert seen == [("/api/chat/stop-project", {"project": "alpha", "dry_run": True}),
+                        ("/api/chat/stop-project", {"project": "alpha"})]
+        app.project, app.project_mode = None, "none"
+        app.dispatch("/stop-a")
+        await pilot.pause(0.3)
+        assert len(seen) == 2                    # no project: refused, nothing sent
