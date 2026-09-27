@@ -32,7 +32,6 @@ import {
 // Every figure comes from the server (GET /api/vm/boxes, /api/vm/images);
 // the host is a 4 GB Pi, so the RAM budget bar is the first thing on the page.
 
-const HOST_MB = 4096
 
 export default function Vms() {
   return (
@@ -176,8 +175,9 @@ function Budget({ data }) {
   const b = data?.budget
   if (!data) return null
   const cap = b?.ram_mb_cap || 0
-  const { segs, used, over } = budgetSegments(data.boxes, cap || HOST_MB)
-  const scale = cap || HOST_MB
+  const host = b?.host_ram_mb || 0
+  const { segs, used, over } = budgetSegments(data.boxes, cap || host || 4096)
+  const scale = cap || host || 4096
   return (
     <section className="sbx-card bx-budget">
       <div className="bx-budget-head">
@@ -185,7 +185,9 @@ function Budget({ data }) {
         <span className={over ? 'error small' : 'small'}>
           {mb(b?.ram_mb_used ?? used)} reserved of {cap ? `${mb(cap)} guest budget` : 'the host'}
         </span>
-        <span className="dim small">host {mb(HOST_MB)} · Jav3 and the OS keep the rest</span>
+        {host > 0 && (
+          <span className="dim small">host {mb(host)} · Jav3 and the OS keep the rest</span>
+        )}
         <span className="grow" />
         {b && (
           <span className="dim small">

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
 import socket
 import time
@@ -187,6 +188,14 @@ _TRANSPORTS: dict[str, type[Transport]] = {"kvm": VsockTransport,
 
 
 # --- the record -------------------------------------------------------------
+
+def host_ram_mb() -> int | None:
+    """This machine's physical RAM (the /vms budget bar used a hardcoded 4 GB,
+    right only on the Pi). None where it can't be read."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1024 * 1024)
+    except (ValueError, OSError, AttributeError):
+        return None
 
 @dataclass
 class Box:
@@ -409,7 +418,8 @@ class Registry:
                 "ram_mb_overhead_per_kvm_box": settings.vm_kvm_box_overhead_mb,
                 "boxes": len(boxes), "boxes_cap": settings.vm_max_boxes,
                 "project_boxes": sum(b.kind == "project" for b in boxes),
-                "project_boxes_cap": settings.vm_max_project_boxes}
+                "project_boxes_cap": settings.vm_max_project_boxes,
+                "host_ram_mb": host_ram_mb()}
 
     def _check_caps(self, kind: str, mem_mb: int, runtime: str = "kvm") -> None:
         mem_mb = ram_cost(mem_mb, runtime)
