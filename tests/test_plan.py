@@ -663,3 +663,56 @@ def test_items_get_the_plan_item_round_cap(tmp_env):
     assert "tool rounds" in plan_mod._item_task(plan, it, [])
     plan["max_iterations"] = 7                      # an explicit plan cap still wins
     assert plan_mod._item_agent(plan, it)["max_iterations"] == 7
+
+
+async def test_fix_during_the_closing_report_relaunches(client, tmp_env, monkeypatch):
+    """2026-09-27: plan_fix calls landing while a finished run wrote its
+    closing report were told "the live run picks it up"; nothing did, and the
+    relaunch ran zero items. A fix during teardown must wait and relaunch."""
+    await _put(client, [{"title": "a", "brief": "a"}], attempts_max=1)
+    seen: dict = {}
+    calls = {"n": 0}
+
+    async def i1(cid, attempt, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await _report(cid, "failed", "first try")
+            return "failed"
+        await _report(cid, "done", "second try")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted({"i1": i1}, seen))
+    gate = asyncio.Event()
+
+    async def slow_synth(system, user, temperature=0.3):
+        await gate.wait()
+        return "ROLLUP"
+    monkeypatch.setattr(plan_mod, "complete_text", slow_synth)
+    monkeypatch.setattr(plan_mod, "FIX_TEARDOWN_WAIT", 5.0)
+
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    for _ in range(200):                      # the drive loop has finished...
+        if SLUG in plan_mod._drive_began and SLUG not in plan_mod._driving:
+            break
+        await asyncio.sleep(0.01)
+    assert plan_mod.is_running(SLUG)          # ...but the run is writing its report
+    fix = asyncio.create_task(plan_mod.fix(SLUG, action="retry", item="i1",
+                                           guidance="do it again"))
+    await asyncio.sleep(0.05)
+    gate.set()
+    out = await fix
+    assert "Relaunched" in out, out
+    await _wait_run()
+    assert _by_id(plan_mod.load(SLUG))["i1"]["status"] == "done"
+
+
+async def test_status_is_compact_and_item_gives_detail(client, tmp_env):
+    await _put(client, [{"title": f"t{n}", "brief": f"b{n}"} for n in range(22)])
+    async with plan_mod.edit(SLUG) as p:
+        for it in p["items"]:
+            it["result_summary"] = "x" * 2000
+    out = await plan_mod.status(SLUG)
+    assert "i22" in out and len(out) < 12_000         # every item fits in one result
+    one = await plan_mod.status(SLUG, item="i22")
+    assert "# Brief" in one and "x" * 2000 in one
+    assert (await plan_mod.status(SLUG, item="i99")).startswith("error:")

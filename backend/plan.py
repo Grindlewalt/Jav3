@@ -77,6 +77,12 @@ MAX_FIXES = 4             # orchestrator re-dispatches per item (plan_fix retry)
 
 _locks: dict[str, asyncio.Lock] = {}
 _runs: dict[str, asyncio.Task] = {}          # project slug -> the detached runner
+# slugs whose _drive loop is live and will read the file again on its next tick
+# (changed only under the plan lock), and slugs whose _drive has STARTED this
+# run — the pair tells a plan_fix whether a run is starting, live or winding
+# down (2026-09-27: a relaunch mid-teardown ran zero items)
+_driving: set[str] = set()
+_drive_began: set[str] = set()
 _live_items: dict[int, dict] = {}            # conversation id -> {project, item_id, title}
 
 
@@ -852,6 +858,7 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
                              "rollup": rollup, "usage": budget.summary(),
                              "plan_status": status})
         bus.close_job(job_id)
+        _drive_began.discard(slug)
         runtime.spawn_depth.reset(dtoken)
         runtime.web_session.reset(wtoken)
         runtime.conversation_id.reset(cidtoken)
@@ -870,6 +877,8 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
     meta: dict[str, dict] = {}
     spawned = 0
     async with edit(slug) as plan:
+        _driving.add(slug)
+        _drive_began.add(slug)
         plan["status"], plan["job_id"], plan["root_id"] = "running", job_id, root_id
         for it in plan["items"]:
             if it["status"] == "running":          # a previous run's leftovers
@@ -937,6 +946,7 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
                     spawned += 1
                     _emit_item(job_id, nxt)
                 if not tasks and (finished(plan) or spawned >= MAX_SPAWNS):
+                    _driving.discard(slug)          # decided under the lock
                     if spawned >= MAX_SPAWNS and ready(plan):
                         for it in ready(plan):
                             it["status"] = "failed"
@@ -950,6 +960,7 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
             else:
                 await asyncio.sleep(settings.plan_tick_seconds)
     finally:
+        _driving.discard(slug)
         for t in tasks.values():
             t.cancel()
         for m in meta.values():
@@ -1151,6 +1162,7 @@ def orchestrator_prompt(project: str | None) -> str:
 
 
 FIX_ACTIONS = ("retry", "edit", "add", "skip")
+FIX_TEARDOWN_WAIT = 300.0     # seconds a plan_fix waits for a closing run to end
 
 
 async def fix(slug: str, *, action: str, item: str | None = None,
@@ -1222,7 +1234,8 @@ async def fix(slug: str, *, action: str, item: str | None = None,
                     what = f"{it['id']} skipped"
             _break_cycles(plan["items"])                # an edited depends_on may loop
             released = release_blocked(plan)
-            job_id = plan.get("job_id") if is_running(slug) else None
+            live = slug in _driving                     # its next tick reads this edit
+            job_id = plan.get("job_id") if live else None
             has_work = any(i["status"] == "todo" for i in plan["items"])
     except LookupError:
         return "error: this project has no plan — call orchestrate first"
@@ -1230,14 +1243,30 @@ async def fix(slug: str, *, action: str, item: str | None = None,
         for r in released:
             _emit_item(job_id, r)
     note = f" Released: {', '.join(r['id'] for r in released)}." if released else ""
-    if is_running(slug):
+    if live:
         return f"{what}.{note} The live run picks it up on its next tick."
+    t = _runs.get(slug)
+    if t is not None and not t.done():
+        if slug not in _drive_began:
+            # a run started a moment ago (a sibling plan_fix) and has not read
+            # the file yet: its first tick sees this edit
+            return f"{what}.{note} The run that is starting picks it up."
+        # winding down (closing report) — it will not read the file again, so
+        # wait it out and relaunch rather than claim it "picks it up"
+        try:
+            await asyncio.wait_for(asyncio.shield(t), timeout=FIX_TEARDOWN_WAIT)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — its outcome is not ours
+            pass
+        if slug in _driving or (_runs.get(slug) not in (None, t) and not _runs[slug].done()):
+            return f"{what}.{note} The run that is starting picks it up."
     if not run or not has_work:
         return f"{what}.{note} The run is not running" + (
             "; nothing is ready to run." if not has_work else "; pass run=true to relaunch.")
     try:
         started = await start_run(slug)
     except RuntimeError as e:
+        if is_running(slug):                        # a sibling plan_fix relaunched it
+            return f"{what}.{note} The run that is starting picks it up."
         return f"{what}.{note} Could not relaunch: {e}"
     return (f"{what}.{note} Relaunched the run (head conversation {started['root_id']}); "
             "follow it with plan_status.")
@@ -1286,26 +1315,64 @@ async def _head_rollup(root_id) -> str | None:
     return row["rollup"] if row else None
 
 
+STATUS_LINE_CHARS = 240     # per-item result/error in the overview; `item` shows it whole
+
+
+def _clip(text: str, n: int = STATUS_LINE_CHARS) -> str:
+    t = " ".join(str(text).split())
+    return t if len(t) <= n else t[:n - 1] + "…"
+
+
 def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str:
+    """One compact block per item, so a 20+ item plan fits in one result (a
+    22-item run truncated at 26k and hid its own second half: harness fault
+    #1). plan_status item=<id> gives an item's full detail."""
+    counts: dict[str, int] = {}
+    for it in plan["items"]:
+        counts[it["status"]] = counts.get(it["status"], 0) + 1
+    tally = ", ".join(f"{n} {st}" for st, n in counts.items())
     lines = [f"Plan '{plan['title']}' — {'RUNNING' if running else 'not running'} "
-             f"(status {plan['status']}, head conversation {plan.get('root_id')}). {why}"]
+             f"(status {plan['status']}, head conversation {plan.get('root_id')}). {why}",
+             f"Items: {tally}. Full detail of one item: plan_status item=<id>."]
     for it in plan["items"]:
         who = f" @{it['assignee']}" if it.get("assignee") else ""
         mdl = f" model {it['model']}" if it.get("model") else ""
         cid = f" conv {it['conversation_id']}" if it.get("conversation_id") else ""
-        lines.append(f"- {it['id']} [{it['status']}]{who}{mdl}{cid} {it['title']}")
+        tries = f" attempts {it['attempts']}" if it.get("attempts") else ""
+        lines.append(f"- {it['id']} [{it['status']}]{who}{mdl}{cid}{tries} {it['title']}")
         if it.get("result_summary"):
-            lines.append(f"    result: {it['result_summary']}")
+            lines.append(f"    result: {_clip(it['result_summary'])}")
         if it.get("last_error") and it["status"] != "done":
-            lines.append(f"    error: {it['last_error']}")
+            lines.append(f"    error: {_clip(it['last_error'])}")
     if not running and rollup:
-        lines.append(f"\n# Closing rollup\n{rollup}")
+        lines.append(f"\n# Closing rollup\n{_clip(rollup, 3000)}")
     elif running:
         lines.append("\nRunning items can be messaged: send_message to item:<id>.")
     return "\n".join(lines)
 
 
-async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None) -> str:
+def _item_text(it: dict) -> str:
+    lines = [f"{it['id']} [{it['status']}] {it['title']}",
+             f"depends on: {', '.join(it['depends_on']) or 'nothing'} · attempts {it.get('attempts', 0)}"
+             f" · re-dispatches {it.get('fixes', 0)}/{MAX_FIXES}"
+             + (f" · conv {it['conversation_id']}" if it.get("conversation_id") else ""),
+             f"\n# Brief\n{it.get('brief') or '(none)'}"]
+    if it.get("result_summary"):
+        lines.append(f"\n# Result\n{it['result_summary']}")
+    if it.get("last_error"):
+        lines.append(f"\n# Last error\n{it['last_error']}")
+    for h in it.get("history") or []:
+        lines.append(f"- attempt {h.get('attempt')}: {h.get('outcome')} — {h.get('error') or ''}"
+                     + (f"\n  got to: {h['progress']}" if h.get("progress") else ""))
+    if it.get("guidance"):
+        lines.append("\n# Your guidance so far\n" + "\n".join(f"- {g}" for g in it["guidance"]))
+    if it.get("notes"):
+        lines.append(f"\n{len(it['notes'])} note(s) from teammates.")
+    return "\n".join(lines)
+
+
+async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None,
+                 item: str | None = None) -> str:
     """The plan_status tool: the checklist as it stands, after waiting (up to
     wait_seconds, capped) for it to change or for a message to arrive for the
     caller. Waiting on a running plan is how an orchestrator supervises one
@@ -1314,6 +1381,11 @@ async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None) ->
     plan, running = load(slug), is_running(slug)
     if plan is None:
         return "error: this project has no plan — call orchestrate first."
+    if item:
+        it = index(plan).get(str(item).strip())
+        if it is None:
+            return f"error: no item {item!r} (items: {', '.join(index(plan))})"
+        return _item_text(it)
     why = "No wait requested."
     if wait and running:
         start = _fingerprint(plan, running)
