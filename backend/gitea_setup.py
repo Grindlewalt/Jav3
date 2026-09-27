@@ -394,7 +394,22 @@ async def _ensure_all_repos() -> None:
                 print(f"  warn  repo {proj.name}: {gitea.scrub(str(e))}")
 
 
+USAGE = ("usage: python -m backend.cli gitea-setup [--dry-run] [--user NAME] [--port N] "
+         "[--password-stdin] [--reset-password] [--yes]")
+_FLAGS = {"--dry-run", "--password-stdin", "--reset-password", "--yes"}
+_VALUED = {"--user", "--port"}
+
+
 def run(args: list[str]) -> None:
+    # anything unknown (e.g. --help) prints usage: it used to run a REAL setup
+    i = 0
+    while i < len(args):
+        if args[i] in _VALUED and i + 1 < len(args):
+            i += 2
+        elif args[i] in _FLAGS:
+            i += 1
+        else:
+            raise SystemExit(USAGE)
     dry = "--dry-run" in args
     plan = Plan(dry)
     user_arg = args[args.index("--user") + 1] if "--user" in args else None
@@ -433,12 +448,14 @@ def run(args: list[str]) -> None:
         pw, chosen = (("", True) if dry else _password(args, interactive))
         plan.say(f"set {login}'s Gitea password (API, not argv)")
         if not dry:
-            asyncio.run(_set_password(login, pw, must_change=not chosen))
+            # never must_change: Gitea then refuses the operator's own API
+            # token until a browser sign-in, so repo creation 403'd (2026-09-27)
+            asyncio.run(_set_password(login, pw, must_change=False))
             if not chosen:
                 pw_file = CONFIG_DIR / "gitea-admin.password"
                 _write_secret(pw_file, pw)
-                print(f"  note  a random first password is in {pw_file} (0600); Gitea "
-                      "asks you to change it at first sign-in — then delete the file")
+                print(f"  note  a random first password is in {pw_file} (0600); sign in "
+                      "with it, change it in Gitea (Settings > Account), then delete the file")
 
     env = {"JARVIS_GITEA_ENABLED": "true", "JARVIS_GITEA_OWNER": login,
            "JARVIS_GITEA_PORT": str(settings.gitea_port)}
