@@ -159,6 +159,8 @@ runcmd:
   - dpkg --purge --force-depends openssh-server openssh-sftp-server openssh-client ssh-import-id socat tcpdump netcat-openbsd || true
   - systemctl daemon-reload
   - systemctl start --no-block jav3-finish-purge.service
+  # a netless disposable guest has nothing to auto-upgrade from
+  - systemctl disable unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer || true
   - systemctl enable jarvis-guest.service
   - /usr/local/sbin/jav3-baseline || true
   - rm -f /usr/local/sbin/jav3-baseline
