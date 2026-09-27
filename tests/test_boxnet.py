@@ -32,7 +32,10 @@ def test_ruleset_pins_before_established_and_drops_forward():
                        "tcp dport 8443 accept", "icmp type echo-request accept"]
     assert "iifname @guest_taps jump guest_input" in text
     fwd = text.split("chain forward {", 1)[1].split("}", 1)[0]
-    assert "policy drop" in fwd and "iifname @guest_taps jump guest_forward" in fwd
+    # accept policy: only guest taps are policed here; a drop policy took down
+    # Docker's bridge (and every other forwarded packet on the host)
+    assert "policy accept" in fwd and "iifname @guest_taps jump guest_forward" in fwd
+    assert "oifname @guest_taps counter drop" in fwd      # nothing new INTO a guest
     gf = text.split("chain guest_forward {", 1)[1].split("}", 1)[0]
     assert "accept" not in gf
 

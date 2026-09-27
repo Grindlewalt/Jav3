@@ -30,9 +30,13 @@ table inet jarvis_vm {
     }
 
     chain forward {
-        type filter hook forward priority -10; policy drop;
+        # policy ACCEPT: this table polices Jav3's guest taps only. A drop policy
+        # here also dropped every other forwarded packet on the host (Docker's
+        # bridge: image builds and the operator's own containers, 2026-09-27).
+        type filter hook forward priority -10; policy accept;
         iifname "jvtap0" jump guest_forward
         oifname "jvtap0" ct state established,related accept
+        oifname "jvtap0" counter drop
     }
 
     # The guest has no legitimate forward path (all egress is via the host proxy).
