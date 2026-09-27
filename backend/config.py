@@ -198,6 +198,9 @@ class Settings(BaseSettings):
     # tokens re-sending the pile each iteration.
     max_react_iterations: int = 60
     subagent_max_iterations: int = 12
+    # a plan item builds a whole slice of a project; 12 rounds went entirely on
+    # recon in the 2026-09-27 Voxelcraft run (every item "ran out of budget")
+    plan_item_max_iterations: int = 60
     recent_message_limit: int = 40
 
     # The explicit orchestrator (backend/plan.py): how many checklist items run

@@ -623,6 +623,10 @@ def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
             if h.get("progress"):
                 line += f"\n  got to: {h['progress']}"
             parts.append(line)
+    rounds = plan.get("max_iterations") or settings.plan_item_max_iterations
+    parts.append(f"\n# Budget\nYou have about {rounds} tool rounds (several calls can go in "
+                 "one round). Spend at most a fifth of them looking around, then build. "
+                 "Leave a few rounds to run the proof and call plan_report.")
     parts.append("\n" + REPORT_RULES)
     return "\n".join(parts)
 
@@ -642,6 +646,8 @@ def _item_agent(plan: dict, it: dict) -> dict:
                  "project": ""}
     if plan.get("max_iterations"):
         agent["max_iterations"] = plan["max_iterations"]
+    elif not agent.get("max_iterations"):
+        agent["max_iterations"] = settings.plan_item_max_iterations
     if it.get("model"):
         # re-checked at spawn: a model switched off since planning fails the
         # attempt out loud (the error lands on the item) instead of the item

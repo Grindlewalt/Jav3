@@ -653,3 +653,13 @@ async def test_fix_edit_add_skip_and_cap(client, tmp_env, monkeypatch):
     capped = await plan_mod.fix(SLUG, action="retry", item="i2", guidance="again", run=False)
     assert capped.startswith("error:") and "Change the approach" in capped
     assert (await plan_mod.fix(SLUG, action="nope")).startswith("error:")
+
+
+def test_items_get_the_plan_item_round_cap(tmp_env):
+    # 12 subagent rounds went entirely on recon in the Voxelcraft run
+    plan = plan_mod.empty_plan(title="t")
+    it = plan_mod.new_item(plan, title="build")
+    assert plan_mod._item_agent(plan, it)["max_iterations"] == settings.plan_item_max_iterations
+    assert "tool rounds" in plan_mod._item_task(plan, it, [])
+    plan["max_iterations"] = 7                      # an explicit plan cap still wins
+    assert plan_mod._item_agent(plan, it)["max_iterations"] == 7
