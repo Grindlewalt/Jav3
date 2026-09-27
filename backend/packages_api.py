@@ -153,13 +153,14 @@ async def resolve():
 
 
 @router.post("/{pkg_id}/approve")
-async def approve(pkg_id: int, body: ApproveBody):
+async def approve(pkg_id: int, body: ApproveBody, user: dict = Depends(require_user)):
     if not body.acknowledge:
         raise HTTPException(400, "approval needs acknowledge: true")
     db = await get_db()
     try:
         try:
-            row = await packages.approve(db, pkg_id, target_variant=body.target_variant)
+            row = await packages.approve(db, pkg_id, target_variant=body.target_variant,
+                                         decided_by=user.get("username") or "operator")
         except LookupError as e:
             raise HTTPException(404, str(e))
         except (packages.PackageError, images.RecipeError) as e:
@@ -180,11 +181,12 @@ async def approve(pkg_id: int, body: ApproveBody):
 
 
 @router.post("/{pkg_id}/reject")
-async def reject(pkg_id: int, body: RejectBody):
+async def reject(pkg_id: int, body: RejectBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         try:
-            return await packages.reject(db, pkg_id, reason=body.reason)
+            return await packages.reject(db, pkg_id, reason=body.reason,
+                                         decided_by=user.get("username") or "operator")
         except LookupError as e:
             raise HTTPException(404, str(e))
         except packages.PackageError as e:
