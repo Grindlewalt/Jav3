@@ -1,13 +1,31 @@
 {
   "manifest_version": 3,
   "name": "Jav3 Browser",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lets your Jav3 server use this browser, in its own window, on sites you allow.",
   "minimum_chrome_version": "116",
-  "background": { "service_worker": "sw.js", "type": "module" },
-  "action": { "default_title": "Jav3", "default_popup": "popup.html", "default_icon": "icon.png" },
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Jav3",
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
   "options_page": "options.html",
-  "icons": { "128": "icon.png" },
-  "permissions": ["tabs", "tabGroups", "scripting", "storage", "notifications", "alarms"],
-  "host_permissions": ["<all_urls>"]
+  "icons": {
+    "128": "icon.png"
+  },
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "scripting",
+    "storage",
+    "notifications",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
 }

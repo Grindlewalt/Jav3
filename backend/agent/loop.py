@@ -168,8 +168,14 @@ def _assemble_messages(system_prompt: str, history: list[dict],
     if tools and inject:
         for i in range(len(messages) - 1, -1, -1):
             if messages[i]["role"] == "user":
-                messages[i] = {**messages[i],
-                               "content": (messages[i]["content"] or "") + "\n\n" + inject}
+                content = messages[i]["content"]
+                if isinstance(content, list):
+                    # a multimodal message (a screenshot re-attached as the
+                    # latest "user" turn): add the note as one more text part
+                    content = content + [{"type": "text", "text": inject}]
+                else:
+                    content = (content or "") + "\n\n" + inject
+                messages[i] = {**messages[i], "content": content}
                 break
     return messages, tools, rules, can_delegate
 

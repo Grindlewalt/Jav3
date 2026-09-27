@@ -228,6 +228,7 @@ async function run(verb, p, c) {
   if (verb === 'open_tab') {
     const host = await allowed(p.url, c);
     notifyAct(verb, host, c);
+    const prev = await focusedWindow();
     const win = await jav3Window();
     let tab;
     if (win == null) {
@@ -238,7 +239,9 @@ async function run(verb, p, c) {
     }
     await adopt(tab);
     await chrome.tabs.update(tab.id, { url: p.url });
+    await giveFocusBack(prev, tab.windowId);
     await waitLoad(tab.id);
+    await giveFocusBack(prev, tab.windowId);
     return { data: await afterLoad(tab.id, c) };
   }
   const tab = await ownTab(p.tab);
@@ -250,9 +253,12 @@ async function run(verb, p, c) {
   if (verb === 'navigate') {
     const host = await allowed(p.url, c);
     notifyAct(verb, host, c);
+    const prev = await focusedWindow();
     await chrome.tabs.update(p.tab, { url: p.url });
     await new Promise(r => setTimeout(r, 200));
+    await giveFocusBack(prev, tab.windowId);
     await waitLoad(p.tab);
+    await giveFocusBack(prev, tab.windowId);
     return { data: await afterLoad(p.tab, c) };
   }
   const host = await allowed(tab.url, c);
@@ -262,7 +268,9 @@ async function run(verb, p, c) {
     return { data: { tab: p.tab, ...r } };
   }
   if (verb === 'screenshot_tab') {
+    const prev = await focusedWindow();
     await chrome.tabs.update(p.tab, { active: true });   // active in Jav3's window only
+    await giveFocusBack(prev, tab.windowId);
     const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
     const blob = await (await fetch(url)).blob();
     const bmp = await createImageBitmap(blob);
@@ -276,6 +284,25 @@ async function run(verb, p, c) {
   if (!r || !r.ok) throw new VerbError((r && r.err) || `${verb} failed`);
   if (verb !== 'scroll') { await new Promise(res => setTimeout(res, 500)); await waitLoad(p.tab); }
   return { data: await info(p.tab), text: verb === 'scroll' ? `scrolled to ${r.y} of ${r.max}` : undefined };
+}
+
+// Jav3 must never pull the operator away from what they're doing. Chrome on
+// macOS (and Brave) can ignore `focused: false` and raise a window on
+// create/navigate/activate, so every such step remembers the window the
+// operator was in and hands focus straight back to it.
+async function focusedWindow() {
+  try {
+    const w = await chrome.windows.getLastFocused();
+    return w && w.focused ? w.id : null;
+  } catch { return null; }
+}
+
+async function giveFocusBack(prevId, jav3WinId) {
+  if (prevId == null || prevId === jav3WinId) return;
+  try {
+    const now = await chrome.windows.getLastFocused();
+    if (now && now.id !== prevId && now.focused) await chrome.windows.update(prevId, { focused: true });
+  } catch { /* the operator's window closed meanwhile: nothing to restore */ }
 }
 
 // After a load the page may have redirected. A redirect to the Jav3 server is
