@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS fetched_urls (
 CREATE TABLE IF NOT EXISTS git_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_slug TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'commit',      -- commit | remote (connect+push)
+    kind TEXT NOT NULL DEFAULT 'commit',      -- commit | remote (connect+push) | push (Gitea PR)
     message TEXT NOT NULL,           -- commit message, or the remote URL
     paths TEXT,                      -- JSON array or NULL = all changes
     status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
@@ -348,14 +348,16 @@ CREATE TABLE IF NOT EXISTS desk_shell_pending (
 -- Boxes themselves are RUNTIME state (backend/vm/boxes.py) and have no table.
 -- ===================================================================
 -- (d) Security profiles. A project points at one via projects.profile_id
--- (NULL = not yet migrated -> the builtin 'Default'). `service_placement` has
+-- (NULL = the profile marked is_default). `service_placement` has
 -- NO default on purpose (operator decision 0.1): a new profile must name one,
 -- so an INSERT that omits it fails. Builtins are migrated to 'per_project'
 -- explicitly by WP2's migration. JSON columns hold arrays of strings.
 CREATE TABLE IF NOT EXISTS security_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    builtin INTEGER NOT NULL DEFAULT 0,
+    builtin INTEGER NOT NULL DEFAULT 0,          -- legacy; no longer read (every profile is editable)
+    -- the ONE profile new/unassigned projects use (partial unique index below)
+    is_default INTEGER NOT NULL DEFAULT 0,
     default_verdict TEXT NOT NULL DEFAULT 'deny'
         CHECK (default_verdict IN ('deny', 'allow')),
     network_off INTEGER NOT NULL DEFAULT 0,
@@ -491,6 +493,23 @@ CREATE TABLE IF NOT EXISTS image_versions (
     built_at TEXT,
     UNIQUE(variant, version)
 );
+-- Agent-filed reports that the HARNESS itself misbehaved (report_harness_fault):
+-- a tool that errored on input the agent believed valid, or a documented
+-- capability that did not do what it says. TEMPORARY diagnostic surface for the
+-- dsh-bridge work — one row per report, mirrored to a low-severity security
+-- event so the operator sees it in the Review Center; GET /api/harness_faults
+-- lists them.
+CREATE TABLE IF NOT EXISTS harness_faults (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER,             -- the turn that hit it (may be gone later; not an FK)
+    project TEXT,                        -- the turn's project, for grouping
+    tool TEXT,                           -- the tool/capability the agent was using
+    tried TEXT NOT NULL,                 -- what_i_tried: tool + intent
+    went_wrong TEXT NOT NULL,            -- what_went_wrong: the harness's fault
+    expected TEXT,                       -- what_i_expected
+    severity TEXT NOT NULL DEFAULT 'low',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -587,6 +606,12 @@ async def init_db() -> None:
             # agents tree can show that node as waiting on the operator. NULL
             # for a request filed over HTTP, or one from before this column.
             await db.execute("ALTER TABLE git_requests ADD COLUMN conversation_id INTEGER")
+        # kind 'push' (backend/gitea.py): the agent's branch + Gitea pull
+        # request it opened, and a diff summary for the Review Center
+        for col, typ in (("branch", "TEXT"), ("pr_number", "INTEGER"),
+                         ("pr_url", "TEXT"), ("summary", "TEXT")):
+            if col not in gcols:
+                await db.execute(f"ALTER TABLE git_requests ADD COLUMN {col} {typ}")
         # triage reviewer verdict columns on the two queue tables
         for table in ("egress_pending", "security_events"):
             async with db.execute(f"PRAGMA table_info({table})") as cur:
@@ -776,18 +801,30 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     exactly what it always did. Data migrations (profiles_migrated, hosts ->
     allow list) are WP2's, in one transaction of their own."""
     await _add_columns(db, "projects", (
-        # (d) the project's security profile; NULL = the builtin 'Default'
+        # (d) the project's security profile; NULL = the one marked is_default
         ("profile_id", "INTEGER REFERENCES security_profiles(id)"),
         # (a) /persist retirement (operator decision 0.3): when its data was
         # imported into the service box's /srv, and when the old disk goes
         ("persist_imported_at", "TEXT"),
         ("persist_delete_after", "TEXT"),
     ))
+    # (d) the marked default profile replaces the builtin named 'Default':
+    # at most one row carries it (the index); profiles.py keeps it at one
+    await _add_columns(db, "security_profiles", (
+        ("is_default", "INTEGER NOT NULL DEFAULT 0"),
+    ))
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_security_profiles_one_default "
+        "ON security_profiles(is_default) WHERE is_default = 1")
     # (c) project-level deny list beside the existing `hosts`. `hosts` stays
     # the allow list (allowlist mode) until WP2's migration moves it; renaming
     # it here would break egress.py, which WP1 does not own.
     await _add_columns(db, "egress_policy", (
         ("deny_hosts", "TEXT NOT NULL DEFAULT '[]'"),
+        # per-project LAN access (backend/lanaccess.py): OFF by default, and
+        # a JSON list of RFC1918 CIDRs / hosts / host:port the box may reach
+        ("lan_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("lan_allow", "TEXT NOT NULL DEFAULT '[]'"),
     ))
     # (b)/(proxy attribution) the guest end of each proxied connection and
     # which box it came from, so the process view can join a proxy row to a
@@ -806,6 +843,24 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     await _add_columns(db, "egress_pending", (
         ("box_id", "TEXT"),
     ))
+    # per-project "Runs in" (backend/vm/placement.py). No row, or mode
+    # 'profile', = the profile's box setting, exactly as before this table.
+    #   shared  the shared box whatever the profile says
+    #   own     the project's own box p-<slug> (runtime/image/mem_mb; NULL =
+    #           the profile's value)
+    #   join    another project's box, box_id (operator only, security event)
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS project_placement ("
+        " slug TEXT PRIMARY KEY,"
+        " mode TEXT NOT NULL DEFAULT 'profile'"
+        "   CHECK (mode IN ('profile','shared','own','join')),"
+        " runtime TEXT CHECK (runtime IS NULL OR runtime IN ('kvm','docker')),"
+        " image TEXT,"
+        " mem_mb INTEGER,"
+        " box_id TEXT,"
+        " set_by TEXT,"
+        " updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        " CHECK (mode <> 'join' OR box_id IS NOT NULL))")
 
 
 async def get_state(db: aiosqlite.Connection, key: str) -> str | None:
@@ -839,8 +894,8 @@ async def open_conversation(db: aiosqlite.Connection, *, project: str | None,
     `kind` tags the node for the run tree (chat/head/leader/subagent/scout/reader/
     agent/scheduled). `title` is stored verbatim as the summary (callers format
     their own prefixes). Pass commit=False when the caller adds a first message in
-    the same transaction and commits itself. Follow-ups (peak confirmation, the
-    opening user message) are the caller's, using the returned id.
+    the same transaction and commits itself. Follow-ups (the opening user
+    message) are the caller's, using the returned id.
 
     `locked` pins the binding: the turn uses this project (or no project at all,
     if `project` is None) instead of following whatever is loaded globally.

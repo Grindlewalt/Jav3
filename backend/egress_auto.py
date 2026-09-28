@@ -16,7 +16,7 @@ it on"), and security-boundary code, so the shape is conservative:
     random-looking labels; allow a small curated list of registries, CDNs and
     well-known APIs. Only when neither side matches is the model asked — ONE
     no-tools classification through Model.complete (budget-metered, own tiny
-    Budget, timeout, skipped in peak windows and when there is no key). Its
+    Budget, timeout, skipped when there is no key). Its
     `unsure` or any unparseable answer leaves the host waiting, as today.
   • An auto-allow is scoped to that one project (never the shared general
     list), exact-host, expires after egress_auto_ttl_days unless promoted, and
@@ -37,7 +37,7 @@ import aiosqlite
 from . import egress, profiles, security
 from .reviewer import _alerted_hosts
 from .agent.budget import Budget, BudgetExceeded, active_budget
-from .agent.model import ModelError, complete_text, in_peak_window
+from .agent.model import ModelError, complete_text
 from .anomaly import entropy_bits_per_char
 from .config import settings
 from .db import get_state, set_state
@@ -196,10 +196,8 @@ def parse_answer(out: str) -> tuple[str, str]:
 
 
 async def ask_model(host: str) -> tuple[str, str] | None:
-    """The model's guess, or None when it could not be asked (no key, peak
-    window, budget, timeout, error) — the caller leaves the host waiting."""
-    if in_peak_window():
-        return None
+    """The model's guess, or None when it could not be asked (no key,
+    budget, timeout, error) — the caller leaves the host waiting."""
     tok = active_budget.set(Budget(max_input=settings.egress_auto_budget_input,
                                    max_output=settings.egress_auto_budget_output))
     try:
@@ -228,7 +226,7 @@ async def get_mode(db: aiosqlite.Connection, slug: str | None = None) -> dict:
     The project's security profile gates it (DESIGN-BOXES (d)): a profile
     with `auto_handle` off never lets auto mode guess for its projects, even
     if the project or the global switch says on. With `auto_handle` on (all
-    four builtins, as migrated) the project value, else the global, decides —
+    migrated profiles and the setup default) the project value, else the global, decides —
     exactly the pre-profiles behaviour. Unattributed traffic is never guessed
     for: an auto-allow is scoped to one project and there is none."""
     glob = "on" if (await get_state(db, KEY)) == "on" else "off"

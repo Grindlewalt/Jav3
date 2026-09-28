@@ -199,7 +199,7 @@ async def test_deploy_agents_tool_wired_and_guarded(client, monkeypatch):
     mod = iu.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    async def fake_run_job(job_id, brief, project, *, peak=False,
+    async def fake_run_job(job_id, brief, project, *,
                            leaf_tools=None, title=""):
         # workers never get the spawn/deploy/create/schedule tools
         names = {s["function"]["name"] for s in (leaf_tools or [])}

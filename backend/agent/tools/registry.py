@@ -26,17 +26,15 @@ a bug we want to see.
 """
 import contextvars
 import importlib.util
-import inspect
 import json
 import re
-import traceback
 from pathlib import Path
 from typing import Awaitable, Callable
 
 import yaml
 
 from ...config import settings
-from . import imported
+from . import argcheck, imported
 
 # How much of a tool's TOOL.md body ships in its spec. Bounds a runaway body
 # while fitting the curated guidance the complex tools (spawn_agent, research,
@@ -300,19 +298,15 @@ async def dispatch(name: str, args: dict) -> str:
             return (f"[skill {name} loaded — follow these instructions now, "
                     f"using the arguments you passed: {json.dumps(args)}]\n{body}")
         return f"error: tool '{name}' is registered but has no handler"
+    # checked BEFORE the call, so only argument mismatches read as the model's
+    # mistake; a read-only tool runs with unknown arguments dropped (argcheck)
+    args, note, err = argcheck.prepare(name, handler, args,
+                                       read_only=name in read_only_names())
+    if err:
+        return err
     try:
-        # bind first so ONLY argument mismatches read as "bad arguments" —
-        # a TypeError raised inside the handler is a real fault, not the
-        # model's, and must keep its traceback
-        inspect.signature(handler).bind(**args)
-    except TypeError as e:
-        return (f"error: bad arguments for '{name}': {e}. Check the tool's "
-                "parameter schema and retry with corrected arguments.")
-    try:
-        return await handler(**args)
+        result = await handler(**args)
     except Exception as e:
-        # The loop must observe failures, not die on them — and the message
-        # should read as the first half of the fix, not just the fault.
-        return (f"error: {name} failed with {type(e).__name__}: {e}. Adjust "
-                "the arguments or try a different approach.\n"
-                f"{traceback.format_exc(limit=4)}")
+        # the loop must observe failures, not die on them
+        return argcheck.crash_message(name, e)
+    return result + note if note and isinstance(result, str) else result

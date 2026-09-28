@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from . import agenttree, bus
 from . import sse as feeds
 from .agent.loop import db_tool_sink
-from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
+from .agent.model import model
 from .vm.turn import run_agent_turn
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .agents_api import _read
@@ -43,7 +43,7 @@ messages_router = APIRouter(prefix="/api/messages", tags=["agents"],
 
 class RunAgent(BaseModel):
     task: str
-    confirm_peak: bool = False
+    confirm_peak: bool = False   # ignored; accepted so old clients don't 422
     # run in THIS project (workspace agent panels pass their slug) instead of
     # whatever project happens to be globally active — several agents can then
     # work different projects at once.
@@ -261,6 +261,18 @@ async def run_agent_headless(slug: str, task: str, active=_USE_DB, *,
 TEMP_LEAN_EXCLUDE = ("soul.md", "standing-memory", "user.md",
                      "all-projects.md", "agents-index", "secrets-index")
 
+# Appended to every headless run (plan items, spawn_agent, temp agents,
+# schedules): nobody is watching these turns live, so an agent that stops at
+# a diagnosis wastes the whole run (the 2026-09-27 benchmark-game plan).
+DELEGATED_DRIVE = """# Working unattended
+Nobody is watching this run, so nobody will unblock you: you finish the task
+or you hand back exactly how far you got. Push through obstacles yourself — a
+failing check is a bug to fix and re-run, a missing file or helper is one to
+write (a stub is fine; say so), an ambiguity is an assumption to make and state.
+After two identical failures, switch approach. Stopping at "the cause is X" is
+not a result. Only a credential, money, or a decision that is the operator's
+is a reason to stop; name it precisely when it is."""
+
 TEMP_REPORT_BACK = """# Temporary agent
 You exist only for this task; when you finish you are gone, and only two
 things survive you: the memory note you write and the final report you
@@ -313,9 +325,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
                         job_id: str | None = None, title: str | None = None,
                         on_open=None, on_event=None,
                         extra_tools: tuple[str, ...] = ()) -> dict:
-    """Shared engine for named and temp headless runs. Peak is auto-confirmed:
-    the caller (a schedule or Jav3 itself) already intended this, there's no
-    human to prompt. `active` pins the project context without disturbing the
+    """Shared engine for named and temp headless runs. `active` pins the project context without disturbing the
     operator's live session.
 
     Headless runs are subagents of something (a parent turn or a schedule), so
@@ -345,8 +355,8 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         # pin the run's project for its tools (host loop path) + its own children
         ptoken = runtime.active_project.set(active)
         cidtoken = runtime.conversation_id.set(conversation_id)
-        confirm_peak(conversation_id)
         system_prompt = await _agent_system_prompt(db, agent, active=active)
+        system_prompt = f"{system_prompt}\n\n{DELEGATED_DRIVE}"
         tools = _agent_tools(agent, await _project_autonomy(db, active))
         if extra_tools:
             tools = tools + _internal_specs(extra_tools)
@@ -421,13 +431,6 @@ async def run_agent(slug: str, body: RunAgent):
         title = f"[{agent['name']}] " + " ".join(body.task.split())[:40]
         conversation_id = await open_conversation(
             db, project=active, title=title, kind="agent", agent=slug)
-
-        if body.confirm_peak:
-            confirm_peak(conversation_id)
-        if in_peak_window() and not peak_confirmed(conversation_id):
-            raise HTTPException(
-                status_code=409, detail="peak_confirmation_required",
-                headers={"X-Conversation-Id": str(conversation_id)})
 
         await db.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",

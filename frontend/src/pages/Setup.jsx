@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
-import { Button, Input, Select } from '../components/index.js'
+import { Button, Checkbox, Input, Select } from '../components/index.js'
 
 // First run: the one page a fresh server shows before anyone can log in.
 // App.jsx routes here while GET /api/setup/status says `needed` and away once
 // it does not; the backend refuses every /api/setup call after the first user
 // exists, so this page is a door that closes behind the operator.
 //
-// Three steps on one sheet, no wizard chrome: the login, an optional model
-// provider (tested before anything is saved), finish. The provider list comes
+// Four steps on one sheet, no wizard chrome: the login, an optional model
+// provider (tested before anything is saved), the default security profile
+// (the one new projects use; /api/setup/profile says where projects can run
+// here and whether a default already exists), finish. The provider list comes
 // from /api/setup/providers, which serves PR1's catalogue when it exists; the
 // seed below is only for a server too old to answer at all.
 
@@ -22,6 +24,17 @@ const SEED = [
   { id: 'ollama', label: 'Ollama (local, no key)', needs_key: false },
 ]
 const MIN_PASSWORD = 8
+const SAFE = { network: 'ask', placement: 'shared', services: false, packages: false }
+const NETWORK = [
+  { value: 'ask', label: 'Ask me (blocked until I approve it)' },
+  { value: 'allow', label: 'Allow it' },
+  { value: 'off', label: 'No network at all' },
+]
+const WHERE = [
+  { value: 'shared', label: 'The shared box' },
+  { value: 'vm', label: 'Each project in its own VM' },
+  { value: 'container', label: 'Each project in its own container (lighter, less isolated)' },
+]
 
 // A hint, not a gate: the server enforces only the minimum length.
 function strength(pw) {
@@ -34,8 +47,19 @@ function strength(pw) {
   return { label: 'weak — a few unrelated words beat one clever one', tone: 'warn' }
 }
 
+// The one-time token from the setup link the installer printed
+// (…/setup?token=…). Kept for the tab in case the query is lost on a reload.
+function setupToken() {
+  const q = new URLSearchParams(window.location.search).get('token')
+  try {
+    if (q) sessionStorage.setItem('jav3-setup-token', q)
+    return q || sessionStorage.getItem('jav3-setup-token') || ''
+  } catch { return q || '' }
+}
+
 export default function Setup({ onDone }) {
   const navigate = useNavigate()
+  const [token] = useState(setupToken)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -46,12 +70,27 @@ export default function Setup({ onDone }) {
   const [test, setTest] = useState(null)    // {busy} | {ok, text}
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [profState, setProfState] = useState(null)   // {current, options, defaults}
+  const [prof, setProf] = useState(SAFE)
+  const [changeProf, setChangeProf] = useState(false)
 
   useEffect(() => {
     api('/api/setup/providers')
       .then((r) => setProviders(r.providers?.length ? r.providers : SEED))
       .catch(() => setProviders(SEED))
+    api('/api/setup/profile')
+      .then((r) => {
+        setProfState(r)
+        if (r.current?.choices) setProf(r.current.choices)
+        else if (r.defaults) setProf(r.defaults)
+      })
+      .catch(() => setProfState(null))      // an older server: it picks the safe default
   }, [])
+
+  const whereOk = (w) => profState?.options?.[w]?.available ?? (w === 'shared')
+  const whereOptions = WHERE.filter((w) => whereOk(w.value))
+  const whereMissing = WHERE.filter((w) => !whereOk(w.value) && profState?.options?.[w.value])
+  const editingProf = profState && (!profState.current || changeProf)
 
   const entry = providers?.find((p) => p.id === provider)
   const showBase = entry && (!entry.needs_key || entry.needs_base_url)
@@ -70,7 +109,7 @@ export default function Setup({ onDone }) {
     try {
       const r = await api('/api/setup/test', {
         method: 'POST',
-        body: JSON.stringify({ provider, api_key: apiKey, base_url: baseUrl }),
+        body: JSON.stringify({ provider, api_key: apiKey, base_url: baseUrl, token }),
       })
       const n = r.models_found?.length || 0
       setTest(r.ok ? { ok: true, text: `ok · ${n} model${n === 1 ? '' : 's'}` }
@@ -88,8 +127,9 @@ export default function Setup({ onDone }) {
     if (password !== confirm) { setError('the passwords do not match'); return }
     setBusy(true)
     try {
-      const body = { username, password }
+      const body = { username, password, token }
       if (provider) Object.assign(body, { provider, api_key: apiKey, base_url: baseUrl })
+      if (editingProf) Object.assign(body, { profile: prof, change_profile: changeProf })
       const r = await api('/api/setup', { method: 'POST', body: JSON.stringify(body) })
       onDone({ username: r.username })
       navigate('/', { replace: true })
@@ -109,6 +149,13 @@ export default function Setup({ onDone }) {
     <div className="setup-wrap">
       <form className="login setup" onSubmit={finish}>
         <h1>Jav3</h1>
+        {!token && (
+          <div className="error" role="alert">
+            Open the one-time setup link the installer printed (it ends in
+            /setup?token=…). On the server, <code>.venv/bin/python -m backend.cli
+            setup --status</code> prints it again.
+          </div>
+        )}
 
         <section className="setup-step">
           <h2><span className="setup-num">1</span>Create your login</h2>
@@ -154,6 +201,36 @@ export default function Setup({ onDone }) {
           )}
           <p className="field-hint setup-where">
             Keys are stored on this server, never in the sandbox VM.</p>
+        </section>
+
+        <section className="setup-step">
+          <h2><span className="setup-num">3</span>Security for new projects</h2>
+          {profState?.current && (
+            <>
+              <p className="field-hint">Default profile: {profState.current.summary}</p>
+              <Checkbox label="Change it" checked={changeProf}
+                        onChange={(e) => setChangeProf(e.target.checked)} />
+            </>
+          )}
+          {editingProf && (
+            <>
+              <Select label="When an agent reaches a new site" value={prof.network}
+                      onChange={(e) => setProf({ ...prof, network: e.target.value })}
+                      options={NETWORK} />
+              <Select label="Where projects run" value={prof.placement}
+                      onChange={(e) => setProf({ ...prof, placement: e.target.value })}
+                      options={whereOptions}
+                      hint={whereMissing.length ? whereMissing.map((w) =>
+                        `${w.value === 'vm' ? 'Own VM' : 'Own container'}: ${profState.options[w.value].reason || 'not available here'}`).join(' · ') : null} />
+              <Checkbox label="Agents may request services" checked={!!prof.services}
+                        onChange={(e) => setProf({ ...prof, services: e.target.checked })} />
+              <Checkbox label="Agents may request packages" checked={!!prof.packages}
+                        onChange={(e) => setProf({ ...prof, packages: e.target.checked })} />
+            </>
+          )}
+          <p className="field-hint setup-where">
+            This becomes the default profile; change it or add others later under
+            Security &gt; Profiles.</p>
         </section>
 
         {error && <div className="error" role="alert">{error}</div>}

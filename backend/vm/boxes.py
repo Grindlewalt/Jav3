@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
 import socket
 import time
@@ -188,6 +189,14 @@ _TRANSPORTS: dict[str, type[Transport]] = {"kvm": VsockTransport,
 
 # --- the record -------------------------------------------------------------
 
+def host_ram_mb() -> int | None:
+    """This machine's physical RAM (the /vms budget bar used a hardcoded 4 GB,
+    right only on the Pi). None where it can't be read."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1024 * 1024)
+    except (ValueError, OSError, AttributeError):
+        return None
+
 @dataclass
 class Box:
     """One box. Addressing fields are fixed at allocation and never change
@@ -213,6 +222,11 @@ class Box:
     ctl: Any = field(default=None, repr=False, compare=False)
     # (variant, version) the running guest booted on; None until a boot
     booted_image: tuple[str, int | None] | None = field(default=None, compare=False)
+    # project boxes: the OTHER projects that have run a turn here (placement
+    # "join"). Kept for the box's life: once non-empty the egress proxy
+    # attributes this box by its bound turn, like the shared box, never by
+    # `project` alone (placement.py, "Join").
+    joined: set = field(default_factory=set, compare=False)
 
     @property
     def transport(self) -> Transport:
@@ -258,7 +272,7 @@ class Box:
                 "cid": self.cid, "runtime": self.runtime,
                 "service_id": self.service_id, "placement": self.placement,
                 "image": {"variant": self.image[0], "version": self.image[1]},
-                "mem_mb": self.mem_mb,
+                "mem_mb": self.mem_mb, "joined": sorted(self.joined),
                 "net": {"tap": self.tap, "host_ip": self.host_ip,
                         "guest_ip": self.guest_ip}}
 
@@ -359,6 +373,7 @@ class Registry:
     def __init__(self):
         self._boxes: dict[str, Box] = {}
         self._op_box: dict[str, str] = {}
+        self._op_project: dict[str, str | None] = {}
 
     # lookup ---------------------------------------------------------------
     def shared(self) -> Box:
@@ -409,7 +424,8 @@ class Registry:
                 "ram_mb_overhead_per_kvm_box": settings.vm_kvm_box_overhead_mb,
                 "boxes": len(boxes), "boxes_cap": settings.vm_max_boxes,
                 "project_boxes": sum(b.kind == "project" for b in boxes),
-                "project_boxes_cap": settings.vm_max_project_boxes}
+                "project_boxes_cap": settings.vm_max_project_boxes,
+                "host_ram_mb": host_ram_mb()}
 
     def _check_caps(self, kind: str, mem_mb: int, runtime: str = "kvm") -> None:
         mem_mb = ram_cost(mem_mb, runtime)
@@ -484,16 +500,35 @@ class Registry:
             for op, bid in list(self._op_box.items()):
                 if bid == box_id:
                     self._op_box.pop(op, None)
+                    self._op_project.pop(op, None)
         return box
 
     # op binding --------------------------------------------------------------
-    def bind_op(self, op_id: str, box: Box) -> None:
+    def bind_op(self, op_id: str, box: Box, project: str | None = None) -> None:
         """Record that `op_id`'s turn runs in `box` (set by guest_turn). The
-        gateway refuses an op that arrives from a different box."""
+        gateway refuses an op that arrives from a different box. `project` is
+        the turn's project: a joined box runs one project's turns at a time
+        and a project's turns stay in the box it is running in."""
         self._op_box[op_id] = box.id
+        self._op_project[op_id] = project
 
     def unbind_op(self, op_id: str) -> None:
         self._op_box.pop(op_id, None)
+        self._op_project.pop(op_id, None)
+
+    def live_box(self, project: str) -> Box | None:
+        """The box a turn of `project` is bound to right now, or None."""
+        for op, bid in reversed(list(self._op_box.items())):
+            if self._op_project.get(op) == project:
+                b = self.get(bid)
+                if b is not None:
+                    return b
+        return None
+
+    def other_projects(self, box: Box, project: str | None) -> set:
+        """Projects other than `project` with a turn bound to `box`."""
+        return {self._op_project.get(op) for op, bid in self._op_box.items()
+                if bid == box.id} - {project}
 
     def op_box(self, op_id: str) -> str | None:
         return self._op_box.get(op_id)
@@ -502,6 +537,7 @@ class Registry:
         """Tests only: forget everything (settings may have changed)."""
         self._boxes.clear()
         self._op_box.clear()
+        self._op_project.clear()
 
 
 registry = Registry()
@@ -519,6 +555,7 @@ budget = registry.budget
 bind_op = registry.bind_op
 unbind_op = registry.unbind_op
 op_box = registry.op_box
+live_box = registry.live_box
 
 
 def all_boxes() -> list[Box]:
@@ -533,7 +570,7 @@ def enabled() -> bool:
 
 async def project_profile(slug: str) -> dict | None:
     """The security profile row for a project (projects.profile_id, falling
-    back to the builtin named 'Default'), or None before WP2 has migrated."""
+    back to the one marked is_default, created on first use if none exists)."""
     from ..db import get_db
     db = await get_db()
     try:
@@ -542,9 +579,11 @@ async def project_profile(slug: str) -> dict | None:
                 "ON sp.id = p.profile_id WHERE p.slug = ?", (slug,)) as cur:
             row = await cur.fetchone()
         if row is None:
-            async with db.execute(
-                    "SELECT * FROM security_profiles WHERE name = 'Default' "
-                    "AND builtin = 1") as cur:
+            # the marked default; the first use creates it when setup did not
+            from .. import profiles
+            p = await profiles.default(db)
+            async with db.execute("SELECT * FROM security_profiles WHERE id = ?",
+                                  (p["id"],)) as cur:
                 row = await cur.fetchone()
         return dict(row) if row is not None else None
     finally:
@@ -584,37 +623,113 @@ def follow_profile_image(box: Box, variant: str | None) -> bool:
 
 
 async def for_project(slug: str | None) -> Box:
-    """The box a turn of project `slug` runs in.
+    """The box a turn of project `slug` runs in (placement.py).
 
-    Flag off, no slug, or a profile without `separate_box`: the shared box.
-    Otherwise the project's own box (allocated on first use). A profile that
-    asks for a separate box and cannot get one (caps) raises BoxCapError: a
-    turn never silently falls back to a weaker boundary than its profile set."""
+    Flag off or no slug: the shared box. A project with a turn bound to a box
+    right now keeps using it (nested and concurrent turns reuse that box's
+    workspace copy; a changed placement applies from the next turn after).
+    Otherwise its placement: its own setting, else its profile's default.
+
+    shared   the shared box. (Profile default only: an existing p-<slug> the
+             operator warmed up is still used, as before placements.)
+    own      p-<slug>, allocated on first use with the placement's runtime /
+             image / memory. Caps raise BoxCapError after idle project boxes
+             have given way: a turn never silently falls back to a weaker
+             boundary than it was given.
+    join     another project's box (Box.joined records it for attribution);
+             re-created from its owner's placement if it was reaped, refused
+             (BoxError) if the owner no longer runs in a box of its own."""
     if not settings.vm_boxes_enabled or not slug:
         return registry.shared()
+    live = registry.live_box(slug)
+    if live is not None:
+        return live
+    from . import placement
+    eff = await placement.effective(slug)
+    if eff["mode"] == "join":
+        return await _join_box(slug, eff["box_id"])
     existing = registry.get(f"p-{slug}") if _SLUG_RE.match(slug) else None
-    if existing is not None:
-        prof = await project_profile(slug)
-        if prof and prof.get("separate_box"):
-            follow_profile_image(existing, prof.get("box_image"))
-        return existing
-    prof = await project_profile(slug)
-    if not prof or not prof.get("separate_box"):
+    if eff["mode"] == "shared":
+        if existing is not None and eff["source"] == "profile":
+            return existing
         return registry.shared()
+    return await _own_box(slug, eff)
+
+
+def _bound(box: Box) -> bool:
+    return any(bid == box.id for bid in registry._op_box.values())
+
+
+async def _own_box(slug: str, eff: dict) -> Box:
+    existing = registry.get(f"p-{slug}")
+    if existing is not None:
+        ctl = existing.ctl
+        if (existing.runtime != (eff.get("runtime") or "kvm") and not _bound(existing)
+                and not (ctl is not None and ctl.running())):
+            # a stopped, idle box on the old runtime: disposable, re-made below
+            await destroy(existing)
+        else:
+            follow_profile_image(existing, eff.get("image"))
+            return existing
     # an idle project box holding the only slot (or the RAM) gives way to a
     # turn that needs one: it is disposable, exactly what the idle reaper
     # would do a few minutes later
     for _ in range(settings.vm_max_boxes + 1):
         try:
             return registry.allocate(
-                "project", project=slug, variant=prof.get("box_image") or "main",
-                mem_mb=prof.get("box_mem_mb"), runtime=prof.get("box_runtime") or "kvm")
+                "project", project=slug, variant=eff.get("image") or "main",
+                mem_mb=eff.get("mem_mb"), runtime=eff.get("runtime") or "kvm")
         except BoxCapError:
             victim = idle_project_box(exclude=f"p-{slug}")
             if victim is None:
                 raise
             await destroy(victim)
     raise BoxCapError("no box could be freed")
+
+
+async def _join_box(slug: str, box_id: str) -> Box:
+    from . import placement
+    owner = placement.owner_of(box_id)
+    box = registry.get(box_id)
+    if box is None and owner:
+        o = await placement.effective(owner)
+        if o["mode"] != "own":
+            raise BoxError(f"{slug} is set to run in {box_id}, which is gone, and "
+                           f"{owner} no longer runs in a box of its own: pick "
+                           f"another box for {slug} (Runs in)")
+        box = await _own_box(owner, o)
+    if box is None or box.kind != "project":
+        raise BoxError(f"{slug} cannot join {box_id}: not a project's turn box")
+    box.joined.add(slug)
+    return box
+
+
+JOIN_WAIT_SECONDS = 600.0
+
+
+async def wait_turn_slot(box: Box, slug: str | None) -> Box:
+    """A joined box runs one project's turns at a time, so its proxy can
+    attribute traffic to the one project whose turn is live. Waits while a
+    turn of another project is bound to `box`; refuses (BoxError) after
+    JOIN_WAIT_SECONDS. Returns the box to use (re-resolved if it vanished
+    while waiting). The caller binds its op with NO await after this."""
+    if box.is_shared or not slug or not box.joined:
+        return box
+    deadline = time.monotonic() + JOIN_WAIT_SECONDS
+    while True:
+        if registry.get(box.id) is not box:
+            box = await for_project(slug)
+            if box.is_shared or not box.joined:
+                return box
+        others = registry.other_projects(box, slug)
+        if not others:
+            return box
+        if time.monotonic() >= deadline:
+            raise BoxError(
+                f"{box.id} is running a turn of {', '.join(sorted(map(str, others)))}; "
+                "a joined box runs one project's turns at a time "
+                f"(waited {int(JOIN_WAIT_SECONDS)} s)")
+        await asyncio.sleep(0.2)
 
 
 def idle_project_box(exclude: str | None = None) -> Box | None:

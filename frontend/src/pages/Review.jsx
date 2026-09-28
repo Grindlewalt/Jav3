@@ -114,7 +114,7 @@ export function ReviewQueue({ slug }) {
   const rejectPkg = usePackageReject(loadBoxReqs)
   const placementOf = (proj) => {
     const p = profiles.find((x) => (x.projects || []).includes(proj))
-      || profiles.find((x) => x.builtin && /^default$/i.test(x.name))
+      || profiles.find((x) => x.is_default)
     return p?.service_placement || ''
   }
 
@@ -258,9 +258,21 @@ export function ReviewQueue({ slug }) {
                   {reqs.map((r) => (
                     <li key={r.id}>
                       <span className="tag new">#{r.id}</span>
-                      <span className="grow ellipsis" title={r.message}>{r.message}</span>
+                      {r.kind === 'push' && <span className="tag">PR</span>}
+                      <span className="grow ellipsis"
+                            title={r.kind === 'push' && r.summary
+                              ? `${r.message}\n\n${r.branch}\n${r.summary}` : r.message}>
+                        {String(r.message || '').split('\n')[0]}
+                        {r.kind === 'push' && r.summary && (
+                          <span className="dim small"> · {r.summary.split('\n').pop()}</span>)}
+                      </span>
+                      {r.kind === 'push' && r.pr_url && (
+                        <a className="win-btn" href={r.pr_url} target="_blank" rel="noreferrer"
+                           title={`review the diff in Gitea (${r.branch})`}>diff ↗</a>)}
                       {r.error && <span className="tag error" title={r.error}>retry</span>}
-                      <button className="win-btn ok" title="approve: commit + push"
+                      <button className="win-btn ok"
+                              title={r.kind === 'push' ? 'approve: merge the pull request into main'
+                                : 'approve: commit + push'}
                               disabled={busy} onClick={() => gitAct(s, r.id, 'approve')}>✓</button>
                       <button className="win-btn" title="reject" disabled={busy}
                               onClick={() => gitAct(s, r.id, 'reject')}>✕</button>

@@ -10,6 +10,9 @@ parameters:
     wait_seconds:
       type: integer
       description: How long to wait for a change before answering (0 = answer now; capped at 600). Use a few minutes while the run is going.
+    item:
+      type: string
+      description: One item id (e.g. i7) for its full detail — brief, whole result, last error, earlier attempts, your guidance. The overview clips each item's result to one line.
 ---
 `enabled: false` keeps this out of ordinary chats, which are told not to wait
 on a plan they launch; chat.py grants it to orchestrator conversations only.

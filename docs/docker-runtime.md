@@ -151,7 +151,7 @@ vm_api.py).
 
 ## 6. Images
 
-`vm/docker/Dockerfile`: debian bookworm-slim, the same toolchain as the KVM
+`vm/docker/Dockerfile`: debian trixie-slim (Debian 13, as the KVM image), the same toolchain as the KVM
 golden image, `tini`, user 10001, setuid bits stripped, and the baked
 entrypoint only. The guest runtime is pushed at start, as in KVM. It builds
 with BuildKit (`COPY --chmod`). Variants: `docker_recipe.render_dockerfile(recipe)`

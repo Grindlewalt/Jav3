@@ -1,5 +1,5 @@
 import {
-  useCallback, useContext, useEffect, useLayoutEffect, useRef, useState,
+  Fragment, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState,
 } from 'react'
 import { api, chatStream, tailStream } from '../api.js'
 import { NavSlotContext } from '../nav.jsx'
@@ -11,6 +11,10 @@ import ModelPicker from '../ModelPicker.jsx'
 import { AskPanel, PermissionModeSelect, useOperatorAsks, usePermissionMode } from '../AskUser.jsx'
 import ChatGroups from '../ChatGroups.jsx'
 import { useSlash } from '../slash/useSlash.jsx'
+import { subscribe } from '../events.js'
+import { useApprovals, placeApprovals } from '../shell/approvals.js'
+import ApprovalRow from '../shell/ApprovalRow.jsx'
+import RunsTab from '../shell/RunsTab.jsx'
 
 // Empty-state greeting, swapped in per new chat. Mostly not about the time of
 // day — a handful per period nod to it (capped at 5) so it doesn't read as a
@@ -174,6 +178,8 @@ function ProjectPicker({ projects, mode, value, global: loaded, onPick }) {
 //   beside           rendered after <main>, inside .chat-layout (the windows)
 //   onProjectChange  called with the slug this chat's work goes to, or null
 //   controlRef       filled with { pickProject(slug), openProject(slug) }
+const NEEDS_POLL_MS = 15000
+
 export default function Chat({
   toolbarExtra = null, beside = null, onProjectChange, controlRef,
 } = {}) {
@@ -194,11 +200,12 @@ export default function Chat({
   // Doesn't repaint the GUI — the toolbar switch and the composer placeholder
   // carry it.
   const [temporary, setTemporary] = useState(false)
-  // draft parked on a peak-pricing 409 until the operator answers in-page.
-  // This must NOT be window.confirm: the iOS home-screen app suppresses
-  // blocking dialogs, so confirm() returns false without ever showing and
-  // every send silently bounced back into the bar.
-  const [peakAsk, setPeakAsk] = useState(null)
+  // the multi-agent jobs this chat launched (/messages `jobs`), and whether
+  // the Runs view is standing in for the transcript
+  const [chatJobs, setChatJobs] = useState([])
+  const [runsView, setRunsView] = useState(false)
+  // bumped when something may have joined the approval queue (see below)
+  const [needsPoke, setNeedsPoke] = useState(0)
   const asks = useOperatorAsks(conversationId)   // ask_user / permission asks
   const [permMode, setPermMode] = usePermissionMode(conversationId)
   // on a phone the list is an overlay, so it starts closed unless the operator
@@ -373,11 +380,12 @@ export default function Chat({
   async function openConversation(id, { resume = false } = {}) {
     tailAbort.current?.abort()
     setTemporary(false)   // saved chats always persist
-    setPeakAsk(null)
     if (!resume) closeSideOnPhone()
     setConversationId(id)
+    setChatJobs([])
     const r = await api(`/api/conversations/${id}/messages`)
     setMessages(r.messages)
+    setChatJobs(r.jobs || [])
     if (!r.running) return
     // a turn is still executing server-side — re-attach and watch it finish,
     // seeding the placeholder with the tool calls it already made
@@ -403,10 +411,11 @@ export default function Chat({
   function newConversation() {
     tailAbort.current?.abort()
     setBusy(false)
-    setPeakAsk(null)
     closeSideOnPhone()
     setConversationId(null)
     setMessages([])
+    setChatJobs([])
+    setRunsView(false)
     setPendingProject('')
     setPendingMode('follow')
     setTemporary(false)
@@ -482,7 +491,7 @@ export default function Chat({
     try { await api(`/api/chat/${id}/stop`, { method: 'POST' }) } catch { /* already done */ }
   }
 
-  async function send(confirmPeak = false, resend = null) {
+  async function send(resend = null) {
     const text = (resend ?? input).trim()
     if (!text || busy) return
     // the orb is on screen only while the chat is empty — grab where it is
@@ -496,7 +505,7 @@ export default function Chat({
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
     try {
       await chatStream(
-        { message: text, conversation_id: conversationId, confirm_peak: confirmPeak,
+        { message: text, conversation_id: conversationId,
           ephemeral: temporary,
           // only meaningful when the conversation is being created by this turn
           ...(conversationId ? {} : { project: pendingProject || null,
@@ -505,15 +514,17 @@ export default function Chat({
         handleTurnEvent,
       )
       api('/api/conversations').then((r) => setConversations(r.conversations))
+      // a turn may have launched research, a team or a plan run: refresh the
+      // Runs view's "this chat" list (a temporary chat has nothing to fetch)
+      const done = conversationId ?? liveId.current
+      if (done && !temporary) {
+        api(`/api/conversations/${done}/messages`)
+          .then((r) => setChatJobs(r.jobs || [])).catch(() => {})
+      }
     } catch (err) {
-      // drop the two optimistic messages; a peak-retry re-adds them
+      // drop the two optimistic messages
       setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the confirmed retry re-sends the
-        // parked draft from scratch
-        setPeakAsk(text)
-      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+      if (err.status === 409 && err.detail === 'turn_in_progress') {
         setInput(text)
         setMessages((m) => [...m, { role: 'error',
           content: 'a turn is still running in this chat — wait for it to finish' }])
@@ -569,10 +580,41 @@ export default function Chat({
     </label>
   )
 
+  // What is waiting on the operator in this chat's scope, inline in the
+  // transcript as /shell shows it (shell/approvals.js). The scope is the
+  // project this chat's work goes to, else a saved chat's own `chat-<id>`
+  // store. The queue reloads on open, every few seconds while a turn runs,
+  // and on `poke`: an egress/notices event on the ONE shared stream
+  // (events.js), plus a slow poll while the tab is visible for git and plan
+  // requests, which have no topic of their own. Never a new EventSource.
+  const approvalScope = effectiveProject
+    || (conversationId && !temporary ? `chat-${conversationId}` : null)
+  useEffect(() => {
+    if (!approvalScope) return undefined
+    const bump = () => setNeedsPoke((n) => n + 1)
+    const offs = [subscribe('egress', bump), subscribe('notices', bump)]
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') bump()
+    }, NEEDS_POLL_MS)
+    return () => { offs.forEach((off) => off()); clearInterval(t) }
+  }, [approvalScope])
+  const approvals = useApprovals({
+    scope: approvalScope, isProject: !!effectiveProject, busy, poke: needsPoke,
+  })
+  const { after: approvalsAfter, tail: approvalsTail } =
+    placeApprovals(messages, approvals.items)
+  const approvalRows = (list) => list.map((a) => (
+    <ApprovalRow key={a.key} a={a} acting={approvals.acting} onDecide={approvals.decide} />
+  ))
+  // Runs is offered wherever there can be runs: a saved chat, or a project
+  const runsOffered = !!(conversationId || effectiveProject) && !temporary
+  const showRuns = runsView && runsOffered
+  const runningJobs = chatJobs.filter((j) => j.running).length
+
   const slash = useSlash({
     input, setInput, busy, conversationId, turnId: () => conversationId ?? liveId.current,
     conversations, projects, active, pendingProject, messages, setMessages,
-    temporary, setTemporary, send: (t) => send(false, t), newChat: newConversation,
+    temporary, setTemporary, send: (t) => send(t), newChat: newConversation,
     openChat: openConversation, openList: () => setSideOpen(true), stop,
     pickProject: (mode, slug) => (conversationId ? assignProject(mode, slug)
       : (setPendingMode(mode), setPendingProject(slug || ''))),
@@ -625,11 +667,29 @@ export default function Chat({
                   read as broken while crowding the phone toolbar. */}
               {!conversationId && tempSwitch}
               <PermissionModeSelect cid={conversationId} value={permMode} onChange={setPermMode} />
+              {runsOffered && (
+                <button type="button" className={`chat-runs-toggle${showRuns ? ' on' : ''}`}
+                        aria-pressed={showRuns}
+                        title={showRuns ? 'back to the conversation'
+                          : 'research, agent teams and plan runs around this chat'}
+                        onClick={() => setRunsView((v) => !v)}>
+                  {showRuns ? 'Chat' : 'Runs'}
+                  {!showRuns && runningJobs > 0 && (
+                    <span className="chat-runs-count">{runningJobs}</span>)}
+                </button>
+              )}
               {toolbarExtra}
             </div>
           </div>
         )}
-        <div className="messages" ref={scrollRef}>
+        {showRuns && (
+          <div className="chat-runs-view">
+            <RunsTab project={effectiveProject} chatJobs={chatJobs} />
+          </div>
+        )}
+        {/* hidden, not unmounted, under the Runs view: the scroll position
+            and the streaming placeholder survive a look at the runs */}
+        <div className="messages" ref={scrollRef} hidden={showRuns}>
           {messages.length === 0 ? (
             <div className="chat-empty">
               <div className="orb" ref={orbRef} />
@@ -641,6 +701,9 @@ export default function Chat({
                   {tempSwitch}
                 </div>
               )}
+              {approvalsTail.length > 0 && (
+                <div className="chat-approvals">{approvalRows(approvalsTail)}</div>
+              )}
             </div>
           ) : (
             <div className="thread">
@@ -651,25 +714,19 @@ export default function Chat({
                     <MessageBody m={m} />
                   </> : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
                 </div>
-              ))}
+              )).map((row, i) => (approvalsAfter.has(i)
+                ? <Fragment key={i}>{row}<div className="chat-approvals">
+                    {approvalRows(approvalsAfter.get(i))}</div></Fragment>
+                : row))}
+              {approvalsTail.length > 0 && (
+                <div className="chat-approvals">{approvalRows(approvalsTail)}</div>
+              )}
             </div>
           )}
         </div>
         <AskPanel asks={asks} cid={liveId.current ?? conversationId} />
         <form className="composer" onSubmit={(e) => { e.preventDefault(); slash.submit() || send() }}>
           <div className="composer-glow" ref={glowRef} />
-          {peakAsk && (
-            <div className="peak-ask" role="alertdialog"
-                 aria-label="peak pricing confirmation">
-              <span className="grow">Peak pricing right now — this reply costs 2×.</span>
-              <button type="button" className="ghost"
-                      onClick={() => { setInput(peakAsk); setPeakAsk(null) }}>
-                Cancel</button>
-              <button type="button"
-                      onClick={() => { const t = peakAsk; setPeakAsk(null); send(true, t) }}>
-                Send anyway</button>
-            </div>
-          )}
           {slash.popup}
           <div className={`composer-inner${multiline ? ' multi' : ''}`}>
             <textarea

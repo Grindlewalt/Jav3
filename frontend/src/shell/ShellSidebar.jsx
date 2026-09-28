@@ -106,7 +106,7 @@ export default function ShellSidebar({
           </LiveSection>
         )}
         {side && (
-          <ChatGroups conversations={side.conversations} folders={side.folders}
+          <ChatGroups showActive={false} conversations={side.conversations} folders={side.folders}
                       projects={side.projects} activeId={activeId}
                       projectHref={(p) => `/shell/p/${encodeURIComponent(p.slug)}`}
                       onOpen={onOpen} onRename={onRename} onDelete={onDelete}

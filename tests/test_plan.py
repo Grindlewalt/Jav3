@@ -289,7 +289,8 @@ async def test_runner_checks_items_off_retries_and_blocks(client, tmp_env, monke
     assert "i4 failed" in items["i5"]["last_error"]
     # what the briefs carried: the dependency's result, and the retry's reason
     assert "dug at code/ground.py" in seen["i2"][0]
-    assert "Previous attempt" in seen["i2"][1] and "wet" in seen["i2"][1]
+    assert "Earlier attempts" in seen["i2"][1] and "wet" in seen["i2"][1]
+    assert items["i2"]["history"][0]["outcome"] == "failed"
     assert "item:" in seen["i1"][0] and "plan_report" in seen["i1"][0]
 
     db = await get_db()
@@ -429,6 +430,48 @@ async def test_siblings_talk_by_item_id_and_leave_notes(client, monkeypatch):
     assert "item:i1" not in roster[0], "the roster excludes the sender itself"
 
 
+async def test_the_roster_teaches_item_addresses_for_siblings_that_are_not_live(
+        client, monkeypatch):
+    """The send_message discovery gap that made a plan item conclude it had
+    nobody to talk to.
+
+    A plan spawns items as their dependencies clear, so when one item asks "who
+    can I reach?" its siblings are usually NOT co-live — the live-turn roster
+    shows only whatever happens to be running (often just the operator's chat).
+    `item:<id>` reaches them anyway (running -> delivered; todo -> a note), so
+    the roster must list every sibling item's address from the plan file, not
+    only the live envelopes."""
+    from backend.db import open_conversation
+    await _put(client, [{"title": "groundwork", "brief": "g"},
+                        {"title": "build on it", "brief": "b", "depends_on": ["i1"]},
+                        {"title": "and more", "brief": "m", "depends_on": ["i1"]}])
+    db = await get_db()
+    try:
+        # only i1 is live; i2 and i3 have not started (they depend on i1) and so
+        # are absent from the broker registry entirely
+        cid = await open_conversation(db, project=SLUG, title="[item i1]", kind="agent")
+        plan_mod._live_items[cid] = {"project": SLUG, "item_id": "i1",
+                                     "title": "groundwork"}
+        try:
+            env = broker.TurnEnvelope(op_id=f"t:{cid}", conversation_id=cid,
+                                      active_project=SLUG)
+            broker.register_turn(env)
+            try:
+                out = await agentmsg.send(db, sender_cid=cid, to="?", body="anyone?")
+            finally:
+                broker.release_turn(env.op_id)
+        finally:
+            plan_mod._live_items.pop(cid, None)
+    finally:
+        await db.close()
+    err = out["error"]
+    assert "item:i2" in err and "item:i3" in err, (
+        "a not-yet-live sibling has no address in the roster, so the model "
+        f"cannot learn to reach it: {err}")
+    assert "[todo]" in err, "the roster shows each item's status"
+    assert "item:i1" not in err, "the sender's own item is excluded"
+
+
 async def test_stop_and_operator_edits_while_running(client, monkeypatch):
     await _put(client, [{"title": "forever", "brief": "f"}, {"title": "also forever", "brief": "g"}],
                max_concurrent=2)
@@ -525,8 +568,8 @@ async def test_orchestrate_tool_plans_and_starts(client, monkeypatch):
     monkeypatch.setattr(plan_mod, "complete_text", fake_complete)
     started = []
 
-    async def fake_start(slug, *, peak=False):
-        started.append((slug, peak))
+    async def fake_start(slug):
+        started.append(slug)
         return {"job_id": "j", "root_id": 7}
     monkeypatch.setattr(plan_mod, "start_run", fake_start)
 
@@ -535,7 +578,7 @@ async def test_orchestrate_tool_plans_and_starts(client, monkeypatch):
         out = await mod.run(dump="do one then two", run=False)
         assert "2 items" in out and "- i2 [todo] two (after i1)" in out and not started
         out = await mod.run(dump="do one then two")
-        assert started == [(SLUG, True)] and "head conversation 7" in out
+        assert started == [SLUG] and "head conversation 7" in out
         etok = runtime.ephemeral.set(True)
         try:
             out = await mod.run(dump="do it quietly")
@@ -544,3 +587,173 @@ async def test_orchestrate_tool_plans_and_starts(client, monkeypatch):
         assert out.startswith("error:") and "incognito" in out and len(started) == 1
     finally:
         runtime.active_project.reset(tok)
+
+
+# --- plan_fix: the orchestrator repairs its own plan ---------------------------
+
+async def test_fix_retries_with_guidance_and_relaunches(client, tmp_env, monkeypatch):
+    await _put(client, [{"title": "root", "brief": "r"},
+                        {"title": "leaf", "brief": "l", "depends_on": ["i1"]}],
+               attempts_max=1, max_concurrent=2)
+    seen: dict = {}
+
+    async def i1(cid, attempt, text):
+        if "use the stub" not in text:
+            await _report(cid, "failed", "fixture.json missing; wrote half the loader")
+            return "failed"
+        await _report(cid, "done", "loader works")
+        return "ok"
+
+    async def i2(cid, attempt, text):
+        await _report(cid, "done", "leaf built")
+        return "ok"
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted({"i1": i1, "i2": i2}, seen))
+
+    async def fake_synth(system, user, temperature=0.3):
+        return "ROLLUP"
+    monkeypatch.setattr(plan_mod, "complete_text", fake_synth)
+
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    items = _by_id(plan_mod.load(SLUG))
+    assert items["i1"]["status"] == "failed" and items["i2"]["status"] == "blocked"
+
+    # a bare retry is refused: it would fail the same way
+    assert (await plan_mod.fix(SLUG, action="retry", item="i1")).startswith("error:")
+    out = await plan_mod.fix(SLUG, action="retry", item="i1",
+                             guidance="create fixture.json yourself and use the stub")
+    assert "Relaunched" in out and "i2" in out            # the blocked leaf is released
+    await _wait_run()
+    items = _by_id(plan_mod.load(SLUG))
+    assert items["i1"]["status"] == "done" and items["i2"]["status"] == "done"
+    assert items["i1"]["fixes"] == 1
+    retry_text = seen["i1"][-1]
+    assert "Orchestrator guidance" in retry_text and "use the stub" in retry_text
+    assert "Earlier attempts" in retry_text and "half the loader" in retry_text
+
+
+async def test_fix_edit_add_skip_and_cap(client, tmp_env, monkeypatch):
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"}])
+    out = await plan_mod.fix(SLUG, action="add", title="stub the api", brief="write api.js",
+                             depends_on=["i1"], run=False)
+    assert out.startswith("added i3")
+    assert (await plan_mod.fix(SLUG, action="add", title="x", depends_on=["i9"],
+                               run=False)).startswith("error:")
+    assert "edited" in await plan_mod.fix(SLUG, action="edit", item="i2", brief="better",
+                                          run=False)
+    assert "skipped" in await plan_mod.fix(SLUG, action="skip", item="i1",
+                                           guidance="moot", run=False)
+    items = _by_id(plan_mod.load(SLUG))
+    assert items["i2"]["brief"] == "better" and items["i1"]["status"] == "skipped"
+    assert items["i3"]["depends_on"] == ["i1"]
+    for n in range(plan_mod.MAX_FIXES):
+        await plan_mod.fix(SLUG, action="retry", item="i2", guidance=f"try {n}", run=False)
+    capped = await plan_mod.fix(SLUG, action="retry", item="i2", guidance="again", run=False)
+    assert capped.startswith("error:") and "Change the approach" in capped
+    assert (await plan_mod.fix(SLUG, action="nope")).startswith("error:")
+
+
+def test_items_get_the_plan_item_round_cap(tmp_env):
+    # 12 subagent rounds went entirely on recon in the Voxelcraft run
+    plan = plan_mod.empty_plan(title="t")
+    it = plan_mod.new_item(plan, title="build")
+    assert plan_mod._item_agent(plan, it)["max_iterations"] == settings.plan_item_max_iterations
+    assert "tool rounds" in plan_mod._item_task(plan, it, [])
+    plan["max_iterations"] = 7                      # an explicit plan cap still wins
+    assert plan_mod._item_agent(plan, it)["max_iterations"] == 7
+
+
+async def test_fix_during_the_closing_report_relaunches(client, tmp_env, monkeypatch):
+    """2026-09-27: plan_fix calls landing while a finished run wrote its
+    closing report were told "the live run picks it up"; nothing did, and the
+    relaunch ran zero items. A fix during teardown must wait and relaunch."""
+    await _put(client, [{"title": "a", "brief": "a"}], attempts_max=1)
+    seen: dict = {}
+    calls = {"n": 0}
+
+    async def i1(cid, attempt, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await _report(cid, "failed", "first try")
+            return "failed"
+        await _report(cid, "done", "second try")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted({"i1": i1}, seen))
+    gate = asyncio.Event()
+
+    async def slow_synth(system, user, temperature=0.3):
+        await gate.wait()
+        return "ROLLUP"
+    monkeypatch.setattr(plan_mod, "complete_text", slow_synth)
+    monkeypatch.setattr(plan_mod, "FIX_TEARDOWN_WAIT", 5.0)
+
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    for _ in range(200):                      # the drive loop has finished...
+        if SLUG in plan_mod._drive_began and SLUG not in plan_mod._driving:
+            break
+        await asyncio.sleep(0.01)
+    assert plan_mod.is_running(SLUG)          # ...but the run is writing its report
+    fix = asyncio.create_task(plan_mod.fix(SLUG, action="retry", item="i1",
+                                           guidance="do it again"))
+    await asyncio.sleep(0.05)
+    gate.set()
+    out = await fix
+    assert "Relaunched" in out, out
+    await _wait_run()
+    assert _by_id(plan_mod.load(SLUG))["i1"]["status"] == "done"
+
+
+async def test_status_is_compact_and_item_gives_detail(client, tmp_env):
+    await _put(client, [{"title": f"t{n}", "brief": f"b{n}"} for n in range(22)])
+    async with plan_mod.edit(SLUG) as p:
+        for it in p["items"]:
+            it["result_summary"] = "x" * 2000
+    out = await plan_mod.status(SLUG)
+    assert "i22" in out and len(out) < 12_000         # every item fits in one result
+    one = await plan_mod.status(SLUG, item="i22")
+    assert "# Brief" in one and "x" * 2000 in one
+    assert (await plan_mod.status(SLUG, item="i99")).startswith("error:")
+
+
+async def test_token_checkpoint_pauses_after_turns_finish(client, tmp_env, monkeypatch):
+    """No hard budget: past the checkpoint nothing new starts, the running turn
+    finishes, the run pauses, and only the operator resumes it."""
+    from backend.agent import budget as budget_mod
+    monkeypatch.setattr(settings, "plan_pause_tokens", 1000)
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"}],
+               max_concurrent=1)
+    seen: dict = {}
+
+    async def heavy(cid, attempt, text):
+        budget_mod.current().add({"prompt_tokens": 900, "completion_tokens": 200})
+        await _report(cid, "done", "spent a lot")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn",
+                        _scripted({"i1": heavy, "i2": heavy}, seen))
+
+    async def no_synth(system, user, temperature=0.3):
+        raise AssertionError("a paused run must not call the model for a rollup")
+    monkeypatch.setattr(plan_mod, "complete_text", no_synth)
+
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    p = plan_mod.load(SLUG)
+    items = _by_id(p)
+    assert p["status"] == "paused" and p["tokens_used"] == 1100
+    assert items["i1"]["status"] == "done" and items["i2"]["status"] == "todo"
+    assert "i2" not in seen                                  # nothing new started
+    # the orchestrator cannot relaunch it...
+    out = await plan_mod.fix(SLUG, action="edit", item="i2", guidance="go")
+    assert "only the operator" in out
+    assert "PAUSED" in await plan_mod.status(SLUG)
+    # ...the operator can, and the next checkpoint moves up
+    monkeypatch.setattr(settings, "plan_pause_tokens", 10_000)
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    p = plan_mod.load(SLUG)
+    assert _by_id(p)["i2"]["status"] == "done" and p["pause_at"] == 11_100

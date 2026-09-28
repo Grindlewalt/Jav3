@@ -6,6 +6,7 @@ what is asserted is the bytes on the wire, not a handler's return value.
 import importlib.util
 import io
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -312,3 +313,26 @@ def test_sigterm_stops_cleanly(tmp_path):
     finally:
         if p.poll() is None:
             p.kill()
+
+
+
+def test_agent_guide_served_and_prompt_on_page(serve):
+    guide = (ROOT / "docs" / "AGENT-INSTALL.md").read_bytes()
+    srv = serve(guide=guide, prompt=ip.agent_prompt("https://g.example/agent.md"))
+    status, h, body = req(srv, path="/agent.md")
+    assert status == 200 and body == guide
+    assert h["content-type"].startswith("text/markdown")
+    _, _, page = req(srv, path="/")
+    assert b"https://g.example/agent.md" in page and b"Codex" in page
+
+
+def test_no_guide_no_route(serve):
+    status, _, _ = req(serve(), path="/agent.md")
+    assert status == 404
+
+
+def test_guide_prompt_matches_the_page():
+    # the copy at the end of docs/AGENT-INSTALL.md and the page's must not drift
+    doc = (ROOT / "docs" / "AGENT-INSTALL.md").read_text()
+    quoted = " ".join(line[2:].strip() for line in doc.splitlines() if line.startswith("> "))
+    assert re.sub(r"\s+", " ", quoted) == ip.agent_prompt(ip.DEFAULT_GUIDE_URL)

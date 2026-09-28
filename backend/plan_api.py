@@ -12,7 +12,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from . import plan as plan_mod
-from .agent.model import in_peak_window
 from .auth import require_user
 from .workspace import project_dir
 from .writes import SecretLeakError
@@ -25,7 +24,7 @@ class PlanRequest(BaseModel):
     dump: str
     files: list[str] = []
     title: str = ""
-    confirm_peak: bool = False
+    confirm_peak: bool = False   # ignored; accepted so old clients don't 422
 
 
 class PlanDoc(BaseModel):
@@ -46,7 +45,7 @@ class ItemIn(BaseModel):
 
 
 class RunRequest(BaseModel):
-    confirm_peak: bool = False
+    confirm_peak: bool = False   # ignored; accepted so old clients don't 422
 
 
 def _out(slug: str, plan: dict | None) -> dict:
@@ -67,10 +66,9 @@ async def make_plan(slug: str, body: PlanRequest):
         raise HTTPException(status_code=400, detail="dump is required")
     if plan_mod.is_running(slug):
         raise HTTPException(status_code=409, detail="plan_running")
-    if in_peak_window() and not body.confirm_peak:
-        raise HTTPException(status_code=409, detail="peak_confirmation_required")
     try:
-        plan = await plan_mod.plan_from_dump(slug, body.dump, body.files, title=body.title)
+        plan = await plan_mod.plan_from_dump(slug, body.dump, body.files, title=body.title,
+                                             operator=True)
     except SecretLeakError as e:
         raise HTTPException(status_code=400, detail=f"refused: {e}")
     except ValueError as e:
@@ -158,10 +156,8 @@ async def run_plan(slug: str, body: RunRequest):
     """Start the runner, detached: the response returns at once with the head
     conversation to follow on /api/runs/{root_id}/stream."""
     await project_dir(slug)
-    if in_peak_window() and not body.confirm_peak:
-        raise HTTPException(status_code=409, detail="peak_confirmation_required")
     try:
-        started = await plan_mod.start_run(slug, peak=body.confirm_peak)
+        started = await plan_mod.start_run(slug, resume=True)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {**started, **_out(slug, plan_mod.load(slug))}

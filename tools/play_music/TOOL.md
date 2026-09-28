@@ -1,8 +1,8 @@
 ---
 name: play_music
 description: Play an audio file that is INSIDE A JAV3 PROJECT in a small floating player in the Jav3 browser tab. Not for the operator's music library.
-when_to_use: Only for an audio file that lives in the active project's files, or a direct http(s) audio URL on the media allowlist — a recording you produced or were given. When the operator asks for music, use music_play instead: it searches their library.
-enabled: true
+when_to_use: "Only for an audio file that lives in the active project's files, or a direct http(s) audio URL on the media allowlist — a recording you produced or were given. When the operator asks for music, use music_play instead — it searches their library."
+enabled: false
 parameters:
   type: object
   properties:

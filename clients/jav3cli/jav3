@@ -177,6 +177,57 @@ def parse_login_line(line: str) -> tuple[str, str]:
     return fields["address"], fields["code"]
 
 
+def login_alts(line: str) -> list[str]:
+    """The optional `alt=<ip:port>,<ip:port>` of a login line: the server's
+    LAN IPs, for when its .local name does not resolve here."""
+    for part in (line or "").strip().strip("'\"`").split():
+        k, sep, v = part.partition("=")
+        if sep and k == "alt":
+            return [a for a in v.strip("'\"`").split(",") if a]
+    return []
+
+
+def _resolves(address: str) -> bool:
+    from urllib.parse import urlsplit
+    host = urlsplit(base_url(address)).hostname or ""
+    try:
+        socket.getaddrinfo(host, None)
+        return True
+    except (socket.gaierror, UnicodeError):
+        return False
+
+
+def pick_login_address(address: str, alts: list[str]) -> str:
+    """The line's address, unless its name does not resolve on this machine
+    (no mDNS here): then the first LAN-IP alternative the server listed. Only
+    a resolution failure falls back — a name that resolves is never second-
+    guessed, so the code goes where the operator's server said."""
+    from urllib.parse import urlsplit
+    host = (urlsplit(base_url(address)).hostname or "").lower()
+    if not host.endswith(".local") or _resolves(address):
+        return address
+    if alts:
+        print(f"note: {address} does not resolve on this machine (no mDNS?); "
+              f"using {alts[0]}", file=sys.stderr)
+        return alts[0]
+    raise CliError(f"{address} does not resolve on this machine — a .local name "
+                   "needs mDNS here. Use the server's IP instead: jav3 login "
+                   "--server <ip>:<port>")
+
+
+def _loopback_base(base: str) -> bool:
+    """http to this same machine never crosses a network: no warning for it."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    host = (urlsplit(base).hostname or "").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 PLAIN_HTTP = ("warning: {base} is plain http — the login code, and the token it "
               "is traded for, cross the network unencrypted. Only use it on a "
               "network you trust.")
@@ -280,10 +331,12 @@ def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
     address, code = parse_login_line(line)
     if args.server:
         address = args.server
+    else:
+        address = pick_login_address(address, login_alts(line))
     base = upgrade_to_https(base_url(address))
     if base.startswith("https://") and not address.startswith("https://"):
         address = base
-    if base.startswith("http://"):
+    if base.startswith("http://") and not _loopback_base(base):
         print(PLAIN_HTTP.format(base=base), file=sys.stderr)
     host = socket.gethostname()
     with _client(base) as c:
@@ -406,7 +459,7 @@ def login_with_password(address: str, username: str, password: str,
     base = upgrade_to_https(base_url(address))
     if base.startswith("https://") and not address.startswith("https://"):
         address = base
-    if base.startswith("http://"):
+    if base.startswith("http://") and not _loopback_base(base):
         print(PLAIN_HTTP_PASSWORD.format(base=base), file=sys.stderr)
     # the server slows repeated failures down (up to 8s each): leave room for it
     with _client(base, timeout=40) as c:
@@ -508,7 +561,7 @@ class Renderer:
             return True
         elif t == "error":
             self.error = ev.get("message") or "error"
-            self._line(f"error: {self.error}")
+            # not printed here: run_turn raises it and main prints it once, on stderr
             return True
         elif t == "idle":
             return True
@@ -516,40 +569,28 @@ class Renderer:
 
 
 def run_turn(c: httpx.Client, message: str, conversation_id: int | None,
-             project: str | None, out=sys.stdout, confirm=input) -> int | None:
+             project: str | None, out=sys.stdout) -> int | None:
     """POST one chat turn and render it. Returns the conversation id."""
     body: dict = {"message": message, "conversation_id": conversation_id}
     if project and conversation_id is None:
         body["project"] = project
-    for _ in range(2):
-        with c.stream("POST", "/api/chat", json=body) as r:
-            if r.status_code == 409:
-                r.read()
-                if _detail(r) == "peak_confirmation_required" and not body.get("confirm_peak"):
-                    try:
-                        ans = confirm("Peak-pricing window — send anyway? [y/N] ")
-                    except EOFError:         # a pipe with nothing left to answer
-                        ans = ""
-                    if ans.strip().lower().startswith("y"):
-                        body["confirm_peak"] = True
-                        continue
-                    raise CliError("not sent: peak-pricing window (each reply costs 2× now) "
-                                   "and no yes was given")
-                raise CliError(f"server said 409: {_detail(r)}")
-            if r.status_code >= 400:
-                r.read()
-                _check(r)
-            rend = Renderer(out)
-            header = r.headers.get("x-conversation-id")
-            if header and header.isdigit():
-                rend.conversation_id = int(header)
-            for ev in iter_sse(r.iter_lines()):
-                if rend.feed(ev):
-                    break
-            if rend.error:
-                raise CliError(rend.error)
-            return rend.conversation_id or conversation_id
-    raise CliError("not sent")
+    with c.stream("POST", "/api/chat", json=body) as r:
+        if r.status_code == 409:
+            r.read()
+            raise CliError(f"server said 409: {_detail(r)}")
+        if r.status_code >= 400:
+            r.read()
+            _check(r)
+        rend = Renderer(out)
+        header = r.headers.get("x-conversation-id")
+        if header and header.isdigit():
+            rend.conversation_id = int(header)
+        for ev in iter_sse(r.iter_lines()):
+            if rend.feed(ev):
+                break
+        if rend.error:
+            raise CliError(rend.error)
+        return rend.conversation_id or conversation_id
 
 
 EXIT_WORDS = ("exit", "quit", "/exit", "/quit")
@@ -571,7 +612,7 @@ def cmd_chat(args, out=sys.stdout, read=input) -> int:
     with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
         try:
             if args.message:
-                run_turn(c, " ".join(args.message), None, args.project, out, read)
+                run_turn(c, " ".join(args.message), None, args.project, out)
                 return 0
             cid = None
             while True:
@@ -584,7 +625,7 @@ def cmd_chat(args, out=sys.stdout, read=input) -> int:
                     return 0
                 if not msg.strip():
                     continue
-                cid = run_turn(c, msg, cid, args.project, out, read)
+                cid = run_turn(c, msg, cid, args.project, out)
         except httpx.HTTPError as e:
             raise CliError(f"connection to {base} failed: {e}")
         except KeyboardInterrupt:
@@ -2595,13 +2636,13 @@ def build_tui(base: str, token: str, **kw):
 
         def on_mount(self) -> None:
             self.render_chrome()
-            self.run_worker(self.reload(), group="ag-reload", exclusive=True)
+            self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
             self.set_interval(2, self._auto_reload)
             self.set_interval(0.15, self.spin)
 
         def _auto_reload(self) -> None:
             if self.mode == "active":
-                self.run_worker(self.reload(), group="ag-reload", exclusive=True)
+                self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
 
         @property
         def tree(self) -> AgentTree:
@@ -2613,6 +2654,17 @@ def build_tui(base: str, token: str, **kw):
             nodes = data.get("nodes") if isinstance(data, dict) else None
             nodes = nodes if isinstance(nodes, list) else []
             return nodes, (data.get("total") if isinstance(data, dict) else None)
+
+        async def _reload_safe(self) -> None:
+            # the fetch is slow; the operator may close the screen meanwhile, and
+            # then its widgets are gone ("No nodes match '#ag-head'" crashed the
+            # whole app). A result for a closed screen is simply dropped.
+            from textual.css.query import NoMatches
+            try:
+                await self.reload()
+            except NoMatches:
+                if self.is_attached:
+                    raise
 
         async def reload(self) -> None:
             try:
@@ -3058,8 +3110,8 @@ def build_tui(base: str, token: str, **kw):
         def yn(k):
             return "yes" if p.get(k) else "no"
         return [
-            f"[b]{_esc(p.get('name') or '?')}[/]" + ("  [$text-muted]builtin[/]"
-                                                     if p.get("builtin") else ""),
+            f"[b]{_esc(p.get('name') or '?')}[/]" + ("  [$text-muted]default[/]"
+                                                     if p.get("is_default") else ""),
             f"box runtime: {_runtime_tag(p.get('box_runtime'))}   service placement: "
             f"[b]{_esc(p.get('service_placement') or 'NOT SET')}[/]",
             f"default verdict: [b]{_esc(p.get('default_verdict') or '?')}[/]   network off: "
@@ -3213,7 +3265,7 @@ def build_tui(base: str, token: str, **kw):
         p = e["raw"]
         projects = _jlist(p.get("projects"))
         return (f"[b]{_esc(p.get('name') or '?')}[/]"
-                + (" [$text-muted]builtin[/]" if p.get("builtin") else "")
+                + (" [$text-muted]default[/]" if p.get("is_default") else "")
                 + f"  {_runtime_tag(p.get('box_runtime'))} [$text-muted]· placement[/] "
                   f"{_esc(p.get('service_placement') or 'NOT SET')} [$text-muted]· "
                   f"{_esc(p.get('default_verdict') or '?')} by default"
@@ -3937,8 +3989,8 @@ def build_tui(base: str, token: str, **kw):
             p = e["raw"]
             keys = ("[$primary]p[/] assign to a project   [$primary]e[/] edit   "
                     "[$primary]a[/] new profile"
-                    + ("   [$text-muted]builtin: cannot be deleted[/]" if p.get("builtin")
-                       else "   [$primary]d[/] delete"))
+                    + ("   [$text-muted]the default: cannot be deleted[/]"
+                       if p.get("is_default") else "   [$primary]d[/] delete"))
             notes = _docker_notes(self.runtimes) if p.get("box_runtime") == "docker" else []
             return "\n".join([keys, ""] + _profile_lines(p) + ([""] + notes if notes else []))
 
@@ -4793,8 +4845,9 @@ def build_tui(base: str, token: str, **kw):
             p = self._profile()
             if p is None:
                 return
-            if p.get("builtin"):
-                self._fail(f"{p.get('name')} is builtin: it cannot be deleted")
+            if p.get("is_default"):
+                self._fail(f"{p.get('name')} is the default for new projects: make "
+                           "another profile the default first (web: Profiles)")
                 return
             users = ", ".join(_jlist(p.get("projects")))
             if await self._confirm(
@@ -5925,33 +5978,23 @@ def build_tui(base: str, token: str, **kw):
                 self.send(self.queue.pop(0))
 
         async def _post(self, body: dict) -> None:
-            for _ in range(2):
-                async with self.client.stream("POST", "/api/chat", json=body) as r:
-                    if r.status_code == 409:
-                        await r.aread()
-                        why = _detail(r)
-                        if why == "peak_confirmation_required" and not body.get("confirm_peak"):
-                            if await self.push_screen_wait(Confirm(
-                                    "Peak pricing right now", "This reply costs 2×. "
-                                    "Send anyway?", grace=0.6)):
-                                body["confirm_peak"] = True
-                                continue
-                            await self.note("not sent")
-                            return
-                        if why == "turn_in_progress":
-                            raise CliError("a turn is still running in this chat — wait, "
-                                           "or /stop it")
-                        raise CliError(f"server said 409: {why}")
-                    if r.is_redirect:
-                        raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
-                    if r.status_code == 401:
-                        self._login_lost()
-                        raise NotLoggedIn(SESSION_LOST)
-                    if r.status_code >= 400:
-                        await r.aread()
-                        raise CliError(f"server said {r.status_code}: {_detail(r)}")
-                    await self._consume(r.aiter_lines())
-                    return
+            async with self.client.stream("POST", "/api/chat", json=body) as r:
+                if r.status_code == 409:
+                    await r.aread()
+                    why = _detail(r)
+                    if why == "turn_in_progress":
+                        raise CliError("a turn is still running in this chat — wait, "
+                                       "or /stop it")
+                    raise CliError(f"server said 409: {why}")
+                if r.is_redirect:
+                    raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
+                if r.status_code == 401:
+                    self._login_lost()
+                    raise NotLoggedIn(SESSION_LOST)
+                if r.status_code >= 400:
+                    await r.aread()
+                    raise CliError(f"server said {r.status_code}: {_detail(r)}")
+                await self._consume(r.aiter_lines())
 
         async def _consume(self, lines) -> bool:
             """Render a stream; True if it carried anything but `idle`."""
@@ -6748,7 +6791,8 @@ def build_tui(base: str, token: str, **kw):
                                    busy_ok=True),
                 "detach": Command(self.c_detach, "drop pending !command output",
                                   busy_ok=True),
-                "web": Command(self.c_web, "open this chat in the browser", busy_ok=True,
+                "web": Command(self.c_web, "open this chat in the web app (Work)",
+                               busy_ok=True,
                                leader="w"),
                 "status": Command(self.c_status, "server, chat, model, usage", busy_ok=True,
                                   leader="s"),
@@ -7287,7 +7331,8 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_web(self, arg: str) -> None:
             import webbrowser
-            url = self.base + (f"/shell/c/{self.cid}" if self.cid else "/shell")
+            # /c/<id> opens that chat in the web app's Work page; / is Work
+            url = self.base + (f"/c/{self.cid}" if self.cid else "/")
             webbrowser.open(url)
             self.notify(f"opened {url}")
 
@@ -8002,21 +8047,7 @@ def cmd_tui(args) -> int:
     return 0
 
 
-def _ask_tty(question: str) -> str:
-    """-p's peak question: stdout is the reply (maybe a file) and stdin may be a
-    pipe already read to the end, so ask on the terminal itself; no terminal
-    reads as no."""
-    try:
-        # two handles: a text-mode "r+" on a tty is refused as unseekable
-        with open("/dev/tty", "w") as out, open("/dev/tty") as inp:
-            out.write(question)
-            out.flush()
-            return inp.readline()
-    except OSError:
-        return ""
-
-
-def cmd_print(args, out=sys.stdout, confirm=_ask_tty) -> int:
+def cmd_print(args, out=sys.stdout) -> int:
     """`jav3 -p message` (or a pipe): one turn, plain text, for scripts."""
     msg = " ".join(args.prompt or [])
     if not sys.stdin.isatty():
@@ -8027,7 +8058,7 @@ def cmd_print(args, out=sys.stdout, confirm=_ask_tty) -> int:
     base, token = _session(args)
     with _client(base, token, timeout=httpx.Timeout(30.0, read=None)) as c:
         try:
-            run_turn(c, msg, getattr(args, "resume", None), args.project, out, confirm)
+            run_turn(c, msg, getattr(args, "resume", None), args.project, out)
         except httpx.HTTPError as e:
             raise CliError(f"connection to {base} failed: {e}")
     return 0

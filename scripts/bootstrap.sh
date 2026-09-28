@@ -26,7 +26,7 @@ main() {
   ref="${JARVIS_REF:-}"
   dir="${JARVIS_DIR:-$HOME/jarvis}"
 
-  say() { printf '== %s\n' "$*"; }
+  say() { printf '== %s\n' "$*" >&2; }   # stderr: --check --json keeps stdout clean
   die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
   if [ "$(id -u)" -eq 0 ] && [ -z "${JARVIS_ALLOW_ROOT:-}" ]; then
@@ -46,7 +46,7 @@ main() {
       as_root="sudo"
     fi
     if   command -v apt-get >/dev/null 2>&1; then $as_root apt-get update -q && $as_root apt-get install -y git
-    elif command -v pacman  >/dev/null 2>&1; then $as_root pacman -Sy --needed --noconfirm git
+    elif command -v pacman  >/dev/null 2>&1; then $as_root pacman -S --needed --noconfirm git
     elif command -v dnf     >/dev/null 2>&1; then $as_root dnf install -y git
     else die "no apt-get, pacman or dnf here — install git yourself, then re-run"
     fi

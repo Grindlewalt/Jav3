@@ -2,16 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Button, EmptyState, Input, Menu, MenuItem, MenuSep, SaveButton, Select, Tag } from './components/index.js'
 import { notifyError } from './notify.js'
+import { followRun } from './runFeed.js'
 
 // The explicit orchestrator's checklist: dump -> plan -> run. The list is the
 // project's .plan.json read back through /api/projects/{slug}/plan; every edit
 // here is a normal edit of that file, which the runner honours on its next
 // tick, so the panel stays usable while a run is live. Live item state rides
-// the head's run stream (plan_item events); job_final refetches.
+// the head's job events (plan_item, via runFeed.js); job_final refetches.
 const TONE = { todo: 'pending', running: 'running', blocked: 'untrusted',
                done: 'done', failed: 'error', skipped: undefined }
 const PLAN_TONE = { draft: undefined, running: 'running', done: 'done',
-                    failed: 'error', stopped: 'pending' }
+                    failed: 'error', stopped: 'pending', paused: 'untrusted' }
 
 export default function PlanPanel({ slug, state, setState }) {
   const [plan, setPlan] = useState(null)
@@ -19,7 +20,6 @@ export default function PlanPanel({ slug, state, setState }) {
   const [agents, setAgents] = useState([])
   const [busy, setBusy] = useState(false)
   const [newTitle, setNewTitle] = useState('')
-  const [peakAsk, setPeakAsk] = useState(null)   // 'plan' | 'run'; in-page, iOS eats confirm()
   const dump = state.dump || ''
 
   const take = (r) => { setPlan(r.plan); setRunning(r.running) }
@@ -29,38 +29,35 @@ export default function PlanPanel({ slug, state, setState }) {
 
   useEffect(() => {
     if (!plan?.root_id || !running) return
-    const es = new EventSource(`/api/runs/${plan.root_id}/stream`)
-    es.onmessage = (m) => {
-      const ev = JSON.parse(m.data)
+    // the head's job on the shared event stream, not a socket of its own
+    const unfollow = followRun(plan.root_id, (ev) => {
       if (ev.type === 'plan_item') {
         const { type, job_id, ...it } = ev
         setPlan((p) => p ? { ...p, items: p.items.map((x) => x.id === it.id ? { ...x, ...it } : x) } : p)
       }
-      if (ev.type === 'job_final') { es.close(); load() }
-    }
-    es.onerror = () => { if (es.readyState === EventSource.CLOSED) load() }
-    return () => es.close()
+      if (ev.type === 'job_final') { unfollow(); load() }
+    }, () => load())
+    return () => unfollow()
   }, [plan?.root_id, running]) // eslint-disable-line
 
-  async function call(path, options, onPeak) {
+  async function call(path, options) {
     setBusy(true)
     try {
       take(await api(`/api/projects/${slug}/plan${path}`, options))
       return true
     } catch (err) {
-      if (err.status === 409 && err.detail === 'peak_confirmation_required' && onPeak) setPeakAsk(onPeak)
-      else notifyError(err)
+      notifyError(err)
       return false
     } finally { setBusy(false) }
   }
-  const post = (path, body, onPeak) =>
-    call(path, { method: 'POST', body: JSON.stringify(body || {}) }, onPeak)
+  const post = (path, body) =>
+    call(path, { method: 'POST', body: JSON.stringify(body || {}) })
   const patch = (id, body) =>
     call(`/items/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
   const remove = (id) => call(`/items/${id}`, { method: 'DELETE' })
 
-  const makePlan = (confirm = false) => post('', { dump, confirm_peak: confirm }, 'plan')
-  const run = (confirm = false) => post('/run', { confirm_peak: confirm }, 'run')
+  const makePlan = () => post('', { dump })
+  const run = () => post('/run', {})
   const stop = () => post('/stop')
   const todo = plan?.items.filter((it) => it.status === 'todo').length || 0
 
@@ -72,15 +69,6 @@ export default function PlanPanel({ slug, state, setState }) {
                onChange={(e) => setState({ dump: e.target.value })} />
         <Button type="submit" disabled={busy || running || !dump.trim()}>Plan</Button>
       </form>
-      {peakAsk && (
-        <div className="peak-ask compact" role="alertdialog" aria-label="peak pricing confirmation">
-          <span className="grow">Peak pricing right now — this costs 2×.</span>
-          <Button variant="ghost" onClick={() => setPeakAsk(null)}>Cancel</Button>
-          <Button onClick={() => { const w = peakAsk; setPeakAsk(null); (w === 'run' ? run : makePlan)(true) }}>
-            {peakAsk === 'run' ? 'Run anyway' : 'Plan anyway'}
-          </Button>
-        </div>
-      )}
       {!plan && <EmptyState pad>no plan yet — dump the ask above and press Plan</EmptyState>}
       {plan && (
         <>
@@ -89,8 +77,16 @@ export default function PlanPanel({ slug, state, setState }) {
             <Tag tone={PLAN_TONE[plan.status]}>{plan.status}</Tag>
             {running
               ? <Button variant="ghost" onClick={stop} disabled={busy}>Stop</Button>
-              : <Button onClick={() => run()} disabled={busy || !todo}>Run</Button>}
+              : <Button onClick={() => run()} disabled={busy || !todo}>
+                  {plan.status === 'paused' ? 'Resume' : 'Run'}</Button>}
           </div>
+          {plan.status === 'paused' && (
+            <div className="small plan-paused">
+              Paused for your review at {(plan.tokens_used || 0).toLocaleString()} tokens:
+              every running turn finished and nothing new started. Look it over, then
+              Resume; it pauses again after the same amount of new work.
+            </div>
+          )}
           <ul className="plan-list grow-scroll">
             {plan.items.map((it, i) => (
               <PlanItem key={it.id} it={it} index={i} count={plan.items.length}

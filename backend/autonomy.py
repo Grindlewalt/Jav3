@@ -32,6 +32,10 @@ _READ = {
     # a blocking question to the operator (backend/operator_ask.py): it changes
     # nothing, and a restricted project needs clarifying most of all
     "ask_user",
+    # reporting a harness fault writes only a host-side diagnostic row + alert,
+    # never a project file — offer it at every level, including read_only, so a
+    # restricted turn can still flag a broken capability
+    "report_harness_fault",
 }
 _STAGE = {
     "write_file", "edit_file", "dashboard", "crawl_codebase", "journal_update",
@@ -49,7 +53,7 @@ _GATED = {
     # is still more than file edits — gated tier
     "run_code",
 }
-_COMMIT = {"git_commit_request", "git_remote_request"}
+_COMMIT = {"git_commit_request", "git_remote_request", "git_push_request"}
 
 # Tools a subagent or team worker is NEVER handed, regardless of the autonomy
 # dial above: they never launch whole teams and never mint persistent

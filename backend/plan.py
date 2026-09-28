@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from . import bus, orchestrator, runtime, writes
 from .agent import budget as budget_mod
 from .agent.budget import BudgetExceeded
-from .agent.model import complete_text, confirm_peak
+from .agent.model import complete_text
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import agents_index
@@ -71,9 +71,18 @@ MAX_ATTEMPTS_CAP = 5
 PLANNER_DUMP_CHARS = 40_000
 PLANNER_FILE_CHARS = 12_000
 SUMMARY_CHARS = 2_000
+HISTORY_KEEP = 4          # earlier attempts' outcomes a retry is shown
+GUIDANCE_KEEP = 6         # orchestrator guidance entries kept per item
+MAX_FIXES = 4             # orchestrator re-dispatches per item (plan_fix retry)
 
 _locks: dict[str, asyncio.Lock] = {}
 _runs: dict[str, asyncio.Task] = {}          # project slug -> the detached runner
+# slugs whose _drive loop is live and will read the file again on its next tick
+# (changed only under the plan lock), and slugs whose _drive has STARTED this
+# run — the pair tells a plan_fix whether a run is starting, live or winding
+# down (2026-09-27: a relaunch mid-teardown ran zero items)
+_driving: set[str] = set()
+_drive_began: set[str] = set()
 _live_items: dict[int, dict] = {}            # conversation id -> {project, item_id, title}
 
 
@@ -89,7 +98,8 @@ def empty_plan(*, title: str = "", dump: str = "") -> dict:
             "job_id": None, "root_id": None, "next_id": 1,
             "attempts_max": settings.plan_attempts_max,
             "max_concurrent": settings.plan_max_concurrent,
-            "max_iterations": 0, "items": []}
+            "max_iterations": 0, "items": [],
+            "tokens_used": 0, "pause_at": settings.plan_pause_tokens, "paused_reason": None}
 
 
 def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
@@ -111,7 +121,8 @@ def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
             "status": "todo", "assignee": (assignee or "").strip() or None,
             "model": (str(model).strip() or None) if model else None,
             "attempts": 0, "stalls": 0, "last_error": None, "result_summary": None,
-            "conversation_id": None, "notes": [], "report": None}
+            "conversation_id": None, "notes": [], "report": None,
+            "history": [], "guidance": [], "fixes": 0}
 
 
 def normalise(plan: dict) -> dict:
@@ -124,7 +135,9 @@ def normalise(plan: dict) -> dict:
     plan["max_concurrent"] = max(1, min(int(plan.get("max_concurrent") or 1),
                                         MAX_CONCURRENT_CAP))
     plan["max_iterations"] = max(0, int(plan.get("max_iterations") or 0))
-    if plan.get("status") not in ("draft", "running", "done", "failed", "stopped"):
+    plan["tokens_used"] = max(0, int(plan.get("tokens_used") or 0))
+    plan["pause_at"] = max(1, int(plan.get("pause_at") or settings.plan_pause_tokens))
+    if plan.get("status") not in ("draft", "running", "done", "failed", "stopped", "paused"):
         plan["status"] = "draft"
     raws = [r for r in list(plan.get("items") or [])[:MAX_ITEMS] if isinstance(r, dict)]
     # ids like i7 must never be reissued: the counter sits above every explicit one
@@ -148,6 +161,9 @@ def normalise(plan: dict) -> dict:
         it["conversation_id"] = raw.get("conversation_id") or None
         it["notes"] = [n for n in (raw.get("notes") or []) if isinstance(n, dict)]
         it["report"] = raw.get("report") if isinstance(raw.get("report"), dict) else None
+        it["history"] = [h for h in (raw.get("history") or []) if isinstance(h, dict)][-HISTORY_KEEP:]
+        it["guidance"] = [str(g) for g in (raw.get("guidance") or []) if g][-GUIDANCE_KEEP:]
+        it["fixes"] = max(0, int(raw.get("fixes") or 0))
         items.append(it)
     ids = {i["id"] for i in items}
     for it in items:
@@ -312,7 +328,13 @@ Reply with ONLY a JSON array, no prose, no markdown fence:
 Rules: 3 to 12 items. Items with no dependency run in PARALLEL, so keep
 independent work independent and put shared groundwork first. Prefer fewer,
 larger items over many tiny ones. Never invent an assignee that is not in the
-roster; null means a general worker."""
+roster; null means a general worker.
+
+Write every brief for an agent that must FINISH on its own: name the files it
+owns, the command that proves it works (a test, a run, a build) and what done
+looks like. A root item gates everything after it, so keep roots small and
+certain. Tell items that depend on unfinished work to stub or build what they
+need rather than wait for it."""
 
 # appended to the planner's instructions only when the operator made explicit
 # model assignments (orchestrate's `models`)
@@ -413,7 +435,7 @@ def _assigned_model(raw: dict, allowed: set[str]) -> str | None:
 
 
 async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "",
-                         models=()) -> dict:
+                         models=(), operator: bool = False) -> dict:
     """One model call turns the dump into the checklist and persists it as the
     project's plan. Refuses to replace a plan that is running.
 
@@ -425,6 +447,11 @@ async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "",
         raise ValueError("the dump is empty — give the planner something to plan")
     if is_running(slug):
         raise RuntimeError("a plan run is in progress — stop it before re-planning")
+    old = load(slug)
+    if old is not None and old.get("status") == "paused" and not operator:
+        raise RuntimeError(f"the plan is paused for the operator's review at "
+                           f"{old['tokens_used']:,} tokens — only the operator can "
+                           "resume or replace it; tell them")
     roster = agents_index() or "(no named agents — leave assignee null)"
     user = (f"Project: {slug}\n\n# Dump\n{dump[:PLANNER_DUMP_CHARS]}\n\n"
             f"{_read_refs(slug, files)}\n\n# Roster\n{roster}")
@@ -541,21 +568,47 @@ def replace_items(plan: dict, incoming: list[dict]) -> None:
 ITEM_PROMPT = """You are one worker on a team of agents executing an explicit
 plan for this project. You get exactly one checklist item. Do it completely,
 stay inside it, coordinate with teammates by message when your work touches
-theirs, and report the outcome with plan_report before you stop."""
+theirs, and report the outcome with plan_report before you stop.
 
-REPORT_RULES = """# Reporting — required
+You are expected to push through problems, not describe them. Every obstacle
+is yours to remove: a failing test is a bug to fix, a missing file is one to
+write, a missing helper from another item is a stub to create (tell its owner),
+an unclear spec is an assumption to make and state in one line. Diagnosing a
+problem and then stopping is a failed item. Keep acting until the proof (the
+test, the run, the build) passes."""
+
+REPORT_RULES = """# Keep moving
+- Work in small verified steps: write, run, read the output, fix, run again.
+- When something fails, fix it and re-run. Try another approach after two
+  identical failures; never stop at "the cause is X".
+- Something you need does not exist yet (a teammate's module, a fixture, a
+  config)? Build the smallest working version yourself, mark it as a stub in
+  a comment, message its owner, and carry on.
+- A tool that misbehaves on valid input is a harness fault: report it with
+  report_harness_fault, route around it, keep going.
+- "blocked" is ONLY for what an agent cannot do at all: a credential or
+  account, a paid service, a decision only the operator can make. Everything
+  else you solve.
+
+# Reporting — required
 When the item is finished, call plan_report with status "done" and a summary
-(what you did, the exact file paths, what the items after you need to know).
-If you cannot finish: plan_report with status "failed" (something went wrong
-that a retry could fix — say what) or "blocked" (needs the operator — say what).
-A final reply without a plan_report call counts as a failed attempt.
+(what you did, the exact file paths, the command that proves it and its real
+output, what the items after you need to know).
+Running out of room before you finish: plan_report with status "failed" and
+say exactly what works, what is left and the next step, so the retry picks up
+there instead of starting over. "blocked" is for operator-only needs (say what).
+Report as soon as the proof passes; a final reply without a plan_report call
+counts as a failed attempt and throws your work's summary away.
 
 # Teammates
-Other items of this plan run in parallel as separate agents. send_message with
-to="?" lists them; address one as item:<id> (for example to="item:i2"). Say so
+The other items of this plan are separate agents. They start as their
+dependencies clear, so a sibling you want may not be running at the same instant
+as you — address it by item:<id> anyway (for example to="item:i2"): a running
+item gets the message now, and one that has not started keeps it as a note it
+reads when it begins, so don't wait for a reply. send_message to="?" lists the
+plan's item:<id> addresses (running or not) alongside whoever is live. Say so
 before you touch files another item owns; ask when only a teammate knows the
-answer; a message to an item that has not started yet is kept and shown to it
-when it starts. Messages to you arrive between your reasoning rounds."""
+answer. Messages to you arrive between your reasoning rounds."""
 
 
 def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
@@ -572,9 +625,22 @@ def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
         parts.append("\n# Notes teammates left for you")
         parts += [f"- from {n.get('from', 'a teammate')}: {n.get('body', '')}"
                   for n in it["notes"]]
-    if it.get("attempts", 0) > 1 and it.get("last_error"):
-        parts.append(f"\n# Previous attempt\nAttempt {it['attempts'] - 1} ended with: "
-                     f"{it['last_error']}\nFix the cause; do not repeat it.")
+    if it.get("guidance"):
+        parts.append("\n# Orchestrator guidance (follow this)")
+        parts += [f"- {g}" for g in it["guidance"]]
+    if it.get("history"):
+        parts.append("\n# Earlier attempts at this item\nThe files they wrote are still in the "
+                     "project: check what exists, CONTINUE from there, and fix what stopped "
+                     "them. Do not start over, and do not repeat what failed.")
+        for h in it["history"]:
+            line = f"- attempt {h.get('attempt')}: {h.get('outcome')} — {h.get('error') or ''}"
+            if h.get("progress"):
+                line += f"\n  got to: {h['progress']}"
+            parts.append(line)
+    rounds = plan.get("max_iterations") or settings.plan_item_max_iterations
+    parts.append(f"\n# Budget\nYou have about {rounds} tool rounds (several calls can go in "
+                 "one round). Spend at most a fifth of them looking around, then build. "
+                 "Leave a few rounds to run the proof and call plan_report.")
     parts.append("\n" + REPORT_RULES)
     return "\n".join(parts)
 
@@ -594,6 +660,8 @@ def _item_agent(plan: dict, it: dict) -> dict:
                  "project": ""}
     if plan.get("max_iterations"):
         agent["max_iterations"] = plan["max_iterations"]
+    elif not agent.get("max_iterations"):
+        agent["max_iterations"] = settings.plan_item_max_iterations
     if it.get("model"):
         # re-checked at spawn: a model switched off since planning fails the
         # attempt out loud (the error lands on the item) instead of the item
@@ -700,7 +768,7 @@ async def _open_head(slug: str, plan: dict, job_id: str) -> tuple[int, str | Non
     return root_id, owner
 
 
-async def start_run(slug: str, *, peak: bool = False) -> dict:
+async def start_run(slug: str, *, resume: bool = False) -> dict:
     """Launch the runner as a detached task. Returns {job_id, root_id}. Raises
     RuntimeError when a run is already live or there is nothing to run."""
     if is_running(slug):
@@ -708,6 +776,16 @@ async def start_run(slug: str, *, peak: bool = False) -> dict:
     plan = load(slug)
     if plan is None:
         raise RuntimeError("this project has no plan yet")
+    if plan.get("status") == "paused":
+        if not resume:
+            raise RuntimeError(
+                f"paused for the operator's review at {plan['tokens_used']:,} tokens "
+                "(the checkpoint is every "
+                f"{settings.plan_pause_tokens:,}) — only the operator can resume it")
+        async with edit(slug) as p:                  # the next checkpoint
+            p["pause_at"] = p["tokens_used"] + settings.plan_pause_tokens
+            p["paused_reason"] = None
+            p["status"] = "stopped"
     # "running" with no live task is a run the process lost (a restart): _drive
     # puts those back to todo, so they count as work here
     if not any(it["status"] in ("todo", "running") for it in plan["items"]):
@@ -715,7 +793,7 @@ async def start_run(slug: str, *, peak: bool = False) -> dict:
     job_id = uuid.uuid4().hex
     root_id, owner = await _open_head(slug, plan, job_id)
     task = asyncio.create_task(run_plan(slug, job_id=job_id, root_id=root_id,
-                                        peak=peak, owner=owner))
+                                        owner=owner))
     _runs[slug] = task
 
     def _done(t: asyncio.Task) -> None:
@@ -735,14 +813,15 @@ def stop_run(slug: str) -> bool:
     return True
 
 
-async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
+async def run_plan(slug: str, *, job_id: str, root_id: int,
                    owner: str | None = None) -> dict:
     """The whole run, start to rollup. Owns its Budget (a plan run is an
     operation of its own even when a chat's tool started it), pins the project
     for every item, and finishes with a rollup whatever happened."""
     plan = load(slug)
     title = plan["title"] if plan else "Plan"
-    budget = budget_mod.Budget(settings.max_op_input_tokens, settings.max_op_output_tokens)
+    # no hard cap: the plan pauses at its token checkpoint instead (_drive)
+    budget = budget_mod.Budget(10**15, 10**15)
     budget_mod.register(job_id, budget)
     optok = budget_mod.active_op_id.set(job_id)
     ptoken = runtime.active_project.set(slug)
@@ -750,8 +829,6 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
     wtoken = runtime.web_session.set(f"job:{job_id}")
     # items sit one hop under the plan: they may spawn helpers, helpers may not
     dtoken = runtime.spawn_depth.set(1)
-    if peak:
-        confirm_peak(root_id)
     bus.publish(job_id, {"type": "job_start", "job_id": job_id, "root_id": root_id,
                          "agent_slug": owner})
     bus.publish(job_id, {"type": "node_spawned", "node_id": root_id, "parent_id": None,
@@ -761,10 +838,17 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
     status, rollup = "failed", ""
     try:
         async with orchestrator.job_workspace(slug, top_level=True):
-            status = await _drive(slug, job_id, root_id)
+            status = await _drive(slug, job_id, root_id, budget)
         bus.publish(job_id, {"type": "node_status", "node_id": root_id,
                              "status": "summarizing"})
-        rollup = await _synthesize(slug, status)
+        if status == "paused":
+            # no model call: the operator looks first
+            p = load(slug) or {}
+            rollup = (f"Paused at {p.get('tokens_used', 0):,} tokens, the review checkpoint "
+                      f"(every {settings.plan_pause_tokens:,}). Every running turn finished; "
+                      "no new item was started. Resume from the plan panel.")
+        else:
+            rollup = await _synthesize(slug, status)
     except asyncio.CancelledError:
         status = "stopped"
         rollup = await _synthesize(slug, status)
@@ -777,7 +861,7 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
             async with _lock(slug):
                 p = load(slug)
                 if p is not None:
-                    p["status"] = status
+                    p["status"] = status     # "paused" included: resume needs the operator
                     for it in p["items"]:
                         if it["status"] == "running":     # stopped mid-flight
                             it["status"] = "todo"
@@ -798,6 +882,7 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
                              "rollup": rollup, "usage": budget.summary(),
                              "plan_status": status})
         bus.close_job(job_id)
+        _drive_began.discard(slug)
         runtime.spawn_depth.reset(dtoken)
         runtime.web_session.reset(wtoken)
         runtime.conversation_id.reset(cidtoken)
@@ -808,14 +893,18 @@ async def run_plan(slug: str, *, job_id: str, root_id: int, peak: bool = False,
             "usage": budget.summary()}
 
 
-async def _drive(slug: str, job_id: str, root_id: int) -> str:
+async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
     """The monitoring loop: spawn what is ready, settle what finished, block
     what cannot run, nudge and re-drive what stalled, honour operator edits.
     Returns the run's final status."""
     tasks: dict[str, asyncio.Task] = {}
     meta: dict[str, dict] = {}
     spawned = 0
+    pausing = False
     async with edit(slug) as plan:
+        base_tokens = plan.get("tokens_used", 0)     # earlier runs of this plan
+        _driving.add(slug)
+        _drive_began.add(slug)
         plan["status"], plan["job_id"], plan["root_id"] = "running", job_id, root_id
         for it in plan["items"]:
             if it["status"] == "running":          # a previous run's leftovers
@@ -859,10 +948,31 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
                     _live_items.pop(m.get("cid"), None)
                     it["stalls"] += 1
                     it["last_error"] = "stalled: no tool call or message for too long"
+                    it.setdefault("history", []).append(
+                        {"attempt": it["attempts"], "outcome": "stalled",
+                         "error": it["last_error"], "progress": "",
+                         "conversation_id": m.get("cid"), "at": _now()})
+                    it["history"] = it["history"][-HISTORY_KEEP:]
                     it["status"] = "todo" if it["stalls"] <= 1 else "failed"
                     _emit_item(job_id, it)
+                # the review checkpoint: past it, start nothing new, let what is
+                # running finish its turn, then pause for the operator
+                if budget is not None:
+                    plan["tokens_used"] = base_tokens + budget.input_tokens + budget.output_tokens
+                if not pausing and plan["tokens_used"] >= plan.get("pause_at", settings.plan_pause_tokens):
+                    pausing = True
+                    plan["paused_reason"] = (f"token checkpoint: {plan['tokens_used']:,} ≥ "
+                                             f"{plan['pause_at']:,}")
+                    bus.publish(job_id, {"type": "node_status", "node_id": root_id,
+                                         "status": "pausing"})
+                if pausing:
+                    if not tasks:
+                        _driving.discard(slug)
+                        plan["status"] = "paused"
+                        await _notify_paused(slug, plan)
+                        return "paused"
                 # spawn what is ready, within the concurrency and spawn caps
-                while len(tasks) < plan["max_concurrent"] and spawned < MAX_SPAWNS:
+                while not pausing and len(tasks) < plan["max_concurrent"] and spawned < MAX_SPAWNS:
                     nxt = next((it for it in ready(plan) if it["id"] not in tasks), None)
                     if nxt is None:
                         break
@@ -877,7 +987,8 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
                         _run_item(slug, job_id, root_id, plan, nxt, deps, m))
                     spawned += 1
                     _emit_item(job_id, nxt)
-                if not tasks and (finished(plan) or spawned >= MAX_SPAWNS):
+                if not pausing and not tasks and (finished(plan) or spawned >= MAX_SPAWNS):
+                    _driving.discard(slug)          # decided under the lock
                     if spawned >= MAX_SPAWNS and ready(plan):
                         for it in ready(plan):
                             it["status"] = "failed"
@@ -891,12 +1002,31 @@ async def _drive(slug: str, job_id: str, root_id: int) -> str:
             else:
                 await asyncio.sleep(settings.plan_tick_seconds)
     finally:
+        _driving.discard(slug)
         for t in tasks.values():
             t.cancel()
         for m in meta.values():
             _live_items.pop(m.get("cid"), None)
         if tasks:
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+
+async def _notify_paused(slug: str, plan: dict) -> None:
+    """The operator's bell: the plan stopped at its checkpoint and waits."""
+    from . import security
+    try:
+        db = await get_db()
+        try:
+            await security.raise_event(
+                db, kind="plan_paused", severity="warn", project=slug,
+                summary=(f"Plan '{plan['title'][:60]}' paused at "
+                         f"{plan['tokens_used']:,} tokens for your review"),
+                detail={"tokens_used": plan["tokens_used"], "pause_at": plan["pause_at"],
+                        "root_id": plan.get("root_id")})
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — a failed bell must not wedge the pause
+        pass
 
 
 async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
@@ -957,6 +1087,13 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
             status, err, summary = "failed", "no structured completion report (plan_report was not called)", None
     if status in ("failed", "blocked"):
         err = err or summary or "the agent reported no reason"
+        # what this attempt got to, so the next one continues instead of
+        # starting over (the tail of its reply when it never reported)
+        got = (summary or "").strip() or " ".join(final.split())[-SUMMARY_CHARS // 2:]
+        it.setdefault("history", []).append(
+            {"attempt": it["attempts"], "outcome": status, "error": err[:500],
+             "progress": got[:SUMMARY_CHARS // 2], "conversation_id": cid, "at": _now()})
+        it["history"] = it["history"][-HISTORY_KEEP:]
     if status == "failed" and it["attempts"] < plan["attempts_max"]:
         it["status"] = "todo"               # retried on the next tick
     else:
@@ -983,9 +1120,11 @@ async def _nudge(root_id: int, it: dict, m: dict) -> None:
     try:
         await agentmsg.send(
             db, sender_cid=root_id, to=str(m["cid"]),
-            body=(f"[plan] item {it['id']} has been quiet for a while. If you are stuck, "
-                  "call plan_report with status \"blocked\" and say what you need; "
-                  "otherwise keep going and call plan_report when the item is done."))
+            body=(f"[plan] item {it['id']} has been quiet for a while. Take the next "
+                  "concrete step now: run the check, fix what it shows, or build what is "
+                  "missing. Only if you need something only the operator can give, call "
+                  "plan_report with status \"blocked\" and say what; otherwise keep going "
+                  "and call plan_report when the item is done."))
     except Exception:  # noqa: BLE001 — a failed nudge is not a failed item
         pass
     finally:
@@ -1033,8 +1172,10 @@ def render_checklist(plan: dict) -> str:
 
 ORCHESTRATOR_PROMPT = """# You are this conversation's orchestrator
 The operator hands you a brain-dump; you get it done through a team of agents
-working in project {project}, and you stay in charge until it is finished. Do
-not do the items' work yourself.
+working in project {project}, and you stay in charge until it is DONE. Your
+job is to keep the work moving: a failure or a block is a problem for you to
+solve, not a result to report. Do not do the items' work yourself; you may make
+a small unblocking fix directly (a missing stub, a name clash, a wrong path).
 
 1. Plan and launch: call orchestrate with the operator's dump — verbatim, plus
    any facts from this conversation the agents need (they will not see it). It
@@ -1044,14 +1185,28 @@ not do the items' work yourself.
    item changes state, a message arrives for you, or the wait runs out, and
    shows every item's status, its agent's conversation id, and its result or
    error. Keep calling it until the run is finished.
-3. Steer: send_message to item:<id> (or the item's conversation id) to correct,
-   unblock or inform a running agent. A failed or blocked item: message it,
-   or tell the operator what it needs.
-4. A single focused task outside the plan can go to spawn_agent or
+3. Steer running items: send_message to item:<id> (or its conversation id) to
+   correct, unblock or inform it the moment you see it drift.
+4. Fix every failed or blocked item, right away, with plan_fix:
+   - Read why it stopped (plan_status shows the error and how far it got;
+     read the files it wrote if that helps). Work out the actual cause.
+   - retry with guidance that removes that cause: the concrete fix, the file
+     to create, the assumption to make, the approach to switch to. A bare
+     retry with no new information fails the same way.
+   - edit the brief when the brief was wrong, add an item for missing
+     groundwork, split an item that was too big, or skip one that is moot.
+   - Items blocked only because a dependency failed restart by themselves
+     once that dependency is fixed.
+   plan_fix restarts the run if it had stopped. Keep going until every item is
+   done or skipped. Exception: every {pause_tokens} tokens the run PAUSES for the
+   operator's review (running turns finish, nothing new starts). Then report
+   where it stands and stop; only the operator resumes it. Go to the operator ONLY for what agents cannot do at all:
+   a credential or account, money, a decision that is genuinely theirs.
+5. A single focused task outside the plan can go to spawn_agent or
    spawn_temp_agent; you wait for that one's report.
-5. When plan_status says the run is finished, report to the operator: what got
-   done (exact paths), what failed or is blocked and why, and what they need
-   to decide.
+6. When everything is done, report to the operator: what got done (exact
+   paths and the proof it works), what you had to fix along the way, and any
+   decision that is theirs.
 
 Model choice: every agent runs on the default model. ONLY when the operator
 explicitly said which model to use for which task, pass that: orchestrate's
@@ -1064,8 +1219,120 @@ speaking: act on them (message the affected agents, adjust the plan)."""
 
 def orchestrator_prompt(project: str | None) -> str:
     return ORCHESTRATOR_PROMPT.format(
+        pause_tokens=f"{settings.plan_pause_tokens:,}",
         project=project or "(none — this conversation lost its project; tell the operator)")
 
+
+
+FIX_ACTIONS = ("retry", "edit", "add", "skip")
+FIX_TEARDOWN_WAIT = 300.0     # seconds a plan_fix waits for a closing run to end
+
+
+async def fix(slug: str, *, action: str, item: str | None = None,
+              guidance: str = "", title: str = "", brief: str = "",
+              depends_on=None, run: bool = True) -> str:
+    """The plan_fix tool: an orchestrator repairs its own plan instead of
+    handing failures to the operator. retry = back to todo with guidance the
+    next attempt reads (and its earlier attempts' history); edit = new
+    title/brief/dependencies; add = a new item; skip = settle a moot item.
+    Items the runner blocked behind a fixed dependency are released, and a
+    stopped run is relaunched when there is work to do."""
+    if action not in FIX_ACTIONS:
+        return f"error: action must be one of {', '.join(FIX_ACTIONS)}"
+    guidance = " ".join((guidance or "").split())[:SUMMARY_CHARS]
+    try:
+        async with edit(slug) as plan:
+            idx = index(plan)
+            if action == "add":
+                if not (title or brief):
+                    return "error: add needs a title and a brief"
+                deps = [str(d) for d in (depends_on or [])]
+                bad = [d for d in deps if d not in idx]
+                if bad:
+                    return f"error: no item {', '.join(bad)} to depend on"
+                if len(plan["items"]) >= MAX_ITEMS:
+                    return f"error: the plan already has {MAX_ITEMS} items"
+                it = new_item(plan, title=title or brief[:80], brief=brief, depends_on=deps)
+                if guidance:
+                    it["guidance"] = [guidance]
+                plan["items"].append(it)
+                what = f"added {it['id']}"
+            else:
+                it = idx.get(str(item or ""))
+                if it is None:
+                    known = ", ".join(idx) or "none"
+                    return f"error: no item {item!r} (items: {known})"
+                if it["status"] == "running" and action != "edit":
+                    return (f"error: {it['id']} is running — send_message to item:{it['id']} "
+                            "to steer it, or wait for it to finish")
+                if action == "retry":
+                    if it["status"] == "done":
+                        return f"error: {it['id']} is done; add a follow-up item instead"
+                    if it.get("fixes", 0) >= MAX_FIXES:
+                        return (f"error: {it['id']} has been re-dispatched {MAX_FIXES} times. "
+                                "Change the approach: edit its brief, split it with add, "
+                                "or skip it and cover the gap another way")
+                    if not guidance:
+                        return ("error: retry needs guidance — what the next attempt must "
+                                "do differently (a bare retry fails the same way)")
+                    it["fixes"] = it.get("fixes", 0) + 1
+                    it["guidance"] = (it.get("guidance", []) + [guidance])[-GUIDANCE_KEEP:]
+                    it["status"], it["report"], it["attempts"], it["stalls"] = "todo", None, 0, 0
+                    what = f"{it['id']} back to todo (re-dispatch {it['fixes']}/{MAX_FIXES})"
+                elif action == "edit":
+                    patch = {k: v for k, v in (("title", title), ("brief", brief)) if v}
+                    if depends_on is not None:
+                        bad = [str(d) for d in depends_on if str(d) not in idx]
+                        if bad:
+                            return f"error: no item {', '.join(bad)} to depend on"
+                        patch["depends_on"] = [str(d) for d in depends_on]
+                    if not patch and not guidance:
+                        return "error: edit needs a title, brief, depends_on or guidance"
+                    apply_item_edit(plan, it, patch)
+                    if guidance:
+                        it["guidance"] = (it.get("guidance", []) + [guidance])[-GUIDANCE_KEEP:]
+                    what = f"{it['id']} edited"
+                else:                                   # skip
+                    it["status"], it["last_error"] = "skipped", guidance or "skipped by the orchestrator"
+                    what = f"{it['id']} skipped"
+            _break_cycles(plan["items"])                # an edited depends_on may loop
+            released = release_blocked(plan)
+            live = slug in _driving                     # its next tick reads this edit
+            job_id = plan.get("job_id") if live else None
+            has_work = any(i["status"] == "todo" for i in plan["items"])
+    except LookupError:
+        return "error: this project has no plan — call orchestrate first"
+    if job_id:
+        for r in released:
+            _emit_item(job_id, r)
+    note = f" Released: {', '.join(r['id'] for r in released)}." if released else ""
+    if live:
+        return f"{what}.{note} The live run picks it up on its next tick."
+    t = _runs.get(slug)
+    if t is not None and not t.done():
+        if slug not in _drive_began:
+            # a run started a moment ago (a sibling plan_fix) and has not read
+            # the file yet: its first tick sees this edit
+            return f"{what}.{note} The run that is starting picks it up."
+        # winding down (closing report) — it will not read the file again, so
+        # wait it out and relaunch rather than claim it "picks it up"
+        try:
+            await asyncio.wait_for(asyncio.shield(t), timeout=FIX_TEARDOWN_WAIT)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — its outcome is not ours
+            pass
+        if slug in _driving or (_runs.get(slug) not in (None, t) and not _runs[slug].done()):
+            return f"{what}.{note} The run that is starting picks it up."
+    if not run or not has_work:
+        return f"{what}.{note} The run is not running" + (
+            "; nothing is ready to run." if not has_work else "; pass run=true to relaunch.")
+    try:
+        started = await start_run(slug)
+    except RuntimeError as e:
+        if is_running(slug):                        # a sibling plan_fix relaunched it
+            return f"{what}.{note} The run that is starting picks it up."
+        return f"{what}.{note} Could not relaunch: {e}"
+    return (f"{what}.{note} Relaunched the run (head conversation {started['root_id']}); "
+            "follow it with plan_status.")
 
 # how often plan_status re-reads the plan while waiting; a module constant so a
 # test can shrink it
@@ -1111,26 +1378,70 @@ async def _head_rollup(root_id) -> str | None:
     return row["rollup"] if row else None
 
 
+STATUS_LINE_CHARS = 240     # per-item result/error in the overview; `item` shows it whole
+
+
+def _clip(text: str, n: int = STATUS_LINE_CHARS) -> str:
+    t = " ".join(str(text).split())
+    return t if len(t) <= n else t[:n - 1] + "…"
+
+
 def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str:
+    """One compact block per item, so a 20+ item plan fits in one result (a
+    22-item run truncated at 26k and hid its own second half: harness fault
+    #1). plan_status item=<id> gives an item's full detail."""
+    counts: dict[str, int] = {}
+    for it in plan["items"]:
+        counts[it["status"]] = counts.get(it["status"], 0) + 1
+    tally = ", ".join(f"{n} {st}" for st, n in counts.items())
     lines = [f"Plan '{plan['title']}' — {'RUNNING' if running else 'not running'} "
-             f"(status {plan['status']}, head conversation {plan.get('root_id')}). {why}"]
+             f"(status {plan['status']}, head conversation {plan.get('root_id')}). {why}",
+             f"Items: {tally}. Tokens so far {plan.get('tokens_used', 0):,}; review "
+             f"checkpoint at {plan.get('pause_at', 0):,}. Full detail of one item: "
+             "plan_status item=<id>."]
+    if plan.get("status") == "paused":
+        lines.append("PAUSED for the operator's review (" + (plan.get("paused_reason") or
+                     "token checkpoint") + "). Only the operator can resume it: tell them "
+                     "what state the plan is in and stop; plan_fix cannot relaunch it.")
     for it in plan["items"]:
         who = f" @{it['assignee']}" if it.get("assignee") else ""
         mdl = f" model {it['model']}" if it.get("model") else ""
         cid = f" conv {it['conversation_id']}" if it.get("conversation_id") else ""
-        lines.append(f"- {it['id']} [{it['status']}]{who}{mdl}{cid} {it['title']}")
+        tries = f" attempts {it['attempts']}" if it.get("attempts") else ""
+        lines.append(f"- {it['id']} [{it['status']}]{who}{mdl}{cid}{tries} {it['title']}")
         if it.get("result_summary"):
-            lines.append(f"    result: {it['result_summary']}")
+            lines.append(f"    result: {_clip(it['result_summary'])}")
         if it.get("last_error") and it["status"] != "done":
-            lines.append(f"    error: {it['last_error']}")
+            lines.append(f"    error: {_clip(it['last_error'])}")
     if not running and rollup:
-        lines.append(f"\n# Closing rollup\n{rollup}")
+        lines.append(f"\n# Closing rollup\n{_clip(rollup, 3000)}")
     elif running:
         lines.append("\nRunning items can be messaged: send_message to item:<id>.")
     return "\n".join(lines)
 
 
-async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None) -> str:
+def _item_text(it: dict) -> str:
+    lines = [f"{it['id']} [{it['status']}] {it['title']}",
+             f"depends on: {', '.join(it['depends_on']) or 'nothing'} · attempts {it.get('attempts', 0)}"
+             f" · re-dispatches {it.get('fixes', 0)}/{MAX_FIXES}"
+             + (f" · conv {it['conversation_id']}" if it.get("conversation_id") else ""),
+             f"\n# Brief\n{it.get('brief') or '(none)'}"]
+    if it.get("result_summary"):
+        lines.append(f"\n# Result\n{it['result_summary']}")
+    if it.get("last_error"):
+        lines.append(f"\n# Last error\n{it['last_error']}")
+    for h in it.get("history") or []:
+        lines.append(f"- attempt {h.get('attempt')}: {h.get('outcome')} — {h.get('error') or ''}"
+                     + (f"\n  got to: {h['progress']}" if h.get("progress") else ""))
+    if it.get("guidance"):
+        lines.append("\n# Your guidance so far\n" + "\n".join(f"- {g}" for g in it["guidance"]))
+    if it.get("notes"):
+        lines.append(f"\n{len(it['notes'])} note(s) from teammates.")
+    return "\n".join(lines)
+
+
+async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None,
+                 item: str | None = None) -> str:
     """The plan_status tool: the checklist as it stands, after waiting (up to
     wait_seconds, capped) for it to change or for a message to arrive for the
     caller. Waiting on a running plan is how an orchestrator supervises one
@@ -1139,6 +1450,11 @@ async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None) ->
     plan, running = load(slug), is_running(slug)
     if plan is None:
         return "error: this project has no plan — call orchestrate first."
+    if item:
+        it = index(plan).get(str(item).strip())
+        if it is None:
+            return f"error: no item {item!r} (items: {', '.join(index(plan))})"
+        return _item_text(it)
     why = "No wait requested."
     if wait and running:
         start = _fingerprint(plan, running)

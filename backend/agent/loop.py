@@ -9,6 +9,7 @@ is what M3+ tools plug into. Yields SSE-ready events:
 import asyncio
 import base64
 import json
+import re
 from collections import OrderedDict
 from typing import AsyncIterator
 
@@ -23,7 +24,7 @@ from .tools import registry
 # what it changed, so eviction never touches them (reads are disposable,
 # writes are load-bearing).
 WRITE_PINNED = frozenset({"write_file", "edit_file", "journal_update",
-                          "memory_write", "git_commit_request",
+                          "memory_write", "git_commit_request", "git_push_request",
                           "create_agent", "schedule_update", "run_code"})
 
 # Delegation tools whose successful results carry a trust note: the observed
@@ -180,6 +181,15 @@ def _assemble_messages(system_prompt: str, history: list[dict],
     return messages, tools, rules, can_delegate
 
 
+# DeepSeek tool-call markup left in a reply's text (the gateway's DSML recovery
+# could not parse it). Here, not in model.py: the guest ships this loop with its
+# own thin model shim. '｜' is U+FF5C.
+_TOOL_MARKUP = re.compile(r"<｜+\s*DSML\s*｜+")
+
+
+def has_tool_markup(content: str) -> bool:
+    return bool(content) and _TOOL_MARKUP.search(content) is not None
+
 async def _force_conclusion(messages: list[dict], conversation_id: int,
                             model_name: str | None, base_url: str | None,
                             rules: str, rewrite_rules: bool = True) -> AsyncIterator[dict]:
@@ -225,6 +235,21 @@ async def _force_conclusion(messages: list[dict], conversation_id: int,
                "point me at where the answer lives)"}
 
 
+def _note(messages: list[dict], text: str) -> None:
+    """Append a system note to the latest TOOL result (next to the call it is
+    about). A screenshot's user message can follow that result, and its content
+    is a list: appending a str to messages[-1] there crashed the turn with
+    "can only concatenate list (not "str") to list" (2026-09-27)."""
+    k = next((j for j in range(len(messages) - 1, -1, -1)
+              if messages[j].get("role") == "tool"), len(messages) - 1)
+    content = messages[k].get("content")
+    if isinstance(content, list):
+        content = content + [{"type": "text", "text": text.strip()}]
+    else:
+        content = (content or "") + text
+    messages[k] = {**messages[k], "content": content}
+
+
 def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
            can_delegate: bool, has_todo: bool = False) -> bool:
     """Mid-flight nudges appended to the last tool result (adjacent to the
@@ -238,56 +263,56 @@ def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
     noted = False
     if err_streak >= settings.dead_end_force_answer:
         force = noted = True
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {err_streak} consecutive tool "
-                        "calls failed or returned nothing — tools are now "
-                        "disabled. Summarize what you tried, what failed, "
-                        "and what you could not determine. If the thing "
-                        "you're looking for may simply not exist, say so.]"}
+        _note(messages,
+            f"\n\n[system note: {err_streak} consecutive tool "
+            "calls failed or returned nothing — tools are now "
+            "disabled. Summarize what you tried, what failed, "
+            "and what you could not determine. If the thing "
+            "you're looking for may simply not exist, say so.]")
     elif err_streak >= settings.dead_end_error_streak:
         noted = True
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {err_streak} consecutive tool "
-                        "calls failed or returned nothing. Diagnose why "
-                        "before retrying: change strategy, delegate "
-                        "(research / spawn_agent), or report honestly what "
-                        "can't be found. Do not repeat similar calls.]"}
+        _note(messages,
+            f"\n\n[system note: {err_streak} consecutive tool "
+            "calls failed or returned nothing. Diagnose why "
+            "before retrying: change strategy, delegate "
+            "(research / spawn_agent), or report honestly what "
+            "can't be found. Do not repeat similar calls.]")
     elif err_streak == 1:
         # first failure of a streak: one cheap line so the next call is a
         # deliberate correction, not a shrug-and-move-on
         noted = True
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        "\n\n[system note: that call failed or returned "
-                        "nothing. Read the message above and make ONE "
-                        "deliberate adjustment (path, arguments, or approach) "
-                        "toward the same goal — don't repeat the call "
-                        "unchanged and don't move on as if it succeeded.]"}
+        _note(messages,
+            "\n\n[system note: that call failed or returned "
+            "nothing. Read the message above and make ONE "
+            "deliberate adjustment (path, arguments, or approach) "
+            "toward the same goal — don't repeat the call "
+            "unchanged and don't move on as if it succeeded.]")
 
     if i + 1 == settings.delegate_nudge_round and can_delegate:
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {i + 1} tool rounds used of "
-                        f"{n_iter}. If substantial gathering or multi-step "
-                        "work remains, STOP hand-rolling calls: hand web "
-                        "gathering to the research tool in one call, hand "
-                        "subtasks to spawn_agent or a deploy_agents team, "
-                        "and keep a todo_update "
-                        "plan so you execute in a straight line.]"}
+        _note(messages,
+            f"\n\n[system note: {i + 1} tool rounds used of "
+            f"{n_iter}. If substantial gathering or multi-step "
+            "work remains, STOP hand-rolling calls: hand web "
+            "gathering to the research tool in one call, hand "
+            "subtasks to spawn_agent or a deploy_agents team, "
+            "and keep a todo_update "
+            "plan so you execute in a straight line.]")
     elif i + 1 == (n_iter * 2) // 3:
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
-                        "used — start concluding. Finish the current step, "
-                        "then answer with what you have and say plainly "
-                        "what you could not determine.]"}
+        _note(messages,
+            f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
+            "used — start concluding. Finish the current step, "
+            "then answer with what you have and say plainly "
+            "what you could not determine.]")
     elif (not noted and has_todo and settings.plan_recheck_every
           and (i + 1) % settings.plan_recheck_every == 0):
         # periodic progress check against the model's own plan; suppressed on
         # rounds that already carry a note so nudges never stack
-        messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                        "\n\n[system note: progress check — against your "
-                        "todo plan: mark finished items done (todo_update) "
-                        "and make the next call serve the next open item. If "
-                        "what you've learned changed the plan, revise it "
-                        "first, then continue.]"}
+        _note(messages,
+            "\n\n[system note: progress check — against your "
+            "todo plan: mark finished items done (todo_update) "
+            "and make the next call serve the next open item. If "
+            "what you've learned changed the plan, revise it "
+            "first, then continue.]")
     return force
 
 
@@ -332,6 +357,7 @@ async def run_turn(
     # (name, canonical args) -> tool_msgs entry, for duplicate read-only calls.
     # Cleared whenever a mutating tool runs — state may have changed under it.
     seen_calls: dict[tuple, dict] = {}
+    markup_retries = 0           # tool-call markup that arrived as unparsed text
     for i in range(n_iter):
         # mail check. i == 0 was drained into `history` above; from here a
         # message arriving mid-turn becomes its own user message, so it reads as
@@ -362,6 +388,17 @@ async def run_turn(
         assert final is not None
         if not final["tool_calls"]:
             content = final["content"] or ""
+            # tool-call markup the gateway could not parse is a harness fault,
+            # not an answer: ending the turn on it voided every item of a plan
+            # run (plan_report never ran). Ask for the call again, twice at most.
+            if call_tools and markup_retries < 2 and has_tool_markup(content):
+                markup_retries += 1
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content": (
+                    "Harness note: your last reply contained tool-call markup "
+                    "as plain text, so nothing ran. Make the call again through "
+                    "the tool-calling interface, not as text.")})
+                continue
             # Self-check: a no-tools pass reliably obeys the operator's rules
             # (tools are what break adherence), so it cleans up anything the
             # tool-laden turn let slip. General — it checks against whatever
@@ -491,12 +528,12 @@ async def run_turn(
         if (has_research and not web_nudged
                 and web_calls >= settings.web_handroll_nudge > 0):
             web_nudged = True
-            messages[-1] = {**messages[-1], "content": messages[-1]["content"] +
-                            f"\n\n[system note: {web_calls} hand-rolled web "
-                            "calls this turn. If more gathering remains, hand "
-                            "the remainder to the research tool in ONE call "
-                            "and continue from its report instead of reading "
-                            "pages yourself.]"}
+            _note(messages,
+                f"\n\n[system note: {web_calls} hand-rolled web "
+                "calls this turn. If more gathering remains, hand "
+                "the remainder to the research tool in ONE call "
+                "and continue from its report instead of reading "
+                "pages yourself.]")
 
     yield {"type": "final",
            "content": "(stopped: hit the ReAct iteration limit without finishing)"}

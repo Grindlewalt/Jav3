@@ -40,7 +40,8 @@ fi
 
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
-FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT=""
+FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT="" PORT_OPT="" NAME_OPT="" CFG_DIR_OPT=""
+DO_GITEA=1 GITEA_DRY=0 DO_DOCKER=1 JSON_OUT=0
 # $SUDO_USER is only meaningful when we are actually running under sudo. Taking
 # it unconditionally means a stale value inherited from the environment wins
 # over who we really are — which reported the wrong username inside a sandbox.
@@ -56,6 +57,9 @@ usage() {
 
 Options
   --check              preflight only: report what is missing, change nothing
+  --json               with --check (or --target): the report as ONE JSON object
+                       on stdout (the human text goes to stderr), for scripts and
+                       installing agents (docs/AGENT-INSTALL.md)
   --target <host>      run the preflight on a REMOTE host over ssh and report
                        what it is missing, changing nothing there. Needs no
                        checkout on the far side. e.g. --target claude@main
@@ -67,8 +71,20 @@ Options
   --state-dir <dir>    where durable state lives (default ~/.local/share/jarvis,
                        or JARVIS_STATE_DIR); a non-default one is written to
                        ~/.config/jarvis/env so the service uses it too
+  --name <name>        install a second, independent instance beside another:
+                       unit jarvis-<name>.service, config ~/.config/jarvis-<name>
+                       (default: none = jarvis.service, ~/.config/jarvis)
+  --config-dir <dir>   where env / secrets.json live (default per --name);
+                       a non-default one is passed to the unit as JARVIS_CONFIG_DIR
+  --port <n>           port the web UI listens on (default 8000, or
+                       JARVIS_LAN_PORT from ~/.config/jarvis/env); a non-default
+                       one is written there and into the systemd unit
   --no-build           skip the frontend build
   --no-image           skip building the guest golden image (slow, ~10 min)
+  --no-gitea           skip the Gitea step (the host git server agents file pull
+                       requests to; add it later: python -m backend.cli gitea-setup)
+  --gitea-dry-run      print what the Gitea step would do, change nothing there
+  --no-docker          skip the Docker boxes step (add it later: python -m backend.cli docker-setup)
   --force              overwrite existing local state during --from
   --yes                do not prompt
   -h, --help           this text
@@ -78,14 +94,21 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)      DO_CHECK=1; DO_USER=0 ;;
+    --json)       JSON_OUT=1 ;;
     --target)     TARGET_HOST="$2"; DO_CHECK=1; DO_USER=0; shift ;;
     --root-phase) DO_ROOT=1; DO_USER=0 ;;
     --user)       TARGET_USER="$2"; shift ;;
     --from)       FROM_HOST="$2"; shift ;;
     --state-dir)  STATE_DIR_OPT="$2"; shift ;;
+    --port)       PORT_OPT="$2"; shift ;;
+    --name)       NAME_OPT="$2"; shift ;;
+    --config-dir) CFG_DIR_OPT="$2"; shift ;;
     --no-build)   BUILD_FRONTEND=0 ;;
     --no-image)   BUILD_IMAGE=0 ;;
     --force)      FORCE=1 ;;
+    --no-gitea)   DO_GITEA=0 ;;
+    --no-docker)  DO_DOCKER=0 ;;
+    --gitea-dry-run) GITEA_DRY=1 ;;
     --yes|-y)     ASSUME_YES=1 ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
@@ -94,17 +117,30 @@ while [ $# -gt 0 ]; do
 done
 
 # ------------------------------------------------------------------ output ---
+# --json: the human report moves to stderr and fd 3 keeps the real stdout for
+# the one JSON object printed at the end.
+if [ "$JSON_OUT" = 1 ]; then
+  [ "$DO_CHECK" = 1 ] || { echo "--json needs --check (or --target)" >&2; exit 64; }
+  exec 3>&1 1>&2
+fi
 BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; OFF=$'\033[0m'
-[ -t 1 ] || { BOLD=""; RED=""; GREEN=""; YELLOW=""; OFF=""; }
+[ -t 1 ] && [ "$JSON_OUT" = 0 ] || { BOLD=""; RED=""; GREEN=""; YELLOW=""; OFF=""; }
 
 step() { printf '\n%s== %s%s\n' "$BOLD" "$*" "$OFF"; }
 ok()   { printf '  %sok%s    %s\n' "$GREEN" "$OFF" "$*"; }
-warn() { printf '  %swarn%s  %s\n' "$YELLOW" "$OFF" "$*"; }
-bad()  { printf '  %sMISS%s  %s\n' "$RED" "$OFF" "$*"; }
+warn() { printf '  %swarn%s  %s\n' "$YELLOW" "$OFF" "$*"; WARNINGS+=("$*"); FIX_TO=warn; }
+# Every MISS and its fix lines are also kept for --json.
+PROBLEMS=() PROBLEM_FIX=() WARNINGS=() FIX_TO=""
+bad()  { printf '  %sMISS%s  %s\n' "$RED" "$OFF" "$*"; PROBLEMS+=("$*"); PROBLEM_FIX+=(""); FIX_TO=bad; }
 # The fix for a failed check belongs next to that check, not in a summary at the
 # bottom. A named failure with its own command is a 10-second job; the same
 # failure discovered three screens from its remedy is a debugging session.
-fix()  { printf '        fix: %s\n' "$*"; }
+fix()  {
+  printf '        fix: %s\n' "$*"
+  local n=${#PROBLEM_FIX[@]}
+  [ "$FIX_TO" = bad ] && [ "$n" -gt 0 ] && PROBLEM_FIX[n-1]+="$*"$'\n'
+  return 0
+}
 die()  { printf '\n%serror:%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
 
 # ------------------------------------------------------------------ detect ---
@@ -133,7 +169,8 @@ elif command -v dnf     >/dev/null 2>&1; then PKG=dnf
 else PKG=unknown
 fi
 
-DISTRO="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" )"
+# No os-release (macOS, where --target is run from) must not trip set -e.
+DISTRO="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" || uname -s )"
 
 case "$PKG" in
   apt)    PACKAGES=(python3-venv python3-pip nodejs npm git curl rsync rclone
@@ -147,17 +184,70 @@ esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Only the packages that are NOT installed. Handing the full list to the
+# package manager "upgrades" every one whose repo version moved on — on Arch
+# that is a partial upgrade (pacman -S --needed skips only IDENTICAL versions),
+# and it broke node on the operator's server (nodejs built against a newer
+# abseil than the system had). So: never name an installed package.
+missing_pkgs() {
+  local p
+  case "$PKG" in
+    pacman) pacman -T "${PACKAGES[@]}" 2>/dev/null || true ;;   # prints the unsatisfied
+    apt)    for p in "${PACKAGES[@]}"; do
+              dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' \
+                || echo "$p"
+            done ;;
+    dnf)    for p in "${PACKAGES[@]}"; do
+              rpm -q --whatprovides "$p" >/dev/null 2>&1 || echo "$p"
+            done ;;
+    *)      [ ${#PACKAGES[@]} -eq 0 ] || printf '%s\n' "${PACKAGES[@]}" ;;   # bash 3.2 + set -u
+  esac
+}
+
+# A checkout installed as a named instance remembers it (see user_phase), so a
+# bare re-run or --check from it inspects that instance, not the default one.
+if [ -z "$NAME_OPT$CFG_DIR_OPT" ] && [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/.jarvis-instance" ]; then
+  NAME_OPT="$(sed -n 's/^JARVIS_INSTANCE=//p' "$REPO_DIR/.jarvis-instance" | tail -1)"
+  CFG_DIR_OPT="$(sed -n 's/^JARVIS_CONFIG_DIR=//p' "$REPO_DIR/.jarvis-instance" | tail -1)"
+fi
+
+# Instance: the unit name and the config dir. Default is the one instance
+# everything else assumes; --name keeps a second one (a test install, say) from
+# overwriting the first one's unit, env file and secrets. The app reads the
+# config dir from JARVIS_CONFIG_DIR (backend/config.py), set in the unit.
+case "$NAME_OPT" in
+  "")                 UNIT=jarvis ;;
+  *[!a-zA-Z0-9_-]*)   die "--name wants letters, digits, - or _ only, got '$NAME_OPT'" ;;
+  *)                  UNIT="jarvis-$NAME_OPT" ;;
+esac
+DEFAULT_CFG_DIR="$HOME/.config/jarvis"
+CFG_DIR="${CFG_DIR_OPT:-${JARVIS_CONFIG_DIR:-$HOME/.config/$UNIT}}"
+CFG_DIR="${CFG_DIR/#\~/$HOME}"
+# so every `python -m backend.cli ...` this script runs reads THIS instance
+export JARVIS_CONFIG_DIR="$CFG_DIR"
+
 # Durable state (memory/ projects/ skills/ agents/ data/) lives in ONE dir
 # outside the checkout — backend/config.py's state_dir. Same precedence as the
 # app: --state-dir, then JARVIS_STATE_DIR from the environment or the env file,
 # then the default.
 STATE_DIR="$STATE_DIR_OPT"
 [ -n "$STATE_DIR" ] || STATE_DIR="${JARVIS_STATE_DIR:-}"
-if [ -z "$STATE_DIR" ] && [ -f "$HOME/.config/jarvis/env" ]; then
-  STATE_DIR="$(sed -n 's/^JARVIS_STATE_DIR=//p' "$HOME/.config/jarvis/env" | tail -1 | tr -d "\"'")"
+if [ -z "$STATE_DIR" ] && [ -f "$CFG_DIR/env" ]; then
+  STATE_DIR="$(sed -n 's/^JARVIS_STATE_DIR=//p' "$CFG_DIR/env" | tail -1 | tr -d "\"'")"
 fi
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/jarvis}"
 STATE_DIR="${STATE_DIR/#\~/$HOME}"
+
+# The port, same precedence: --port, JARVIS_LAN_PORT (env, then env file), 8000.
+# backend/config.py's lan_port and the unit's --port must agree, so both are
+# written from this one value.
+PORT="$PORT_OPT"
+[ -n "$PORT" ] || PORT="${JARVIS_LAN_PORT:-}"
+if [ -z "$PORT" ] && [ -f "$CFG_DIR/env" ]; then
+  PORT="$(sed -n 's/^JARVIS_LAN_PORT=//p' "$CFG_DIR/env" | tail -1 | tr -d "\"'")"
+fi
+PORT="${PORT:-8000}"
+case "$PORT" in ''|*[!0-9]*) die "--port wants a number, got '$PORT'" ;; esac
 
 # Where the guest images resolve, exactly as the app resolves them (an existing
 # box may still run from the old in-checkout layout until migrate-state).
@@ -170,7 +260,7 @@ vm_dir() {
 
 # ---------------------------------------------------------------- preflight --
 # Each check appends to MISSING_ROOT (needs the root phase) or MISSING_USER.
-MISSING_ROOT=() MISSING_USER=() BLOCKED=()
+MISSING_ROOT=() MISSING_USER=() BLOCKED=() CONFLICT=()
 
 check_cpu_virt() {
   # A working /dev/kvm settles the question on every architecture — if the
@@ -291,10 +381,11 @@ check_packages() {
     ok "system packages present"
   else
     bad "missing packages: ${missing[*]}"
+    local need; need="$(missing_pkgs | tr '\n' ' ')"
     case "$PKG" in
-      apt)    fix "sudo apt-get install -y ${PACKAGES[*]}" ;;
-      pacman) fix "sudo pacman -Sy --needed ${PACKAGES[*]}" ;;
-      dnf)    fix "sudo dnf install -y ${PACKAGES[*]}" ;;
+      apt)    fix "sudo apt-get install -y $need" ;;
+      pacman) fix "sudo pacman -S $need   (only these; not -Sy, never the full list)" ;;
+      dnf)    fix "sudo dnf install -y $need" ;;
     esac
     MISSING_ROOT+=("packages")
   fi
@@ -321,7 +412,7 @@ check_packages() {
     bad "no UEFI firmware for $ARCH"
     case "$PKG" in
       apt)    fix "sudo apt-get install -y $FW_PKG_APT" ;;
-      pacman) fix "sudo pacman -Sy --needed $FW_PKG_PAC" ;;
+      pacman) fix "sudo pacman -S --needed $FW_PKG_PAC" ;;
       dnf)    fix "sudo dnf install -y edk2-ovmf" ;;
     esac
     MISSING_ROOT+=("packages")
@@ -333,6 +424,21 @@ check_node_version() {
   local major; major="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
   if [ -n "$major" ] && [ "$major" -lt 18 ] 2>/dev/null; then
     warn "node $(node -v) is older than 18 — the Vite build may fail"
+  fi
+}
+
+# Something else on our port makes the service crash-loop with "address already
+# in use" buried in the journal. Our own running service is not a conflict.
+check_port() {
+  have ss || return 0
+  if [ -z "$(ss -Hltn "sport = :$PORT" 2>/dev/null)" ]; then
+    ok "port $PORT is free"
+  elif systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+    ok "port $PORT is in use by the running $UNIT.service"
+  else
+    bad "port $PORT is already taken by another program"
+    fix "pick a free one: bash ${REPO_DIR:-.}/scripts/install.sh --port 8780   (ss -ltnp shows who has $PORT)"
+    CONFLICT+=("port")
   fi
 }
 
@@ -360,11 +466,32 @@ check_user_side() {
   if [ -f "$REPO_DIR/frontend/dist/index.html" ]; then ok "frontend built"
   else bad "frontend not built"; fix "cd $REPO_DIR/frontend && npm install && npm run build"; MISSING_USER+=("frontend"); fi
 
-  if [ -f "$HOME/.config/jarvis/env" ]; then ok "config file present"
-  else bad "no ~/.config/jarvis/env"; fix "mkdir -p ~/.config/jarvis && touch ~/.config/jarvis/env && chmod 600 ~/.config/jarvis/env"; MISSING_USER+=("config"); fi
+  # Another app (or another Jav3 checkout) already owning this instance's
+  # config dir or unit name: installing would overwrite it. --name avoids both.
+  if [ -d "$CFG_DIR" ] && [ ! -f "$CFG_DIR/env" ] && [ -n "$(ls -A "$CFG_DIR" 2>/dev/null)" ]; then
+    bad "$CFG_DIR already holds files from something else (no Jav3 env file in it)"
+    fix "install beside it: bash $REPO_DIR/scripts/install.sh --name <name>   (or --config-dir <dir>)"
+    CONFLICT+=("config-dir")
+  fi
+  local unitf="$HOME/.config/systemd/user/$UNIT.service" wd
+  if [ -f "$unitf" ]; then
+    wd="$(sed -n 's/^WorkingDirectory=//p' "$unitf" | head -1)"
+    if [ -n "$wd" ] && [ "$wd" != "$REPO_DIR" ]; then
+      bad "$UNIT.service belongs to another checkout ($wd)"
+      fix "install beside it: bash $REPO_DIR/scripts/install.sh --name <name>"
+      CONFLICT+=("unit")
+    fi
+  fi
 
-  if [ -f "$HOME/.config/systemd/user/jarvis.service" ]; then ok "systemd user unit installed"
-  else bad "jarvis.service not installed"; fix "bash $REPO_DIR/scripts/install.sh"; MISSING_USER+=("unit"); fi
+  # after a conflict, "create the env file / install the unit" is exactly the
+  # wrong advice, so those two lines stay quiet
+  if [ ${#CONFLICT[@]} -gt 0 ]; then :
+  elif [ -f "$CFG_DIR/env" ]; then ok "config file present"
+  else bad "no $CFG_DIR/env"; fix "mkdir -p $CFG_DIR && touch $CFG_DIR/env && chmod 600 $CFG_DIR/env"; MISSING_USER+=("config"); fi
+
+  if [ ${#CONFLICT[@]} -gt 0 ]; then :
+  elif [ -f "$HOME/.config/systemd/user/$UNIT.service" ]; then ok "systemd user unit $UNIT.service installed"
+  else bad "$UNIT.service not installed"; fix "bash $REPO_DIR/scripts/install.sh"; MISSING_USER+=("unit"); fi
 
   local vmd; vmd="$(vm_dir)"
   if ls "$vmd"/base-v*.qcow2 >/dev/null 2>&1; then ok "guest golden image present ($vmd)"
@@ -372,7 +499,7 @@ check_user_side() {
 
   if [ -f "$REPO_DIR/data/jarvis.db" ] && [ ! -f "$STATE_DIR/data/jarvis.db" ]; then
     warn "state is still inside the checkout ($REPO_DIR) — it keeps working there"
-    fix "systemctl --user stop jarvis && $REPO_DIR/.venv/bin/python -m backend.cli migrate-state && systemctl --user start jarvis"
+    fix "systemctl --user stop $UNIT && $REPO_DIR/.venv/bin/python -m backend.cli migrate-state && systemctl --user start $UNIT"
   fi
 }
 
@@ -385,49 +512,149 @@ preflight() {
   check_packages
   check_node_version
   check_linger
+  check_port
   check_user_side
 }
 
 # --------------------------------------------------------------- root phase --
+# What the root phase changed on the system, printed at the end so it can be
+# reverted; and whether any step failed (never reported as ok).
+CHANGES=() ROOT_FAILED=0
+
+# Load a module now and persist it for boot, but only when that means
+# something: a built-in module needs neither (and a modules-load entry for one
+# logs a failure at boot on some kernels), and a failed modprobe (blacklisted,
+# or module loading locked on a hardened kernel) is reported, not persisted.
+# NOT -Sy (a partial upgrade, unsupported on Arch). And if the local sync db is
+# newer than the system, even installing only the missing packages can drag
+# installed libraries forward as dependencies: the same breakage. So ask pacman
+# what it WOULD install, and refuse if any of it is already installed.
+pacman_install() {
+  local need=("$@") plan=() q upgrades=() planned
+  planned="$(pacman -Sp --print-format '%n' "${need[@]}" 2>/dev/null)" \
+    || die "pacman cannot resolve: ${need[*]}. If a package is 'not found', the
+       package database is stale: bring the system up to date first (a full
+       upgrade, the only kind Arch supports), then re-run this phase:
+           sudo pacman -Syu"
+  mapfile -t plan <<<"$planned"
+  for q in "${plan[@]}"; do
+    [ -n "$q" ] || continue
+    if pacman -Q "$q" >/dev/null 2>&1; then upgrades+=("$q"); fi
+  done
+  if [ ${#upgrades[@]} -gt 0 ]; then
+    die "installing ${need[*]} would also upgrade installed packages: ${upgrades[*]}
+       (the sync db is newer than your system — a partial upgrade, which Arch
+       does not support). Bring the system up to date first, then re-run:
+           sudo pacman -Syu"
+  fi
+  pacman -S --noconfirm "${need[@]}" || die "pacman could not install: ${need[*]}"
+}
+
+load_module() {
+  local mod="$1" conf="$2" fn
+  fn="$(modinfo -F filename "$mod" 2>/dev/null || true)"
+  if [ -z "$fn" ]; then
+    bad "this kernel has no $mod module"; ROOT_FAILED=1; return 0
+  fi
+  if [ "$fn" = "(builtin)" ]; then
+    ok "$mod is built into the kernel — nothing to load or persist"; return 0
+  fi
+  if ! modprobe "$mod"; then
+    bad "modprobe $mod failed (blacklisted, or module loading locked on this kernel?) — not persisted"
+    ROOT_FAILED=1; return 0
+  fi
+  if grep -qx "$mod" "$conf" 2>/dev/null; then
+    ok "$mod loaded (already persisted in $conf)"
+  else
+    printf '%s\n' "$mod" >> "$conf"
+    CHANGES+=("$conf: $mod   (revert: remove the line; modprobe -r $mod)")
+    ok "$mod loaded and persisted in $conf"
+  fi
+}
+
 root_phase() {
   [ "$(id -u)" -eq 0 ] || die "--root-phase must run as root (use sudo)"
   id "$TARGET_USER" >/dev/null 2>&1 || die "no such user: $TARGET_USER (pass --user)"
 
   step "packages ($PKG)"
-  case "$PKG" in
-    apt)    apt-get update -qq && apt-get install -y -qq "${PACKAGES[@]}" ;;
-    pacman) pacman -Sy --needed --noconfirm "${PACKAGES[@]}" ;;
-    dnf)    dnf install -y -q "${PACKAGES[@]}" ;;
-    *)      warn "unknown package manager — install by hand: ${PACKAGES[*]}" ;;
-  esac
-  ok "packages installed"
+  local need=()
+  mapfile -t need < <(missing_pkgs)
+  if [ ${#need[@]} -eq 0 ]; then
+    ok "all packages already installed — nothing to do (installed ones are never upgraded here)"
+  else
+    echo "  installing only what is missing: ${need[*]}"
+    case "$PKG" in
+      apt)    apt-get update -qq && apt-get install -y -qq --no-upgrade "${need[@]}" \
+                || die "apt-get could not install: ${need[*]}" ;;
+      pacman) pacman_install "${need[@]}" ;;
+      dnf)    dnf install -y -q "${need[@]}" || die "dnf could not install: ${need[*]}" ;;
+      *)      warn "unknown package manager — install by hand: ${need[*]}" ;;
+    esac
+    if [ "$PKG" != unknown ]; then
+      ok "installed: ${need[*]}"
+      case "$PKG" in
+        pacman) CHANGES+=("packages installed: ${need[*]}   (revert: pacman -Rs ${need[*]})") ;;
+        apt)    CHANGES+=("packages installed: ${need[*]}   (revert: apt-get remove ${need[*]})") ;;
+        dnf)    CHANGES+=("packages installed: ${need[*]}   (revert: dnf remove ${need[*]})") ;;
+      esac
+    fi
+  fi
 
   step "kvm + vsock kernel modules"
   local kvm_mod=""
   grep -qw vmx /proc/cpuinfo && kvm_mod=kvm_intel
   grep -qw svm /proc/cpuinfo && kvm_mod=kvm_amd
-  if [ -z "$kvm_mod" ]; then
+  if [ -e /dev/kvm ]; then
+    ok "/dev/kvm present — nothing to load"
+  elif [ -z "$kvm_mod" ]; then
     warn "no vmx/svm flag — virtualization is off in firmware; skipping modprobe"
     warn "enable VT-x / SVM Mode in BIOS and re-run this phase"
   else
-    modprobe "$kvm_mod" || warn "modprobe $kvm_mod failed"
-    printf '%s\n' "$kvm_mod" > /etc/modules-load.d/kvm.conf
-    ok "$kvm_mod loaded and persisted"
+    load_module "$kvm_mod" /etc/modules-load.d/kvm.conf
   fi
-  modprobe vhost_vsock || warn "modprobe vhost_vsock failed"
-  echo vhost_vsock > /etc/modules-load.d/vhost_vsock.conf
-  ok "vhost_vsock loaded and persisted"
+  if [ -e /dev/vhost-vsock ]; then
+    ok "/dev/vhost-vsock present (module loaded or built in) — nothing to load"
+  else
+    load_module vhost_vsock /etc/modules-load.d/vhost_vsock.conf
+  fi
 
   step "group membership"
   # /dev/kvm and /dev/vhost-vsock are group kvm; the service user must be in it
   # or rootless qemu cannot open them.
-  getent group kvm >/dev/null || groupadd -r kvm
-  usermod -aG kvm "$TARGET_USER"
-  ok "$TARGET_USER added to group kvm (needs a fresh login to take effect)"
+  if id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx kvm; then
+    ok "$TARGET_USER is already in group kvm"
+  else
+    if ! getent group kvm >/dev/null; then
+      groupadd -r kvm && CHANGES+=("group kvm created   (revert: groupdel kvm)")
+    fi
+    if usermod -aG kvm "$TARGET_USER"; then
+      CHANGES+=("$TARGET_USER added to group kvm   (revert: gpasswd -d $TARGET_USER kvm)")
+      ok "$TARGET_USER added to group kvm (needs a fresh login to take effect)"
+    else
+      bad "could not add $TARGET_USER to group kvm"; ROOT_FAILED=1
+    fi
+  fi
 
   step "linger"
-  loginctl enable-linger "$TARGET_USER"
-  ok "linger enabled for $TARGET_USER (user service survives logout and reboot)"
+  if [ "$(loginctl show-user "$TARGET_USER" -p Linger --value 2>/dev/null)" = yes ]; then
+    ok "linger already enabled for $TARGET_USER"
+  elif loginctl enable-linger "$TARGET_USER"; then
+    CHANGES+=("linger enabled for $TARGET_USER   (revert: loginctl disable-linger $TARGET_USER)")
+    ok "linger enabled for $TARGET_USER (user service survives logout and reboot)"
+  else
+    bad "loginctl enable-linger $TARGET_USER failed"; ROOT_FAILED=1
+  fi
+
+  step "what this phase changed"
+  if [ ${#CHANGES[@]} -eq 0 ]; then
+    printf '  nothing\n'
+  else
+    printf '  - %s\n' "${CHANGES[@]}"
+  fi
+  if [ "$ROOT_FAILED" = 1 ]; then
+    printf '\n%sroot phase finished with failures (MISS lines above).%s\n' "$RED" "$OFF"
+    exit 1
+  fi
 
   printf '\n%sroot phase done.%s Now run, as %s:\n\n    bash %s/scripts/install.sh\n\n' \
     "$BOLD" "$OFF" "$TARGET_USER" "$REPO_DIR"
@@ -545,15 +772,15 @@ PY" || die "could not snapshot the source database"
   # The JWT secret comes too, or every existing login token is invalidated.
   rsync -a "${private[@]}" "$host:$root/data/jwt_secret" "$STATE_DIR/data/jwt_secret" 2>/dev/null \
     || warn "no data/jwt_secret on the source (existing sessions will need a re-login)"
-  mkdir -p "$HOME/.config/jarvis"
-  chmod 700 "$HOME/.config/jarvis"
-  rsync -a "${private[@]}" "$host:.config/jarvis/env" "$HOME/.config/jarvis/env" 2>/dev/null \
+  mkdir -p "$CFG_DIR"
+  chmod 700 "$CFG_DIR"
+  rsync -a "${private[@]}" "$host:.config/jarvis/env" "$CFG_DIR/env" 2>/dev/null \
     || warn "no ~/.config/jarvis/env on the source — you will need to set the API key"
-  rsync -a "${private[@]}" "$host:.config/jarvis/secrets.json" "$HOME/.config/jarvis/secrets.json" 2>/dev/null \
+  rsync -a "${private[@]}" "$host:.config/jarvis/secrets.json" "$CFG_DIR/secrets.json" 2>/dev/null \
     || true
   # The source's env may pin ITS state dir; this box's is $STATE_DIR.
-  if grep -q '^JARVIS_STATE_DIR=' "$HOME/.config/jarvis/env" 2>/dev/null; then
-    sed -i "s#^JARVIS_STATE_DIR=.*#JARVIS_STATE_DIR=$STATE_DIR#" "$HOME/.config/jarvis/env"
+  if grep -q '^JARVIS_STATE_DIR=' "$CFG_DIR/env" 2>/dev/null; then
+    sed -i "s#^JARVIS_STATE_DIR=.*#JARVIS_STATE_DIR=$STATE_DIR#" "$CFG_DIR/env"
   fi
   ssh "$host" "rm -f '$root/data/jarvis.migrate.db'" || true
   trap - EXIT
@@ -601,34 +828,61 @@ user_phase() {
   fi
 
   step "config"
-  mkdir -p "$HOME/.config/jarvis"
-  touch "$HOME/.config/jarvis/env"
-  chmod 600 "$HOME/.config/jarvis/env"
+  mkdir -p "$CFG_DIR"
+  touch "$CFG_DIR/env"
+  chmod 600 "$CFG_DIR/env"
+  # The checkout remembers a non-default instance, so the printed
+  # `.venv/bin/python -m backend.cli ...` commands (and a bare re-run of this
+  # script) land on it rather than on the default ~/.config/jarvis.
+  local was=""
+  [ ! -f .jarvis-instance ] || was="$(sed -n 's/^JARVIS_CONFIG_DIR=//p' .jarvis-instance | tail -1)"
+  [ -n "$was" ] || was="$DEFAULT_CFG_DIR"
+  [ "$was" = "$CFG_DIR" ] \
+    || warn "this checkout now defaults to $UNIT ($CFG_DIR), was $was — bare backend.cli commands follow it"
+  if [ "$CFG_DIR" != "$DEFAULT_CFG_DIR" ]; then
+    printf 'JARVIS_INSTANCE=%s\nJARVIS_CONFIG_DIR=%s\n' "$NAME_OPT" "$CFG_DIR" > .jarvis-instance
+    ok "this checkout is instance ${NAME_OPT:-custom} ($CFG_DIR), recorded in .jarvis-instance"
+  else
+    rm -f .jarvis-instance
+  fi
   # A non-default state dir must reach the service too, not just this script.
   if [ "$STATE_DIR" != "$HOME/.local/share/jarvis" ] \
-     && ! grep -qxF "JARVIS_STATE_DIR=$STATE_DIR" "$HOME/.config/jarvis/env"; then
-    sed -i '/^JARVIS_STATE_DIR=/d' "$HOME/.config/jarvis/env"
-    echo "JARVIS_STATE_DIR=$STATE_DIR" >> "$HOME/.config/jarvis/env"
-    ok "state dir $STATE_DIR recorded in ~/.config/jarvis/env"
+     && ! grep -qxF "JARVIS_STATE_DIR=$STATE_DIR" "$CFG_DIR/env"; then
+    sed -i '/^JARVIS_STATE_DIR=/d' "$CFG_DIR/env"
+    echo "JARVIS_STATE_DIR=$STATE_DIR" >> "$CFG_DIR/env"
+    ok "state dir $STATE_DIR recorded in $CFG_DIR/env"
   fi
-  if grep -q 'JARVIS_DEEPSEEK_API_KEY' "$HOME/.config/jarvis/env" 2>/dev/null; then
-    ok "API key present in ~/.config/jarvis/env"
+  # A named instance advertises its own mDNS name, not a second "jav3.local".
+  if [ -n "$NAME_OPT" ] && ! grep -q '^JARVIS_INSTANCE_NAME=' "$CFG_DIR/env"; then
+    echo "JARVIS_INSTANCE_NAME=jav3-$NAME_OPT" >> "$CFG_DIR/env"
+    ok "mDNS name jav3-$NAME_OPT.local recorded in $CFG_DIR/env"
+  fi
+  if [ "$PORT" != 8000 ] && ! grep -qxF "JARVIS_LAN_PORT=$PORT" "$CFG_DIR/env"; then
+    sed -i '/^JARVIS_LAN_PORT=/d' "$CFG_DIR/env"
+    echo "JARVIS_LAN_PORT=$PORT" >> "$CFG_DIR/env"
+    ok "port $PORT recorded in $CFG_DIR/env"
+  fi
+  if grep -q 'JARVIS_DEEPSEEK_API_KEY' "$CFG_DIR/env" 2>/dev/null; then
+    ok "API key present in $CFG_DIR/env"
   fi
 
   step "systemd user units"
   mkdir -p "$HOME/.config/systemd/user"
   # The unit hardcodes %h/jarvis; if the checkout lives elsewhere, rewrite the
   # paths rather than silently installing a unit that points at nothing.
-  sed "s#%h/jarvis#$REPO_DIR#g" scripts/jarvis.service \
-    > "$HOME/.config/systemd/user/jarvis.service"
-  sed "s#%h/jarvis#$REPO_DIR#g" scripts/jarvis-backup.service \
-    > "$HOME/.config/systemd/user/jarvis-backup.service"
-  cp scripts/jarvis-backup.timer   "$HOME/.config/systemd/user/" 2>/dev/null || true
+  # A non-default config dir reaches the app (and the backup) via the unit.
+  local cfgenv=()
+  [ "$CFG_DIR" = "$DEFAULT_CFG_DIR" ] || cfgenv=(-e "/^\[Service\]/a Environment=JARVIS_CONFIG_DIR=$CFG_DIR")
+  sed -e "s#%h/jarvis#$REPO_DIR#g" -e "s#--port 8000#--port $PORT#" "${cfgenv[@]}" scripts/jarvis.service \
+    > "$HOME/.config/systemd/user/$UNIT.service"
+  sed -e "s#%h/jarvis#$REPO_DIR#g" "${cfgenv[@]}" scripts/jarvis-backup.service \
+    > "$HOME/.config/systemd/user/$UNIT-backup.service"
+  cp scripts/jarvis-backup.timer "$HOME/.config/systemd/user/$UNIT-backup.timer" 2>/dev/null || true
   chmod +x scripts/backup.sh 2>/dev/null || true
   systemctl --user daemon-reload
-  systemctl --user enable jarvis.service >/dev/null
-  systemctl --user enable --now jarvis-backup.timer >/dev/null 2>&1 || true
-  ok "jarvis.service installed and enabled"
+  systemctl --user enable "$UNIT.service" >/dev/null
+  systemctl --user enable --now "$UNIT-backup.timer" >/dev/null 2>&1 || true
+  ok "$UNIT.service installed and enabled"
 
   if [ "$BUILD_IMAGE" = 1 ]; then
     step "guest golden image"
@@ -647,6 +901,42 @@ user_phase() {
   fi
 
   first_run_setup
+  gitea_step
+  docker_step
+}
+
+# Docker boxes: the lighter box runtime (docs/docker-runtime.md). Optional and
+# automatic: when Docker is already installed and usable, the box image is
+# built and the runtime switched on; otherwise it says what to do and moves on.
+# Docker itself is never installed from here (no package manager: see Gitea).
+docker_step() {
+  if [ "$DO_DOCKER" != 1 ]; then ok "Docker boxes skipped (--no-docker)"; return 0; fi
+  step "docker boxes (optional, lighter than VMs)"
+  if ! have docker; then
+    ok "Docker not installed — skipping. Later: install Docker, then run $REPO_DIR/.venv/bin/python -m backend.cli docker-setup"
+    return 0
+  fi
+  .venv/bin/python -m backend.cli docker-setup --yes \
+    || warn "Docker boxes not set up — fix the line above, then re-run: $REPO_DIR/.venv/bin/python -m backend.cli docker-setup"
+}
+
+# Gitea: the host git server agents file pull requests to (docs/gitea.md).
+# Optional, on by default. The pinned static binary is downloaded and its
+# sha256 checked by backend/gitea_setup.py — NEVER a package manager (the
+# pacman partial upgrade that broke node). Idempotent: a re-run keeps the
+# config, the accounts and still-valid tokens.
+gitea_step() {
+  if [ "$DO_GITEA" != 1 ]; then ok "Gitea skipped (--no-gitea)"; return 0; fi
+  step "gitea (host git server for agent pull requests)"
+  local args=()
+  [ "$GITEA_DRY" = 1 ] && args+=(--dry-run)
+  if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ] || [ ! -t 1 ]; then args+=(--yes); fi
+  if ! have systemctl; then
+    warn "no systemctl — skipping Gitea (needs a systemd --user service)"
+    return 0
+  fi
+  .venv/bin/python -m backend.cli gitea-setup ${args[@]+"${args[@]}"} \
+    || warn "Gitea setup did not finish — re-run: $REPO_DIR/.venv/bin/python -m backend.cli gitea-setup"
 }
 
 # The first login + model provider. Interactive on a terminal; otherwise (or
@@ -666,6 +956,8 @@ first_run_setup() {
   local url; url="$(printf '%s\n' "$st" | sed -n 2p)"
   if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ] || [ ! -t 1 ]; then
     ok "no login yet — finish setup in a browser once the service is up: ${url:-/setup}"
+    # the .local name needs mDNS on the machine you browse from; the LAN IPs don't
+    printf '%s\n' "$st" | sed -n '3,$p' | sed 's/^/          or: /'
     return 0
   fi
   .venv/bin/python -m backend.cli setup \
@@ -675,17 +967,69 @@ first_run_setup() {
 # ------------------------------------------------------------------ verify ---
 verify() {
   step "verify"
-  systemctl --user restart jarvis || { warn "could not start jarvis.service"; return 1; }
+  systemctl --user restart "$UNIT" || { warn "could not start $UNIT.service"; return 1; }
   local i
   for i in $(seq 1 30); do
-    if curl -sf localhost:8000/api/health >/dev/null 2>&1; then
-      ok "health check passed — http://localhost:8000"
+    if curl -sf "localhost:$PORT/api/health" >/dev/null 2>&1; then
+      ok "health check passed — http://localhost:$PORT"
       return 0
     fi
     sleep 1
   done
-  warn "no health response after 30s — check: journalctl --user -u jarvis -n 50"
+  warn "no health response after 30s — check: journalctl --user -u $UNIT -n 50"
   return 1
+}
+
+# ------------------------------------------------------------------- json ---
+jstr() {
+  local v="$1"
+  v="${v//\\/\\\\}"; v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"; v="${v//$'\t'/\\t}"; v="${v//$'\r'/}"; v="${v//$'\033'/}"
+  printf '"%s"' "$v"
+}
+jarr() {   # jarr a b c -> ["a","b","c"]
+  local first=1 x
+  printf '['
+  for x in "$@"; do
+    [ $first = 1 ] || printf ','
+    first=0; jstr "$x"
+  done
+  printf ']'
+}
+jbool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
+emit_json() {
+  local ready=false i fixes
+  if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#MISSING_USER[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ] \
+     && [ ${#CONFLICT[@]} -eq 0 ]; then ready=true; fi
+  {
+    printf '{"ready":%s,"arch":%s,"distro":%s,"pkg":%s,"user":%s,' "$ready" \
+      "$(jstr "$ARCH")" "$(jstr "$DISTRO")" "$(jstr "$PKG")" "$(jstr "$TARGET_USER")"
+    printf '"repo_dir":%s,"unit":%s,"port":%s,"config_dir":%s,"state_dir":%s,' \
+      "$(jstr "$REPO_DIR")" "$(jstr "$UNIT")" "$PORT" "$(jstr "$CFG_DIR")" "$(jstr "$STATE_DIR")"
+    printf '"kvm":%s,"vsock":%s,"docker":%s,' \
+      "$(jbool test -r /dev/kvm -a -w /dev/kvm)" "$(jbool test -e /dev/vhost-vsock)" \
+      "$(jbool docker info)"
+    printf '"blocked":%s,"missing_root":%s,"missing_user":%s,"conflict":%s,' \
+      "$(jarr ${BLOCKED[@]+"${BLOCKED[@]}"})" "$(jarr ${MISSING_ROOT[@]+"${MISSING_ROOT[@]}"})" \
+      "$(jarr ${MISSING_USER[@]+"${MISSING_USER[@]}"})" "$(jarr ${CONFLICT[@]+"${CONFLICT[@]}"})"
+    # shellcheck disable=SC2046  # one package name per word
+    printf '"missing_packages":%s,' "$(jarr $(missing_pkgs 2>/dev/null))"
+    if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
+      printf '"root_command":%s,' \
+        "$(jstr "sudo bash ${REPO_DIR:-<path-to-jarvis-checkout>}/scripts/install.sh --root-phase --user $TARGET_USER")"
+    else
+      printf '"root_command":null,'
+    fi
+    printf '"problems":['
+    for i in "${!PROBLEMS[@]}"; do
+      [ "$i" = 0 ] || printf ','
+      fixes="${PROBLEM_FIX[$i]%$'\n'}"
+      printf '{"message":%s,"fix":' "$(jstr "${PROBLEMS[$i]}")"
+      if [ -n "$fixes" ]; then (IFS=$'\n'; jarr $fixes); else printf '[]'; fi
+      printf '}'
+    done
+    printf '],"warnings":%s}\n' "$(jarr ${WARNINGS[@]+"${WARNINGS[@]}"})"
+  } >&3
 }
 
 # -------------------------------------------------------------------- main ---
@@ -698,6 +1042,10 @@ if [ -n "$TARGET_HOST" ]; then
   [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] \
     || die "--target needs to read this script from disk"
   printf '%s== remote preflight: %s%s\n' "$BOLD" "$TARGET_HOST" "$OFF"
+  if [ "$JSON_OUT" = 1 ]; then
+    ssh -o ConnectTimeout=10 "$TARGET_HOST" 'bash -s -- --check --json' < "${BASH_SOURCE[0]}" >&3
+    exit $?
+  fi
   ssh -o ConnectTimeout=10 "$TARGET_HOST" 'bash -s -- --check' < "${BASH_SOURCE[0]}"
   rc=$?
   if [ $rc -eq 0 ]; then
@@ -726,14 +1074,21 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
   printf '\n%sNeeds one root window. Copy-paste this whole block:%s\n\n' "$BOLD" "$OFF"
   printf '    sudo bash %s/scripts/install.sh --root-phase --user %s\n\n' \
     "${REPO_DIR:-<path-to-jarvis-checkout>}" "$TARGET_USER"
-  printf '  It installs: %s\n' "${PACKAGES[*]}"
-  printf '  and: loads kvm + vhost_vsock (persisted), adds %s to the kvm group,\n' "$TARGET_USER"
-  printf '  and enables systemd linger. Nothing else.\n'
+  NEED_PKGS="$(missing_pkgs | tr '\n' ' ')"
+  printf '  It installs only the missing packages: %s\n' "${NEED_PKGS:-(none)}"
+  printf '  and: loads kvm + vhost_vsock unless present or built in (persisting a\n'
+  printf '  module in /etc/modules-load.d/ only after it loads), adds %s to the\n' "$TARGET_USER"
+  printf '  kvm group, and enables systemd linger. Nothing else; it ends by listing\n'
+  printf '  exactly what it changed, with the command to revert each.\n'
+  if [ ${#BLOCKED[@]} -gt 0 ]; then
+    printf '  It is worth running now: packages, group and linger do not wait for the\n'
+    printf '  BIOS. After enabling virtualization, run it again to load kvm.\n'
+  fi
   printf '\n  If you would rather run the individual commands yourself:\n\n'
   case "$PKG" in
-    apt)    printf '    sudo apt-get update && sudo apt-get install -y %s\n' "${PACKAGES[*]}" ;;
-    pacman) printf '    sudo pacman -Sy --needed %s\n' "${PACKAGES[*]}" ;;
-    dnf)    printf '    sudo dnf install -y %s\n' "${PACKAGES[*]}" ;;
+    apt)    [ -z "$NEED_PKGS" ] || printf '    sudo apt-get update && sudo apt-get install -y --no-upgrade %s\n' "$NEED_PKGS" ;;
+    pacman) [ -z "$NEED_PKGS" ] || printf '    sudo pacman -S %s    # only if it would not upgrade anything installed; else pacman -Syu first\n' "$NEED_PKGS" ;;
+    dnf)    [ -z "$NEED_PKGS" ] || printf '    sudo dnf install -y %s\n' "$NEED_PKGS" ;;
   esac
   if grep -qw vmx /proc/cpuinfo; then printf '    sudo modprobe kvm_intel && echo kvm_intel | sudo tee /etc/modules-load.d/kvm.conf\n'
   elif grep -qw svm /proc/cpuinfo; then printf '    sudo modprobe kvm_amd   && echo kvm_amd   | sudo tee /etc/modules-load.d/kvm.conf\n'
@@ -744,11 +1099,17 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
 fi
 
 if [ "$DO_CHECK" = 1 ]; then
-  if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#MISSING_USER[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ]; then
+  [ "$JSON_OUT" = 1 ] && emit_json
+  if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#MISSING_USER[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ] \
+     && [ ${#CONFLICT[@]} -eq 0 ]; then
     printf '\n%sready.%s\n' "$GREEN" "$OFF"; exit 0
   fi
   exit 1
 fi
+
+# Overwriting another install's unit or another app's config is never the
+# right default, --yes or not.
+[ ${#CONFLICT[@]} -eq 0 ] || die "this would overwrite another install (${CONFLICT[*]}) — see the fix lines above"
 
 # A missing root phase is not fatal for the user phase — the venv and the
 # frontend build fine without KVM, and the image build skips itself with a
@@ -766,13 +1127,24 @@ user_phase
 printf '\n%sinstalled.%s\n' "$BOLD" "$OFF"
 printf '  state dir:            %s\n' "$(cd "$REPO_DIR" && .venv/bin/python -m backend.cli paths state_dir 2>/dev/null || echo "$STATE_DIR")"
 printf '  first-run setup:      %s/.venv/bin/python -m backend.cli setup   (or open the GUI; add logins with --add-user)\n' "$REPO_DIR"
-printf '  backups (rclone):     set a remote via /api/backup/config, or JARVIS_BACKUP_REMOTE in ~/.config/jarvis/env\n'
-printf '  start:                systemctl --user restart jarvis\n'
-printf '  logs:                 journalctl --user -u jarvis -f\n'
+printf '  config:               %s/env\n' "$CFG_DIR"
+printf '  web UI:               http://localhost:%s/\n' "$PORT"
+printf '  backups (rclone):     set a remote via /api/backup/config, or JARVIS_BACKUP_REMOTE in %s/env\n' "$CFG_DIR"
+printf '  start:                systemctl --user restart %s\n' "$UNIT"
+printf '  logs:                 journalctl --user -u %s -f\n' "$UNIT"
 printf '  re-check:             bash %s/scripts/install.sh --check\n' "$REPO_DIR"
 
-if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ]; then
-  verify || true
-else
-  printf '\n%snot starting:%s root steps above are still outstanding.\n' "$YELLOW" "$OFF"
+# Start it either way. Without KVM/vsock no agent turn can run (there is no
+# host-side loop), but the web UI, logins, settings, projects and the TUI all
+# work, and a server that is up says so more usefully than one that is not.
+if [ ${#MISSING_ROOT[@]} -gt 0 ] || [ ${#BLOCKED[@]} -gt 0 ]; then
+  printf '\n%sstarting without a guest runtime:%s the web UI works, but agent turns\n' "$YELLOW" "$OFF"
+  if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
+    printf '  will fail until the root steps above are done'
+    [ ${#BLOCKED[@]} -eq 0 ] || printf ' and virtualization is enabled in BIOS (BLOCKED above)'
+  else
+    printf '  will fail until virtualization is enabled in BIOS (BLOCKED above)'
+  fi
+  printf '\n  (then: systemctl --user restart %s).\n' "$UNIT"
 fi
+verify || true

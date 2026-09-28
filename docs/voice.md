@@ -2,7 +2,7 @@
 
 Hands-free Jav3: you talk, he talks back, and interrupting him works the
 way interrupting a person does. The full agent is underneath — voice turns
-ARE chat turns (same persistence, budget, peak gate, project binding), so
+ARE chat turns (same persistence, budget, project binding), so
 everything a typed conversation can do, a spoken one can too.
 
 ## Topology
@@ -26,8 +26,8 @@ local barge-in VAD                            state machine,       token    whis
 ## The state machine (backend/voice.py)
 
 `LISTENING → THINKING → SPEAKING`, plus `BARGE_PENDING` (playback paused
-locally, waiting for the transcript verdict) and `CONFIRM_PEAK` (the peak
-pricing question was spoken; the next utterance answers it).
+locally, waiting for the transcript verdict) and `CONFIRM_ESCALATE` ("send it
+up?" was spoken; the next utterance answers it).
 
 **Latency path:** tokens stream → `voice_text.SpeechChunker` cuts speakable
 sentences (min 25 / max 250 chars, abbreviation + decimal guards, code
@@ -106,8 +106,7 @@ both threads are visible in the sidebar.
 
 With `JARVIS_VOICE_LOCAL_MODEL` set (`gemma-4:12b` since 2026-08-04), voice turns run on
 the operator's own ollama box by default — conversation, media control,
-quick questions: no API cost, no peak gate (the gate only prices DeepSeek
-hours), first token in ~120 ms over the LAN. Three ways a turn reaches
+quick questions: no API cost, first token in ~120 ms over the LAN. Three ways a turn reaches
 DeepSeek instead:
 
 1. **The model bounces it**: the local prompt (`voice_text.LOCAL_PROMPT`)

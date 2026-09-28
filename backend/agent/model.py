@@ -1,11 +1,9 @@
 """The single model choke point: every LLM call goes through Model.complete,
-and the peak-cost gate lives in front of it. `providers.resolve` routes each
+and the gateway (key policy, budget, ledger) lives in front of it. `providers.resolve` routes each
 call — `provider/model` -> endpoint, key, wire kind — and the non-OpenAI
 wire formats live in adapters.py."""
 import json
 import re
-import time
-from datetime import datetime, time as dtime
 from typing import AsyncIterator
 
 from ..config import settings
@@ -33,11 +31,20 @@ def _is_voice_local(name: str, base: str) -> bool:
 # TEXT instead of the structured tool_calls field, so the serving layer doesn't
 # parse them and they arrive as garbage content (the tool never runs). Recover
 # them: parse the markup back into tool_calls. The '｜' below is U+FF5C.
+# V4.1 puts a space after the bars (`<｜｜DSML｜｜ invoke`); V4 did not. Missing
+# that space failed every item of the 2026-09-27 benchmark-game plan run: the
+# markup was taken as a final answer and plan_report never ran.
 _DSML_MARK = "DSML"
+_B = r"｜+\s*DSML\s*｜+\s*"          # the <｜｜DSML｜｜ > tag prefix, any spacing
+# the close is sometimes written without its slash (`<｜｜DSML｜｜ invoke>`); a
+# call with no close at all was cut off mid-argument and is NOT recovered (a
+# truncated write_file must not run) — the loop asks for it again instead
 _DSML_INVOKE = re.compile(
-    r'<｜｜DSML｜｜invoke name="([^"]+)">(.*?)</｜｜DSML｜｜invoke>', re.S)
+    rf'<{_B}invoke\s+name="([^"]+)"\s*>(.*?)<\s*/?\s*{_B}invoke\s*>', re.S)
 _DSML_PARAM = re.compile(
-    r'<｜｜DSML｜｜parameter name="([^"]+)"[^>]*>(.*?)</｜｜DSML｜｜parameter>', re.S)
+    rf'<{_B}parameter\s+name="([^"]+)"([^>]*)>(.*?)</{_B}parameter\s*>', re.S)
+_DSML_START = re.compile(rf'<{_B}')
+_DSML_NONSTRING = re.compile(r'string\s*=\s*"false"')
 
 
 def _coerce(v: str):
@@ -49,59 +56,35 @@ def _coerce(v: str):
     return v
 
 
+def _dsml_value(attrs: str, v: str):
+    """string="true" is the raw text; string="false" is a JSON value (numbers,
+    booleans, arrays, objects); no attribute (V4) gets the old light coercion."""
+    if _DSML_NONSTRING.search(attrs):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return _coerce(v)
+    if "string" in attrs:
+        return v
+    return _coerce(v)
+
+
 def parse_dsml_tool_calls(content: str) -> list[dict]:
     """Recover tool calls the model emitted as text markup instead of structured
     fields. Returns [] if there are none."""
     calls = []
     for i, m in enumerate(_DSML_INVOKE.finditer(content)):
-        args = {p.group(1): _coerce(p.group(2)) for p in _DSML_PARAM.finditer(m.group(2))}
+        args = {p.group(1): _dsml_value(p.group(2), p.group(3))
+                for p in _DSML_PARAM.finditer(m.group(2))}
         calls.append({"id": f"dsml_{i}", "type": "function",
                       "function": {"name": m.group(1), "arguments": json.dumps(args)}})
     return calls
 
 
-class PeakPricingConfirmationRequired(Exception):
-    """Raised when a call lands inside a peak-pricing window and the user
-    hasn't confirmed they want to pay 2x for this conversation recently."""
-
-
-def _parse_window(spec: str) -> tuple[dtime, dtime]:
-    start_s, end_s = spec.split("-")
-    h1, m1 = (int(x) for x in start_s.split(":"))
-    h2, m2 = (int(x) for x in end_s.split(":"))
-    return dtime(h1, m1), dtime(h2, m2)
-
-
-def in_peak_window(now: datetime | None = None, windows: list[str] | None = None) -> bool:
-    now = now or datetime.now()
-    t = now.time()
-    for spec in windows if windows is not None else settings.peak_windows:
-        start, end = _parse_window(spec)
-        if start <= end:
-            if start <= t < end:
-                return True
-        else:  # crosses midnight, e.g. 23:00-03:00
-            if t >= start or t < end:
-                return True
-    return False
-
-
-# conversation_id -> unix time the user last confirmed peak usage
-_peak_confirmations: dict[int, float] = {}
-
-
-def confirm_peak(conversation_id: int) -> None:
-    _peak_confirmations[conversation_id] = time.time()
-
-
-def peak_confirmed(conversation_id: int) -> bool:
-    ts = _peak_confirmations.get(conversation_id)
-    return ts is not None and time.time() - ts < settings.peak_confirm_ttl_minutes * 60
-
-
-def check_peak_gate(conversation_id: int) -> None:
-    if in_peak_window() and not peak_confirmed(conversation_id):
-        raise PeakPricingConfirmationRequired()
+def dsml_prose(content: str) -> str:
+    """The prose the model wrote before its tool-call markup ("Let me check X.")."""
+    m = _DSML_START.search(content)
+    return (content[:m.start()] if m else content).strip()
 
 
 CAPTURE_STATE_KEY = "capture_context"
@@ -180,7 +163,7 @@ class ModelClient:
     """Pure transport to an OpenAI-compatible chat-completions endpoint (every
     provider of kind openai/ollama — DeepSeek, OpenAI, OpenRouter, Groq, ...):
     it builds the request, streams it (with retry + DSML recovery), and yields
-    events. It holds NO key policy, budget, peak gate, or ledger — those are the
+    events. It holds NO key policy, budget, or ledger — those are the
     host nucleus (ModelGateway). The auth key is passed in per call, so this
     layer can run keyless when a gateway drives it (the VM-inversion seam).
     Per-provider request shape (output cap, sampling) comes from the read-only
@@ -255,7 +238,7 @@ class ModelClient:
             recovered = parse_dsml_tool_calls(content)
             if recovered:
                 tcs = recovered
-                content = ""   # the markup was the tool call, not a message
+                content = dsml_prose(content)   # the markup was the tool call
         yield {"type": "message", "content": content, "tool_calls": tcs,
                "usage": raw["usage"]}
 
@@ -372,8 +355,8 @@ def _cache_weight(route) -> float | None:
 
 class ModelGateway:
     """The host nucleus in front of the transport: the one place that holds the
-    API-key policy, routes a call to its provider, enforces the peak-pricing
-    gate, meters the shared token Budget, and writes the model_calls ledger.
+    API-key policy, routes a call to its provider, meters the shared token Budget,
+    and writes the model_calls ledger.
     `complete(...)` keeps the exact public contract every caller relies on
     (token events, then one message event). Wrapping the transport this way is
     the seam the VM inversion splits along — the transport can move guest-side
@@ -399,7 +382,7 @@ class ModelGateway:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} (+ an opaque
         `provider_blocks` for adapters that need replay state). Raises
-        PeakPricingConfirmationRequired / BudgetExceeded / ModelError before any
+        BudgetExceeded / ModelError before any
         network I/O.
 
         model_name is `provider/model` (a bare id runs on the default model's
@@ -414,10 +397,6 @@ class ModelGateway:
             route = providers.resolve(model_name, base_url, deepseek_key=self.api_key)
         except providers.ProviderError as e:
             raise ModelError(str(e)) from None
-        # the peak gate prices DEEPSEEK hours — other providers (and a local
-        # ollama) cost the same at any hour, so only DeepSeek calls are gated
-        if conversation_id is not None and route.is_deepseek:
-            check_peak_gate(conversation_id)
         budget = budget_mod.get(op_id) if op_id else budget_mod.current()
         if budget is not None and budget.over():
             raise budget_mod.BudgetExceeded(

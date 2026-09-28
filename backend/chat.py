@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, providers, runtime
 from .agent import budget
-from .agent.model import confirm_peak, in_peak_window, model, peak_confirmed
+from .agent.model import model
 from .agent.loop import db_tool_sink
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
 from .auth import require_actor
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_a
 class ChatRequest(BaseModel):
     message: str
     conversation_id: int | None = None
-    confirm_peak: bool = False
+    confirm_peak: bool = False   # ignored; accepted so old clients don't 422
     # "temporary chat" in the GUI: persist nothing, memory writes go to a temp dir
     ephemeral: bool = False
     # pin a NEW conversation to this project (workspace chat panels pass their
@@ -561,7 +561,7 @@ ARTIFACT_TOOLS = frozenset({"write_file", "edit_file", "read_file", "list_files"
                             "todo_update", "deploy_agents"})
 
 # a turn that used any of these did real project work — journal-worthy
-_JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request"})
+_JOURNAL_WORTHY = frozenset({"write_file", "edit_file", "git_commit_request", "git_push_request"})
 
 
 async def _link_tool_calls(db, conversation_id: int, before_id: int | None,
@@ -747,6 +747,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # voice block's reasoning) and, below, the tool to watch one
         orchestrating = bool(row and row["mode"] == "orchestrate")
         if orchestrating:
+            # its turn lasts the whole run (it waits in plan_status); the plan's
+            # token checkpoint is the brake, not a hard cap mid-supervision
+            the_budget.max_input = the_budget.max_output = 10**15
             from .plan import orchestrator_prompt
             system_prompt = f"{system_prompt}\n\n{orchestrator_prompt(active)}"
         # tool subsetting: with no project loaded, project-scoped run/git/
@@ -788,12 +791,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             excluded = agent_exclusions(agent_def)
             entries = [e for e in entries if e["name"] not in excluded]
         if orchestrating and any(e["name"] == "orchestrate" for e in entries):
-            # plan_status is `enabled: false` (an ordinary chat that launches a
+            # plan_status / plan_fix are `enabled: false` (an ordinary chat that launches a
             # plan is told not to wait on it); an orchestrator's whole job is
             # to. Granted only where orchestrate itself survived the project's
             # autonomy dial — watching a plan it may not start is pointless.
             entries = entries + [{**e, "enabled": True} for e in load_registry()
-                                 if e["name"] == "plan_status"]
+                                 if e["name"] in ("plan_status", "plan_fix")]
         # ...and a shortened Notes body. NOT zero: the first line of a body is
         # where the load-bearing operating instruction lives ("Do not call
         # music_search first"), and dropping it entirely broke tool use on the local
@@ -1343,6 +1346,15 @@ async def _tree_groups(db, roots: list[int], live: set[int], needs: dict,
     return out
 
 
+@router.get("/chat/running")
+async def running_ids():
+    """Ids of every conversation with a loop in flight right now, and nothing
+    else: no DB read, so the web sidebar's Active group can poll it cheaply.
+    GET /api/chat/agents?scope=active leaves out a plain chat whose own turn
+    is streaming (it is not agent work); this is how the sidebar sees those."""
+    return {"running": sorted(_running_loops())}
+
+
 @router.get("/chat/agents")
 async def agents_tree(scope: Literal["active", "finished", "all"] = "active",
                       limit: int = agenttree.FINISHED_DEFAULT, offset: int = 0):
@@ -1598,14 +1610,6 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
         if conversation_id is not None and conversation_id in _active_turns:
             raise HTTPException(status_code=409, detail="turn_in_progress")
         if conversation_id is None:
-            # Peak-cost gate (spec §4) BEFORE the conversation exists: the old
-            # order created the row first, so this 409 left an orphan,
-            # blank-rendering conversation behind (and the retry opened a
-            # fresh one — twin entries in the sidebar). DeepSeek hours only.
-            if (in_peak_window() and not body.confirm_peak
-                    and providers.peak_priced(pinned_model)):
-                raise HTTPException(status_code=409,
-                                    detail="peak_confirmation_required")
             # identity is validated here, not in the detached turn: a typo'd
             # slug is a 404 on the POST the operator can see, not an error
             # event on a conversation that already exists
@@ -1675,8 +1679,6 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             if body.permission_mode:
                 await permissions.set_mode(db, conversation_id, body.permission_mode)
                 await db.commit()
-            if body.confirm_peak:
-                confirm_peak(conversation_id)
         else:
             async with db.execute(
                 "SELECT model FROM conversations WHERE id = ?", (conversation_id,)
@@ -1687,17 +1689,6 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             if body.permission_mode:
                 await permissions.set_mode(db, conversation_id, body.permission_mode)
                 await db.commit()
-            # Peak-cost gate for an existing conversation: confirmation is
-            # keyed to its id, so it can (and must) be checked after lookup.
-            if body.confirm_peak:
-                confirm_peak(conversation_id)
-            if (in_peak_window() and not peak_confirmed(conversation_id)
-                    and providers.peak_priced(pinned_model or existing["model"])):
-                raise HTTPException(
-                    status_code=409,
-                    detail="peak_confirmation_required",
-                    headers={"X-Conversation-Id": str(conversation_id)},
-                )
 
         if pinned_model:
             await db.execute("UPDATE conversations SET model = ? WHERE id = ?",
@@ -1746,7 +1737,7 @@ def start_turn(conversation_id: int, *, ephemeral: bool = False,
                actor: str | None = None) -> asyncio.Task:
     """Launch a chat turn as a detached task. The one shared seam between the
     HTTP endpoint above and the voice orchestrator: the caller has already
-    inserted the user message row, run the peak gate, and (if it wants the
+    inserted the user message row and (if it wants the
     early events) subscribed to the conversation's bus channel."""
     task = asyncio.create_task(
         _run_chat_turn(conversation_id, ephemeral, user_msg, tab, voice=voice,

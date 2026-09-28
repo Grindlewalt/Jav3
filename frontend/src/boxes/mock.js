@@ -115,20 +115,20 @@ const S = {
   lanIp: '',
   lanConfigured: '192.168.1.250',
   profiles: [
-    { id: 1, name: 'Default', builtin: true, default_verdict: 'deny', network_off: false,
+    { id: 1, name: 'Default', is_default: true, default_verdict: 'deny', network_off: false,
       allow_hosts: ['pypi.org', 'files.pythonhosted.org'], deny_hosts: [], secrets: [],
       auto_handle: false, separate_box: false, box_image: 'main', box_mem_mb: null, box_runtime: 'kvm',
       allow_services: false, allow_package_requests: true, service_placement: 'per_project',
       projects: ['notes'] },
-    { id: 2, name: 'Scoped', builtin: true, default_verdict: 'deny', network_off: false,
+    { id: 2, name: 'Scoped', is_default: false, default_verdict: 'deny', network_off: false,
       allow_hosts: [], deny_hosts: ['pastebin.com'], secrets: ['GITHUB_TOKEN'], auto_handle: false,
       separate_box: true, box_image: 'dev', box_mem_mb: 768, box_runtime: 'kvm', allow_services: true,
       allow_package_requests: true, service_placement: 'per_project', projects: ['alpha'] },
-    { id: 3, name: 'Offline', builtin: true, default_verdict: 'deny', network_off: true,
+    { id: 3, name: 'Offline', is_default: false, default_verdict: 'deny', network_off: true,
       allow_hosts: [], deny_hosts: [], secrets: [], auto_handle: false, separate_box: false,
       box_image: 'main', box_mem_mb: null, box_runtime: 'kvm', allow_services: false,
       allow_package_requests: false, service_placement: 'per_project', projects: [] },
-    { id: 4, name: 'Scraper', builtin: false, default_verdict: 'deny', network_off: false,
+    { id: 4, name: 'Scraper', is_default: false, default_verdict: 'deny', network_off: false,
       allow_hosts: ['example.org'], deny_hosts: [], secrets: [], auto_handle: true, separate_box: true,
       box_image: 'dev', box_mem_mb: 512, box_runtime: 'docker', allow_services: true,
       allow_package_requests: true, service_placement: 'shared', projects: ['bravo'] },
@@ -235,7 +235,7 @@ function pkgRow(p) {
 }
 function profileOf(slug) {
   return S.profiles.find((p) => p.projects.includes(slug))
-    || S.profiles.find((p) => p.builtin && p.name === 'Default')
+    || S.profiles.find((p) => p.is_default)
 }
 function box(id) { return S.boxes.find((b) => b.id === id) || fail(404, 'no such box') }
 function budget() {
@@ -430,13 +430,17 @@ const routes = [
   ['GET', /^\/api\/profiles$/, () => ({ profiles: S.profiles })],
   ['POST', /^\/api\/profiles$/, (_, b) => {
     if (!b.service_placement || !b.box_runtime) fail(422, 'service_placement and box_runtime are required')
-    const p = { ...b, id: S.nextId++, builtin: false, projects: [] }
+    const p = { ...b, id: S.nextId++, is_default: false, projects: [] }
     S.profiles.push(p)
+    return p
+  }],
+  ['POST', /^\/api\/profiles\/(\d+)\/default$/, ([id]) => {
+    const p = S.profiles.find((x) => x.id === Number(id)) || fail(404, 'no such profile')
+    for (const x of S.profiles) x.is_default = x.id === p.id
     return p
   }],
   ['PUT', /^\/api\/profiles\/(\d+)$/, ([id], b) => {
     const p = S.profiles.find((x) => x.id === Number(id)) || fail(404, 'no such profile')
-    if (p.builtin && b.name && b.name !== p.name) fail(409, 'builtin profiles keep their name')
     for (const k of ['service_placement', 'box_runtime']) {
       if (k in b && !b[k]) fail(422, `${k} is required`)
     }
@@ -445,7 +449,7 @@ const routes = [
   }],
   ['DELETE', /^\/api\/profiles\/(\d+)$/, ([id]) => {
     const p = S.profiles.find((x) => x.id === Number(id)) || fail(404, 'no such profile')
-    if (p.builtin) fail(409, 'builtin profiles cannot be deleted')
+    if (p.is_default) fail(409, `'${p.name}' is the default profile for new projects: make another profile the default first`)
     if (p.projects.length) fail(409, `profile is in use by: ${p.projects.join(', ')}`)
     S.profiles = S.profiles.filter((x) => x.id !== Number(id))
     return { ok: true }
@@ -478,7 +482,7 @@ const routes = [
   }],
   ['GET', /^\/api\/egress\/policy\/([^/]+)$/, ([slug]) => {
     if (slug === '__image_build__') {
-      return { slug, profile: { id: null, name: 'Image build', default: 'deny', network_off: false, builtin: true },
+      return { slug, profile: { id: null, name: 'Image build', default: 'deny', network_off: false, is_default: false, fixed: true },
         project_allow: [], project_deny: [], source: 'fixed',
         effective_allow: ['deb.debian.org', 'security.debian.org', 'pypi.org', 'files.pythonhosted.org',
           'registry.npmjs.org'], effective_deny: [] }
@@ -486,7 +490,7 @@ const routes = [
     const pol = S.policy[slug] || { allow: [], deny: [] }
     const prof = profileOf(slug)
     return { slug, profile: { id: prof.id, name: prof.name, default: prof.default_verdict,
-      network_off: prof.network_off, builtin: prof.builtin },
+      network_off: prof.network_off, is_default: !!prof.is_default },
       project_allow: pol.allow, project_deny: pol.deny,
       effective_allow: [...new Set([...pol.allow, ...prof.allow_hosts])],
       effective_deny: [...new Set([...pol.deny, ...prof.deny_hosts])], source: 'profile' }
@@ -521,7 +525,7 @@ const routes = [
           deny: p.deny }
       })
     const profileGroups = S.profiles.map((p) => {
-      const isDefault = p.builtin && p.name === 'Default'
+      const isDefault = !!p.is_default
       return { project: isDefault ? '__general__' : `profile:${p.id}`, kind: 'profile',
         profile: { id: p.id, name: p.name, default: p.default_verdict },
         entries: p.allow_hosts.map((host) => ({ host, source: isDefault && host === 'pypi.org' ? 'seed' : 'operator' })),
@@ -533,7 +537,7 @@ const routes = [
     if (b.id != null) return { ok: true }
     const list = b.list === 'deny' ? 'deny' : 'allow'
     const m = /^profile:(\d+)$/.exec(b.project || '')
-    const prof = b.project === '__general__' ? S.profiles.find((p) => p.builtin && p.name === 'Default')
+    const prof = b.project === '__general__' ? S.profiles.find((p) => p.is_default)
       : m ? S.profiles.find((p) => p.id === Number(m[1])) : null
     if (prof) {
       const field = list === 'deny' ? 'deny_hosts' : 'allow_hosts'

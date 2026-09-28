@@ -13,7 +13,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import bus, orchestrator, research
-from .agent.model import in_peak_window
 from .agent.tools.registry import load_registry, openai_tool_specs
 from .auth import require_user
 from .autonomy import NON_DELEGABLE
@@ -64,7 +63,7 @@ def sse(event: dict) -> str:
 class ResearchRun(BaseModel):
     topic: str
     angles: int = 4
-    confirm_peak: bool = False
+    confirm_peak: bool = False   # ignored; accepted so old clients don't 422
     # run against THIS project (workspace research panels pass their slug)
     # instead of whatever project happens to be globally active
     project: str | None = None
@@ -97,12 +96,6 @@ async def research_run(body: ResearchRun):
     import uuid
     job_id = uuid.uuid4().hex  # minted here so we subscribe before the task runs
 
-    # Peak gate once for the whole job (a fresh job id can never be
-    # pre-confirmed, so the body flag is the only greenlight).
-    if not body.confirm_peak and in_peak_window():
-        raise HTTPException(status_code=409, detail="peak_confirmation_required",
-                            headers={"X-Conversation-Id": job_id})
-
     queue = bus.subscribe(job_id)
     task = asyncio.create_task(
         research.run_research(body.topic, project, n_angles=body.angles, job_id=job_id))
@@ -128,7 +121,7 @@ async def research_run(body: ResearchRun):
 
 class FunnelRun(BaseModel):
     brief: str
-    confirm_peak: bool = False
+    confirm_peak: bool = False   # ignored; accepted so old clients don't 422
 
 
 @router.post("/funnel")
@@ -151,10 +144,6 @@ async def funnel_run(body: FunnelRun):
     import uuid
     job_id = uuid.uuid4().hex
 
-    if not body.confirm_peak and in_peak_window():
-        raise HTTPException(status_code=409, detail="peak_confirmation_required",
-                            headers={"X-Conversation-Id": job_id})
-
     # workers are terminal: a leaf falling through with tools=None would get
     # the FULL registry (spawn_agent, deploy_agents, create_agent...) — the
     # deploy_agents handler strips NON_DELEGABLE, and so must this endpoint
@@ -162,7 +151,7 @@ async def funnel_run(body: FunnelRun):
         [e for e in load_registry() if e["name"] not in NON_DELEGABLE])
     queue = bus.subscribe(job_id)
     task = asyncio.create_task(
-        orchestrator.run_job(job_id, body.brief, project, peak=True,
+        orchestrator.run_job(job_id, body.brief, project,
                              leaf_tools=leaf_tools))
 
     async def event_stream():

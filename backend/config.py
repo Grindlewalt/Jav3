@@ -12,13 +12,13 @@ log = logging.getLogger(__name__)
 
 # Where the env file, secrets.json, providers.json and backup.json live. Read
 # from the process environment only (it has to be known BEFORE the env file is
-# read), so a second instance on the same user account gets its own key and
-# secrets instead of sharing the first one's.
+# read), so a second instance on the same user account (scripts/install.sh
+# --name) gets its own key and secrets instead of sharing the first one's.
 #
 # A checkout installed as a named instance remembers it in <repo>/.jarvis-instance
-# (one line, JARVIS_CONFIG_DIR=<dir>), so a plain `.venv/bin/python -m
-# backend.cli ...` run from it targets that instance, not the default one. The
-# environment still wins.
+# (one line, JARVIS_CONFIG_DIR=<dir>, written by install.sh), so a plain
+# `.venv/bin/python -m backend.cli ...` run from it targets that instance, not
+# the default one. The environment still wins.
 def _instance_config_dir() -> str | None:
     try:
         for line in (BASE_DIR / ".jarvis-instance").read_text().splitlines():
@@ -116,6 +116,22 @@ class Settings(BaseSettings):
     # The committer email on every commit Jav3 makes in a project repo.
     git_author_email: str = "jav3@localhost"
 
+    # Gitea on the host (backend/gitea.py, docs/gitea.md): a systemd --user
+    # service from the pinned static binary, SQLite, HTTP only. OFF until
+    # `python -m backend.cli gitea-setup` (or the installer) has run; off means
+    # every git path behaves exactly as without it. The API is always called
+    # host-side on 127.0.0.1:<gitea_port>; gitea_url is the address the
+    # operator's browser uses for links (empty = http://<first LAN IP>:<port>).
+    gitea_enabled: bool = False
+    gitea_port: int = 3000
+    gitea_url: str = ""
+    gitea_owner: str = ""            # the operator's Gitea username (= Jav3's)
+    gitea_bot_user: str = "jav3-agent"
+    gitea_dir: Path | None = None    # default <state_dir>/gitea
+    # 0600 files next to the env file; read host-side only, never in a box
+    gitea_admin_token_path: Path = CONFIG_DIR / "gitea-admin.token"
+    gitea_bot_token_path: Path = CONFIG_DIR / "gitea-bot.token"
+
     # Operator API keys the agent uses by {{secret:NAME}} placeholder but
     # never sees (backend/secrets.py). Lives next to the env file.
     secrets_path: Path = CONFIG_DIR / "secrets.json"
@@ -155,8 +171,7 @@ class Settings(BaseSettings):
     # Per-model prices come from the provider catalogue (providers_catalog
     # .json, or ~/.config/jarvis/providers.json to override one). These flat
     # per-1M USD rates only price a ledger row whose model the catalogue has
-    # never heard of. DeepSeek's peak hours are double; the peak gate in
-    # agent/model.py asks before spending in them.
+    # never heard of.
     price_cache_hit_per_m: float = 0.003
     price_cache_miss_per_m: float = 0.15
     price_output_per_m: float = 0.60
@@ -187,17 +202,20 @@ class Settings(BaseSettings):
     # from it; an explicitly set per-service URL always wins.
     services_host: str = "localhost"
 
-    # Peak-pricing windows, local time, "HH:MM-HH:MM". May cross midnight.
-    peak_windows: list[str] = ["18:00-21:00", "23:00-03:00"]
-    # How long a user's "yes, use the API" answer stays valid.
-    peak_confirm_ttl_minutes: int = 60
-
     # Backstop for the main/chat loop. Subagents get a much tighter cap below:
     # a research subagent reading 1-3 sources needs a handful of rounds, not 60
     # — leaving it high let subagents read 40-85 pages and burn millions of
     # tokens re-sending the pile each iteration.
     max_react_iterations: int = 60
     subagent_max_iterations: int = 12
+    # a plan item builds a whole slice of a project; 12 rounds went entirely on
+    # recon in the 2026-09-27 Voxelcraft run (every item "ran out of budget")
+    plan_item_max_iterations: int = 60
+    # plan runs have NO hard token budget (a 1M-output cap killed five items
+    # mid-work, 2026-09-27). Instead, every plan_pause_tokens (in + out, over the
+    # plan's whole life, across relaunches) the run stops starting items, lets
+    # running turns finish, and pauses until the operator resumes it.
+    plan_pause_tokens: int = 100_000_000
     recent_message_limit: int = 40
 
     # The explicit orchestrator (backend/plan.py): how many checklist items run
@@ -457,7 +475,7 @@ class Settings(BaseSettings):
     voice_max_workers: int = 3          # backgrounded twins per voice session
     # Local fast tier: when set (e.g. "llama3.1:8b"), voice turns run on this
     # ollama model by default — conversational stuff, media control, quick
-    # questions stay on the operator's own GPUs with no API cost or peak gate.
+    # questions stay on the operator's own GPUs with no API cost.
     # The model escalates to DeepSeek only by [ESCALATE] + spoken permission,
     # or immediately when the operator says "smart model" / "deepseek".
     # Empty string = every voice turn runs on DeepSeek as before.
@@ -690,6 +708,8 @@ class Settings(BaseSettings):
             self.db_path = self.data_dir / "jarvis.db"
         if "vm_dir" not in explicit or self.vm_dir is None:
             self.vm_dir = self.data_dir / "vm"
+        if "gitea_dir" not in explicit or self.gitea_dir is None:
+            self.gitea_dir = root / "gitea"
         return self
 
     @property

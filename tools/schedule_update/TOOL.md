@@ -41,7 +41,7 @@ parameters:
   required: [action]
 ---
 There is deliberately no enable action. A schedule is standing autonomous
-execution (headless, peak pricing auto-confirmed), so only the operator can
+execution (headless, no one to ask), so only the operator can
 switch one on — from the bell or the Schedules tab. After creating one, say
 so plainly: "created paused, waiting for your approval." delete only retracts
 proposals the operator hasn't decided on yet; ask them to remove anything

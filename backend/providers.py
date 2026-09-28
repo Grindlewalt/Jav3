@@ -545,15 +545,6 @@ def turn_model_id(model_name: str | None, base_url: str | None = None) -> str:
         return model_name or default_model()
 
 
-def peak_priced(model_id: str | None) -> bool:
-    """Whether a turn on this model (None = the default) spends in DeepSeek's
-    peak-priced hours — the only provider the peak gate applies to."""
-    try:
-        return split_id(canonical(model_id or default_model()))[0] == "deepseek"
-    except ProviderError:
-        return True
-
-
 def set_default(model_id: str) -> str:
     """The nav switcher (PUT /api/model): the id must already be an enabled
     model. Returns the canonical id."""
@@ -610,7 +601,7 @@ class Route:
     key: str = field(repr=False, default="local")
     info: dict = field(default_factory=dict)   # the catalogue model entry
     # set when the provider needs a key and has none: the gateway raises it
-    # AFTER its peak/budget gates, so those still answer first
+    # AFTER its budget gate, so that still answers first
     key_error: str | None = None
 
     @property

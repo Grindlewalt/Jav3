@@ -20,3 +20,7 @@ parameters:
 Commits the project's live files — your write_file/edit_file changes apply
 immediately, so they are already committable. Nothing commits or pushes until
 the operator approves this request.
+
+Never run `git push` or `git remote` yourself: the box has no credentials and
+its git state is discarded. To propose work for review as a pull request, use
+git_push_request.

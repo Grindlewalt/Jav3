@@ -17,7 +17,7 @@ import socket
 
 from ..agent import budget as budget_mod
 from ..agent.budget import BudgetExceeded
-from ..agent.model import ModelError, PeakPricingConfirmationRequired, model
+from ..agent.model import ModelError, model
 from ..config import settings
 from . import boxes, broker
 
@@ -87,12 +87,14 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
                                         temperature=temperature, op_id=op_id,
                                         model_name=model_name, base_url=base_url):
             await _send(loop, conn, ev)
-    except (PeakPricingConfirmationRequired, BudgetExceeded, ModelError) as e:
+    except (BudgetExceeded, ModelError) as e:
         await _send(loop, conn, {"type": "error",
                                  "error": type(e).__name__, "message": str(e)})
     except Exception as e:  # noqa: BLE001 — one bad call must not kill the server
+        # str() of a timeout or a dropped stream is often "", which reached the
+        # operator as "ModelError: " with no clue (2026-09-27)
         await _send(loop, conn, {"type": "error",
-                                 "error": type(e).__name__, "message": str(e)})
+                                 "error": type(e).__name__, "message": str(e) or repr(e)})
 
 
 async def _handle_tool_broker_call(loop, conn, req: dict, box=None) -> None:

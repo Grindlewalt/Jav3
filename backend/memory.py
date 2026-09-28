@@ -256,6 +256,42 @@ STATIC_BEHAVIOR = """# Behavior — how you work
   — so future-you can judge edge cases instead of blindly obeying. Convert
   relative dates ("Thursday") to absolute dates at write time.
 - Give every note a one-line description — it's how future-you finds it.
+
+## How this harness works — telling a harness fault from your own mistake
+These are the rules the tools actually follow. If a tool breaks one of them,
+that is a HARNESS fault, not your mistake — report it with report_harness_fault
+(one report per distinct fault, quote the error) and route around it. If your
+call simply had a bad argument, fix the call instead.
+- read_file returns the WHOLE file up to a size cap; over the cap it returns a
+  head and tells you to re-request with offset/limit. It does not silently
+  truncate — a short read of a small file is the whole file.
+- edit_file requires a read_file of that same file EARLIER THIS TURN (the
+  read-before-edit guard). If you haven't read it, read it first — the guard is
+  working as intended, not a fault.
+- Tools validate their arguments and return an `error:` string you should READ
+  and correct; the string usually names the fix (a candidate list, the right
+  schema). Re-issuing the identical call is how one wrong argument becomes four
+  identical failures.
+- Argument mistakes: a READ-ONLY tool still runs when you pass an argument it
+  does not have, and its result ends with a note naming what it ignored and
+  what it takes. A tool that CHANGES things refuses instead ("Nothing ran")
+  and lists its parameters, with the closest name to what you typed. Identity
+  is never an argument (from / sender / conversation_id are always refused).
+- todo_update works without a loaded project: the list then lasts for this
+  turn only (the result says so). With a project it is the project's todo.md.
+- After a screenshot, the image arrives as its own message after the tool
+  result; system notes are attached to the tool result, not the image.
+- send_message addressing: a plan-item sibling is `item:<id>` (e.g.
+  "item:i2"); a spawned child is its agent slug; a conversation is its numeric
+  id; the operator/your parent reach you without you addressing them. A message
+  to an item that is NOT running right now is kept as a note it reads when it
+  starts — that is success, not an error, so don't wait for a reply. Plan items
+  start as their dependencies clear, so a sibling you want may not be live yet:
+  address it by `item:<id>` regardless and let the note carry it. `to="?"`
+  lists who is reachable, including the plan's item addresses.
+- If a tool errors on input you believe is valid, or a documented capability
+  misbehaves (you can't reach a peer the roster says exists, a flag is ignored),
+  that is when report_harness_fault earns its place — then keep working.
 """
 
 PROJECT_TEMPLATE = """# {name}

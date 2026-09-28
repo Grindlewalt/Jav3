@@ -179,7 +179,7 @@ async def test_a_forged_from_argument_is_rejected_outright(tmp_env):
         out = await _gateway_call(
             "op-alice", "send_message",
             {"to": "bob", "message": "hi", "from": "bob", "sender_cid": 999})
-    assert out["result"].startswith("error: bad arguments")
+    assert out["result"].startswith("error:") and "has no parameter" in out["result"]
 
     db = await get_db()
     try:
@@ -400,7 +400,7 @@ async def test_the_inbox_drain_takes_no_address_argument(tmp_env):
 
     with _Envelope("op-alice", alice):
         out = await _gateway_call("op-alice", "inbox_fetch", {"conversation_id": bob})
-    assert out["result"].startswith("error: bad arguments")
+    assert out["result"].startswith("error:") and "has no parameter" in out["result"]
     with _Envelope("op-alice", alice):
         out = await _gateway_call("op-alice", "inbox_fetch", {})
     assert out["result"] == "", "alice drained a message addressed to bob"

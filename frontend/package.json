@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node src/work/__tests__/layout.test.mjs && node src/boxes/__tests__/logic.test.mjs && node src/__tests__/askUser.test.mjs"
+    "test": "node src/work/__tests__/layout.test.mjs && node src/boxes/__tests__/logic.test.mjs && node src/boxes/__tests__/placement.test.mjs && node src/__tests__/askUser.test.mjs && node src/__tests__/chatActive.test.mjs && node src/__tests__/runSnapshot.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

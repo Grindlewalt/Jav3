@@ -18,7 +18,6 @@ def _clean(monkeypatch):
     egress._context.update(egress._EMPTY)
     egress._cut.clear()
     egress_auto._locks.clear()
-    monkeypatch.setattr(settings, "peak_windows", [])
     yield
     egress._cut.clear()
 
@@ -334,16 +333,6 @@ async def test_no_key_falls_back_to_the_operator(db, monkeypatch):
     pend = await egress.list_pending(db, "proj")
     assert pend and pend[0]["auto_verdict"] is None     # it can try again later
     assert await _events(db) == []
-
-
-async def test_peak_window_skips_the_model(db, model_says, monkeypatch):
-    calls = model_says('{"verdict": "yes", "reason": "x"}')
-    monkeypatch.setattr(settings, "peak_windows", ["00:00-23:59"])
-    await _on(db, "proj")
-    assert await egress_auto.judge(db, "proj", "odd-site.example", 443) is None
-    assert calls == []
-    # deterministic rules still work in a peak window
-    assert (await egress_auto.judge(db, "proj", "huggingface.co", 443))[0] == "allow"
 
 
 async def test_model_call_is_budget_metered(db, model_says):

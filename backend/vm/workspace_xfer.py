@@ -21,8 +21,15 @@ SKIP = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "dist",
         ".workspace.json", ".context.json", ".staging"}
 
 
-def _skip(rel: str) -> bool:
-    return any(part in SKIP for part in Path(rel).parts)
+# what a turn's writes may NOT bring back. `dist` is skipped going IN (build
+# output is regenerated) but kept coming OUT: a build the agent made on purpose
+# was dropped here while run_code told it "kept" (dist/voxelcraft.html,
+# 2026-09-27). run_code's per-file and per-run caps still bound its size.
+SKIP_OUT = SKIP - {"dist"}
+
+
+def _skip(rel: str, skip=SKIP) -> bool:
+    return any(part in skip for part in Path(rel).parts)
 
 
 def build_merged_tar(slug: str) -> bytes:
@@ -59,7 +66,7 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes) -> dict:
             if not m.isfile():
                 continue
             rel = m.name
-            if _skip(rel):
+            if _skip(rel, SKIP_OUT):
                 continue
             f = tar.extractfile(m)
             if f is None:

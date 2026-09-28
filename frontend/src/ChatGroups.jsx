@@ -6,11 +6,19 @@ import { notifyError } from './notify.js'
 import Menu, { MenuItem, MenuSep } from './components/Menu.jsx'
 import Input from './components/Input.jsx'
 import Button from './components/Button.jsx'
+import { activeFrom } from './chatActive.js'
 
-// The chat sidebar's list, grouped: Projects (links to their workspace), then
-// Starred, then each folder, then Recent (everything unfiled). Each chat shows
-// exactly once — a starred chat lives under Starred even if it is filed, and
-// returns to its folder when unstarred.
+// The chat sidebar's list, grouped: Active (something running right now),
+// Projects (links to their workspace), then Starred, then each folder, then
+// Recent (everything unfiled). Each chat shows exactly once — an active chat
+// lives under Active while it runs, a starred one under Starred even if it is
+// filed, and each returns to its usual group when that stops.
+//
+// Active is polled, not pushed (useActive below): GET /api/chat/running (every
+// loop in flight, no DB read) for a plain chat's own streaming turn, and GET
+// /api/chat/agents?scope=active for roots with agents working or a node
+// waiting on the operator. Only chats in `conversations` show; an agent job
+// root that is not a chat stays on the Agents page.
 //
 // Self-contained over the folder/star API (GET/POST/PATCH/DELETE
 // /api/chat/folders, PATCH /api/conversations/{id} {starred, folder_id}) so a
@@ -24,6 +32,36 @@ import Button from './components/Button.jsx'
 // here; `projectHref` points the Projects rows somewhere other than the board.
 
 const GROUPS_KEY = 'jarvis.chat.groups'
+const ACTIVE_POLL_MS = 5000
+
+function useActive(enabled) {
+  const [active, setActive] = useState(() => new Map())
+  useEffect(() => {
+    if (!enabled) return undefined
+    let alive = true
+    let busy = false
+    const poll = async () => {
+      if (busy || document.hidden) return
+      busy = true
+      try {
+        const [r, t] = await Promise.all([
+          api('/api/chat/running'), api('/api/chat/agents?scope=active')])
+        if (alive) setActive(activeFrom(r.running, t.nodes))
+      } catch { /* keep the last answer; the next poll retries */ }
+      busy = false
+    }
+    poll()
+    const timer = setInterval(poll, ACTIVE_POLL_MS)
+    const onVis = () => { if (!document.hidden) poll() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      alive = false
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [enabled])
+  return active
+}
 
 function readFolded() {
   try { return JSON.parse(localStorage.getItem(GROUPS_KEY)) || {} } catch { return {} }
@@ -56,9 +94,10 @@ const boardHref = (p) => `/projects/${encodeURIComponent(p.slug)}`
 
 export default function ChatGroups({
   conversations, activeId, projects = [], onOpen, onRename, onDelete, onChanged,
-  folders: givenFolders, projectHref = boardHref,
+  folders: givenFolders, projectHref = boardHref, showActive = true,
 }) {
   const ask = useAsk()
+  const live = useActive(showActive)
   const [ownFolders, setFolders] = useState([])
   const controlled = givenFolders !== undefined
   const folders = controlled ? givenFolders : ownFolders
@@ -136,15 +175,20 @@ export default function ChatGroups({
   }
 
   const known = new Set(folders.map((f) => f.id))
-  const starred = conversations.filter((c) => c.starred)
-  const inFolder = (fid) => conversations.filter((c) => !c.starred && c.folder_id === fid)
+  // waiting on the operator first, then the list's own order (newest first)
+  const activeRows = conversations.filter((c) => live.has(c.id))
+    .sort((a, b) => !!live.get(b.id).needs - !!live.get(a.id).needs)
+  const rest = activeRows.length ? conversations.filter((c) => !live.has(c.id)) : conversations
+  const starred = rest.filter((c) => c.starred)
+  const inFolder = (fid) => rest.filter((c) => !c.starred && c.folder_id === fid)
   // a folder id the list doesn't know yet (created elsewhere) reads as unfiled
   // rather than vanishing until the next folder refresh
-  const recent = conversations.filter(
+  const recent = rest.filter(
     (c) => !c.starred && (c.folder_id == null || !known.has(c.folder_id)))
 
   const row = (c) => {
     const key = `c:${c.id}`
+    const act = live.get(c.id)
     return (
       <li key={c.id}
           className={[c.id === activeId ? 'active' : '', menu === key ? 'menu-open' : '']
@@ -153,8 +197,25 @@ export default function ChatGroups({
         {/* title owns the row; the project slug sits under it so a long slug
             can never crush the title into two letters */}
         <div className="convo-main">
-          <span className="convo-title ellipsis" title={c.summary || `#${c.id}`}>
-            {listTitle(c)}</span>
+          {act ? (
+            <span className="convo-active-line">
+              <span className={act.needs ? 'convo-active-dot needs' : 'convo-active-dot'}
+                    aria-hidden="true" />
+              <span className="convo-title ellipsis" title={c.summary || `#${c.id}`}>
+                {listTitle(c)}</span>
+              {act.agents > 0 && (
+                <span className="convo-active-agents"
+                      title={`${act.agents} agent${act.agents === 1 ? '' : 's'} working`}>
+                  {act.agents}</span>
+              )}
+              {act.needs && (
+                <span className="convo-active-needs" title={act.needs}>needs you</span>
+              )}
+            </span>
+          ) : (
+            <span className="convo-title ellipsis" title={c.summary || `#${c.id}`}>
+              {listTitle(c)}</span>
+          )}
           {/* an agent's thread is still a chat and still belongs in this list —
               it just isn't Jav3 speaking, so say so */}
           {(c.agent_slug || c.project_slug) && (
@@ -209,6 +270,7 @@ export default function ChatGroups({
 
   return (
     <div className="convo-list">
+      {activeRows.length > 0 && group('active', 'Active', activeRows)}
       {projects.length > 0 && (
         <section className="convo-group">
           <GroupHead id="projects" label="Projects" count={projects.length}

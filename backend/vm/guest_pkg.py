@@ -21,6 +21,7 @@ _COPY_MODULES = {
     "backend/agent/imageresult.py": "backend/agent/imageresult.py",
     "backend/codeindex.py": "backend/codeindex.py",
     "backend/agent/tools/todostore.py": "backend/agent/tools/todostore.py",
+    "backend/agent/tools/argcheck.py": "backend/agent/tools/argcheck.py",
 }
 
 # clean tools that run IN the guest (against the pushed workspace); their handler

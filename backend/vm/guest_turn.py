@@ -95,6 +95,10 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
     # the project's profile gives it its own. Resolved BEFORE anything is
     # registered, so a refusal (BoxCapError) leaks no budget or token.
     box = await boxes.for_project(active_slug)
+    # a joined box (placement "join") runs one project's turns at a time so its
+    # egress is attributed to the right project; nothing awaits between here
+    # and bind_op below, so the slot cannot be taken in between
+    box = await boxes.wait_turn_slot(box, active_slug)
     owns_budget = budget_mod.get(op_id) is None
     if owns_budget:
         # share the operation's Budget object if we're inside one (nested), else
@@ -114,7 +118,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
     broker.register_token(op_id, op_token)
     holds_ws = bool(push_workspace and active_slug)
     if boxes.enabled():
-        boxes.bind_op(op_id, box)          # the gateway refuses it from any other box
+        boxes.bind_op(op_id, box, active_slug)          # the gateway refuses it from any other box
     # /persist is a shared-box mechanism (retired in favour of service boxes)
     want_persist = bool(persist and holds_ws and box.is_shared
                         and not (envelope is not None and envelope.ephemeral)

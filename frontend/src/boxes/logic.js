@@ -377,6 +377,45 @@ export const RUNTIMES = [
   { value: 'docker', label: 'Docker', hint: 'a container — shares the host kernel (less isolated)' },
 ]
 
+// The profile form's one "Network" choice, over two stored fields
+// (network_off, default_verdict). "ask" is default_verdict=deny: a site on
+// neither list is refused and queued for you to approve.
+export const NETWORK_MODES = [
+  { value: 'off', label: 'Off', hint: 'no network at all, whatever the lists say' },
+  { value: 'ask', label: 'Ask me about new sites', hint: 'a site on neither list waits for you' },
+  { value: 'allow', label: 'Allow new sites', hint: 'a site on neither list is let through' },
+]
+export const networkMode = (p) =>
+  (p?.network_off ? 'off' : p?.default_verdict === 'allow' ? 'allow' : 'ask')
+export function withNetworkMode(mode) {
+  if (mode === 'off') return { network_off: true }
+  return { network_off: false, default_verdict: mode === 'allow' ? 'allow' : 'deny' }
+}
+// The rule for a site on neither list, in the words the pages use.
+export const newSitesText = (p) =>
+  ({ off: 'network off', ask: 'ask me', allow: 'allowed' })[networkMode(p)]
+
+// The profile form's one "Runs in" choice, over separate_box + box_runtime.
+// The shared box leaves box_runtime as it was (it only matters for an own box).
+export const RUNS_IN = [
+  { value: 'shared', label: 'Shared box', hint: 'the one box every shared project uses' },
+  { value: 'vm', label: 'Own VM', hint: 'a virtual machine per project — its own kernel' },
+  { value: 'container', label: 'Own container', hint: 'a container per project — shares the host kernel (less isolated)' },
+]
+export const runsIn = (p) =>
+  (!p?.separate_box ? 'shared' : p.box_runtime === 'docker' ? 'container' : 'vm')
+export function withRunsIn(value) {
+  if (value === 'vm') return { separate_box: true, box_runtime: 'kvm' }
+  if (value === 'container') return { separate_box: true, box_runtime: 'docker' }
+  return { separate_box: false }
+}
+export function runsInText(p) {
+  const r = runsIn(p)
+  if (r === 'shared') return 'shared box'
+  const what = `${p.box_image || 'main'}${p.box_mem_mb ? `, ${p.box_mem_mb} MB` : ''}`
+  return `${r === 'vm' ? 'own VM' : 'own container'} (${what})`
+}
+
 export function parseHosts(text) {
   const seen = new Set()
   const out = []
@@ -391,10 +430,10 @@ export const validHost = (h) => HOST_RE.test(h)
 
 export function blankProfile() {
   return {
-    name: '', builtin: false, default_verdict: 'deny', network_off: false,
+    name: '', is_default: false, default_verdict: 'deny', network_off: false,
     allow_hosts: [], deny_hosts: [], secrets: [], auto_handle: false,
     separate_box: false, box_image: 'main', box_mem_mb: 768,
-    box_runtime: '', service_placement: '',   // explicit: no default (decision 0.1)
+    box_runtime: 'kvm', service_placement: 'per_project',   // shared box; per-project services
     allow_services: false, allow_package_requests: false, projects: [],
   }
 }
@@ -406,10 +445,10 @@ export function validateProfile(p, { names = [], minMem = 256 } = {}) {
   if (!name) e.name = 'a name is required'
   else if (names.some((n) => n.toLowerCase() === name.toLowerCase())) e.name = 'that name is taken'
   if (!['per_service', 'per_project', 'shared'].includes(p.service_placement)) {
-    e.service_placement = 'pick a service placement — there is no default'
+    e.service_placement = 'pick where its services run'
   }
   if (!['kvm', 'docker'].includes(p.box_runtime)) {
-    e.box_runtime = 'pick a box runtime — there is no default'
+    e.box_runtime = 'pick where it runs'
   }
   if (!['allow', 'deny'].includes(p.default_verdict)) e.default_verdict = 'allow or deny'
   const bad = [...(p.allow_hosts || []), ...(p.deny_hosts || [])].filter((h) => !validHost(h))
@@ -443,8 +482,8 @@ export function profilePayload(p) {
     separate_box: !!p.separate_box,
     box_image: p.box_image || 'main',
     box_mem_mb: p.box_mem_mb == null || p.box_mem_mb === '' ? null : Number(p.box_mem_mb),
-    box_runtime: p.box_runtime,
-    service_placement: p.service_placement,
+    box_runtime: p.box_runtime || 'kvm',
+    service_placement: p.service_placement || 'per_project',
     allow_services: !!p.allow_services,
     allow_package_requests: !!p.allow_package_requests,
   }
@@ -455,51 +494,80 @@ export function profilePayload(p) {
 export const GENERAL = '__general__'
 export const IMAGE_BUILD = '__image_build__'
 
-// The Network page's allow/deny view, from GET /api/egress/allowlist: the
-// PROJECT groups (kind "project"), each with its profile, then the PROFILE
-// baselines (kind "profile", keyed "profile:<id>" or "__general__" for the
-// Default). `profiles` (GET /api/profiles) adds what the groups do not carry
-// (network_off, builtin, the verdict); `projects` names the slugs. A group's
-// `key` is what the revoke route takes as `project`.
-export function groupPolicy({ groups = [], profiles = [], projects = [], filter = '' }) {
+// The Network page's per-project view, from GET /api/egress/allowlist
+// (`groups`) and GET /api/profiles (`profiles`): one row per project with its
+// profile, the profile's new-sites rule, and the EFFECTIVE always-allow and
+// always-block lists — the profile's and the project's merged, each entry
+// marked with where it lives:
+//   project  the project's own list (edit it in the project's editor)
+//   auto     a live auto-mode allow on the project (Keep / Revoke)
+//   profile  the profile's list (edit the profile)
+//   general  the Default profile's list (the old shared list, key __general__)
+// An allow entry that is also on a block list carries `blocked: true` (block
+// wins). Every project has a profile: one with none recorded is on Default.
+export function projectPolicy({ groups = [], profiles = [], projects = [], filter = '' }) {
   const names = Object.fromEntries(projects.map((p) => [p.slug, p.name]))
-  const profById = new Map(profiles.map((p) => [p.id, p]))
-  const denyList = (d) => (d || []).map((x) => (typeof x === 'string' ? x : x?.host)).filter(Boolean)
-  const projectGroups = groups
-    .filter((g) => g && g.kind === 'project' && g.project && g.project !== IMAGE_BUILD)
-    .filter((g) => !filter || g.project === filter)
-    .map((g) => ({
-      key: g.project, slug: g.project, name: names[g.project] || g.project,
-      profile: g.profile ? { id: g.profile.id, name: g.profile.name, default: g.profile.default } : null,
-      allow: g.entries || [],
-      deny: denyList(g.deny),
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name))
-  // filtered to one project: only its own profile's baseline (it may have no
-  // list of its own yet, so its profile comes from the profiles list)
-  let wanted = null
-  if (filter) {
-    const own = projectGroups[0]?.profile?.id
-      ?? profiles.find((p) => (p.projects || []).includes(filter))?.id
-    wanted = own != null ? own : undefined
+  const isDefaultProf = (p) => !!p && !!p.is_default
+  const def = profiles.find(isDefaultProf)
+  const hostOf = (x) => (typeof x === 'string' ? x : x?.host)
+  const byProject = new Map()
+  const byProfile = new Map()          // profile id -> its group
+  for (const g of groups) {
+    if (!g) continue
+    if (g.kind === 'project' && g.project && !String(g.project).startsWith('__')) byProject.set(g.project, g)
+    if (g.kind === 'profile' && g.profile) byProfile.set(g.profile.id, g)
   }
-  const profileGroups = groups
-    .filter((g) => g && g.kind === 'profile')
-    .filter((g) => wanted === null || (wanted !== undefined && g.profile?.id === wanted)
-      || (wanted === undefined && g.project === GENERAL))
-    .map((g) => {
-      const full = profById.get(g.profile?.id) || {}
-      return {
-        key: g.project, id: g.profile?.id ?? g.project, name: g.profile?.name || full.name || g.project,
-        builtin: !!full.builtin, isDefault: g.project === GENERAL,
-        default_verdict: g.profile?.default || full.default_verdict || 'deny',
-        network_off: !!full.network_off,
-        projects: g.projects || full.projects || [],
-        allow: g.entries || [],
-        deny: denyList(g.deny),
-      }
-    })
-  return { projectGroups, profileGroups }
+  const slugs = new Set(projects.map((p) => p.slug).filter((x) => x && !String(x).startsWith('__')))
+  for (const k of byProject.keys()) slugs.add(k)
+  if (filter) { slugs.clear(); if (!String(filter).startsWith('__')) slugs.add(filter) }
+  const rows = [...slugs].map((slug) => {
+    const own = byProject.get(slug)
+    const listed = profiles.find((p) => (p.projects || []).includes(slug))
+    const pid = own?.profile?.id ?? listed?.id ?? def?.id
+    const full = profiles.find((p) => p.id === pid) || listed || def || {}
+    const pg = byProfile.get(pid)
+    const general = pg?.project === GENERAL || isDefaultProf(full)
+    const profSrc = general ? 'general' : 'profile'
+    const profile = {
+      id: pid ?? null,
+      name: full.name || own?.profile?.name || pg?.profile?.name || 'Default',
+      isDefault: general,
+      network_off: !!full.network_off,
+      default_verdict: full.default_verdict || own?.profile?.default || pg?.profile?.default || 'deny',
+      key: pg?.project ?? (general ? GENERAL : pid != null ? `profile:${pid}` : GENERAL),
+    }
+    const block = []
+    const seenB = new Set()
+    for (const h of (own?.deny || []).map(hostOf).filter(Boolean)) {
+      if (!seenB.has(h)) { seenB.add(h); block.push({ host: h, from: 'project' }) }
+    }
+    for (const h of (pg?.deny || full.deny_hosts || []).map(hostOf).filter(Boolean)) {
+      if (!seenB.has(h)) { seenB.add(h); block.push({ host: h, from: profSrc }) }
+    }
+    const allow = []
+    const seenA = new Set()
+    const add = (e, from) => {
+      const k = `${from}|${e.host}`
+      if (!e.host || seenA.has(k)) return
+      seenA.add(k)
+      allow.push({ ...e, from, blocked: seenB.has(e.host) })
+    }
+    for (const e of own?.entries || []) add(e, e.source === 'auto' ? 'auto' : 'project')
+    for (const e of pg?.entries || (full.allow_hosts || []).map((h) => ({ host: h, source: 'operator' }))) {
+      add(e, profSrc)
+    }
+    return { slug, name: names[slug] || slug, profile, allow, block }
+  })
+  rows.sort((x, y) => x.name.localeCompare(y.name))
+  return rows
+}
+
+// Plain words for where an effective entry lives.
+export const POLICY_FROM = {
+  project: { text: 'project', title: "this project's own list" },
+  auto: { text: 'auto', title: 'a live auto-mode allow: it expires unless you keep it' },
+  profile: { text: 'profile', title: "the profile's list: every project on the profile shares it" },
+  general: { text: 'general', title: "the Default profile's list: every project on Default shares it" },
 }
 
 // The label for an egress row's project: the builders' traffic and the
@@ -576,4 +644,15 @@ export function persistDaysLeft(view, now = Date.now()) {
   const t = Date.parse(String(after).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(after) ? '' : 'Z'))
   if (Number.isNaN(t)) return null
   return Math.max(0, Math.ceil((t - now) / 86400000))
+}
+
+// Why a profile's Delete is disabled, or null when it may go: the default
+// (new and unassigned projects use it) until another is marked, and any
+// profile a project still uses. The server enforces both (409).
+export function deleteBlock(p) {
+  if (!p) return 'no profile'
+  if (p.is_default) return 'it is the default for new projects: make another profile the default first'
+  const used = (p.projects || []).length
+  if (used) return `used by ${used} project${used === 1 ? '' : 's'}: move ${used === 1 ? 'it' : 'them'} to another profile first`
+  return null
 }

@@ -51,7 +51,6 @@ class FakeLink:
 
 def make_session(monkeypatch):
     from backend import voice
-    monkeypatch.setattr(voice, "in_peak_window", lambda: False)
     to_browser = []
 
     async def send_json(obj):

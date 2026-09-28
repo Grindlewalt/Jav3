@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import (agents_api, agents_run, artifacts_api, auth, backup, browser_api, chat, desk_api,
                devices_api, egress_api, events_api,
-               git_api, git_serve_api, gui, guest_shell, lan, logs_api,
+               git_api, git_serve_api, gitea_api, gui, guest_shell, harness_api, lan, logs_api,
                media_api, memory_api,
                notifications_api, permissions_api, plan_api, projects, providers, reviewer,
                reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
@@ -42,6 +42,37 @@ def require_single_process(env=None) -> None:
             "it to 1; the systemd unit passes --workers 1.")
 
 
+def _warn_missing_guest_devices() -> None:
+    """One line in the journal when the guest runtime cannot work here. The
+    web UI runs without it, but every agent turn will fail, and the operator
+    reading `journalctl` should not have to guess why."""
+    import logging
+    import os
+    missing = [d for d in ("/dev/kvm", "/dev/vhost-vsock") if not os.path.exists(d)]
+    if missing:
+        logging.getLogger("jav3").warning(
+            "no %s: the web UI works, but agent turns will fail until KVM and "
+            "vhost_vsock are available (bash scripts/install.sh --check says why)",
+            " or ".join(missing))
+
+
+async def _announce_setup_link() -> None:
+    """Until the first login exists, put the one-time setup link in the
+    journal: the operator can read it there, a LAN visitor cannot."""
+    import logging
+    from . import setup_api
+    try:
+        if await setup_api.users_exist():
+            setup_api.drop_setup_token()
+            return
+        from .cli import server_urls
+        logging.getLogger("jav3").warning(
+            "first-run setup is open: finish it at %s",
+            setup_api.setup_link(server_urls()[0]))
+    except Exception:          # noqa: BLE001 — a hint is never fatal
+        logging.getLogger("jav3").exception("could not announce the setup link")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     require_single_process()
@@ -52,6 +83,8 @@ async def lifespan(app: FastAPI):
     await providers.migrate_legacy_override()   # the old nav switch slot -> default
     await schedules.ensure_default_schedules()
     compile_registry()
+    _warn_missing_guest_devices()
+    await _announce_setup_link()
     task = asyncio.create_task(schedules.scheduler_loop())
     reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
     triage = asyncio.create_task(reviewer.sweeper_loop())  # auto queue triage
@@ -135,7 +168,9 @@ app.include_router(runs_api.router)
 app.include_router(runs_api.jobs_router)
 app.include_router(git_api.router)
 app.include_router(git_serve_api.router)
+app.include_router(gitea_api.router)
 app.include_router(notifications_api.router)
+app.include_router(harness_api.router)
 app.include_router(permissions_api.router)
 app.include_router(logs_api.router)
 app.include_router(secrets.router)
@@ -159,6 +194,8 @@ app.include_router(packages_api.images_router)  # WP5
 from . import profiles_api  # noqa: E402  # WP2
 app.include_router(profiles_api.router)  # WP2
 app.include_router(profiles_api.project_router)  # WP2
+from . import placement_api  # noqa: E402  # per-project "Runs in"
+app.include_router(placement_api.router)
 from . import services_api  # noqa: E402  # WP3
 app.include_router(services_api.router)  # WP3
 

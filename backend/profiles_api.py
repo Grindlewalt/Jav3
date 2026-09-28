@@ -5,9 +5,10 @@ same-origin gated like every control-plane state change. Every write is a
 `profile_changed` security event carrying a field diff.
 
   GET    /api/profiles                  {profiles:[row + projects:[slugs]]}
-  POST   /api/profiles                  create; service_placement + box_runtime REQUIRED (422)
+  POST   /api/profiles                  create; service_placement/box_runtime default per_project/kvm
   PUT    /api/profiles/{id}             edit;   service_placement + box_runtime REQUIRED (422)
-  DELETE /api/profiles/{id}             builtins 409; in-use 409
+  DELETE /api/profiles/{id}             the default 409; in-use 409
+  POST   /api/profiles/{id}/default     mark it the default for new/unassigned projects
   PUT    /api/projects/{slug}/profile   {profile_id}
 """
 from fastapi import APIRouter, Depends, HTTPException
@@ -104,6 +105,19 @@ async def delete_profile(pid: int, user: dict = Depends(require_user)):
             return await profiles.delete(db, pid, actor=_actor(user))
         except profiles.ProfileError as e:
             _fail(e)
+    finally:
+        await db.close()
+
+
+@router.post("/{pid}/default")
+async def make_default(pid: int, user: dict = Depends(require_user)):
+    db = await get_db()
+    try:
+        try:
+            await profiles.set_default(db, pid, actor=_actor(user))
+        except profiles.ProfileError as e:
+            _fail(e)
+        return await _row_with_projects(db, pid)
     finally:
         await db.close()
 

@@ -9,10 +9,8 @@ over vsock so the host runs it behind every gate."""
 import asyncio
 import contextvars
 import importlib.util
-import inspect
 import json
 import socket
-import traceback
 
 from ... import boxinfo, turnctx
 from ...config import settings
@@ -100,17 +98,16 @@ async def _local_dispatch(name: str, args: dict) -> str:
                 f"{type(e).__name__}: {e}. Use a different tool.")
     if handler is None:
         return f"error: in-guest tool '{name}' has no handler in the pushed package"
+    from . import argcheck        # shipped from the host (guest_pkg _COPY_MODULES)
+    args, note, err = argcheck.prepare(name, handler, args,
+                                       read_only=name in read_only_names())
+    if err:
+        return err
     try:
-        # bind first so only argument mismatches read as "bad arguments"
-        inspect.signature(handler).bind(**args)
-    except TypeError as e:
-        return (f"error: bad arguments for '{name}': {e}. Check the schema and "
-                "retry with corrected arguments.")
-    try:
-        return await handler(**args)
+        result = await handler(**args)
     except Exception as e:  # noqa: BLE001 — the loop must observe failures, not die
-        return (f"error: {name} failed with {type(e).__name__}: {e}. Adjust the "
-                f"arguments or try a different approach.\n{traceback.format_exc(limit=4)}")
+        return argcheck.crash_message(name, e)
+    return result + note if note and isinstance(result, str) else result
 
 
 async def _broker_dispatch(name: str, args: dict) -> str:

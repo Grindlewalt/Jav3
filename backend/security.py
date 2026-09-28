@@ -88,3 +88,48 @@ async def count_unacknowledged(db: aiosqlite.Connection) -> int:
     async with db.execute(
             "SELECT COUNT(*) AS n FROM security_events WHERE acknowledged = 0") as cur:
         return (await cur.fetchone())["n"]
+
+
+# --- harness self-report (report_harness_fault) ------------------------------
+# TEMPORARY diagnostic surface: an agent logs when the HARNESS misbehaved (a
+# tool that errored on input it believed valid, a documented capability that
+# didn't do what it says). Stored in its own table AND mirrored to a
+# low-severity security event so it is reviewable beside the other alerts.
+
+_FAULT_COLUMNS = ("id, conversation_id, project, tool, tried, went_wrong, "
+                  "expected, severity, created_at")
+
+
+async def record_harness_fault(db: aiosqlite.Connection, *, tried: str,
+                                went_wrong: str, expected: str | None = None,
+                                tool: str | None = None, severity: str = "low",
+                                conversation_id: int | None = None,
+                                project: str | None = None) -> int:
+    """Persist one harness-fault report and raise a matching security event.
+
+    The row is the durable record; the event is what surfaces it in the bell
+    and Review Center. A security event's severity is info|warn|critical, so a
+    'low' harness fault maps to 'info' there while the row keeps 'low' verbatim.
+    """
+    cur = await db.execute(
+        "INSERT INTO harness_faults (conversation_id, project, tool, tried, "
+        "went_wrong, expected, severity) VALUES (?,?,?,?,?,?,?)",
+        (conversation_id, project, tool, tried, went_wrong, expected, severity))
+    await db.commit()
+    fault_id = cur.lastrowid
+    head = (tool + ": " if tool else "") + went_wrong
+    await raise_event(
+        db, kind="harness_fault", severity="info",
+        project=project, summary=f"Harness fault reported: {head[:160]}",
+        detail={"fault_id": fault_id, "conversation_id": conversation_id,
+                "tool": tool, "tried": tried, "went_wrong": went_wrong,
+                "expected": expected, "severity": severity})
+    return fault_id
+
+
+async def list_harness_faults(db: aiosqlite.Connection, *,
+                              limit: int = 100) -> list[dict]:
+    async with db.execute(
+        f"SELECT {_FAULT_COLUMNS} FROM harness_faults ORDER BY id DESC LIMIT ?",
+        (limit,)) as cur:
+        return [dict(r) for r in await cur.fetchall()]

@@ -65,3 +65,23 @@ async def test_workspace_roundtrip_edit_in_guest_reconciled(tmp_env):
     assert landed.is_file() and landed.read_text() == "edited from the guest"
     # untouched files stay untouched
     assert (settings.projects_dir / "demo" / "hello.txt").read_text() == "original"
+
+
+async def test_build_output_comes_back_but_not_deps(tmp_env, tmp_path):
+    """dist/ is skipped going into the guest, but a build the agent made must
+    come back (dist/voxelcraft.html was dropped while run_code said "kept")."""
+    (settings.projects_dir / "demo").mkdir(parents=True, exist_ok=True)
+    out = tmp_path / "staging"
+    (out / "dist").mkdir(parents=True)
+    (out / "dist" / "game.html").write_text("<html></html>")
+    (out / "node_modules" / "x").mkdir(parents=True)
+    (out / "node_modules" / "x" / "i.js").write_text("junk")
+    result = await workspace_xfer.apply_guest_writes("demo", _tar_dir(out))
+    assert result["applied"] == ["dist/game.html"]
+    assert (settings.projects_dir / "demo" / "dist" / "game.html").is_file()
+    assert "dist/game.html" not in {m for m in _names(workspace_xfer.build_merged_tar("demo"))}
+
+
+def _names(tar_bytes: bytes) -> list[str]:
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as t:
+        return t.getnames()

@@ -6,12 +6,14 @@ import { human, tsShort } from '../format.js'
 import { Link } from 'react-router-dom'
 import { Button, EmptyState, Input, Select, Tag, Toggle } from '../components/index.js'
 import { listProfiles } from '../boxes/api/profiles.js'
+import RunsIn from '../boxes/RunsIn.jsx'
 import {
-  allowHost, allowlist, approvePending, getPolicy, promoteAuto, promoteToProfile, putPolicy,
-  rejectPending, revokeAllow,
+  allowHost, allowlist, approvePending, getLan, getPolicy, promoteAuto, promoteToProfile,
+  putLan, putPolicy, rejectPending, revokeAllow,
 } from '../boxes/api/policy.js'
 import {
-  GENERAL, groupPolicy, IMAGE_BUILD, needsProject, parseHosts, projectLabel,
+  GENERAL, IMAGE_BUILD, needsProject, newSitesText, parseHosts, POLICY_FROM, projectLabel,
+  projectPolicy,
 } from '../boxes/logic.js'
 
 // The guest's network, read like a log: what is waiting on you, what was
@@ -27,34 +29,34 @@ const FEED_CAP = 300
 // The operator's wording, verbatim — this is the whole disclaimer.
 const AUTO_LABEL = 'Auto (test only — can make mistakes; you can leave it on)'
 
-// egress_events.verdict -> what the row says, and the Tag that says it.
-// Auto decisions share their manual twin's colour and add a dashed outline,
-// so "who decided" reads without a legend.
+// egress_events.verdict -> what the row says, and the Tag that says it. Three
+// words only: allowed, blocked, cut. Auto decisions keep their manual twin's
+// colour, add a dashed outline and a small "auto"; a queue approval (logged
+// so a block isn't the last word on a host since let through) reads
+// "allowed" with a note saying who approved it.
+const CUT_TIP = 'Cut by the anomaly guard: an allowed site looked like data leaving '
+  + '(a random-looking name, a traffic spike, or clockwork-regular connections). '
+  + 'The proxy stopped it there and refuses every later request to that site.'
 const VERDICTS = {
   allow: { text: 'allowed', tone: 'done' },
-  deny: { text: 'denied', tone: 'pending' },
-  auto_allow: { text: 'auto-allowed', tone: 'done', auto: true },
-  auto_deny: { text: 'auto-denied', tone: 'pending', auto: true },
-  cut: { text: 'cut', tone: 'error' },
-  // not a request: the queue approval that followed a deny, logged so the
-  // deny isn't the last word on a host that has since been let through
-  approved: { text: 'approved', tone: 'done' },
-  reviewer_approved: { text: 'approved', tone: 'done', auto: true },   // dashed = the reviewer
+  deny: { text: 'blocked', tone: 'pending' },
+  auto_allow: { text: 'allowed', tone: 'done', auto: true },
+  auto_deny: { text: 'blocked', tone: 'pending', auto: true },
+  cut: { text: 'cut', tone: 'error', tip: CUT_TIP },
+  approved: { text: 'allowed', tone: 'done', note: 'approved by you' },
+  reviewer_approved: { text: 'allowed', tone: 'done', dashed: true, note: 'by the reviewer' },
 }
 const APPROVALS = new Set(['approved', 'reviewer_approved'])
 const verdictOf = (v) => VERDICTS[v] || { text: v || '?', tone: 'pending' }
 
 function VerdictTag({ verdict }) {
   const v = verdictOf(verdict)
-  return <Tag tone={v.tone} className={`net-verdict${v.auto ? ' auto' : ''}`}>{v.text}</Tag>
-}
-
-// allowlist entry source -> Tag
-const SOURCES = {
-  seed: { text: 'built-in', tone: undefined },
-  operator: { text: 'you', tone: 'done' },
-  reviewer: { text: 'reviewer', tone: 'running' },
-  auto: { text: 'auto', tone: 'pending' },
+  return (
+    <Tag tone={v.tone} className={`net-verdict${v.auto || v.dashed ? ' auto' : ''}`}
+         title={v.tip || (v.auto ? 'decided by auto mode' : v.note) || undefined}>
+      {v.text}{v.auto && <span className="net-auto-mark"> auto</span>}
+    </Tag>
+  )
 }
 
 const projLabel = (slug, names) => projectLabel(slug, names)
@@ -163,7 +165,7 @@ function Counts({ project, tick }) {
   return (
     <div className="net-counts" title="distinct hosts in the last 24 hours; waiting is now">
       <span><b>{n('allowed')}</b> allowed</span>
-      <span><b>{n('denied')}</b> denied</span>
+      <span><b>{n('denied')}</b> blocked</span>
       <span className={c?.waiting ? 'net-count-waiting' : ''}><b>{n('waiting')}</b> waiting</span>
     </div>
   )
@@ -268,12 +270,14 @@ function DecisionRow({ d, names, onAllow }) {
         <span className="net-host mono">{d.host}{d.n > 1 && (
           <span className="dim net-dec-n"> ×{d.n}</span>)}</span>
         <span className="net-dec-proj dim">{projLabel(d.project, names)}</span>
-        <span className="net-dec-bytes dim" title="sent / received">
-          {!APPROVALS.has(d.verdict) && <>↑{human(d.bytes_out)} ↓{human(d.bytes_in)}</>}</span>
+        <span className="net-dec-bytes dim" title={APPROVALS.has(d.verdict) ? undefined : 'sent / received'}>
+          {APPROVALS.has(d.verdict) ? verdictOf(d.verdict).note
+            : <>↑{human(d.bytes_out)} ↓{human(d.bytes_in)}</>}</span>
       </button>
       {open && (
         <div className="net-dec-detail">
           {d.reason && <div>{d.reason}</div>}
+          {d.verdict === 'cut' && <div className="dim">{CUT_TIP}</div>}
           {req && <div className="mono dim ellipsis" title={req}>{req}</div>}
           {(d.box_id || d.service_id) && (
             <div className="dim small">
@@ -318,11 +322,21 @@ function Decisions({ feed, names, onChanged }) {
   )
 }
 
-// ---- allow and deny, by project, then the profile baselines ----------------------
-// Every approval writes the project's OWN list now (DESIGN-BOXES (c)); the
-// profile's lists are the shared baseline under it, edited by the operator
-// only — here by "→ profile" (promote), or on the Profiles tab. Deny beats
-// allow at every level.
+// ---- always allow / always block, one view per project -----------------------
+// Each project with its profile and the profile's new-sites rule, then the
+// lists that actually apply to it: the profile's and the project's own,
+// merged, each entry marked with where it lives. Project entries are edited
+// here (or in the project's own lists below); profile entries on the profile.
+// Every approval writes the project's OWN list (DESIGN-BOXES (c)).
+
+// backend/egress.py decide(), in one sentence
+const ORDER = 'How a site is judged: a cut site, or a profile with the network off, is '
+  + 'always blocked; otherwise any "always block" entry wins; then any "always allow" '
+  + "entry (or a live auto allow) lets it through; any other site follows the profile's "
+  + 'new-sites rule.'
+
+// allow-entry source (who put it there) -> a small dim word
+const WHO = { seed: 'built-in', reviewer: 'reviewer', operator: '' }
 
 function PolicyLists({ project, names, projects, tick, onChanged }) {
   const ask = useAsk()
@@ -337,131 +351,120 @@ function PolicyLists({ project, names, projects, tick, onChanged }) {
     listProfiles().then(setProfiles).catch(() => setProfiles([]))
   }, [])
   useEffect(() => { reload(); loadProfiles() }, [tick]) // eslint-disable-line
-  const { projectGroups, profileGroups } = useMemo(() => groupPolicy({
+  const rows = useMemo(() => projectPolicy({
     groups: groups || [], profiles, filter: project,
     projects: projects.length ? projects : Object.entries(names).map(([slug, name]) => ({ slug, name })),
   }), [groups, profiles, project, projects, names])
   const refresh = () => { reload(); loadProfiles(); onChanged?.() }
 
-  // `g.key` is the list's own key: a slug, "profile:<id>", or "__general__"
-  async function revoke(g, e, list = 'allow') {
-    const where = g.slug ? `${g.name}'s own list` : `the ${g.name} profile's ${list} list`
+  // project and auto entries only: the revoke route keys on the project slug
+  async function revoke(r, e, list = 'allow') {
     const ok = await ask.confirm(`Remove ${e.host}?`, {
       body: list === 'deny'
-        ? `It comes off ${where}; it is judged by what is left.`
-        : `It comes off ${where}; the next attempt is judged by what is left (and waits for you if nothing allows it).`
-          + (g.slug ? '' : ` Every project on ${g.name} is affected.`),
+        ? `It comes off ${r.name}'s always-block list; it is judged by what is left.`
+        : `It comes off ${r.name}'s always-allow list; the next attempt is judged by what is left.`,
       confirmLabel: 'Remove', danger: true })
     if (!ok) return
     try {
-      await revokeAllow(e.source === 'auto' && e.id != null
-        ? { project: g.key, host: e.host, id: e.id }
-        : { project: g.key, host: e.host, list })
+      await revokeAllow(e.from === 'auto' && e.id != null
+        ? { project: r.slug, host: e.host, id: e.id }
+        : { project: r.slug, host: e.host, list })
       refresh()
     } catch (err) { notifyError(err) }
   }
   async function keep(e) {
     try { await promoteAuto(e.id); refresh() } catch (err) { notifyError(err) }
   }
-  async function addDeny(g) {
-    const host = await ask.prompt(`Deny a host for ${g.name}`, '', { confirmLabel: 'Deny' })
+  async function addBlock(r) {
+    const host = await ask.prompt(`Always block a site for ${r.name}`, '', { confirmLabel: 'Block' })
     if (!host) return
     try {
-      const pol = await getPolicy(g.slug)
-      await putPolicy(g.slug, undefined, [...new Set([...pol.project_deny, host.trim().toLowerCase()])])
+      const pol = await getPolicy(r.slug)
+      await putPolicy(r.slug, undefined, [...new Set([...pol.project_deny, host.trim().toLowerCase()])])
       refresh()
     } catch (err) { notifyError(err) }
   }
-  async function promote(g, host, list) {
-    const prof = profiles.find((p) => p.id === g.profile?.id) || g.profile
-    if (!prof) { notifyError(new Error('this project has no profile to promote to yet')); return }
-    const others = (prof.projects || []).filter((x) => x !== g.slug)
-    const ok = await ask.confirm(`Move ${host} to ${prof.name}'s ${list} list?`, {
-      body: `It leaves ${g.name}'s own list and becomes part of the ${prof.name} baseline: `
-        + (others.length ? `${others.join(', ')} ${list === 'deny' ? 'are denied' : 'are allowed'} it too.`
-          : 'no other project uses that profile today, but any project moved onto it will be.'),
-      confirmLabel: 'Promote', danger: list === 'allow' && others.length > 0 })
+  async function promote(r, host, list) {
+    const prof = profiles.find((p) => p.id === r.profile.id) || r.profile
+    const others = (prof.projects || []).filter((x) => x !== r.slug)
+    const what = list === 'deny' ? 'always-block' : 'always-allow'
+    const ok = await ask.confirm(`Move ${host} to the ${prof.name} profile's ${what} list?`, {
+      body: `It leaves ${r.name}'s own list and applies to every project on ${prof.name}: `
+        + (others.length ? `${others.join(', ')} ${list === 'deny' ? 'block' : 'allow'} it too.`
+          : 'no other project uses that profile today, but any project moved onto it will.'),
+      confirmLabel: 'Move', danger: list === 'allow' && others.length > 0 })
     if (!ok) return
     // profile_id null: the project's own profile, resolved by the host
-    try { await promoteToProfile(g.slug, host, { list }); refresh() } catch (err) { notifyError(err) }
+    try { await promoteToProfile(r.slug, host, { list }); refresh() } catch (err) { notifyError(err) }
   }
 
-  const entryRow = (g, e) => {
-    const src = SOURCES[e.source] || { text: e.source || 'you' }
+  const fromTag = (e) => {
+    const f = POLICY_FROM[e.from] || { text: e.from }
     return (
-      <li key={`a:${e.source}:${e.id ?? e.host}`} className="net-allow">
-        <span className="net-host mono" title={e.host}>{e.host}</span>
-        <span className="net-allow-meta">
-          <Tag tone={src.tone} className={e.source === 'auto' ? 'net-verdict auto' : ''}
-               title={e.reason || ''}>{src.text}</Tag>
-          {e.source === 'auto' && (
-            <span className="dim small" title={e.reason || ''}>until {tsShort(e.expires_at)}</span>)}
-        </span>
-        <span className="net-actions">
-          {e.source === 'auto' ? (
-            <Button variant="ghost" title="keep it: move it onto the list"
-                    onClick={() => keep(e)}>Keep</Button>
-          ) : g.slug && g.profile && (
-            <Button variant="ghost" title={`move it to ${g.profile.name}'s allow list`}
-                    onClick={() => promote(g, e.host, 'allow')}>→ profile</Button>
-          )}
-          {e.source !== 'seed' && (
-            <Button variant="ghost" danger onClick={() => revoke(g, e)}>Revoke</Button>)}
-        </span>
-      </li>
+      <Tag className={e.from === 'auto' ? 'net-verdict auto' : ''}
+           tone={e.from === 'auto' ? 'pending' : e.from === 'project' ? 'done' : undefined}
+           title={e.from === 'auto' ? (e.reason || f.title) : f.title}>{f.text}</Tag>
     )
   }
-  const denyRow = (g, host) => (
-    <li key={`d:${host}`} className="net-allow net-deny">
-      <span className="net-host mono" title={host}>{host}</span>
-      <span className="net-allow-meta"><Tag tone="error">denied</Tag></span>
+  const editProfile = <Link className="small" to="/security/profiles">edit profile</Link>
+  const allowRow = (r, e) => (
+    <li key={`a:${e.from}:${e.id ?? e.host}`} className={`net-allow${e.blocked ? ' net-overruled' : ''}`}>
+      <span className="net-host mono" title={e.host}>{e.host}</span>
+      <span className="net-allow-meta">
+        {fromTag(e)}
+        {WHO[e.source] && <span className="dim small">{WHO[e.source]}</span>}
+        {e.from === 'auto' && (
+          <span className="dim small" title={e.reason || ''}>until {tsShort(e.expires_at)}</span>)}
+        {e.blocked && <span className="dim small">blocked wins</span>}
+      </span>
       <span className="net-actions">
-        {g.slug && g.profile && (
-          <Button variant="ghost" title={`move it to ${g.profile.name}'s deny list`}
-                  onClick={() => promote(g, host, 'deny')}>→ profile</Button>)}
-        <Button variant="ghost" onClick={() => revoke(g, { host }, 'deny')}>Remove</Button>
+        {e.from === 'auto' && <>
+          <Button variant="ghost" title="keep it: move it onto the project's list"
+                  onClick={() => keep(e)}>Keep</Button>
+          <Button variant="ghost" danger onClick={() => revoke(r, e)}>Revoke</Button></>}
+        {e.from === 'project' && <>
+          <Button variant="ghost" title={`move it to the ${r.profile.name} profile's always-allow list`}
+                  onClick={() => promote(r, e.host, 'allow')}>→ profile</Button>
+          <Button variant="ghost" danger onClick={() => revoke(r, e)}>Remove</Button></>}
+        {(e.from === 'profile' || e.from === 'general') && e.source !== 'seed' && editProfile}
+      </span>
+    </li>
+  )
+  const blockRow = (r, e) => (
+    <li key={`d:${e.from}:${e.host}`} className="net-allow net-deny">
+      <span className="net-host mono" title={e.host}>{e.host}</span>
+      <span className="net-allow-meta"><Tag tone="error">blocked</Tag>{fromTag(e)}</span>
+      <span className="net-actions">
+        {e.from === 'project' ? <>
+          <Button variant="ghost" title={`move it to the ${r.profile.name} profile's always-block list`}
+                  onClick={() => promote(r, e.host, 'deny')}>→ profile</Button>
+          <Button variant="ghost" onClick={() => revoke(r, e, 'deny')}>Remove</Button></>
+          : editProfile}
       </span>
     </li>
   )
 
   return (
     <section className="net-sec">
-      <div className="sbx-sec-head"><h3>Allow &amp; deny — by project</h3></div>
-      {projectGroups.length === 0 && <EmptyState>no project has its own list yet</EmptyState>}
-      {projectGroups.map((g) => (
-        <div key={g.key} className="net-group">
+      <div className="sbx-sec-head"><h3>Always allow &amp; always block</h3>
+        <Link className="small" to="/security/profiles">profiles →</Link></div>
+      <div className="dim small net-order">{ORDER}</div>
+      {groups && rows.length === 0 && <EmptyState>no projects yet</EmptyState>}
+      {rows.map((r) => (
+        <div key={r.slug} className="net-group">
           <div className="net-group-head">
-            {g.name}
-            {g.profile && <> <Tag title="its profile: the baseline under this list">
-              {g.profile.name}</Tag></>}
-            <span className="dim small"> · {g.allow.length} allowed · {g.deny.length} denied</span>
-            <Button variant="link" onClick={() => addDeny(g)}>+ deny a host</Button>
+            {r.name}
+            {' '}<Tag title="this project's profile">
+              {r.profile.isDefault ? 'Default profile' : `${r.profile.name} profile`}</Tag>
+            <span className="dim small"> · new sites: {newSitesText(r.profile)}
+              {' · '}{r.allow.length} always allowed · {r.block.length} blocked</span>
+            <Button variant="link" onClick={() => addBlock(r)}>+ block a site</Button>
           </div>
+          {r.allow.length === 0 && r.block.length === 0 && (
+            <div className="dim small">nothing listed: every site follows the new-sites rule</div>)}
           <ul className="net-list">
-            {g.allow.map((e) => entryRow(g, e))}
-            {g.deny.map((h) => denyRow(g, h))}
-          </ul>
-        </div>
-      ))}
-
-      <div className="sbx-sec-head"><h3>Profile baselines</h3>
-        <Link className="small" to="/security/profiles">edit profiles →</Link></div>
-      {profileGroups.length === 0 && <EmptyState>no profiles on this server yet</EmptyState>}
-      {profileGroups.map((p) => (
-        <div key={p.key} className="net-group">
-          <div className="net-group-head">
-            {p.name}
-            {p.isDefault && <> <Tag title="every project without another profile">default</Tag></>}
-            <span className="dim small">
-              {' · '}{p.network_off ? 'network off'
-                : `unlisted hosts ${p.default_verdict === 'allow' ? 'allowed' : 'denied'}`}
-              {p.projects.length ? ` · ${p.projects.map((x) => projLabel(x, names)).join(', ')}` : ''}
-            </span>
-          </div>
-          {p.allow.length === 0 && p.deny.length === 0 && <EmptyState>empty</EmptyState>}
-          <ul className="net-list">
-            {p.allow.map((e) => entryRow(p, e))}
-            {p.deny.map((h) => denyRow(p, h))}
+            {r.block.map((e) => blockRow(r, e))}
+            {r.allow.map((e) => allowRow(r, e))}
           </ul>
         </div>
       ))}
@@ -470,9 +473,10 @@ function PolicyLists({ project, names, projects, tick, onChanged }) {
 }
 
 // ---- per-project egress policy editor ---------------------------------------
-// The project's own lists over its profile's baseline. What the proxy applies
-// is the effective pair (decision order: cut, project deny, profile deny,
-// project allow, profile allow, live auto-allow, the profile's default).
+// The project's own always-allow / always-block lists, on top of its
+// profile's. Decision order (backend/egress.py decide): cut, network off,
+// project block, profile block, project allow, profile allow, live auto
+// allow, the profile's new-sites rule.
 function PolicyEditor({ slug }) {
   const [pol, setPol] = useState(null)
   const [allowText, setAllowText] = useState('')
@@ -500,42 +504,96 @@ function PolicyEditor({ slug }) {
   if (pol.fixed || slug === GENERAL) {
     return (
       <div className="sbx-card">
-        <div className="sbx-sec-head"><h3>Egress policy</h3></div>
+        <div className="sbx-sec-head"><h3>Project lists</h3></div>
         <div className="small">{pol.fixed
           ? <>The image builders' fixed, registry-only policy — it cannot be edited.</>
           : <>This is the Default profile's list: edit it on <Link to="/security/profiles">Profiles</Link>.</>}</div>
         {pol.effective_allow.length > 0 && (
-          <div className="dim small">allows: {pol.effective_allow.join(', ')}</div>)}
+          <div className="dim small">always allows: {pol.effective_allow.join(', ')}</div>)}
       </div>
     )
   }
   return (
     <div className="sbx-card">
-      <div className="sbx-sec-head"><h3>Egress policy</h3>
+      <div className="sbx-sec-head"><h3>Project lists</h3>
         <span className="dim small">{status}</span></div>
       <div className="net-policy">
         <div className="small">
-          profile <b>{pol.profile?.name || 'Default'}</b>
-          {pol.profile?.network_off
-            ? <span className="dim"> · network off</span>
-            : pol.profile?.default && (
-              <span className="dim"> · unlisted hosts {pol.profile.default === 'allow' ? 'allowed' : 'denied'}</span>)}
-          {' '}<Link to="/security/profiles" className="small">change…</Link>
+          <b>{pol.profile?.name || 'Default'}</b> profile
+          <span className="dim"> · new sites: {newSitesText({
+            network_off: pol.profile?.network_off, default_verdict: pol.profile?.default })}</span>
+          {' '}<Link to="/security/profiles" className="small">edit profile</Link>
         </div>
         <div className="bx-two">
-          <Input textarea label="This project allows (one per line)" className="md-editor" rows={4}
+          <Input textarea label="Always allow — this project (one site per line)" className="md-editor" rows={4}
                  spellCheck={false} value={allowText} onChange={(e) => setAllowText(e.target.value)} />
-          <Input textarea label="This project denies — beats every allow" className="md-editor" rows={4}
+          <Input textarea label="Always block — this project (wins)" className="md-editor" rows={4}
                  spellCheck={false} value={denyText} onChange={(e) => setDenyText(e.target.value)} />
         </div>
         <div className="row">
           <span className="grow" />
-          <Button disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save policy'}</Button>
+          <Button disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save lists'}</Button>
         </div>
         {pol.effective_allow.length > 0 && (
-          <div className="dim small">effective allow: {pol.effective_allow.join(', ')}</div>)}
+          <div className="dim small">with the profile, always allowed: {pol.effective_allow.join(', ')}</div>)}
         {pol.effective_deny.length > 0 && (
-          <div className="dim small">effective deny: {pol.effective_deny.join(', ')}</div>)}
+          <div className="dim small">with the profile, always blocked: {pol.effective_deny.join(', ')}</div>)}
+      </div>
+    </div>
+  )
+}
+
+// ---- per-project LAN access -------------------------------------------------
+// Box -> LAN only, through the host proxy: the guest still has no route to the
+// LAN. Entries are RFC1918 CIDRs, addresses or names, optionally :port. The
+// Jav3 host, loopback, link-local/metadata and the box network are refused at
+// save and again at connect, even inside a listed range.
+function LanAccess({ slug }) {
+  const [lan, setLan] = useState(null)
+  const [text, setText] = useState('')
+  const [status, setStatus] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  function load() {
+    getLan(slug).then((l) => { setLan(l); setText(l.allow.join('\n')) })
+      .catch(() => setLan(null))
+  }
+  useEffect(() => { load() }, [slug]) // eslint-disable-line
+
+  async function send(change) {
+    setBusy(true)
+    try {
+      await putLan(slug, change)
+      setStatus('saved'); setTimeout(() => setStatus(''), 1500); load()
+    } catch (err) { notifyError(err) }
+    setBusy(false)
+  }
+
+  if (!lan || slug === GENERAL || slug === IMAGE_BUILD) return null
+  return (
+    <div className="sbx-card">
+      <div className="sbx-sec-head"><h3>LAN access</h3>
+        <span className="dim small">{status}</span></div>
+      <div className="net-policy">
+        <Toggle checked={lan.enabled} disabled={busy} label="LAN access"
+                onText="On: this project's boxes may reach the devices listed below"
+                offText="Off"
+                onChange={(on) => send({ enabled: on, allow: parseHosts(text) })} />
+        {!lan.enabled && (
+          <div className="dim small">Off: boxes in this project cannot reach any
+            private or LAN address (NAS, Home Assistant, router).</div>)}
+        <Input textarea label="Allowed LAN targets (one per line: 10.0.0.0/24, 10.0.0.60:8123, nas.lan)"
+               className="md-editor" rows={4} spellCheck={false} value={text}
+               onChange={(e) => setText(e.target.value)} />
+        <div className="row">
+          <span className="dim small grow">
+            Never reachable, even inside a listed range: this server
+            {lan.hostIps.length > 0 && <> ({lan.hostIps.join(', ')})</>}, loopback,
+            link-local / cloud metadata and the box network.
+          </span>
+          <Button disabled={busy} onClick={() => send({ allow: parseHosts(text) })}>
+            {busy ? 'Saving…' : 'Save LAN list'}</Button>
+        </div>
       </div>
     </div>
   )
@@ -634,6 +692,8 @@ export function NetworkPanel({ slug }) {
       <Decisions feed={feed.slice(0, 60)} names={{}} onChanged={bump} />
       <PolicyLists project={slug} names={{}} projects={[]} tick={tick} onChanged={bump} />
       <PolicyEditor slug={slug} />
+      <LanAccess slug={slug} />
+      <RunsIn slug={slug} />
       <Grants slug={slug} />
     </div>
   )
@@ -677,13 +737,15 @@ export default function Network() {
 
       {filter ? (
         <details className="net-sec net-more">
-          <summary>Policy and secret grants for {names[filter] || filter}</summary>
+          <summary>Lists, LAN access, where it runs and secret grants for {names[filter] || filter}</summary>
           <PolicyEditor slug={filter} />
+          <LanAccess slug={filter} />
+          <RunsIn slug={filter} />
           <Grants slug={filter} />
         </details>
       ) : (
-        <div className="dim small">pick a project above to edit its egress
-          policy and secret grants</div>
+        <div className="dim small">pick a project above to edit its own lists,
+          LAN access, the box it runs in and secret grants</div>
       )}
     </div>
   )

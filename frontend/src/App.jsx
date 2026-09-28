@@ -254,7 +254,7 @@ export default function App() {
 
   if (user === undefined || setupNeeded === undefined)
     return <div className="center">…</div>
-  if (setupNeeded && location.pathname !== '/setup') return <Navigate to="/setup" replace />
+  if (setupNeeded && location.pathname !== '/setup') return <Navigate to={'/setup' + location.search} replace />
   if (!setupNeeded && location.pathname === '/setup')
     return <Navigate to={user ? '/' : '/login'} replace />
   // The page being asked for rides along, so logging in lands back on it

@@ -2,7 +2,7 @@
 // (docs/boxes-api-final.md section 3, WP2).
 import { call, enc, get, post, put } from '../http.js'
 
-// -> {slug, profile:{id, name, default, network_off, builtin}, project_allow,
+// -> {slug, profile:{id, name, default, network_off, is_default}, project_allow,
 //     project_deny, effective_allow, effective_deny, source}
 // `__image_build__` answers the builders' fixed policy (source "fixed"),
 // which cannot be edited.
@@ -57,3 +57,17 @@ export const rejectPending = (id) => call(`/api/egress/pending/${enc(id)}/reject
 // Allow a host that is not waiting (an auto-deny). -> {ok, host, added_to};
 // a project is required (409 {"detail":"needs_project"} otherwise).
 export const allowHost = (project, host) => post('/api/egress/allow', { project, host })
+
+// Per-project LAN access (backend/lanaccess.py). OFF by default.
+// -> {slug, enabled, allow:[entries], host_ips:[never reachable]}
+export async function getLan(slug) {
+  const r = await get(`/api/egress/lan/${enc(slug)}`)
+  return { enabled: !!r.enabled, allow: r.allow || [], hostIps: r.host_ips || [] }
+}
+// Either may be undefined to leave it; a refused entry answers 400 with why.
+export const putLan = (slug, { enabled, allow } = {}) => {
+  const body = {}
+  if (enabled !== undefined) body.enabled = !!enabled
+  if (allow !== undefined) body.allow = allow
+  return put(`/api/egress/lan/${enc(slug)}`, body)
+}

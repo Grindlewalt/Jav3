@@ -194,3 +194,31 @@ async def test_api_lan_requires_auth_and_reports(tmp_env, fake_lan, monkeypatch)
     assert body["ips"] == ["192.168.5.20"] and body["port"] == settings.lan_port
     svc = {r["service"]: r["reachable"] for r in body["services"]}
     assert svc == {"searxng": True, "voice_sidecar": False, "voice_local": False}
+
+
+async def test_mdns_steps_aside_for_another_server(fake_lan, monkeypatch):
+    """Another box already answering as jav3.local: advertise as jav3-2."""
+    regs = []
+
+    class Other:
+        def parsed_addresses(self):
+            return ["10.9.9.9"]
+
+    class FakeZC:
+        async def async_get_service_info(self, typ, name, timeout):
+            return Other() if name.startswith("jav3._") else None
+
+        async def async_register_service(self, info, **k):
+            regs.append(info)
+            return asyncio.sleep(0)
+
+        async def async_unregister_service(self, info):
+            return asyncio.sleep(0)
+
+        async def async_close(self):
+            pass
+    _fake_zeroconf(monkeypatch, FakeZC)
+    await lan.start("Jav3")
+    assert lan.advertised_hostname() == "jav3-2.local"
+    assert regs[-1]["server"] == "jav3-2.local."
+    await lan.stop()

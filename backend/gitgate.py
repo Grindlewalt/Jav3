@@ -364,9 +364,21 @@ async def approve_request(rid: int) -> dict:
             raise ValueError(f"request #{rid} is {row['status']}, not pending")
         if row.get("kind") == "remote":
             return await _approve_remote(db, rid, row)
+        if row.get("kind") == "push":
+            from . import gitea
+            return await gitea.approve_push(db, rid, row)
         slug, message = row["project_slug"], row["message"]
         paths = json.loads(row["paths"]) if row["paths"] else None
         await ensure_repo(slug)
+        from . import gitea
+        if gitea.enabled():
+            # take in anything merged in Gitea first, so the push after this
+            # commit is a fast-forward (only HEAD + index move; files stay)
+            try:
+                await gitea.reconcile(slug)
+                await gitea.sync_main(slug)
+            except (RuntimeError, ValueError):
+                pass
         if paths:
             await run_git(slug, "add", "--", *paths, check=True)
         else:
@@ -391,6 +403,15 @@ async def approve_request(rid: int) -> dict:
                 await push_to_remote(slug)
             except (RuntimeError, ValueError) as e:
                 error = f"push failed: {e}"  # commit stands
+        if gitea.enabled():
+            # main mirrors to Gitea as the operator (protected against the bot)
+            try:
+                await gitea.ensure_remote_repo(slug)
+                gerr = await gitea.push_main(slug)
+            except (RuntimeError, ValueError) as e:
+                gerr = f"Gitea: {gitea.scrub(str(e))}"
+            if gerr:
+                error = f"{error}; {gerr}" if error else gerr
         await db.execute(
             "UPDATE git_requests SET status = 'approved', commit_sha = ?, error = ?, "
             "decided_at = datetime('now') WHERE id = ?", (sha.strip(), error, rid))
@@ -406,6 +427,9 @@ async def reject_request(rid: int) -> dict:
         row = await _fetch_request(db, rid)
         if row["status"] != "pending":
             raise ValueError(f"request #{rid} is {row['status']}, not pending")
+        if row.get("kind") == "push":
+            from . import gitea
+            return await gitea.reject_push(db, rid, row)
         await db.execute(
             "UPDATE git_requests SET status = 'rejected', decided_at = datetime('now') "
             "WHERE id = ?", (rid,))
@@ -416,6 +440,8 @@ async def reject_request(rid: int) -> dict:
 
 
 async def list_requests(slug: str) -> list[dict]:
+    from . import gitea
+    await gitea.reconcile(slug)     # push rows follow merges/closes done in Gitea
     db = await get_db()
     try:
         async with db.execute(

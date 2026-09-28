@@ -1,12 +1,13 @@
 // node frontend/src/boxes/__tests__/logic.test.mjs
 import assert from 'node:assert/strict'
 import {
-  budgetSegments, connCheck, diffLines, filterCatalogue, flattenTree, groupPolicy,
+  budgetSegments, connCheck, diffLines, filterCatalogue, flattenTree, projectPolicy,
   mergeProcs, navState, nestProcs, parseHosts, persistDaysLeft, profilePayload,
   sortBoxes, treeTotals, uptime, validPackage, validateProfile, variantUsers, blankProfile,
   exposeChoices, exposeDefault, exposePayload, procsRefetch, boxTotals, boxIsOdd, normBoxProcs,
   normRuntimes, assignableProjects, packageReach, buildState, applyBuildEvent, mergeBuildRest,
   buildNeedsReload, verLabel, projectLabel, needsProject,
+  networkMode, withNetworkMode, newSitesText, runsIn, withRunsIn, runsInText, deleteBlock,
 } from '../logic.js'
 
 let n = 0
@@ -163,67 +164,92 @@ t('parseHosts dedupes and lowercases', () => {
   assert.deepEqual(parseHosts('A.com, b.org\n a.com  c.net'), ['a.com', 'b.org', 'c.net'])
 })
 
-t('validateProfile: placement and runtime are required, no defaults', () => {
+t('validateProfile: a new profile is savable with defaults (shared box, per project)', () => {
   const p = { ...blankProfile(), name: 'Mine' }
+  assert.equal(p.service_placement, 'per_project'); assert.equal(p.box_runtime, 'kvm')
+  assert.equal(p.separate_box, false)
   let e = validateProfile(p)
-  assert.ok(e.service_placement); assert.ok(e.box_runtime)
-  e = validateProfile({ ...p, service_placement: 'per_project', box_runtime: 'kvm' })
   assert.deepEqual(e, {})
-  e = validateProfile({ ...p, service_placement: 'shared', box_runtime: 'docker', name: 'default' },
-    { names: ['Default'] })
+  e = validateProfile({ ...p, service_placement: '' })
+  assert.ok(e.service_placement)
+  e = validateProfile({ ...p, name: 'default' }, { names: ['Default'] })
   assert.equal(e.name, 'that name is taken')
-  e = validateProfile({ ...p, service_placement: 'shared', box_runtime: 'kvm',
-    allow_hosts: ['a.com'], deny_hosts: ['a.com'] })
+  e = validateProfile({ ...p, allow_hosts: ['a.com'], deny_hosts: ['a.com'] })
   assert.match(e.hosts, /both/)
-  e = validateProfile({ ...p, service_placement: 'shared', box_runtime: 'kvm',
-    separate_box: true, box_mem_mb: 100 })
+  e = validateProfile({ ...p, separate_box: true, box_mem_mb: 100 })
   assert.ok(e.box_mem_mb)
 })
 
-t('profilePayload carries placement and runtime verbatim', () => {
+t('profilePayload carries placement and runtime, defaulting when empty', () => {
   const pl = profilePayload({ ...blankProfile(), name: ' x ', service_placement: 'per_service',
     box_runtime: 'docker', box_mem_mb: '512' })
   assert.equal(pl.name, 'x'); assert.equal(pl.service_placement, 'per_service')
   assert.equal(pl.box_runtime, 'docker'); assert.equal(pl.box_mem_mb, 512)
   assert.equal('projects' in pl, false)
+  const d = profilePayload({ name: 'y', service_placement: '', box_runtime: '' })
+  assert.equal(d.service_placement, 'per_project'); assert.equal(d.box_runtime, 'kvm')
 })
 
-t('groupPolicy: project groups by kind, then profile baselines with their keys', () => {
+t('network mode: one radio over network_off + default_verdict', () => {
+  assert.equal(networkMode({ network_off: true, default_verdict: 'allow' }), 'off')
+  assert.equal(networkMode({ network_off: false, default_verdict: 'deny' }), 'ask')
+  assert.equal(networkMode({ default_verdict: 'allow' }), 'allow')
+  assert.deepEqual(withNetworkMode('off'), { network_off: true })
+  assert.deepEqual(withNetworkMode('ask'), { network_off: false, default_verdict: 'deny' })
+  assert.deepEqual(withNetworkMode('allow'), { network_off: false, default_verdict: 'allow' })
+  assert.equal(newSitesText({ default_verdict: 'deny' }), 'ask me')
+  assert.equal(newSitesText({ network_off: 1 }), 'network off')
+})
+
+t('runs in: one radio over separate_box + box_runtime', () => {
+  assert.equal(runsIn({ separate_box: false, box_runtime: 'docker' }), 'shared')
+  assert.equal(runsIn({ separate_box: true, box_runtime: 'kvm' }), 'vm')
+  assert.equal(runsIn({ separate_box: 1, box_runtime: 'docker' }), 'container')
+  assert.deepEqual(withRunsIn('shared'), { separate_box: false })
+  assert.deepEqual(withRunsIn('vm'), { separate_box: true, box_runtime: 'kvm' })
+  assert.deepEqual(withRunsIn('container'), { separate_box: true, box_runtime: 'docker' })
+  assert.equal(runsInText({ separate_box: 0 }), 'shared box')
+  assert.equal(runsInText({ separate_box: 1, box_runtime: 'kvm', box_image: 'main', box_mem_mb: 512 }),
+    'own VM (main, 512 MB)')
+})
+
+t('projectPolicy: one row per project, profile + project lists merged with sources', () => {
   const profiles = [
-    { id: 1, name: 'Default', builtin: true, default_verdict: 'deny', network_off: false, projects: ['a', 'c'] },
-    { id: 2, name: 'Scoped', builtin: true, default_verdict: 'deny', network_off: true, projects: ['b'] },
+    { id: 1, name: 'Default', is_default: true, default_verdict: 'deny', network_off: false, projects: ['a', 'c'] },
+    { id: 2, name: 'Scoped', is_default: false, default_verdict: 'allow', network_off: true, projects: ['b'] },
   ]
   const groups = [
     { project: 'a', kind: 'project', profile: { id: 1, name: 'Default', default: 'deny' },
       entries: [{ host: 'x.com', source: 'operator' }, { host: 'auto.io', source: 'auto', id: 9 }],
       deny: ['y.com'] },
-    { project: 'b', kind: 'project', profile: { id: 2, name: 'Scoped', default: 'deny' },
-      entries: [], deny: ['z.com'] },
+    { project: 'b', kind: 'project', profile: { id: 2, name: 'Scoped', default: 'allow' },
+      entries: [{ host: 'evil.com', source: 'operator' }], deny: ['z.com'] },
     { project: '__image_build__', kind: 'project', profile: { id: 0, name: 'Image build' }, entries: [], deny: [] },
     { project: '__general__', kind: 'profile', profile: { id: 1, name: 'Default', default: 'deny' },
       entries: [{ host: 'pypi.org', source: 'seed' }], deny: [], projects: ['a', 'c'] },
-    { project: 'profile:2', kind: 'profile', profile: { id: 2, name: 'Scoped', default: 'deny' },
+    { project: 'profile:2', kind: 'profile', profile: { id: 2, name: 'Scoped', default: 'allow' },
       entries: [], deny: ['evil.com'], projects: ['b'] },
   ]
   const projects = [{ slug: 'a', name: 'Alpha' }, { slug: 'b', name: 'Beta' }, { slug: 'c', name: 'C' }]
-  let r = groupPolicy({ groups, profiles, projects })
-  assert.deepEqual(r.projectGroups.map((g) => g.slug), ['a', 'b'])      // never __image_build__
-  assert.equal(r.projectGroups[0].name, 'Alpha')
-  assert.equal(r.projectGroups[0].profile.name, 'Default')
-  assert.equal(r.projectGroups[0].allow[1].source, 'auto')
-  assert.deepEqual(r.projectGroups[0].deny, ['y.com'])
-  assert.deepEqual(r.profileGroups.map((g) => g.key), ['__general__', 'profile:2'])
-  assert.equal(r.profileGroups[0].isDefault, true)
-  assert.equal(r.profileGroups[0].allow[0].source, 'seed')
-  assert.equal(r.profileGroups[1].network_off, true)                    // from /api/profiles
-  assert.deepEqual(r.profileGroups[1].deny, ['evil.com'])
-  r = groupPolicy({ groups, profiles, projects, filter: 'b' })
-  assert.deepEqual(r.projectGroups.map((g) => g.slug), ['b'])
-  assert.deepEqual(r.profileGroups.map((g) => g.key), ['profile:2'])
-  // a project without a list of its own: its profile's baseline only
-  r = groupPolicy({ groups, profiles, projects, filter: 'c' })
-  assert.equal(r.projectGroups.length, 0)
-  assert.deepEqual(r.profileGroups.map((g) => g.key), ['__general__'])
+  let r = projectPolicy({ groups, profiles, projects })
+  assert.deepEqual(r.map((x) => x.slug), ['a', 'b', 'c'])            // never __image_build__
+  const [a, b, c] = r
+  assert.equal(a.name, 'Alpha'); assert.equal(a.profile.name, 'Default')
+  assert.equal(a.profile.isDefault, true); assert.equal(a.profile.key, '__general__')
+  assert.deepEqual(a.allow.map((e) => [e.host, e.from]),
+    [['x.com', 'project'], ['auto.io', 'auto'], ['pypi.org', 'general']])
+  assert.deepEqual(a.block, [{ host: 'y.com', from: 'project' }])
+  assert.equal(b.profile.network_off, true); assert.equal(b.profile.key, 'profile:2')
+  assert.deepEqual(b.block.map((e) => [e.host, e.from]), [['z.com', 'project'], ['evil.com', 'profile']])
+  assert.equal(b.allow[0].blocked, true)                                // block wins
+  // a project with no list of its own still shows its profile's lists
+  assert.equal(c.profile.name, 'Default')
+  assert.deepEqual(c.allow.map((e) => e.from), ['general'])
+  r = projectPolicy({ groups, profiles, projects, filter: 'b' })
+  assert.deepEqual(r.map((x) => x.slug), ['b'])
+  // the panel knows no project names: the filter alone is enough
+  r = projectPolicy({ groups, profiles, projects: [], filter: 'c' })
+  assert.equal(r.length, 1); assert.equal(r[0].profile.name, 'Default')
 })
 
 t('projectLabel and needsProject', () => {
@@ -334,3 +360,10 @@ t('build panel: events fold into phase, log and result; REST keeps the finished 
 })
 
 console.log(`${n} passed`)
+
+t('deleteBlock: the default and in-use profiles cannot go, with a reason', () => {
+  assert.match(deleteBlock({ is_default: true, projects: [] }), /make another profile the default/)
+  assert.match(deleteBlock({ is_default: false, projects: ['a'] }), /used by 1 project: move it/)
+  assert.match(deleteBlock({ projects: ['a', 'b'] }), /used by 2 projects: move them/)
+  assert.equal(deleteBlock({ is_default: false, projects: [] }), null)
+})

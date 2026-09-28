@@ -11,7 +11,10 @@
 # binaries, no login shell for that user, no package caches. Everything else
 # (read-only rootfs, cap-drop ALL, no network, limits) is in the run spec
 # (backend/vm/docker_runtime.py run_spec/validate_spec).
-ARG BASE=debian:bookworm-slim
+# Debian 13, as the KVM golden image (vm/build_base.sh): the guest code relies on
+# its Python (tarfile's extractall(filter=...) is 3.11.4+; bookworm ships 3.11.2
+# and every docker box crashed in bootstrap, 2026-09-27)
+ARG BASE=debian:trixie-slim
 FROM ${BASE}
 
 # the same curated toolchain as the KVM golden image (vm/build_base.sh), so
@@ -29,9 +32,13 @@ RUN set -eux; \
     mkdir -p /opt/jarvis /home/jav3 /srv; \
     chown 10001:10001 /opt/jarvis /home/jav3 /srv; \
     chmod 0700 /opt/jarvis /home/jav3 /srv; \
+    install -d -o root -g root -m 0755 /usr/local/lib/jav3; \
     find / -xdev -type f -perm /6000 -exec chmod a-s {} + ; \
     echo "jav3-docker-box" > /etc/jarvis-image-version
 
+# the directory exists (0755) BEFORE the COPY: a COPY --chmod that creates its
+# parent gave the directory 0644 too — untraversable, so uid 10001 could not
+# read bootstrap.py and every docker box died at start (2026-09-27, the Pi)
 COPY --chown=root:root --chmod=0644 bootstrap.py /usr/local/lib/jav3/bootstrap.py
 
 USER 10001:10001

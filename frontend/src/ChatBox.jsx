@@ -30,9 +30,6 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
-  // draft parked on a peak-pricing 409 — in-page, never window.confirm (the
-  // iOS home-screen app suppresses blocking dialogs; see Chat.jsx)
-  const [peakAsk, setPeakAsk] = useState(null)
   const bottomRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
   const ask = useAsk()
@@ -103,7 +100,6 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     setThreadAs('')
     setCid(null)
     setMessages([])
-    setPeakAsk(null)
   }
 
   async function del(id, e) {
@@ -124,7 +120,6 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
 
   async function open(id) {
     tailAbort.current?.abort()
-    setPeakAsk(null)
     setCid(id)
     if (!id) { setMessages([]); setThreadAs(''); return }
     const r = await api(`/api/conversations/${id}/messages`)
@@ -157,12 +152,12 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     try { await api(`/api/chat/${cid}/stop`, { method: 'POST' }) } catch { /* already done */ }
   }
 
-  async function send(confirmPeak = false, resend = null) {
-    const text = (resend ?? input).trim()
+  async function send() {
+    const text = input.trim()
     if (!text || busy) return
     setBusy(true)
     // clear the bar NOW — the message visibly left; it comes back on failure
-    if (!resend) setInput('')
+    setInput('')
     const wasNew = cid === null
     setMessages((m) => [...m, { role: 'user', content: text },
                         { role: 'assistant', content: '', streaming: true, parts: [] }])
@@ -173,7 +168,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
         // raced the turn's project resolution)
         // identity binds the same way: new conversations only (the backend
         // ignores it on an existing one, and 404s an unknown slug)
-        { message: text, conversation_id: cid, confirm_peak: confirmPeak,
+        { message: text, conversation_id: cid,
           project: wasNew && projectSlug ? projectSlug : undefined,
           agent: wasNew && newAs ? newAs : undefined,
           permission_mode: wasNew ? permMode : undefined },
@@ -189,12 +184,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
       if (!projectSlug) refresh()
     } catch (err) {
       setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'peak_confirmation_required') {
-        // a new conversation doesn't exist yet on this 409 (the backend
-        // gates before creating it), so the confirmed retry re-sends the
-        // parked draft from scratch
-        setPeakAsk(text)
-      } else if (err.status === 409 && err.detail === 'turn_in_progress') {
+      if (err.status === 409 && err.detail === 'turn_in_progress') {
         setInput(text)
         setMessages((m) => [...m, { role: 'error',
           content: 'a turn is still running in this chat — wait for it to finish' }])
@@ -266,18 +256,6 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
         <div ref={bottomRef} />
       </div>
       <AskPanel asks={asks} cid={cid} compact />
-      {peakAsk && (
-        <div className="peak-ask compact" role="alertdialog"
-             aria-label="peak pricing confirmation">
-          <span className="grow">Peak pricing — this reply costs 2×.</span>
-          <button type="button" className="ghost"
-                  onClick={() => { setInput(peakAsk); setPeakAsk(null) }}>
-            Cancel</button>
-          <button type="button"
-                  onClick={() => { const t = peakAsk; setPeakAsk(null); send(true, t) }}>
-            Send anyway</button>
-        </div>
-      )}
       <form className="row" onSubmit={(e) => { e.preventDefault(); send() }}>
         <textarea className="grow" rows={2} value={input}
                   placeholder={`message ${whoName}…`}

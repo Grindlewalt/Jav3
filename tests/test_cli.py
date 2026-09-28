@@ -1275,7 +1275,7 @@ def _security_server(seen, token="sess"):
             own = [] if slug == "__general__" else ["x.org"]
             return httpx.Response(200, json={
                 "slug": slug, "profile": {"id": 1, "name": "Default", "default": "deny",
-                                          "network_off": False, "builtin": True},
+                                          "network_off": False, "is_default": True},
                 "project_allow": own, "project_deny": [],
                 "effective_allow": own + ["pypi.org"], "effective_deny": [],
                 "mode": "allowlist", "inherit_general": 1, "hosts": own,
@@ -1550,17 +1550,18 @@ async def test_tui_brackets_in_titles_and_tool_args_do_not_crash(cfg):
         assert "test [ -f x" in _text(app.query("ToolView").last().query_one("#head"))
 
 
-def test_print_mode_peak_without_an_answer_is_not_sent():
-    """jav3 -p in the peak window with stdin a pipe (read to the end already)
-    died with an EOFError traceback; now it is a plain `not sent`."""
-    def handler(request):
-        return httpx.Response(409, json={"detail": "peak_confirmation_required"})
+def test_print_mode_409_is_a_plain_error_and_sends_no_peak_flag():
+    """The peak-pricing gate is gone: -p never prompts, never retries, and the
+    body carries no confirm_peak. A 409 (a busy chat) is one plain error."""
+    bodies = []
 
-    def no_tty(question):
-        raise EOFError
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(409, json={"detail": "turn_in_progress"})
     with httpx.Client(base_url="http://h:1", transport=httpx.MockTransport(handler)) as c:
-        with pytest.raises(jav3.CliError, match="not sent"):
-            jav3.run_turn(c, "hi", None, None, io.StringIO(), no_tty)
+        with pytest.raises(jav3.CliError, match="409: turn_in_progress"):
+            jav3.run_turn(c, "hi", None, None, io.StringIO())
+    assert len(bodies) == 1 and "confirm_peak" not in bodies[0]
 
 
 async def test_tui_export_to_a_missing_dir_and_a_missing_editor_are_errors(cfg, monkeypatch):
@@ -1744,13 +1745,13 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
                                   "unit": "jav3-svc-9", "service_id": 9, "tag": "service",
                                   "rss": 30_000_000, "cpu_pct": 2.0, "started": "09:00",
                                   "conns": [conn_ok], "children": [child]}]}]}
-    profiles = [{"id": 1, "name": "Default", "builtin": 1, "default_verdict": "deny",
+    profiles = [{"id": 1, "name": "Default", "is_default": True, "default_verdict": "deny",
                  "network_off": 0, "allow_hosts": ["pypi.org"], "deny_hosts": ["bad.example"],
                  "secrets": [], "auto_handle": 1, "separate_box": 0, "box_image": "main",
                  "box_mem_mb": None, "box_runtime": "kvm", "allow_services": 1,
                  "allow_package_requests": 1, "service_placement": "per_project",
                  "projects": ["demo", "site"]},
-                {"id": 2, "name": "Sandboxed", "builtin": 0, "default_verdict": "deny",
+                {"id": 2, "name": "Sandboxed", "is_default": False, "default_verdict": "deny",
                  "network_off": 0, "allow_hosts": [], "deny_hosts": [], "secrets": ["TBA_KEY"],
                  "auto_handle": 0, "separate_box": 1, "box_image": "dev", "box_mem_mb": 768,
                  "box_runtime": "docker", "allow_services": 0, "allow_package_requests": 0,
@@ -1811,7 +1812,7 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
                 {"loc": ["body", "service_placement"], "msg": "Field required",
                  "type": "missing"}]})
         if method == "DELETE" and path == "/api/profiles/1":
-            return httpx.Response(409, json={"detail": "a builtin profile cannot be deleted"})
+            return httpx.Response(409, json={"detail": "the default profile cannot be deleted"})
         if method == "PUT" and path == "/api/projects/__image_build__/profile":
             return httpx.Response(409, json={"detail": "reserved"})
         if method == "POST" and path.startswith("/api/packages/") and path.endswith("/approve"):
@@ -1873,7 +1874,7 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
             return httpx.Response(200, json={
                 "slug": slug,
                 "profile": {"id": 1, "name": "Default", "default": "deny",
-                            "network_off": False, "builtin": True},
+                            "network_off": False, "is_default": True},
                 "project_allow": own[0], "project_deny": own[1],
                 "effective_allow": own[0] + ["pypi.org"],
                 "effective_deny": own[1] + ["bad.example"],
@@ -2259,7 +2260,7 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
         scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
         assert await _until(pilot, lambda: scr.loaded["profiles"] and len(_rows(scr)) == 2)
         rows = _rows(scr)
-        assert "Default" in rows[0] and "builtin" in rows[0] and "per_project" in rows[0]
+        assert "Default" in rows[0] and "default" in rows[0] and "per_project" in rows[0]
         assert "docker" in rows[1] and "less isolated" in rows[1]
         await pilot.press("down")
         d = _text(scr.query_one("#sec-detail"))
@@ -2321,12 +2322,12 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
         await pilot.press("y")
         assert await _until(pilot, lambda: ("PUT", "/api/projects/demo/profile",
                                             {"profile_id": 2}) in _posts(seen))
-        # builtins cannot be deleted; others after a Confirm
+        # the default cannot be deleted; others after a Confirm
         assert await _until(pilot, lambda: app.screen is scr)
         scr.select_key("R1")
         await pilot.press("d")
         await pilot.pause(0.2)
-        assert app.screen is scr and "builtin" in _text(scr.query_one("#sec-sub"))
+        assert app.screen is scr and "the default" in _text(scr.query_one("#sec-sub"))
         scr.select_key("R2")
         await pilot.press("d")
         assert await _modal(pilot, app, "Confirm")
@@ -2350,9 +2351,9 @@ async def test_tui_profiles_runtimes_weak_unavailable_and_server_refusals(cfg):
         await scr._send("POST", "/api/profiles", "x", json={"name": "Bad"})
         sub = _text(scr.query_one("#sec-sub"))
         assert "422" in sub and "service_placement: Field required" in sub
-        # a builtin's 409 from the server is shown as it came
+        # a 409 from the server is shown as it came
         await scr._send("DELETE", "/api/profiles/1", "x")
-        assert "a builtin profile cannot be deleted" in _text(scr.query_one("#sec-sub"))
+        assert "the default profile cannot be deleted" in _text(scr.query_one("#sec-sub"))
     # docker off on the host: greyed with its reason, and refused in the form
     seen = []
     app = jav3.build_tui("http://h:1", "session:sess",
@@ -2871,3 +2872,45 @@ async def test_history_recall_does_not_trap_arrows_in_the_slash_menu(cfg):
         await pilot.press("up")
         await pilot.pause(0.1)
         assert not app.popup_open() and app.editor.text == "last message"
+
+
+async def test_agents_reload_after_close_does_not_crash():
+    """A reload whose fetch finished after the operator left the Agents screen
+    crashed the whole app: NoMatches("No nodes match '#ag-head'")."""
+    nodes = [{"id": 10, "parent_id": None, "kind": "orchestrator", "title": "Ship it",
+              "agent_slug": None, "project": "demo", "model": None, "running": True,
+              "started_at": "2026-09-25T10:00:00"}]
+    srv = _LiveServer(nodes=nodes, messages={})
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.press("left")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
+        scr = app.screen
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
+        await scr._reload_safe()                    # the late result: dropped, no crash
+        await pilot.pause(0.1)
+        assert app.is_running
+
+
+def test_plain_http_warning_skips_loopback():
+    assert jav3._loopback_base("http://localhost:8780")
+    assert jav3._loopback_base("http://127.0.0.1:8780")
+    assert jav3._loopback_base("http://[::1]:8780")
+    assert not jav3._loopback_base("http://10.0.0.58:8780")
+    assert not jav3._loopback_base("http://jav3.local:8000")
+
+
+def test_login_line_alts_used_only_when_local_name_does_not_resolve(monkeypatch):
+    line = "address=nowhere-xyz.local:8780 code=abc alt=10.0.0.58:8780,10.0.0.59:8780"
+    assert jav3.parse_login_line(line) == ("nowhere-xyz.local:8780", "abc")
+    alts = jav3.login_alts(line)
+    assert alts == ["10.0.0.58:8780", "10.0.0.59:8780"]
+    monkeypatch.setattr(jav3, "_resolves", lambda a: False)
+    assert jav3.pick_login_address("nowhere-xyz.local:8780", alts) == "10.0.0.58:8780"
+    with pytest.raises(jav3.CliError, match="mDNS"):
+        jav3.pick_login_address("nowhere-xyz.local:8780", [])
+    # a name that is not .local is never swapped
+    assert jav3.pick_login_address("jav3.lan:8000", alts) == "jav3.lan:8000"
+    monkeypatch.setattr(jav3, "_resolves", lambda a: True)
+    assert jav3.pick_login_address("jav3.local:8780", alts) == "jav3.local:8780"

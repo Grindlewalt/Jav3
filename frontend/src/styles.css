@@ -1251,22 +1251,6 @@ input:focus, textarea:focus { border-color: var(--accent);
    which drew a hard square rectangle inside the round bar. */
 .composer textarea:focus-visible { outline: none; }
 .composer textarea:focus { box-shadow: none; border-color: transparent; }
-/* peak-pricing confirmation — an in-page strip, because window.confirm never
-   shows in the iOS home-screen app. Same glass recipe as the model menu; it
-   rises from just above the pill and holds the parked draft's fate. */
-.peak-ask {
-  pointer-events: auto; position: relative;
-  max-width: 880px; margin: 0 auto 10px;
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  background: var(--glass); border: 1px solid var(--border);
-  backdrop-filter: blur(16px) saturate(1.15);
-  -webkit-backdrop-filter: blur(16px) saturate(1.15);
-  border-radius: 14px; padding: 10px 10px 10px 16px;
-  box-shadow: var(--shadow-pop); font-size: 13px;
-  animation: rise-in 0.16s cubic-bezier(0.21, 1.02, 0.55, 1) both;
-}
-.peak-ask button { font-size: 12.5px; padding: 6px 12px; flex-shrink: 0; }
-.peak-ask.compact { margin: 0 0 8px; padding: 8px 8px 8px 12px; font-size: 12.5px; }
 
 .send-btn {
   width: 38px; height: 38px; padding: 0; border-radius: 50%; flex-shrink: 0;
@@ -3025,7 +3009,7 @@ body.nav-locked .notice-pill { display: none; }
 .voice-orb.speaking .voice-orb-core { background: var(--accent);
   animation: voice-pulse 0.8s ease-in-out infinite; }
 .voice-orb.barge_pending .voice-orb-core,
-.voice-orb.confirm_peak .voice-orb-core { background: var(--amber); }
+.voice-orb.confirm_escalate .voice-orb-core { background: var(--amber); }
 .voice-orb.offline .voice-orb-core,
 .voice-orb.mic_denied .voice-orb-core { background: var(--red); }
 .voice-orb.working::after {
@@ -3499,9 +3483,13 @@ body.nav-locked .notice-pill { display: none; }
 .sh-home-chats button:hover:not(:disabled) { background: var(--panel-2);
   filter: none; transform: none; }
 
+/* ---- ask_user / permission card (AskUser.jsx), above the composer ---- */
+.sh-ask { flex-shrink: 0; padding: 0 var(--sp-9); max-height: 55vh; overflow-y: auto; }
+.sh-ask:empty { display: none; }
+.sh-ask > .ask-card { max-width: var(--measure); margin: 0 auto 10px; }
+
 /* ---- composer ---- */
 .sh-composer { flex-shrink: 0; padding: 0 var(--sp-9) calc(var(--sp-8) + var(--sab)); }
-.sh-composer .peak-ask { max-width: var(--measure); }
 .sh-box {
   max-width: var(--measure); margin: 0 auto; background: var(--panel);
   border: 1px solid var(--border); border-radius: var(--radius);
@@ -3580,6 +3568,7 @@ body.nav-locked .notice-pill { display: none; }
   .sh-head-meta { flex-wrap: wrap; }
   .sh-thread { padding-left: var(--sp-6); padding-right: var(--sp-6); }
   .sh-composer { padding-left: var(--sp-5); padding-right: var(--sp-5); }
+  .sh-ask { padding-left: var(--sp-5); padding-right: var(--sp-5); }
   .sh-scope { max-width: 140px; }
 }
 }
@@ -3935,6 +3924,10 @@ a:has(> .nav-dot) { position: relative; }
 .bx-hosts { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
 .bx-hosts .tag { margin-left: 0; }
 .net-allow.net-deny .net-host { color: var(--red); }
+.net-allow.net-overruled .net-host { text-decoration: line-through; opacity: .7; }
+.net-auto-mark { font-size: .85em; opacity: .8; }
+.net-order { margin: 0 0 var(--sp-5); max-width: 70ch; }
+.bx-indent { padding-left: var(--sp-8); }
 .net-group-head > button.link { margin-left: var(--sp-6); font-weight: 400; font-size: var(--fs-sm); }
 
 /* Work: a maximized window has the whole Work area (Work.jsx .work-max);
@@ -3987,3 +3980,58 @@ a:has(> .nav-dot) { position: relative; }
 .perm-mode { font-size: 12px; padding: 2px 6px; }
 .perm-rules { list-style: none; margin: 0; padding: 0; }
 .perm-rules li { gap: 10px; align-items: center; padding: 4px 0; border-top: 1px solid var(--border); }
+
+/* Work chat: /shell's inline approvals and its Runs view, brought into the
+   main chat (pages/Chat.jsx). The rows themselves are the shell's .sh-approval. */
+.chat-approvals { display: flex; flex-direction: column; gap: var(--sp-3);
+  margin: 0 0 22px; }
+.chat-empty .chat-approvals { width: min(640px, 100%); margin: 18px auto 0;
+  text-align: left; }
+.chat-layout .messages[hidden] { display: none; }
+.chat-runs-view { flex: 1; min-height: 0; overflow-y: auto; display: flex;
+  flex-direction: column; width: 100%; max-width: 880px; margin: 0 auto;
+  padding: 8px 24px calc(124px + var(--sab)); box-sizing: border-box; }
+.chat-runs-toggle {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  background: transparent; color: var(--dim); border: 1px solid transparent;
+  border-radius: var(--radius-pill); padding: var(--pad-row-sm);
+  font-size: var(--fs-sm); font-weight: 500; white-space: nowrap;
+}
+.chat-runs-toggle:hover:not(:disabled), .chat-runs-toggle.on {
+  color: var(--text); border-color: var(--border);
+  background: color-mix(in srgb, var(--panel-2) 60%, transparent);
+  filter: none; transform: none;
+}
+.chat-runs-count { min-width: 16px; padding: 0 5px; border-radius: var(--radius-pill);
+  background: var(--accent); color: var(--bg); font-size: var(--fs-xs);
+  line-height: 16px; text-align: center; }
+/* ---- chat list: Active group (ChatGroups.jsx) ----
+   A chat with something running: a live dot, the count of agents working
+   under it, and a "needs you" tag when a node waits on the operator. */
+.convo-active-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.convo-active-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green); animation: pulse 1.6s ease-in-out infinite;
+}
+.convo-active-dot.needs { background: var(--amber); }
+.convo-active-agents {
+  flex-shrink: 0; font-size: var(--fs-xs); color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 5px;
+}
+.convo-active-needs {
+  flex-shrink: 0; font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--amber);
+}
+@media (prefers-reduced-motion: reduce) { .convo-active-dot { animation: none; } }
+
+/* per-project "Runs in" (boxes/RunsIn.jsx) */
+.bx-runsin { display: flex; flex-direction: column; gap: var(--sp-4); }
+.bx-runsin-label { margin-top: var(--sp-4); }
+.bx-runsin .bx-dot { color: var(--dim); margin-right: var(--sp-4); }
+.bx-runsin .bx-dot.on { color: var(--green); }
+.bx-runsin-pick { max-height: 16rem; overflow-y: auto; }
+.bx-runsin-ask {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: var(--sp-8); border: 1px solid var(--border); border-radius: 6px;
+}

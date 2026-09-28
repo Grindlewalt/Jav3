@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import Md from './Md.jsx'
+import { followRun } from './runFeed.js'
 
-// Live agent-job tree, keyed by the job's HEAD conversation id. Streams
-// /api/runs/{cid}/stream (snapshot + follow); embeddable anywhere — the chat
-// activity area, the Jobs page. Extracted from the retired Runs tab.
+// Live agent-job tree, keyed by the job's HEAD conversation id. Snapshot +
+// follow through runFeed.js (the shared event stream, never a socket per
+// tree); embeddable anywhere — the chat activity area, the Jobs page.
+// Extracted from the retired Runs tab.
 const STATUS_TAG = {
   planning: 'planning', delegating: 'planning', running: 'running',
   summarizing: 'running', done: 'done', error: 'error',
@@ -14,16 +16,17 @@ export default function JobTree({ cid, onFinal }) {
   const [order, setOrder] = useState([])
   const [open, setOpen] = useState({})
   const [live, setLive] = useState(true)
-  const esRef = useRef(null)
+  const onFinalRef = useRef(onFinal)
+  onFinalRef.current = onFinal
 
   useEffect(() => {
     setNodes({}); setOrder([]); setOpen({}); setLive(true)
-    const es = new EventSource(`/api/runs/${cid}/stream`)
-    esRef.current = es
     const up = (id, patch) =>
       setNodes((n) => ({ ...n, [id]: { ...(n[id] || {}), ...patch } }))
-    es.onmessage = (m) => {
-      const ev = JSON.parse(m.data)
+    let stop = null
+    let ended = false
+    const onEvent = (ev) => {
+      if (ended) return
       if (ev.type === 'node_spawned') {
         setNodes((n) => ({ ...n, [ev.node_id]: {
           status: 'planning', ...(n[ev.node_id] || {}),
@@ -35,13 +38,16 @@ export default function JobTree({ cid, onFinal }) {
       if (ev.type === 'tool') up(ev.node_id, { tool: ev.name })
       if (ev.type === 'node_done') up(ev.node_id, { status: 'done', rollup: ev.rollup, tool: null })
       if (ev.type === 'error') up(ev.node_id, { status: 'error', tool: ev.message })
-      if (ev.type === 'job_final') { setLive(false); es.close(); onFinal?.() }
+      if (ev.type === 'job_final') {
+        ended = true; setLive(false); stop?.(); onFinalRef.current?.()
+      }
     }
-    // transient blips auto-reconnect (the browser retries while CONNECTING);
-    // only a dead socket ends the live view
-    es.onerror = () => { if (es.readyState === EventSource.CLOSED) setLive(false) }
-    return () => es.close()
-  }, [cid]) // eslint-disable-line
+    // no connection of its own: the snapshot is a fetch and the live events
+    // ride the shared per-browser stream (runFeed.js). Only an unreadable run
+    // ends the live view; a stream blip is re-synced there.
+    stop = followRun(cid, onEvent, () => setLive(false))
+    return () => stop()
+  }, [cid])
 
   return (
     <div className="run-tree" style={{ padding: '4px 2px' }}>

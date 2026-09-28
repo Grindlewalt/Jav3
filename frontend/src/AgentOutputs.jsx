@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api, subscribeSse, tailStream } from './api.js'
+import { api, subscribeSse } from './api.js'
+import { subscribe } from './events.js'
+import { followRun } from './runFeed.js'
 import { notifyError } from './notify.js'
 import { ts } from './format.js'
 import Md from './Md.jsx'
@@ -17,19 +19,18 @@ import Toolbar from './components/Toolbar.jsx'
 //
 // Liveness without a poll. There is no "an output started" broadcast, so the
 // list refreshes on the events that do exist: an operator-started run's
-// completion notice (/api/agents/notices/stream), the end of any running
-// row's own stream (tailed below, a few at a time), a job node spawning or
-// finishing on a tailed job stream, and the tab coming back into view. A run
-// started elsewhere while this tab sits idle shows up on the next of those.
+// completion notice (/api/agents/notices/stream), a running row's turn or run
+// ending, a job node spawning or finishing in a running job, and the tab
+// coming back into view. A run started elsewhere while this tab sits idle
+// shows up on the next of those. All of it rides the one shared per-browser
+// stream (events.js): each running row used to hold its own stream open, and
+// a browser has six connections per host for every tab together.
 const LIMIT = 100
-const MAX_TAILS = 4    // each tail is a held connection; browsers cap ~6 per host
 
-// which stream follows a running row, by kind
-const tailUrl = (o) => ({
-  agent: `/api/agents/runs/${o.id}/stream`,
-  chat: `/api/chat/${o.id}/stream`,
-  head: `/api/runs/${o.id}/stream`,
-})[o.kind]
+// the running rows that have something to follow: a chat turn or agent run
+// (its `run_end` on the `runs` topic) and a job head (its tree, runFeed.js)
+const FOLLOWED = new Set(['agent', 'chat', 'head'])
+const JOB_CHANGES = ['node_spawned', 'node_done', 'job_final', 'error']
 
 const stopUrl = (o) => ({
   agent: `/api/agents/runs/${o.id}/stop`,
@@ -52,7 +53,6 @@ export default function AgentOutputs() {
   const navigate = useNavigate()
   const [roster, setRoster] = useState([])
   const [outputs, setOutputs] = useState(null)
-  const tailed = useRef(new Set())      // ids whose stream we already followed
   const timer = useRef(null)
 
   const load = useCallback(() => {
@@ -73,7 +73,6 @@ export default function AgentOutputs() {
 
   useEffect(() => {
     setOutputs(null)
-    tailed.current = new Set()
     load()
     return () => clearTimeout(timer.current)
   }, [load])
@@ -92,29 +91,27 @@ export default function AgentOutputs() {
     return () => { stop(); document.removeEventListener('visibilitychange', onVis) }
   }, [slug, reload])
 
-  // follow the running rows' own streams; each tail ending means that row
-  // changed state. An id is tailed once — if the server still calls it
-  // running after its stream closed, re-tailing would spin.
-  const runningKey = (outputs || []).filter((o) => o.running && tailUrl(o))
-    .map((o) => o.id).join(',')
+  // follow the running rows on the shared stream, every one of them (no
+  // connection each, so no cap). Keyed by the running set, so a reload that
+  // leaves it unchanged does not re-follow: a row the server still calls
+  // running after it ended reloads once, never spins.
+  const runningKey = (outputs || []).filter((o) => o.running && FOLLOWED.has(o.kind))
+    .map((o) => `${o.kind}:${o.id}`).join(',')
   useEffect(() => {
-    const rows = (outputs || []).filter((o) => o.running && tailUrl(o)
-                                        && !tailed.current.has(o.id)).slice(0, MAX_TAILS)
-    const tails = rows.map((o) => {
-      tailed.current.add(o.id)
-      const t = { id: o.id, ctl: new AbortController(), ended: false }
-      tailStream(tailUrl(o), (ev) => {
-        if (['node_spawned', 'node_done', 'job_final', 'final', 'error'].includes(ev.type))
-          reload()
-      }, t.ctl.signal).then(() => { t.ended = true; reload() }, () => {})
-      return t
-    })
-    // a tail cut short here (the running set changed) never saw its row end,
-    // so it may be picked up again; only a stream that closed on its own is spent
-    return () => tails.forEach((t) => {
-      if (!t.ended) tailed.current.delete(t.id)
-      t.ctl.abort()
-    })
+    const rows = (outputs || []).filter((o) => o.running && FOLLOWED.has(o.kind))
+    const turns = new Set(rows.filter((o) => o.kind !== 'head').map((o) => o.id))
+    const stops = rows.filter((o) => o.kind === 'head').map((o) => followRun(o.id,
+      // the snapshot's own node events are what the list already shows; a
+      // job_final in it means the row finished before we looked
+      (ev, live) => {
+        if (live ? JOB_CHANGES.includes(ev.type) : ev.type === 'job_final') reload()
+      }, () => {}))
+    if (turns.size) {
+      stops.push(subscribe('runs', (ev) => {
+        if (ev?.type === 'run_end' && turns.has(ev.conversation_id)) reload()
+      }))
+    }
+    return () => stops.forEach((stop) => stop())
   }, [runningKey]) // eslint-disable-line
 
   async function stopRun(o) {

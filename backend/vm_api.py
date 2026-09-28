@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_user
-from .vm import boxes
+from .vm import boxes, placement
 from .vm.lifecycle import VMError, vm
 
 router = APIRouter(prefix="/api/vm", tags=["vm"], dependencies=[Depends(require_user)])
@@ -113,11 +113,12 @@ async def _box_row(b) -> dict:
     row = boxes.status_json(b)
     row["image_pending"] = None
     if b.kind == "project":
-        # the profile's box_image changed under an allocated box: a stopped
-        # box picks it up at its next start, a running one after a restart
-        prof = await boxes.project_profile(b.project) or {}
-        want = prof.get("box_image") or "main"
-        if prof.get("separate_box") and want != b.image[0]:
+        # the project's placement (its own, else its profile's) changed the
+        # image under an allocated box: a stopped box picks it up at its next
+        # start, a running one after a restart
+        eff = await placement.effective(b.project)
+        want = eff.get("image") or "main"
+        if eff["mode"] == "own" and want != b.image[0]:
             row["image_pending"] = want
             row["restart_needed"] = True
     return row
@@ -136,17 +137,22 @@ async def _warm_project_box(box_id: str):
     project's profile (image, memory, runtime), exactly as the turn would."""
     b = boxes.get(box_id)
     if b is not None and b.kind == "project":
-        prof = await boxes.project_profile(b.project) or {}
-        if prof.get("separate_box"):
-            boxes.follow_profile_image(b, prof.get("box_image"))
+        eff = await placement.effective(b.project)
+        if eff["mode"] == "own":
+            boxes.follow_profile_image(b, eff.get("image"))
     if b is not None or not boxes.enabled() or not box_id.startswith("p-"):
         return _box_or_404(box_id)
-    prof = await boxes.project_profile(box_id[2:]) or {}
+    eff = await placement.effective(box_id[2:])
+    if eff["mode"] != "own":
+        # warmed up the way the profile would make it (before placements a
+        # warm box of a shared-box project was allowed and used; it still is)
+        prof = await boxes.project_profile(box_id[2:]) or {}
+        eff = placement.resolve({"mode": "own"}, prof, box_id[2:])
     try:
         return boxes.allocate("project", project=box_id[2:],
-                              variant=prof.get("box_image") or "main",
-                              mem_mb=prof.get("box_mem_mb"),
-                              runtime=prof.get("box_runtime") or "kvm")
+                              variant=eff.get("image") or "main",
+                              mem_mb=eff.get("mem_mb"),
+                              runtime=eff.get("runtime") or "kvm")
     except boxes.BoxCapError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except boxes.BoxError as e:

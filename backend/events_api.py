@@ -6,7 +6,7 @@ tabs over plain http and every ordinary fetch queued forever. The SPA now opens
 this endpoint once per browser (a leader tab, frontend/src/events.js) and fans
 the events out to its tabs over a BroadcastChannel.
 
-    GET /api/events?topics=gui,security,notices,egress,procs     (default: all)
+    GET /api/events?topics=gui,security,notices,egress,procs,runs   (default: all)
 
 Each event is one SSE `data:` line:
 
@@ -23,15 +23,57 @@ Authorisation is per topic: each topic names the dependency its own endpoint
 requires, and a request naming a topic the caller may not read is refused
 outright rather than silently narrowed.
 """
+import re
 from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Request
 
-from . import agents_run, egress, gui, procview_api, security, sse
+from . import agents_run, bus, egress, gui, procview_api, security, sse
 from .auth import require_user
 from .egress_api import channel_feed
 
 router = APIRouter(prefix="/api", tags=["events"])
+
+
+# A job's own bus channel is its job_id, a fresh uuid4 hex per run (research,
+# funnel, plan, deploy_agents); no other channel looks like one.
+_JOB_CHAN = re.compile(r"[0-9a-f]{32}")
+# what a live job tree reads (JobTree.jsx, PlanPanel.jsx). Not `token`: every
+# leaf's streamed reply would go to every browser for a tree that ignores it.
+RUN_EVENTS = frozenset({"job_start", "node_spawned", "node_status", "tool",
+                        "node_done", "error", "job_final", "plan_item"})
+
+
+# a chat turn (chat.py, `chat:<cid>`) or a named-agent run (agents_run.py,
+# `agentrun:<cid>`) ending: its channel's terminal sentinel. The Outputs tab
+# (AgentOutputs.jsx) refreshes a running row on it instead of holding that
+# row's own stream open.
+_TURN_CHAN = re.compile(r"(chat|agentrun):(\d+)")
+
+
+def _pick_run_event(channel: str, ev: dict) -> dict | None:
+    if not isinstance(ev, dict):
+        return None
+    if ev.get("type") == "job_end":
+        m = _TURN_CHAN.fullmatch(channel)
+        if m:
+            return {"type": "run_end", "conversation_id": int(m.group(2)),
+                    "kind": "agent" if m.group(1) == "agentrun" else "chat"}
+        return None
+    if ev.get("type") not in RUN_EVENTS or not _JOB_CHAN.fullmatch(channel):
+        return None
+    return {**ev, "job_id": channel}
+
+
+def runs_feed() -> sse.Subscription:
+    """Every agent job's tree events, each stamped with its job_id, plus
+    `run_end` when a chat turn or agent run finishes. Replaces
+    the per-run GET /api/runs/{cid}/stream a JobTree used to hold open: the
+    browser takes the snapshot from GET /api/runs/{cid}/tree?depth=full and
+    follows the live events here, filtered to its own job."""
+    q = bus.tap(_pick_run_event)
+    return sse.Subscription(q, [{"type": "stream_open", "channel": "runs"}],
+                            lambda: bus.untap(q))
 
 
 # topic -> (auth check, the same as the feed's own endpoint; subscription factory)
@@ -48,6 +90,8 @@ TOPICS: dict[str, tuple[Callable[[Request], dict], Callable[[], sse.Subscription
     # WP3: {"type":"service_changed"|"service_state","service_id",...}
     # (vm/services.py): the service lists refetch on either
     "services": (require_user, lambda: channel_feed("services")),
+    # agent-job trees ({..., "job_id"}): JobTree / PlanPanel filter by job
+    "runs": (require_user, runs_feed),
 }
 
 
