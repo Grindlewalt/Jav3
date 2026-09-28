@@ -82,7 +82,14 @@ def to_pixels(rx: float, ry: float, convention: str, width: int, height: int) ->
 
 # --- state (grounding.json) ------------------------------------------------------
 
+# Where grounding.json lives when set (scripts/grounding_probe.py --state-dir
+# points a trial run at a scratch dir so the live ranking is left alone).
+STATE_DIR: Path | None = None
+
+
 def _path() -> Path:
+    if STATE_DIR is not None:
+        return Path(STATE_DIR) / "grounding.json"
     return providers._state_path().parent / "grounding.json"
 
 
@@ -396,7 +403,10 @@ def rank(rows: list[dict]) -> list[dict]:
 
 
 async def _probe_one(job: dict, model_id: str, fixtures: list[dict],
-                     order: list[tuple[int, int]]) -> dict:
+                     order: list[tuple[int, int]], on_step=None) -> dict:
+    """Ask `model_id` every target in `order`; the ranking row. `on_step`, if
+    given, is called after each target with a dict {model, fixture,
+    description, box, size, answer (raw rx, ry, conf or None), ms, error}."""
     from .agent import budget as budget_mod
     answers, boxes, sizes, lat = [], [], [], []
     errors, last_error = 0, None
@@ -404,7 +414,7 @@ async def _probe_one(job: dict, model_id: str, fixtures: list[dict],
         f = fixtures[fi]
         t = f["targets"][ti]
         job["current"] = f"{model_id} · {f['name']}"
-        ans = None
+        ans, ms, err = None, None, None
         try:
             ans, ms = await _ask(model_id, f["png"], f["w"], f["h"],
                                  t["description"], None)
@@ -412,19 +422,56 @@ async def _probe_one(job: dict, model_id: str, fixtures: list[dict],
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            errors += 1
-            last_error = f"timed out after {settings.grounding_timeout_s:.0f}s"
+            err = f"timed out after {settings.grounding_timeout_s:.0f}s"
         except budget_mod.BudgetExceeded as e:
-            errors += 1
-            last_error = str(e)[:200]
+            err = str(e)[:200]
         except Exception as e:  # noqa: BLE001 — a refused image is a miss, not a crash
+            err = str(e)[:200] or type(e).__name__
+        if err is not None:
             errors += 1
-            last_error = str(e)[:200] or type(e).__name__
+            last_error = err
         answers.append(ans)
         boxes.append(t["box"])
         sizes.append((f["w"], f["h"]))
         job["done"] += 1
+        if on_step is not None:
+            on_step({"model": model_id, "fixture": f["name"],
+                     "description": t["description"], "box": tuple(t["box"]),
+                     "size": (f["w"], f["h"]), "answer": ans, "ms": ms, "error": err})
     return score_model(model_id, answers, boxes, sizes, lat, errors, last_error)
+
+
+async def run_probe(models: list[str] | None = None, *, targets: int | None = None,
+                    on_step=None, save: bool = True) -> list[dict]:
+    """The model finder in the foreground (scripts/grounding_probe.py): probe
+    `models` (default: every candidate) on the first `targets` targets
+    (default settings.grounding_probe_targets), write the ranking to
+    grounding.json (keeping the pin) unless save=False, and return it. Same
+    scoring as start_probe; no job, no security event. ValueError for a model
+    that is not a candidate, NotConfigured when there is nothing to test,
+    grounding_fixtures.FixturesUnavailable without Pillow."""
+    from . import grounding_fixtures as gf
+    cands = [c["id"] for c in candidates()]
+    if models:
+        bad = [m for m in models if m not in cands]
+        if bad:
+            raise ValueError(f"not an enabled image-capable model: {', '.join(bad)}")
+        chosen = list(dict.fromkeys(models))
+    else:
+        chosen = cands
+    if not chosen:
+        raise NotConfigured("no image-capable model is enabled (Settings → Providers)")
+    fixtures = gf.fixtures()
+    order = _targets(fixtures, settings.grounding_probe_targets if targets is None else targets)
+    job = {"done": 0, "current": None}
+    rows = [await _probe_one(job, mid, fixtures, order, on_step) for mid in chosen]
+    ranking = rank(rows)
+    if save:
+        st = _load()
+        st["ranking"] = ranking
+        st["probed_at"] = _now()
+        _save(st)
+    return ranking
 
 
 async def _run(job: dict) -> None:

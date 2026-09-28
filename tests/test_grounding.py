@@ -410,3 +410,58 @@ async def test_api_needs_login(tmp_env):
     async with httpx.AsyncClient(transport=transport, base_url="http://jav3.lan:8000") as c:
         assert (await c.get("/api/grounding")).status_code == 401
         assert (await c.get("/api/grounding/fixtures/0.png")).status_code == 401
+
+
+# --- the foreground probe (scripts/grounding_probe.py) ------------------------------
+
+async def test_run_probe_foreground_steps_and_state_dir(tmp_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(grounding, "STATE_DIR", tmp_path / "scratch")
+    _probe_models(monkeypatch, ["p/bad", "p/good"])
+    steps = []
+    ranking = await grounding.run_probe(["p/good", "p/bad"], targets=12,
+                                        on_step=steps.append)
+    assert [r["model"] for r in ranking] == ["p/good", "p/bad"]
+    assert ranking[0]["n"] == 12 and ranking[0]["hit_rate"] == 1.0
+    assert len(steps) == 24 and steps[0]["model"] == "p/good"
+    s = steps[0]
+    assert s["answer"] is not None and s["error"] is None and len(s["box"]) == 4
+    saved = json.loads((tmp_path / "scratch" / "grounding.json").read_text())
+    assert saved["ranking"][0]["model"] == "p/good"
+    assert not (settings.data_dir / "grounding.json").exists()
+    with pytest.raises(ValueError):
+        await grounding.run_probe(["p/nope"], targets=1)
+
+
+async def test_run_probe_without_candidates(tmp_env, monkeypatch):
+    monkeypatch.setattr(grounding, "candidates", lambda: [])
+    with pytest.raises(grounding.NotConfigured):
+        await grounding.run_probe(targets=1)
+
+
+async def test_probe_script_dry_run_and_real_run_never_print_a_key(
+        tmp_env, monkeypatch, tmp_path, capsys):
+    from scripts import grounding_probe as gp
+    key = "sk-THIS-IS-A-TEST-KEY-123456"
+    monkeypatch.setattr(gp, "_keys", lambda: [key])
+    _probe_models(monkeypatch, ["p/good", "p/err"])
+    real = model_mod.model.complete
+
+    async def leaky(messages, **kw):     # an error that echoes the key
+        if kw["model_name"] == "p/err":
+            raise model_mod.ModelError(f"bad auth for {key}")
+        async for ev in real(messages, **kw):
+            yield ev
+    monkeypatch.setattr(model_mod.model, "complete", leaky)
+    monkeypatch.setattr(settings, "db_path", settings.db_path)   # restored after
+    monkeypatch.setattr(grounding, "STATE_DIR", None)            # restored after
+    assert await gp.main(["--dry-run", "--targets", "5",
+                          "--state-dir", str(tmp_path / "s")]) == 0
+    out = capsys.readouterr().out
+    assert "candidates (2)" in out and "24 screens" in out
+    assert not (tmp_path / "s" / "grounding.json").exists()
+    assert await gp.main(["--targets", "5", "--state-dir", str(tmp_path / "s")]) == 0
+    out = capsys.readouterr().out
+    assert key not in out and "***" in out
+    assert "misses for p/err" in out and "grounding.json written" in out
+    assert (tmp_path / "s" / "grounding.json").exists()
+    assert (tmp_path / "s" / "ledger.db").exists()      # the ledger moved too
