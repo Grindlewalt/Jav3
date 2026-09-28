@@ -1900,8 +1900,10 @@ class Session:
         ms = self.b.monitors()
         if monitor is None:
             return ms[0], 0, len(ms)
+        # indices are 1-based on the wire: the model reads "monitor 1 of 2" in
+        # the screenshot text and the server matches zoom regions on that
         for i, m in enumerate(ms):
-            if m.name == monitor or str(i) == monitor:
+            if m.name == monitor or str(i + 1) == monitor:
                 return m, i, len(ms)
         raise DeskError(f"no monitor {monitor!r} (have: {', '.join(m.name for m in ms)})")
 
