@@ -116,7 +116,8 @@ def smoke(plan: Plan) -> bool:
     # python fine as root yet every box died on an unreadable bootstrap.py
     r = _docker("run", "--rm", "--network", "none", "--user", "10001:10001",
                 "--read-only", "--entrypoint", "python3", settings.docker_image_turn,
-                "-c", "open('/usr/local/lib/jav3/bootstrap.py').read(); print('jav3-docker-ok')",
+                "-c", "import tarfile; tarfile.data_filter; "
+                "open('/usr/local/lib/jav3/bootstrap.py').read(); print('jav3-docker-ok')",
                 timeout=120)
     if "jav3-docker-ok" not in r.stdout:
         print(f"  FAIL  smoke test: {(r.stderr or r.stdout).strip()[-300:]}")

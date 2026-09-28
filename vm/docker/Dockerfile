@@ -11,7 +11,10 @@
 # binaries, no login shell for that user, no package caches. Everything else
 # (read-only rootfs, cap-drop ALL, no network, limits) is in the run spec
 # (backend/vm/docker_runtime.py run_spec/validate_spec).
-ARG BASE=debian:bookworm-slim
+# Debian 13, as the KVM golden image (vm/build_base.sh): the guest code relies on
+# its Python (tarfile's extractall(filter=...) is 3.11.4+; bookworm ships 3.11.2
+# and every docker box crashed in bootstrap, 2026-09-27)
+ARG BASE=debian:trixie-slim
 FROM ${BASE}
 
 # the same curated toolchain as the KVM golden image (vm/build_base.sh), so
