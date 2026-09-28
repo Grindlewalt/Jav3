@@ -52,10 +52,28 @@ Roughly 21k lines of Python and 8k of JS across ~80 test modules and 43 tools.
 
 ## Install
 
+One line, as the user the server will run as (not root):
+
+```
+curl -fsSL https://raw.githubusercontent.com/Grindlewalt/Jav3/main/scripts/bootstrap.sh | sh
+```
+
+It clones to `~/jarvis` (`JARVIS_DIR=…` changes that) and hands over to
+`scripts/install.sh`; installer flags pass through (`| sh -s -- --port 8780`).
+Or by hand:
+
 ```
 git clone https://github.com/Grindlewalt/Jav3.git ~/jav3     # any path works
 cd ~/jav3 && bash scripts/install.sh
 ```
+
+**Or let a coding agent do it** (Claude Code, Codex, OpenCode, OpenClaw, …):
+paste the prompt at the end of [`docs/AGENT-INSTALL.md`](docs/AGENT-INSTALL.md)
+into it on the host. The guide has it look around read-only, ask the setup
+questions (port, runtime, second instance, provider, security profile, Gitea…),
+wait for a go, leave root steps and secrets to you, and verify with
+`python -m backend.cli doctor --json`. `install.sh --check --json` and
+`doctor --json` are the machine-readable reports it works from.
 
 The installer ends at first-run setup: on a terminal it asks for your login and
 model provider (and tests the key); otherwise it prints a one-time link,

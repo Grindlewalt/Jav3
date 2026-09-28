@@ -41,7 +41,7 @@ fi
 # ---------------------------------------------------------------- options ----
 DO_CHECK=0 DO_ROOT=0 DO_USER=1 BUILD_FRONTEND=1 BUILD_IMAGE=1
 FROM_HOST="" FORCE=0 ASSUME_YES=0 TARGET_HOST="" STATE_DIR_OPT="" PORT_OPT="" NAME_OPT="" CFG_DIR_OPT=""
-DO_GITEA=1 GITEA_DRY=0 DO_DOCKER=1
+DO_GITEA=1 GITEA_DRY=0 DO_DOCKER=1 JSON_OUT=0
 # $SUDO_USER is only meaningful when we are actually running under sudo. Taking
 # it unconditionally means a stale value inherited from the environment wins
 # over who we really are — which reported the wrong username inside a sandbox.
@@ -57,6 +57,9 @@ usage() {
 
 Options
   --check              preflight only: report what is missing, change nothing
+  --json               with --check (or --target): the report as ONE JSON object
+                       on stdout (the human text goes to stderr), for scripts and
+                       installing agents (docs/AGENT-INSTALL.md)
   --target <host>      run the preflight on a REMOTE host over ssh and report
                        what it is missing, changing nothing there. Needs no
                        checkout on the far side. e.g. --target claude@main
@@ -91,6 +94,7 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)      DO_CHECK=1; DO_USER=0 ;;
+    --json)       JSON_OUT=1 ;;
     --target)     TARGET_HOST="$2"; DO_CHECK=1; DO_USER=0; shift ;;
     --root-phase) DO_ROOT=1; DO_USER=0 ;;
     --user)       TARGET_USER="$2"; shift ;;
@@ -113,17 +117,30 @@ while [ $# -gt 0 ]; do
 done
 
 # ------------------------------------------------------------------ output ---
+# --json: the human report moves to stderr and fd 3 keeps the real stdout for
+# the one JSON object printed at the end.
+if [ "$JSON_OUT" = 1 ]; then
+  [ "$DO_CHECK" = 1 ] || { echo "--json needs --check (or --target)" >&2; exit 64; }
+  exec 3>&1 1>&2
+fi
 BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; OFF=$'\033[0m'
-[ -t 1 ] || { BOLD=""; RED=""; GREEN=""; YELLOW=""; OFF=""; }
+[ -t 1 ] && [ "$JSON_OUT" = 0 ] || { BOLD=""; RED=""; GREEN=""; YELLOW=""; OFF=""; }
 
 step() { printf '\n%s== %s%s\n' "$BOLD" "$*" "$OFF"; }
 ok()   { printf '  %sok%s    %s\n' "$GREEN" "$OFF" "$*"; }
-warn() { printf '  %swarn%s  %s\n' "$YELLOW" "$OFF" "$*"; }
-bad()  { printf '  %sMISS%s  %s\n' "$RED" "$OFF" "$*"; }
+warn() { printf '  %swarn%s  %s\n' "$YELLOW" "$OFF" "$*"; WARNINGS+=("$*"); FIX_TO=warn; }
+# Every MISS and its fix lines are also kept for --json.
+PROBLEMS=() PROBLEM_FIX=() WARNINGS=() FIX_TO=""
+bad()  { printf '  %sMISS%s  %s\n' "$RED" "$OFF" "$*"; PROBLEMS+=("$*"); PROBLEM_FIX+=(""); FIX_TO=bad; }
 # The fix for a failed check belongs next to that check, not in a summary at the
 # bottom. A named failure with its own command is a 10-second job; the same
 # failure discovered three screens from its remedy is a debugging session.
-fix()  { printf '        fix: %s\n' "$*"; }
+fix()  {
+  printf '        fix: %s\n' "$*"
+  local n=${#PROBLEM_FIX[@]}
+  [ "$FIX_TO" = bad ] && [ "$n" -gt 0 ] && PROBLEM_FIX[n-1]+="$*"$'\n'
+  return 0
+}
 die()  { printf '\n%serror:%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
 
 # ------------------------------------------------------------------ detect ---
@@ -183,7 +200,7 @@ missing_pkgs() {
     dnf)    for p in "${PACKAGES[@]}"; do
               rpm -q --whatprovides "$p" >/dev/null 2>&1 || echo "$p"
             done ;;
-    *)      printf '%s\n' "${PACKAGES[@]}" ;;
+    *)      [ ${#PACKAGES[@]} -eq 0 ] || printf '%s\n' "${PACKAGES[@]}" ;;   # bash 3.2 + set -u
   esac
 }
 
@@ -963,6 +980,58 @@ verify() {
   return 1
 }
 
+# ------------------------------------------------------------------- json ---
+jstr() {
+  local v="$1"
+  v="${v//\\/\\\\}"; v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"; v="${v//$'\t'/\\t}"; v="${v//$'\r'/}"; v="${v//$'\033'/}"
+  printf '"%s"' "$v"
+}
+jarr() {   # jarr a b c -> ["a","b","c"]
+  local first=1 x
+  printf '['
+  for x in "$@"; do
+    [ $first = 1 ] || printf ','
+    first=0; jstr "$x"
+  done
+  printf ']'
+}
+jbool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
+emit_json() {
+  local ready=false i fixes
+  if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#MISSING_USER[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ] \
+     && [ ${#CONFLICT[@]} -eq 0 ]; then ready=true; fi
+  {
+    printf '{"ready":%s,"arch":%s,"distro":%s,"pkg":%s,"user":%s,' "$ready" \
+      "$(jstr "$ARCH")" "$(jstr "$DISTRO")" "$(jstr "$PKG")" "$(jstr "$TARGET_USER")"
+    printf '"repo_dir":%s,"unit":%s,"port":%s,"config_dir":%s,"state_dir":%s,' \
+      "$(jstr "$REPO_DIR")" "$(jstr "$UNIT")" "$PORT" "$(jstr "$CFG_DIR")" "$(jstr "$STATE_DIR")"
+    printf '"kvm":%s,"vsock":%s,"docker":%s,' \
+      "$(jbool test -r /dev/kvm -a -w /dev/kvm)" "$(jbool test -e /dev/vhost-vsock)" \
+      "$(jbool docker info)"
+    printf '"blocked":%s,"missing_root":%s,"missing_user":%s,"conflict":%s,' \
+      "$(jarr ${BLOCKED[@]+"${BLOCKED[@]}"})" "$(jarr ${MISSING_ROOT[@]+"${MISSING_ROOT[@]}"})" \
+      "$(jarr ${MISSING_USER[@]+"${MISSING_USER[@]}"})" "$(jarr ${CONFLICT[@]+"${CONFLICT[@]}"})"
+    # shellcheck disable=SC2046  # one package name per word
+    printf '"missing_packages":%s,' "$(jarr $(missing_pkgs 2>/dev/null))"
+    if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
+      printf '"root_command":%s,' \
+        "$(jstr "sudo bash ${REPO_DIR:-<path-to-jarvis-checkout>}/scripts/install.sh --root-phase --user $TARGET_USER")"
+    else
+      printf '"root_command":null,'
+    fi
+    printf '"problems":['
+    for i in "${!PROBLEMS[@]}"; do
+      [ "$i" = 0 ] || printf ','
+      fixes="${PROBLEM_FIX[$i]%$'\n'}"
+      printf '{"message":%s,"fix":' "$(jstr "${PROBLEMS[$i]}")"
+      if [ -n "$fixes" ]; then (IFS=$'\n'; jarr $fixes); else printf '[]'; fi
+      printf '}'
+    done
+    printf '],"warnings":%s}\n' "$(jarr ${WARNINGS[@]+"${WARNINGS[@]}"})"
+  } >&3
+}
+
 # -------------------------------------------------------------------- main ---
 
 # Remote preflight: ship THIS script down the pipe and run its --check there.
@@ -973,6 +1042,10 @@ if [ -n "$TARGET_HOST" ]; then
   [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] \
     || die "--target needs to read this script from disk"
   printf '%s== remote preflight: %s%s\n' "$BOLD" "$TARGET_HOST" "$OFF"
+  if [ "$JSON_OUT" = 1 ]; then
+    ssh -o ConnectTimeout=10 "$TARGET_HOST" 'bash -s -- --check --json' < "${BASH_SOURCE[0]}" >&3
+    exit $?
+  fi
   ssh -o ConnectTimeout=10 "$TARGET_HOST" 'bash -s -- --check' < "${BASH_SOURCE[0]}"
   rc=$?
   if [ $rc -eq 0 ]; then
@@ -1026,6 +1099,7 @@ if [ ${#MISSING_ROOT[@]} -gt 0 ]; then
 fi
 
 if [ "$DO_CHECK" = 1 ]; then
+  [ "$JSON_OUT" = 1 ] && emit_json
   if [ ${#MISSING_ROOT[@]} -eq 0 ] && [ ${#MISSING_USER[@]} -eq 0 ] && [ ${#BLOCKED[@]} -eq 0 ] \
      && [ ${#CONFLICT[@]} -eq 0 ]; then
     printf '\n%sready.%s\n' "$GREEN" "$OFF"; exit 0

@@ -38,6 +38,9 @@ DEFAULT_TITLE = "Jav3"
 DEFAULT_COMMAND = ("curl -fsSL https://raw.githubusercontent.com/Grindlewalt/Jav3"
                    "/main/scripts/bootstrap.sh | sh")
 DEFAULT_BOOTSTRAP = Path(__file__).resolve().parent.parent / "scripts" / "bootstrap.sh"
+DEFAULT_GUIDE = Path(__file__).resolve().parent.parent / "docs" / "AGENT-INSTALL.md"
+DEFAULT_GUIDE_URL = ("https://raw.githubusercontent.com/Grindlewalt/Jav3"
+                     "/main/docs/AGENT-INSTALL.md")
 
 MAX_HEAD = 8 * 1024          # request line + headers, bytes
 READ_TIMEOUT = 5.0           # seconds to deliver the WHOLE head, not per recv
@@ -62,14 +65,33 @@ REASONS = {
 TEXT = "text/plain; charset=utf-8"
 
 
-def render_page(title: str, command: str) -> bytes:
+def agent_prompt(guide_url: str) -> str:
+    """The one paragraph a person pastes into their coding agent (Claude Code,
+    Codex, OpenCode, OpenClaw...). docs/AGENT-INSTALL.md ends with the same text
+    (tests/test_installpage.py keeps the two equal); the guide carries the rest."""
+    return (
+        "You are installing and configuring Jav3, a self-hosted AI agent harness "
+        "(a server that runs AI agents inside a KVM or Docker sandbox, with the "
+        "model key held on the host, an egress proxy and approval gates), on this "
+        "Linux machine for me. First fetch and read the whole guide at "
+        f"{guide_url} and follow it exactly: look around read-only, ask me its "
+        "setup questions and wait for my go before changing anything, never use "
+        "sudo, reboot or touch other services without my OK, let me type every "
+        "password and API key myself, and finish with its report.")
+
+
+def render_page(title: str, command: str, prompt: str = "") -> bytes:
     t, c = html.escape(title), html.escape(command)
+    agent = ("<p>Or let your coding agent (Claude Code, Codex, OpenCode, OpenClaw...) "
+             "do it: paste this into it, on the machine that will host Jav3:</p>"
+             f"<pre style=\"white-space:pre-wrap\">{html.escape(prompt)}</pre>"
+             if prompt else "")
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         "<meta name=viewport content=\"width=device-width, initial-scale=1\">"
         f"<title>{t}</title></head><body><h1>{t}</h1>"
         "<p>Install on a Linux box (as the user that will run it):</p>"
-        f"<pre>{c}</pre></body></html>\n"
+        f"<pre>{c}</pre>{agent}</body></html>\n"
     ).encode("utf-8")
 
 
@@ -244,18 +266,20 @@ class InstallPageServer(socketserver.ThreadingTCPServer):
     request_queue_size = 128
 
     def __init__(self, bind: str, port: int, *, title: str, command: str,
-                 bootstrap: bytes, rate_per_minute: int = 30, max_conns: int = 64,
-                 log_stream=None):
+                 bootstrap: bytes, guide: bytes | None = None, prompt: str = "",
+                 rate_per_minute: int = 30, max_conns: int = 64, log_stream=None):
         self.address_family = socket.AF_INET6 if ":" in bind else socket.AF_INET
         self.limiter = RateLimiter(rate_per_minute)
         self._slots = threading.BoundedSemaphore(max_conns)
         self._log_stream = log_stream if log_stream is not None else sys.stdout
         self._log_lock = threading.Lock()
         routes = {
-            "/": (render_page(title, command), "text/html; charset=utf-8"),
+            "/": (render_page(title, command, prompt), "text/html; charset=utf-8"),
             "/bootstrap.sh": (bootstrap, "text/x-shellscript; charset=utf-8"),
             "/healthz": (b"ok\n", TEXT),
         }
+        if guide is not None:
+            routes["/agent.md"] = (guide, "text/markdown; charset=utf-8")
         self._get = {p: build_response(200, b, t) for p, (b, t) in routes.items()}
         self._head = {p: build_response(200, b, t, head=True) for p, (b, t) in routes.items()}
         self._errors: dict[tuple[int, bool], bytes] = {}
@@ -352,6 +376,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--title", default=env.get("INSTALLPAGE_TITLE", DEFAULT_TITLE))
     p.add_argument("--command", default=env.get("INSTALLPAGE_COMMAND", DEFAULT_COMMAND),
                    help="the one-liner shown on the page")
+    p.add_argument("--guide", type=Path,
+                   default=Path(env.get("INSTALLPAGE_GUIDE", str(DEFAULT_GUIDE))),
+                   help="the agent install guide served at /agent.md (read once; "
+                        "optional: missing = no /agent.md)")
+    p.add_argument("--guide-url", default=env.get("INSTALLPAGE_GUIDE_URL", DEFAULT_GUIDE_URL),
+                   help="where the agent prompt on the page tells agents to read the guide")
     p.add_argument("--rate", type=int, default=int(env.get("INSTALLPAGE_RATE", "30")),
                    help="requests per minute per client IP (default 30)")
     p.add_argument("--max-conns", type=int,
@@ -370,8 +400,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.rate < 1 or args.max_conns < 1:
         print("installpage: --rate and --max-conns must be at least 1", file=sys.stderr)
         return 2
+    try:
+        guide = load_bootstrap(args.guide)      # same size/emptiness rules
+    except (OSError, ValueError) as e:
+        print(json.dumps({"event": "no_guide", "detail": str(e)}), flush=True)
+        guide = None
     server = InstallPageServer(args.bind, args.port, title=args.title, command=args.command,
-                               bootstrap=script, rate_per_minute=args.rate,
+                               bootstrap=script, guide=guide,
+                               prompt=agent_prompt(args.guide_url),
+                               rate_per_minute=args.rate,
                                max_conns=args.max_conns)
 
     # serve_forever runs on this thread and shutdown() blocks until it returns,

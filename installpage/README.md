@@ -1,6 +1,7 @@
 # installpage
 
-A white page with a title and the one-line install, meant to face the
+A white page with a title, the one-line install and the one-paragraph
+prompt for a coding agent, meant to face the
 internet. One file, Python 3.11+, standard library only; it does not import
 the Jav3 backend and needs no checkout or venv where it runs.
 
@@ -8,6 +9,7 @@ the Jav3 backend and needs no checkout or venv where it runs.
 |---|---|
 | `GET /` | `text/html` — title, one sentence, the one-liner in a `<pre>`. No CSS, no JS, nothing external. |
 | `GET /bootstrap.sh` | the bootstrap script, `text/x-shellscript`, read once at startup |
+| `GET /agent.md` | `docs/AGENT-INSTALL.md`, the guide an AI agent follows to install Jav3, `text/markdown`, read once at startup (absent file = no route) |
 | `GET /healthz` | `ok` |
 | `HEAD` on any of those | same headers, no body |
 | any other path | `404` |
@@ -27,6 +29,8 @@ python3 installpage/server.py --bind :: --port 8080    # all addresses, v4 + v6
 | `--bootstrap` | `INSTALLPAGE_BOOTSTRAP` | `../scripts/bootstrap.sh` next to this file |
 | `--title` | `INSTALLPAGE_TITLE` | `Jav3` |
 | `--command` | `INSTALLPAGE_COMMAND` | the GitHub raw bootstrap one-liner |
+| `--guide` | `INSTALLPAGE_GUIDE` | `../docs/AGENT-INSTALL.md` next to this file |
+| `--guide-url` | `INSTALLPAGE_GUIDE_URL` | the GitHub raw guide; the agent prompt on the page points here (set it to this page's own `/agent.md` once it is public) |
 | `--rate` | `INSTALLPAGE_RATE` | `30` requests/minute per client IP |
 | `--max-conns` | `INSTALLPAGE_MAX_CONNS` | `64` concurrent connections |
 

@@ -195,3 +195,30 @@ def test_failed_modprobe_is_not_ok_and_not_persisted(tmp_path):
 def test_loaded_module_is_persisted_once(tmp_path):
     out, conf = _load_module_harness(tmp_path, "/lib/modules/x/vhost_vsock.ko", 0)
     assert "failed=0 changes=1" in out and conf.read_text() == "vhost_vsock\n"
+
+
+
+@needs_bash
+@pytest.mark.parametrize("args", [["--check", "--json"], ["--check", "--json", "--port", "8780"]])
+def test_check_json_is_one_object_on_stdout(tmp_path, args):
+    import json
+    r = run(tmp_path, *args)
+    d = json.loads(r.stdout)                     # nothing else on stdout
+    for k in ("ready", "kvm", "docker", "blocked", "missing_root", "missing_user",
+              "conflict", "missing_packages", "root_command", "problems", "warnings"):
+        assert k in d, k
+    assert d["port"] == (8780 if "8780" in args else 8000)
+    assert all(set(p) == {"message", "fix"} for p in d["problems"])
+    assert "MISS" in r.stderr or d["ready"]     # the human report moved to stderr
+
+
+@needs_bash
+def test_json_without_check_is_refused(tmp_path):
+    r = run(tmp_path, "--json")
+    assert r.returncode == 64 and "--json needs --check" in r.stderr
+
+
+def test_bootstrap_progress_goes_to_stderr():
+    # `curl .../bootstrap.sh | sh -s -- --check --json` must leave stdout pure JSON
+    txt = (ROOT / "scripts" / "bootstrap.sh").read_text()
+    assert "say() { printf '== %s\\n' \"$*\" >&2; }" in txt

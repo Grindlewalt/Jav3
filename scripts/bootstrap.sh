@@ -26,7 +26,7 @@ main() {
   ref="${JARVIS_REF:-}"
   dir="${JARVIS_DIR:-$HOME/jarvis}"
 
-  say() { printf '== %s\n' "$*"; }
+  say() { printf '== %s\n' "$*" >&2; }   # stderr: --check --json keeps stdout clean
   die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
   if [ "$(id -u)" -eq 0 ] && [ -z "${JARVIS_ALLOW_ROOT:-}" ]; then
