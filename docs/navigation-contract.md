@@ -281,6 +281,18 @@ State: everything in A–E is built and merged on this branch; the Pi runs it
 (e06b1e2..e8c09aa) and the comparison harness (7e9c673) are NOT yet deployed
 (the Mac left the LAN mid-session). In order:
 
+A1. **DeltaMath fix, steps 2–4 (top priority; step 1 = version gate is in,
+   5f20903).** (2) candidates fallback in lib/dom.js + page.js: list
+   likely-clickable elements (cursor:pointer, click attrs, tabindex, short
+   leaf text) as a second block `candidates (no button markup — probably
+   clickable…)`, same id space, `mode: "all"` on read_page, auto when < 8
+   interactive in-view; (3) real pointer-event click sequence at the centre +
+   `browser_click(tab, x, y)` on the latest tab screenshot (fresh ≤120 s,
+   CSS-px conversion), `browser_type` into activeElement; manifest 0.4.0;
+   (4) one playbook sentence. Verify on a DeltaMath-like page in headless
+   Chrome (div buttons, no markup). Operator: reload the extension after
+   deploy.
+
 1. **Redeploy to the Pi** (`deploy_test.sh worktree-navigation`; the script
    does not `pip install`, so any new requirement goes into `~/jarvis/.venv`
    by hand, then restart) and **finish the live jav3-desk trial**: unlock the
