@@ -44,16 +44,30 @@ RUN_EVENTS = frozenset({"job_start", "node_spawned", "node_status", "tool",
                         "node_done", "error", "job_final", "plan_item"})
 
 
+# a chat turn (chat.py, `chat:<cid>`) or a named-agent run (agents_run.py,
+# `agentrun:<cid>`) ending: its channel's terminal sentinel. The Outputs tab
+# (AgentOutputs.jsx) refreshes a running row on it instead of holding that
+# row's own stream open.
+_TURN_CHAN = re.compile(r"(chat|agentrun):(\d+)")
+
+
 def _pick_run_event(channel: str, ev: dict) -> dict | None:
-    if not isinstance(ev, dict) or ev.get("type") not in RUN_EVENTS:
+    if not isinstance(ev, dict):
         return None
-    if not _JOB_CHAN.fullmatch(channel):
+    if ev.get("type") == "job_end":
+        m = _TURN_CHAN.fullmatch(channel)
+        if m:
+            return {"type": "run_end", "conversation_id": int(m.group(2)),
+                    "kind": "agent" if m.group(1) == "agentrun" else "chat"}
+        return None
+    if ev.get("type") not in RUN_EVENTS or not _JOB_CHAN.fullmatch(channel):
         return None
     return {**ev, "job_id": channel}
 
 
 def runs_feed() -> sse.Subscription:
-    """Every agent job's tree events, each stamped with its job_id. Replaces
+    """Every agent job's tree events, each stamped with its job_id, plus
+    `run_end` when a chat turn or agent run finishes. Replaces
     the per-run GET /api/runs/{cid}/stream a JobTree used to hold open: the
     browser takes the snapshot from GET /api/runs/{cid}/tree?depth=full and
     follows the live events here, filtered to its own job."""

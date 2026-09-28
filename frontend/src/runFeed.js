@@ -18,7 +18,8 @@ import { snapshotEvents } from './runSnapshot.js'
 // overlap is harmless). When the shared stream reopens (a new leader tab, a
 // reconnect) the snapshot is taken again: events in the gap are gone.
 //
-// onEvent(ev) gets the old stream's event shapes. onError(err) when the run
+// onEvent(ev, live) gets the old stream's event shapes; live is false for
+// the snapshot's. onError(err) when the run
 // cannot be read (not a job, deleted). Returns the unsubscribe.
 export function followRun(cid, onEvent, onError) {
   let jobId = null
@@ -33,10 +34,10 @@ export function followRun(cid, onEvent, onError) {
       const nodes = (r && r.nodes) || []
       jobId = nodes.find((n) => n.id === cid)?.job_id || null
       if (!jobId) throw Object.assign(new Error('not a job'), { status: 404 })
-      for (const ev of snapshotEvents(cid, nodes)) onEvent(ev)
+      for (const ev of snapshotEvents(cid, nodes)) onEvent(ev, false)
       const later = held
       held = []
-      for (const ev of later) if (ev.job_id === jobId) onEvent(ev)
+      for (const ev of later) if (ev.job_id === jobId) onEvent(ev, true)
     }).catch((e) => { if (!closed) onError?.(e) })
       .finally(() => { loading = false })
   }
@@ -49,7 +50,7 @@ export function followRun(cid, onEvent, onError) {
       return
     }
     if (loading) held.push(ev)
-    else if (jobId && ev.job_id === jobId) onEvent(ev)
+    else if (jobId && ev.job_id === jobId) onEvent(ev, true)
   })
   sync()
   return () => { closed = true; held = []; unsub() }

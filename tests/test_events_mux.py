@@ -233,3 +233,24 @@ async def test_runs_topic_carries_every_jobs_tree_events_stamped(token):
     finally:
         await it.aclose()
     assert bus._taps == {}, "the tap goes with the connection"
+
+
+async def test_runs_topic_says_when_a_chat_turn_or_agent_run_ends(token):
+    """The Outputs tab refreshes a running row on this instead of holding the
+    row's own /api/chat/{cid}/stream or /api/agents/runs/{cid}/stream open."""
+    it = await _open(token, "runs")
+    try:
+        await _next(it)
+        bus.publish("chat:7", {"type": "final", "content": "hi"})   # not an end
+        bus.close_job("chat:7")
+        bus.publish("agentrun:8", bus.JOB_END)
+        bus.close_job("gui")                                         # not a turn
+        bus.close_job("chat:x")
+        assert (await _next(it))["event"] == {"type": "run_end", "conversation_id": 7,
+                                              "kind": "chat"}
+        assert (await _next(it))["event"] == {"type": "run_end", "conversation_id": 8,
+                                              "kind": "agent"}
+        bus.publish("0123456789abcdef" * 2, {"type": "job_final", "root_id": 1})
+        assert (await _next(it))["event"]["type"] == "job_final", "nothing else got through"
+    finally:
+        await it.aclose()
