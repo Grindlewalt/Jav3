@@ -31,8 +31,23 @@ your answer, and **Disconnect** (revokes the token).
 A closed list of verbs, checked on the server and again in the extension
 (`lib/verbs.js`): `open_tab`, `navigate`, `read_page` (text plus a list of
 links/buttons/fields across every frame, each with an id, role, visible text,
-size/position and an in-view flag), `click`, `type`, `scroll`,
-`scroll_to_element`, `screenshot_tab`, `close_tab`, `list_tabs`.
+size/position and an in-view flag), `click`, `type`, `select` (a native
+`<select>`), `hover`, `key` (Enter, Escape, Tab, shift+Tab, arrows, ctrl+…),
+`back` / `forward`, `scroll`, `scroll_to_element`, `screenshot_tab`,
+`close_tab`, `list_tabs`.
+
+- **Readable element list (0.3.0).** Web components' open shadow roots are
+  read; each control is named from its label (`aria-labelledby`, `<label>`,
+  placeholder, title, an icon's alt text); icon-only buttons are kept; what is
+  in view is listed first; a `<select>` shows its options. Password field
+  values are never read out. Every action waits for the page to go quiet and
+  reports whether it changed; an id whose element has disappeared is reported
+  as such instead of clicking something else. `lib/dom.js` holds the shared
+  helpers and is injected into a frame before each page function.
+- **Keys are synthetic.** They carry `isTrusted: false`, so the extension does
+  the default action itself when the page does not cancel it (Enter submits
+  the form, Tab moves focus, Escape closes a dialog/details). Browser
+  shortcuts do nothing.
 
 - **Only its own tabs.** Jav3 opens tabs in a separate, unfocused window
   (grouped as "Jav3") and refuses any tab it did not open. Your tabs, focus and
@@ -84,4 +99,4 @@ else: chat, the desk socket and every Settings route refuse it. See
 
 ## Test
 
-    node --test clients/jav3-browser/test/verbs.test.mjs
+    node --test clients/jav3-browser/test/*.test.mjs

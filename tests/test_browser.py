@@ -20,6 +20,8 @@ from backend.main import app
 from backend.vm import broker
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+# every verb has a browser_<verb> tool except `forward` (browser_back forward=true)
+TOOL_VERBS = set(browser.VERBS) - {"forward"}
 
 
 @pytest.fixture(autouse=True)
@@ -303,7 +305,7 @@ async def test_per_project_grants_and_routing(env, monkeypatch):
             r = await _tool("browser_click")(tab=7, element="f0:1")
             assert "read the tab first" in r
             page = await _tool("browser_read_page")(tab=7)
-            assert "UNTRUSTED" in page and "[f0:2] input:text 'q'" in page
+            assert "UNTRUSTED" in page and '[f0:2] input:text "q" @ 0,20 100x20' in page
             assert "f1=accounts.other.com" in page and "[f1:1]" in page
             assert "off-screen" in page                        # the f1:1 button
             assert "tab 7" in await _tool("browser_click")(tab=7, element="f0:1")
@@ -342,7 +344,7 @@ async def test_every_browser_result_taints_the_turn(env):
             budget_mod.active_op_id.reset(tok)
             broker._tainted.discard("op-bt")
         assert all(broker.classify_taint("browser_" + v) == "untrusted"
-                   for v in browser.VERBS)
+                   for v in TOOL_VERBS)
     finally:
         await fe.stop()
 
@@ -433,7 +435,7 @@ async def test_tools_offered_only_with_a_browser_connected(env):
     assert not any(n.startswith("browser_") for n in names())
     fe = await FakeExt(env["btok"]).start()
     try:
-        assert {"browser_" + v for v in browser.VERBS} <= names()
+        assert {"browser_" + v for v in TOOL_VERBS} <= names()
     finally:
         await fe.stop()
 
@@ -471,4 +473,155 @@ async def test_extension_zip_is_served(env):
     assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
     names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
     assert "jav3-browser/manifest.json" in names and "jav3-browser/lib/verbs.js" in names
+    assert "jav3-browser/lib/dom.js" in names         # injected into every frame
     assert not any("/test/" in n for n in names)
+
+
+# --- navigation pass: select / hover / key / back, stale ids, changed, screenshot ids ---
+
+def test_new_verbs_validate():
+    v = browser.validate
+    assert v("select", {"tab": 2, "element": "f0:7", "label": "UK", "x": 1}) == {
+        "tab": 2, "element": "f0:7", "label": "UK"}
+    assert v("select", {"tab": 2, "element": 7, "value": ""}) == {
+        "tab": 2, "element": "f0:7", "value": ""}
+    assert v("hover", {"tab": 2, "element": "f1:3"}) == {"tab": 2, "element": "f1:3"}
+    assert v("key", {"tab": 2, "combo": "Shift+tab"}) == {"tab": 2, "combo": "shift+Tab"}
+    assert v("key", {"tab": 2, "combo": "cmd+Ctrl+a"}) == {"tab": 2, "combo": "ctrl+super+a"}
+    assert v("key", {"tab": 2, "combo": "Esc"}) == {"tab": 2, "combo": "Escape"}
+    assert v("key", {"tab": 2, "combo": "ArrowDown"}) == {"tab": 2, "combo": "Down"}
+    assert v("key", {"tab": 2, "combo": "f5"}) == {"tab": 2, "combo": "F5"}
+    assert v("back", {"tab": 2, "url": "x"}) == {"tab": 2}
+    assert v("forward", {"tab": 2}) == {"tab": 2}
+    assert browser.VERBS["select"] == browser.VERBS["hover"] == browser.VERBS["key"] == "act"
+    assert browser.VERBS["back"] == browser.VERBS["forward"] == "read"
+    for verb, params in [
+            ("select", {"tab": 1, "element": "f0:1"}),                         # neither
+            ("select", {"tab": 1, "element": "f0:1", "value": "a", "label": "A"}),  # both
+            ("select", {"tab": 1, "element": "f0:1", "label": " "}),
+            ("select", {"tab": 1, "element": "f0:1", "value": 3}),
+            ("select", {"tab": 1, "element": "f0:1", "label": "x" * 501}),
+            ("select", {"tab": 1, "label": "UK"}),                             # no element
+            ("hover", {"tab": 1, "element": "nope"}),
+            ("key", {"tab": 1, "combo": ""}), ("key", {"tab": 1}),
+            ("key", {"tab": 1, "combo": "hyper+a"}), ("key", {"tab": 1, "combo": "Enterr"}),
+            ("key", {"tab": 1, "combo": "ctrl+alt+shift+super+altgr+a"}),      # 5 modifiers
+            ("key", {"tab": 1, "combo": "ctrl+ a"}), ("key", {"tab": 1, "combo": "F25"}),
+            ("back", {})]:
+        with pytest.raises(browser.BrowserError):
+            v(verb, params)
+
+
+async def test_select_label_is_secret_checked(env, monkeypatch):
+    from backend import secrets as secrets_mod
+    monkeypatch.setattr(secrets_mod, "find_in_bytes",
+                        lambda b: ["API_KEY"] if b"sk-live-123" in b else [])
+    with pytest.raises(browser.BrowserError, match="API_KEY"):
+        browser.validate("select", {"tab": 1, "element": 2, "value": "sk-live-123"})
+
+
+def test_element_lines_select_options_icons_values():
+    page = browser.render("read_page", {"tab": 3, "url": "https://ex.com/", "title": "T",
+        "text": "hi", "elements": [
+            {"id": "f0:9", "tag": "button", "name": "", "text": "", "icon": True,
+             "box": {"x": 1, "y": 2, "w": 3, "h": 4}, "inView": False},
+            {"id": "f0:7", "tag": "select", "name": "Country", "text": "",
+             "options": [{"t": "US", "v": "us", "s": True}, {"t": "UK", "v": "uk", "s": False},
+                         {"t": "DE", "v": "de", "s": False}], "more": 4,
+             "box": {"x": 10, "y": 40, "w": 120, "h": 24}, "inView": True},
+            {"id": "f0:8", "tag": "input", "type": "email", "name": "Email",
+             "value": "a@b.c", "box": {"x": 0, "y": 0, "w": 9, "h": 9}, "inView": True},
+            {"id": "f0:10", "tag": "input", "type": "checkbox", "name": "Remember me",
+             "checked": True, "box": {"x": 0, "y": 0, "w": 9, "h": 9}, "inView": True}]},
+        {"tab": 3}, changed=None, first=True)
+    assert '[f0:7] select "Country" options: US*, UK, DE … (+4 more) @ 10,40 120x24' in page
+    assert '[f0:8] input:email "Email" value="a@b.c"' in page
+    assert '[f0:10] input:checkbox "Remember me" checked' in page
+    assert "[f0:9] button (icon, no label) @ 1,2 3x4 off-screen" in page
+    # in view first, whatever order the frames sent
+    assert page.index("[f0:7]") < page.index("[f0:9]")
+    assert page.rstrip().endswith("changed: unknown (first read of this tab)")
+
+
+def test_screenshot_element_listing_scales_and_places_frames():
+    b = browser.Browser(device_id=1, name="c", ws=None)
+    browser._note_view(b, "read_page", 5, {
+        "viewport": {"w": 400, "h": 300, "dpr": 2},
+        "frames": [{"index": 0, "offset": {"x": 0, "y": 0}},
+                   {"index": 1, "offset": {"x": 100, "y": 50}},
+                   {"index": 2, "offset": None}],
+        "elements": [
+            {"id": "f0:12", "tag": "button", "name": "Sign in", "frame": 0,
+             "box": {"x": 40, "y": 15, "w": 60, "h": 18}, "inView": True},
+            {"id": "f0:13", "tag": "a", "name": "Far", "frame": 0,
+             "box": {"x": 40, "y": 900, "w": 60, "h": 18}, "inView": False},
+            {"id": "f1:1", "tag": "input", "type": "text", "name": "User", "frame": 1,
+             "box": {"x": 10, "y": 10, "w": 50, "h": 20}, "inView": True},
+            {"id": "f2:1", "tag": "button", "name": "Nested", "frame": 2,
+             "box": {"x": 0, "y": 0, "w": 5, "h": 5}, "inView": True}]})
+    out = browser.screenshot_elements(b.views[5], 800, 600)
+    assert '[f0:12] button "Sign in" @ 80,30 120x36' in out
+    assert '[f1:1] input "User" @ 220,120 100x40' in out
+    assert "f0:13" not in out and "Nested" not in out and "1 element(s) in nested" in out
+    browser._note_view(b, "click", 5, {})
+    assert "shifted after the last click" in browser.screenshot_elements(b.views[5], 800, 600)
+    browser._note_view(b, "scroll", 5, {})
+    out = browser.screenshot_elements(b.views[5], 800, 600)
+    assert "scrolled since the last browser_read_page" in out and "f0:12" not in out
+    assert "no read of this tab" in browser.screenshot_elements(None, 800, 600)
+
+
+async def test_stale_changed_key_and_screenshot_through_the_tools(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()
+    state = {"sig": "0000abcd:3"}
+
+    async def answer(m):
+        verb, p = m["verb"], m["params"]
+        if verb in ("click", "hover") and p.get("element") == "f0:2":
+            return {"ok": False, "code": "stale", "err": "element is no longer on the page"}
+        res = await FakeExt.default_answer(m)
+        if verb == "read_page":
+            res["data"]["viewport"] = {"w": 400, "h": 300, "dpr": 2}
+            res["data"]["frames"][0]["offset"] = {"x": 0, "y": 0}
+        if verb == "key":
+            res["data"]["text"] = "pressed Enter on input \"q\"; submitted the form"
+        if verb != "screenshot_tab":
+            res["data"]["sig"] = state["sig"]
+        return res
+    fe.answer = answer
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-nav")
+        try:
+            # key is input too: no blind keys
+            assert "read the tab first" in await _tool("browser_key")(tab=7, combo="Enter")
+            page = await _tool("browser_read_page")(tab=7, wait_ms=500)
+            assert fe.reqs[-1]["params"]["wait_ms"] == 500
+            assert page.rstrip().endswith("changed: unknown (first read of this tab)")
+            r = await _tool("browser_click")(tab=7, element="f0:1")
+            assert r.rstrip().endswith("changed: no")
+            state["sig"] = "0000beef:4"
+            r = await _tool("browser_key")(tab=7, combo="return")
+            assert fe.reqs[-1]["params"] == {"tab": 7, "combo": "Return"}
+            assert "submitted the form" in r and r.rstrip().endswith("changed: yes")
+            r = await _tool("browser_click")(tab=7, element="f0:2")
+            assert r == "error: element f0:2 is no longer on the page — browser_read_page again"
+            assert "no longer on the page" in await _tool("browser_hover")(tab=7, element="f0:2")
+            r = await _tool("browser_select")(tab=7, element="f0:1", label="UK")
+            assert fe.reqs[-1]["params"] == {"tab": 7, "element": "f0:1", "label": "UK"}
+            shot = await _tool("browser_screenshot_tab")(tab=7)
+            assert '[f0:1] link "More" @ 0,0 20x20' in shot    # 800 px image / 400 px viewport
+            assert "[f1:1]" not in shot                        # off-screen in the read
+            await _tool("browser_back")(tab=7)
+            assert fe.reqs[-1]["verb"] == "back"
+            await _tool("browser_back")(tab=7, forward=True)
+            assert fe.reqs[-1]["verb"] == "forward"
+            # history moved: old ids are gone, and the screenshot says so
+            assert "read the tab first" in await _tool("browser_click")(tab=7, element="f0:1")
+            assert "went forward since" in await _tool("browser_screenshot_tab")(tab=7)
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-nav")
+    finally:
+        await fe.stop()

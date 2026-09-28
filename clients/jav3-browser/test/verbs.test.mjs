@@ -16,7 +16,7 @@ test('closed verb list, unknown fields dropped', () => {
   assert.deepEqual(validate('read_page', { tab: 1, wait_ms: 3000, min_elements: 5, selector: '.x' }),
     { tab: 1, max_chars: 8000, wait_ms: 3000, min_elements: 5, selector: '.x' });
   assert.deepEqual(validate('list_tabs', { tab: 4 }), {});
-  assert.equal(Object.keys(VERBS).length, 10);
+  assert.equal(Object.keys(VERBS).length, 15);
 });
 
 test('element id parsing and frame consent', () => {
@@ -43,6 +43,31 @@ test('element id parsing and frame consent', () => {
   assert.equal(frameConsentNeeded('mail.google.com', 'accounts.google.com'), false);
   assert.equal(frameConsentNeeded('app.example.com', 'login.other.com'), true);
   assert.equal(frameConsentNeeded('example.com', ''), false);   // about:blank subframe
+});
+
+test('select / hover / key / back / forward', () => {
+  assert.deepEqual(validate('select', { tab: 2, element: 'f0:7', label: 'UK', x: 1 }), { tab: 2, element: 'f0:7', label: 'UK' });
+  assert.deepEqual(validate('select', { tab: 2, element: 7, value: '' }), { tab: 2, element: 'f0:7', value: '' });
+  assert.deepEqual(validate('hover', { tab: 2, element: 'f1:3' }), { tab: 2, element: 'f1:3' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'Shift+tab' }), { tab: 2, combo: 'shift+Tab' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'cmd+Ctrl+a' }), { tab: 2, combo: 'ctrl+super+a' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'Esc' }), { tab: 2, combo: 'Escape' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'ArrowDown' }), { tab: 2, combo: 'Down' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'f5' }), { tab: 2, combo: 'F5' });
+  assert.deepEqual(validate('back', { tab: 2, url: 'x' }), { tab: 2 });
+  assert.deepEqual(validate('forward', { tab: 2 }), { tab: 2 });
+  assert.equal(VERBS.select, 'act'); assert.equal(VERBS.key, 'act'); assert.equal(VERBS.back, 'read');
+  for (const [v, p] of [
+    ['select', { tab: 1, element: 'f0:1' }], ['select', { tab: 1, element: 'f0:1', value: 'a', label: 'A' }],
+    ['select', { tab: 1, element: 'f0:1', label: ' ' }], ['select', { tab: 1, element: 'f0:1', value: 3 }],
+    ['select', { tab: 1, element: 'f0:1', label: 'x'.repeat(501) }], ['select', { tab: 1, label: 'UK' }],
+    ['hover', { tab: 1, element: 'nope' }], ['key', { tab: 1, combo: '' }], ['key', { tab: 1 }],
+    ['key', { tab: 1, combo: 'hyper+a' }], ['key', { tab: 1, combo: 'Enterr' }],
+    ['key', { tab: 1, combo: 'ctrl+alt+shift+super+altgr+a' }], ['key', { tab: 1, combo: 'ctrl+ a' }],
+    ['key', { tab: 1, combo: 'F25' }], ['back', {}]]) {
+    assert.throws(() => validate(v, p), VerbError, `${v} ${JSON.stringify(p)}`);
+  }
+  assert.equal(describe('key', 'example.com'), 'Jav3 is pressing a key on example.com');
 });
 
 test('popup adoption decision', () => {

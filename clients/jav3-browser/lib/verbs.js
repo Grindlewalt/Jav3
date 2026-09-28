@@ -1,24 +1,36 @@
 // The closed verb list, extension side. Pure (no chrome.* calls) so node can
 // test it: node --test clients/jav3-browser/test/
 // Mirrors backend/browser.py `validate`; both sides check every request.
+import './dom.js';
+
+const DOM = globalThis.__jav3Dom;
 
 export const VERBS = Object.freeze({
   open_tab: 'read', navigate: 'read', read_page: 'read', scroll: 'read',
   scroll_to_element: 'read', screenshot_tab: 'read', close_tab: 'read',
-  list_tabs: 'read', click: 'act', type: 'act',
+  list_tabs: 'read', back: 'read', forward: 'read',
+  click: 'act', type: 'act', select: 'act', hover: 'act', key: 'act',
 });
 const TAB_VERBS = new Set(Object.keys(VERBS).filter(v => v !== 'open_tab' && v !== 'list_tabs'));
 // Verbs whose `element` id comes from a browser_read_page of that tab: they
 // need a fresh all-frames read (enforced host-side, backend/browser.py).
-export const ELEMENT_VERBS = Object.freeze(['click', 'type', 'scroll_to_element']);
+export const ELEMENT_VERBS = Object.freeze(['click', 'type', 'scroll_to_element', 'select', 'hover']);
 export const TEXT_CAP = 2000;
 export const URL_CAP = 2000;
 export const PAGE_TEXT_CAP = 20000;
 export const WAIT_CAP_MS = 10000;         // bounded retry budget on read_page
 export const MAX_FRAME_INDEX = 999;
 export const MAX_ELEMENT_N = 100000;
+export const OPTION_CAP = 500;
 
-export class VerbError extends Error {}
+export class VerbError extends Error {
+  constructor(msg, code) { super(msg); if (code) this.code = code; }
+}
+
+// "Ctrl+Shift+t" -> "ctrl+shift+t"; the desk's grammar (lib/dom.js). Throws VerbError.
+export function normalizeCombo(combo) {
+  try { return DOM.normalizeCombo(combo); } catch (e) { throw new VerbError(e.message); }
+}
 
 function int(params, k, lo, hi, dflt) {
   const v = params[k] === undefined ? dflt : params[k];
@@ -146,6 +158,17 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
     const sub = params.submit === undefined ? false : params.submit;
     if (typeof sub !== 'boolean') throw new VerbError('submit must be true or false');
     p.submit = sub;
+  } else if (verb === 'select') {
+    const hasV = params.value !== undefined && params.value !== null;
+    const hasL = params.label !== undefined && params.label !== null;
+    if (hasV === hasL) throw new VerbError('give exactly one of value or label');
+    const k = hasV ? 'value' : 'label';
+    if (typeof params[k] !== 'string') throw new VerbError(`${k} must be a string`);
+    if (params[k].length > OPTION_CAP) throw new VerbError(`${k} is too long`);
+    if (k === 'label' && !params.label.trim()) throw new VerbError('label must not be empty');
+    p[k] = params[k];
+  } else if (verb === 'key') {
+    p.combo = normalizeCombo(params.combo);
   } else if (verb === 'scroll') {
     p.pages = int(params, 'pages', -10, 10, 1);
     if (!p.pages) throw new VerbError('pages must not be 0');
@@ -187,7 +210,8 @@ const DOING = {
   open_tab: 'opening', navigate: 'loading', read_page: 'reading', scroll: 'scrolling',
   scroll_to_element: 'scrolling to an element on', screenshot_tab: 'taking a screenshot of',
   close_tab: 'closing a tab on', list_tabs: 'listing its tabs',
-  click: 'clicking on', type: 'typing on',
+  click: 'clicking on', type: 'typing on', select: 'choosing an option on',
+  hover: 'hovering on', key: 'pressing a key on', back: 'going back on', forward: 'going forward on',
 };
 export function describe(verb, host) {
   const d = DOING[verb] || verb;
