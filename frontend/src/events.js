@@ -35,7 +35,8 @@ import { TAB_ID, tabName } from './tab.js'
 // topics (`procs`, WP4; `vm-images`, WP5; `vm-boxes`, WP1; `services`, WP3) start flowing the moment the backend
 // registers them in events_api.TOPICS, with no frontend change and no risk to
 // the four existing feeds before then.
-export const TOPICS = ['gui', 'security', 'notices', 'egress', 'procs', 'vm-images', 'vm-boxes', 'services']
+// `runs`: every agent job's tree events, for JobTree and the plan panel (runFeed.js)
+export const TOPICS = ['gui', 'security', 'notices', 'egress', 'procs', 'vm-images', 'vm-boxes', 'services', 'runs']
 
 // the old per-feed URLs, so api.js subscribeSse callers need not change
 export const URL_TOPIC = {

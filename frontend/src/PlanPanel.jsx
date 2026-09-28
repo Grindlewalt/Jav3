@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Button, EmptyState, Input, Menu, MenuItem, MenuSep, SaveButton, Select, Tag } from './components/index.js'
 import { notifyError } from './notify.js'
+import { followRun } from './runFeed.js'
 
 // The explicit orchestrator's checklist: dump -> plan -> run. The list is the
 // project's .plan.json read back through /api/projects/{slug}/plan; every edit
 // here is a normal edit of that file, which the runner honours on its next
 // tick, so the panel stays usable while a run is live. Live item state rides
-// the head's run stream (plan_item events); job_final refetches.
+// the head's job events (plan_item, via runFeed.js); job_final refetches.
 const TONE = { todo: 'pending', running: 'running', blocked: 'untrusted',
                done: 'done', failed: 'error', skipped: undefined }
 const PLAN_TONE = { draft: undefined, running: 'running', done: 'done',
@@ -28,17 +29,15 @@ export default function PlanPanel({ slug, state, setState }) {
 
   useEffect(() => {
     if (!plan?.root_id || !running) return
-    const es = new EventSource(`/api/runs/${plan.root_id}/stream`)
-    es.onmessage = (m) => {
-      const ev = JSON.parse(m.data)
+    // the head's job on the shared event stream, not a socket of its own
+    const unfollow = followRun(plan.root_id, (ev) => {
       if (ev.type === 'plan_item') {
         const { type, job_id, ...it } = ev
         setPlan((p) => p ? { ...p, items: p.items.map((x) => x.id === it.id ? { ...x, ...it } : x) } : p)
       }
-      if (ev.type === 'job_final') { es.close(); load() }
-    }
-    es.onerror = () => { if (es.readyState === EventSource.CLOSED) load() }
-    return () => es.close()
+      if (ev.type === 'job_final') { unfollow(); load() }
+    }, () => load())
+    return () => unfollow()
   }, [plan?.root_id, running]) // eslint-disable-line
 
   async function call(path, options) {

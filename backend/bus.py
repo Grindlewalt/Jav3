@@ -9,6 +9,7 @@ Publishing never touches the DB and never raises into the orchestrator: a slow
 or gone subscriber must not stall or crash the job.
 """
 import asyncio
+from typing import Callable
 
 _subscribers: dict[str, set[asyncio.Queue]] = {}
 
@@ -52,9 +53,33 @@ def publish_to(q: asyncio.Queue, event: dict) -> None:
             pass
 
 
+# Taps see every channel's events, filtered and reshaped by their own function
+# (channel, event) -> event | None. The one user is the `runs` topic on the
+# shared /api/events stream (backend/events_api.py): a job's channel is minted
+# per run, so a connection opened once per browser cannot name it in advance.
+_taps: dict[int, tuple[Callable[[str, dict], dict | None], asyncio.Queue]] = {}
+
+
+def tap(pick: Callable[[str, dict], dict | None]) -> asyncio.Queue:
+    q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    _taps[id(q)] = (pick, q)
+    return q
+
+
+def untap(q: asyncio.Queue) -> None:
+    _taps.pop(id(q), None)
+
+
 def publish(job_id: str, event: dict) -> None:
     for q in list(_subscribers.get(job_id, ())):
         publish_to(q, event)
+    for pick, q in list(_taps.values()):
+        try:
+            out = pick(job_id, event)
+        except Exception:  # noqa: BLE001 — a bad filter must not break a publisher
+            out = None
+        if out is not None:
+            publish_to(q, out)
 
 
 def close_job(job_id: str) -> None:
