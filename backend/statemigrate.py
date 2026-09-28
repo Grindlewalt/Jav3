@@ -15,7 +15,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from .config import STATE_DIRS, has_state, settings
+from .config import STATE_DIRS, has_any_state, has_state, settings
 
 _DB_FILES = {"jarvis.db", "jarvis.db-wal", "jarvis.db-shm"}
 
@@ -132,7 +132,7 @@ def migrate_state(to: Path | None = None) -> list[str]:
         raise MigrateError("the target is the code checkout itself — nothing to do")
     if not has_state(src):
         raise MigrateError(f"no legacy state under {src} — nothing to migrate")
-    if has_state(dst):
+    if has_any_state(dst):
         raise MigrateError(f"{dst} already holds Jav3 state — refusing to merge "
                            "into it. Move it aside or pick another --to.")
     src_db = src / "data" / "jarvis.db"

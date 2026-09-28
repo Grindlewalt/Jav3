@@ -2,6 +2,7 @@ import logging
 import os
 import secrets
 import shutil
+import sqlite3
 from pathlib import Path
 
 from pydantic import PrivateAttr, model_validator
@@ -50,9 +51,35 @@ def _has_content(d: Path) -> bool:
         return False
 
 
+def _db_has_tables(p: Path) -> bool:
+    """`p` is a SQLite file with at least one table. Opened read-only
+    (mode=ro): probing must never create the file — a 0-byte jarvis.db left by
+    a read-write connect is exactly what fooled has_state on the Pi."""
+    try:
+        if not p.is_file() or p.stat().st_size == 0:
+            return False
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        try:
+            return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                               "LIMIT 1").fetchone() is not None
+        finally:
+            con.close()
+    except (OSError, sqlite3.Error):
+        return False
+
+
 def has_state(root: Path) -> bool:
-    """True when `root` holds a real Jav3 state layout (a DB, or any memory/
-    project/agent file) rather than empty scaffolding."""
+    """True when `root` holds a real Jav3 install: data/jarvis.db exists AND
+    has at least one table. Empty scaffolding dirs, seeded skills or memory
+    files and a 0-byte or missing DB are not state — pointing the service at
+    such a dir means running on an empty DB (the Pi deploy of 2026-09-28)."""
+    return _db_has_tables(root / "data" / "jarvis.db")
+
+
+def has_any_state(root: Path) -> bool:
+    """The loose probe for "would I overwrite something here": any DB file,
+    or any memory / project / agent file. For refusing to migrate or restore
+    INTO a dir, where a false positive only costs a --force."""
     return ((root / "data" / "jarvis.db").exists()
             or any(_has_content(root / n) for n in _LEGACY_PROBE))
 
