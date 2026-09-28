@@ -156,6 +156,7 @@ class Desk:
     shell_busy: bool = False
     send_lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
     turns: dict = dataclasses.field(default_factory=dict)   # conversation id -> monotonic
+    grants: dict = dataclasses.field(default_factory=dict)  # cached from get_grants
     locked: bool = False               # from the client's hello / latest state frame
     asleep: bool = False
 
@@ -191,6 +192,16 @@ def offered() -> bool:
     when some computer is connected. Every tool spec ships on every turn, so a
     desk that is not there costs tokens and invites the model to promise it."""
     return bool(_desks)
+
+
+def shell_offered() -> bool:
+    """Whether desk_shell belongs in this turn's toolset: some connected
+    computer has shell granted in Settings (ask / trusted) AND allowed at the
+    computer itself. Offering a tool that can only answer "shell is off"
+    invites the model to try it and then to argue for turning it on. Reads
+    the grants cached on the Desk (attach / set_grants), so it stays sync."""
+    return any(d.grants.get("shell", "off") != "off" and d.ceiling.get("shell")
+               for d in _desks.values())
 
 
 # --- security events ---------------------------------------------------------------
@@ -301,6 +312,7 @@ async def set_grants(device_id: int, *, screen: bool | None = None,
     g = await get_grants(device_id)
     d = _desks.get(device_id)
     if d is not None:
+        d.grants = g
         try:
             await d.send(_wire_grants(g))
         except Exception:  # noqa: BLE001 — a dead socket is reaped by its own loop
@@ -379,8 +391,9 @@ async def attach(device_id: int, name: str, ws, hello: dict) -> Desk:
             pass
     d = Desk(device_id=device_id, name=name, ws=ws, hello=_clean_hello(hello))
     d.locked, d.asleep = hello.get("locked") is True, hello.get("asleep") is True
+    d.grants = await get_grants(device_id)
     _desks[device_id] = d
-    await d.send(_wire_grants(await get_grants(device_id)))
+    await d.send(_wire_grants(d.grants))
     if _session_gap(("start", device_id)):
         await _event("desk_session", f"computer '{name}' connected for computer use "
                      f"({d.hello['backend'] or '?'} on {d.hello['platform'] or '?'})",

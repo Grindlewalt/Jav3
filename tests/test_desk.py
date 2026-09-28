@@ -425,7 +425,28 @@ async def test_tools_offered_only_with_a_desk_connected(env):
     assert not any(n.startswith("desk_") for n in names())
     fd = await FakeDesk(env["desk_tok"]).start()
     try:
-        assert {"desk_screenshot", "desk_click", "desk_shell"} <= names()
+        # shell is off in Settings (the default): desk_shell is not offered
+        assert {"desk_screenshot", "desk_click"} <= names()
+        assert "desk_shell" not in names()
+        await _grant(env, shell="ask")
+        assert "desk_shell" in names()
+        await _grant(env, shell="off")
+        assert "desk_shell" not in names()
+    finally:
+        await fd.stop()
+
+
+async def test_desk_shell_not_offered_when_the_computer_says_no(env):
+    names = lambda: {s["function"]["name"] for s in registry.openai_tool_specs()}  # noqa: E731
+    await _grant(env, shell="trusted")          # granted before it connects
+    fd = await FakeDesk(env["desk_tok"], ceiling={"screen": True, "input": True,
+                                                  "shell": False}).start()
+    try:
+        assert "desk_screenshot" in names() and "desk_shell" not in names()
+        await fd.ws.send({"type": "ceiling", "ceiling": {"screen": True, "input": True,
+                                                         "shell": True}})
+        await asyncio.sleep(0.05)
+        assert "desk_shell" in names()
     finally:
         await fd.stop()
 

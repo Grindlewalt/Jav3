@@ -184,11 +184,15 @@ def _requirements_met(entry: dict) -> bool:
     is still catalogued on the Tools tab, so it is discoverable rather than
     invisible — it just is not granted.
     """
-    if entry.get("requires_desk") is True:
+    if entry.get("requires_desk") in (True, "shell"):
         # the computer-use tools (tools/desk_*): offered only while some
-        # computer is connected (backend/desk.py), same reasoning as below
+        # computer is connected (backend/desk.py), same reasoning as below;
+        # `requires_desk: shell` (desk_shell) also needs shell granted in
+        # Settings and allowed at that computer
         from ... import desk
         if not desk.offered():
+            return False
+        if entry["requires_desk"] == "shell" and not desk.shell_offered():
             return False
     if entry.get("requires_browser") is True:
         # tools/browser_*: only while a jav3-browser extension is connected
