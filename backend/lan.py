@@ -102,6 +102,26 @@ def media_hosts() -> list[str]:
 
 # --- mDNS ---------------------------------------------------------------------
 
+async def _free_name(zc, name: str, ips: list[str]) -> str:
+    """`name`, or the first of name-2, name-3, ... that no OTHER server on the
+    LAN answers for. An answer with one of our own addresses is us (a restart)."""
+    ask = getattr(zc, "async_get_service_info", None)
+    if ask is None:
+        return name
+    for i in range(1, 10):
+        cand = name if i == 1 else f"{name}-{i}"
+        try:
+            info = await ask(SERVICE_TYPE, f"{cand}.{SERVICE_TYPE}", 1500)
+        except Exception:   # noqa: BLE001 — no answer is as good as no clash
+            info = None
+        if info is None:
+            return cand
+        theirs = set(info.parsed_addresses()) if hasattr(info, "parsed_addresses") else set()
+        if not theirs or theirs & set(ips):
+            return cand
+    return name
+
+
 async def start(app_title: str = "") -> None:
     """Advertise over mDNS. Never raises: a failure is a logged warning."""
     global _zc, _info, _own
@@ -124,6 +144,22 @@ async def start(app_title: str = "") -> None:
             port=settings.lan_port, properties={"path": "/"},
             server=f"{name}.local.")
         _zc = AsyncZeroconf()
+        # allow_name_change only renames the SERVICE on a clash; the host
+        # name `<name>.local` would be shared with the other box, and a login
+        # line built from it hands the code to that box. So ask first whether
+        # another server already answers as <name>, and step aside if it does.
+        free = await _free_name(_zc, name, ips)
+        if free != name:
+            log.warning("mDNS: %s.local is already another server's on this LAN; "
+                        "advertising as %s.local (set JARVIS_INSTANCE_NAME to choose)",
+                        name, free)
+            name = free
+            _state.update(name=name, hostname=f"{name}.local")
+            _info = ServiceInfo(
+                SERVICE_TYPE, f"{name}.{SERVICE_TYPE}",
+                addresses=[socket.inet_aton(ip) for ip in ips],
+                port=settings.lan_port, properties={"path": "/"},
+                server=f"{name}.local.")
         # the first await queues the registration, the second is its probing
         # + announce actually finishing (zeroconf's two-step async API)
         pending = await _zc.async_register_service(_info, allow_name_change=True)

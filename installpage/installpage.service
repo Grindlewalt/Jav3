@@ -2,6 +2,7 @@
 #
 #   sudo install -d /opt/installpage
 #   sudo install -m 0644 installpage/server.py scripts/bootstrap.sh /opt/installpage/
+#   sudo install -m 0644 docs/AGENT-INSTALL.md /opt/installpage/agent.md
 #   sudo install -m 0644 installpage/installpage.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now installpage
 #
@@ -14,7 +15,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -I -B /opt/installpage/server.py --bootstrap /opt/installpage/bootstrap.sh
+ExecStart=/usr/bin/python3 -I -B /opt/installpage/server.py --bootstrap /opt/installpage/bootstrap.sh --guide /opt/installpage/agent.md
 Environment=INSTALLPAGE_BIND=::
 Environment=INSTALLPAGE_PORT=8080
 # Environment=INSTALLPAGE_TITLE=Jav3

@@ -2891,3 +2891,26 @@ async def test_agents_reload_after_close_does_not_crash():
         await scr._reload_safe()                    # the late result: dropped, no crash
         await pilot.pause(0.1)
         assert app.is_running
+
+
+def test_plain_http_warning_skips_loopback():
+    assert jav3._loopback_base("http://localhost:8780")
+    assert jav3._loopback_base("http://127.0.0.1:8780")
+    assert jav3._loopback_base("http://[::1]:8780")
+    assert not jav3._loopback_base("http://10.0.0.58:8780")
+    assert not jav3._loopback_base("http://jav3.local:8000")
+
+
+def test_login_line_alts_used_only_when_local_name_does_not_resolve(monkeypatch):
+    line = "address=nowhere-xyz.local:8780 code=abc alt=10.0.0.58:8780,10.0.0.59:8780"
+    assert jav3.parse_login_line(line) == ("nowhere-xyz.local:8780", "abc")
+    alts = jav3.login_alts(line)
+    assert alts == ["10.0.0.58:8780", "10.0.0.59:8780"]
+    monkeypatch.setattr(jav3, "_resolves", lambda a: False)
+    assert jav3.pick_login_address("nowhere-xyz.local:8780", alts) == "10.0.0.58:8780"
+    with pytest.raises(jav3.CliError, match="mDNS"):
+        jav3.pick_login_address("nowhere-xyz.local:8780", [])
+    # a name that is not .local is never swapped
+    assert jav3.pick_login_address("jav3.lan:8000", alts) == "jav3.lan:8000"
+    monkeypatch.setattr(jav3, "_resolves", lambda a: True)
+    assert jav3.pick_login_address("jav3.local:8780", alts) == "jav3.local:8780"

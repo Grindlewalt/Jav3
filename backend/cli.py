@@ -1,5 +1,5 @@
 """Admin CLI:
-  python -m backend.cli setup [--status | --add-user | --profile-only]
+  python -m backend.cli setup [--status | --add-user | --profile-only | --provider-only]
                              [--username U --password-stdin]
                              [--network ask|allow|off] [--placement shared|vm|container]
                              [--services] [--packages] [--change-profile] [--yes]
@@ -15,6 +15,7 @@
   python -m backend.cli gitea-setup [--dry-run] [--user U] [--port N] [--password-stdin]
                                    [--reset-password] [--yes]  # install/configure Gitea
   python -m backend.cli docker-setup [--dry-run] [--rebuild] [--yes]  # build + enable Docker boxes
+  python -m backend.cli doctor [--json]              # how far the install got; the next fix per stage
   python -m backend.cli import-skill <folder|https-git-url[#subdir]|clawhub:slug> [--name N] [--replace]
 """
 import asyncio
@@ -151,6 +152,9 @@ def services_check() -> None:
 
 
 def _prompt_password() -> str:
+    if not sys.stdin.isatty():
+        sys.exit("create-user: no terminal to read a password from — use "
+                 "`python -m backend.cli setup --add-user --username U --password-stdin`")
     pw = getpass.getpass("password: ")
     if not pw:
         sys.exit("empty password refused")
@@ -180,6 +184,9 @@ def main() -> None:
     elif len(sys.argv) >= 2 and sys.argv[1] == "docker-setup":
         from . import docker_setup
         sys.exit(docker_setup.run(sys.argv[2:]))
+    elif len(sys.argv) >= 2 and sys.argv[1] == "doctor":
+        from . import doctor
+        sys.exit(doctor.run(sys.argv[2:]))
     elif len(sys.argv) >= 2 and sys.argv[1] == "import-skill":
         import_skill_command(sys.argv[2:])
     elif len(sys.argv) >= 2 and sys.argv[1] in ("migrate-state", "backup", "restore"):
@@ -297,83 +304,15 @@ def _apply_profile(prof: dict | None) -> None:
     print(f"default profile {r['action']}: {r['summary']}")
 
 
-def setup_command(args: list[str]) -> None:
-    """The TUI twin of the web /setup page: login, model provider, finish.
-    Interactive on a terminal; scriptable with the flags (secrets on stdin,
-    one per line, password first — never in argv, where `ps` can read them)."""
-    import argparse
+def _provider_step(a, tty: bool, scripted: bool, offer_menu: bool) -> tuple[str, str, str]:
+    """(provider id, key, base URL) from the flags or the terminal; ("", "", "")
+    = none. Checks the entry and runs the test call; exits on a refusal."""
     from . import setup_api
     from .setup_api import SetupError
-
-    ap = argparse.ArgumentParser(prog="python -m backend.cli setup")
-    ap.add_argument("--username")
-    ap.add_argument("--password-stdin", action="store_true")
-    ap.add_argument("--provider", help="provider id, or 'none' to skip")
-    ap.add_argument("--api-key-stdin", action="store_true")
-    ap.add_argument("--base-url")
-    ap.add_argument("--no-test", action="store_true", help="skip the test call")
-    ap.add_argument("--add-user", action="store_true",
-                    help="add another login even though setup is done")
-    ap.add_argument("--status", action="store_true",
-                    help="print needed/done and the URLs; exit 0 iff needed")
-    # the default security profile (the one new projects use)
-    ap.add_argument("--network", choices=("ask", "allow", "off"),
-                    help="new sites: ask me (default), allow, or no network")
-    ap.add_argument("--placement", choices=("shared", "vm", "container"),
-                    help="where projects run (default: the shared box)")
-    ap.add_argument("--services", action="store_true",
-                    help="agents may request services")
-    ap.add_argument("--packages", action="store_true",
-                    help="agents may request packages")
-    ap.add_argument("--change-profile", action="store_true",
-                    help="re-apply the answers to an existing default profile")
-    ap.add_argument("--profile-only", action="store_true",
-                    help="only the profile step (works after setup is done)")
-    ap.add_argument("--yes", action="store_true",
-                    help="no questions: flags, else the safe defaults")
-    a = ap.parse_args(args)
-    tty = sys.stdin.isatty()
-    scripted = a.password_stdin or a.api_key_stdin
-
-    asyncio.run(init_db())
-    exists = asyncio.run(setup_api.users_exist())
-    if a.status:
-        print("done" if exists else "needed")
-        for url in server_urls():
-            print(url)
-        sys.exit(1 if exists else 0)
-    if a.profile_only:
-        prof = _profile_step(a, interactive=tty and not a.yes, change=True)
-        _apply_profile(prof)
-        return
-    if exists and not a.add_user:
-        print("setup is already done (a login exists). To add another login: "
-              "python -m backend.cli setup --add-user", file=sys.stderr)
-        sys.exit(1)
-    if not tty and not (a.username and a.password_stdin):
-        print("setup: no terminal — pass --username and --password-stdin",
-              file=sys.stderr)
-        sys.exit(2)
-
-    # 1. the login
-    print("\n1. Create your login")
-    username = a.username or _ask("   username: ")
-    if a.password_stdin:
-        password = _stdin_line("password")
-    else:
-        print(f"   (at least {setup_api.MIN_PASSWORD} characters; a few "
-              "unrelated words beat one clever one)")
-        password = _prompt_password()
-    try:
-        username = setup_api.validate_credentials(username, password)
-    except SetupError as e:
-        sys.exit(f"setup: {e.detail}")
-
-    # 2. the provider (skipped by --add-user unless one is named)
     pid = key = base = ""
     if a.provider:
         pid = "" if a.provider.lower() == "none" else a.provider.strip().lower()
-    elif tty and not scripted and not a.add_user:
+    elif tty and not scripted and offer_menu:
         cat = setup_api.catalogue()
         print("\n2. Connect a model provider")
         for i, p in enumerate(cat, 1):
@@ -417,6 +356,108 @@ def setup_command(args: list[str]) -> None:
                     sys.exit("setup: provider test failed (nothing was created; "
                              "--no-test skips the check)")
 
+    return pid, key, base
+
+
+def setup_command(args: list[str]) -> None:
+    """The TUI twin of the web /setup page: login, model provider, finish.
+    Interactive on a terminal; scriptable with the flags (secrets on stdin,
+    one per line, password first — never in argv, where `ps` can read them)."""
+    import argparse
+    from . import setup_api
+    from .setup_api import SetupError
+
+    ap = argparse.ArgumentParser(prog="python -m backend.cli setup")
+    ap.add_argument("--username")
+    ap.add_argument("--password-stdin", action="store_true")
+    ap.add_argument("--provider", help="provider id, or 'none' to skip")
+    ap.add_argument("--api-key-stdin", action="store_true")
+    ap.add_argument("--base-url")
+    ap.add_argument("--no-test", action="store_true", help="skip the test call")
+    ap.add_argument("--add-user", action="store_true",
+                    help="add another login even though setup is done")
+    ap.add_argument("--status", action="store_true",
+                    help="print needed/done and the URLs; exit 0 iff needed")
+    # the default security profile (the one new projects use)
+    ap.add_argument("--network", choices=("ask", "allow", "off"),
+                    help="new sites: ask me (default), allow, or no network")
+    ap.add_argument("--placement", choices=("shared", "vm", "container"),
+                    help="where projects run (default: the shared box)")
+    ap.add_argument("--services", action="store_true",
+                    help="agents may request services")
+    ap.add_argument("--packages", action="store_true",
+                    help="agents may request packages")
+    ap.add_argument("--change-profile", action="store_true",
+                    help="re-apply the answers to an existing default profile")
+    ap.add_argument("--profile-only", action="store_true",
+                    help="only the profile step (works after setup is done)")
+    ap.add_argument("--list-providers", action="store_true",
+                    help="print the provider ids --provider accepts, and exit")
+    ap.add_argument("--provider-only", action="store_true",
+                    help="only the provider step (works after setup is done)")
+    ap.add_argument("--yes", action="store_true",
+                    help="no questions: flags, else the safe defaults")
+    a = ap.parse_args(args)
+    tty = sys.stdin.isatty()
+    scripted = a.password_stdin or a.api_key_stdin
+
+    asyncio.run(init_db())
+    exists = asyncio.run(setup_api.users_exist())
+    if a.status:
+        print("done" if exists else "needed")
+        for url in server_urls():
+            # while setup is open, the link carries the one-time token the
+            # web /setup page needs (setup_api.setup_token)
+            print(url if exists else setup_api.setup_link(url))
+        sys.exit(1 if exists else 0)
+    if a.profile_only:
+        prof = _profile_step(a, interactive=tty and not a.yes, change=True)
+        _apply_profile(prof)
+        return
+    if a.list_providers:
+        for p in setup_api.catalogue():
+            print(f"{p['id']:<16} {p['label']}"
+                  + ("" if p.get("needs_key", True) else "   (no key; local)"))
+        return
+    if a.provider_only:
+        if not a.provider and not tty:
+            sys.exit("setup: no terminal — pass --provider ID (and --api-key-stdin)")
+        pid, key, base = _provider_step(a, tty, scripted, offer_menu=True)
+        if not pid:
+            return
+        try:
+            r = setup_api.store_provider(pid, key, base)
+        except SetupError as e:
+            sys.exit(f"setup: {e.detail}")
+        print(f"provider {pid} saved" + (f" · default model {r['default']}"
+                                         if r.get("default") else ""))
+        return
+    if exists and not a.add_user:
+        print("setup is already done (a login exists). To add another login: "
+              "python -m backend.cli setup --add-user", file=sys.stderr)
+        sys.exit(1)
+    if not tty and not (a.username and a.password_stdin):
+        print("setup: no terminal — pass --username and --password-stdin",
+              file=sys.stderr)
+        sys.exit(2)
+
+    # 1. the login
+    print("\n1. Create your login")
+    username = a.username or _ask("   username: ")
+    if a.password_stdin:
+        password = _stdin_line("password")
+    else:
+        print(f"   (at least {setup_api.MIN_PASSWORD} characters; a few "
+              "unrelated words beat one clever one)")
+        password = _prompt_password()
+    try:
+        username = setup_api.validate_credentials(username, password)
+    except SetupError as e:
+        sys.exit(f"setup: {e.detail}")
+
+    # 2. the provider (skipped by --add-user unless one is named)
+    pid, key, base = _provider_step(a, tty, scripted, offer_menu=not a.add_user)
+
     # 3. the default security profile (skipped by --add-user)
     prof = None if a.add_user else _profile_step(
         a, interactive=tty and not scripted and not a.yes, change=a.change_profile)
@@ -427,6 +468,7 @@ def setup_command(args: list[str]) -> None:
             asyncio.run(add_user(username, password))
         else:
             asyncio.run(setup_api.create_first_user(username, password))
+            setup_api.drop_setup_token()
     except SetupError as e:
         sys.exit(f"setup: {e.detail}")
     print(f"\nlogin '{username}' created")

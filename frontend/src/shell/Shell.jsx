@@ -6,6 +6,7 @@ import { isPhone, useIsPhone } from '../breakpoints.js'
 import { notify, notifyError } from '../notify.js'
 import { useChatStream } from '../useChatStream.js'
 import { listTitle } from '../ChatGroups.jsx'
+import { AskPanel, useOperatorAsks } from '../AskUser.jsx'
 import ShellSidebar from './ShellSidebar.jsx'
 import Transcript from './Transcript.jsx'
 import Composer from './Composer.jsx'
@@ -76,6 +77,11 @@ export default function Shell() {
   const liveId = useRef(null)      // id of the turn in flight (a temp chat never adopts it)
   const adopted = useRef(null)     // id a live send just put in the URL — don't reopen it
   const pendingAs = useRef('')     // "new chat as <agent>" surviving the navigation
+  // ask_user / permission asks from the turn in flight, answered above the
+  // composer with the Work chat's card. Fed from both paths: a send's stream
+  // and a reopened chat's tail (which replays the asks still waiting).
+  const asks = useOperatorAsks(cid)
+  const onAskEvent = asks.onEvent
 
   const refreshSide = useCallback(
     () => api('/api/sidebar').then(setSide).catch(() => {}), [])
@@ -107,10 +113,13 @@ export default function Shell() {
     setThreadAgent(null)
     setChatJobs([])
     if (cid == null) { openThread(null); return }
-    openThread(cid, { onTailDone: refreshSide })
+    openThread(cid, {
+      onEvent: (ev) => { onAskEvent(ev); handleTurnEvent(ev) },
+      onTailDone: refreshSide,
+    })
       .then((r) => { if (r) { setThreadAgent(r.agent_slug || null); setChatJobs(r.jobs || []) } })
       .catch(notifyError)
-  }, [cid, openThread, refreshSide])
+  }, [cid, openThread, refreshSide, onAskEvent, handleTurnEvent])
 
   // arriving at a fresh chat resets its choices — except the agent a "new chat
   // as…" asked for on the way here
@@ -214,6 +223,7 @@ export default function Shell() {
         refreshSide()
       }
     }
+    onAskEvent(ev)
     handleTurnEvent(ev)
   }
 
@@ -296,6 +306,7 @@ export default function Shell() {
                     slug={slug} side={side} agentName={agentSlug ? agentName(agentSlug) : 'Jav3'}
                     temporary={temporary} onOpen={open} approvals={approvals}
                     onReview={() => openDock('git')} />
+        <div className="sh-ask"><AskPanel asks={asks} cid={cid ?? liveId.current} /></div>
         <Composer value={input} onChange={setInput} onSend={() => send()}
                   busy={busy} onStop={stop}
                   fresh={fresh} agents={agents} agentSlug={agentSlug}

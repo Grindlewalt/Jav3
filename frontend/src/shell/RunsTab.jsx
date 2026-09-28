@@ -7,9 +7,9 @@ import { ago } from '../format.js'
 // The multi-agent jobs around this chat: the ones this conversation launched
 // (research, deploy_agents, orchestrate — /messages `jobs`, the durable
 // parent link) and, in a project, every other run in that project
-// (GET /api/jobs). One row each; a row opens its live tree (JobTree streams
-// /api/runs/{id}/stream). The transcript keeps only a one-line mention, so the
-// tallest thing in a thread lives here instead.
+// (GET /api/jobs). One row each; a row opens its live tree (JobTree follows
+// it on the shared event stream, runFeed.js). The transcript keeps only a
+// one-line mention, so the tallest thing in a thread lives here instead.
 
 const POLL_MS = 5000
 

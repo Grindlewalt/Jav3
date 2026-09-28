@@ -12,13 +12,13 @@ log = logging.getLogger(__name__)
 
 # Where the env file, secrets.json, providers.json and backup.json live. Read
 # from the process environment only (it has to be known BEFORE the env file is
-# read), so a second instance on the same user account gets its own key and
-# secrets instead of sharing the first one's.
+# read), so a second instance on the same user account (scripts/install.sh
+# --name) gets its own key and secrets instead of sharing the first one's.
 #
 # A checkout installed as a named instance remembers it in <repo>/.jarvis-instance
-# (one line, JARVIS_CONFIG_DIR=<dir>), so a plain `.venv/bin/python -m
-# backend.cli ...` run from it targets that instance, not the default one. The
-# environment still wins.
+# (one line, JARVIS_CONFIG_DIR=<dir>, written by install.sh), so a plain
+# `.venv/bin/python -m backend.cli ...` run from it targets that instance, not
+# the default one. The environment still wins.
 def _instance_config_dir() -> str | None:
     try:
         for line in (BASE_DIR / ".jarvis-instance").read_text().splitlines():

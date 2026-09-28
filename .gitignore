@@ -28,3 +28,6 @@ agents/*
 
 # vendored external research dump (Claude Code source study) — huge, not ours
 collection-claude-code-source-code/
+
+# install.sh --name: which instance this checkout belongs to
+/.jarvis-instance

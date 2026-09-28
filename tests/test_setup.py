@@ -94,7 +94,39 @@ async def client(tmp_env):
     await init_db()          # the app lifespan's job; ASGITransport skips it
     t = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=t, base_url=BASE) as c:
+        # the operator's page carries the one-time token from the setup link;
+        # the token tests below use a bare client (`raw_client`)
+        post = c.post
+
+        async def with_token(url, *a, json=None, **kw):
+            if json is not None and url.startswith("/api/setup"):
+                json = {"token": setup_api.setup_token(), **json}
+            return await post(url, *a, json=json, **kw)
+        c.post = with_token
         yield c
+
+
+@pytest.fixture
+async def raw_client(tmp_env):
+    await init_db()
+    t = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=t, base_url=BASE) as c:
+        yield c
+
+
+async def test_setup_needs_the_one_time_token(raw_client, no_providers):
+    r = await raw_client.post("/api/setup", json=GOOD)
+    assert r.status_code == 403 and "setup?token=" in r.json()["detail"]
+    r = await raw_client.post("/api/setup", json={**GOOD, "token": "wrong"})
+    assert r.status_code == 403
+    r = await raw_client.post("/api/setup/test", json={"provider": "ollama"})
+    assert r.status_code == 403
+    assert await _count_users() == 0
+    tok = setup_api.setup_token()
+    assert oct(setup_api._token_path().stat().st_mode & 0o777) == "0o600"
+    r = await raw_client.post("/api/setup", json={**GOOD, "token": tok})
+    assert r.status_code == 200
+    assert not setup_api._token_path().exists()     # the door closed behind it
 
 
 async def _count_users() -> int:
@@ -360,6 +392,7 @@ def test_cli_setup_status(tmp_env, monkeypatch, no_providers):
     code, out = _run_cli(monkeypatch, ["setup", "--status"], "")
     assert code == 0 and out.splitlines()[0] == "needed"
     assert out.splitlines()[1].startswith("http://")
+    assert "/setup?token=" + setup_api.setup_token() in out
     asyncio.run(setup_api.create_first_user("op", "password123"))
     code, out = _run_cli(monkeypatch, ["setup", "--status"], "")
     assert code == 1 and out.splitlines()[0] == "done"

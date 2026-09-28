@@ -69,6 +69,45 @@ def base_built() -> bool:
     return _base_image().exists()
 
 
+def blockers() -> list[str]:
+    """Everything that stops an agent turn on this host, all at once, so the
+    operator does not fix KVM only to discover the missing key next."""
+    out = []
+    if not os.path.exists("/dev/kvm"):
+        out.append("no /dev/kvm (CPU virtualization off in BIOS, or the kvm module "
+                   f"not loaded; `bash {settings.base_dir}/scripts/install.sh --check` says which)")
+    if not os.path.exists("/dev/vhost-vsock"):
+        out.append("no /dev/vhost-vsock (sudo modprobe vhost_vsock)")
+    if not base_built():
+        out.append("no guest image (VM_DIR=%s bash %s/vm/build_base.sh, once KVM works)"
+                   % (settings.vm_dir, settings.base_dir))
+    try:
+        from .. import providers
+        pid = providers.default_provider()
+        if providers.needs_key(providers.provider(pid)) and not providers.api_key(pid):
+            out.append(f"no API key for the default provider {pid} (Settings → Providers)")
+    except Exception:   # noqa: BLE001 — the list is advice; never let it raise
+        pass
+    return out
+
+
+def no_image_message() -> str:
+    """Why there is no guest image, and the next step, from facts on this host:
+    without /dev/kvm build_base.sh cannot run either, so saying "run it" alone
+    sends the operator into a second failure."""
+    b = blockers()
+    if len(b) > 1:
+        return "cannot run an agent turn on this host yet:\n" + "\n".join(
+            f"  {i}. {x}" for i, x in enumerate(b, 1))
+    build = (f"VM_DIR={settings.vm_dir} bash {settings.base_dir}/vm/build_base.sh")
+    if not os.path.exists("/dev/kvm"):
+        return ("no golden image, and it cannot be built yet: /dev/kvm is missing "
+                "(CPU virtualization off in BIOS, or the kvm module not loaded; "
+                f"`bash {settings.base_dir}/scripts/install.sh --check` says which). "
+                f"Once it exists: {build}")
+    return f"no golden image — build it (about 10 min): {build}"
+
+
 def _console_log() -> Path:
     return settings.vm_dir / "console.log"
 
@@ -140,6 +179,7 @@ class GuestVM:
                 "idle_scrub_seconds": settings.vm_idle_scrub_seconds,
                 "egress": settings.vm_egress,
                 "rebuilding": self._rebuilding,
+                "blockers": blockers(),
                 "persist": persist_status(),
                 **_image_meta()}
 
@@ -155,7 +195,8 @@ class GuestVM:
     async def _build_overlay(self) -> None:
         base = self._image()
         if not base.exists():
-            raise VMError(f"no golden image {base.name} — run vm/build_base.sh on the Pi")
+            raise VMError(no_image_message() if self.box is None
+                          else f"no image {base.name} for box {self.box}")
         self._dir.mkdir(parents=True, exist_ok=True)
         overlay = self._dir / "overlay.qcow2"
         overlay.unlink(missing_ok=True)
@@ -384,7 +425,7 @@ class GuestVM:
         accepts a connection. Caller holds `_lock`. Idempotent — one guest serves
         many turns; the idle reaper reboots it between operation batches."""
         if not base_built():
-            raise VMError("no golden image — run vm/build_base.sh on the Pi first")
+            raise VMError(no_image_message())
         if not gateway.enabled:
             raise VMError("vsock gateway not running (no vsock on this host?)")
         from .guest_turn import GUEST_RUNTURN_PORT
@@ -422,7 +463,7 @@ class GuestVM:
         the host gateway). Returns the guest's answer + the isolation report.
         Tears the guest down after."""
         if not base_built():
-            raise VMError("no golden image — run vm/build_base.sh on the Pi first")
+            raise VMError(no_image_message())
         if not gateway.enabled:
             raise VMError("vsock gateway not running (no vsock on this host?)")
         from .guest_turn import guest_turn
