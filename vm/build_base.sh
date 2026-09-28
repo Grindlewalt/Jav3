@@ -18,7 +18,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # dir, or the old in-checkout layout on a not-yet-migrated box).
 if [ -z "${VM_DIR:-}" ]; then
   VM_DIR="$(cd "$SCRIPT_DIR/.." && .venv/bin/python -m backend.cli paths vm_dir 2>/dev/null)" \
-    || VM_DIR="$HOME/jarvis/data/vm"
+    || VM_DIR="${JARVIS_STATE_DIR:-$HOME/.local/share/jarvis}/data/vm"
+fi
+
+# Before a 350 MB download: the provisioning boot is -accel kvm, so without a
+# usable /dev/kvm this can only fail, ten minutes later.
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+  if [ -e /dev/kvm ]; then
+    echo "error: /dev/kvm exists but $(id -un) cannot open it — sudo usermod -aG kvm $(id -un), then log in again" >&2
+  else
+    echo "error: no /dev/kvm — CPU virtualization is off in BIOS or the kvm module is not loaded." >&2
+    echo "       bash $SCRIPT_DIR/../scripts/install.sh --check  says which, and the fix." >&2
+  fi
+  exit 1
 fi
 
 # Arch, firmware paths and the qemu binary are resolved per host — this used to

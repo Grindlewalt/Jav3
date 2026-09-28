@@ -151,6 +151,9 @@ def services_check() -> None:
 
 
 def _prompt_password() -> str:
+    if not sys.stdin.isatty():
+        sys.exit("create-user: no terminal to read a password from — use "
+                 "`python -m backend.cli setup --add-user --username U --password-stdin`")
     pw = getpass.getpass("password: ")
     if not pw:
         sys.exit("empty password refused")
@@ -340,7 +343,9 @@ def setup_command(args: list[str]) -> None:
     if a.status:
         print("done" if exists else "needed")
         for url in server_urls():
-            print(url)
+            # while setup is open, the link carries the one-time token the
+            # web /setup page needs (setup_api.setup_token)
+            print(url if exists else setup_api.setup_link(url))
         sys.exit(1 if exists else 0)
     if a.profile_only:
         prof = _profile_step(a, interactive=tty and not a.yes, change=True)
@@ -427,6 +432,7 @@ def setup_command(args: list[str]) -> None:
             asyncio.run(add_user(username, password))
         else:
             asyncio.run(setup_api.create_first_user(username, password))
+            setup_api.drop_setup_token()
     except SetupError as e:
         sys.exit(f"setup: {e.detail}")
     print(f"\nlogin '{username}' created")
