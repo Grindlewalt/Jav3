@@ -272,3 +272,44 @@ pyflakes clean on owned files; `pytest` on owned test files green; `npm run
 build` in `frontend/` green if any .jsx changed; small tool outputs (the
 600 s stream watchdog); one commit per WP with a message that says what a
 user can now do.
+
+## H. Backlog: desktop + web navigation (2026-09-28)
+
+State: everything in A–E is built and merged on this branch; the Pi runs it
+(ee54eac) with the model finder's ranking live (deepseek-flash 0.95, p95
+1.4 s). The four locked-screen / shell-offer / memory-guard / has_state fixes
+(e06b1e2..e8c09aa) and the comparison harness (7e9c673) are NOT yet deployed
+(the Mac left the LAN mid-session). In order:
+
+1. **Redeploy to the Pi** (`deploy_test.sh worktree-navigation`; the script
+   does not `pip install`, so any new requirement goes into `~/jarvis/.venv`
+   by hand, then restart) and **finish the live jav3-desk trial**: unlock the
+   Mac, `jav3-desk --backend macos run` (flag BEFORE the subcommand), rerun
+   the three TextEdit turns with `<scratch>/turn.py`; watch for elements_src
+   ax, click-by-id, `changed:` lines, stuck notes. Device 6 is paired.
+2. **DeltaMath failure** (operator report): `browser_read_page` listed ZERO
+   interactive elements on deltamath.com (Angular `div` buttons, no markup)
+   and `browser_key` failed `unknown action "key"` because the browser still
+   runs the OLD unpacked extension 0.2.0 (closed verb list in lib/verbs.js)
+   while the server offers the 0.3.0 verbs. Fix in flight: (a) server-side
+   version gate with a "reload the extension" error; (b) **candidates
+   fallback** — list likely-clickable elements (cursor:pointer, click
+   attributes, tabindex, short leaf text) in a second block so the model can
+   click text it judges to be a button; (c) real pointer-event click
+   sequences and `browser_click(x, y)` on the latest tab screenshot for pages
+   with no markup at all. Operator action: reload the extension in
+   chrome://extensions after each deploy.
+3. **Flash vs Qwen3.8-27B**: add an OpenRouter key on the Pi, run
+   `scripts/grounding_probe.py --models openrouter/qwen/qwen3.8-27b` (gate:
+   ≥ 0.953, p95 ≤ 2.5 s), then `scripts/nav_compare.py --agents
+   navigator,navigator-qwen --runs 3` (bar: +15 pts, 3:1 wins, ≤ 2× $/success).
+   Only then make navigation a sub-agent on the winner. Holo4-27B and
+   MiMo-V2.6-Flash are the next candidates (same harness, one YAML entry).
+4. Settings UI: show `locked`/`asleep` per computer; Linux lock detection
+   beyond logind's LockedHint; old-client fallback text.
+5. Deferred browser items: `chrome.debugger` trusted input (for sites that
+   check isTrusted), file upload, dialogs. Deferred desk items: Windows UIA,
+   wlroots element coordinates, uinput backend.
+6. `.claude/ops/deploy_test.sh` should `pip install -r requirements.txt`
+   (setup-must-be-code rule); CLAUDE.md still describes the deleted
+   computeruse/pairing module — rewrite that section from this file.
