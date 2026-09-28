@@ -68,9 +68,10 @@ class WS:
 class FakeExt:
     """The extension: hello with the token, answers requests with `answer`."""
 
-    def __init__(self, token, headers=()):
+    def __init__(self, token, headers=(), v=1):
         self.ws = WS(headers=headers)
         self.token = token
+        self.v = v              # 1 = a pre-0.4.0 build (no version reported)
         self.reqs: list[dict] = []
         self.answer = self.default_answer
         self.welcome = None
@@ -78,7 +79,7 @@ class FakeExt:
 
     async def start(self):
         assert (await self.ws.handshake())["type"] == "websocket.accept"
-        await self.ws.send({"type": "hello", "token": self.token, "v": 1, "ua": "Chrome"})
+        await self.ws.send({"type": "hello", "token": self.token, "v": self.v, "ua": "Chrome"})
         self.welcome = await self.ws.recv()
         assert self.welcome["type"] == "welcome", self.welcome
         self.task = asyncio.create_task(self._pump())
@@ -623,5 +624,67 @@ async def test_stale_changed_key_and_screenshot_through_the_tools(env, monkeypat
         finally:
             budget_mod.active_op_id.reset(tok)
             broker._tainted.discard("op-nav")
+    finally:
+        await fe.stop()
+
+
+# --- extension version gate -------------------------------------------------------------
+
+def test_ext_version_helpers():
+    assert browser.parse_ext_version("0.4.0") == "0.4.0"
+    assert browser.parse_ext_version(1) is None and browser.parse_ext_version("x") is None
+    assert browser.ext_outdated("0.2.0", "0.3.0") and not browser.ext_outdated("0.3.0", "0.3.0")
+    # unreported = 0.3.0 or older: 0.3.0 verbs pass, 0.4.0 forms do not
+    assert not browser.ext_outdated(None, "0.3.0") and browser.ext_outdated(None, "0.4.0")
+    assert browser.needs_version("key", {}) == "0.3.0"
+    assert browser.needs_version("read_page", {}) is None
+
+
+async def test_outdated_extension_is_refused_with_a_reload_hint(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"], v="0.2.0").start()
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-ver")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            r = await _tool("browser_key")(tab=7, combo="Enter")
+            assert r == ("error: the jav3-browser extension in that browser is 0.2.0; this "
+                         "action needs 0.3.0 — reload it in chrome://extensions (Developer "
+                         "mode → Reload) and read the page again")
+            assert fe.reqs[-1]["verb"] == "read_page"          # never sent
+            lst = (await env["op"].get("/api/browser")).json()["browsers"][0]
+            assert lst["ext_version"] == "0.2.0" and lst["outdated"] is True
+            assert lst["ext_current"] == browser.CURRENT_EXT_VERSION
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-ver")
+    finally:
+        await fe.stop()
+
+
+async def test_unreported_version_turns_unknown_action_into_reload_hint(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()           # v: 1, like 0.2.0 / 0.3.0 builds
+
+    async def answer(m):
+        if m["verb"] == "key":
+            return {"ok": False, "code": "invalid", "err": 'unknown action "key"'}
+        return await FakeExt.default_answer(m)
+    fe.answer = answer
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-ver2")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            r = await _tool("browser_key")(tab=7, combo="Enter")
+            assert r.startswith("error: the jav3-browser extension in that browser is 0.2.0 "
+                                "or older; this action needs 0.3.0 — reload it")
+            lst = (await env["op"].get("/api/browser")).json()["browsers"][0]
+            assert lst["ext_version"] == "0.3.0 or older"
+            assert lst["outdated"] is (browser.CURRENT_EXT_VERSION != "0.3.0")
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-ver2")
     finally:
         await fe.stop()

@@ -66,7 +66,7 @@ async function connect() {
   S.ws = ws;
   await setStatus('connecting');
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'hello', token: c.token, v: 1,
+    ws.send(JSON.stringify({ type: 'hello', token: c.token, v: chrome.runtime.getManifest().version,
       ua: navigator.userAgent.slice(0, 120), paused: c.paused }));
     clearInterval(S.pinger);
     S.pinger = setInterval(() => send({ type: 'ping' }), PING_MS);

@@ -14,7 +14,8 @@ sockets and the single chokepoint every browser action crosses:
 
 Wire protocol (JSON text frames, `type` on every one):
 
-    C->S hello    {token, v, ua, paused}
+    C->S hello    {token, v, ua, paused}  v: the extension's manifest version
+                  ("0.4.0"); builds before 0.4.0 sent the integer 1
     S->C welcome  {name, deny_hosts}      hosts the extension must never open
     S->C req      {id, verb, params}
     C->S res      {id, ok, text?, data?, image?:{mime,w,h,b64}, err?, code?}
@@ -119,6 +120,63 @@ WAIT_CAP_MS = 10_000
 MAX_FRAME_INDEX = 999
 _ELEMENT_ID_RE = re.compile(r"^f(\d{1,3}):(\d{1,6})$")
 
+# The extension is loaded unpacked, so the one in the operator's browser can be
+# older than this server (2026-09-28: a 0.2.0 build answered `unknown action
+# "key"` and the agent had nothing left to press with). A verb or form an older
+# build does not know names the first version that does; hello carries `v`.
+MIN_EXT_VERSION = {"select": "0.3.0", "hover": "0.3.0", "key": "0.3.0",
+                   "back": "0.3.0", "forward": "0.3.0"}
+# Builds before 0.4.0 sent `v: 1` (a protocol number), so an unreported
+# version means "0.3.0 or older": 0.3.0 verbs are let through (and an
+# `unknown action` answer is turned into the reload message), 0.4.0 forms are not.
+UNREPORTED_EXT = "0.3.0"
+_VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
+
+
+def _ext_manifest_version() -> str:
+    from pathlib import Path
+    try:
+        m = json.loads((Path(__file__).resolve().parent.parent / "clients" / "jav3-browser"
+                        / "manifest.json").read_text())
+        v = m.get("version")
+        return v if isinstance(v, str) and _VERSION_RE.match(v) else "0.0.0"
+    except (OSError, ValueError):
+        return "0.0.0"
+
+
+CURRENT_EXT_VERSION = _ext_manifest_version()   # the build this server ships
+
+
+def parse_ext_version(v) -> str | None:
+    """The hello's `v` -> "0.4.0", or None when the build does not report one."""
+    return v if isinstance(v, str) and _VERSION_RE.match(v) else None
+
+
+def _vt(v: str) -> tuple[int, ...]:
+    m = _VERSION_RE.match(v or "")
+    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+
+def ext_outdated(have: str | None, need: str | None = None) -> bool:
+    """Is the extension (None = unreported, i.e. <= 0.3.0) older than `need`
+    (default: the build this server ships)?"""
+    need = need or CURRENT_EXT_VERSION
+    if have is None:
+        return _vt(need) > _vt(UNREPORTED_EXT)
+    return _vt(have) < _vt(need)
+
+
+def needs_version(verb: str, p: dict) -> str | None:
+    """The oldest extension that can run this validated request."""
+    return MIN_EXT_VERSION.get(verb)
+
+
+def outdated_error(have: str | None, need: str) -> str:
+    what = have or f"{UNREPORTED_EXT} or older (it does not report its version)"
+    return (f"the jav3-browser extension in that browser is {what}; this action needs "
+            f"{need} — reload it in chrome://extensions (Developer mode → Reload) and "
+            "read the page again")
+
 
 class BrowserError(Exception):
     """A refusal or failure the tool hands back to the model as `error: …`."""
@@ -130,6 +188,7 @@ class Browser:
     name: str
     ws: object
     ua: str = ""
+    ext: str | None = None      # the extension's version from hello; None = pre-0.4.0
     paused: bool = False
     deny_hosts: frozenset = frozenset()
     connected_at: float = dataclasses.field(default_factory=time.time)
@@ -258,13 +317,15 @@ async def attach(device_id: int, name: str, ws, hello: dict, host_header: str = 
             pass
     ua = hello.get("ua") if isinstance(hello.get("ua"), str) else ""
     b = Browser(device_id=device_id, name=name, ws=ws, ua=ua[:120],
+                ext=parse_ext_version(hello.get("v")),
                 paused=hello.get("paused") is True, deny_hosts=_own_hosts(host_header))
     _browsers[device_id] = b
     await b.send({"type": "welcome", "name": name, "deny_hosts": sorted(b.deny_hosts)})
     if desk._session_gap(("browser_start", device_id)):
         await _event("browser_session", f"browser '{name}' connected for browser use",
                      severity="info", detail={"device_id": device_id, "phase": "start",
-                                              "ua": b.ua, "paused": b.paused})
+                                              "ua": b.ua, "paused": b.paused,
+                                              "ext": b.ext})
     return b
 
 
@@ -884,6 +945,12 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         p = validate(verb, params or {}, b.deny_hosts)
     except BrowserError as e:
         return await _refuse(b, verb, {}, str(e), project)
+    need = needs_version(verb, p)
+    if need and ext_outdated(b.ext, need):
+        # audited, but no security event: the operator just has an old build
+        why = outdated_error(b.ext, need)
+        await _audit(b, verb, p, False, why, project)
+        return f"error: {why}"
     op = desk._op_key()
     if verb in _FRESH_VERBS:
         at = b.reads.get((op, p["tab"]))
@@ -919,6 +986,10 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         if code == "stale" and p.get("element"):
             return (f"error: element {p['element']} is no longer on the page — "
                     "browser_read_page again")
+        if code == "invalid" and err.startswith("unknown action"):
+            # an unreported (pre-0.4.0) build that is older than 0.3.0
+            return "error: " + outdated_error(b.ext or "0.2.0 or older",
+                                              need or CURRENT_EXT_VERSION)
         return f"error: {err or 'the browser refused'}"
     data = res.get("data") if isinstance(res.get("data"), dict) else {}
     tab = data.get("tab") if isinstance(data.get("tab"), int) else p.get("tab")
@@ -961,7 +1032,12 @@ async def overview() -> list[dict]:
     for r in rows:
         b = _browsers.get(r["id"])
         out.append({**r, "online": b is not None, "paused": b.paused if b else None,
-                    "ua": b.ua if b else None, "grants": await list_grants(r["id"])})
+                    "ua": b.ua if b else None,
+                    # what its hello reported; Settings flags an old unpacked build
+                    "ext_version": (b.ext or f"{UNREPORTED_EXT} or older") if b else None,
+                    "ext_current": CURRENT_EXT_VERSION,
+                    "outdated": ext_outdated(b.ext) if b else None,
+                    "grants": await list_grants(r["id"])})
     return out
 
 
