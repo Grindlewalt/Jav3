@@ -2,6 +2,20 @@ from backend import writes
 from backend.agent.tools.todostore import parse_todo_text, render_todos
 from backend.agent.tools.toolctx import require_project
 
+# no project loaded: a plan for THIS turn only, instead of an error that cost a
+# round ("no project is loaded in the guest for this turn", 2026-09-27)
+_scratch: dict = {}
+_SCRATCH_KEEP = 64
+
+
+def _turn_key():
+    try:
+        from backend import turnctx          # in the guest
+        return turnctx.op_id.get()
+    except ImportError:
+        from backend.agent import budget     # on the host
+        return budget.active_op_id.get()
+
 
 def _render(todos) -> str:
     if not todos:
@@ -50,12 +64,35 @@ def _pick(todos, index, text):
 
 
 async def run(action: str, text: str | None = None, index: int | None = None) -> str:
-    slug = await require_project()
+    try:
+        slug = await require_project()
+    except LookupError:
+        slug = None
+    if slug is None:
+        key = _turn_key()
+        todos = _scratch.setdefault(key, [])
+        while len(_scratch) > _SCRATCH_KEEP:
+            _scratch.pop(next(iter(_scratch)))
+        out = _apply(todos, action, text, index)
+        return out if out.startswith("error") else (
+            out + "\n(no project is loaded, so this list lasts for this turn only)")
     # read through writes.resolve so an in-guest turn sees its own pending
     # edits; write through apply_write so todo.md crosses the one chokepoint
     # (secret refusal + advisory scan on the host, .staging buffer in the guest)
     src = writes.resolve(slug, "todo.md")
     todos = parse_todo_text(src.read_text()) if src else []
+    out = _apply(todos, action, text, index)
+    if out.startswith("error") or action == "list":
+        return out
+    try:
+        await writes.apply_write(slug, "todo.md", render_todos(todos).encode())
+    except writes.SecretLeakError as e:
+        return f"error: todo update refused — {e}"
+    return out
+
+
+def _apply(todos: list, action: str, text, index) -> str:
+    """Change `todos` in place; the rendered list, or an error string."""
     if action == "list":
         pass
     elif action == "add":
@@ -71,10 +108,5 @@ async def run(action: str, text: str | None = None, index: int | None = None) ->
         else:
             todos[at]["done"] = action == "check"
     else:
-        return f"error: unknown action '{action}'"
-    if action != "list":
-        try:
-            await writes.apply_write(slug, "todo.md", render_todos(todos).encode())
-        except writes.SecretLeakError as e:
-            return f"error: todo update refused — {e}"
+        return f"error: unknown action '{action}' (use list, add, check, uncheck or delete)"
     return _render(todos)

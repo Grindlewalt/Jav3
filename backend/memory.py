@@ -272,6 +272,15 @@ call simply had a bad argument, fix the call instead.
   and correct; the string usually names the fix (a candidate list, the right
   schema). Re-issuing the identical call is how one wrong argument becomes four
   identical failures.
+- Argument mistakes: a READ-ONLY tool still runs when you pass an argument it
+  does not have, and its result ends with a note naming what it ignored and
+  what it takes. A tool that CHANGES things refuses instead ("Nothing ran")
+  and lists its parameters, with the closest name to what you typed. Identity
+  is never an argument (from / sender / conversation_id are always refused).
+- todo_update works without a loaded project: the list then lasts for this
+  turn only (the result says so). With a project it is the project's todo.md.
+- After a screenshot, the image arrives as its own message after the tool
+  result; system notes are attached to the tool result, not the image.
 - send_message addressing: a plan-item sibling is `item:<id>` (e.g.
   "item:i2"); a spawned child is its agent slug; a conversation is its numeric
   id; the operator/your parent reach you without you addressing them. A message
