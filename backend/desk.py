@@ -11,8 +11,11 @@ single chokepoint every desk action crosses:
 Wire protocol (JSON text frames, `type` on every one):
 
     C->S hello    {v, host, platform, session, backend, monitors, apps,
-                   ceiling:{screen,input,shell}}
+                   ceiling:{screen,input,shell}, locked?, asleep?}
     C->S ceiling  {ceiling:{...}}        the local flags changed (allow-shell)
+    C->S state    {locked, asleep}       the screen locked / the display slept,
+                                         or came back (additive to v1: an old
+                                         client never sends it = awake)
     S->C grants   {screen, input, shell} what Settings allows right now
     S->C req      {id, verb, params}
     C->S res      {id, ok, text, image?:{mime,w,h,b64}, err?,
@@ -107,6 +110,9 @@ WAIT_MAX_MS = 10_000        # desk_wait
 STUCK_N = 3                 # identical unchanged input actions before the note
 STUCK_NOTE = ("note: the screen has not changed after 3 identical actions; use "
               "an element id, zoom with region, or the keyboard")
+# the same sentences the client refuses with (clients/jav3-desk LOCKED_ERR)
+LOCKED_ERR = "the screen is locked — ask the operator to unlock it"
+ASLEEP_ERR = "the display is asleep — ask the operator to wake it"
 NO_GROUNDING = ('no grounding model; click by element id or coordinates, or run '
                 '"Find grounding model" in Settings')
 
@@ -150,6 +156,8 @@ class Desk:
     shell_busy: bool = False
     send_lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
     turns: dict = dataclasses.field(default_factory=dict)   # conversation id -> monotonic
+    locked: bool = False               # from the client's hello / latest state frame
+    asleep: bool = False
 
     @property
     def ceiling(self) -> dict:
@@ -370,6 +378,7 @@ async def attach(device_id: int, name: str, ws, hello: dict) -> Desk:
         except Exception:  # noqa: BLE001
             pass
     d = Desk(device_id=device_id, name=name, ws=ws, hello=_clean_hello(hello))
+    d.locked, d.asleep = hello.get("locked") is True, hello.get("asleep") is True
     _desks[device_id] = d
     await d.send(_wire_grants(await get_grants(device_id)))
     if _session_gap(("start", device_id)):
@@ -416,6 +425,9 @@ def on_frame(d: Desk, msg: dict) -> dict | None:
     if t == "ceiling" and isinstance(msg.get("ceiling"), dict):
         d.hello["ceiling"] = {k: msg["ceiling"].get(k) is True
                               for k in ("screen", "input", "shell")}
+        return None
+    if t == "state":
+        d.locked, d.asleep = msg.get("locked") is True, msg.get("asleep") is True
         return None
     if t == "res":
         fut = d.pending.get(msg.get("id")) if isinstance(msg.get("id"), str) else None
@@ -1032,6 +1044,12 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
                  else "")
         return await _refuse(d, verb, {}, f"{cap} is switched off on the computer "
                              f"itself{extra}; the server cannot turn it on.")
+    if cap in ("screen", "input") and (d.locked or d.asleep):
+        # one honest sentence (the playbook says: stop and tell the operator);
+        # audited, but no security event — a locked screen is not an attack
+        why = LOCKED_ERR if d.locked else ASLEEP_ERR
+        await _audit(d, verb, {}, False, why)
+        return f"error: {why}"
     if cap == "input":
         f = d.frame
         if (f is None or time.monotonic() - f["at"] > FRESH_FRAME_S
@@ -1270,6 +1288,8 @@ async def overview() -> list[dict]:
                     "backend": d.hello["backend"] if d else None,
                     "session": d.hello["session"] if d else None,
                     "ceiling": d.ceiling if d else None,
+                    "locked": d.locked if d else None,
+                    "asleep": d.asleep if d else None,
                     "grants": await get_grants(r["id"])})
     return out
 

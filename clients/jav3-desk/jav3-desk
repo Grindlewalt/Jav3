@@ -37,6 +37,12 @@ python3-dbus). Wayland backends and Windows send none, with the reason.
 `region` zooms a screenshot; every input verb waits for the screen to settle
 and says whether it changed (A.4); `wait` and `drag` are verbs too (A.3).
 
+A locked screen or a sleeping display is reported, not fought: the hello and
+a `state {locked, asleep}` frame (sent when it changes, polled every
+STATE_POLL_S) carry it, and screenshot / wait / input verbs are refused with
+one sentence asking the operator to unlock or wake it (macOS: CGSession +
+CGDisplayIsAsleep; Linux: loginctl LockedHint when logind knows the session).
+
 Files, in $XDG_CONFIG_HOME/jav3 (default ~/.config/jav3), dir 0700:
   desk.json          {"address", "token"} 0600
   desk-shell         present = shell allowed at this computer
@@ -88,6 +94,9 @@ WAIT_MAX_MS = 10_000
 TEXT_CAP = 2000
 OUTPUT_CAP = 16_000
 PING_S = 20
+STATE_POLL_S = 5          # how often the locked / asleep state is re-read
+LOCKED_ERR = "the screen is locked — ask the operator to unlock it"
+ASLEEP_ERR = "the display is asleep — ask the operator to wake it"
 UNIT_NAME = "jav3-desk.service"
 LABEL = "local.jav3.desk"
 
@@ -1203,11 +1212,41 @@ class Backend:
     def deny_keys(self) -> set[str]:
         return set()
 
+    def screen_state(self) -> dict:
+        """{"locked", "asleep"}: whether a capture would only show a lock
+        screen or nothing. False when the backend cannot tell cheaply."""
+        return {"locked": False, "asleep": False}
+
     def notify(self, text: str) -> None:
         n = find_bin("notify-send")
         if n:
             subprocess.Popen([n, "-a", "jav3-desk", "jav3-desk", text], shell=False,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def screen_refusal(state: dict) -> str | None:
+    """The one sentence a locked / asleep screen gets instead of a capture."""
+    if state.get("locked"):
+        return LOCKED_ERR
+    if state.get("asleep"):
+        return ASLEEP_ERR
+    return None
+
+
+def logind_locked() -> bool:
+    """systemd-logind's LockedHint for this session (set by most lockers via
+    `loginctl lock-session` or the idle hint). False when there is no
+    loginctl, no session, or the answer is anything but yes."""
+    lc = find_bin("loginctl")
+    if not lc:
+        return False
+    sid = os.environ.get("XDG_SESSION_ID") or "auto"
+    try:
+        r = subprocess.run([lc, "show-session", sid, "-p", "LockedHint", "--value"],
+                           shell=False, capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "yes"
 
 
 def drag_path(x0: int, y0: int, x1: int, y1: int, n: int = 12) -> list[tuple[int, int]]:
@@ -1375,6 +1414,9 @@ class WlrootsBackend(Backend):
         super().__init__()
         self._ptr = None
 
+    def screen_state(self) -> dict:
+        return {"locked": logind_locked(), "asleep": False}
+
     def pointer(self) -> WaylandPointer:
         if self._ptr is None:
             self._ptr = WaylandPointer()
@@ -1527,6 +1569,9 @@ class X11Backend(Backend):
     def optional(self):
         return ("import", "maim", "scrot")
 
+    def screen_state(self) -> dict:
+        return {"locked": logind_locked(), "asleep": False}
+
     def monitors(self) -> list[Monitor]:
         w, h = (int(v) for v in run_argv([self.bin["xdotool"], "getdisplaygeometry"])
                 .split())
@@ -1674,6 +1719,24 @@ class MacBackend(Backend):
         self.cg.CGEventCreate.argtypes = [ctypes.c_void_p]
         self.cg.CGEventGetLocation.restype = Pt
         self.cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+        # lock / sleep: a capture of a locked screen fails ("could not create
+        # image from display") or shows only the lock screen
+        self.cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+        self.cg.CGSessionCopyCurrentDictionary.argtypes = []
+        self.cg.CGDisplayIsAsleep.restype = ctypes.c_uint32
+        self.cg.CGDisplayIsAsleep.argtypes = [ctypes.c_uint32]
+        self.cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        self.cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                                      ctypes.c_uint32]
+        self.cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+        self.cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.cf.CFGetTypeID.restype = ctypes.c_ulong
+        self.cf.CFGetTypeID.argtypes = [ctypes.c_void_p]
+        self.cf.CFBooleanGetTypeID.restype = ctypes.c_ulong
+        self.cf.CFBooleanGetValue.restype = ctypes.c_bool
+        self.cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+        self.cf.CFNumberGetValue.restype = ctypes.c_bool
+        self.cf.CFNumberGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
         self.pos = (0, 0)
         self._ax: ElementSource | None = None
 
@@ -1698,9 +1761,40 @@ class MacBackend(Backend):
                                w=int(r.size.x), h=int(r.size.y)))
         return out
 
+    def _locked(self) -> bool:
+        """CGSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]: the
+        key is present (true) only while the lock screen is up. No session
+        dictionary (no GUI login) reads as unlocked."""
+        ct, cf = self.ct, self.cf
+        d = self.cg.CGSessionCopyCurrentDictionary()
+        if not d:
+            return False
+        key = cf.CFStringCreateWithCString(None, b"CGSSessionScreenIsLocked",
+                                           0x08000100)          # UTF-8
+        try:
+            v = cf.CFDictionaryGetValue(d, key) if key else None
+            if not v:
+                return False
+            if cf.CFGetTypeID(v) == cf.CFBooleanGetTypeID():
+                return bool(cf.CFBooleanGetValue(v))
+            n = ct.c_int32(0)                                   # a CFNumber, if ever
+            return bool(cf.CFNumberGetValue(v, 3, ct.byref(n)) and n.value)
+        finally:
+            if key:
+                cf.CFRelease(key)
+            cf.CFRelease(d)
+
+    def screen_state(self) -> dict:
+        return {"locked": self._locked(),
+                "asleep": bool(self.cg.CGDisplayIsAsleep(self.cg.CGMainDisplayID()))}
+
     def _capture(self, mon: Monitor, rect, f: str) -> tuple[int, int]:
         """screencapture -R takes a rect in global points and writes it at
-        the display's native (Retina: 2x) pixels; returns that native size."""
+        the display's native (Retina: 2x) pixels; returns that native size.
+        A locked screen or a sleeping display is refused first, in words."""
+        why = screen_refusal(self.screen_state())
+        if why:
+            raise DeskError(why)
         x, y, w, h = (mon.x, mon.y, mon.w, mon.h) if rect is None else (
             mon.x + rect[0], mon.y + rect[1], rect[2], rect[3])
         run_argv([self.bin["screencapture"], "-x", "-R", f"{x},{y},{w},{h}", "-t", "jpg", f])
@@ -1871,17 +1965,28 @@ class Session:
         self.shell_busy = False
         self.last_action = 0.0
         self.sent_ceiling = ceiling()
+        self.sent_state: dict | None = None
         self.inflight: set[asyncio.Task] = set()
+
+    def state(self) -> dict:
+        """{"locked", "asleep"} from the backend; a probe that breaks reads
+        as neither (the capture itself will then say what is wrong)."""
+        try:
+            st = self.b.screen_state()
+        except Exception:  # noqa: BLE001
+            st = {}
+        return {"locked": st.get("locked") is True, "asleep": st.get("asleep") is True}
 
     def hello(self) -> dict:
         try:
             mons = [m.__dict__ for m in self.b.monitors()]
         except Exception:  # noqa: BLE001 — hello must not die on a probe
             mons = []
+        self.sent_state = self.state()
         return {"type": "hello", "v": PROTOCOL_V, "host": socket.gethostname(),
                 "platform": sys.platform, "session": self.b.session,
                 "backend": self.b.name, "monitors": mons,
-                "apps": sorted(self.apps), "ceiling": ceiling()}
+                "apps": sorted(self.apps), "ceiling": ceiling(), **self.sent_state}
 
     def allowed(self, verb: str) -> str | None:
         cap = {"screenshot": "screen", "wait": "screen", "shell": "shell"}.get(verb, "input")
@@ -1905,7 +2010,8 @@ class Session:
         for i, m in enumerate(ms):
             if m.name == monitor or str(i + 1) == monitor:
                 return m, i, len(ms)
-        raise DeskError(f"no monitor {monitor!r} (have: {', '.join(m.name for m in ms)})")
+        raise DeskError(f"no monitor {monitor!r} (have: {', '.join(m.name for m in ms)}); "
+                        f'use monitor="{ms[0].name if ms else 'main'}" or an index from 1')
 
     def _elements(self, frame: Frame) -> dict:
         """The element list for `frame`, within ELEMENTS_BUDGET_S; never
@@ -2101,6 +2207,14 @@ class Session:
             if why:
                 raise DeskError(why)
             p = validate(verb, m.get("params") or {}, self.frame, self.apps, self.deny)
+            if verb != "shell":
+                st = await asyncio.to_thread(self.state)
+                why = screen_refusal(st)
+                if why:
+                    if st != self.sent_state:          # the server learns it now
+                        self.sent_state = st
+                        await ws.send(json.dumps({"type": "state", **st}))
+                    raise DeskError(why)
             if time.time() - self.last_action > 300:
                 self.b.notify("Jav3 is using this computer")
             self.last_action = time.time()
@@ -2138,6 +2252,7 @@ class Session:
         async with conn as ws:
             await ws.send(json.dumps(self.hello()))
             pinger = asyncio.create_task(self._ping(ws))
+            watcher = asyncio.create_task(self._watch_state(ws))
             try:
                 async for raw in ws:
                     try:
@@ -2158,7 +2273,18 @@ class Session:
                         return "killed: " + str(m.get("reason") or "")
             finally:
                 pinger.cancel()
+                watcher.cancel()
         return "closed"
+
+    async def _watch_state(self, ws) -> None:
+        """C->S state {locked, asleep} whenever it changes, so the server can
+        refuse a screenshot before asking for one."""
+        while True:
+            await asyncio.sleep(STATE_POLL_S)
+            st = await asyncio.to_thread(self.state)
+            if st != self.sent_state:
+                self.sent_state = st
+                await ws.send(json.dumps({"type": "state", **st}))
 
     async def _ping(self, ws) -> None:
         while True:
@@ -2268,6 +2394,12 @@ def cmd_status(args) -> int:
         print(f"backend: {e}")
     print(f"shell:   {'allowed' if shell_allowed() else 'off'} at this computer")
     print(f"paused:  {'yes' if paused() else 'no'}")
+    try:
+        st = BACKENDS[args.backend or detect_backend()]().screen_state()
+        print(f"screen:  {'locked' if st.get('locked') else 'unlocked'}, display "
+              f"{'asleep' if st.get('asleep') else 'awake'}")
+    except Exception as e:  # noqa: BLE001 — status reports, never dies
+        print(f"screen:  unknown ({e})")
     if sys.platform == "darwin":
         print(f"grant Accessibility + Screen Recording to: {sys.executable}")
     return 0

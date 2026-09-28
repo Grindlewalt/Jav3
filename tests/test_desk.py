@@ -70,8 +70,10 @@ class WS:
 class FakeDesk:
     """A jav3-desk client: says hello, answers requests with `answer`."""
 
-    def __init__(self, token, ceiling=None, apps=("firefox",), monitors=("0",)):
+    def __init__(self, token, ceiling=None, apps=("firefox",), monitors=("0",),
+                 hello=None):
         self.ws = WS(token)
+        self.hello_extra = dict(hello or {})
         self.ceiling = ceiling or {"screen": True, "input": True, "shell": True}
         self.apps = list(apps)
         self.monitors = [{"name": n, "x": 0, "y": 0, "w": W, "h": H, "scale": 1}
@@ -86,7 +88,8 @@ class FakeDesk:
         await self.ws.send({"type": "hello", "v": 1, "host": "laptop",
                             "platform": "linux", "session": "x11", "backend": "x11",
                             "monitors": self.monitors,
-                            "apps": self.apps, "ceiling": self.ceiling})
+                            "apps": self.apps, "ceiling": self.ceiling,
+                            **self.hello_extra})
         first = await self.ws.recv()
         assert first["type"] == "grants"
         self.frames.append(first)
@@ -237,6 +240,33 @@ async def test_grants_are_server_side_and_pushed_live(env):
         assert row["online"] and row["backend"] == "x11" and row["grants"]["screen"]
         assert row["ceiling"] == {"screen": True, "input": True, "shell": True}
         assert all(d["id"] != env["cli_id"] for d in lst)   # CLI tokens aren't desks
+    finally:
+        await fd.stop()
+
+
+async def test_locked_screen_is_refused_in_one_sentence(env):
+    fd = await FakeDesk(env["desk_tok"], hello={"locked": True, "asleep": True}).start()
+    try:
+        await _grant(env, screen=True, input=True)
+        out = await _tool("desk_screenshot")()
+        assert out == "error: the screen is locked — ask the operator to unlock it"
+        assert (await _tool("desk_click")(x=1, y=1)) == out
+        assert not fd.reqs                        # nothing was asked of the computer
+        assert not await _events("desk_refused")  # not a security event
+        row = next(d for d in (await env["op"].get("/api/desk")).json()["desks"]
+                   if d["id"] == env["desk_id"])
+        assert row["locked"] is True and row["asleep"] is True
+        # unlocked, display still asleep: the other sentence
+        await fd.ws.send({"type": "state", "locked": False, "asleep": True})
+        await asyncio.sleep(0.05)
+        assert (await _tool("desk_screenshot")()) == \
+            "error: the display is asleep — ask the operator to wake it"
+        await fd.ws.send({"type": "state", "locked": False, "asleep": False})
+        await asyncio.sleep(0.05)
+        assert "1280x800" in imageresult.split(await _tool("desk_screenshot")())[0]
+        row = next(d for d in (await env["op"].get("/api/desk")).json()["desks"]
+                   if d["id"] == env["desk_id"])
+        assert row["locked"] is False and row["asleep"] is False
     finally:
         await fd.stop()
 

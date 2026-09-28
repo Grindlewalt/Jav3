@@ -212,6 +212,40 @@ async def test_session_enforces_grants_ceiling_and_scales(cfg, monkeypatch):
     assert jd.main(["deny-shell"]) == 0 and not jd.ceiling()["shell"]
 
 
+async def test_locked_or_asleep_screen_is_refused_and_reported(cfg, monkeypatch):
+    monkeypatch.setattr(jd, "SETTLE_S", 0)
+    b = FakeBackend()
+    st = {"locked": True, "asleep": False}
+    b.screen_state = lambda: dict(st)
+    s = jd.Session(b, "jav3.lan:8000", "jvd_x")
+    h = s.hello()
+    assert h["locked"] is True and h["asleep"] is False and h["v"] == 1
+    s.grants = {"screen": True, "input": True, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "1", "verb": "screenshot", "params": {}})
+    assert ws.sent[-1] == {"type": "res", "id": "1", "ok": False,
+                           "err": "the screen is locked — ask the operator to unlock it"}
+    st.update(locked=False, asleep=True)
+    await s.handle(ws, {"id": "2", "verb": "screenshot", "params": {}})
+    # the change is reported as a state frame before the refusal
+    assert ws.sent[-2] == {"type": "state", "locked": False, "asleep": True}
+    assert ws.sent[-1]["err"] == "the display is asleep — ask the operator to wake it"
+    assert not b.calls                                   # no input, no capture
+    st.update(asleep=False)
+    await s.handle(ws, {"id": "3", "verb": "screenshot", "params": {}})
+    assert ws.sent[-1]["ok"]
+    # a probe that raises reads as awake: the capture itself will say what broke
+    b.screen_state = lambda: 1 / 0
+    assert s.state() == {"locked": False, "asleep": False}
+
+
+def test_monitor_error_names_the_valid_choices(cfg):
+    s = jd.Session(FakeBackend(), "jav3.lan:8000", "jvd_x")
+    with pytest.raises(jd.DeskError) as e:
+        s._pick("7")
+    assert str(e.value) == 'no monitor \'7\' (have: 0); use monitor="0" or an index from 1'
+
+
 def test_login_saves_a_private_desk_token(cfg, monkeypatch):
     seen = {}
 

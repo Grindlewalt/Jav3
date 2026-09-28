@@ -98,6 +98,19 @@ captures match (perceptual hash or byte-equal on a 64-px thumbnail), minimum
 0.3 s, maximum 3 s, and reports `changed` against the pre-action thumbnail and
 `settled_ms`. `SETTLE_S` stays as the floor.
 
+### A.5 Locked screen / sleeping display
+
+`hello` carries `locked` and `asleep` (booleans), and the client sends
+`C->S state {locked, asleep}` whenever either changes (polled every 5 s, and
+at once when a request is refused for it). macOS reads
+`CGSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]` and
+`CGDisplayIsAsleep(main)`; X11 / wlroots read logind's `LockedHint` when
+`loginctl` knows the session, and never report `asleep`. While locked or
+asleep, screenshot / wait / input verbs are refused on both sides with
+`the screen is locked — ask the operator to unlock it` or
+`the display is asleep — ask the operator to wake it`; `GET /api/desk` shows
+both flags. An old client never sends them and reads as awake.
+
 ## B. Desk server (backend/desk.py) and tools (tools/desk_*)
 
 - Per desk, keep the latest frame: image bytes, w, h, monitor, region, and the
