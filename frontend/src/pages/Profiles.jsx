@@ -23,7 +23,10 @@ import { LoadError, ProjectList, RuntimeStatus, Unavailable, useLoad } from '../
 // has exactly one profile. First-run setup creates the first default.
 //
 // A new profile starts on the shared box with per-project service boxes;
-// every choice is one radio (Network, Runs in) over the stored fields.
+// every choice is one radio (Network, Default for its projects) over the
+// stored fields. A project's own "Runs in" (boxes/RunsIn.jsx) overrides the
+// profile's box setting, which is only the default for projects that have
+// not chosen.
 
 const NEVER_AUTO = 'service_* and svc_unreported, '
   + 'package_* and image_variant_built, unexpected_process and proc_report_mismatch, '
@@ -61,7 +64,7 @@ export default function Profiles() {
   async function makeDefault(p) {
     if (!await ask.confirm(`Make ${p.name} the default?`, {
       body: 'New projects, and every project without a profile of its own, will use it '
-        + `from their next turn: new sites ${newSitesText(p)}; runs in ${runsInText(p)}.`,
+        + `from their next turn: new sites ${newSitesText(p)}; default box ${runsInText(p)} (projects that picked their own keep it).`,
       confirmLabel: 'Make default', danger: p.default_verdict === 'allow' && !p.network_off })) return
     try { await makeDefaultProfile(p.id); notify(`${p.name} is now the default`); pr.reload() }
     catch (e) { notifyError(e) }
@@ -93,7 +96,7 @@ export default function Profiles() {
                 </span>
                 <span className="small">
                   Secrets: {(p.secrets || []).length ? p.secrets.join(', ') : 'none'}
-                  {' · '}Runs in: {runsInText(p)}
+                  {' · '}Default for its projects: {runsInText(p)}
                   {p.auto_handle ? ' · auto-handles alerts' : ''}
                 </span>
                 <span className="dim small">used by: <ProjectList slugs={p.projects} empty="no project" /></span>
@@ -221,7 +224,8 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
         </div>
 
         <div className="field">
-          <span>Runs in</span>
+          <span>Default for its projects <span className="dim small">(where they run
+            unless a project picks its own box under Runs in)</span></span>
           <div className="bx-radios">
             {RUNS_IN.map((o) => {
               const why = unavailable(o.value)
@@ -314,13 +318,14 @@ function Assignments({ profiles, projects, onDone }) {
     if (!await ask.confirm(`Move ${slug} to ${to.name}?`, {
       body: `From its next turn: secrets ${(to.secrets || []).join(', ') || 'none'}; `
         + `new sites: ${to.default_verdict === 'allow' && !to.network_off ? 'ALLOWED' : newSitesText(to)}; `
-        + `runs in: ${runsInText(to)}.`,
+        + `default box: ${runsInText(to)} (unless it picked its own under Runs in).`,
       confirmLabel: 'Move', danger: to.default_verdict === 'allow' })) return
     try { await assignProfile(slug, to.id); onDone() } catch (e) { notifyError(e) }
   }
   return (
     <section className="sbx-sec">
-      <div className="sbx-sec-head"><h3>Projects</h3></div>
+      <div className="sbx-sec-head"><h3>Projects</h3>
+        <span className="dim small">where each one runs: Security › Network, pick the project, Runs in</span></div>
       <ul className="staged-list rev-list">
         {projects.map((pj) => {
           const cur = of[pj.slug] || def

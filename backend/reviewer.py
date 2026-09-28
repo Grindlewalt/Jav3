@@ -40,7 +40,10 @@ AUTO_KEY = "reviewer_auto"           # session_state toggle; absent = enabled
 _NEVER_ACK_KINDS = {"egress_anomaly", "host_cut", "secret_leak",
                     "unexpected_process", "proc_report_mismatch",
                     "profile_changed", "profiles_migrated",
-                    "persist_imported", "persist_disk_deleted"}
+                    "persist_imported", "persist_disk_deleted",
+                    # per-project placement: a changed box, and above all two
+                    # projects sharing one (vm/placement.py)
+                    "placement_changed", "box_joined"}
 # service_* / svc_* (service boxes), package_* (catalogue), image_* (variant
 # builds), docker_* (weak isolation, refused hardening, socket refusal)
 _NEVER_ACK_PREFIXES = ("service_", "package_", "svc_", "image_", "docker_")

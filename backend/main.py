@@ -161,6 +161,8 @@ app.include_router(packages_api.images_router)  # WP5
 from . import profiles_api  # noqa: E402  # WP2
 app.include_router(profiles_api.router)  # WP2
 app.include_router(profiles_api.project_router)  # WP2
+from . import placement_api  # noqa: E402  # per-project "Runs in"
+app.include_router(placement_api.router)
 from . import services_api  # noqa: E402  # WP3
 app.include_router(services_api.router)  # WP3
 

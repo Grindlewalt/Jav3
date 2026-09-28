@@ -4018,3 +4018,14 @@ a:has(> .nav-dot) { position: relative; }
   color: var(--amber);
 }
 @media (prefers-reduced-motion: reduce) { .convo-active-dot { animation: none; } }
+
+/* per-project "Runs in" (boxes/RunsIn.jsx) */
+.bx-runsin { display: flex; flex-direction: column; gap: var(--sp-4); }
+.bx-runsin-label { margin-top: var(--sp-4); }
+.bx-runsin .bx-dot { color: var(--dim); margin-right: var(--sp-4); }
+.bx-runsin .bx-dot.on { color: var(--green); }
+.bx-runsin-pick { max-height: 16rem; overflow-y: auto; }
+.bx-runsin-ask {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: var(--sp-8); border: 1px solid var(--border); border-radius: 6px;
+}
