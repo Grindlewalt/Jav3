@@ -29,7 +29,13 @@ Backends (auto-detected, or --backend):
   macos     screencapture + sips · Quartz (ctypes) · needs the Accessibility
             and Screen Recording grants (see `jav3-desk status`)
   uinput    TODO(M2): stub — /dev/uinput for GNOME/KDE Wayland
-Accessibility-tree clicking (AT-SPI / AX) is TODO(M4).
+
+Every screenshot carries a numbered element list from the accessibility tree
+(docs/navigation-contract.md A.2), boxes in pixels of the returned image:
+macOS AXUIElement (ctypes; needs Accessibility), X11 AT-SPI2 (gi Atspi, else
+python3-dbus). Wayland backends and Windows send none, with the reason.
+`region` zooms a screenshot; every input verb waits for the screen to settle
+and says whether it changed (A.4); `wait` and `drag` are verbs too (A.3).
 
 Files, in $XDG_CONFIG_HOME/jav3 (default ~/.config/jav3), dir 0700:
   desk.json          {"address", "token"} 0600
@@ -58,6 +64,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -68,7 +75,16 @@ USER_AGENT = "jav3-desk/1"
 PROTOCOL_V = 1
 PROMPT = "Paste the line from Settings → Add computer: "
 LONG_EDGE = 1280          # screenshots are downscaled to this long edge
-SETTLE_S = 0.6            # after an input action, before the auto-screenshot
+SETTLE_S = 0.3            # settle floor after an input action (A.4 minimum)
+SETTLE_MAX_S = 3.0        # settle ceiling: a clock or a video never "settles"
+SETTLE_POLL_S = 0.08      # between thumbnails while settling
+THUMB_EDGE = 64           # settle compares thumbnails this big (long edge)
+ZOOM_MAX = 3.0            # a zoom upscales at most this much over native pixels
+ELEMENTS_BUDGET_S = 1.5   # the accessibility walk never blocks a screenshot longer
+ELEMENTS_CAP = 400
+ELEMENTS_DEPTH = 12
+ROW_PX = 40               # reading order: rows of this many image px, then x
+WAIT_MAX_MS = 10_000
 TEXT_CAP = 2000
 OUTPUT_CAP = 16_000
 PING_S = 20
@@ -257,17 +273,81 @@ class Monitor:
 
 @dataclass
 class Frame:
-    """The last screenshot: which monitor rect it shows and how big the image
-    is. The model's coordinates are pixels of that image."""
+    """The last screenshot: which screen rect it shows and how big the image
+    is. The model's coordinates are pixels of that image. `rect` is a zoom
+    (desk_screenshot region=): a rect in the monitor's input units relative to
+    its origin; None = the whole monitor. `region` is the zoom as the server
+    asked for it, in pixels of the last FULL-frame image, echoed back."""
     monitor: Monitor
     iw: int
     ih: int
+    rect: tuple[int, int, int, int] | None = None
+    region: dict | None = None
+    index: int = 0            # of `count` monitors, 0-based here, 1-based on the wire
+    count: int = 1
+
+    def screen_rect(self) -> tuple[int, int, int, int]:
+        """(x, y, w, h) this image shows, in the backend's global input space."""
+        m = self.monitor
+        if self.rect is None:
+            return m.x, m.y, m.w, m.h
+        rx, ry, rw, rh = self.rect
+        return m.x + rx, m.y + ry, rw, rh
 
     def to_screen(self, px: int, py: int) -> tuple[int, int]:
-        m = self.monitor
-        x = m.x + round(px * m.w / self.iw)
-        y = m.y + round(py * m.h / self.ih)
-        return (min(max(x, m.x), m.x + m.w - 1), min(max(y, m.y), m.y + m.h - 1))
+        sx, sy, sw, sh = self.screen_rect()
+        x = sx + round(px * sw / self.iw)
+        y = sy + round(py * sh / self.ih)
+        return (min(max(x, sx), sx + sw - 1), min(max(y, sy), sy + sh - 1))
+
+    def from_screen(self, gx: float, gy: float) -> tuple[float, float]:
+        """A global screen point as (unclipped) pixels of this image."""
+        sx, sy, sw, sh = self.screen_rect()
+        return (gx - sx) * self.iw / sw, (gy - sy) * self.ih / sh
+
+    def box_to_image(self, x: float, y: float, w: float, h: float
+                     ) -> tuple[int, int, int, int] | None:
+        """A global screen box as an image-pixel box clipped to the image;
+        None when nothing of it is inside (the element is dropped)."""
+        x0, y0 = self.from_screen(x, y)
+        x1, y1 = self.from_screen(x + w, y + h)
+        x0, y0 = max(0, round(x0)), max(0, round(y0))
+        x1, y1 = min(self.iw, round(x1)), min(self.ih, round(y1))
+        if x1 - x0 < 1 or y1 - y0 < 1:
+            return None
+        return x0, y0, x1 - x0, y1 - y0
+
+    def wire(self) -> dict:
+        return {"monitor": self.monitor.name, "index": self.index + 1, "count": self.count,
+                "region": self.region, "screen": {"w": self.monitor.w, "h": self.monitor.h}}
+
+
+def region_rect(full: Frame, region: dict) -> tuple[tuple[int, int, int, int], dict]:
+    """A zoom request in pixels of the last full-frame image of a monitor ->
+    (the screen rect relative to the monitor origin, the region actually
+    shown). The region is clipped to that image rather than refused, and the
+    clipped one is what gets echoed, so the echo says what the picture shows."""
+    x0, y0 = max(0, region["x"]), max(0, region["y"])
+    x1 = min(full.iw, region["x"] + region["w"])
+    y1 = min(full.ih, region["y"] + region["h"])
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        raise DeskError(f"region is outside the {full.iw}x{full.ih} screenshot "
+                        "(or under 4 px)")
+    m = full.monitor
+    kx, ky = m.w / full.iw, m.h / full.ih
+    rx, ry = int(x0 * kx), int(y0 * ky)
+    rw = max(1, min(m.w - rx, round((x1 - x0) * kx)))
+    rh = max(1, min(m.h - ry, round((y1 - y0) * ky)))
+    return (rx, ry, rw, rh), {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+
+
+def zoom_size(rw: int, rh: int, native: float = 1.0) -> tuple[int, int]:
+    """Image size for a zoomed rect of rw x rh input units: the long edge
+    goes to LONG_EDGE, but never more than ZOOM_MAX times the rect's native
+    pixels (`native` = device pixels per input unit) — past that the model
+    sees interpolation, not detail."""
+    f = min(LONG_EDGE / max(rw, rh, 1), ZOOM_MAX * native)
+    return max(1, round(rw * f)), max(1, round(rh * f))
 
 
 def fit(w: int, h: int, long_edge: int = LONG_EDGE) -> float:
@@ -296,6 +376,575 @@ def image_size(data: bytes) -> tuple[int, int] | None:
                 return w, h
             i += 2 + seg
     return None
+
+
+# --- settle: tiny thumbnails ---------------------------------------------------------------
+
+def decode_thumb(data: bytes) -> tuple[int, int, bytes] | None:
+    """(w, h, grey bytes) of a binary PNM (P5/P6: grim -t ppm, ImageMagick
+    pgm:-) or an uncompressed 24/32-bit BMP (sips); None for anything else
+    (JPEG/PNG would need a decoder, and this client has no dependencies —
+    those are compared byte-for-byte instead)."""
+    try:
+        if data[:2] in (b"P5", b"P6"):
+            fields, i = [], 2
+            while len(fields) < 3:
+                while data[i:i + 1].isspace():
+                    i += 1
+                if data[i:i + 1] == b"#":
+                    i = data.index(b"\n", i)
+                    continue
+                j = i
+                while data[j:j + 1] and not data[j:j + 1].isspace():
+                    j += 1
+                fields.append(int(data[i:j]))
+                i = j
+            w, h, maxv = fields
+            px = data[i + 1:]
+            if maxv > 255 or w <= 0 or h <= 0:
+                return None
+            if data[:2] == b"P5":
+                return (w, h, bytes(px[:w * h])) if len(px) >= w * h else None
+            if len(px) < w * h * 3:
+                return None
+            return w, h, bytes((px[k] + px[k + 1] + px[k + 1] + px[k + 2]) >> 2
+                               for k in range(0, w * h * 3, 3))
+        if data[:2] == b"BM" and len(data) >= 54:
+            off = struct.unpack("<I", data[10:14])[0]
+            w, h = struct.unpack("<ii", data[18:26])
+            bpp, comp = struct.unpack("<HI", data[28:34])
+            if bpp not in (24, 32) or comp not in (0, 3) or w <= 0 or not h:
+                return None
+            step = bpp // 8
+            stride = (w * step + 3) & ~3
+            rows = range(abs(h)) if h < 0 else range(h - 1, -1, -1)    # top-down
+            out = bytearray()
+            for r in rows:
+                row = data[off + r * stride:off + r * stride + w * step]
+                if len(row) < w * step:
+                    return None
+                out += bytes((row[k] + row[k + 1] + row[k + 1] + row[k + 2]) >> 2
+                             for k in range(0, w * step, step))
+            return w, abs(h), bytes(out)
+    except (ValueError, IndexError, struct.error):
+        return None
+    return None
+
+
+def thumbs_match(a: bytes | None, b: bytes | None) -> bool:
+    """Same screen, for settle's purposes. Decodable thumbnails (raw pixels)
+    match when at most 1 in 400 pixels differ by more than 24 grey levels, so
+    a blinking caret does not keep the screen "changing"; anything else is
+    byte-equal (a JPEG of the same pixels is the same bytes, but a caret blink
+    reads as a change — the SETTLE_MAX_S ceiling bounds that)."""
+    if a is None or b is None:
+        return False
+    if a == b:
+        return True
+    da, db = decode_thumb(a), decode_thumb(b)
+    if not da or not db or da[:2] != db[:2]:
+        return False
+    n = len(da[2])
+    diff = sum(1 for p, q in zip(da[2], db[2]) if abs(p - q) > 24)
+    return diff <= max(1, n // 400)
+
+
+# --- the element list (accessibility tree -> numbered, image-pixel boxes) ---------------------
+
+# normalized roles the model sees; everything else is walked through, not listed
+ROLES = ("button", "link", "textfield", "checkbox", "radio", "menuitem", "tab",
+         "slider", "combobox", "listitem", "cell", "toggle")
+# roles whose label is required: an empty list row is noise, an empty button
+# is an icon-only control and stays (src tells the model it is real)
+_NEEDS_LABEL = ("listitem", "cell")
+
+AX_ROLES = {"AXButton": "button", "AXMenuButton": "button", "AXLink": "link",
+            "AXTextField": "textfield", "AXTextArea": "textfield",
+            "AXCheckBox": "checkbox", "AXRadioButton": "radio",
+            "AXMenuItem": "menuitem", "AXMenuBarItem": "menuitem",
+            "AXSlider": "slider", "AXIncrementor": "slider",
+            "AXComboBox": "combobox", "AXPopUpButton": "combobox",
+            "AXRow": "listitem", "AXDisclosureTriangle": "toggle",
+            "AXStaticText": "text", "AXImage": "text"}
+AX_SUBROLES = {"AXTabButton": "tab", "AXSwitch": "toggle", "AXToggle": "toggle",
+               "AXSearchField": "textfield", "AXSecureTextField": "textfield"}
+ATSPI_ROLES = {"push button": "button", "button": "button", "toggle button": "toggle",
+               "switch": "toggle", "link": "link", "entry": "textfield",
+               "password text": "textfield", "editbar": "textfield",
+               "check box": "checkbox", "radio button": "radio",
+               "menu item": "menuitem", "check menu item": "menuitem",
+               "radio menu item": "menuitem", "menu": "menuitem",
+               "page tab": "tab", "slider": "slider", "spin button": "slider",
+               "combo box": "combobox", "list item": "listitem",
+               "table cell": "cell", "label": "text", "static": "text",
+               "image": "text", "icon": "text", "text": "text"}
+
+
+def ax_role(role: str | None, subrole: str | None) -> str:
+    return AX_SUBROLES.get(subrole or "") or AX_ROLES.get(role or "", "")
+
+
+def atspi_role(name: str | None, *, editable: bool = False, selectable: bool = False) -> str:
+    """AT-SPI role name -> ours. A `text` is a field only when editable; a
+    table cell counts only when selectable (the cheap stand-in for "has an
+    action" — asking the Action interface per cell costs a round trip)."""
+    r = ATSPI_ROLES.get((name or "").lower(), "")
+    if r == "text" and (name or "").lower() == "text" and editable:
+        return "textfield"
+    if r == "cell" and not selectable:
+        return ""
+    return r
+
+
+def _intersects(a: tuple, b: tuple) -> bool:
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] \
+        and b[1] < a[1] + a[3]
+
+
+def walk_tree(roots, read, clip: tuple, deadline: float, *,
+              max_depth: int = ELEMENTS_DEPTH, cap: int = ELEMENTS_CAP
+              ) -> tuple[list[dict], bool]:
+    """Depth-first over an accessibility tree, source-agnostic: `read(node)`
+    returns {role (already ours, "" = structural, "text" = static text or a
+    named image), label, value, focused, enabled, box: (x, y, w, h) global
+    or None, children: [...], hidden: bool}. Returns (raw elements in
+    global coordinates, partial). A subtree whose box is off `clip` is
+    skipped; static text becomes the label of the nearest unlabeled control
+    above it (within 3 levels) and is never listed itself. Stops at the
+    deadline or the cap with partial=True."""
+    out: list[dict] = []
+    seen: set = set()
+    stack = [(r, 0, None, 0) for r in reversed(list(roots))]
+    while stack:
+        if time.monotonic() > deadline or len(out) >= cap:
+            return out, True
+        node, depth, owner, owner_depth = stack.pop()
+        try:
+            info = read(node)
+        except Exception:  # noqa: BLE001 — one dead node must not end the walk
+            continue
+        if not info or info.get("hidden"):
+            continue
+        box = info.get("box")
+        if box and box[2] > 0 and box[3] > 0 and not _intersects(box, clip):
+            continue
+        role = info.get("role") or ""
+        if role == "text":
+            t = (info.get("label") or "").strip()
+            if owner is not None and t and not out[owner]["label"] \
+                    and depth - owner_depth <= 3:
+                out[owner]["label"] = t[:200]
+            continue
+        if role in ROLES and box and box[2] > 0 and box[3] > 0:
+            key = (role, tuple(round(v) for v in box))
+            if key not in seen:
+                seen.add(key)
+                label = (info.get("label") or "").strip()[:200]
+                el = {"role": role, "label": label, "box": box}
+                v = info.get("value")
+                if v not in (None, "") and str(v) != label:
+                    el["value"] = str(v)[:200]
+                if info.get("focused"):
+                    el["focused"] = True
+                if info.get("enabled") is False:
+                    el["enabled"] = False
+                out.append(el)
+                if not label:
+                    owner, owner_depth = len(out) - 1, depth
+        if depth < max_depth:
+            for c in reversed(list(info.get("children") or ())):
+                stack.append((c, depth + 1, owner, owner_depth))
+    return out, False
+
+
+def build_elements(raw: list[dict], frame: Frame, src: str) -> list[dict]:
+    """Global boxes -> image-pixel boxes of THIS image (crop + scale), clipped;
+    elements outside dropped; unlabeled rows dropped; ids 1..N in reading
+    order (rows of ROW_PX image px, then x)."""
+    out = []
+    for e in raw:
+        if not e["label"] and e["role"] in _NEEDS_LABEL:
+            continue
+        b = frame.box_to_image(*e["box"])
+        if b is None:
+            continue
+        el = {"role": e["role"], "label": e["label"], "x": b[0], "y": b[1],
+              "w": b[2], "h": b[3], "src": src}
+        for k in ("value", "focused", "enabled"):
+            if k in e:
+                el[k] = e[k]
+        out.append(el)
+    out.sort(key=lambda e: (e["y"] // ROW_PX, e["x"], e["y"]))
+    return [{"id": i, **e} for i, e in enumerate(out[:ELEMENTS_CAP], 1)]
+
+
+class ElementSource:
+    """Where the element list comes from. `collect(clip, deadline)` returns
+    (raw elements in global input coordinates, partial); `unavailable()`
+    is the honest reason there are none, or None."""
+    src = "none"
+
+    def __init__(self, note: str = "not supported on this backend"):
+        self.note = note
+
+    def unavailable(self) -> str | None:
+        return self.note
+
+    def collect(self, clip: tuple, deadline: float) -> tuple[list[dict], bool]:
+        return [], False
+
+
+class FakeElementSource(ElementSource):
+    """Tests: a recorded tree of dicts ({role, label, box, children, ...},
+    roles already ours) walked by the real walker."""
+
+    def __init__(self, roots: list[dict], src: str = "ax", note: str | None = None):
+        super().__init__(note or "")
+        self.roots, self.src = roots, src
+
+    def unavailable(self):
+        return self.note or None
+
+    def collect(self, clip, deadline):
+        return walk_tree(self.roots, lambda n: n, clip, deadline)
+
+
+def ax_info(v: dict) -> dict:
+    """AX attribute values (already Python) -> walk_tree's node info. Split
+    out of the ctypes reader so a recorded tree tests it without the API."""
+    role = ax_role(v.get("AXRole"), v.get("AXSubrole"))
+    val = v.get("AXValue")
+    if isinstance(val, float) and val.is_integer():
+        val = int(val)
+    if role == "text":
+        label = (val if isinstance(val, str) else "") or v.get("AXDescription") \
+            or v.get("AXTitle") or ""
+    else:
+        label = (v.get("AXTitle") or v.get("AXDescription")
+                 or (val if isinstance(val, str) and role != "textfield" else "")
+                 or v.get("AXPlaceholderValue") or v.get("AXHelp") or "")
+    pos, size = v.get("AXPosition"), v.get("AXSize")
+    return {"role": role, "label": label,
+            "value": val if role in ("textfield", "checkbox", "radio", "slider",
+                                     "combobox", "toggle") else None,
+            "focused": v.get("AXFocused") is True, "enabled": v.get("AXEnabled"),
+            "box": (pos[0], pos[1], size[0], size[1]) if pos and size else None,
+            "children": v.get("AXChildren") or []}
+
+
+def atspi_info(role_name: str, name: str, description: str, states: set[str],
+               extents: tuple | None, children: list) -> dict:
+    """AT-SPI node facts -> walk_tree's node info (testable without a bus).
+    `states` are lowercase names: showing, focused, enabled, sensitive,
+    editable, selectable, checked."""
+    role = atspi_role(role_name, editable="editable" in states,
+                      selectable="selectable" in states)
+    value = None
+    if role in ("checkbox", "radio", "toggle"):
+        value = "checked" if "checked" in states else "unchecked"
+    return {"role": role, "label": name or description or "", "value": value,
+            "focused": "focused" in states,
+            "enabled": "enabled" in states or "sensitive" in states,
+            "hidden": "showing" not in states,
+            "box": tuple(extents) if extents and extents[2] > 0 else None,
+            "children": children}
+
+
+class MacAXSource(ElementSource):
+    """AXUIElement over ctypes (ApplicationServices + CoreFoundation, no
+    PyObjC). The focused application's windows and menu bar first, then the
+    other apps with on-screen windows, front to back (CGWindowList), while the
+    budget lasts. AX positions are global points — the same space as the
+    Quartz input events, so Frame maps them like any click."""
+    src = "ax"
+    ATTRS = ("AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXHelp",
+             "AXPlaceholderValue", "AXPosition", "AXSize", "AXFocused", "AXEnabled",
+             "AXChildren")
+    OTHER_APPS = 6
+
+    def __init__(self):
+        super().__init__("")
+        import ctypes
+        import ctypes.util
+        c = self.ct = ctypes
+        vp = c.c_void_p
+        self.ax = c.cdll.LoadLibrary("/System/Library/Frameworks/ApplicationServices"
+                                     ".framework/ApplicationServices")
+        self.cf = c.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+        self.cg = c.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+        ax, cf = self.ax, self.cf
+        ax.AXIsProcessTrusted.restype = c.c_bool
+        ax.AXUIElementCreateSystemWide.restype = vp
+        ax.AXUIElementCreateApplication.restype = vp
+        ax.AXUIElementCreateApplication.argtypes = [c.c_int32]
+        ax.AXUIElementCopyAttributeValue.argtypes = [vp, vp, c.POINTER(vp)]
+        ax.AXUIElementCopyAttributeValue.restype = c.c_int32
+        ax.AXUIElementCopyMultipleAttributeValues.argtypes = [vp, vp, c.c_uint32,
+                                                              c.POINTER(vp)]
+        ax.AXUIElementCopyMultipleAttributeValues.restype = c.c_int32
+        ax.AXUIElementSetMessagingTimeout.argtypes = [vp, c.c_float]
+        ax.AXUIElementGetPid.argtypes = [vp, c.POINTER(c.c_int32)]
+        ax.AXValueGetTypeID.restype = c.c_ulong
+        ax.AXValueGetType.argtypes = [vp]
+        ax.AXValueGetType.restype = c.c_uint32
+        ax.AXValueGetValue.argtypes = [vp, c.c_uint32, vp]
+        ax.AXValueGetValue.restype = c.c_bool
+        for fn, res, args in (("CFRelease", None, [vp]), ("CFGetTypeID", c.c_ulong, [vp]),
+                              ("CFStringGetTypeID", c.c_ulong, []),
+                              ("CFBooleanGetTypeID", c.c_ulong, []),
+                              ("CFNumberGetTypeID", c.c_ulong, []),
+                              ("CFArrayGetTypeID", c.c_ulong, []),
+                              ("CFArrayGetCount", c.c_long, [vp]),
+                              ("CFArrayGetValueAtIndex", vp, [vp, c.c_long]),
+                              ("CFBooleanGetValue", c.c_bool, [vp]),
+                              ("CFNumberGetValue", c.c_bool, [vp, c.c_int, vp]),
+                              ("CFStringGetLength", c.c_long, [vp]),
+                              ("CFStringGetCString", c.c_bool, [vp, c.c_char_p, c.c_long,
+                                                                c.c_uint32]),
+                              ("CFStringCreateWithCString", vp, [vp, c.c_char_p, c.c_uint32]),
+                              ("CFArrayCreate", vp, [vp, vp, c.c_long, vp]),
+                              ("CFDictionaryGetValue", vp, [vp, vp])):
+            f = getattr(cf, fn)
+            f.restype, f.argtypes = res, args
+        self.cg.CGWindowListCopyWindowInfo.restype = vp
+        self.cg.CGWindowListCopyWindowInfo.argtypes = [c.c_uint32, c.c_uint32]
+        self.T = {n: getattr(cf, f"CF{n}GetTypeID")() for n in
+                  ("String", "Boolean", "Number", "Array")}
+        self.T["AXValue"] = ax.AXValueGetTypeID()
+        self._keep: list = []
+        self._s: dict = {}
+        self._lock = threading.Lock()
+        names = [self.cfstr(a) for a in self.ATTRS]
+        arr = (vp * len(names))(*names)
+        cb = c.addressof(c.c_char.in_dll(cf, "kCFTypeArrayCallBacks"))
+        self.attr_array = cf.CFArrayCreate(None, arr, len(names), cb)
+
+    def cfstr(self, s: str):
+        """Interned CFString (kept for the process lifetime; a handful)."""
+        if s not in self._s:
+            self._s[s] = self.cf.CFStringCreateWithCString(None, s.encode(), 0x08000100)
+        return self._s[s]
+
+    def unavailable(self):
+        if not self.ax.AXIsProcessTrusted():
+            return "no Accessibility permission"
+        return None
+
+    def py(self, obj):
+        """A CF object -> Python (str, bool, float, list of borrowed refs,
+        (a, b) for an AXValue point/size); None for anything else, including
+        the AXError values CopyMultiple puts in place of missing attributes."""
+        if not obj:
+            return None
+        c, cf = self.ct, self.cf
+        t = cf.CFGetTypeID(obj)
+        if t == self.T["String"]:
+            n = cf.CFStringGetLength(obj)
+            buf = c.create_string_buffer(n * 4 + 1)
+            if cf.CFStringGetCString(obj, buf, len(buf), 0x08000100):
+                return buf.value.decode(errors="replace")[:400]
+            return ""
+        if t == self.T["Boolean"]:
+            return bool(cf.CFBooleanGetValue(obj))
+        if t == self.T["Number"]:
+            d = c.c_double()
+            cf.CFNumberGetValue(obj, 13, c.byref(d))        # kCFNumberDoubleType
+            return d.value
+        if t == self.T["Array"]:
+            return [cf.CFArrayGetValueAtIndex(obj, i) for i in range(cf.CFArrayGetCount(obj))]
+        if t == self.T["AXValue"]:
+            kind = self.ax.AXValueGetType(obj)
+            if kind in (1, 2):                              # CGPoint, CGSize
+                pt = (c.c_double * 2)()
+                self.ax.AXValueGetValue(obj, kind, c.cast(pt, c.c_void_p))
+                return (pt[0], pt[1])
+        return None
+
+    def attr(self, el, name: str):
+        out = self.ct.c_void_p()
+        if self.ax.AXUIElementCopyAttributeValue(el, self.cfstr(name),
+                                                 self.ct.byref(out)) != 0:
+            return None
+        self._keep.append(out.value)
+        return out.value
+
+    def read(self, el) -> dict:
+        """One IPC per node (CopyMultipleAttributeValues), not one per attr."""
+        out = self.ct.c_void_p()
+        if self.ax.AXUIElementCopyMultipleAttributeValues(
+                el, self.attr_array, 0, self.ct.byref(out)) != 0 or not out.value:
+            return {}
+        self._keep.append(out.value)
+        return ax_info(dict(zip(self.ATTRS, (self.py(v) for v in self.py(out.value)))))
+
+    def roots(self) -> list:
+        c, ax, cf = self.ct, self.ax, self.cf
+        out, pids = [], []
+        sysw = ax.AXUIElementCreateSystemWide()
+        self._keep.append(sysw)
+        app = self.attr(sysw, "AXFocusedApplication")
+        if app:
+            pid = c.c_int32()
+            ax.AXUIElementGetPid(app, c.byref(pid))
+            pids.append(pid.value)
+        info = self.cg.CGWindowListCopyWindowInfo(1 | 16, 0)   # on screen, no desktop
+        if info:
+            self._keep.append(info)
+            for d in self.py(info) or []:
+                layer = self.py(cf.CFDictionaryGetValue(d, self.cfstr("kCGWindowLayer")))
+                pid = self.py(cf.CFDictionaryGetValue(d, self.cfstr("kCGWindowOwnerPID")))
+                if layer == 0 and pid and int(pid) not in pids:
+                    pids.append(int(pid))
+        for i, pid in enumerate(pids[:1 + self.OTHER_APPS]):
+            a = ax.AXUIElementCreateApplication(pid)
+            if not a:
+                continue
+            self._keep.append(a)
+            ax.AXUIElementSetMessagingTimeout(a, 0.25)   # a hung app costs 0.25 s, not 6
+            out += self.py(self.attr(a, "AXWindows")) or []
+            if i == 0:
+                mb = self.attr(a, "AXMenuBar")
+                if mb:
+                    out.append(mb)
+        return out
+
+    def collect(self, clip, deadline):
+        """One walk at a time: screenshots run concurrently in worker
+        threads, and `_keep` (the CF objects released after a walk) must not
+        be shared. A second caller waits inside the same budget, then gives up."""
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return [], True
+        try:
+            return walk_tree(self.roots(), self.read, clip, deadline)
+        finally:
+            for o in self._keep:
+                if o:
+                    self.cf.CFRelease(o)
+            self._keep = []
+            self._lock.release()
+
+
+class GiAtspiSource(ElementSource):
+    """AT-SPI2 through gi.repository.Atspi (what pyatspi wraps, so a host
+    with pyatspi has it). Active windows first. Screen coordinates, which on
+    X11 are the xdotool input space."""
+    src = "atspi"
+    STATES = ("showing", "focused", "enabled", "sensitive", "editable",
+              "selectable", "checked", "active")
+
+    def __init__(self, Atspi):
+        super().__init__("")
+        self.A = Atspi
+
+    def unavailable(self):
+        return None
+
+    def _states(self, acc) -> set[str]:
+        ss = acc.get_state_set()
+        return {n for n in self.STATES if ss.contains(getattr(self.A.StateType, n.upper()))}
+
+    def read(self, acc) -> dict:
+        kids = [acc.get_child_at_index(i) for i in range(min(acc.get_child_count(), 500))]
+        try:
+            r = acc.get_extents(self.A.CoordType.SCREEN)
+            ext = (r.x, r.y, r.width, r.height)
+        except Exception:  # noqa: BLE001 — no Component interface
+            ext = None
+        return atspi_info(acc.get_role_name(), acc.get_name(), acc.get_description(),
+                          self._states(acc), ext, kids)
+
+    def collect(self, clip, deadline):
+        desk = self.A.get_desktop(0)
+        wins = []
+        for i in range(desk.get_child_count()):
+            app = desk.get_child_at_index(i)
+            for j in range(app.get_child_count() if app else 0):
+                w = app.get_child_at_index(j)
+                if w:
+                    wins.append(w)
+        wins.sort(key=lambda w: "active" not in self._states(w))
+        return walk_tree(wins, self.read, clip, deadline)
+
+
+class DbusAtspiSource(ElementSource):
+    """AT-SPI2 over raw D-Bus (python3-dbus), for hosts without gi. A node is
+    (bus name, object path); every fact is a round trip, so this is the
+    slowest source and the budget decides how much of the screen it covers."""
+    src = "atspi"
+    BITS = {"active": 1, "checked": 4, "editable": 7, "enabled": 8, "focused": 12,
+            "selectable": 22, "sensitive": 24, "showing": 25}
+    ACC = "org.a11y.atspi.Accessible"
+
+    def __init__(self, dbus):
+        super().__init__("")
+        self.dbus = dbus
+        addr = dbus.SessionBus().get_object("org.a11y.Bus", "/org/a11y/bus") \
+            .GetAddress(dbus_interface="org.a11y.Bus")
+        self.bus = dbus.bus.BusConnection(addr)
+
+    def unavailable(self):
+        return None
+
+    def _call(self, node, iface, method, *args):
+        obj = self.bus.get_object(node[0], node[1], introspect=False)
+        return getattr(obj, method)(*args, dbus_interface=iface, timeout=0.3)
+
+    def _states(self, node) -> set[str]:
+        try:
+            lo, hi = (list(self._call(node, self.ACC, "GetState")) + [0, 0])[:2]
+        except Exception:  # noqa: BLE001 — an app that went away
+            return set()
+        bits = int(lo) | (int(hi) << 32)
+        return {n for n, b in self.BITS.items() if bits >> b & 1}
+
+    def _prop(self, node, name):
+        return str(self._call(node, "org.freedesktop.DBus.Properties", "Get",
+                              self.ACC, name))
+
+    def _kids(self, node) -> list:
+        return [(str(b), str(p)) for b, p in self._call(node, self.ACC, "GetChildren")][:500]
+
+    def read(self, node) -> dict:
+        try:
+            ext = tuple(int(v) for v in self._call(node, "org.a11y.atspi.Component",
+                                                   "GetExtents", self.dbus.UInt32(0)))
+        except Exception:  # noqa: BLE001 — no Component interface
+            ext = None
+        return atspi_info(str(self._call(node, self.ACC, "GetRoleName")),
+                          self._prop(node, "Name"), self._prop(node, "Description"),
+                          self._states(node), ext, self._kids(node))
+
+    def collect(self, clip, deadline):
+        wins = []
+        for app in self._kids(("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root")):
+            try:
+                wins += self._kids(app)
+            except Exception:  # noqa: BLE001 — an app that went away
+                continue
+        wins.sort(key=lambda w: "active" not in self._states(w))
+        return walk_tree(wins, self.read, clip, deadline)
+
+
+def atspi_source() -> ElementSource:
+    """The best AT-SPI binding on this host (gi, which pyatspi is built on;
+    else raw python3-dbus), or an honest none."""
+    try:
+        import gi
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+        return GiAtspiSource(Atspi)
+    except Exception:  # noqa: BLE001 — ImportError, or ValueError from require_version
+        pass
+    try:
+        import dbus
+        import dbus.bus  # noqa: F401
+    except ImportError:
+        return ElementSource("AT-SPI not installed (python3-gi + gir1.2-atspi-2.0, "
+                             "or python3-dbus)")
+    try:
+        return DbusAtspiSource(dbus)
+    except Exception as e:  # noqa: BLE001 — no accessibility bus running
+        return ElementSource(f"AT-SPI bus not reachable ({type(e).__name__})")
 
 
 # --- the closed action list -----------------------------------------------------------------
@@ -374,15 +1023,37 @@ def validate(verb: str, p: dict, frame: Frame | None, apps: dict,
     if verb == "screenshot":
         if p.get("monitor") is not None:
             out["monitor"] = str(p["monitor"])[:32]
+        r = p.get("region")
+        if r is not None:
+            # shape only: the bounds are the last full-frame image of that
+            # monitor, which the session checks (and clips to)
+            if not isinstance(r, dict):
+                raise DeskError("region must be {x, y, w, h}")
+            out["region"] = {"x": _num(r, "x", 0, 100_000), "y": _num(r, "y", 0, 100_000),
+                             "w": _num(r, "w", 4, 100_000), "h": _num(r, "h", 4, 100_000)}
+        out["elements"] = p.get("elements", True) is not False
         return out
-    if verb in ("move", "click") or (verb == "scroll" and "x" in p):
+    if verb == "wait":
+        if p.get("mode", "stable") not in ("stable", "change"):
+            raise DeskError("mode must be stable or change")
+        out["mode"] = p.get("mode", "stable")
+        out["timeout_ms"] = _num(p, "timeout_ms", 0, WAIT_MAX_MS, 3000)
+        return out
+    if verb in ("move", "click", "drag") or (verb == "scroll" and "x" in p):
         if frame is None:
             raise DeskError("no screenshot yet; coordinates have nothing to refer to")
         out["x"] = _num(p, "x", 0, frame.iw - 1)
         out["y"] = _num(p, "y", 0, frame.ih - 1)
-    if verb in ("move", "click", "scroll", "type", "key", "open"):
+    if verb in ("move", "click", "scroll", "type", "key", "open", "drag"):
         out["screenshot_after"] = p.get("screenshot_after", True) is not False
     if verb == "move":
+        return out
+    if verb == "drag":
+        out["to_x"] = _num(p, "to_x", 0, frame.iw - 1)
+        out["to_y"] = _num(p, "to_y", 0, frame.ih - 1)
+        if p.get("button", "left") not in BUTTONS:
+            raise DeskError("bad button")
+        out["button"] = p.get("button", "left")
         return out
     if verb == "click":
         if p.get("button", "left") not in BUTTONS:
@@ -485,8 +1156,27 @@ class Backend:
     def monitors(self) -> list[Monitor]:
         raise NotImplementedError
 
-    def screenshot(self, mon: Monitor) -> bytes:
+    def screenshot(self, mon: Monitor, rect: tuple | None = None) -> bytes:
+        """The monitor fitted to LONG_EDGE; with `rect` (relative to the
+        monitor, input units) that rect at native resolution fitted to
+        LONG_EDGE, upscaled at most ZOOM_MAX (zoom_size)."""
         raise NotImplementedError
+
+    def thumbnail(self, mon: Monitor, rect: tuple | None = None) -> bytes:
+        """A cheap capture for settle, compared with thumbs_match. The
+        default is the full screenshot, compared byte-for-byte: correct but
+        slower, and a blinking caret reads as a change."""
+        return self.screenshot(mon) if rect is None else self.screenshot(mon, rect)
+
+    def cursor(self) -> tuple[int, int] | None:
+        """The pointer in global input units, when cheap to read; else None."""
+        return None
+
+    def elements_source(self) -> ElementSource:
+        return ElementSource("not supported on this backend")
+
+    def drag(self, x0: int, y0: int, x1: int, y1: int, button: str) -> None:
+        raise DeskError(f"drag is not supported on the {self.name} backend")
 
     def move(self, x: int, y: int) -> None:
         raise NotImplementedError
@@ -520,12 +1210,36 @@ class Backend:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _grim_shot(b: Backend, mon: Monitor) -> bytes:
+def drag_path(x0: int, y0: int, x1: int, y1: int, n: int = 12) -> list[tuple[int, int]]:
+    """Intermediate pointer positions for a drag, end included: apps that
+    track motion (sliders, drag-and-drop) ignore a jump straight to the end."""
+    out: list[tuple[int, int]] = []
+    for i in range(1, n + 1):
+        p = (round(x0 + (x1 - x0) * i / n), round(y0 + (y1 - y0) * i / n))
+        if not out or out[-1] != p:
+            out.append(p)
+    return out
+
+
+def _grim_shot(b: Backend, mon: Monitor, rect: tuple | None = None,
+               thumb: bool = False) -> bytes:
     """grim's -s is the output image scale relative to LOGICAL size (its
     default is the output's own scale, i.e. physical pixels), so this both
-    downsizes and undoes HiDPI in one go. JPEG: ~65 ms vs ~800 ms for PNG."""
-    s = fit(mon.w, mon.h)
-    return run_argv([b.bin["grim"], "-o", mon.name, "-t", "jpeg", "-q", "80",
+    downsizes and undoes HiDPI in one go. JPEG: ~65 ms vs ~800 ms for PNG.
+    A zoom is -g in layout coordinates, scaled up to native (mon.scale) and
+    at most ZOOM_MAX; a settle thumbnail is a tiny raw PPM (no decoder
+    needed to compare it)."""
+    if rect is None:
+        where, (w, h) = ["-o", mon.name], (mon.w, mon.h)
+        s = fit(w, h)
+    else:
+        rx, ry, w, h = rect
+        where = ["-g", f"{mon.x + rx},{mon.y + ry} {w}x{h}"]
+        s = zoom_size(w, h, mon.scale)[0] / w
+    if thumb:
+        return run_argv([b.bin["grim"], *where, "-t", "ppm",
+                         "-s", f"{THUMB_EDGE / max(w, h):.4f}", "-"])
+    return run_argv([b.bin["grim"], *where, "-t", "jpeg", "-q", "80",
                      "-s", f"{s:.4f}", "-"])
 
 
@@ -636,6 +1350,12 @@ class WaylandPointer:
             time.sleep(0.03)
         self.roundtrip()
 
+    def button(self, button: str, pressed: bool) -> None:
+        self._send(self.ptr, 2, self.u32(self._t()) + self.u32(self.BTN[button])
+                   + self.u32(1 if pressed else 0))
+        self._send(self.ptr, 4)
+        self.roundtrip()
+
     def scroll(self, dx: int, dy: int) -> None:
         for axis, n in ((0, dy), (1, dx)):
             if n:
@@ -665,12 +1385,35 @@ class WlrootsBackend(Backend):
         x0, y0 = min(m.x for m in ms), min(m.y for m in ms)
         return x0, y0, max(m.x + m.w for m in ms) - x0, max(m.y + m.h for m in ms) - y0
 
-    def screenshot(self, mon: Monitor) -> bytes:
-        return _grim_shot(self, mon)
+    def screenshot(self, mon: Monitor, rect: tuple | None = None) -> bytes:
+        return _grim_shot(self, mon, rect)
+
+    def thumbnail(self, mon: Monitor, rect: tuple | None = None) -> bytes:
+        return _grim_shot(self, mon, rect, thumb=True)
+
+    def elements_source(self) -> ElementSource:
+        # AT-SPI extents on Wayland are window-relative or zero (no global
+        # coordinates by design), so boxes would point at the wrong place
+        return ElementSource("not supported on this backend (AT-SPI has no screen "
+                             "coordinates on Wayland)")
 
     def move(self, x: int, y: int) -> None:
         x0, y0, w, h = self.layout()
         self.pointer().motion_absolute(x - x0, y - y0, w, h)
+
+    def drag(self, x0, y0, x1, y1, button):
+        """Virtual pointer throughout (not Hyprland's cursor dispatch): the
+        press, the motion and the release must come from one device."""
+        lx, ly, w, h = self.layout()
+        p = self.pointer()
+        p.motion_absolute(x0 - lx, y0 - ly, w, h)
+        p.button(button, True)
+        try:
+            for x, y in drag_path(x0, y0, x1, y1):
+                time.sleep(0.015)
+                p.motion_absolute(x - lx, y - ly, w, h)
+        finally:
+            p.button(button, False)
 
     def click(self, button: str, count: int) -> None:
         self.pointer().click(button, count)
@@ -738,6 +1481,13 @@ class HyprlandBackend(WlrootsBackend):
             pass
         super().move(x, y)
 
+    def cursor(self):
+        try:
+            got = run_argv([self.bin["hyprctl"], "cursorpos"], timeout=2).decode()
+            return tuple(int(float(v)) for v in got.split(","))[:2]
+        except (DeskError, ValueError, OSError, subprocess.TimeoutExpired):
+            return None
+
     def deny_keys(self) -> set[str]:
         """Whatever this compositor binds to `exit` (default super+M)."""
         out = set()
@@ -782,16 +1532,24 @@ class X11Backend(Backend):
                 .split())
         return [Monitor(name="0", x=0, y=0, w=w, h=h)]
 
-    def screenshot(self, mon: Monitor) -> bytes:
-        s = fit(mon.w, mon.h)
-        tw, th = max(1, round(mon.w * s)), max(1, round(mon.h * s))
+    def screenshot(self, mon: Monitor, rect: tuple | None = None) -> bytes:
+        if rect is None:
+            x, y, w, h = mon.x, mon.y, mon.w, mon.h
+            s = fit(w, h)
+            tw, th = max(1, round(w * s)), max(1, round(h * s))
+        else:
+            x, y, w, h = mon.x + rect[0], mon.y + rect[1], rect[2], rect[3]
+            tw, th = zoom_size(w, h)
         if self.bin.get("import"):
             return run_argv([self.bin["import"], "-window", "root", "-crop",
-                             f"{mon.w}x{mon.h}+{mon.x}+{mon.y}", "-resize",
+                             f"{w}x{h}+{x}+{y}", "-resize",
                              f"{tw}x{th}!", "-quality", "80", "jpeg:-"])
         if self.bin.get("maim"):
-            return run_argv([self.bin["maim"], "-f", "jpg", "-g",
-                             f"{mon.w}x{mon.h}+{mon.x}+{mon.y}"])
+            # no resize in maim: a zoom comes back at native size (the Frame
+            # takes the image's real size, so clicks still map)
+            return run_argv([self.bin["maim"], "-f", "jpg", "-g", f"{w}x{h}+{x}+{y}"])
+        if rect is not None:
+            raise DeskError("zooming with region needs ImageMagick (import) or maim")
         if self.bin.get("scrot"):
             with tempfile.TemporaryDirectory() as d:
                 f = os.path.join(d, "s.jpg")
@@ -799,8 +1557,42 @@ class X11Backend(Backend):
                 return Path(f).read_bytes()
         raise DeskError("install ImageMagick (import), maim or scrot for screenshots")
 
+    def thumbnail(self, mon: Monitor, rect: tuple | None = None) -> bytes:
+        """A raw PGM from ImageMagick (decodable, so a caret blink is not a
+        change); without it, the full screenshot compared byte-for-byte."""
+        if not self.bin.get("import"):
+            return super().thumbnail(mon, rect)
+        x, y, w, h = (mon.x, mon.y, mon.w, mon.h) if rect is None else (
+            mon.x + rect[0], mon.y + rect[1], rect[2], rect[3])
+        k = THUMB_EDGE / max(w, h)
+        return run_argv([self.bin["import"], "-window", "root", "-crop", f"{w}x{h}+{x}+{y}",
+                         "-resize", f"{max(1, round(w * k))}x{max(1, round(h * k))}!",
+                         "-colorspace", "Gray", "-depth", "8", "pgm:-"])
+
+    def elements_source(self) -> ElementSource:
+        return atspi_source()
+
+    def cursor(self):
+        try:
+            out = run_argv([self.bin["xdotool"], "getmouselocation", "--shell"],
+                           timeout=2).decode()
+        except (DeskError, OSError, subprocess.TimeoutExpired):
+            return None
+        kv = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+        try:
+            return int(kv["X"]), int(kv["Y"])
+        except (KeyError, ValueError):
+            return None
+
     def move(self, x, y):
         run_argv([self.bin["xdotool"], "mousemove", "--sync", str(x), str(y)])
+
+    def drag(self, x0, y0, x1, y1, button):
+        b = {"left": "1", "middle": "2", "right": "3"}[button]
+        argv = [self.bin["xdotool"], "mousemove", "--sync", str(x0), str(y0), "mousedown", b]
+        for x, y in drag_path(x0, y0, x1, y1):
+            argv += ["sleep", "0.015", "mousemove", "--sync", str(x), str(y)]
+        run_argv(argv + ["mouseup", b], timeout=20)
 
     def click(self, button, count):
         run_argv([self.bin["xdotool"], "click", "--repeat", str(count), "--delay", "80",
@@ -875,27 +1667,100 @@ class MacBackend(Backend):
             ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p]
         self.cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
         self.cf.CFRelease.argtypes = [ctypes.c_void_p]
+        self.cg.CGGetActiveDisplayList.argtypes = [ctypes.c_uint32,
+                                                   ctypes.POINTER(ctypes.c_uint32),
+                                                   ctypes.POINTER(ctypes.c_uint32)]
+        self.cg.CGEventCreate.restype = ctypes.c_void_p
+        self.cg.CGEventCreate.argtypes = [ctypes.c_void_p]
+        self.cg.CGEventGetLocation.restype = Pt
+        self.cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
         self.pos = (0, 0)
+        self._ax: ElementSource | None = None
 
     def _post(self, ev) -> None:
         self.cg.CGEventPost(0, ev)          # kCGHIDEventTap
         self.cf.CFRelease(ev)
 
     def monitors(self):
-        r = self.cg.CGDisplayBounds(self.cg.CGMainDisplayID())
-        return [Monitor(name="main", x=int(r.origin.x), y=int(r.origin.y),
-                        w=int(r.size.x), h=int(r.size.y))]
+        """Every active display in global points, the main one first (named
+        "main" as before; the others "display-2", ...)."""
+        main = self.cg.CGMainDisplayID()
+        ids = (self.ct.c_uint32 * 16)()
+        n = self.ct.c_uint32(0)
+        if self.cg.CGGetActiveDisplayList(16, ids, self.ct.byref(n)) != 0 or not n.value:
+            ids, n = (self.ct.c_uint32 * 1)(main), self.ct.c_uint32(1)
+        order = sorted(ids[:n.value], key=lambda d: d != main)
+        out = []
+        for i, d in enumerate(order):
+            r = self.cg.CGDisplayBounds(d)
+            out.append(Monitor(name="main" if d == main else f"display-{i + 1}",
+                               x=int(r.origin.x), y=int(r.origin.y),
+                               w=int(r.size.x), h=int(r.size.y)))
+        return out
 
-    def screenshot(self, mon):
+    def _capture(self, mon: Monitor, rect, f: str) -> tuple[int, int]:
+        """screencapture -R takes a rect in global points and writes it at
+        the display's native (Retina: 2x) pixels; returns that native size."""
+        x, y, w, h = (mon.x, mon.y, mon.w, mon.h) if rect is None else (
+            mon.x + rect[0], mon.y + rect[1], rect[2], rect[3])
+        run_argv([self.bin["screencapture"], "-x", "-R", f"{x},{y},{w},{h}", "-t", "jpg", f])
+        return image_size(Path(f).read_bytes()[:65536]) or (w, h)
+
+    def screenshot(self, mon, rect=None):
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "s.jpg")
-            run_argv([self.bin["screencapture"], "-x", "-m", "-t", "jpg", f])
-            run_argv([self.bin["sips"], "-Z", str(LONG_EDGE), f])
+            nw, nh = self._capture(mon, rect, f)
+            if rect is None:
+                target = min(LONG_EDGE, max(nw, nh))
+            else:
+                target = max(zoom_size(rect[2], rect[3], max(nw, nh) / max(rect[2], rect[3])))
+            if target != max(nw, nh):
+                run_argv([self.bin["sips"], "-Z", str(target), f])
             return Path(f).read_bytes()
+
+    def thumbnail(self, mon, rect=None):
+        """An uncompressed BMP from sips (decodable without a library)."""
+        with tempfile.TemporaryDirectory() as d:
+            f, t = os.path.join(d, "s.jpg"), os.path.join(d, "t.bmp")
+            nw, nh = self._capture(mon, rect, f)
+            k = THUMB_EDGE / max(nw, nh)
+            run_argv([self.bin["sips"], "-z", str(max(1, round(nh * k))),
+                      str(max(1, round(nw * k))), "-s", "format", "bmp", f, "--out", t])
+            return Path(t).read_bytes()
+
+    def cursor(self):
+        ev = self.cg.CGEventCreate(None)
+        if not ev:
+            return None
+        p = self.cg.CGEventGetLocation(ev)
+        self.cf.CFRelease(ev)
+        return round(p.x), round(p.y)
+
+    def elements_source(self) -> ElementSource:
+        if self._ax is None:
+            try:
+                self._ax = MacAXSource()
+            except (OSError, AttributeError, ValueError) as e:
+                self._ax = ElementSource(f"accessibility API unavailable ({e})"[:120])
+        return self._ax
 
     def move(self, x, y):
         self.pos = (x, y)
         self._post(self.cg.CGEventCreateMouseEvent(None, 5, self.Pt(x, y), 0))
+
+    def drag(self, x0, y0, x1, y1, button):
+        """Quartz wants down, then *Dragged* events (not Moved), then up."""
+        down, up, dragged, btn = {"left": (1, 2, 6, 0), "right": (3, 4, 7, 1),
+                                  "middle": (25, 26, 27, 2)}[button]
+        self.move(x0, y0)
+        self._post(self.cg.CGEventCreateMouseEvent(None, down, self.Pt(x0, y0), btn))
+        try:
+            for x, y in drag_path(x0, y0, x1, y1):
+                time.sleep(0.015)
+                self._post(self.cg.CGEventCreateMouseEvent(None, dragged, self.Pt(x, y), btn))
+        finally:
+            self._post(self.cg.CGEventCreateMouseEvent(None, up, self.Pt(x1, y1), btn))
+            self.pos = (x1, y1)
 
     def click(self, button, count):
         down, up, btn = {"left": (1, 2, 0), "right": (3, 4, 1), "middle": (25, 26, 2)}[button]
@@ -997,6 +1862,8 @@ class Session:
         self.b = backend
         self.address, self.token = address, token
         self.frame: Frame | None = None
+        self.full: dict[str, Frame] = {}          # last full-frame shot per monitor
+        self.elements: ElementSource | None = None
         self.grants = {"screen": False, "input": False, "shell": "off"}
         self.apps = local_apps()
         self.deny = backend.deny_keys()
@@ -1017,7 +1884,7 @@ class Session:
                 "apps": sorted(self.apps), "ceiling": ceiling()}
 
     def allowed(self, verb: str) -> str | None:
-        cap = {"screenshot": "screen", "shell": "shell"}.get(verb, "input")
+        cap = {"screenshot": "screen", "wait": "screen", "shell": "shell"}.get(verb, "input")
         c = ceiling()
         g = self.grants.get(cap)
         if cap == "shell":
@@ -1029,34 +1896,142 @@ class Session:
             return f"{cap} is not granted"
         return None
 
-    def _shot(self, monitor: str | None = None) -> dict:
+    def _pick(self, monitor: str | None) -> tuple[Monitor, int, int]:
         ms = self.b.monitors()
-        mon = ms[0]
-        if monitor is not None:
-            pick = [m for i, m in enumerate(ms) if m.name == monitor or str(i) == monitor]
-            if not pick:
-                raise DeskError(f"no monitor {monitor!r} (have: "
-                                f"{', '.join(m.name for m in ms)})")
-            mon = pick[0]
-        data = self.b.screenshot(mon)
+        if monitor is None:
+            return ms[0], 0, len(ms)
+        for i, m in enumerate(ms):
+            if m.name == monitor or str(i) == monitor:
+                return m, i, len(ms)
+        raise DeskError(f"no monitor {monitor!r} (have: {', '.join(m.name for m in ms)})")
+
+    def _elements(self, frame: Frame) -> dict:
+        """The element list for `frame`, within ELEMENTS_BUDGET_S; never
+        raises (a broken accessibility API costs the list, not the shot)."""
+        if self.elements is None:
+            try:
+                self.elements = self.b.elements_source()
+            except Exception as e:  # noqa: BLE001
+                self.elements = ElementSource(f"accessibility unavailable ({type(e).__name__})")
+        es = self.elements
+        try:
+            why = es.unavailable()
+            if why:
+                return {"elements": [], "elements_src": "none", "elements_note": why}
+            raw, partial = es.collect(frame.screen_rect(),
+                                      time.monotonic() + ELEMENTS_BUDGET_S)
+        except Exception as e:  # noqa: BLE001
+            return {"elements": [], "elements_src": "none",
+                    "elements_note": f"accessibility tree failed ({type(e).__name__})"}
+        out = {"elements": build_elements(raw, frame, es.src), "elements_src": es.src}
+        if partial:
+            out["elements_note"] = "partial"
+        return out
+
+    def _shot(self, monitor: str | None = None, region: dict | None = None,
+              elements: bool = True, rect: tuple | None = None) -> dict:
+        """A screenshot response body: image, frame, elements, cursor. A
+        `region` (full-frame image px of that monitor's last full shot) is
+        turned into a screen rect here; an auto-shot passes the current
+        frame's `rect` + `region` straight through so the model keeps its zoom."""
+        mon, idx, count = self._pick(monitor)
+        if region is not None and rect is None:
+            full = self.full.get(mon.name)
+            if full is None:
+                raise DeskError(f"no full screenshot of {mon.name!r} yet; region is in "
+                                "the pixels of that one — take it first")
+            rect, region = region_rect(full, region)
+        data = self.b.screenshot(mon) if rect is None else self.b.screenshot(mon, rect)
         size = image_size(data)
         if size is None:
             raise DeskError("the screenshot tool returned something that is not an image")
-        self.frame = Frame(mon, *size)
+        frame = Frame(mon, *size, rect=rect, region=region if rect else None,
+                      index=idx, count=count)
+        self.frame = frame
+        if rect is None:
+            self.full[mon.name] = frame
         mime = "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
-        return {"mime": mime, "w": size[0], "h": size[1],
-                "b64": base64.b64encode(data).decode()}
+        out = {"image": {"mime": mime, "w": size[0], "h": size[1],
+                         "b64": base64.b64encode(data).decode()},
+               "frame": frame.wire()}
+        if elements:
+            out.update(self._elements(frame))
+        else:
+            out.update(elements=[], elements_src="none", elements_note="not requested")
+        try:
+            c = self.b.cursor()
+        except Exception:  # noqa: BLE001 — optional
+            c = None
+        if c is not None:
+            cx, cy = frame.from_screen(*c)
+            if 0 <= cx < frame.iw and 0 <= cy < frame.ih:
+                out["cursor"] = {"x": int(cx), "y": int(cy)}
+        return out
+
+    def _thumb(self, frame: Frame | None) -> bytes | None:
+        try:
+            if frame is None:
+                return self.b.thumbnail(self._pick(None)[0])
+            return self.b.thumbnail(frame.monitor, frame.rect) if frame.rect \
+                else self.b.thumbnail(frame.monitor)
+        except Exception:  # noqa: BLE001 — settle is best effort; never fail the action
+            return None
+
+    def settle(self, before: bytes | None, floor: float = SETTLE_S,
+               ceiling_s: float = SETTLE_MAX_S, until_change: bool = False
+               ) -> tuple[bool | None, int]:
+        """A.4: after `floor`, capture thumbnails until two consecutive match
+        (or, until_change, until one differs from `before` and then settles),
+        up to `ceiling_s`. Returns (changed vs `before` — None when unknown,
+        settled_ms). Thumbnails are the backend's cheapest capture: raw
+        pixels where the tool can emit them (grim ppm, ImageMagick pgm, sips
+        bmp), else a full JPEG compared byte-for-byte (see thumbs_match)."""
+        t0 = time.monotonic()
+        if floor > 0:
+            time.sleep(floor)
+        f = self.frame
+        prev = self._thumb(f)
+        if until_change:
+            while thumbs_match(before, prev) and time.monotonic() - t0 < ceiling_s:
+                time.sleep(SETTLE_POLL_S)
+                prev = self._thumb(f)
+        cur = prev
+        while time.monotonic() - t0 < ceiling_s:
+            time.sleep(SETTLE_POLL_S)
+            cur = self._thumb(f)
+            if cur is None or thumbs_match(prev, cur):
+                break
+            prev = cur
+        changed = None if before is None or cur is None else not thumbs_match(before, cur)
+        return changed, int((time.monotonic() - t0) * 1000)
 
     def execute(self, verb: str, p: dict) -> dict:
         """Blocking: runs in a worker thread."""
         if verb == "screenshot":
-            img = self._shot(p.get("monitor"))
-            return {"ok": True, "text": f"screenshot {img['w']}x{img['h']}", "image": img}
+            out = self._shot(p.get("monitor"), p.get("region"), p.get("elements", True))
+            img = out["image"]
+            what = f" zoomed on {out['frame']['region']}" if out["frame"]["region"] else ""
+            return {"ok": True, "text": f"screenshot {img['w']}x{img['h']}{what}", **out}
         f = self.frame
+        if verb == "wait":
+            before = self._thumb(f)
+            changed, ms = self.settle(before, floor=0, ceiling_s=p["timeout_ms"] / 1000,
+                                      until_change=p["mode"] == "change")
+            out = {"ok": True, "text": f"wait {p['mode']}: "
+                   f"{'changed' if changed else 'no change'} after {ms} ms",
+                   "changed": changed, "settled_ms": ms}
+            if changed is None:
+                del out["changed"]
+            out.update(self._auto_shot(f))
+            return out
+        before = self._thumb(f)
         if verb in ("move", "click") or (verb == "scroll" and "x" in p):
             self.b.move(*f.to_screen(p["x"], p["y"]))
         if verb == "click":
             self.b.click(p["button"], p["count"])
+        elif verb == "drag":
+            self.b.drag(*f.to_screen(p["x"], p["y"]), *f.to_screen(p["to_x"], p["to_y"]),
+                        p["button"])
         elif verb == "scroll":
             self.b.scroll(p["dx"], p["dy"])
         elif verb == "type":
@@ -1069,11 +2044,19 @@ class Session:
             else:
                 subprocess.Popen(self.apps[p["app"]], shell=False, start_new_session=True,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        out = {"ok": True, "text": f"{verb} done"}
+        changed, ms = self.settle(before, floor=SETTLE_S * (3 if verb == "open" else 1))
+        out = {"ok": True, "text": f"{verb} done", "changed": changed, "settled_ms": ms}
+        if changed is None:
+            del out["changed"]
         if p.get("screenshot_after"):
-            time.sleep(SETTLE_S * (3 if verb == "open" else 1))
-            out["image"] = self._shot(self.frame.monitor.name if self.frame else None)
+            out.update(self._auto_shot(f))
         return out
+
+    def _auto_shot(self, f: Frame | None) -> dict:
+        """The screenshot an input verb returns: same monitor, same zoom."""
+        if f is None:
+            return self._shot()
+        return self._shot(f.monitor.name, rect=f.rect, region=f.region)
 
     async def shell(self, p: dict) -> dict:
         if p["mode"] == "argv":
@@ -1127,7 +2110,7 @@ class Session:
                     res = await self.shell(p)
                 finally:
                     self.shell_busy = False
-            elif verb == "screenshot":
+            elif verb in ("screenshot", "wait"):
                 res = await asyncio.to_thread(self.execute, verb, p)
             else:
                 async with self.input_lock:
@@ -1189,9 +2172,8 @@ class Session:
 
 
 def cmd_run(args) -> int:
-    try:
-        import websockets  # noqa: F401
-    except ImportError:
+    import importlib.util
+    if importlib.util.find_spec("websockets") is None:
         raise DeskError("jav3-desk needs websockets: install python-websockets "
                         "(Arch) / python3-websockets (Debian) or pip install websockets")
     creds = load_credentials()
