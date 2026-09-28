@@ -3483,6 +3483,11 @@ body.nav-locked .notice-pill { display: none; }
 .sh-home-chats button:hover:not(:disabled) { background: var(--panel-2);
   filter: none; transform: none; }
 
+/* ---- ask_user / permission card (AskUser.jsx), above the composer ---- */
+.sh-ask { flex-shrink: 0; padding: 0 var(--sp-9); max-height: 55vh; overflow-y: auto; }
+.sh-ask:empty { display: none; }
+.sh-ask > .ask-card { max-width: var(--measure); margin: 0 auto 10px; }
+
 /* ---- composer ---- */
 .sh-composer { flex-shrink: 0; padding: 0 var(--sp-9) calc(var(--sp-8) + var(--sab)); }
 .sh-box {
@@ -3563,6 +3568,7 @@ body.nav-locked .notice-pill { display: none; }
   .sh-head-meta { flex-wrap: wrap; }
   .sh-thread { padding-left: var(--sp-6); padding-right: var(--sp-6); }
   .sh-composer { padding-left: var(--sp-5); padding-right: var(--sp-5); }
+  .sh-ask { padding-left: var(--sp-5); padding-right: var(--sp-5); }
   .sh-scope { max-width: 140px; }
 }
 }

@@ -212,3 +212,45 @@ async def test_the_old_per_feed_endpoints_share_the_code():
     assert await _next(it) == {"type": "player"}, "no tab stamp on a tab's own stream"
     await it.aclose()
     assert gui.tab_list() == []
+
+
+async def test_runs_topic_carries_every_jobs_tree_events_stamped(token):
+    """A JobTree used to hold GET /api/runs/{cid}/stream open per expanded run;
+    now the job's events ride the shared stream, tagged with their job_id."""
+    job = "0123456789abcdef" * 2
+    it = await _open(token, "runs")
+    try:
+        assert await _next(it) == {"topic": "runs", "event": {
+            "type": "stream_open", "channel": "runs"}}
+        bus.publish(job, {"type": "token", "node_id": 5, "content": "x"})  # firehose: dropped
+        bus.publish("agentrun:5", {"type": "tool", "name": "x"})           # not a job channel
+        bus.publish(job, {"type": "node_spawned", "node_id": 5, "parent_id": None})
+        bus.publish(job, bus.JOB_END)                                      # sentinel: dropped
+        bus.publish(job, {"type": "job_final", "job_id": job, "root_id": 5})
+        assert await _next(it) == {"topic": "runs", "event": {
+            "type": "node_spawned", "node_id": 5, "parent_id": None, "job_id": job}}
+        assert (await _next(it))["event"]["type"] == "job_final"
+    finally:
+        await it.aclose()
+    assert bus._taps == {}, "the tap goes with the connection"
+
+
+async def test_runs_topic_says_when_a_chat_turn_or_agent_run_ends(token):
+    """The Outputs tab refreshes a running row on this instead of holding the
+    row's own /api/chat/{cid}/stream or /api/agents/runs/{cid}/stream open."""
+    it = await _open(token, "runs")
+    try:
+        await _next(it)
+        bus.publish("chat:7", {"type": "final", "content": "hi"})   # not an end
+        bus.close_job("chat:7")
+        bus.publish("agentrun:8", bus.JOB_END)
+        bus.close_job("gui")                                         # not a turn
+        bus.close_job("chat:x")
+        assert (await _next(it))["event"] == {"type": "run_end", "conversation_id": 7,
+                                              "kind": "chat"}
+        assert (await _next(it))["event"] == {"type": "run_end", "conversation_id": 8,
+                                              "kind": "agent"}
+        bus.publish("0123456789abcdef" * 2, {"type": "job_final", "root_id": 1})
+        assert (await _next(it))["event"]["type"] == "job_final", "nothing else got through"
+    finally:
+        await it.aclose()
