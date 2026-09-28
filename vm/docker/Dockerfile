@@ -29,9 +29,13 @@ RUN set -eux; \
     mkdir -p /opt/jarvis /home/jav3 /srv; \
     chown 10001:10001 /opt/jarvis /home/jav3 /srv; \
     chmod 0700 /opt/jarvis /home/jav3 /srv; \
+    install -d -o root -g root -m 0755 /usr/local/lib/jav3; \
     find / -xdev -type f -perm /6000 -exec chmod a-s {} + ; \
     echo "jav3-docker-box" > /etc/jarvis-image-version
 
+# the directory exists (0755) BEFORE the COPY: a COPY --chmod that creates its
+# parent gave the directory 0644 too — untraversable, so uid 10001 could not
+# read bootstrap.py and every docker box died at start (2026-09-27, the Pi)
 COPY --chown=root:root --chmod=0644 bootstrap.py /usr/local/lib/jav3/bootstrap.py
 
 USER 10001:10001

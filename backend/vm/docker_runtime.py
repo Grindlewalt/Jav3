@@ -153,6 +153,14 @@ class Isolation:
         return self.userns == "none"
 
 
+# `docker run --memory` is silently ignored when the kernel has the memory
+# cgroup off — Raspberry Pi OS boots with cgroup_disable=memory (2026-09-27)
+NO_MEMORY_LIMIT = ("no memory limits: this kernel has the memory cgroup off, so a "
+                   "box can use all of the host's RAM. On a Raspberry Pi add "
+                   "'cgroup_enable=memory cgroup_memory=1' to /boot/firmware/cmdline.txt "
+                   "and reboot")
+
+
 def plan_isolation(info: DaemonInfo) -> Isolation:
     """Decide runtime + user namespacing, or refuse. Pure (settings only)."""
     warnings: list[str] = []
@@ -179,6 +187,8 @@ def plan_isolation(info: DaemonInfo) -> Isolation:
         if _setting("docker_require_userns", False):
             raise DockerHardeningError(msg)
         warnings.append(msg)
+    if info.raw.get("MemoryLimit") is False:
+        warnings.append(NO_MEMORY_LIMIT)
     return Isolation(oci_runtime=oci, userns=userns, warnings=warnings,
                      apparmor=info.apparmor)
 

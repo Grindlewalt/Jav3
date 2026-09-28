@@ -12,7 +12,7 @@ right:
   3. build the box image from vm/docker unless an image built from this exact
      Dockerfile + entrypoint already exists (label jav3.src.sha), then tag the
      service and builder images from it.
-  4. smoke-test it: a container with no network runs python.
+  4. smoke-test it: as the box user, with no network, read the entrypoint.
   5. switch the runtime on in Jav3's env file: JARVIS_DOCKER_ENABLED and
      JARVIS_VM_BOXES_ENABLED (Docker boxes are boxes).
 
@@ -112,8 +112,12 @@ def smoke(plan: Plan) -> bool:
     plan.say(f"smoke test: a no-network container from {settings.docker_image_turn} runs python")
     if plan.dry:
         return True
-    r = _docker("run", "--rm", "--network", "none", "--entrypoint", "python3",
-                settings.docker_image_turn, "-c", "print('jav3-docker-ok')", timeout=120)
+    # as the box's own user, reading the real entrypoint: the first image ran
+    # python fine as root yet every box died on an unreadable bootstrap.py
+    r = _docker("run", "--rm", "--network", "none", "--user", "10001:10001",
+                "--read-only", "--entrypoint", "python3", settings.docker_image_turn,
+                "-c", "open('/usr/local/lib/jav3/bootstrap.py').read(); print('jav3-docker-ok')",
+                timeout=120)
     if "jav3-docker-ok" not in r.stdout:
         print(f"  FAIL  smoke test: {(r.stderr or r.stdout).strip()[-300:]}")
         return False
@@ -132,6 +136,10 @@ def run(args: list[str]) -> int:
         print(f"  skip  {problem}")
         return 1
     print("  ok    Docker daemon reachable")
+    mem = _docker("info", "--format", "{{.MemoryLimit}}", timeout=20).stdout.strip()
+    if mem == "false":
+        from .vm.docker_runtime import NO_MEMORY_LIMIT
+        print(f"  warn  {NO_MEMORY_LIMIT}")
     if shutil.which("setfacl") is None:
         print("  skip  setfacl not found: install your OS's 'acl' package, then re-run")
         return 1

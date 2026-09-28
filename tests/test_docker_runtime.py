@@ -734,3 +734,12 @@ async def test_availability_off_and_on(dsettings, monkeypatch):
     assert bad["available"] is False and "seccomp" in bad["reason"]
     rt = await dr.runtimes_json()
     assert set(rt) == {"kvm", "docker"} and "available" in rt["kvm"]
+
+
+def test_missing_memory_cgroup_is_a_warning():
+    # Raspberry Pi OS boots with cgroup_disable=memory: --memory is silently ignored
+    from backend.vm import docker_runtime as d
+    info = d.DaemonInfo(seccomp=True, raw={"MemoryLimit": False})
+    assert d.NO_MEMORY_LIMIT in d.plan_isolation(info).warnings
+    ok = d.DaemonInfo(seccomp=True, raw={"MemoryLimit": True})
+    assert d.NO_MEMORY_LIMIT not in d.plan_isolation(ok).warnings
