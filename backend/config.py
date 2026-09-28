@@ -158,6 +158,12 @@ class Settings(BaseSettings):
     # keeps each verdict to a handful of tokens.
     permission_judge_model: str = ""
     permission_judge_max_tokens: int = 5
+    # Grounding (backend/grounding.py): the vision model that turns "the Save
+    # button" into a point on a screenshot. "" = the winner of the last model
+    # finder probe; a "provider/model" pins one. Targets cap the probe's cost.
+    grounding_model: str = ""
+    grounding_probe_targets: int = 60
+    grounding_timeout_s: float = 20.0
     # Flash caps output at 384K (verified accepted by the API on v4, and the
     # v4.1 limit is the same). The old 4096 was a v3-era default: large
     # tool-call payloads (whole-file writes) hit it mid-arguments and
@@ -269,8 +275,9 @@ class Settings(BaseSettings):
     tool_result_keep_recent: int = 2
     # How many recent screenshots stay in-context as real image blocks; older
     # ones become a text stub. Each screenshot is ~1k+ tokens and re-sent every
-    # iteration, so a browsing loop only keeps the CURRENT view by default.
-    screenshot_keep_recent: int = 1
+    # iteration. Three frames let the model compare before/after an action
+    # (docs/navigation-contract.md E); the guest copy must match.
+    screenshot_keep_recent: int = 3
 
     # Dead-end circuit-breaker (the convo-12 post-mortem: 173 tool calls of
     # near-duplicate searches and failing installs, never concluding). After
