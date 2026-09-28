@@ -45,8 +45,9 @@ CONVENTIONS = ("px", "k1000", "unit")
 DEFAULT_CONVENTION = "px"         # what the prompt asks for; a pin with no probe
 UNUSABLE_BELOW = 0.5              # hit rate under which a model is never picked
 EST_TOKENS_IN = 1100              # one screenshot + the prompt
-EST_TOKENS_OUT = 80               # the JSON answer plus a reasoning model's
-                                  # short think (DeepSeek Flash: ~40-60 tokens)
+EST_TOKENS_OUT = 25               # the JSON answer; DeepSeek Flash with thinking
+                                  # off (GROUNDING_EXTRA_DEEPSEEK): 18-21, median
+                                  # 20 over 107 asks (it was ~98 thinking)
 # Output cap per ask. It must cover a reasoning model's thinking as well as the
 # answer: DeepSeek V4.1 Flash thinks for 35-65 tokens before it answers, and at
 # the old cap of 64 a third of its replies were cut off mid-JSON (measured on
@@ -56,6 +57,12 @@ EST_TOKENS_OUT = 80               # the JSON answer plus a reasoning model's
 # thinking and was then right), hence 1536: a few seconds, well inside
 # grounding_timeout_s, and ~$0.001 at Flash prices when it happens.
 MAX_TOKENS = 1536
+# Request fields sent with every grounding ask to a DeepSeek model (and only
+# DeepSeek): thinking off. Pointing at a button needs no reasoning, and the
+# thinking is what ran past MAX_TOKENS and set the p95 latency. Measured on the
+# test box, 2026-09-28, 107 targets: hit rate 0.953 either way, p95 2484 ->
+# 1388 ms, output 10520 -> 2119 tokens, no answer cut off. {} turns it back on.
+GROUNDING_EXTRA_DEEPSEEK: dict = {"thinking": {"type": "disabled"}}
 
 
 @dataclasses.dataclass
@@ -293,6 +300,18 @@ def _conf(v) -> float:
     return max(0.0, min(1.0, c))
 
 
+def _extra_kw(model_id: str) -> dict:
+    """{"extra": GROUNDING_EXTRA_DEEPSEEK} for a DeepSeek model, else {}: other
+    providers may reject a field they do not know."""
+    try:   # a bare id runs on the default provider, as in providers.resolve
+        provider, _ = providers.split_id(providers.canonical(model_id))
+    except providers.ProviderError:
+        return {}
+    if provider == "deepseek" and GROUNDING_EXTRA_DEEPSEEK:
+        return {"extra": GROUNDING_EXTRA_DEEPSEEK}
+    return {}
+
+
 async def _ask(model_id: str, image: bytes, width: int, height: int,
                description: str, op_id: str | None,
                zoom: int = 0, sized: bool = False
@@ -306,7 +325,8 @@ async def _ask(model_id: str, image: bytes, width: int, height: int,
     async def drain() -> str:
         parts = []
         async for ev in model.complete(messages, model_name=model_id, op_id=op_id,
-                                       temperature=0, max_tokens=MAX_TOKENS):
+                                       temperature=0, max_tokens=MAX_TOKENS,
+                                       **_extra_kw(model_id)):
             if ev.get("type") == "message":
                 parts.append(ev.get("content") or "")
         return "".join(parts)

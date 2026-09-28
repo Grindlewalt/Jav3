@@ -609,3 +609,55 @@ async def test_probe_script_dry_run_and_real_run_never_print_a_key(
     assert "misses for p/err" in out and "grounding.json written" in out
     assert (tmp_path / "s" / "grounding.json").exists()
     assert (tmp_path / "s" / "ledger.db").exists()      # the ledger moved too
+
+
+# --- thinking off for DeepSeek (the `extra` seam in agent/model.py) ----------------
+
+def _capture_payloads(monkeypatch, reply='{"x": 10, "y": 20, "confidence": 0.9}'):
+    sent = []
+
+    async def fake_stream(self, base, key, payload):
+        sent.append({"base": base, "payload": payload})
+        yield {"type": "raw", "content": reply, "tool_calls": [], "usage": None}
+
+    monkeypatch.setattr(model_mod.ModelClient, "_stream_once", fake_stream)
+    return sent
+
+
+def test_extra_only_for_deepseek(tmp_env):
+    assert grounding._extra_kw("deepseek/deepseek-flash") == {
+        "extra": {"thinking": {"type": "disabled"}}}
+    assert grounding._extra_kw("openai/gpt-5-mini") == {}
+    assert grounding._extra_kw("anthropic/claude-x") == {}
+    assert grounding._extra_kw("") == {}
+
+
+async def test_ask_sends_thinking_disabled_to_deepseek(tmp_env, monkeypatch):
+    sent = _capture_payloads(monkeypatch)
+    monkeypatch.setattr(model_mod, "model", model_mod.ModelGateway(api_key="test"))
+    ans, _ms, _size = await grounding._ask("deepseek/deepseek-flash",
+                                           gf.fixture(0)["png"], 1280, 800,
+                                           "the Run button", None)
+    assert ans[:2] == (10, 20)
+    p = sent[0]["payload"]
+    assert p["thinking"] == {"type": "disabled"}
+    assert p["model"] == "deepseek-flash" and p["stream"] is True
+    assert p["max_tokens"] == grounding.MAX_TOKENS
+
+
+async def test_client_extra_merges_but_never_overrides_protected(tmp_env, monkeypatch):
+    sent = _capture_payloads(monkeypatch)
+    m = model_mod.ModelClient(api_key="test")
+    msgs = [{"role": "user", "content": "x"}]
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    extra = {"model": "evil", "messages": [], "stream": False, "tools": [],
+             "thinking": {"type": "disabled"}, "max_tokens": 7}
+    [ev async for ev in m.complete(msgs, tools=tools, model_name="deepseek-flash",
+                                   extra=extra)]
+    p = sent[0]["payload"]
+    assert p["model"] == "deepseek-flash" and p["stream"] is True
+    assert p["tools"] == tools and p["messages"][0]["content"] == "x"
+    assert p["thinking"] == {"type": "disabled"} and p["max_tokens"] == 7
+    # no extra = today's payload, no thinking field
+    [ev async for ev in m.complete(msgs, model_name="deepseek-flash")]
+    assert "thinking" not in sent[1]["payload"]

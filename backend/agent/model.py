@@ -183,6 +183,7 @@ class ModelClient:
         base_url: str | None = None,
         key: str | None = None,
         max_tokens: int | None = None,
+        extra: dict | None = None,
     ) -> AsyncIterator[dict]:
         """Stream {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} with any DSML
@@ -219,6 +220,7 @@ class ModelClient:
             key_name = ("max_completion_tokens" if "max_completion_tokens" in payload
                         else "max_tokens")
             payload[key_name] = max_tokens
+        _merge_extra(payload, extra)
 
         # Transient failures (connect errors, 5xx) retry with backoff — but only
         # while nothing has streamed to the caller yet (adapters.retrying).
@@ -325,6 +327,20 @@ def _shape_for_provider(payload: dict, base: str, name: str) -> None:
         payload.pop("stream_options", None)   # reports usage on the last chunk anyway
 
 
+# Request fields a caller's `extra` may never replace: they are what the call
+# IS (which model, which conversation, streamed, which tools).
+_PROTECTED = frozenset({"model", "messages", "stream", "tools"})
+
+
+def _merge_extra(payload: dict, extra: dict | None) -> None:
+    """Provider-specific request fields from the caller (grounding turns
+    DeepSeek's thinking off with {"thinking": {"type": "disabled"}}), merged
+    last so they win over the shaping above, except for _PROTECTED keys."""
+    for k, v in (extra or {}).items():
+        if k not in _PROTECTED:
+            payload[k] = v
+
+
 # Back-compat alias: tests construct Model(api_key=...) and patch Model._stream_once.
 Model = ModelClient
 
@@ -378,12 +394,17 @@ class ModelGateway:
         base_url: str | None = None,
         op_id: str | None = None,
         max_tokens: int | None = None,
+        extra: dict | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} (+ an opaque
         `provider_blocks` for adapters that need replay state). Raises
         BudgetExceeded / ModelError before any
         network I/O.
+
+        `extra` = provider-specific request fields merged into an
+        OpenAI-compatible payload (ModelClient, via _merge_extra); the caller
+        sends only fields that provider accepts.
 
         model_name is `provider/model` (a bare id runs on the default model's
         provider); None = the default model. base_url pins an allowlisted
@@ -404,6 +425,8 @@ class ModelGateway:
         if route.key_error:
             raise ModelError(route.key_error)
 
+        # `extra` is OpenAI-wire only: the anthropic/google adapters build their
+        # own request shapes and ignore it.
         if route.kind == "anthropic":
             stream = adapters.anthropic_complete(route, messages, tools, temperature)
         elif route.kind == "google":
@@ -415,7 +438,8 @@ class ModelGateway:
             stream = self.transport.complete(
                 messages, tools=tools, temperature=temperature,
                 model_name=route.model, base_url=base, key=route.key,
-                **({"max_tokens": max_tokens} if max_tokens else {}))
+                **({"max_tokens": max_tokens} if max_tokens else {}),
+                **({"extra": extra} if extra else {}))
 
         final: dict | None = None
         try:
