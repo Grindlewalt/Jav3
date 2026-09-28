@@ -18,4 +18,4 @@ parameters:
       description: Which connected browser (name). Omit when only one is connected.
   required: [tab, element]
 ---
-Read the page again afterwards to see what changed. Clicking into a cross-origin iframe on a different site than the tab asks the operator to allow that site too. If the click opens a popup (window.open / OAuth chooser), Jav3 adopts it and reports its tab number.
+The result ends with `changed: yes/no` (whether the page text or its controls changed once it settled); read the page again to see what changed. An id that has left the page returns "no longer on the page — browser_read_page again". Clicking into a cross-origin iframe on a different site than the tab asks the operator to allow that site too. If the click opens a popup (window.open / OAuth chooser), Jav3 adopts it and reports its tab number.
