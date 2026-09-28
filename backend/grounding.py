@@ -45,8 +45,17 @@ CONVENTIONS = ("px", "k1000", "unit")
 DEFAULT_CONVENTION = "px"         # what the prompt asks for; a pin with no probe
 UNUSABLE_BELOW = 0.5              # hit rate under which a model is never picked
 EST_TOKENS_IN = 1100              # one screenshot + the prompt
-EST_TOKENS_OUT = 24               # {"x": 640, "y": 410, "confidence": 0.9}
-MAX_TOKENS = 64
+EST_TOKENS_OUT = 80               # the JSON answer plus a reasoning model's
+                                  # short think (DeepSeek Flash: ~40-60 tokens)
+# Output cap per ask. It must cover a reasoning model's thinking as well as the
+# answer: DeepSeek V4.1 Flash thinks for 35-65 tokens before it answers, and at
+# the old cap of 64 a third of its replies were cut off mid-JSON (measured on
+# the test box, 2026-09-27: 15/40 "no point", every one truncated). A model that
+# does not think stops at ~25 tokens anyway, so a generous cap costs nothing.
+# 512 still cut off the odd hard target (a calendar day took ~1000 tokens of
+# thinking and was then right), hence 1536: a few seconds, well inside
+# grounding_timeout_s, and ~$0.001 at Flash prices when it happens.
+MAX_TOKENS = 1536
 
 
 @dataclasses.dataclass
@@ -180,16 +189,40 @@ PROMPT = (
     'If the element is not visible, answer {{"x": null, "y": null, "confidence": 0}}.\n\n'
     "Element: {description}")
 
+# With refine on, pass one also asks for the element's size, which gates the
+# second pass. Measured on Flash it costs accuracy of its own: asking for the
+# size makes it think longer, and 5/107 answers ran out of MAX_TOKENS in
+# thought (pass one 99/107 against 102/107 with PROMPT).
+PROMPT_SIZED = (
+    "You are a GUI grounding model. The screenshot is {w}x{h} pixels. Find the "
+    "one on-screen element described below and give the point to click: the "
+    "CENTRE of the element's box, in pixels of this image, measured from the "
+    "top-left corner, and the box's width and height in pixels.\n"
+    "Answer with ONE JSON object and nothing else:\n"
+    '{{"x": <int>, "y": <int>, "w": <int>, "h": <int>, "confidence": <0..1>}}\n'
+    'If the element is not visible, answer {{"x": null, "y": null, "confidence": 0}}.\n\n'
+    "Element: {description}")
+
 SYSTEM = "You locate UI elements on screenshots. Reply with JSON only."
 
 
-def _messages(image: bytes, width: int, height: int, description: str) -> list[dict]:
+ZOOM_NOTE = (
+    "This image is a {scale}x enlargement of a small part of a larger screenshot, "
+    "cut around where the element probably is. It may be off-centre or cut by "
+    "the edge. Answer in pixels of THIS image.\n")
+
+
+def _messages(image: bytes, width: int, height: int, description: str,
+              zoom: int = 0, sized: bool = False) -> list[dict]:
     from .agent import imageresult
     mime = imageresult.sniff(image)
     if mime is None:
         raise ValueError("not an image (PNG, JPEG, WebP or GIF bytes expected)")
     b64 = base64.b64encode(image).decode()
-    text = PROMPT.format(w=width, h=height, description=description.strip()[:300])
+    text = (PROMPT_SIZED if sized else PROMPT).format(
+        w=width, h=height, description=description.strip()[:300])
+    if zoom:
+        text = ZOOM_NOTE.format(scale=zoom) + text
     # the same shape as loop._image_message: a user message whose content is a
     # text part plus an image_url data-URI part
     return [{"role": "system", "content": SYSTEM},
@@ -230,6 +263,26 @@ def parse_answer(text: str) -> tuple[float, float, float] | None:
     return None
 
 
+def parse_size(text: str) -> tuple[float, float] | None:
+    """The element's (w, h) from the first JSON object that has both, raw in
+    the model's convention; None when it gave none."""
+    for m in re.finditer(r"\{[^{}]*\}", text or ""):
+        try:
+            obj = json.loads(m.group(0))
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        w, h = obj.get("w", obj.get("width")), obj.get("h", obj.get("height"))
+        try:
+            w, h = float(w), float(h)
+        except (TypeError, ValueError):
+            continue
+        if w > 0 and h > 0:
+            return w, h
+    return None
+
+
 def _conf(v) -> float:
     try:
         c = float(v)
@@ -241,11 +294,14 @@ def _conf(v) -> float:
 
 
 async def _ask(model_id: str, image: bytes, width: int, height: int,
-               description: str, op_id: str | None) -> tuple[tuple | None, int]:
-    """One gateway call, drained. (parsed answer or None, latency ms). Raises
-    whatever the gateway raises, or asyncio.TimeoutError."""
+               description: str, op_id: str | None,
+               zoom: int = 0, sized: bool = False
+               ) -> tuple[tuple | None, int, tuple | None]:
+    """One gateway call, drained. (parsed answer or None, latency ms, raw
+    element size or None). Raises whatever the gateway raises, or
+    asyncio.TimeoutError."""
     from .agent.model import model
-    messages = _messages(image, width, height, description)
+    messages = _messages(image, width, height, description, zoom, sized)
 
     async def drain() -> str:
         parts = []
@@ -257,19 +313,123 @@ async def _ask(model_id: str, image: bytes, width: int, height: int,
 
     t0 = time.monotonic()
     text = await asyncio.wait_for(drain(), timeout=settings.grounding_timeout_s)
-    return parse_answer(text), int((time.monotonic() - t0) * 1000)
+    return (parse_answer(text), int((time.monotonic() - t0) * 1000),
+            parse_size(text))
+
+
+# --- two-pass refine ------------------------------------------------------------------
+#
+# The first answer is usually on the right element or one neighbour away: the
+# misses measured on DeepSeek V4.1 Flash were all 22-px glyph icons in a row,
+# pointed one or two icons off. The second pass cuts REFINE_CROP around the
+# first point, enlarges it REFINE_SCALE times (Pillow) and asks again; the
+# answer maps back into the full image. If the second pass fails, finds
+# nothing or Pillow is missing, the first answer stands.
+#
+# Only for SMALL elements (the first pass's own w/h, both <= REFINE_MAX_SIDE):
+# refining everything was measured worse (0.953 -> 0.907 on 107 targets) —
+# a 520-px text field does not fit a 320-px crop, and without its surroundings
+# the model points at the label above it. Gated, it fixed 3 and broke 1 of
+# 38 refined, but pass one needs PROMPT_SIZED for the gate and that prompt
+# lost more than refine won back (0.944 vs 0.953, p95 7.0 s vs 2.5 s, 1.8x
+# the tokens), so it is off by default: locate(refine=True) or
+# `scripts/grounding_probe.py --refine` to measure it on another model.
+
+REFINE = False                    # locate()'s default (measured: see above)
+REFINE_CROP = (320, 200)          # px of the image passed to locate()
+REFINE_SCALE = 4
+REFINE_MAX_SIDE = 48              # px; larger (or unsized) elements keep pass one
+
+
+def _small(size: tuple | None, conv: str, width: int, height: int) -> bool:
+    """Whether a first-pass element size (raw, in `conv`) is small enough to
+    refine."""
+    if not size:
+        return False
+    if conv == "k1000":
+        w, h = size[0] * width / 1000.0, size[1] * height / 1000.0
+    elif conv == "unit":
+        w, h = size[0] * width, size[1] * height
+    else:
+        w, h = size
+    return 0 < w <= REFINE_MAX_SIDE and 0 < h <= REFINE_MAX_SIDE
+
+
+def _zoom(image: bytes, width: int, height: int, x: int, y: int
+          ) -> tuple[bytes, int, int, int, int] | None:
+    """(png of the enlarged crop, x0, y0, crop w, crop h) in the coordinates
+    of a `width` x `height` image, around (x, y); None without Pillow or for
+    bytes Pillow cannot read."""
+    try:
+        import io
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        im = Image.open(io.BytesIO(image))
+        im.load()
+    except Exception:  # noqa: BLE001 — not decodable: skip the refine
+        return None
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+    cw, ch = min(REFINE_CROP[0], width), min(REFINE_CROP[1], height)
+    x0 = max(0, min(width - cw, x - cw // 2))
+    y0 = max(0, min(height - ch, y - ch // 2))
+    # the bytes may not be exactly width x height (a client that sent a
+    # scaled capture); crop in the image's own pixels
+    sx, sy = im.width / width, im.height / height
+    crop = im.crop((int(x0 * sx), int(y0 * sy), int((x0 + cw) * sx), int((y0 + ch) * sy)))
+    crop = crop.resize((cw * REFINE_SCALE, ch * REFINE_SCALE), Image.LANCZOS)
+    buf = io.BytesIO()
+    crop.save(buf, format="PNG")
+    return buf.getvalue(), x0, y0, cw, ch
+
+
+async def _refine(model_id: str, conv: str, image: bytes, width: int, height: int,
+                  x: int, y: int, description: str, op_id: str | None
+                  ) -> tuple[int, int, float, int] | None:
+    """Second pass around (x, y): (x, y, confidence, ms) in image pixels, or
+    None (no Pillow, not found in the crop, or an answer outside it). Raises
+    what _ask raises."""
+    z = _zoom(image, width, height, x, y)
+    if z is None:
+        return None
+    png, x0, y0, cw, ch = z
+    zw, zh = cw * REFINE_SCALE, ch * REFINE_SCALE
+    ans, ms, _size = await _ask(model_id, png, zw, zh, description, op_id,
+                                zoom=REFINE_SCALE)
+    if ans is None:
+        return None
+    rx, ry, conf = ans
+    zx, zy = to_pixels(rx, ry, conv, zw, zh)
+    return (max(0, min(width - 1, x0 + int(round(zx / REFINE_SCALE)))),
+            max(0, min(height - 1, y0 + int(round(zy / REFINE_SCALE)))), conf, ms)
+
+
+def _to_raw(x: int, y: int, convention: str, width: int, height: int) -> tuple[float, float]:
+    """The inverse of to_pixels (for the probe's refined answers)."""
+    if convention == "k1000":
+        return x * 1000.0 / width, y * 1000.0 / height
+    if convention == "unit":
+        return x / width, y / height
+    return float(x), float(y)
 
 
 async def locate(image: bytes, width: int, height: int, description: str,
-                 *, op_id: str | None = None) -> Located | None:
+                 *, op_id: str | None = None, refine: bool | None = None) -> Located | None:
     """Ground `description` on `image` (PNG/JPEG bytes, `width` x `height`).
     Returns None when the model answered but could not find it, or the call
     failed or timed out (logged); raises NotConfigured when there is no model
-    to ask. A spent budget (BudgetExceeded) propagates like any model call."""
+    to ask. A spent budget (BudgetExceeded) propagates like any model call.
+    `refine` (default REFINE) asks pass one for the element's size too and
+    adds the zoomed second pass for small elements; its latency is included
+    in latency_ms."""
     model_id, conv = _resolve()
     from .agent import budget as budget_mod
     try:
-        ans, ms = await _ask(model_id, image, width, height, description, op_id)
+        do_refine = REFINE if refine is None else refine
+        ans, ms, size = await _ask(model_id, image, width, height, description, op_id,
+                                   sized=do_refine)
     except budget_mod.BudgetExceeded:
         raise
     except asyncio.TimeoutError:
@@ -283,6 +443,19 @@ async def locate(image: bytes, width: int, height: int, description: str,
         return None
     rx, ry, conf = ans
     x, y = to_pixels(rx, ry, conv, width, height)
+    if do_refine and _small(size, conv, width, height):
+        try:
+            r = await _refine(model_id, conv, image, width, height, x, y,
+                              description, op_id)
+        except budget_mod.BudgetExceeded:
+            raise
+        except Exception as e:  # noqa: BLE001 — incl. timeout: the first answer stands
+            log.info("grounding: refine on %s failed: %s", model_id, str(e)[:200] or
+                     type(e).__name__)
+            r = None
+        if r is not None:
+            x, y, conf, ms2 = r
+            ms += ms2
     return Located(x=x, y=y, confidence=conf, model=model_id, convention=conv,
                    latency_ms=ms)
 
@@ -403,21 +576,45 @@ def rank(rows: list[dict]) -> list[dict]:
 
 
 async def _probe_one(job: dict, model_id: str, fixtures: list[dict],
-                     order: list[tuple[int, int]], on_step=None) -> dict:
+                     order: list[tuple[int, int]], on_step=None,
+                     refine: bool = False) -> dict:
     """Ask `model_id` every target in `order`; the ranking row. `on_step`, if
     given, is called after each target with a dict {model, fixture,
-    description, box, size, answer (raw rx, ry, conf or None), ms, error}."""
+    description, box, size, answer (raw rx, ry, conf or None), first (the
+    first-pass answer; differs from answer only with refine), ms, error}.
+
+    refine=True measures what locate() does with its second pass: the refined
+    point is handed back in the model's stored convention (px when it has
+    none), so convention detection only works on a model already probed."""
     from .agent import budget as budget_mod
     answers, boxes, sizes, lat = [], [], [], []
     errors, last_error = 0, None
+    conv = DEFAULT_CONVENTION
+    if refine:
+        e = _entry(_load(), model_id)
+        if e and e.get("convention") in CONVENTIONS:
+            conv = e["convention"]
     for fi, ti in order:
         f = fixtures[fi]
         t = f["targets"][ti]
         job["current"] = f"{model_id} · {f['name']}"
-        ans, ms, err = None, None, None
+        ans, first, ms, err = None, None, None, None
         try:
-            ans, ms = await _ask(model_id, f["png"], f["w"], f["h"],
-                                 t["description"], None)
+            ans, ms, size = await _ask(model_id, f["png"], f["w"], f["h"],
+                                       t["description"], None, sized=refine)
+            first = ans
+            if refine and ans is not None and _small(size, conv, f["w"], f["h"]):
+                x, y = to_pixels(ans[0], ans[1], conv, f["w"], f["h"])
+                try:
+                    r = await _refine(model_id, conv, f["png"], f["w"], f["h"], x, y,
+                                      t["description"], None)
+                except (asyncio.CancelledError, budget_mod.BudgetExceeded):
+                    raise
+                except Exception:  # noqa: BLE001 — as in locate(): the first answer stands
+                    r = None
+                if r is not None:
+                    ans = (*_to_raw(r[0], r[1], conv, f["w"], f["h"]), r[2])
+                    ms += r[3]
             lat.append(ms)
         except asyncio.CancelledError:
             raise
@@ -437,12 +634,13 @@ async def _probe_one(job: dict, model_id: str, fixtures: list[dict],
         if on_step is not None:
             on_step({"model": model_id, "fixture": f["name"],
                      "description": t["description"], "box": tuple(t["box"]),
-                     "size": (f["w"], f["h"]), "answer": ans, "ms": ms, "error": err})
+                     "size": (f["w"], f["h"]), "answer": ans, "first": first,
+                     "ms": ms, "error": err})
     return score_model(model_id, answers, boxes, sizes, lat, errors, last_error)
 
 
 async def run_probe(models: list[str] | None = None, *, targets: int | None = None,
-                    on_step=None, save: bool = True) -> list[dict]:
+                    on_step=None, save: bool = True, refine: bool = False) -> list[dict]:
     """The model finder in the foreground (scripts/grounding_probe.py): probe
     `models` (default: every candidate) on the first `targets` targets
     (default settings.grounding_probe_targets), write the ranking to
@@ -464,7 +662,7 @@ async def run_probe(models: list[str] | None = None, *, targets: int | None = No
     fixtures = gf.fixtures()
     order = _targets(fixtures, settings.grounding_probe_targets if targets is None else targets)
     job = {"done": 0, "current": None}
-    rows = [await _probe_one(job, mid, fixtures, order, on_step) for mid in chosen]
+    rows = [await _probe_one(job, mid, fixtures, order, on_step, refine) for mid in chosen]
     ranking = rank(rows)
     if save:
         st = _load()

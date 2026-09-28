@@ -168,12 +168,13 @@ async def test_locate_uses_winner_and_its_convention(tmp_env, monkeypatch):
     monkeypatch.setattr(model_mod.model, "complete",
                         _fake_complete('ok {"x": 500, "y": 250, "confidence": 0.7}', seen))
     png = gf.fixture(0)["png"]
-    loc = await grounding.locate(png, 1280, 800, "the Run button", op_id="op1")
+    loc = await grounding.locate(png, 1280, 800, "the Run button", op_id="op1",
+                                 refine=False)
     assert (loc.x, loc.y, loc.confidence) == (640, 200, 0.7)
     assert loc.model == "p/good" and loc.convention == "k1000"
     call = seen[0]
     assert call["model_name"] == "p/good" and call["op_id"] == "op1"
-    assert call["temperature"] == 0 and call["max_tokens"] == 64
+    assert call["temperature"] == 0 and call["max_tokens"] == grounding.MAX_TOKENS >= 256
     user = call["messages"][-1]
     assert user["role"] == "user" and user["content"][0]["type"] == "text"
     assert "the Run button" in user["content"][0]["text"]
@@ -187,10 +188,10 @@ async def test_locate_pin_wins_and_config_wins_over_pin(tmp_env, monkeypatch):
     seen = []
     monkeypatch.setattr(model_mod.model, "complete",
                         _fake_complete('{"x": 10, "y": 20}', seen))
-    loc = await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    loc = await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x", refine=False)
     assert loc.model == "p/other" and loc.convention == "px" and (loc.x, loc.y) == (10, 20)
     monkeypatch.setattr(settings, "grounding_model", "q/cfg")
-    loc = await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    loc = await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x", refine=False)
     assert loc.model == "q/cfg"
     assert grounding.status()["pinned_by"] == "config"
 
@@ -211,6 +212,149 @@ async def test_locate_not_found_and_failures_return_none(tmp_env, monkeypatch):
     monkeypatch.setattr(settings, "grounding_timeout_s", 0.05)
     monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x":1,"y":1}', delay=1))
     assert await grounding.locate(png, 1280, 800, "x") is None
+
+
+# --- the zoomed second pass ---------------------------------------------------------------
+
+@pytest.mark.parametrize("text,want", [
+    ('{"x": 5, "y": 6, "w": 22, "h": 20, "confidence": 1}', (22.0, 20.0)),
+    ('{"x": 5, "y": 6, "width": 40, "height": 30}', (40.0, 30.0)),
+    ('{"x": 5, "y": 6, "confidence": 1}', None),
+    ('{"x": 5, "y": 6, "w": 0, "h": 9}', None),
+    ('', None),
+])
+def test_parse_size(text, want):
+    assert grounding.parse_size(text) == want
+
+
+def test_prompt_asks_for_the_size_only_when_refining():
+    png = gf.fixture(0)["png"]
+    text = grounding._messages(png, 1280, 800, "Save")[-1]["content"][0]["text"]
+    assert '"w"' not in text and text.endswith("Element: Save")
+    sized = grounding._messages(png, 1280, 800, "Save", sized=True)[-1]["content"][0]["text"]
+    assert "CENTRE" in sized and '"w"' in sized and sized.endswith("Element: Save")
+    z = grounding._messages(png, 1280, 800, "Save", zoom=4)
+    assert "4x enlargement" in z[-1]["content"][0]["text"]
+
+
+async def test_locate_default_is_one_pass(tmp_env, monkeypatch):
+    # the measured winner on DeepSeek V4.1 Flash: one pass, no size asked
+    assert grounding.REFINE is False
+    _write_state({"ranking": [], "pinned": "p/m"})
+    seen = []
+    monkeypatch.setattr(model_mod.model, "complete", _two_pass(
+        '{"x": 100, "y": 20, "w": 22, "h": 22}', '{"x": 440, "y": 88}', seen))
+    loc = await grounding.locate(gf.fixture(3)["png"], 1280, 800, "the undo arrow")
+    assert (loc.x, loc.y) == (100, 20) and len(seen) == 1
+    assert '"w"' not in seen[0]["messages"][-1]["content"][0]["text"]
+
+
+def test_zoom_crop_is_clamped_and_enlarged():
+    import io
+    from PIL import Image
+    png = gf.fixture(0)["png"]
+    got = grounding._zoom(png, 1280, 800, 10, 790)          # bottom-left corner
+    assert got is not None
+    data, x0, y0, cw, ch = got
+    assert (x0, y0, cw, ch) == (0, 600, 320, 200)
+    assert Image.open(io.BytesIO(data)).size == (320 * grounding.REFINE_SCALE,
+                                                  200 * grounding.REFINE_SCALE)
+    assert grounding._zoom(png, 1280, 800, 640, 400)[1:3] == (480, 300)
+    assert grounding._zoom(b"\x89PNG\r\n\x1a\nnot really", 1280, 800, 5, 5) is None
+
+
+def test_small_gate_per_convention():
+    assert grounding._small((22, 22), "px", 1280, 800)
+    assert not grounding._small((520, 34), "px", 1280, 800)
+    assert grounding._small((20, 30), "k1000", 1280, 800)       # 25.6 x 24 px
+    assert not grounding._small((0.3, 0.05), "unit", 1280, 800)
+    assert not grounding._small(None, "px", 1280, 800)
+
+
+def _two_pass(first: str, second, seen: list):
+    """A fake gateway: `first` for the full screenshot, `second` (text, or an
+    exception to raise) for the zoomed crop."""
+    async def complete(messages, **kw):
+        zoomed = "enlargement" in messages[-1]["content"][0]["text"]
+        seen.append({"zoomed": zoomed, "messages": messages, **kw})
+        if zoomed and isinstance(second, Exception):
+            raise second
+        text = second if zoomed else first
+        yield {"type": "message", "content": text, "tool_calls": [], "usage": {}}
+    return complete
+
+
+async def test_locate_refines_a_small_element_and_maps_back(tmp_env, monkeypatch):
+    _write_state({"ranking": [], "pinned": "p/m"})
+    seen = []
+    # pass one: (100, 20), a 22x22 icon; the crop is then x0=0, y0=0 and the
+    # zoomed answer (440, 88) is (110, 22) in the screenshot
+    monkeypatch.setattr(model_mod.model, "complete", _two_pass(
+        '{"x": 100, "y": 20, "w": 22, "h": 22, "confidence": 0.6}',
+        '{"x": 440, "y": 88, "w": 88, "h": 88, "confidence": 0.9}', seen))
+    loc = await grounding.locate(gf.fixture(3)["png"], 1280, 800, "the undo arrow",
+                                 refine=True)
+    assert (loc.x, loc.y, loc.confidence) == (110, 22, 0.9)
+    assert [s["zoomed"] for s in seen] == [False, True]
+    zoom_text = seen[1]["messages"][-1]["content"][0]["text"]
+    assert "1280x800" in zoom_text and "the undo arrow" in zoom_text
+
+    # refine=False: one call, pass one stands
+    seen.clear()
+    loc = await grounding.locate(gf.fixture(3)["png"], 1280, 800, "x", refine=False)
+    assert (loc.x, loc.y) == (100, 20) and len(seen) == 1
+
+
+async def test_locate_keeps_pass_one_for_large_unsized_or_failed(tmp_env, monkeypatch):
+    _write_state({"ranking": [], "pinned": "p/m"})
+    png = gf.fixture(5)["png"]
+    seen = []
+    # a 520-px field is never refined; neither is an answer with no size
+    for first in ('{"x": 640, "y": 191, "w": 520, "h": 34}', '{"x": 640, "y": 191}'):
+        seen.clear()
+        monkeypatch.setattr(model_mod.model, "complete",
+                            _two_pass(first, '{"x": 1, "y": 1}', seen))
+        loc = await grounding.locate(png, 1280, 800, "the Full name field", refine=True)
+        assert (loc.x, loc.y) == (640, 191) and len(seen) == 1
+    # the second pass finds nothing, or fails: pass one stands
+    small = '{"x": 300, "y": 20, "w": 20, "h": 20, "confidence": 0.7}'
+    for second in ('{"x": null, "y": null, "confidence": 0}',
+                   model_mod.ModelError("boom")):
+        seen.clear()
+        monkeypatch.setattr(model_mod.model, "complete", _two_pass(small, second, seen))
+        loc = await grounding.locate(png, 1280, 800, "an icon", refine=True)
+        assert (loc.x, loc.y, loc.confidence) == (300, 20, 0.7) and len(seen) == 2
+
+
+async def test_locate_refine_in_k1000(tmp_env, monkeypatch):
+    _write_state({"ranking": [{"model": "p/k", "hit_rate": 0.9, "unusable": False,
+                               "convention": "k1000"}], "pinned": ""})
+    seen = []
+    # pass one: k1000 (500, 500) = (640, 400), 16x16 px; crop x0=480 y0=300;
+    # zoomed k1000 (250, 750) = (320, 600) of 1280x800 = (80, 150) in the crop
+    monkeypatch.setattr(model_mod.model, "complete", _two_pass(
+        '{"x": 500, "y": 500, "w": 12.5, "h": 20}',
+        '{"x": 250, "y": 750}', seen))
+    loc = await grounding.locate(gf.fixture(0)["png"], 1280, 800, "a checkbox", refine=True)
+    assert (loc.x, loc.y) == (560, 450) and loc.convention == "k1000"
+
+
+async def test_run_probe_refine_reports_first_and_refined(tmp_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(grounding, "STATE_DIR", tmp_path / "s")
+    monkeypatch.setattr(grounding, "candidates",
+                        lambda: [{"id": "p/m", "label": "p/m", "price_in": None,
+                                  "price_out": None}])
+    seen = []
+    monkeypatch.setattr(model_mod.model, "complete", _two_pass(
+        '{"x": 100, "y": 20, "w": 22, "h": 22}', '{"x": 440, "y": 88}', seen))
+    steps = []
+    await grounding.run_probe(["p/m"], targets=3, on_step=steps.append, refine=True)
+    assert len(seen) == 6
+    assert steps[0]["first"][:2] == (100.0, 20.0) and steps[0]["answer"][:2] == (110.0, 22.0)
+    seen.clear()
+    steps.clear()
+    await grounding.run_probe(["p/m"], targets=3, on_step=steps.append)
+    assert len(seen) == 3 and steps[0]["answer"] is steps[0]["first"]
 
 
 # --- candidates + probe ------------------------------------------------------------------
@@ -299,7 +443,7 @@ async def test_probe_ranks_and_writes_state(tmp_env, monkeypatch):
     assert [x["model"] for x in r][0] == "p/good"
     good = r[0]
     assert good["convention"] == "k1000" and good["hit_rate"] == 1.0
-    assert good["cost_per_1k"] == round((1100 * 1.0 + 24 * 2.0) / 1e6 * 1000, 4)
+    assert good["cost_per_1k"] == round((grounding.EST_TOKENS_IN * 1.0 + grounding.EST_TOKENS_OUT * 2.0) / 1e6 * 1000, 4)
     bad = next(x for x in r if x["model"] == "p/bad")
     err = next(x for x in r if x["model"] == "p/err")
     assert bad["unusable"] and err["unusable"]

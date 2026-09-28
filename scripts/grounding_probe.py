@@ -151,6 +151,28 @@ def _misses(steps: list[dict], ranking: list[dict], limit: int) -> None:
             say(f"  {s['fixture']:<20} '{s['description'][:60]}'  box ({x},{y} {bw}x{bh})  {where}")
 
 
+def _refine_effect(steps: list[dict], ranking: list[dict]) -> None:
+    """With --refine: pass one alone vs with the second pass, per model."""
+    conv = {r["model"]: r["convention"] for r in ranking}
+    say("")
+    for mid, c in conv.items():
+        rows = [s for s in steps if s["model"] == mid]
+        first = final = fixed = broken = refined = 0
+        for s in rows:
+            w, h = s["size"]
+            hits = []
+            for ans in (s.get("first"), s["answer"]):
+                pt = None if ans is None else grounding.to_pixels(ans[0], ans[1], c, w, h)
+                hits.append(gf.score(pt, s["box"])[0])
+            first += hits[0]
+            final += hits[1]
+            refined += s.get("first") is not s["answer"]
+            fixed += hits[1] and not hits[0]
+            broken += hits[0] and not hits[1]
+        say(f"refine on {mid}: pass one {first}/{len(rows)}, with refine {final}/{len(rows)} "
+            f"({refined} refined: {fixed} fixed, {broken} broken)")
+
+
 async def _ledger_cost(db_path: Path) -> str:
     import aiosqlite
     try:
@@ -176,6 +198,8 @@ async def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--state-dir", type=Path)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--misses", type=int, default=8, help="misses to show per model")
+    ap.add_argument("--refine", action="store_true",
+                    help="measure locate()'s zoomed second pass too (twice the calls)")
     a = ap.parse_args(argv)
 
     _SECRETS[:] = _keys()
@@ -206,18 +230,24 @@ async def main(argv: list[str] | None = None) -> int:
         ans = s["answer"]
         raw = ("err: " + s["error"][:60]) if s["error"] else \
             ("none" if ans is None else f"({ans[0]:g},{ans[1]:g})")
+        first = s.get("first")
+        if first is not None and first is not ans:
+            raw = f"({first[0]:g},{first[1]:g}) refined {raw}"
         say(f"[{len(steps)}] {s['model']} {n}/{a.targets} {s['fixture']}: "
             f"{s['description'][:40]!r} -> {raw} {s['ms'] or '-'}ms")
 
     say("")
     try:
-        ranking = await grounding.run_probe(a.models, targets=a.targets, on_step=on_step)
+        ranking = await grounding.run_probe(a.models, targets=a.targets, on_step=on_step,
+                                            refine=a.refine)
     except (ValueError, grounding.NotConfigured, gf.FixturesUnavailable) as e:
         say(f"probe refused: {e}")
         return 2
     say(f"\nprobe took {time.monotonic() - t0:.0f}s")
     _table(ranking)
     _misses(steps, ranking, a.misses)
+    if a.refine:
+        _refine_effect(steps, ranking)
     lat = [s["ms"] for s in steps if s["ms"]]
     if lat:
         say(f"\nlatency: median {statistics.median(lat):.0f} ms over {len(lat)} answers")
