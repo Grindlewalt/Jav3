@@ -18,7 +18,9 @@ def _words(s):
 
 
 def test_word_budget():
-    assert 80 < _words(navplaybook.desk_block()) <= 220
+    assert 80 < _words(navplaybook.desk_block()) <= 230
+    assert "never use shell or other tools to change the computer's state" \
+        in navplaybook.desk_block()
     assert 80 < _words(navplaybook.browser_block()) <= 220
     for block in (navplaybook.desk_block(), navplaybook.browser_block()):
         assert "#" not in block  # plain prose, no markdown headers

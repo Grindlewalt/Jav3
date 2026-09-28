@@ -519,11 +519,11 @@ def _tainted(op: str | None) -> bool:
     return bool(op) and broker.op_tainted(op)
 
 
-def _taint() -> None:
+def _taint(source: str = "desk") -> None:
     op = budget_mod.active_op_id.get()
     if op:
         from .vm import broker
-        broker.mark_tainted(str(op))
+        broker.mark_tainted(str(op), source)
 
 
 def _rate(q: collections.deque, per_s: int) -> bool:

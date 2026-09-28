@@ -901,7 +901,7 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
                              "wait for it", project, kind="browser_rate_limited")
     b.busy = True
     b.last_action_at = time.time()
-    desk._taint()     # whatever comes back was written by some web page
+    desk._taint("browser")     # whatever comes back was written by some web page
     try:
         res = await _call(b, verb, p)
     except BrowserError as e:

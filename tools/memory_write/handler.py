@@ -2,7 +2,8 @@ import re
 
 from backend import secrets as secrets_mod
 from backend.memory import notes_dir, parse_note
-from backend.runtime import write_taint
+from backend.memory import weakening_advice
+from backend.runtime import nav_taint, write_taint
 
 
 def _safe_name(name: str) -> str:
@@ -30,6 +31,24 @@ def _with_frontmatter(description: str | None, body: str, taint: str | None = No
     return "---\n" + "\n".join(lines) + "\n---\n" + body.rstrip() + "\n"
 
 
+async def _refused_event(note: str, src: str, hit: str) -> None:
+    try:
+        from backend import security
+        from backend.db import get_db
+        db = await get_db()
+        try:
+            await security.raise_event(
+                db, kind="memory_refused", severity="warn",
+                summary=f"memory note '{note}' refused: written after reading a "
+                        f"{'screen' if src == 'desk' else 'web page'}, it recommends "
+                        "weakening a guard",
+                detail={"note": note, "source": src, "match": hit[:120]})
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — the refusal stands even if the alert fails
+        pass
+
+
 async def run(name: str, content: str, mode: str = "append",
               description: str | None = None) -> str:
     notes = notes_dir()
@@ -49,6 +68,16 @@ async def run(name: str, content: str, mode: str = "append",
                     "list notes with memory_read first")
         path.unlink()
         return f"memory note '{path.stem}' deleted"
+    src = nav_taint.get()
+    hit = weakening_advice(f"{description or ''}\n{content}") if src else None
+    if hit:
+        # refused, not quarantined: a screen or a page talked this turn into
+        # recommending a weaker guard (the live trial's "turn shell on" note)
+        await _refused_event(path.stem, src, hit)
+        return ("error: refused — this turn read a " + ("screen" if src == "desk" else "web page")
+                + f" and the note recommends weakening a guard (\"{hit[:60]}\"). "
+                "Tell the operator what you needed instead; changing Jav3's "
+                "permissions is their call, made in Settings.")
     op_taint = write_taint.get()
     if mode == "replace" or not path.exists():
         # taint is STICKY: a clean-turn replace of an already-tainted note keeps
