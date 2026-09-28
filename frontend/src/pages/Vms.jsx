@@ -127,6 +127,7 @@ export function Boxes() {
                   <span className="dim small">
                     {KIND_TEXT[b.kind] || b.kind}
                     {b.project ? ` · ${b.project}` : ''}
+                    {b.joined?.length ? ` · shared with ${b.joined.join(', ')}` : ''}
                     {b.state === 'running' && b.inflight > 0 ? ` · ${b.inflight} turn(s) now` : ''}
                     {b.state !== 'running' ? ` · ${b.state}` : ''}
                   </span>

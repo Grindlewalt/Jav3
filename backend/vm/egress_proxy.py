@@ -148,7 +148,21 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
             att["box_id"] = boxes.SHARED_ID
         return att
     att.update(box_id=box.id, kind=box.kind)
-    if box.kind == "project":
+    if box.kind == "project" and box.joined:
+        # a JOINED box (placement "join") carries more than one project, so
+        # its listener says which box, not whose traffic. It is attributed by
+        # the host-registered turn bound to it (the per-turn identity), and
+        # boxes.wait_turn_slot keeps those turns to one project at a time.
+        # No live turn, or turns of two projects: unattributed (the Default
+        # profile, no secrets injected), never the owner's policy and secrets.
+        live = egress.contexts_matching(
+            lambda e: bool(e["op_id"]) and boxes.op_box(e["op_id"]) == box.id)
+        projects = {e["project"] for e in live}
+        if len(projects) == 1:
+            e = live[0]
+            att.update(project=e["project"], op_id=e["op_id"],
+                       conversation_id=e["conversation_id"])
+    elif box.kind == "project":
         att["project"] = box.project
         e = egress.context_matching(
             lambda e: bool(e["op_id"]) and boxes.op_box(e["op_id"]) == box.id)

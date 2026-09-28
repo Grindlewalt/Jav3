@@ -6,6 +6,7 @@ import { human, tsShort } from '../format.js'
 import { Link } from 'react-router-dom'
 import { Button, EmptyState, Input, Select, Tag, Toggle } from '../components/index.js'
 import { listProfiles } from '../boxes/api/profiles.js'
+import RunsIn from '../boxes/RunsIn.jsx'
 import {
   allowHost, allowlist, approvePending, getLan, getPolicy, promoteAuto, promoteToProfile,
   putLan, putPolicy, rejectPending, revokeAllow,
@@ -692,6 +693,7 @@ export function NetworkPanel({ slug }) {
       <PolicyLists project={slug} names={{}} projects={[]} tick={tick} onChanged={bump} />
       <PolicyEditor slug={slug} />
       <LanAccess slug={slug} />
+      <RunsIn slug={slug} />
       <Grants slug={slug} />
     </div>
   )
@@ -735,14 +737,15 @@ export default function Network() {
 
       {filter ? (
         <details className="net-sec net-more">
-          <summary>Lists, LAN access and secret grants for {names[filter] || filter}</summary>
+          <summary>Lists, LAN access, where it runs and secret grants for {names[filter] || filter}</summary>
           <PolicyEditor slug={filter} />
           <LanAccess slug={filter} />
+          <RunsIn slug={filter} />
           <Grants slug={filter} />
         </details>
       ) : (
         <div className="dim small">pick a project above to edit its own lists,
-          LAN access and secret grants</div>
+          LAN access, the box it runs in and secret grants</div>
       )}
     </div>
   )

@@ -94,6 +94,12 @@ def context_matching(pred) -> dict | None:
             return dict(e)
     return None
 
+
+def contexts_matching(pred) -> list[dict]:
+    """Every live turn entry for which `pred(entry)` holds, innermost first
+    (a joined box asks whether its live turns are all one project's)."""
+    return [dict(e) for e in reversed(_stack) if pred(e)]
+
 # (project_slug, host) pairs auto-cut this process. The nft drop (Pi-side) is
 # the hard block; this in-memory set is what the proxy checks synchronously so a
 # cut takes effect on the very next request without a DB round-trip.

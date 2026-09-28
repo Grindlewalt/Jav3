@@ -843,6 +843,24 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     await _add_columns(db, "egress_pending", (
         ("box_id", "TEXT"),
     ))
+    # per-project "Runs in" (backend/vm/placement.py). No row, or mode
+    # 'profile', = the profile's box setting, exactly as before this table.
+    #   shared  the shared box whatever the profile says
+    #   own     the project's own box p-<slug> (runtime/image/mem_mb; NULL =
+    #           the profile's value)
+    #   join    another project's box, box_id (operator only, security event)
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS project_placement ("
+        " slug TEXT PRIMARY KEY,"
+        " mode TEXT NOT NULL DEFAULT 'profile'"
+        "   CHECK (mode IN ('profile','shared','own','join')),"
+        " runtime TEXT CHECK (runtime IS NULL OR runtime IN ('kvm','docker')),"
+        " image TEXT,"
+        " mem_mb INTEGER,"
+        " box_id TEXT,"
+        " set_by TEXT,"
+        " updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        " CHECK (mode <> 'join' OR box_id IS NOT NULL))")
 
 
 async def get_state(db: aiosqlite.Connection, key: str) -> str | None:
