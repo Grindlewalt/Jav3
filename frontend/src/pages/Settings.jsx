@@ -15,6 +15,7 @@ import Page from '../components/Page.jsx'
 import BackupPanel from '../BackupPanel.jsx'
 import BrowserPanel from '../BrowserPanel.jsx'
 import DeskPanel from '../DeskPanel.jsx'
+import GroundingPanel from '../GroundingPanel.jsx'
 import ProvidersPanel from '../ProvidersPanel.jsx'
 import PermissionRulesPanel from '../PermissionRulesPanel.jsx'
 import GiteaPanel from '../GiteaPanel.jsx'
@@ -30,6 +31,7 @@ export default function Settings() {
       <ProvidersPanel />
       <DevicesPanel />
       <DeskPanel />
+      <GroundingPanel />
       <BrowserPanel />
       <PermissionRulesPanel />
       <GiteaPanel />
