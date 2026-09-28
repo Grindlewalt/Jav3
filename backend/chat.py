@@ -16,6 +16,7 @@ from .agent.tools.registry import load_registry, openai_tool_specs, read_only_na
 from .auth import require_actor
 from .config import settings
 from .db import get_db, open_conversation
+from . import navplaybook
 from .memory import (assemble_system_prompt, estimate_tokens,
                      get_active_project, standing_rules_tail)
 # module level, not function level: it is the turn's single loop entry now, and
@@ -814,6 +815,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 entries, notes_max=LOCAL_NOTES_MAX if tools_only else None)
         finally:
             runtime.local_turn.reset(ltoken)
+        # computer-use / browser playbook: only on turns actually offered
+        # desk_* or browser_* tools (they are withheld unless one is connected)
+        system_prompt = navplaybook.append_to(system_prompt, tools)
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it. The voice local
         # tier also gets past turns' TOOL work replayed: a 4B reading a history

@@ -29,6 +29,7 @@ from .chat import INTERRUPTED_MARKER
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import assemble_system_prompt, get_active_project
+from . import navplaybook
 
 router = APIRouter(prefix="/api/agents", tags=["agents"],
                    dependencies=[Depends(require_user)])
@@ -360,6 +361,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         tools = _agent_tools(agent, await _project_autonomy(db, active))
         if extra_tools:
             tools = tools + _internal_specs(extra_tools)
+        system_prompt = navplaybook.append_to(system_prompt, tools)
         mdl, burl = _agent_overrides(agent)
         cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
@@ -473,6 +475,7 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
                            "agent": agent["name"], "agent_slug": agent.get("slug")})
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent, await _project_autonomy(db, active))
+        system_prompt = navplaybook.append_to(system_prompt, tools)
         mdl, burl = _agent_overrides(agent)
         # max_iterations used to be honoured headless and ignored here, so one
         # definition ran two caps depending on who started it. An interactive
