@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
+import Posture from '../Posture.jsx'
 import { useEgressDecide } from '../EgressDecide.jsx'
 import { PendingCountContext } from '../Notices.jsx'
 import { notify, notifyError } from '../notify.js'
@@ -576,6 +577,7 @@ export default function Review() {
 export function ReviewHome() {
   return (
     <div className="review-page">
+      <Posture />
       <TriagePanel />
       <ReviewQueue />
     </div>

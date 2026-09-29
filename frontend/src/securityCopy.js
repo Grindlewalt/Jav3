@@ -6,6 +6,8 @@
 // House rules for this file: plain and specific, sentence case, no "leverage"
 // or "seamless". Every sentence has to be true of the code it describes.
 
+import { newSitesText, runsInText } from './boxes/logic.js'
+
 // ---- one line under each tab's title (WEB-12) ----------------------------------
 // The Security and VMs shells look the current tab up here and hand the line to
 // <Page lede>. The Secrets tab is missing on purpose: its panel already opens
@@ -247,4 +249,38 @@ export function dockerLead(docker) {
       + 'a container would have a real user\'s rights on the host.')
   }
   return parts.join(' ')
+}
+
+// ---- the Queue's "what is on" line (WEB-12) -------------------------------------------
+// One item per default a newcomer cannot see anywhere else, each with the tab that
+// changes it. An item whose data did not load is left out, never guessed.
+
+export function postureItems({ profiles, auto, reviewer }) {
+  const items = []
+  const def = (profiles || []).find((p) => p.is_default)
+  if (def) {
+    const sites = newSitesText(def)
+    items.push({
+      label: 'Unlisted sites', value: sites, to: '/security/profiles',
+      tone: sites === 'allowed' ? 'warn' : '',
+      title: `What a box gets when it asks for a site no list covers, on the Default profile (${def.name}).`,
+    })
+    items.push({
+      label: 'Projects run in', value: runsInText(def), to: '/security/profiles',
+      title: `Where a project's boxes run unless it picks its own, on the Default profile (${def.name}).`,
+    })
+  }
+  if (auto) {
+    items.push({
+      label: 'Auto-allow', value: auto.effective ? 'on' : 'off', to: '/security/network',
+      tone: auto.effective ? 'warn' : '', title: AUTO_ALLOW_LEDE,
+    })
+  }
+  if (reviewer) {
+    items.push({
+      label: 'Auto review', value: reviewer.enabled ? 'on' : 'off', to: '/security',
+      title: AUTO_REVIEW_LEDE[0],
+    })
+  }
+  return items
 }

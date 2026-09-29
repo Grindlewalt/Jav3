@@ -4225,3 +4225,7 @@ a:has(> .nav-dot) { position: relative; }
 .bx-seg.loose { background-image: repeating-linear-gradient(135deg, transparent 0 4px, rgba(0, 0, 0, 0.35) 4px 7px); }
 .bx-warn-details { margin-top: var(--sp-3); }
 .bx-warn-details > summary { cursor: pointer; }
+.posture { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-7); margin: 0 0 var(--sp-6); font-size: var(--fs-md); }
+.posture-item { color: var(--text); text-decoration: none; }
+.posture-item:hover b { text-decoration: underline; }
+.posture-item.warn b { color: var(--amber); }

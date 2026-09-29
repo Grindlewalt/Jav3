@@ -4,7 +4,7 @@ import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, AUTO_REVIEW_LEDE,
   PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
   askAge, askKindText, decidedText, dockerLead, dockerMemoryUnlimited, faultText, ledeFor, plural,
-  ramLabel, secretChecklist, tallyLine,
+  postureItems, ramLabel, secretChecklist, tallyLine,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -124,5 +124,19 @@ assert.doesNotMatch(dockerLead({ available: true, weak: false, warnings: ['no gV
 assert.match(dockerLead({ available: true, weak: true, warnings: [] }), /without user separation/)
 assert.equal(dockerLead({ available: true, weak: false, warnings: [] }), '')
 assert.equal(dockerLead({ available: false, weak: true, warnings: [MEM] }), '')
+
+// WEB-12: the Queue's "what is on" line reads the defaults, and drops what did not load
+const prof = { is_default: true, name: 'Default', network_off: false, default_verdict: 'deny',
+  separate_box: false }
+let items = postureItems({ profiles: [prof], auto: { effective: false }, reviewer: { enabled: true } })
+assert.deepEqual(items.map((i) => [i.label, i.value]), [['Unlisted sites', 'ask me'],
+  ['Projects run in', 'shared box'], ['Auto-allow', 'off'], ['Auto review', 'on']])
+assert.ok(items.every((i) => !i.tone))
+items = postureItems({ profiles: [{ ...prof, default_verdict: 'allow' }], auto: { effective: true }, reviewer: null })
+assert.equal(items.find((i) => i.label === 'Unlisted sites').tone, 'warn')   // allow-by-default stands out
+assert.equal(items.find((i) => i.label === 'Auto-allow').tone, 'warn')
+assert.equal(items.some((i) => i.label === 'Auto review'), false)
+assert.deepEqual(postureItems({ profiles: null, auto: null, reviewer: null }), [])
+assert.equal(postureItems({ profiles: [{ ...prof, network_off: true }] })[0].value, 'network off')
 
 console.log('securityCopy ok')

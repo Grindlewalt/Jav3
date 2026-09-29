@@ -67,7 +67,11 @@ export default function Catalogue() {
             {resolving ? 'Resolving…' : 'Resolve pending'}</Button>)}
       </div>
       {!pk.data && !pk.error && <div className="dim">…</div>}
-      {pk.data && rows.length === 0 && <EmptyState>no package requests{f.status || f.manager || f.q ? ' match' : ''}</EmptyState>}
+      {pk.data && rows.length === 0 && (
+        f.status || f.manager || f.q
+          ? <EmptyState>No package requests match these filters.</EmptyState>
+          : <EmptyState hint="Approved ones are built into an image; pending ones also wait in the Security queue.">
+              No package requests yet. When an agent asks to install a package, it shows up here.</EmptyState>)}
       <div className="bx-cat">
         {rows.map((p) => (
           <div key={p.id} className={`sbx-row bx-cat-row${p.status === 'pending' ? ' sev-warn' : ''}`}>
