@@ -291,6 +291,12 @@ async def test_api_approve_applies_the_proposal_and_keeps_it_binding(op):
     assert (await op.get("/api/memory/proposals")).json()["items"] == []
 
 
+async def test_api_approve_needs_no_body(op):
+    await _propose()
+    r = await op.post("/api/memory/proposals/operator-preferences/approve")
+    assert r.status_code == 200 and "Shell: fish" in _text("operator-preferences")
+
+
 async def test_api_approve_refuses_a_proposal_that_changed_since_it_was_read(op):
     await _propose()
     it = (await op.get("/api/memory/proposals/operator-preferences")).json()

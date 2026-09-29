@@ -78,7 +78,7 @@ async def _propose(stem, label, mode, description, content, op_taint, notes,
     as `source: agent, approved: false` used to demote the operator's own text,
     so the standing rules in it dropped out of the prompt. The change is kept as
     a complete proposed note in .proposals/, which prompt assembly never reads;
-    the operator sees a diff on the Memory page and approves or rejects it. More
+    the operator reviews a diff (GET /api/memory/proposals) and approves or rejects it. More
     writes before then build on the proposal, not on the note."""
     if mode == "replace" and not content.strip():
         return ("error: the content is empty. To remove a note use mode=delete "
@@ -102,12 +102,12 @@ async def _propose(stem, label, mode, description, content, op_taint, notes,
                        {"note": stem, "mode": mode, "tainted": bool(taint)})
     return (f"note {label} is one the operator wrote or approved, so it is unchanged "
             "and still binding. Your change is saved as a proposal that takes effect "
-            "only when the operator approves it on the Memory page. Tell them.")
+            "only when the operator approves it. Tell them.")
 
 
 async def _delete(stem: str, name: str, notes, path) -> str:
-    """Delete = move to the trash (the operator restores it from the Memory
-    page), with an audit event. A binding note, one the operator wrote or
+    """Delete = move to the trash (the operator can restore it: GET /api/memory/trash),
+    with an audit event. A binding note, one the operator wrote or
     approved, cannot be deleted from a turn that has read untrusted content:
     that would strip a standing rule on an injection's say-so."""
     if not path.exists() and not memory.proposal_path(stem, notes).exists():
@@ -126,15 +126,15 @@ async def _delete(stem: str, name: str, notes, path) -> str:
                            {"note": stem, "by": "agent"})
         return ("error: refused — this turn read untrusted content (a web page, a "
                 f"search, a file or a message), and '{stem}' is one of the operator's "
-                "binding notes. Tell the operator what you wanted removed; they can "
-                "delete it on the Memory page.")
+                "binding notes. Tell the operator what you wanted removed; deleting it "
+                "is their call.")
     tid = memory.trash_note(stem, notes)
     await memory.audit("memory_deleted", "warn" if binding else "info",
                        f"memory note '{stem}' deleted by an agent"
                        + (" (it was binding)" if binding else ""),
                        {"note": stem, "by": "agent", "trash_id": tid, "binding": binding})
     return (f"memory note '{stem}' deleted (moved to the trash; the operator can "
-            "restore it from the Memory page)")
+            "restore it)")
 
 
 async def run(name: str, content: str, mode: str | None = "append",

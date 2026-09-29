@@ -292,6 +292,8 @@ async def taint_from_egress(att: dict, host: str | None = None) -> None:
     tell which of them asked. A package registry does not count: `pip install`
     and `npm install` would otherwise taint every build."""
     from .. import egress
+    if att.get("kind") not in ("shared", "project"):
+        return          # a service box's own traffic is not a turn's; nor is an image build's
     if host and egress._host_matches(egress._norm(host), list(egress.IMAGE_BUILD_HOSTS)):
         return
     proj = att.get("project")

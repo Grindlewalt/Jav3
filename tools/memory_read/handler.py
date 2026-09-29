@@ -59,6 +59,6 @@ async def run(name: str | None = None) -> str:
         # is binding. Its text can come from untrusted content like any other.
         if note_taint(prop["meta"]) == "untrusted":
             _taint_turn()
-        text += ("\n\n[A change to this note is pending the operator's approval on the "
-                 "Memory page. It is NOT binding yet. The proposed note:]\n" + prop["body"] + "\n")
+        text += ("\n\n[A change to this note is pending the operator's approval. It is NOT "
+                 "binding yet. The proposed note:]\n" + prop["body"] + "\n")
     return text

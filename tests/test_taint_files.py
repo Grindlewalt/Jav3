@@ -205,6 +205,20 @@ async def test_package_registries_do_not_taint(tmp_env):
         _drop("op-p")
 
 
+async def test_a_service_boxs_own_traffic_is_not_a_turns(tmp_env):
+    _reg("op-s")
+    try:
+        for kind in ("service", "builder"):
+            await broker.taint_from_egress({"project": "demo", "op_id": None, "kind": kind},
+                                           "example.org")
+        assert not broker.op_tainted("op-s")
+        await broker.taint_from_egress({"project": "demo", "op_id": None, "kind": "project"},
+                                       "example.org")
+        assert broker.op_tainted("op-s")          # a project box's turns do count
+    finally:
+        _drop("op-s")
+
+
 async def test_unattributed_traffic_taints_nobody(tmp_env):
     _reg("op-u")
     try:
