@@ -309,55 +309,74 @@ build` in `frontend/` green if any .jsx changed; small tool outputs (the
 600 s stream watchdog); one commit per WP with a message that says what a
 user can now do.
 
-## H. Backlog: desktop + web navigation (2026-09-28)
+## H. Backlog: desktop + web navigation (cleaned 2026-09-29)
 
-State: everything in A–E is built and merged on this branch; the Pi runs it
-(ee54eac) with the model finder's ranking live (deepseek-flash 0.95, p95
-1.4 s). The four locked-screen / shell-offer / memory-guard / has_state fixes
-(e06b1e2..e8c09aa) and the comparison harness (7e9c673) are NOT yet deployed
-(the Mac left the LAN mid-session). In order:
+State: branch tip 803a8af, tree clean, unpushed; full suite at the 19-failure
+macOS baseline (2521 passed). The Pi runs 803a8af (health ok, grounding =
+deepseek-flash 0.95 / p95 1.4 s). The Mac is paired as desk device 6 (screen +
+input, shell off), client not running. Finished work is in git history, not
+here.
 
-A1. **DeltaMath fix, steps 2–4 (top priority; step 1 = version gate is in,
-   5f20903).** (2) candidates fallback in lib/dom.js + page.js: list
-   likely-clickable elements (cursor:pointer, click attrs, tabindex, short
-   leaf text) as a second block `candidates (no button markup — probably
-   clickable…)`, same id space, `mode: "all"` on read_page, auto when < 8
-   interactive in-view; (3) real pointer-event click sequence at the centre +
-   `browser_click(tab, x, y)` on the latest tab screenshot (fresh ≤120 s,
-   CSS-px conversion), `browser_type` into activeElement; manifest 0.4.0;
-   (4) one playbook sentence. Verify on a DeltaMath-like page in headless
-   Chrome (div buttons, no markup). Operator: reload the extension after
-   deploy.
+Rules for whoever picks this up: **agents are Sonnet only, the orchestrator is
+Opus** (operator, 2026-09-29). **Ask the operator before anything that moves
+their mouse or keyboard**; never start a desk trial unprompted. Agents stall on
+600 s silent streams: small tool outputs, commit per step.
 
-1. **Redeploy to the Pi** (`deploy_test.sh worktree-navigation`; the script
-   does not `pip install`, so any new requirement goes into `~/jarvis/.venv`
-   by hand, then restart) and **finish the live jav3-desk trial**: unlock the
-   Mac, `jav3-desk --backend macos run` (flag BEFORE the subcommand), rerun
-   the three TextEdit turns with `<scratch>/turn.py`; watch for elements_src
-   ax, click-by-id, `changed:` lines, stuck notes. Device 6 is paired.
-2. **DeltaMath failure** (operator report): `browser_read_page` listed ZERO
-   interactive elements on deltamath.com (Angular `div` buttons, no markup)
-   and `browser_key` failed `unknown action "key"` because the browser still
-   runs the OLD unpacked extension 0.2.0 (closed verb list in lib/verbs.js)
-   while the server offers the 0.3.0 verbs. Fix in flight: (a) server-side
-   version gate with a "reload the extension" error; (b) **candidates
-   fallback** — list likely-clickable elements (cursor:pointer, click
-   attributes, tabindex, short leaf text) in a second block so the model can
-   click text it judges to be a button; (c) real pointer-event click
-   sequences and `browser_click(x, y)` on the latest tab screenshot for pages
-   with no markup at all. Operator action: reload the extension in
-   chrome://extensions after each deploy.
-3. **Flash vs Qwen3.8-27B**: add an OpenRouter key on the Pi, run
-   `scripts/grounding_probe.py --models openrouter/qwen/qwen3.8-27b` (gate:
-   ≥ 0.953, p95 ≤ 2.5 s), then `scripts/nav_compare.py --agents
-   navigator,navigator-qwen --runs 3` (bar: +15 pts, 3:1 wins, ≤ 2× $/success).
-   Only then make navigation a sub-agent on the winner. Holo4-27B and
-   MiMo-V2.6-Flash are the next candidates (same harness, one YAML entry).
-4. Settings UI: show `locked`/`asleep` per computer; Linux lock detection
-   beyond logind's LockedHint; old-client fallback text.
-5. Deferred browser items: `chrome.debugger` trusted input (for sites that
-   check isTrusted), file upload, dialogs. Deferred desk items: Windows UIA,
-   wlroots element coordinates, uinput backend.
-6. `.claude/ops/deploy_test.sh` should `pip install -r requirements.txt`
-   (setup-must-be-code rule); CLAUDE.md still describes the deleted
-   computeruse/pairing module — rewrite that section from this file.
+### In progress (started, not finished)
+
+P1. **Live desk trial, last turn.** Turns (a) screenshot + AX elements and (b)
+    open TextEdit → click "New Document" by id → type, both passed on the real
+    Mac. Still to run, one turn: open TextEdit, type, zoom into the toolbar
+    with `region`, read element ids, close without saving. Also the first live
+    measurement of the latency fix (9a21a16; expect ~1 s per action, was
+    9–10 s). Needs the Mac to itself for ~2 min. Driver: `<scratch>/turn.py`
+    (raise its 3500-char log cap). 1 agent, no code.
+P2. **DeltaMath on the real site.** Code is done and deployed (version gate,
+    candidates fallback, pointer-event clicks, `browser_click(tab, x, y)`,
+    extension 0.4.0), verified only on a look-alike page in headless Chrome.
+    Operator first: reload the unpacked extension in chrome://extensions.
+    Then one real attempt on an assignment; fix whatever it shows. 1 agent.
+
+### To do (not started)
+
+T1. **Settings UI.** DeskPanel: show `locked` / `asleep` per computer.
+    BrowserPanel: show the extension version and the "outdated" flag.
+    `npm run build` is the gate. 1 agent.
+T2. **Trial leftovers, small.** Walk/thumbnail reuse window 2 s → 3 s (the
+    trial's gaps were 2.1–2.5 s, so reuse never hit); desk_shell output is
+    labelled "read the screen of…" (should say shell output); unit tests for
+    the in-process macOS capture path; Linux lock detection beyond logind's
+    LockedHint; old-client fallback text for a locked screen. 1 agent.
+T3. **Ops + notes.** `.claude/ops/deploy_test.sh` must
+    `pip install -r requirements.txt` (setup-must-be-code; pillow had to be
+    installed by hand); CLAUDE.md still describes the deleted
+    computeruse/pairing module — rewrite that section from this file. Both
+    live in the MAIN checkout, untracked: needs a session that is not isolated
+    in a worktree. 1 agent, or the orchestrator by hand.
+
+### Operator decisions (no agent)
+
+D1. Push `worktree-navigation` / open a PR (against main; #3 and #4 merged).
+D2. Approve or reject the quarantined memory note `mac-desk-computer-state`
+    on the Pi (its first version says TextEdit is not offered — now false).
+D3. The stray `~/.local/share/jarvis.stray-scaffold-2026-09-28` on the Pi:
+    delete once confirmed unneeded.
+
+### Parked (operator: skip for now)
+
+K1. **Flash vs Qwen3.8-27B.** Harness ready (`scripts/nav_compare.py`, 20
+    tasks in `scripts/nav_tasks.yaml`, navigator presets created through the
+    API). Needs an OpenRouter key on the Pi. Gate: fixture probe ≥ 0.953 and
+    p95 ≤ 2.5 s; then 20 tasks × 3 runs, switch only at +15 pts success, 3:1
+    wins, ≤ 2× $/success. Next candidates: Holo4-27B, MiMo-V2.6-Flash. Large:
+    its own day. 1 agent.
+K2. Deferred browser: `chrome.debugger` trusted input (sites that check
+    isTrusted), file upload, dialogs, coordinate clicks inside iframes.
+K3. Deferred desk: Windows UIA, wlroots element coordinates, uinput backend.
+
+### Agent count
+
+To finish everything active: **5 Sonnet agents** (P1, P2, T1, T2, T3). T1 and
+T2 can run in parallel with no operator; P1 and P2 each need the operator for
+a few minutes; T3 needs a non-worktree session. K1 adds one more when
+unparked.
