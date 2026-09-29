@@ -18,6 +18,7 @@ only the operator may push or merge, the bot is not on either whitelist.
 The box never holds a credential and its git state is discarded, so there is
 no `git push` from inside it at all.
 """
+import asyncio
 import base64
 import logging
 import os
@@ -38,6 +39,8 @@ BRANCH_PREFIX = "agent/"
 _AGENT_REF = re.compile(r"^agent/[0-9a-f]{8}$")
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 API_TIMEOUT = 30
+MERGE_CHECK_TRIES = 3               # a merge Gitea says "try again later" to is retried
+MERGE_CHECK_WAIT = 2.0              # ...this many seconds apart (a conflict never clears)
 
 # tests swap in httpx.MockTransport; None = the real network
 _transport: httpx.AsyncBaseTransport | None = None
@@ -70,6 +73,16 @@ def _api_message(r: httpx.Response) -> str:
     return str(m or r.text or "no detail")[:300].strip()
 
 
+def _gist(out: str) -> str:
+    """The lines of git's stderr that say why, without the ref and URL chatter."""
+    keep = []
+    for line in (out or "").splitlines():
+        t = re.sub(r"^(remote:\s*)?(error:\s*)?", "", line.strip()).strip()
+        if t and not t.startswith(("To http", "failed to push", "! [", "hint:")):
+            keep.append(t)
+    return "; ".join(keep)[:300]
+
+
 def explain_git_failure(out: str, who: str = "the agent bot") -> GiteaError:
     """Raw `git push` stderr -> what happened. Unknown text passes through."""
     low = (out or "").lower()
@@ -77,7 +90,8 @@ def explain_git_failure(out: str, who: str = "the agent bot") -> GiteaError:
                               "couldn't connect", "timed out")):
         return GiteaUnreachable(f"Gitea isn't answering at {api_base()}: {out}")
     if "protected branch" in low or "not allowed to push" in low or "pre-receive hook declined" in low:
-        return GiteaError(f"Gitea refused the push: the branch is protected ({out})")
+        return GiteaError(f"Gitea refused the push because the branch is protected "
+                          f"({_gist(out)}). Only the operator can push to main.")
     if any(k in low for k in ("authentication failed", "invalid username", "401", "403",
                               "could not read username")):
         return GiteaError(f"Gitea rejected {who}'s token, so nothing was pushed. The "
@@ -520,11 +534,16 @@ async def approve_push(db, rid: int, row: dict) -> dict:
             await _finish(db, rid, "rejected", None, "the pull request was closed in Gitea")
             raise ValueError("the pull request was already closed in Gitea, so this "
                              "request was closed. Nothing was merged.")
-        r = await api("POST", f"/repos/{owner()}/{slug}/pulls/{number}/merge",
-                      json_body={"Do": "merge", "delete_branch_after_merge": True},
-                      allow=(405, 409))
+        for attempt in range(MERGE_CHECK_TRIES):
+            r = await api("POST", f"/repos/{owner()}/{slug}/pulls/{number}/merge",
+                          json_body={"Do": "merge", "delete_branch_after_merge": True},
+                          allow=(405, 409))
+            if not _still_checking(r) or attempt == MERGE_CHECK_TRIES - 1:
+                break
+            await asyncio.sleep(MERGE_CHECK_WAIT)
         if r.status_code in (405, 409):
-            err = scrub(_merge_refusal(r, number, row.get("pr_url")))
+            now = await _pull(slug, number) or {}
+            err = scrub(_merge_refusal(r, number, row.get("pr_url"), now.get("mergeable")))
             await db.execute("UPDATE git_requests SET error = ? WHERE id = ?", (err, rid))
             await db.commit()
             raise GiteaRefused(err)
@@ -533,10 +552,29 @@ async def approve_push(db, rid: int, row: dict) -> dict:
                          await _sync_quiet(slug))
 
 
-def _merge_refusal(r: httpx.Response, number: int, url: str | None) -> str:
+def _still_checking(r: httpx.Response) -> bool:
+    """A merge 405 "Please try again later". Gitea says this both while it is
+    still working out whether the PR merges (right after main moved) and, for
+    good, when it does not merge because it conflicts: the API has no other
+    word for "not mergeable". Seen live 2026-09-29: a conflicting PR answered
+    it every 3 s for over a minute, with `mergeable: false`."""
+    return r.status_code == 405 and "try again later" in _api_message(r).lower()
+
+
+def _merge_refusal(r: httpx.Response, number: int, url: str | None,
+                   mergeable: bool | None = None) -> str:
     """Gitea's 405/409 on a merge, in words: what it is and what to do."""
     where = f" ({url})" if url else ""
     msg = _api_message(r)
+    if _still_checking(r):
+        if mergeable is False:
+            return (f"Gitea won't merge pull request #{number}: it reports it as not "
+                    "mergeable, which after main has moved usually means it conflicts with "
+                    "what was merged since the agent branched. Reject this request and ask "
+                    "the agent to file a fresh one (it will be built on the new main), or "
+                    f"open it in Gitea to see the conflict{where}. It stays pending.")
+        return (f"Gitea hasn't finished checking whether pull request #{number} can merge. "
+                f"Wait a few seconds and approve again; it stays pending{where}.")
     if r.status_code == 409:
         return (f"Gitea can't merge pull request #{number}: {msg}. Main has probably moved "
                 "since the agent branched. Reject this request and ask the agent to file "

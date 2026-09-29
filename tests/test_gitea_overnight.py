@@ -384,3 +384,66 @@ async def test_status_says_what_is_missing(client, tmp_env, monkeypatch):
 async def test_status_configured_has_no_missing_list(client, fake):
     st = (await client.get("/api/gitea/status")).json()
     assert st["configured"] and st["running"] and "missing" not in st
+
+
+# --- "Please try again later": Gitea's word for both "checking" and "conflicts" ---------
+
+def _try_later(counter: list, until: int | None = None):
+    """A merge that answers 405 "Please try again later" (until the Nth call, or always)."""
+    def handler(req):
+        if req.method == "POST" and req.url.path.endswith("/merge"):
+            counter.append(1)
+            if until is None or len(counter) <= until:
+                return httpx.Response(405, json={"message": "Please try again later"})
+    return handler
+
+
+async def test_a_conflicting_pr_is_called_a_conflict_after_the_retries(client, fake, monkeypatch):
+    monkeypatch.setattr(gitea, "MERGE_CHECK_WAIT", 0)
+    (_pdir() / "code" / "x.py").write_text("print(1)\n")
+    await registry.dispatch("git_push_request", {"title": "Add x"})
+    rid = (await _rows(client)).json()["requests"][0]["id"]
+    fake.pulls[1]["mergeable"] = False                   # what real Gitea reports for a conflict
+    seen: list = []
+    _wrap(monkeypatch, fake, _try_later(seen))
+    r = await client.post(f"/api/projects/demo/git/requests/{rid}/approve")
+    assert r.status_code == 409, r.text
+    d = r.json()["detail"]
+    assert "not mergeable" in d and "conflicts with what was merged" in d
+    assert "try again later" not in d.lower() and "file a fresh one" in d
+    assert len(seen) == gitea.MERGE_CHECK_TRIES          # retried, then gave up
+    assert (await _rows(client)).json()["requests"][0]["status"] == "pending"
+
+
+async def test_a_pr_gitea_is_still_checking_says_wait(client, fake, monkeypatch):
+    monkeypatch.setattr(gitea, "MERGE_CHECK_WAIT", 0)
+    (_pdir() / "code" / "x.py").write_text("print(1)\n")
+    await registry.dispatch("git_push_request", {"title": "Add x"})
+    rid = (await _rows(client)).json()["requests"][0]["id"]
+    _wrap(monkeypatch, fake, _try_later([]))
+    r = await client.post(f"/api/projects/demo/git/requests/{rid}/approve")
+    assert r.status_code == 409
+    assert "hasn't finished checking" in r.json()["detail"] and "approve again" in r.json()["detail"]
+
+
+async def test_a_merge_that_clears_while_retrying_goes_through(client, fake, monkeypatch):
+    monkeypatch.setattr(gitea, "MERGE_CHECK_WAIT", 0)
+    (_pdir() / "code" / "x.py").write_text("print(1)\n")
+    await registry.dispatch("git_push_request", {"title": "Add x"})
+    rid = (await _rows(client)).json()["requests"][0]["id"]
+    seen: list = []
+    _wrap(monkeypatch, fake, _try_later(seen, until=1))   # checking on the first call only
+    r = await client.post(f"/api/projects/demo/git/requests/{rid}/approve")
+    assert r.status_code == 200 and r.json()["status"] == "approved", r.text
+    assert len(seen) == 2 and fake.pulls[1]["merged"]
+
+
+def test_protected_branch_refusal_is_one_readable_line():
+    raw = ("remote: \nremote: error:        \nremote: error: Not allowed to push to protected "
+           "branch main        \nremote: error:        \nTo http://127.0.0.1:3000/o/r.git\n"
+           " ! [remote rejected] abc -> main (pre-receive hook declined)\n"
+           "error: failed to push some refs to 'http://127.0.0.1:3000/o/r.git'")
+    msg = str(gitea.explain_git_failure(raw))
+    assert "Not allowed to push to protected branch main" in msg
+    assert "\n" not in msg and "To http" not in msg and "failed to push" not in msg
+    assert msg.endswith("Only the operator can push to main.")
