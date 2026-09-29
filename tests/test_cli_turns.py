@@ -73,6 +73,20 @@ async def test_an_unreachable_server_says_so_and_nothing_is_lost():
         assert srv.posts[-1]["message"] == "hello there"
 
 
+async def test_a_stream_that_just_closes_with_no_final_reads_the_same_way():
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        await send(pilot, app, "write it")
+        assert await wait_for(lambda: srv.feeds)
+        srv.feed.put({"type": "start", "conversation_id": 4}, {"type": "token", "text": "Hm"})
+        srv.feed.close()                                     # a clean close, no final
+        assert await wait_for(lambda: any("server went away" in n for n in notes(app)))
+        assert await wait_for(lambda: not app.busy)
+        assert app.editor.text == "write it"
+
+
 async def test_a_refused_send_keeps_the_text_in_the_prompt():
     srv = FakeServer()
     srv.post_status = 404

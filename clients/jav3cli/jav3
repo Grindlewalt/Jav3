@@ -7433,6 +7433,11 @@ def build_tui(base: str, token: str, **kw):
                 body = self._body(message)
                 self.turn.local = bool(body.get("local"))
                 await self._post(body)
+                t = self.turn
+                if t is not None and not (t.done or t.failed or t.idle or t.interrupted
+                                          or self.stop_requested):
+                    # the stream closed cleanly with no final: a server going down
+                    raise httpx.RemoteProtocolError("the stream ended without a final")
             except CliError as e:
                 await self.note(str(e), "error")
                 if self.turn is not None and self.turn.cid is None:
