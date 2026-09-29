@@ -6,6 +6,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 import zipfile
 
 import httpx
@@ -753,5 +754,113 @@ async def test_read_page_mode_reaches_the_extension(env, monkeypatch):
         await _grant(env)
         await _tool("browser_read_page")(tab=7, mode="interactive")
         assert fe.reqs[-1]["params"]["mode"] == "interactive"
+    finally:
+        await fe.stop()
+
+
+# --- coordinate clicks and typing into the focused element -------------------------------
+
+def test_click_needs_exactly_one_of_element_or_xy():
+    both = "give exactly one of element (an id from browser_read_page) or x, y"
+    for bad in ({"tab": 7}, {"tab": 7, "element": "f0:1", "x": 1, "y": 2}):
+        with pytest.raises(browser.BrowserError, match=re.escape(both)):
+            browser.validate("click", bad)
+    with pytest.raises(browser.BrowserError, match="y must be a whole number"):
+        browser.validate("click", {"tab": 7, "x": 3})
+    with pytest.raises(browser.BrowserError, match="outside 0..10000"):
+        browser.validate("click", {"tab": 7, "x": -1, "y": 2})
+    assert browser.validate("click", {"tab": 7, "x": 3, "y": 4}) == {"tab": 7, "x": 3, "y": 4}
+    assert browser.validate("type", {"tab": 7, "text": "hi"}) == {"tab": 7, "text": "hi",
+                                                                 "submit": False}
+    assert browser.needs_version("click", {"tab": 7, "x": 1, "y": 1}) == "0.4.0"
+    assert browser.needs_version("click", {"tab": 7, "element": "f0:1"}) is None
+    assert browser.needs_version("type", {"tab": 7, "text": "x"}) == "0.4.0"
+
+
+def test_shot_to_css_freshness_bounds_and_scale(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(browser.time, "monotonic", lambda: now[0])
+    p = {"tab": 7, "x": 241, "y": 81}
+    fresh = ("take a browser_screenshot_tab of tab 7 first (a click by coordinates needs one "
+             "from this turn, under 120 s old; x, y are pixels of it)")
+    with pytest.raises(browser.BrowserError, match=re.escape(fresh)):
+        browser.shot_to_css(None, p)
+    shot = {"at": 1000.0, "w": 2560, "h": 1600, "scale": (2.0, 2.0), "moved": None}
+    assert browser.shot_to_css(shot, p) == {"tab": 7, "x": 120.5, "y": 40.5}
+    now[0] = 1121.0
+    with pytest.raises(browser.BrowserError, match=re.escape(fresh)):
+        browser.shot_to_css(shot, p)
+    now[0] = 1000.0
+    with pytest.raises(browser.BrowserError, match=re.escape(
+            "x=2560, y=0 is outside the latest screenshot of tab 7 (2560x1600 px)")):
+        browser.shot_to_css(shot, {"tab": 7, "x": 2560, "y": 0})
+    with pytest.raises(browser.BrowserError, match="tab 7 scrolled since the latest screenshot"):
+        browser.shot_to_css({**shot, "moved": "scrolled"}, p)
+    with pytest.raises(browser.BrowserError, match="did not report its scale"):
+        browser.shot_to_css({**shot, "scale": None}, p)
+    # the scale: reported, else image / viewport, else unknown
+    assert browser._shot_scale(800, 600, {"scale": {"x": 1.25, "y": 1.25}}) == (1.25, 1.25)
+    assert browser._shot_scale(800, 600, {"viewport": {"w": 400, "h": 300}}) == (2.0, 2.0)
+    assert browser._shot_scale(800, 600, {}) is None
+
+
+async def test_coordinate_click_and_focused_typing_through_the_tools(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"], v="0.4.0").start()
+
+    async def answer(m):
+        res = await FakeExt.default_answer(m)
+        if m["verb"] == "screenshot_tab":
+            res["data"]["scale"] = {"x": 2, "y": 2}      # 800x600 image of a 400x300 page
+        return res
+    fe.answer = answer
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-xy")
+        try:
+            r = await _tool("browser_click")(tab=7, x=100, y=50)
+            assert r.startswith("error: take a browser_screenshot_tab of tab 7 first")
+            assert fe.reqs == []                             # never sent
+            await _tool("browser_screenshot_tab")(tab=7)
+            r = await _tool("browser_click")(tab=7, x=101, y=50)
+            assert not r.startswith("error"), r
+            assert fe.reqs[-1]["verb"] == "click"
+            assert fe.reqs[-1]["params"] == {"tab": 7, "x": 50.5, "y": 25.0}
+            r = await _tool("browser_click")(tab=7, x=800, y=10)
+            assert r == "error: x=800, y=10 is outside the latest screenshot of tab 7 (800x600 px)"
+            assert "exactly one of element" in await _tool("browser_click")(tab=7, element="f0:1",
+                                                                            x=1, y=1)
+            # typing with no element goes to the focused field; it still needs a read
+            assert "read the tab first" in await _tool("browser_type")(tab=7, text="x = 4")
+            await _tool("browser_read_page")(tab=7)
+            await _tool("browser_type")(tab=7, text="x = 4")
+            assert fe.reqs[-1]["params"] == {"tab": 7, "text": "x = 4", "submit": False}
+            # the page moved: the old screenshot's pixels are refused
+            await _tool("browser_scroll")(tab=7, pages=1)
+            r = await _tool("browser_click")(tab=7, x=10, y=10)
+            assert r.startswith("error: tab 7 scrolled since the latest screenshot")
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-xy")
+    finally:
+        await fe.stop()
+
+
+async def test_coordinate_click_needs_extension_0_4_0(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()                  # unreported = 0.3.0 or older
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-xy2")
+        try:
+            await _tool("browser_screenshot_tab")(tab=7)
+            r = await _tool("browser_click")(tab=7, x=1, y=1)
+            assert r.startswith("error: the jav3-browser extension in that browser is 0.3.0 or "
+                                "older (it does not report its version); this action needs "
+                                "0.4.0 — reload it")
+            assert fe.reqs[-1]["verb"] == "screenshot_tab"
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-xy2")
     finally:
         await fe.stop()

@@ -235,3 +235,26 @@ test('candidates skip what is already listed, including through shadow hosts', (
   assert.equal(D.leafish({ children: [{ children: [{}] }] }), false);
   assert.equal(D.CAND_CAP, 150);
 });
+
+// --- realistic clicks ---------------------------------------------------------------------
+
+test('click sequence: the order and fields a real left click has', () => {
+  const seq = D.clickSequence(120.5, 40);
+  assert.deepEqual(seq.map(s => s.type), ['pointerover', 'pointerenter', 'mouseover', 'pointermove',
+    'pointerdown', 'mousedown', 'focus', 'pointerup', 'mouseup', 'click']);
+  for (const s of seq.filter(s => s.init)) {
+    assert.equal(s.init.clientX, 120.5); assert.equal(s.init.clientY, 40);
+    assert.equal(s.init.button, 0); assert.equal(s.init.composed, true);
+    assert.equal(s.init.bubbles, s.type !== 'pointerenter', s.type);
+    if (s.ctor === 'PointerEvent') {
+      assert.equal(s.init.pointerType, 'mouse'); assert.equal(s.init.isPrimary, true);
+    }
+  }
+  const by = t => seq.find(s => s.type === t);
+  assert.equal(by('pointerdown').init.buttons, 1);
+  assert.equal(by('mousedown').init.buttons, 1);
+  assert.equal(by('pointerup').init.buttons, 0);
+  assert.equal(by('click').ctor, 'MouseEvent');
+  assert.equal(by('click').init.detail, 1);
+  assert.equal(by('focus').ctor, null);
+});

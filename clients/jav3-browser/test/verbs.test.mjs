@@ -132,3 +132,26 @@ test('read_page mode: auto / all / interactive, anything else refused', () => {
   assert.equal(validate('read_page', { tab: 1 }).mode, undefined);
   assert.throws(() => validate('read_page', { tab: 1, mode: 'every' }), /mode must be one of auto, all, interactive/);
 });
+
+test('click: exactly one of element or x, y; type may omit element', () => {
+  assert.deepEqual(validate('click', { tab: 2, x: 10.5, y: 3 }), { tab: 2, x: 10.5, y: 3 });
+  assert.deepEqual(validate('click', { tab: 2, element: 'f0:4' }), { tab: 2, element: 'f0:4' });
+  assert.throws(() => validate('click', { tab: 2, element: 'f0:4', x: 1, y: 1 }), /exactly one of element or x, y/);
+  assert.throws(() => validate('click', { tab: 2 }), /exactly one of element or x, y/);
+  assert.throws(() => validate('click', { tab: 2, x: 1 }), /y must be a number/);
+  assert.throws(() => validate('click', { tab: 2, x: -1, y: 1 }), /outside/);
+  assert.deepEqual(validate('type', { tab: 2, text: 'hi' }), { tab: 2, text: 'hi', submit: false });
+});
+
+test('screenshot scale and the CSS-px conversion', async () => {
+  const { shotScale, toCssPoint } = await import('../lib/verbs.js');
+  // a 2x display: 2560x1600 capture of a 1280x800 viewport
+  const s = shotScale(2560, 1600, { w: 1280, h: 800, dpr: 2 });
+  assert.deepEqual(s, { x: 2, y: 2 });
+  assert.deepEqual(toCssPoint(241, 81, s), { x: 120.5, y: 40.5 });
+  // page zoom 125% on a 1x display: the image is wider than the CSS viewport
+  assert.deepEqual(shotScale(1600, 1000, { w: 1280, h: 800, dpr: 1.25 }), { x: 1.25, y: 1.25 });
+  // no viewport reported: the dpr, else 1
+  assert.deepEqual(shotScale(800, 600, { dpr: 2 }), { x: 2, y: 2 });
+  assert.deepEqual(shotScale(800, 600, null), { x: 1, y: 1 });
+});

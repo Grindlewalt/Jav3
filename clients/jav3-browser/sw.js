@@ -5,10 +5,10 @@
 // notification with Cancel on every action, Pause, Disconnect.
 import {
   VerbError, validate, hostOf, isDenied, siteDecision, describe,
-  parseLoginLine, baseUrl, wsUrl, parseElementId, frameConsentNeeded, shouldAdopt,
+  parseLoginLine, baseUrl, wsUrl, parseElementId, frameConsentNeeded, shouldAdopt, shotScale,
 } from './lib/verbs.js';
 import {
-  readPage, pageSig, domQuiet, clickEl, typeEl, selectEl, hoverEl, keyPress, scrollToEl, scrollPage,
+  readPage, pageSig, domQuiet, clickEl, clickAt, typeActive, viewportInfo, typeEl, selectEl, hoverEl, keyPress, scrollToEl, scrollPage,
 } from './lib/page.js';
 
 const ASK_TIMEOUT_MS = 60000;
@@ -443,7 +443,12 @@ async function run(verb, p, c) {
     const bmp = await createImageBitmap(blob);
     const img = { mime: 'image/jpeg', w: bmp.width, h: bmp.height, b64: url.split(',', 2)[1] };
     bmp.close();
-    return { data: await info(p.tab), image: img };
+    // the viewport and scale, so the server can turn a point on this picture
+    // into CSS px for browser_click(tab, x, y)
+    let viewport = null;
+    try { viewport = await inject(p.tab, viewportInfo, [], 0); } catch { viewport = null; }
+    const scale = shotScale(img.w, img.h, viewport);
+    return { data: { ...(await info(p.tab)), viewport, scale }, image: img };
   }
   if (verb === 'scroll') {
     const r = await inject(p.tab, scrollPage, [p.pages]);
@@ -470,6 +475,33 @@ async function run(verb, p, c) {
     // "[#5]" (the element's number in its frame) -> the id the model uses
     r.text = String(r.text || '').replace(/\[#(\d+)\]/g, (_, n) => `[f${index}:${n}]`);
     await new Promise(res => setTimeout(res, 150));
+    await waitLoad(p.tab);
+    await giveFocusBack(prev, tab.windowId);
+    return { data: { ...(await info(p.tab)), opened: openedSince(since, p.tab), text: r.text || '',
+                     sig: await settleSig(p.tab, SETTLE_MS) } };
+  }
+  if ((verb === 'click' && p.element === undefined) || (verb === 'type' && p.element === undefined)) {
+    // a coordinate click (top frame, CSS px) or typing into the focused
+    // element (the frame the last click/type went into when focus is an
+    // <iframe>), like key
+    const since = Date.now();
+    const prev = await focusedWindow();
+    let r;
+    if (verb === 'click') {
+      r = await inject(p.tab, clickAt, [p.x, p.y], 0);
+      if (r && r.ok) await saveFocusFrame(p.tab, 0);
+    } else {
+      r = await inject(p.tab, typeActive, [p.text, p.submit], 0);
+      if (r && r.inFrame) {
+        const fid = await loadFocusFrame(p.tab);
+        const f = (await loadFrames(p.tab)).find(m => m.frameId === fid);
+        if (fid == null || !f) throw new VerbError('the focus is inside a frame Jav3 has not clicked into; click the field first');
+        if (frameConsentNeeded(host, f.host)) await allowed(f.url, c);
+        r = await inject(p.tab, typeActive, [p.text, p.submit], fid);
+      }
+    }
+    if (!r || !r.ok || r.inFrame) throw pageErr(r, verb);
+    await new Promise(res => setTimeout(res, 300));
     await waitLoad(p.tab);
     await giveFocusBack(prev, tab.windowId);
     return { data: { ...(await info(p.tab)), opened: openedSince(since, p.tab), text: r.text || '',

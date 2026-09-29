@@ -85,6 +85,11 @@ export function readPage(maxChars, selector, mode) {
            viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 } };
 }
 
+// The top frame's viewport, reported with each tab screenshot.
+export function viewportInfo() {
+  return { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 };
+}
+
 // The same signature readPage reports, without re-labelling anything.
 export function pageSig() {
   const D = globalThis.__jav3Dom;
@@ -109,13 +114,44 @@ export function domQuiet(timeoutMs, quietMs) {
   });
 }
 
-export function clickEl(id) {
-  const el = globalThis.__jav3Dom.findJav3(document, id);
+// A realistic pointer/mouse sequence at the element's centre, dispatched on
+// whatever is on top there (lib/dom.js realClick), so framework listeners on
+// plain <div>s (pointerdown, mousedown, click) all fire.
+export async function clickEl(id) {
+  const D = globalThis.__jav3Dom;
+  const el = D.findJav3(document, id);
   if (!el) return { ok: false, code: 'stale' };
-  el.scrollIntoView({ block: 'center', inline: 'center' });
-  if (typeof el.focus === 'function') el.focus();
-  el.click();
-  return { ok: true };
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  const r = el.getBoundingClientRect();
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const hit = D.deepPoint(document, x, y) || el;
+  return D.realClick(window, document, hit, x, y, el);
+}
+
+// A click at (x, y), CSS px of the top frame's viewport (the server converts
+// from screenshot pixels).
+export async function clickAt(x, y) {
+  const D = globalThis.__jav3Dom;
+  if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) {
+    return { ok: false, err: `${x},${y} is outside the page (${window.innerWidth}x${window.innerHeight} CSS px); take a new browser_screenshot_tab` };
+  }
+  const hit = D.deepPoint(document, x, y);
+  if (!hit) return { ok: false, err: 'nothing on the page at that point' };
+  if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
+    return { ok: false, code: 'frame', err: 'that point is inside an iframe; browser_read_page and click its element by id (f1:…)' };
+  }
+  return D.realClick(window, document, hit, x, y, null);
+}
+
+// browser_type with no element: into whatever has focus.
+export function typeActive(text, submit) {
+  const D = globalThis.__jav3Dom;
+  const el = D.deepActive(document);
+  if (!el || el === document.body || el === document.documentElement) {
+    return { ok: false, code: 'no_focus', err: 'nothing is focused on that page — click the field first (browser_click by id or by x, y), then type' };
+  }
+  if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') return { ok: true, inFrame: true };
+  return D.typeInto(window, document, el, text, submit);
 }
 
 export function typeEl(id, text, submit) {

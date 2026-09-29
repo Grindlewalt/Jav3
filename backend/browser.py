@@ -87,6 +87,7 @@ from .agent import imageresult
 from .db import get_db
 
 FRESH_READ_S = 120          # click/type need a read_page of that tab this recent
+FRESH_SHOT_S = 120          # a click by x, y needs a screenshot of that tab this recent
 ACTIONS_PER_S = 5
 CALL_TIMEOUT_S = 90         # includes the extension's first-visit site ask (60 s)
 IDLE_DROP_S = 60
@@ -172,6 +173,10 @@ def ext_outdated(have: str | None, need: str | None = None) -> bool:
 
 def needs_version(verb: str, p: dict) -> str | None:
     """The oldest extension that can run this validated request."""
+    if verb == "click" and "x" in p:
+        return "0.4.0"          # coordinate clicks + the screenshot's scale
+    if verb == "type" and "element" not in p:
+        return "0.4.0"          # typing into the focused element
     return MIN_EXT_VERSION.get(verb)
 
 
@@ -202,6 +207,7 @@ class Browser:
     reads: dict = dataclasses.field(default_factory=dict)   # (op, tab) -> monotonic
     sigs: dict = dataclasses.field(default_factory=dict)    # tab -> last page signature
     views: dict = dataclasses.field(default_factory=dict)   # tab -> latest read's layout
+    shots: dict = dataclasses.field(default_factory=dict)   # (op, tab) -> latest screenshot
     times: collections.deque = dataclasses.field(default_factory=collections.deque)
     busy: bool = False
     send_lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
@@ -560,6 +566,22 @@ def validate(verb: str, params: dict, deny_hosts=frozenset()) -> dict:
             if params["mode"] not in READ_MODES:
                 raise BrowserError("mode must be one of " + ", ".join(READ_MODES))
             p["mode"] = params["mode"]
+    elif verb == "click":
+        # exactly one of element / (x, y); x, y are pixels of the latest
+        # browser_screenshot_tab of that tab (act() converts them to CSS px)
+        has_xy = params.get("x") is not None or params.get("y") is not None
+        has_el = params.get("element") not in (None, "")
+        if has_xy == has_el:
+            raise BrowserError("give exactly one of element (an id from browser_read_page) "
+                               "or x, y (pixels of the latest browser_screenshot_tab)")
+        if has_el:
+            p["element"] = parse_element_id(params.get("element"))
+        else:
+            p["x"] = _int(params, "x", 0, 10_000)
+            p["y"] = _int(params, "y", 0, 10_000)
+    elif verb == "type":
+        if params.get("element") not in (None, ""):     # none: the focused element
+            p["element"] = parse_element_id(params.get("element"))
     elif verb in _ELEMENT_VERBS:
         p["element"] = parse_element_id(params.get("element"))
     if verb == "type":
@@ -933,6 +955,48 @@ def _note_sig(b: Browser, tab, sig) -> tuple[bool | None, bool]:
     return sig != prev, False
 
 
+def _shot_scale(img_w: int, img_h: int, data: dict) -> tuple[float, float] | None:
+    """Screenshot px per CSS px: what the extension reported (0.4.0+), else
+    image size / viewport, else None (a pre-0.4.0 build)."""
+    sc = data.get("scale") if isinstance(data.get("scale"), dict) else {}
+    sx, sy = _num(sc.get("x")), _num(sc.get("y"))
+    if sx and sy and 0.1 <= sx <= 10 and 0.1 <= sy <= 10:
+        return sx, sy
+    vp = data.get("viewport") if isinstance(data.get("viewport"), dict) else {}
+    vw, vh = _num(vp.get("w")), _num(vp.get("h"))
+    if vw and vh:
+        return img_w / vw, img_h / vh
+    return None
+
+
+def _note_shot(b: Browser, op, tab: int, img: dict, data: dict) -> None:
+    b.shots[(op, tab)] = {"at": time.monotonic(), "w": img["w"], "h": img["h"],
+                          "scale": _shot_scale(img["w"], img["h"], data), "moved": None}
+
+
+def shot_to_css(shot: dict | None, p: dict) -> dict:
+    """A click at x, y in pixels of the latest screenshot of that tab (this
+    turn, under FRESH_SHOT_S s old, the page not moved since) -> the same
+    request with x, y in CSS px of the viewport. Mirrors the desk's
+    fresh-frame rule."""
+    tab, x, y = p["tab"], p["x"], p["y"]
+    if shot is None or time.monotonic() - shot["at"] > FRESH_SHOT_S:
+        raise BrowserError(f"take a browser_screenshot_tab of tab {tab} first (a click by "
+                           f"coordinates needs one from this turn, under {FRESH_SHOT_S} s "
+                           "old; x, y are pixels of it)")
+    if shot.get("moved"):
+        raise BrowserError(f"tab {tab} {shot['moved']} since the latest screenshot; take a "
+                           "new browser_screenshot_tab (x, y are pixels of it)")
+    if not (0 <= x < shot["w"] and 0 <= y < shot["h"]):
+        raise BrowserError(f"x={x}, y={y} is outside the latest screenshot of tab {tab} "
+                           f"({shot['w']}x{shot['h']} px)")
+    if not shot.get("scale"):
+        raise BrowserError("that screenshot did not report its scale; " + outdated_error(
+            None, "0.4.0"))
+    sx, sy = shot["scale"]
+    return {**p, "x": round(x / sx, 1), "y": round(y / sy, 1)}
+
+
 def _note_view(b: Browser, verb: str, tab: int, data: dict) -> None:
     """Keep the latest read's layout per tab for screenshot_tab's listing."""
     if verb == "close_tab":
@@ -1004,7 +1068,12 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         await _audit(b, verb, p, False, why, project)
         return f"error: {why}"
     op = desk._op_key()
-    if verb in _FRESH_VERBS:
+    if verb == "click" and "x" in p:
+        try:
+            p = shot_to_css(b.shots.get((op, p["tab"])), p)
+        except BrowserError as e:
+            return await _refuse(b, verb, p, str(e), project, kind="browser_blind")
+    elif verb in _FRESH_VERBS:
         at = b.reads.get((op, p["tab"]))
         if at is None or time.monotonic() - at > FRESH_READ_S:
             return await _refuse(b, verb, p, f"read the tab first (browser_read_page of "
@@ -1048,6 +1117,14 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     changed, first = _note_sig(b, tab, data.get("sig"))
     if isinstance(tab, int):
         _note_view(b, verb, tab, data)
+        if verb in _MOVES_PAGE or verb == "close_tab":
+            # the pixels of an earlier screenshot no longer point at the same things
+            moved = {"scroll": "scrolled", "scroll_to_element": "scrolled",
+                     "navigate": "navigated", "back": "went back", "forward": "went forward",
+                     "close_tab": "was closed"}[verb]
+            for k, s in b.shots.items():
+                if k[1] == tab:
+                    s["moved"] = moved
     if verb == "read_page" and isinstance(tab, int):
         b.reads[(op, tab)] = time.monotonic()
     elif verb in ("navigate", "close_tab", "back", "forward") and isinstance(tab, int):
@@ -1059,6 +1136,8 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     img = _image(res)
     if img is None:
         return "error: the browser sent no usable screenshot"
+    if isinstance(tab, int):
+        _note_shot(b, op, tab, img, data)
     listing = screenshot_elements(b.views.get(tab), img["w"], img["h"])
     return imageresult.with_inline(
         f"{text}\n[screenshot {img['w']}x{img['h']} attached]\n{listing}", b64=img["b64"],

@@ -41,6 +41,31 @@ function int(params, k, lo, hi, dflt) {
   return v;
 }
 
+function coord(params, k) {
+  const v = params[k];
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new VerbError(`${k} must be a number`);
+  if (v < 0 || v > 100000) throw new VerbError(`${k}=${v} is outside 0..100000`);
+  return v;
+}
+
+// Screenshot pixels per CSS px: captureVisibleTab returns the viewport at
+// device pixels, so image width / viewport width (devicePixelRatio x zoom);
+// the reported devicePixelRatio when the viewport is unknown. The server
+// divides a screenshot point by this to get the CSS px clickAt wants.
+export function shotScale(imgW, imgH, viewport) {
+  const vw = viewport && Number(viewport.w), vh = viewport && Number(viewport.h);
+  const dpr = viewport && Number(viewport.dpr) > 0 ? Number(viewport.dpr) : 1;
+  const x = imgW > 0 && vw > 0 ? imgW / vw : dpr;
+  const y = imgH > 0 && vh > 0 ? imgH / vh : x;
+  return { x, y };
+}
+
+// A screenshot point -> CSS px of the viewport (what the server does before
+// sending x, y; mirrored here so both sides agree and node can test it).
+export function toCssPoint(x, y, scale) {
+  return { x: Math.round((x / scale.x) * 10) / 10, y: Math.round((y / scale.y) * 10) / 10 };
+}
+
 export function hostOf(url) {
   try {
     const u = new URL(url);
@@ -156,6 +181,17 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
       if (!READ_MODES.includes(params.mode)) throw new VerbError(`mode must be one of ${READ_MODES.join(', ')}`);
       p.mode = params.mode;
     }
+  } else if (verb === 'click') {
+    // exactly one of element / (x, y); x, y are CSS px of the top frame's
+    // viewport (the server converted them from screenshot pixels)
+    const hasXY = params.x !== undefined || params.y !== undefined;
+    const hasEl = params.element !== undefined && params.element !== null;
+    if (hasXY === hasEl) throw new VerbError('give exactly one of element or x, y');
+    if (hasEl) p.element = parseElementId(params.element).id;
+    else { p.x = coord(params, 'x'); p.y = coord(params, 'y'); }
+  } else if (verb === 'type') {
+    // no element: type into whatever has focus
+    if (params.element !== undefined && params.element !== null) p.element = parseElementId(params.element).id;
   } else if (ELEMENT_VERBS.includes(verb)) p.element = parseElementId(params.element).id;
   if (verb === 'type') {
     if (typeof params.text !== 'string' || !params.text) throw new VerbError('text is required');

@@ -8,7 +8,7 @@
 // injection) and as an ES module (import). It installs globalThis.__jav3Dom
 // once per realm; the IIFE keeps re-injection free of redeclaration errors.
 (function () {
-  const V = 3;
+  const V = 4;
   if (globalThis.__jav3Dom && globalThis.__jav3Dom.v === V) return;
 
   const ATTR = 'data-jav3-id';
@@ -195,6 +195,146 @@
                  box: { x: r.left, y: r.top, w: r.width, h: r.height } });
     });
     return orderInViewFirst(dedupeContained(raw).map(i => raw[i]), CAND_CAP);
+  }
+
+  // --- realistic clicks -------------------------------------------------------------
+
+  // The events a real left click produces at (x, y), CSS px of the frame's
+  // viewport, in the order Chrome fires them. Pure: the caller adds `view`
+  // and dispatches. {type:'focus'} is a step, not an event: focus moves
+  // there unless the mousedown was cancelled.
+  function clickSequence(x, y) {
+    const at = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y,
+                 screenX: x, screenY: y, button: 0 };
+    const ptr = { pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1 };
+    const P = (type, extra) => ({ ctor: 'PointerEvent', type, init: { ...at, ...ptr, buttons: 0, ...extra } });
+    const M = (type, extra) => ({ ctor: 'MouseEvent', type, init: { ...at, buttons: 0, ...extra } });
+    return [
+      P('pointerover'),
+      P('pointerenter', { bubbles: false, cancelable: false }),
+      M('mouseover'),
+      P('pointermove'),
+      P('pointerdown', { buttons: 1, pressure: 0.5 }),
+      M('mousedown', { buttons: 1, detail: 1 }),
+      { ctor: null, type: 'focus', init: null },
+      P('pointerup', { pressure: 0 }),
+      M('mouseup', { detail: 1 }),
+      M('click', { detail: 1 }),
+    ];
+  }
+
+  // elementFromPoint, descending into open shadow roots (overlay-aware: what
+  // is on top at that point is what a real click hits).
+  function deepPoint(doc, x, y) {
+    let el = doc.elementFromPoint(x, y);
+    while (el && el.shadowRoot) {
+      const d = el.shadowRoot.elementFromPoint(x, y);
+      if (!d || d === el) break;
+      el = d;
+    }
+    return el;
+  }
+
+  const FOCUSABLE = 'a[href], button, input, select, textarea, summary, [tabindex], ' +
+    '[contenteditable=""], [contenteditable=true]';
+  const ACTIVATABLE = 'a[href], button, input[type=submit]';
+
+  function describeEl(x) {
+    if (!x || !x.tagName) return 'the page';
+    const n = clean(accessibleName(x), 40);
+    return x.tagName.toLowerCase() + (n ? ' ' + JSON.stringify(n) : '');
+  }
+
+  // Dispatch clickSequence on `hit` (what is at the point); `el` is the element
+  // the model asked for (null for a coordinate click). -> Promise<{ok, text}>
+  async function realClick(win, doc, hit, x, y, el) {
+    const want = el || hit;
+    let got = false;
+    const mark = () => { got = true; };
+    want.addEventListener('click', mark, true);
+    let changed = false;
+    const mo = new win.MutationObserver(() => { changed = true; });
+    mo.observe(doc, { subtree: true, childList: true, attributes: true, characterData: true });
+    const url = win.location.href;
+    let downCancelled = false, pointerCancelled = false;
+    for (const s of clickSequence(x, y)) {
+      if (s.type === 'focus') {
+        if (downCancelled) continue;
+        const f = hit.closest ? hit.closest(FOCUSABLE) : null;
+        if (f && typeof f.focus === 'function') f.focus({ preventScroll: true });
+        else if (doc.activeElement && doc.activeElement !== doc.body && doc.activeElement.blur) doc.activeElement.blur();
+        continue;
+      }
+      // a cancelled pointerdown suppresses the compatibility mouse events
+      if (pointerCancelled && (s.type === 'mousedown' || s.type === 'mouseup')) continue;
+      const Ctor = s.ctor === 'PointerEvent' && typeof win.PointerEvent === 'function' ? win.PointerEvent : win.MouseEvent;
+      const notCancelled = hit.dispatchEvent(new Ctor(s.type, { ...s.init, view: win }));
+      if (!notCancelled && s.type === 'pointerdown') pointerCancelled = true;
+      if (!notCancelled && s.type === 'mousedown') downCancelled = true;
+    }
+    await new Promise(r => setTimeout(r, 150));
+    mo.disconnect();
+    want.removeEventListener('click', mark, true);
+    changed = changed || win.location.href !== url;
+    let text = 'clicked ' + describeEl(want);
+    if (el && hit !== el && !(el.contains && el.contains(hit))) {
+      text += `; the point was covered by ${describeEl(hit)}, which got the click`;
+    }
+    // el.click() as a last resort, and only when (a) nothing changed within
+    // 150 ms and (b) the element never saw the dispatched click (an overlay or
+    // a sticky header took it). A dispatched click that DID reach a link or
+    // button already ran its default action (navigation, form submit), so
+    // clicking again would submit twice or undo a toggle; and it is limited
+    // to native activatable elements because el.click() on a <div> does
+    // nothing the dispatched sequence did not already do.
+    const act = el && el.matches && el.matches(ACTIVATABLE) ? el : null;
+    if (act && !changed && !got) {
+      act.click();
+      text += '; nothing reacted, so it was activated directly';
+    }
+    return { ok: true, text };
+  }
+
+  // Type into an element that already has focus (no element id): key events
+  // around the insertion so framework listeners see typing. Inputs/textareas:
+  // insert at the caret via the prototype value setter + an input event;
+  // contenteditable: execCommand('insertText').
+  function typeInto(win, doc, el, text, submit) {
+    const tag = el.tagName;
+    if (tag === 'INPUT' && (el.type === 'password' || el.type === 'file')) {
+      return { ok: false, err: 'Jav3 does not type into password or file fields' };
+    }
+    const field = tag === 'TEXTAREA' ||
+      (tag === 'INPUT' && !/^(button|submit|reset|checkbox|radio|file|image|range|color|hidden)$/i.test(el.type));
+    if (!field && !el.isContentEditable) {
+      return { ok: false, err: `the focused element (${describeEl(el)}) is not a text field; click the field first` };
+    }
+    const init = { key: text.length === 1 ? text : 'Unidentified', bubbles: true, cancelable: true,
+                   composed: true, view: win };
+    if (el.dispatchEvent(new win.KeyboardEvent('keydown', init))) {
+      el.dispatchEvent(new win.KeyboardEvent('keypress', { ...init, charCode: text.charCodeAt(0) }));
+      if (field) {
+        const v = String(el.value || '');
+        let a = v.length, b = v.length;
+        try { if (el.selectionStart != null) { a = el.selectionStart; b = el.selectionEnd; } } catch { /* no caret */ }
+        const proto = tag === 'INPUT' ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v.slice(0, a) + text + v.slice(b));
+        el.dispatchEvent(new win.InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      } else {
+        doc.execCommand('insertText', false, text);
+      }
+    }
+    el.dispatchEvent(new win.KeyboardEvent('keyup', init));
+    if (field) el.dispatchEvent(new win.Event('change', { bubbles: true }));
+    if (submit) {
+      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
+      el.dispatchEvent(new win.KeyboardEvent('keydown', opts));
+      el.dispatchEvent(new win.KeyboardEvent('keyup', opts));
+      if (el.form) {
+        if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
+      }
+    }
+    return { ok: true, text: `typed ${text.length} character(s) into ${describeEl(el)}` };
   }
 
   // --- accessible names -------------------------------------------------------------
@@ -424,6 +564,6 @@
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
     CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
-    collectCandidates,
+    collectCandidates, clickSequence, deepPoint, realClick, typeInto, describeEl,
   };
 })();
