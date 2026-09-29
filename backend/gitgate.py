@@ -8,12 +8,15 @@ kept out via a host-written .gitignore, and the agent can never write into
 import asyncio
 import base64
 import json
+import logging
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .config import settings
 from .db import get_db
+
+log = logging.getLogger("jav3.gitgate")
 
 GIT_TIMEOUT = 30
 NET_TIMEOUT = 120       # push / fetch / ls-remote cross the internet on a Pi
@@ -48,6 +51,29 @@ async def run_git(slug: str, *args: str, check: bool = False,
     if check and proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {_scrub((err or out).strip())}")
     return proc.returncode, out, err
+
+
+async def flush_guest_writes(slug: str) -> None:
+    """Bring this turn's file writes to the host before a git tool reads them.
+
+    A turn that runs in a guest VM buffers write_file/edit_file there (.staging)
+    and hands the buffer back only after its final message. Until then the host
+    repo cannot see the files: git_status said "clean", git_commit_request said
+    "nothing to commit", and git_push_request snapshotted a tree WITHOUT the
+    agent's new files (a PR holding one host-side journal line, 2026-09-29).
+    The guest's `pull` returns the buffer without clearing it and applying it
+    again is idempotent, so this is safe mid-turn and again at turn end. A no-op
+    outside a brokered guest tool call (HTTP, host-run turns, tests)."""
+    from .agent import budget as budget_mod
+    from .vm import broker
+    op = budget_mod.active_op_id.get()
+    if not op or broker.get_turn(op) is None:
+        return
+    from .vm import guest_turn
+    try:
+        await asyncio.wait_for(guest_turn.pull_writes(slug), timeout=60)
+    except Exception as e:  # noqa: BLE001 — the git tool still answers, from what the host has
+        log.warning("could not pull the guest's writes for %s: %s", slug, e)
 
 
 # per-slug init lock: git_status/git_diff are read_only-flagged, so the loop
@@ -290,9 +316,12 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
     if not message or not message.strip():
         raise ValueError("commit message must not be empty")
     await ensure_repo(slug)
+    await flush_guest_writes(slug)      # this turn's write_file/edit_file, still in the VM
     _, porcelain, _ = await run_git(slug, "status", "--porcelain")
     if not porcelain.strip():
-        raise ValueError("nothing to commit — the working tree is clean")
+        raise ValueError("nothing to commit — the working tree is clean: every file in "
+                         "the project already matches the last commit. Write or edit "
+                         "a file first.")
     db = await get_db()
     try:
         cur = await db.execute(
@@ -356,10 +385,18 @@ async def _approve_remote(db, rid: int, row: dict) -> dict:
     return await _fetch_request(db, rid)
 
 
-async def approve_request(rid: int) -> dict:
+async def _own_request(db, rid: int, slug: str | None) -> dict:
+    """The request, checked to belong to the project in the URL."""
+    row = await _fetch_request(db, rid)
+    if slug is not None and row["project_slug"] != slug:
+        raise KeyError(f"no git request #{rid} in project {slug}")
+    return row
+
+
+async def approve_request(rid: int, slug: str | None = None) -> dict:
     db = await get_db()
     try:
-        row = await _fetch_request(db, rid)
+        row = await _own_request(db, rid, slug)
         if row["status"] != "pending":
             raise ValueError(f"request #{rid} is {row['status']}, not pending")
         if row.get("kind") == "remote":
@@ -383,6 +420,18 @@ async def approve_request(rid: int) -> dict:
             await run_git(slug, "add", "--", *paths, check=True)
         else:
             await run_git(slug, "add", "-A", check=True)
+        rc, _, _ = await run_git(slug, "diff", "--cached", "--quiet")
+        rc_head, head, _ = await run_git(slug, "rev-parse", "--verify", "-q", "HEAD")
+        if rc == 0 and rc_head == 0:
+            # nothing left to commit: a pull request merged since (or an earlier
+            # approval) already put these files into main. Close the request
+            # instead of leaving it pending with a git error nobody can fix.
+            await db.execute(
+                "UPDATE git_requests SET status = 'approved', commit_sha = ?, error = ?, "
+                "decided_at = datetime('now') WHERE id = ?",
+                (head.strip(), "nothing new to commit: these changes are already in main", rid))
+            await db.commit()
+            return await _fetch_request(db, rid)
         try:
             await run_git(slug, "-c", "user.name=Jav3",
                           "-c", f"user.email={settings.git_author_email}",
@@ -409,7 +458,7 @@ async def approve_request(rid: int) -> dict:
                 await gitea.ensure_remote_repo(slug)
                 gerr = await gitea.push_main(slug)
             except (RuntimeError, ValueError) as e:
-                gerr = f"Gitea: {gitea.scrub(str(e))}"
+                gerr = f"committed; main not pushed to Gitea: {gitea.scrub(str(e))}"
             if gerr:
                 error = f"{error}; {gerr}" if error else gerr
         await db.execute(
@@ -421,10 +470,10 @@ async def approve_request(rid: int) -> dict:
         await db.close()
 
 
-async def reject_request(rid: int) -> dict:
+async def reject_request(rid: int, slug: str | None = None) -> dict:
     db = await get_db()
     try:
-        row = await _fetch_request(db, rid)
+        row = await _own_request(db, rid, slug)
         if row["status"] != "pending":
             raise ValueError(f"request #{rid} is {row['status']}, not pending")
         if row.get("kind") == "push":

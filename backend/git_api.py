@@ -101,25 +101,45 @@ async def requests(slug: str):
     return {"requests": await gitgate.list_requests(slug)}
 
 
+def _gitea_failure(e: Exception, verb: str) -> HTTPException | None:
+    """A Gitea-side failure of an approve/reject, as an HTTP answer that says
+    what happened and that the request is untouched. None = not a Gitea one."""
+    from . import gitea
+    if isinstance(e, gitea.GiteaRefused):
+        return HTTPException(status_code=409, detail=str(e))
+    if isinstance(e, gitea.GiteaUnreachable):
+        return HTTPException(status_code=502, detail=(
+            f"{e}. The request is still pending: start Gitea, then {verb} it again."))
+    if isinstance(e, gitea.GiteaError):
+        return HTTPException(status_code=502, detail=f"{e}. The request is still pending.")
+    if isinstance(e, gitea.GiteaOff):
+        return HTTPException(status_code=409, detail=str(e))
+    return None
+
+
 @router.post("/requests/{rid}/approve")
 async def approve(slug: str, rid: int):
     _check_project(slug)
     try:
-        return await gitgate.approve_request(rid)
+        return await gitgate.approve_request(rid, slug)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=e.args[0])
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise (_gitea_failure(e, "approve")
+               or HTTPException(status_code=500, detail=str(e)))
 
 
 @router.post("/requests/{rid}/reject")
 async def reject(slug: str, rid: int):
     _check_project(slug)
     try:
-        return await gitgate.reject_request(rid)
+        return await gitgate.reject_request(rid, slug)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=e.args[0])
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except RuntimeError as e:
+        raise (_gitea_failure(e, "reject")
+               or HTTPException(status_code=500, detail=str(e)))
