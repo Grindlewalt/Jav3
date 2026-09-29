@@ -4,12 +4,18 @@ from backend.agent.tools.toolctx import require_project
 
 async def run(path: str, find: str, replace: str, all: bool = False) -> str:
     slug = await require_project()
+    if not find:
+        return ("error: 'find' is empty — pass the exact text to replace (to create or "
+                "overwrite a whole file use write_file).")
     if find == replace:
         return "error: find and replace are identical — no change to make."
     p = resolve(slug, path)
     if p is None:
         return f"error: no such file: {path}"
-    text = p.read_text()
+    try:
+        text = p.read_text()
+    except UnicodeDecodeError:
+        return f"error: {path} is binary — edit_file only edits text files."
     count = text.count(find)
     if count == 0:
         return (f"error: 'find' text not found in {path}. Read the file with read_file "
@@ -25,5 +31,7 @@ async def run(path: str, find: str, replace: str, all: bool = False) -> str:
         return (f"error: edit refused — the result would contain the literal value "
                 f"of secret(s): {', '.join(e.names)}. Reference secrets as "
                 "{{secret:NAME}} placeholders; never paste their values into files.")
+    except ValueError as e:        # a protected path (.git, .staging)
+        return f"error: edit refused — {e}."
     n = count if all else 1
     return f"edited {path} ({n} replacement{'s' if n != 1 else ''})"

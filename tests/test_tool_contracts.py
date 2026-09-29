@@ -282,3 +282,56 @@ async def test_search_codebase_none_query_and_bool_flag(proj):
     out = await _tool("search_codebase", query="a(", regex="false")
     assert "a(b" in out and not out.startswith("error"), out
     assert (await _tool("search_codebase", query="a(", regex="yes")).startswith("error: bad regex")
+
+
+# --- TOOLS-05: empty and impossible paths are the model's mistake, said plainly ---
+
+@pytest.mark.parametrize("path", ["", "  ", ".", "./", "sub/.."])
+async def test_write_file_with_no_real_path_says_path_is_required(proj, path):
+    out = await _tool("write_file", path=path, content="x")
+    assert out.startswith("error: path is required"), out
+    assert "harness fault" not in out
+
+
+async def test_write_file_under_an_existing_file_is_a_path_error(proj):
+    (proj / "notes.txt").write_text("a")
+    out = await _tool("write_file", path="notes.txt/inner.txt", content="x")
+    assert out.startswith("error: write_file:") and "really a file" in out, out
+    assert "harness fault" not in out
+
+
+@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../b"])
+async def test_paths_that_leave_the_project_read_as_the_models_path(proj, path):
+    for tool, args in (("write_file", {"content": "x"}), ("read_file", {}),
+                       ("edit_file", {"find": "a", "replace": "b"})):
+        out = await _tool(tool, path=path, **args)
+        assert out.startswith(f"error: {tool}:") and "outside the project" in out, out
+        assert "harness fault" not in out
+
+
+async def test_a_nul_in_a_path_is_a_path_error(proj):
+    out = await _tool("read_file", path="a\x00b")
+    assert out.startswith("error: read_file:") and "NUL" in out, out
+
+
+async def test_protected_paths_are_refused_plainly(proj):
+    out = await _tool("write_file", path=".git/config", content="x")
+    assert out.startswith("error: write refused — cannot write into .git"), out
+    (proj / ".git").mkdir()
+    (proj / ".git" / "config").write_text("[core]\n")
+    out = await _tool("edit_file", path=".git/config", find="core", replace="x")
+    assert out.startswith("error: edit refused — cannot write into .git"), out
+
+
+async def test_edit_file_with_an_empty_find_changes_nothing(proj):
+    before = (proj / "README.md").read_text()
+    for kw in ({}, {"all": True}):
+        out = await _tool("edit_file", path="README.md", find="", replace="X", **kw)
+        assert out.startswith("error: 'find' is empty"), out
+    assert (proj / "README.md").read_text() == before
+
+
+async def test_edit_file_on_a_binary_file_is_a_plain_error(proj):
+    (proj / "b.bin").write_bytes(b"\xff\xfe\x00\x80")
+    out = await _tool("edit_file", path="b.bin", find="a", replace="b")
+    assert out.startswith("error: b.bin is binary"), out
