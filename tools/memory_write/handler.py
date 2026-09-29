@@ -3,7 +3,7 @@ import re
 import yaml
 
 from backend import secrets as secrets_mod
-from backend.memory import notes_dir, parse_note
+from backend.memory import notes_dir, parse_note, strip_leading_frontmatter
 from backend.memory import weakening_advice
 from backend.runtime import nav_taint, write_taint
 
@@ -21,7 +21,8 @@ def _with_frontmatter(description: str | None, body: str, taint: str | None = No
     # operator approves it (flips approved: true). This is what stops laundered
     # web content from being promoted to a standing rule by writing it to memory.
     lines = ["source: agent", "approved: false"]
-    if description:
+    if description is not None and str(description).strip():
+        description = str(description)   # a hand-edited note may hold an int or a date
         # single-line YAML value dumped BY yaml: a Python repr is not YAML (both
         # quote kinds made it unparseable, and an unparseable note used to read
         # as operator-authored and trusted)
@@ -54,17 +55,43 @@ async def _refused_event(note: str, src: str, hit: str) -> None:
         pass
 
 
-async def run(name: str, content: str, mode: str = "append",
+_MODES = ("append", "replace", "delete")
+
+
+def _label(stem: str, name: str) -> str:
+    """The note as the model should name it from now on: when the name it gave
+    was rewritten (case, spaces, punctuation, a path), say so, or it would go on
+    calling the note by a name it never wrote."""
+    if stem == name:
+        return f"'{stem}'"
+    return (f"'{stem}' (your name {name!r} was normalised; use '{stem}' with "
+            "memory_read and memory_write)")
+
+
+async def run(name: str, content: str, mode: str | None = "append",
               description: str | None = None) -> str:
+    mode = "append" if mode is None else str(mode).strip().lower()
+    if mode not in _MODES:
+        return (f"error: unknown mode {mode!r}. Use one of: append (add to the "
+                "note), replace (rewrite it), delete (remove it).")
+    name = str(name)
+    try:
+        stem = _safe_name(name)
+    except ValueError:
+        return "error: bad note name. Use letters, digits and hyphens."
+    label = _label(stem, name)
+    content = "" if content is None else str(content)
+    description = None if description is None else str(description)
     notes = notes_dir()
     notes.mkdir(parents=True, exist_ok=True)
-    path = notes / f"{_safe_name(name)}.md"
+    path = notes / f"{stem}.md"
     # same hard line as writes.apply_write: a real secret VALUE never lands in
     # an agent-reachable file — memory notes are read back verbatim by
-    # memory_read and would otherwise be an unscanned side door
-    leaks = secrets_mod.find_in_bytes(content.encode())
+    # memory_read and would otherwise be an unscanned side door. The name and
+    # the description are written into the file (and the prompt index) too.
+    leaks = secrets_mod.find_in_bytes("\n".join((name, description or "", content)).encode())
     if leaks:
-        return ("error: refused — the content contains the literal value of "
+        return ("error: refused — the note contains the literal value of "
                 f"an operator secret ({', '.join(leaks)}). Use the "
                 "{{secret:NAME}} placeholder form instead.")
     if mode == "delete":
@@ -73,6 +100,9 @@ async def run(name: str, content: str, mode: str = "append",
                     "list notes with memory_read first")
         path.unlink()
         return f"memory note '{path.stem}' deleted"
+    # a leading --- block in the body is the model's own frontmatter, not ours
+    body_desc, content = strip_leading_frontmatter(content)
+    description = description or body_desc
     src = nav_taint.get()
     hit = weakening_advice(f"{description or ''}\n{content}") if src else None
     if hit:
@@ -94,11 +124,11 @@ async def run(name: str, content: str, mode: str = "append",
             except OSError:
                 pass
         path.write_text(_with_frontmatter(description, content, taint=op_taint or prior))
-        return f"memory note '{path.stem}' written"
+        return f"memory note {label} written"
     # append: keep (or update) the existing frontmatter, never duplicate it, and
     # carry the taint forward (a new untrusted write escalates a clean note).
     meta, body = parse_note(path.read_text())
     desc = description or meta.get("description")
     taint = op_taint or meta.get("taint")
     path.write_text(_with_frontmatter(desc, body + "\n\n" + content.strip(), taint=taint))
-    return f"appended to memory note '{path.stem}'"
+    return f"appended to memory note {label}"

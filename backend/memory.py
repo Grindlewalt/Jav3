@@ -499,6 +499,30 @@ def parse_note(text: str) -> tuple[dict, str]:
     return meta, m.group(2).strip()
 
 
+def strip_leading_frontmatter(text: str) -> tuple[str | None, str]:
+    """(description, body) for text an AGENT wrote as a note body. A leading
+    `---` block in it is not ours: nested under the frontmatter the tool writes,
+    it would ride the prompt as noise once the note is approved. It is removed,
+    and its `description` (when it parses and has one) is handed back so the
+    caller can use it if the model gave none. A `---` line that never closes is
+    content (a horizontal rule), and stays."""
+    lead = (text or "").lstrip("﻿").lstrip()
+    if not lead.startswith("---"):
+        return None, text
+    m = _FRONTMATTER.match(lead)
+    if not m:
+        return None, text
+    import yaml
+    desc = None
+    try:
+        meta = yaml.safe_load(m.group(1))
+        if isinstance(meta, dict) and meta.get("description"):
+            desc = str(meta["description"])
+    except yaml.YAMLError:
+        pass
+    return desc, m.group(2).strip()
+
+
 def note_taint(meta: dict) -> str:
     """'untrusted' if the note carries a persisted taint stamp (it was written in
     a turn that had consumed web/research content), else 'trusted'. Set by the
