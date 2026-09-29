@@ -2,6 +2,7 @@ import re
 
 import yaml
 
+from backend import memory
 from backend import secrets as secrets_mod
 from backend.memory import notes_dir, parse_note, strip_leading_frontmatter
 from backend.memory import weakening_advice
@@ -68,6 +69,38 @@ def _label(stem: str, name: str) -> str:
             "memory_read and memory_write)")
 
 
+async def _delete(stem: str, name: str, notes, path) -> str:
+    """Delete = move to the trash (the operator restores it from the Memory
+    page), with an audit event. A binding note, one the operator wrote or
+    approved, cannot be deleted from a turn that has read untrusted content:
+    that would strip a standing rule on an injection's say-so."""
+    if not path.exists() and not memory.proposal_path(stem, notes).exists():
+        return (f"error: no note named '{name}' to delete — "
+                "list notes with memory_read first")
+    binding = False
+    if path.exists():
+        try:
+            binding = memory.note_trusted(parse_note(path.read_text())[0])
+        except OSError:
+            pass
+    if binding and write_taint.get():
+        await memory.audit("memory_refused", "warn",
+                           f"memory note '{stem}' delete refused: this turn had read "
+                           "untrusted content and the note is binding",
+                           {"note": stem, "by": "agent"})
+        return ("error: refused — this turn read untrusted content (a web page, a "
+                f"search, a file or a message), and '{stem}' is one of the operator's "
+                "binding notes. Tell the operator what you wanted removed; they can "
+                "delete it on the Memory page.")
+    tid = memory.trash_note(stem, notes)
+    await memory.audit("memory_deleted", "warn" if binding else "info",
+                       f"memory note '{stem}' deleted by an agent"
+                       + (" (it was binding)" if binding else ""),
+                       {"note": stem, "by": "agent", "trash_id": tid, "binding": binding})
+    return (f"memory note '{stem}' deleted (moved to the trash; the operator can "
+            "restore it from the Memory page)")
+
+
 async def run(name: str, content: str, mode: str | None = "append",
               description: str | None = None) -> str:
     mode = "append" if mode is None else str(mode).strip().lower()
@@ -95,11 +128,7 @@ async def run(name: str, content: str, mode: str | None = "append",
                 f"an operator secret ({', '.join(leaks)}). Use the "
                 "{{secret:NAME}} placeholder form instead.")
     if mode == "delete":
-        if not path.exists():
-            return (f"error: no note named '{name}' to delete — "
-                    "list notes with memory_read first")
-        path.unlink()
-        return f"memory note '{path.stem}' deleted"
+        return await _delete(stem, name, notes, path)
     # a leading --- block in the body is the model's own frontmatter, not ours
     body_desc, content = strip_leading_frontmatter(content)
     description = description or body_desc

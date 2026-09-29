@@ -61,6 +61,139 @@ def notes_dir():
     return settings.memory_dir / "notes"
 
 
+# --- trash and proposals -----------------------------------------------------
+# Both live in dot-directories INSIDE the notes dir: the prompt assembly, the
+# tools and the operator's file listing all glob `*.md` one level down or skip
+# dot-dirs, so nothing in them can be read as a note, and backups (which sync
+# the whole memory dir) carry them along.
+TRASH = ".trash"
+PROPOSALS = ".proposals"
+TRASH_CAP = 500                      # entries kept; the oldest go first
+_TRASH_ID = re.compile(r"^\d{8}T\d{6}Z(?:-\d+)?__[^/\\]+$")
+
+
+def trash_dir(notes=None):
+    return (notes or notes_dir()) / TRASH
+
+
+def proposal_path(stem: str, notes=None):
+    return (notes or notes_dir()) / PROPOSALS / f"{stem}.md"
+
+
+def _trash_file(tid: str, notes, suffix: str = ".md"):
+    """The trash file for an id from a URL or a listing: anything that is not
+    exactly the shape we mint is refused before it touches a path."""
+    if not isinstance(tid, str) or not _TRASH_ID.match(tid) or tid.split("__", 1)[1] in ("", ".", ".."):
+        raise ValueError("bad trash id")
+    return trash_dir(notes) / f"{tid}{suffix}"
+
+
+def trash_note(stem: str, notes=None) -> str:
+    """Move notes/<stem>.md, and its pending proposal if it has one, into the
+    trash. Returns the trash id. Nothing is ever unlinked outright: deleting a
+    note is undoable. FileNotFoundError when neither file exists."""
+    from datetime import datetime, timezone
+    notes = notes or notes_dir()
+    src, prop = notes / f"{stem}.md", proposal_path(stem, notes)
+    if not src.is_file() and not prop.is_file():
+        raise FileNotFoundError(stem)
+    dest_dir = trash_dir(notes)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    tid, n = f"{stamp}__{stem}", 1
+    while (dest_dir / f"{tid}.md").exists() or (dest_dir / f"{tid}.proposal.md").exists():
+        n += 1
+        tid = f"{stamp}-{n}__{stem}"
+    if src.is_file():
+        src.replace(dest_dir / f"{tid}.md")
+    else:                                    # only a proposal existed: keep it as the entry
+        prop.replace(dest_dir / f"{tid}.md")
+        prop = None
+    if prop is not None and prop.is_file():
+        prop.replace(dest_dir / f"{tid}.proposal.md")
+    _trim_trash(dest_dir)
+    return tid
+
+
+def _trim_trash(d) -> None:
+    entries = sorted(p for p in d.glob("*.md") if not p.name.endswith(".proposal.md"))
+    for p in entries[:max(0, len(entries) - TRASH_CAP)]:
+        p.unlink(missing_ok=True)
+        p.with_name(p.stem + ".proposal.md").unlink(missing_ok=True)
+
+
+def list_trash(notes=None) -> list[dict]:
+    """Trashed notes, newest first."""
+    d = trash_dir(notes)
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.glob("*.md"), reverse=True):
+        if p.name.endswith(".proposal.md") or not _TRASH_ID.match(p.stem):
+            continue
+        stamp, name = p.stem.split("__", 1)
+        try:
+            meta, _ = parse_note(p.read_text())
+            size = p.stat().st_size
+        except OSError:
+            continue
+        s = stamp.split("-")[0]
+        out.append({"id": p.stem, "name": name, "size": size,
+                    "deleted_at": f"{s[:4]}-{s[4:6]}-{s[6:8]}T{s[9:11]}:{s[11:13]}:{s[13:15]}Z",
+                    "source": str(meta.get("source", "operator")),
+                    "taint": note_taint(meta),
+                    "has_proposal": p.with_name(p.stem + ".proposal.md").is_file()})
+    return out
+
+
+def restore_trash(tid: str, notes=None) -> str:
+    """Put a trashed note back (with its proposal, if the name is free of one).
+    Returns the note name. ValueError for a malformed id, FileNotFoundError for
+    an unknown one, FileExistsError when a note of that name exists now: a
+    restore never overwrites."""
+    notes = notes or notes_dir()
+    src = _trash_file(tid, notes)
+    if not src.is_file():
+        raise FileNotFoundError(tid)
+    name = tid.split("__", 1)[1]
+    dest = notes / f"{name}.md"
+    if dest.exists():
+        raise FileExistsError(name)
+    notes.mkdir(parents=True, exist_ok=True)
+    src.replace(dest)
+    tprop = _trash_file(tid, notes, ".proposal.md")
+    if tprop.is_file():
+        pdest = proposal_path(name, notes)
+        if pdest.exists():
+            tprop.unlink()               # a newer proposal is already waiting
+        else:
+            pdest.parent.mkdir(parents=True, exist_ok=True)
+            tprop.replace(pdest)
+    return name
+
+
+async def audit(kind: str, severity: str, summary: str, detail: dict | None = None) -> None:
+    """One security event for something an agent (or the operator) did to memory.
+    Best-effort: the action stands even if the alert cannot be written. Skipped
+    in an incognito turn, where the notes dir is a throwaway. Names the run that
+    did it so the Review Center can point at the conversation."""
+    from . import runtime
+    if runtime.ephemeral.get():
+        return
+    try:
+        from . import security
+        from .db import get_db
+        db = await get_db()
+        try:
+            await security.raise_event(
+                db, kind=kind, severity=severity, summary=summary,
+                detail={**(detail or {}), "conversation_id": runtime.conversation_id.get()})
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — never fail the memory action over its alert
+        pass
+
+
 def _context_file(slug: str):
     return settings.projects_dir / slug / ".context.json"
 
