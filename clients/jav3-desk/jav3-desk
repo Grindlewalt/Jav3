@@ -73,6 +73,7 @@ import sys
 import tempfile
 import threading
 import time
+import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -90,6 +91,8 @@ THUMB_EDGE = 160          # settle compares thumbnails this big (long edge): at 
 PIXEL_TOL = 8             # grey levels a thumbnail pixel may move and still "match"
 ZOOM_MAX = 3.0            # a zoom upscales at most this much over native pixels
 ELEMENTS_BUDGET_S = 1.5   # the accessibility walk never blocks a screenshot longer
+PRE_REUSE_S = 2.0         # an input verb reuses the last response's walk + thumbnail
+                          # as its "before" when they are younger than this
 ELEMENTS_CAP = 400
 ELEMENTS_DEPTH = 12
 ROW_PX = 40               # reading order: rows of this many image px, then x
@@ -103,6 +106,9 @@ LOCKED_ERR = "the screen is locked — ask the operator to unlock it"
 ASLEEP_ERR = "the display is asleep — ask the operator to wake it"
 UNIT_NAME = "jav3-desk.service"
 LABEL = "local.jav3.desk"
+
+
+log = logging.getLogger("jav3-desk")
 
 
 class DeskError(Exception):
@@ -519,6 +525,8 @@ def _intersects(a: tuple, b: tuple) -> bool:
 BG_ROLES = ("button", "textfield", "combobox", "checkbox", "radio", "toggle", "tab", "link")
 BG_SHOWN = 8              # a background window lists at most this many elements
 BG_NODES = 400            # ...and its walk visits at most this many nodes
+BG_TIME_S = 0.15          # ...within this long (a sluggish background app, System
+                          # Settings at 150-250 ms a node, must not eat the budget)
 
 
 def _contains(outer: tuple | None, inner: tuple | None) -> bool:
@@ -551,10 +559,11 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
     roots (and roots of no kind) are walked in full. A background window
     whose box lies inside the first front window's is covered and
     contributes nothing; any other lists at most BG_SHOWN of its buttons
-    and fields (no rows) from a walk of at most BG_NODES nodes. `windows`,
+    and fields (no rows) from a walk of at most BG_NODES nodes and BG_TIME_S
+    seconds. `windows`,
     when given, receives per background group {"shown", "total", "more"}:
     how many it lists of how many the full walk would have (a lower bound
-    when `more`: the node cap cut it)."""
+    when `more`: the node or time cap cut it)."""
     out: list[dict] = []
     seen: set = set()
     roots = list(roots)
@@ -598,12 +607,13 @@ def _walk_one(info: dict, read, clip, deadline, out: list, seen: set, group,
     cut it. `bg` (a background window's counters) limits what is kept."""
     stack = [(None, 0, None, 0)]
     nodes = 0
+    until = time.monotonic() + BG_TIME_S
     while stack:
         if time.monotonic() > deadline or len(out) >= cap:
             return True
         node, depth, owner, owner_depth = stack.pop()
         if node is not None:
-            if bg is not None and nodes >= BG_NODES:
+            if bg is not None and (nodes >= BG_NODES or time.monotonic() > until):
                 bg["more"] = True
                 return False
             try:
@@ -794,7 +804,10 @@ def ax_info(v: dict) -> dict:
                  or (val if isinstance(val, str) and role != "textfield" else "")
                  or v.get("AXPlaceholderValue") or v.get("AXHelp") or "")
     pos, size = v.get("AXPosition"), v.get("AXSize")
-    return {"role": role, "label": label,
+    # a closed menu (every menu bar item has one) is 0x0 with all its items
+    # below it: skipping it saves the menu bar most of its nodes
+    hidden = v.get("AXRole") == "AXMenu" and bool(size) and not (size[0] and size[1])
+    return {"role": role, "label": label, "hidden": hidden,
             "value": val if role in ("textfield", "checkbox", "radio", "slider",
                                      "combobox", "toggle") else None,
             "focused": v.get("AXFocused") is True, "enabled": v.get("AXEnabled"),
@@ -831,9 +844,12 @@ class MacAXSource(ElementSource):
              "AXPlaceholderValue", "AXPosition", "AXSize", "AXFocused", "AXEnabled",
              "AXChildren")
     OTHER_APPS = 6
+    AX_TIMEOUT_S = 0.25       # per AX message during a walk: a hung app costs this
+    AX_CANNOT_COMPLETE = -25204
 
     def __init__(self):
         super().__init__("")
+        self._hung: set[int] = set()
         import ctypes
         import ctypes.util
         c = self.ct = ctypes
@@ -883,6 +899,7 @@ class MacAXSource(ElementSource):
         self.T["AXValue"] = ax.AXValueGetTypeID()
         self._keep: list = []
         self._s: dict = {}
+        self._arrays: dict = {}
         self._lock = threading.Lock()
         names = [self.cfstr(a) for a in self.ATTRS]
         arr = (vp * len(names))(*names)
@@ -939,15 +956,44 @@ class MacAXSource(ElementSource):
         return out.value
 
     def read(self, el) -> dict:
-        """One IPC per node (CopyMultipleAttributeValues), not one per attr."""
+        """One IPC per node (CopyMultipleAttributeValues), not one per attr.
+        An app that timed out once in this walk is skipped for the rest of it
+        (a hung app would otherwise cost AX_TIMEOUT_S per node)."""
+        pid = self.ct.c_int32()
+        if self._hung and self.ax.AXUIElementGetPid(el, self.ct.byref(pid)) == 0 \
+                and pid.value in self._hung:
+            return {}
         out = self.ct.c_void_p()
-        if self.ax.AXUIElementCopyMultipleAttributeValues(
-                el, self.attr_array, 0, self.ct.byref(out)) != 0 or not out.value:
+        err = self.ax.AXUIElementCopyMultipleAttributeValues(
+            el, self.attr_array, 0, self.ct.byref(out))
+        if err == self.AX_CANNOT_COMPLETE:
+            if self.ax.AXUIElementGetPid(el, self.ct.byref(pid)) == 0:
+                self._hung.add(pid.value)
+            return {}
+        if err != 0 or not out.value:
             return {}
         self._keep.append(out.value)
         return ax_info(dict(zip(self.ATTRS, (self.py(v) for v in self.py(out.value)))))
 
-    def roots(self) -> tuple[list, list[str], list[str]]:
+    def multi(self, el, names: tuple) -> dict:
+        """Several attributes in one IPC: {name: python value}."""
+        arr = self._arrays.get(names)
+        if arr is None:
+            c = self.ct
+            vals = (c.c_void_p * len(names))(*[self.cfstr(n) for n in names])
+            cb = c.addressof(c.c_char.in_dll(self.cf, "kCFTypeArrayCallBacks"))
+            arr = self._arrays[names] = self.cf.CFArrayCreate(None, vals, len(names), cb)
+        out = self.ct.c_void_p()
+        if self.ax.AXUIElementCopyMultipleAttributeValues(el, arr, 0,
+                                                          self.ct.byref(out)) != 0 \
+                or not out.value:
+            return {}
+        self._keep.append(out.value)
+        # element-valued attributes stay raw (borrowed, alive while `out` is)
+        return {n: v if n in ("AXWindows", "AXMenuBar") else self.py(v)
+                for n, v in zip(names, self.py(out.value) or [])}
+
+    def roots(self, deadline: float = float("inf")) -> tuple[list, list[str], list[str]]:
         """(root elements, their group names, their kinds): each window as
         "<App>: <title>" (or just the app), the front app's menu bar as
         "menu bar"; the focused app's windows are "front", its menu bar
@@ -970,20 +1016,27 @@ class MacAXSource(ElementSource):
                 if layer == 0 and pid and int(pid) not in pids:
                     pids.append(int(pid))
         for i, pid in enumerate(pids[:1 + self.OTHER_APPS]):
+            if time.monotonic() > deadline:
+                break
             a = ax.AXUIElementCreateApplication(pid)
             if not a:
                 continue
             self._keep.append(a)
-            ax.AXUIElementSetMessagingTimeout(a, 0.25)   # a hung app costs 0.25 s, not 6
-            app_name = self.py(self.attr(a, "AXTitle")) or f"app {pid}"
-            for w in self.py(self.attr(a, "AXWindows")) or []:
+            ax.AXUIElementSetMessagingTimeout(a, self.AX_TIMEOUT_S)
+            v = self.multi(a, ("AXTitle", "AXWindows", "AXMenuBar"))
+            if not v:
+                continue                                   # hung or gone: next app
+            app_name = v.get("AXTitle") if isinstance(v.get("AXTitle"), str) else ""
+            app_name = app_name or f"app {pid}"
+            wins = self.py(v.get("AXWindows")) or []
+            for w in wins if isinstance(wins, list) else []:
                 title = self.py(self.attr(w, "AXTitle"))
                 out.append(w)
                 groups.append(f"{app_name}: {title}" if title else app_name)
                 kinds.append("front" if i == 0 else "background")
             if i == 0:
-                mb = self.attr(a, "AXMenuBar")
-                if mb:
+                mb = v.get("AXMenuBar")
+                if mb and self.cf.CFGetTypeID(mb) != self.T["AXValue"]:
                     out.append(mb)
                     groups.append(MENU_BAR)
                     kinds.append("menu")
@@ -1062,7 +1115,13 @@ class MacAXSource(ElementSource):
         if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             return [], True
         try:
-            roots, groups, kinds = self.roots()
+            # the global AX timeout: child elements do not inherit the app
+            # element's, and the default is 6 s per message
+            sysw = self.ax.AXUIElementCreateSystemWide()
+            self._keep.append(sysw)
+            self.ax.AXUIElementSetMessagingTimeout(sysw, self.AX_TIMEOUT_S)
+            self._hung = set()
+            roots, groups, kinds = self.roots(deadline)
             return walk_tree(roots, self.read, clip, deadline, groups=groups,
                              kinds=None if walk == "all" else kinds, windows=windows)
         finally:
@@ -1402,6 +1461,7 @@ class Backend:
     name = "?"
     session = "?"
     needs: tuple[str, ...] = ()
+    cheap_thumb = False       # thumbnail() is in-process (tens of ms, no subprocess)
 
     def __init__(self):
         self.bin = {n: find_bin(n) for n in self.needs + self.optional()}
@@ -1994,6 +2054,127 @@ class MacBackend(Backend):
         self.cf.CFNumberGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
         self.pos = (0, 0)
         self._ax: ElementSource | None = None
+        self._dids: dict[str, int] = {}
+        try:
+            self._cg_thumb_setup()
+            self.cheap_thumb = True
+        except (OSError, AttributeError):
+            self.cheap_thumb = False
+
+    def _cg_thumb_setup(self) -> None:
+        """In-process thumbnails: CGDisplayCreateImageForRect drawn into a
+        THUMB_EDGE grey bitmap — ~40 ms against ~200-400 ms for screencapture
+        + sips, twice or more per action while settling."""
+        ct, cg, vp = self.ct, self.cg, self.ct.c_void_p
+
+        class Rect(ct.Structure):
+            _fields_ = [("origin", self.Pt), ("size", self.Pt)]
+        self.CGRect = Rect
+        cg.CGDisplayCreateImageForRect.restype = vp
+        cg.CGDisplayCreateImageForRect.argtypes = [ct.c_uint32, Rect]
+        cg.CGColorSpaceCreateDeviceGray.restype = vp
+        cg.CGBitmapContextCreate.restype = vp
+        cg.CGBitmapContextCreate.argtypes = [vp, ct.c_size_t, ct.c_size_t, ct.c_size_t,
+                                             ct.c_size_t, vp, ct.c_uint32]
+        cg.CGContextDrawImage.argtypes = [vp, Rect, vp]
+        cg.CGContextSetInterpolationQuality.argtypes = [vp, ct.c_int]
+        cg.CGContextRelease.argtypes = [vp]
+        cg.CGImageRelease.argtypes = [vp]
+        cg.CGPreflightScreenCaptureAccess.restype = ct.c_bool
+        cg.CGImageGetWidth.restype = ct.c_size_t
+        cg.CGImageGetWidth.argtypes = [vp]
+        cg.CGImageGetHeight.restype = ct.c_size_t
+        cg.CGImageGetHeight.argtypes = [vp]
+        cg.CGColorSpaceCreateDeviceRGB.restype = vp
+        cg.CGBitmapContextCreateImage.restype = vp
+        cg.CGBitmapContextCreateImage.argtypes = [vp]
+        self._grey = cg.CGColorSpaceCreateDeviceGray()
+        self._rgb = cg.CGColorSpaceCreateDeviceRGB()
+        io = self.imageio = ct.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ImageIO.framework/ImageIO")
+        io.CGImageDestinationCreateWithData.restype = vp
+        io.CGImageDestinationCreateWithData.argtypes = [vp, vp, ct.c_size_t, vp]
+        io.CGImageDestinationAddImage.argtypes = [vp, vp, vp]
+        io.CGImageDestinationFinalize.restype = ct.c_bool
+        io.CGImageDestinationFinalize.argtypes = [vp]
+        cf = self.cf
+        cf.CFDataCreateMutable.restype = vp
+        cf.CFDataCreateMutable.argtypes = [vp, ct.c_long]
+        cf.CFDataGetLength.restype = ct.c_long
+        cf.CFDataGetLength.argtypes = [vp]
+        cf.CFDataGetBytePtr.restype = vp
+        cf.CFDataGetBytePtr.argtypes = [vp]
+        self._jpeg_uti = cf.CFStringCreateWithCString(None, b"public.jpeg", 0x08000100)
+
+    def _cg_image(self, mon: Monitor, rect):
+        """(CGImage, native w, h) of the monitor or `rect` (points relative
+        to it), captured in process; None when this path cannot vouch for
+        the picture: no display id yet, or no Screen Recording permission
+        (the image would then hold only the wallpaper). The caller releases."""
+        did = self._dids.get(mon.name)
+        if not self.cheap_thumb or did is None or not self.cg.CGPreflightScreenCaptureAccess():
+            return None
+        why = screen_refusal(self.screen_state())
+        if why:
+            raise DeskError(why)
+        x, y, w, h = (0, 0, mon.w, mon.h) if rect is None else rect
+        img = self.cg.CGDisplayCreateImageForRect(
+            did, self.CGRect(self.Pt(x, y), self.Pt(w, h)))
+        if not img:
+            return None
+        return img, self.cg.CGImageGetWidth(img), self.cg.CGImageGetHeight(img)
+
+    def _draw(self, img, tw: int, th: int, grey: bool):
+        """`img` scaled into a fresh tw x th bitmap context: (ctx, buffer)."""
+        n = 1 if grey else 4
+        buf = (self.ct.c_uint8 * (tw * th * n))()
+        # RGB: kCGImageAlphaNoneSkipLast (5); grey: kCGImageAlphaNone (0)
+        ctx = self.cg.CGBitmapContextCreate(buf, tw, th, 8, tw * n,
+                                            self._grey if grey else self._rgb,
+                                            0 if grey else 5)
+        if not ctx:
+            return None, None
+        self.cg.CGContextSetInterpolationQuality(ctx, 2 if grey else 3)
+        self.cg.CGContextDrawImage(ctx, self.CGRect(self.Pt(0, 0), self.Pt(tw, th)), img)
+        return ctx, buf
+
+    def _cg_screenshot(self, mon: Monitor, rect) -> bytes | None:
+        """The screenshot as a JPEG, captured, scaled and encoded in process
+        (CoreGraphics + ImageIO): no screencapture, no sips, no temp file."""
+        got = self._cg_image(mon, rect)
+        if got is None:
+            return None
+        img, nw, nh = got
+        ctx = out = data = dest = None
+        try:
+            if rect is None:
+                target = min(LONG_EDGE, max(nw, nh))
+            else:
+                target = max(zoom_size(rect[2], rect[3], max(nw, nh) / max(rect[2], rect[3])))
+            k = target / max(nw, nh, 1)
+            tw, th = max(1, round(nw * k)), max(1, round(nh * k))
+            ctx, _buf = self._draw(img, tw, th, grey=False)
+            if not ctx:
+                return None
+            out = self.cg.CGBitmapContextCreateImage(ctx)
+            data = self.cf.CFDataCreateMutable(None, 0)
+            dest = self.imageio.CGImageDestinationCreateWithData(data, self._jpeg_uti, 1, None)
+            if not (out and data and dest):
+                return None
+            self.imageio.CGImageDestinationAddImage(dest, out, None)
+            if not self.imageio.CGImageDestinationFinalize(dest):
+                return None
+            return self.ct.string_at(self.cf.CFDataGetBytePtr(data),
+                                     self.cf.CFDataGetLength(data))
+        finally:
+            for o in (dest, data):
+                if o:
+                    self.cf.CFRelease(o)
+            if out:
+                self.cg.CGImageRelease(out)
+            if ctx:
+                self.cg.CGContextRelease(ctx)
+            self.cg.CGImageRelease(img)
 
     def _post(self, ev) -> None:
         self.cg.CGEventPost(0, ev)          # kCGHIDEventTap
@@ -2014,6 +2195,7 @@ class MacBackend(Backend):
             out.append(Monitor(name="main" if d == main else f"display-{i + 1}",
                                x=int(r.origin.x), y=int(r.origin.y),
                                w=int(r.size.x), h=int(r.size.y)))
+            self._dids[out[-1].name] = d
         return out
 
     def _locked(self) -> bool:
@@ -2056,6 +2238,10 @@ class MacBackend(Backend):
         return image_size(Path(f).read_bytes()[:65536]) or (w, h)
 
     def screenshot(self, mon, rect=None):
+        """In process when it can (_cg_screenshot); else screencapture + sips."""
+        data = self._cg_screenshot(mon, rect)
+        if data is not None and image_size(data):
+            return data
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "s.jpg")
             nw, nh = self._capture(mon, rect, f)
@@ -2067,8 +2253,32 @@ class MacBackend(Backend):
                 run_argv([self.bin["sips"], "-Z", str(target), f])
             return Path(f).read_bytes()
 
+    def _cg_thumbnail(self, mon: Monitor, rect) -> bytes | None:
+        """A binary PGM (P5) of the monitor or `rect` at THUMB_EDGE, drawn in
+        process; None when _cg_image cannot vouch for the picture."""
+        got = self._cg_image(mon, rect)
+        if got is None:
+            return None
+        img, nw, nh = got
+        ctx = None
+        try:
+            k = THUMB_EDGE / max(nw, nh, 1)
+            tw, th = max(1, round(nw * k)), max(1, round(nh * k))
+            ctx, buf = self._draw(img, tw, th, grey=True)
+            if not ctx:
+                return None
+            return b"P5\n%d %d\n255\n" % (tw, th) + bytes(buf)
+        finally:
+            if ctx:
+                self.cg.CGContextRelease(ctx)
+            self.cg.CGImageRelease(img)
+
     def thumbnail(self, mon, rect=None):
-        """An uncompressed BMP from sips (decodable without a library)."""
+        """In process (CoreGraphics, a PGM) when it can; else an uncompressed
+        BMP from screencapture + sips (decodable without a library)."""
+        t = self._cg_thumbnail(mon, rect)
+        if t is not None:
+            return t
         with tempfile.TemporaryDirectory() as d:
             f, t = os.path.join(d, "s.jpg"), os.path.join(d, "t.bmp")
             nw, nh = self._capture(mon, rect, f)
@@ -2356,6 +2566,11 @@ class Session:
         self.full: dict[str, Frame] = {}          # last full-frame shot per monitor
         self.elements: ElementSource | None = None
         self.walk = "front"                       # the last screenshot's walk
+        # what the last response showed, as the next input verb's "before":
+        # {"at", "key": (monitor, rect), "sig", "thumb"}; see _before()
+        self.pre: dict | None = None
+        self.settled_thumb: bytes | None = None   # settle's last capture
+        self.tm: dict = {}                        # this request's phase timings (ms)
         self.grants = {"screen": False, "input": False, "shell": "off"}
         self.apps = local_apps()
         self.deny = backend.deny_keys()
@@ -2422,6 +2637,16 @@ class Session:
             except Exception as e:  # noqa: BLE001
                 self.elements = ElementSource(f"accessibility unavailable ({type(e).__name__})")
         es = self.elements
+        t0 = time.monotonic()
+        try:
+            return self._walk(es, frame, walk)
+        finally:
+            self._tick("elements_ms", t0)
+
+    def _tick(self, phase: str, t0: float) -> None:
+        self.tm[phase] = self.tm.get(phase, 0) + int((time.monotonic() - t0) * 1000)
+
+    def _walk(self, es: ElementSource, frame: Frame, walk: str | None) -> dict:
         try:
             why = es.unavailable()
             if why:
@@ -2461,7 +2686,9 @@ class Session:
                 raise DeskError(f"no full screenshot of {mon.name!r} yet; region is in "
                                 "the pixels of that one — take it first")
             rect, region = region_rect(full, region)
+        t0 = time.monotonic()
         data = self.b.screenshot(mon) if rect is None else self.b.screenshot(mon, rect)
+        self._tick("capture_ms", t0)
         size = image_size(data)
         if size is None:
             raise DeskError("the screenshot tool returned something that is not an image")
@@ -2507,6 +2734,7 @@ class Session:
         pixels where the tool can emit them (grim ppm, ImageMagick pgm, sips
         bmp), else a full JPEG compared byte-for-byte (see thumbs_match)."""
         t0 = time.monotonic()
+        self.settled_thumb = None
         if floor > 0:
             time.sleep(floor)
         f = self.frame
@@ -2523,15 +2751,52 @@ class Session:
                 break
             prev = cur
         changed = None if before is None or cur is None else not thumbs_match(before, cur)
+        self.settled_thumb = cur
+        self._tick("settle_ms", t0)
         return changed, int((time.monotonic() - t0) * 1000)
 
     def execute(self, verb: str, p: dict) -> dict:
-        """Blocking: runs in a worker thread."""
+        """Blocking: runs in a worker thread. The response carries `timing`
+        {capture_ms, settle_ms, elements_ms, total_ms}, also logged at debug."""
+        self.tm = {"capture_ms": 0, "settle_ms": 0, "elements_ms": 0}
+        t0 = time.monotonic()
+        out = self._execute(verb, p)
+        self._tick("total_ms", t0)
+        timing = dict(self.tm)
+        log.debug("%s: %s", verb, " ".join(f"{k}={v}" for k, v in timing.items()))
+        return {**out, "timing": timing}
+
+    def _remember(self, f: Frame | None, res: dict, thumb: bytes | None) -> None:
+        """Keep what this response showed (element sig + thumbnail of the
+        screen it describes) as the next input verb's "before"."""
+        if f is None:
+            self.pre = None
+            return
+        self.pre = {"at": time.monotonic(), "key": (f.monitor.name, f.rect),
+                    "sig": self._sig_of(res), "thumb": thumb}
+
+    def _before(self, f: Frame | None) -> tuple[str | None, bytes | None]:
+        """(element sig, thumbnail) of the screen right before an action. The
+        last response's, when it is under PRE_REUSE_S old and of this same
+        frame: the model acted on that screen, and walking it again costs a
+        second tree walk per action. Else a fresh walk and capture."""
+        pre, self.pre = self.pre, None
+        if (pre is not None and f is not None
+                and time.monotonic() - pre["at"] < PRE_REUSE_S
+                and pre["key"] == (f.monitor.name, f.rect)):
+            return pre["sig"], pre["thumb"] if pre["thumb"] is not None else self._thumb(f)
+        sig = self._sig(f)
+        return sig, self._thumb(f)
+
+    def _execute(self, verb: str, p: dict) -> dict:
         if verb == "screenshot":
             self.walk = p.get("walk", "front")
             out = self._shot(p.get("monitor"), p.get("region"), p.get("elements", True))
             img = out["image"]
             what = f" zoomed on {out['frame']['region']}" if out["frame"]["region"] else ""
+            # a cheap thumbnail now saves the next action a capture before it
+            self._remember(self.frame, out, self._thumb(self.frame)
+                           if getattr(self.b, "cheap_thumb", False) else None)
             return {"ok": True, "text": f"screenshot {img['w']}x{img['h']}{what}", **out}
         f = self.frame
         if verb == "wait":
@@ -2543,10 +2808,11 @@ class Session:
                    "changed": changed, "settled_ms": ms}
             if changed is None:
                 del out["changed"]
-            out.update(self._auto_shot(f))
+            shot = self._auto_shot(f)
+            self._remember(self.frame, shot, self.settled_thumb)
+            out.update(shot)
             return out
-        sig_before = self._sig(f)
-        before = self._thumb(f)           # the last thing before the action itself
+        sig_before, before = self._before(f)
         if verb in ("move", "click") or (verb == "scroll" and "x" in p):
             self.b.move(*f.to_screen(p["x"], p["y"]))
         if verb == "click":
@@ -2570,11 +2836,12 @@ class Session:
         # the post-action comparisons use the SETTLED screen: the auto-shot
         # (taken now) or, without one, a fresh walk
         shot = self._auto_shot(f) if p.get("screenshot_after") else None
+        settled = self.settled_thumb
         els_changed = None
-        if sig_before is not None:
-            sig_after = self._sig_of(shot) if shot is not None else self._sig(f)
-            if sig_after is not None:
-                els_changed = sig_after != sig_before
+        after = shot if shot is not None else self._elements(f) if f is not None else {}
+        sig_after = self._sig_of(after)
+        if sig_before is not None and sig_after is not None:
+            els_changed = sig_after != sig_before
         out = {"ok": True, "text": f"{verb} done", "settled_ms": ms}
         if changed is not None:
             out["pixels_changed"] = changed
@@ -2590,9 +2857,14 @@ class Session:
                     why += (" (secure keyboard entry is on in another app, which "
                             "blocks typed keys)")
                 out.update(ok=False, err=why)
-                shot = shot or self._auto_shot(f)     # the model sees where it went
+                if shot is None:                      # the model sees where it went
+                    shot = self._auto_shot(f)
+                    settled = None                    # the thumb predates this shot
         if shot is not None:
             out.update(shot)
+            self._remember(self.frame, shot, settled)
+        else:
+            self._remember(f, after, settled)
         return out
 
     def _sig(self, frame: Frame | None) -> str | None:
@@ -2773,6 +3045,9 @@ def cmd_run(args) -> int:
     creds = load_credentials()
     if not creds:
         raise DeskError("not logged in — run: jav3-desk login")
+    # JAV3_DESK_DEBUG=1: per-request phase timings (capture, settle, elements)
+    logging.basicConfig(level=logging.DEBUG if os.environ.get("JAV3_DESK_DEBUG")
+                        else logging.WARNING, format="jav3-desk: %(message)s")
     b = BACKENDS[args.backend or detect_backend()]()
     _write_private("desk.pid", str(os.getpid()).encode())
     print(f"jav3-desk: {b.name} backend, server {base_url(args.server or creds['address'])}",

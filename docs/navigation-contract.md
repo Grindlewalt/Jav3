@@ -79,8 +79,12 @@ C->S res {id, ok:true, text,
                                               # levels on > 40 pixels
     elements_changed?: bool,                  # element list (count + labels)
                                               # differs; catches overlays
-    settled_ms?: int                          # how long until two consecutive
+    settled_ms?: int,                         # how long until two consecutive
                                               # captures matched
+    timing?: {capture_ms, settle_ms,          # this request's phases on the
+              elements_ms, total_ms}          # client; the server ends input-verb
+                                              # results with "took 1.6 s (settle
+                                              # 1.3, elements 0.2)"
 }
 ```
 
@@ -117,6 +121,16 @@ at 64 px / 6 pixels), minimum 0.3 s, maximum 3 s, and reports `changed`
 (pixels OR element list) against the pre-action state and `settled_ms`.
 `SETTLE_S` stays as the floor. The server renders `changed: yes (elements)`
 when only the list moved.
+
+One tree walk per action: the "before" (element sig + thumbnail) is the
+previous response's when it is under 2 s old and of the same frame
+(monitor + zoom); otherwise the client walks and captures before acting.
+The walk after settle feeds both the response and the next action's
+"before". The 1.5 s budget covers the whole walk (the app list included),
+AX messages time out after 0.25 s globally, and an app that timed out is
+skipped for the rest of that walk. On macOS the screenshot and the
+thumbnails are captured in process (CoreGraphics + ImageIO), with
+screencapture + sips as the fallback.
 
 ### A.5 Locked screen / sleeping display
 

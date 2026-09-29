@@ -999,6 +999,21 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
     return "\n".join(lines)
 
 
+def took_line(timing) -> str | None:
+    """`took 1.6 s (settle 1.3, elements 0.2)` from the client's per-phase
+    timing (ms); None when an old client sent none or it is malformed."""
+    if not isinstance(timing, dict) or not _isnum(timing.get("total_ms")):
+        return None
+    total = timing["total_ms"]
+    if not 0 <= total <= 3_600_000:
+        return None
+    parts = [f"{name} {timing[k] / 1000:.1f}" for k, name in
+             (("settle_ms", "settle"), ("elements_ms", "elements"), ("capture_ms", "capture"))
+             if _isnum(timing.get(k)) and 0 < timing[k] <= total and
+             (k != "capture_ms" or timing[k] >= 500)]
+    return f"took {total / 1000:.1f} s" + (f" ({', '.join(parts)})" if parts else "")
+
+
 def _match_label(els: list[dict], target: str) -> dict | None:
     """A registry element the description names without doubt: a unique exact
     (case-insensitive) label, also as "label role" / "role label" ("Save
@@ -1214,15 +1229,17 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     if via is not None:
         head.append(_via_line(verb, via, p))
     head.append(text[:2000] or f"{verb} done")
+    took = took_line(res.get("timing")) if verb in INPUT_VERBS else None
     if f is None:
         if changed is not None:
             head.append(changed_line(changed, elements_only))
-        return "\n".join(head)
+        return "\n".join(head + ([took] if took else []))
     body = render_frame(d, f, same=verb == "screenshot" and prev_hash == f["hash"],
                         changed=changed, settled_ms=settled,
                         asked_elements=p.get("elements", True), elements_only=elements_only)
     return imageresult.with_inline(
-        "\n".join([*head, body, f"[{d.name}: screenshot {img['w']}x{img['h']} attached]"]),
+        "\n".join([*head, body, *([took] if took else []),
+                   f"[{d.name}: screenshot {img['w']}x{img['h']} attached]"]),
         b64=img["b64"], mime=img["mime"], caption=_caption(d, img))
 
 

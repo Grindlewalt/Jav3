@@ -677,8 +677,10 @@ async def test_changed_uses_the_settled_frame_and_the_element_list(cfg, monkeypa
     await s.handle(ws, {"id": "2", "verb": "key", "params": {"combo": "Escape"}})
     r = ws.sent[-1]
     assert r["changed"] is False and r["elements_changed"] is False
-    # the pre-action thumbnail is the one right before the action; the
-    # comparison is against the settled frame, not the first capture
+    # the pre-action thumbnail is the one right before the action (when the
+    # last response is too old to reuse); the comparison is against the
+    # settled frame, not the first capture
+    monkeypatch.setattr(jd, "PRE_REUSE_S", 0)
     b.thumbs = [b"PRE", b"MID", b"END", b"END"]
     b.key = lambda combo: None
     await s.handle(ws, {"id": "3", "verb": "key",
@@ -686,6 +688,64 @@ async def test_changed_uses_the_settled_frame_and_the_element_list(cfg, monkeypa
     r = ws.sent[-1]
     assert r["pixels_changed"] is True and r["changed"] is True and "image" not in r
     assert "elements_changed" in r                   # the walk ran without a shot too
+
+
+class CountingSource(jd.FakeElementSource):
+    def __init__(self, roots):
+        super().__init__(roots)
+        self.walks = 0
+
+    def collect(self, clip, deadline, walk="front", windows=None):
+        self.walks += 1
+        return super().collect(clip, deadline, walk, windows)
+
+
+async def test_an_action_reuses_the_last_responses_walk_and_thumbnail(cfg, monkeypatch):
+    monkeypatch.setattr(jd, "SETTLE_S", 0)
+    monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)
+    tree = [{"role": "", "box": (0, 0, 2560, 1600), "children": [
+        {"role": "button", "label": "Save", "box": (400, 300, 200, 60)}]}]
+    src = CountingSource(tree)
+    b = NavBackend(tree=tree)
+    b.elements_source = lambda: src
+    b.cheap_thumb = True
+    thumbs = []
+    real_thumb = b.thumbnail
+    b.thumbnail = lambda mon, rect=None: thumbs.append(rect) or real_thumb(mon, rect)
+    s = jd.Session(b, "a", "t")
+    s.grants = {"screen": True, "input": True, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "0", "verb": "screenshot", "params": {}})
+    assert (src.walks, len(thumbs)) == (1, 1)           # the cheap thumbnail rides along
+    r = ws.sent[-1]
+    assert set(r["timing"]) == {"capture_ms", "settle_ms", "elements_ms", "total_ms"}
+    # a click right after: no walk and no capture before it, one walk after
+    b.thumbs = [b"A", b"A"]
+    await s.handle(ws, {"id": "1", "verb": "click", "params": {"x": 10, "y": 10}})
+    r = ws.sent[-1]
+    assert src.walks == 2 and len(thumbs) == 1 + 2      # settle's two captures only
+    assert r["elements_changed"] is False and r["pixels_changed"] is True   # T0 -> A
+    assert r["timing"]["total_ms"] >= r["timing"]["settle_ms"]
+    # chained: the click's settled thumbnail is the next action's before
+    b.thumbs = [b"A", b"A"]
+    tree[0]["children"].append({"role": "button", "label": "New", "box": (0, 0, 9, 9)})
+    await s.handle(ws, {"id": "2", "verb": "click",
+                        "params": {"x": 10, "y": 10, "screenshot_after": False}})
+    r = ws.sent[-1]
+    assert src.walks == 3 and r["pixels_changed"] is False and r["elements_changed"] is True
+    # too old: walk and capture again before the action
+    monkeypatch.setattr(jd, "PRE_REUSE_S", 0)
+    b.thumbs = [b"A", b"A", b"A"]
+    await s.handle(ws, {"id": "3", "verb": "click", "params": {"x": 10, "y": 10}})
+    assert src.walks == 3 + 2 and ws.sent[-1]["changed"] is False
+    # another frame (a zoom) never reuses the full frame's state
+    monkeypatch.setattr(jd, "PRE_REUSE_S", 2.0)
+    await s.handle(ws, {"id": "4", "verb": "screenshot",
+                        "params": {"region": {"x": 0, "y": 0, "w": 640, "h": 400}}})
+    s.pre["key"] = ("DP-1", None)
+    n = src.walks
+    await s.handle(ws, {"id": "5", "verb": "click", "params": {"x": 10, "y": 10}})
+    assert src.walks == n + 2
 
 
 def test_elements_are_grouped_by_window_then_reading_order():

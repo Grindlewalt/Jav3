@@ -1004,6 +1004,32 @@ async def test_background_windows_say_how_much_is_shown(env):
         await fd.stop()
 
 
+async def test_input_results_end_with_how_long_they_took(env):
+    timing = {"capture_ms": 60, "settle_ms": 1300, "elements_ms": 210, "total_ms": 1630}
+    fd = await _nav(env, changed=True, timing=timing)
+    try:
+        shot = await _tool("desk_screenshot")()
+        assert "took " not in shot                        # screenshots: no line
+        out = await _tool("desk_click")(x=10, y=10)
+        lines = out.splitlines()
+        at = next(i for i, ln in enumerate(lines) if ln.endswith("attached]")
+                  or "attached]" in ln)
+        assert lines[at - 1] == "took 1.6 s (settle 1.3, elements 0.2)"
+        assert lines[at - 2].startswith("changed: yes")
+        # a slow capture is named too
+        fd.answer = rich(changed=True, timing={**timing, "capture_ms": 900,
+                                               "total_ms": 2400})
+        out = await _tool("desk_key")(combo="Escape")
+        assert "\ntook 2.4 s (settle 1.3, elements 0.2, capture 0.9)\n[laptop: " in out
+        # an old client (no timing) or garbage: no line
+        for t in (None, {"total_ms": "x"}, {"total_ms": -5}):
+            fd.answer = rich(changed=True, timing=t)
+            assert "took " not in await _tool("desk_key")(combo="Escape")
+    finally:
+        await fd.stop()
+    assert desk.took_line({"total_ms": 400}) == "took 0.4 s"
+
+
 async def test_changed_by_elements_only_is_named(env):
     fd = await _nav(env, changed=True, pixels_changed=False, elements_changed=True)
     try:
