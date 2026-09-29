@@ -791,3 +791,36 @@ async def test_disabled_top_row_and_pin_with_nothing_left_raises_naming_it(
     with pytest.raises(grounding.NotConfigured, match="q/cfg"):
         await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
     assert seen == []
+
+
+def _capture_events(monkeypatch):
+    got = []
+
+    async def fake_event(summary, detail, kind="grounding_probe"):
+        got.append((kind, summary, detail))
+    monkeypatch.setattr(grounding, "_event", fake_event)
+    return got
+
+
+async def test_locate_raises_an_image_sent_event_without_the_image_or_text(
+        tmp_env, monkeypatch):
+    _write_state({"ranking": [_row("p/m", "px")]})
+    got = _capture_events(monkeypatch)
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 50, "y": 60}'))
+    png = gf.fixture(0)["png"]
+    await grounding.locate(png, 1280, 800, "the secret button", op_id="op9", refine=False)
+    sent = [g for g in got if g[0] == "grounding_image_sent"]
+    assert len(sent) == 1
+    d = sent[0][2]
+    assert d == {"model": "p/m", "provider": "p", "width": 1280, "height": 800,
+                 "bytes": len(png), "op_id": "op9"}
+    assert "secret" not in json.dumps(sent[0])
+
+
+async def test_probe_fixture_calls_raise_no_image_sent_event(tmp_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(grounding, "STATE_DIR", tmp_path / "s")
+    got = _capture_events(monkeypatch)
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 50, "y": 60}'))
+    await grounding.run_probe(["p/m"], targets=3)
+    await grounding._run({"id": "j", "models": ["p/m"], "by": "t", "running": True})
+    assert got and all(g[0] == "grounding_probe" for g in got)

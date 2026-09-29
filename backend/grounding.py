@@ -456,8 +456,8 @@ def _zoom(image: bytes, width: int, height: int, x: int, y: int
 
 
 async def _refine(model_id: str, conv: str, image: bytes, width: int, height: int,
-                  x: int, y: int, description: str, op_id: str | None
-                  ) -> tuple[int, int, float, int] | None:
+                  x: int, y: int, description: str, op_id: str | None,
+                  notify: bool = False) -> tuple[int, int, float, int] | None:
     """Second pass around (x, y): (x, y, confidence, ms) in image pixels, or
     None (no Pillow, not found in the crop, or an answer outside it). Raises
     what _ask raises."""
@@ -466,6 +466,8 @@ async def _refine(model_id: str, conv: str, image: bytes, width: int, height: in
         return None
     png, x0, y0, cw, ch = z
     zw, zh = cw * REFINE_SCALE, ch * REFINE_SCALE
+    if notify:
+        await _image_sent(model_id, zw, zh, len(png), op_id)
     ans, ms, _size = await _ask(model_id, png, zw, zh, description, op_id,
                                 zoom=REFINE_SCALE)
     if ans is None:
@@ -498,6 +500,7 @@ async def locate(image: bytes, width: int, height: int, description: str,
     from .agent import budget as budget_mod
     try:
         do_refine = REFINE if refine is None else refine
+        await _image_sent(model_id, width, height, len(image), op_id)
         ans, ms, size = await _ask(model_id, image, width, height, description, op_id,
                                    sized=do_refine)
     except budget_mod.BudgetExceeded:
@@ -521,7 +524,7 @@ async def locate(image: bytes, width: int, height: int, description: str,
     if do_refine and _small(size, conv, width, height):
         try:
             r = await _refine(model_id, conv, image, width, height, x, y,
-                              description, op_id)
+                              description, op_id, notify=True)
         except budget_mod.BudgetExceeded:
             raise
         except Exception as e:  # noqa: BLE001 — incl. timeout: the first answer stands
@@ -533,6 +536,16 @@ async def locate(image: bytes, width: int, height: int, description: str,
             ms += ms2
     return Located(x=x, y=y, confidence=conf, model=model_id, convention=conv,
                    latency_ms=ms)
+
+
+async def _image_sent(model_id: str, width: int, height: int, size: int,
+                      op_id: str | None) -> None:
+    """Security event: a real screenshot is about to leave for a provider.
+    Metadata only, never the image or the description."""
+    await _event(f"screenshot sent to {model_id} for grounding ({width}x{height})",
+                 {"model": model_id, "provider": model_id.split("/", 1)[0],
+                  "width": width, "height": height, "bytes": size, "op_id": op_id},
+                 kind="grounding_image_sent")
 
 
 # --- the model finder -----------------------------------------------------------------
@@ -569,13 +582,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-async def _event(summary: str, detail: dict) -> None:
+async def _event(summary: str, detail: dict, kind: str = "grounding_probe") -> None:
     try:
         from . import security
         from .db import get_db
         db = await get_db()
         try:
-            await security.raise_event(db, kind="grounding_probe", severity="info",
+            await security.raise_event(db, kind=kind, severity="info",
                                        summary=summary, detail=detail)
         finally:
             await db.close()
