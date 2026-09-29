@@ -234,9 +234,10 @@ def prepare(name: str, handler, args: dict, *, read_only: bool) -> tuple[dict, s
     return args, (f"\n\n[note: {' '.join(notes)}]" if notes else ""), None
 
 
-# exceptions that are the path or the arguments being wrong, not the harness:
-# (type, what to say). Matched by name so this module imports nothing beyond
-# the standard library (HTTPException comes from fastapi via fsutil.safe_join).
+# exceptions that are the path or the arguments being wrong, not the harness, and
+# what to tell the model. The HTTPException that fsutil.safe_join raises is
+# matched by its status_code / detail attributes, so this module imports nothing
+# beyond the standard library.
 def _user_fault(e: BaseException) -> str | None:
     detail = getattr(e, "detail", None)
     status = getattr(e, "status_code", None)
