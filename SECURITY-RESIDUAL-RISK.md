@@ -25,8 +25,11 @@ quarantine was removed 2026-07-20): every write still crosses one host chokepoin
 a real secret value**, and runs the deterministic **diff gates** as an ADVISORY
 tripwire — flagged writes land but raise deduped security events. Git is the
 review/undo surface (projects are repos from creation with a baseline commit;
-commits/pushes remain operator-approved). Untrusted-derived memory
-carries a **persisted taint** that keeps it out of binding context. A prompt
+commits/pushes remain operator-approved). Notes an agent writes to memory are
+**quarantined until the operator approves them**; the taint stamp on a note
+is a warning shown to the operator at that moment, not the gate (residual
+#23 lists which channels into the prompt are approval-gated, which are
+tagged and withheld, and which are not gated at all). A prompt
 injection that reaches code execution lands in a box with no secrets, no LAN, and
 a watched, policy-gated, cuttable pipe to the internet.
 
@@ -45,8 +48,12 @@ a watched, policy-gated, cuttable pipe to the internet.
 - **Fast exfil / beaconing.** High-entropy hosts, volume spikes and beacon
   cadence auto-cut the destination (nftables drop on both guest-forward and
   host-output) and raise a critical alert.
-- **Laundered memory.** Memory promotions made after untrusted content is
-  consumed are taint-stamped and excluded from binding context. (Canonical-file
+- **Laundered memory notes.** An agent-written note is never binding until the
+  operator approves it, whatever the turn read; a write onto a note that IS
+  binding becomes a proposal and leaves the note as it was; a note written
+  after untrusted content also carries a taint stamp the operator sees, and
+  approval is the only thing that clears it. (This covers memory NOTES only:
+  project files are a different channel, see residual #23. Canonical-file
   protection CHANGED 2026-07-20: guest edits now apply to the real files at turn
   end — see residual #5/#6.)
 - **base_url key-exfil seam.** The model gateway now refuses any guest-supplied
@@ -623,6 +630,68 @@ a watched, policy-gated, cuttable pipe to the internet.
       unencrypted (see the backup row below), so a captured blob lives as long
       as that backup does, whatever the retention.
 
+23. **Memory and the other channels into the prompt (added 2026-09-29).**
+    Text that rides the system prompt is what an injection wants to reach. The
+    channels differ in how well they are guarded, and this is the honest list:
+    - **Approval-gated (nothing reaches the prompt until the operator acts).**
+      Memory notes: an agent's note is `source: agent, approved: false` and
+      stays out of the standing memory and the rules tail until the operator
+      approves it on the Memory page (approving also clears its taint stamp).
+      A write onto a note that is already binding (operator-written, or
+      approved) is stored as a proposal in `notes/.proposals/`, which prompt
+      assembly never reads; the note stays exactly as it was and the operator
+      approves or rejects the proposal on `/api/memory/proposals` (a diff, bound
+      to the text they read). Frontmatter that cannot be read fails closed
+      (pending and tainted). Schedules an agent proposes are created paused and
+      wait for approval. Git commits and pushes wait for approval.
+    - **Tagged and withheld, live on the operator's say-so.** A journal line
+      written in a turn that had read untrusted content is tagged
+      `[unverified]` in `project.md`: it stays in the file, the operator sees
+      it, and it is left out of the prompt and the all-projects rollup until the
+      operator removes the tag. `create_agent` (which writes a description into
+      the agents index and a prompt that runs unattended) is refused outright
+      in such a turn. A binding note cannot be deleted from such a turn.
+    - **Not gated.** A journal line or an agent definition written from a turn
+      the ledger thinks is clean goes live at once. **Project files an agent
+      writes with `write_file` / `edit_file` / `run_code` are not taint-gated at
+      all:** `project.md` and any file the operator ticked for the context are
+      loaded whole into every prompt of that project, and the diff gates that
+      see the write are advisory. The all-projects rollup (`## Summary` of every
+      project's `project.md`, one line of at most 300 chars) and the agents index
+      (one line of at most 200 chars per agent) are size-capped, not vetted.
+    - **What marks a turn as having read untrusted content.** By tool name:
+      `web_read`, `web_search`, `read_and_summarize`, `research`, `desk_*`,
+      `browser_*`, `local_*`, `service_logs`, `projector_*` (MCP results);
+      also an imported skill's body, a peer's message, a remote screenshot.
+      A child agent's taint passes up to the turn that delegated to it when
+      the child ends, and a child starts as tainted as its parent. Reading a
+      note that carries a taint stamp (or whose frontmatter is unreadable), or
+      a tainted proposal, taints the turn; reading the agent's own clean
+      pending notes does not. The egress proxy taints every live turn of a
+      project when it allows a connection (package registries excepted), which
+      covers a `curl` or `git clone` inside `run_code`. Files a tainted turn
+      wrote are remembered on the host (`backend/taintpaths.py`), and the guest
+      reports a `read_file` / `search_codebase` / `crawl_codebase` result that
+      touches one, or a `run_code` whose code names one, before the text returns.
+    - **What that still misses.** A `run_code` program that opens a tainted file
+      by a name it computes. A guest that lies: the file half is guest-reported
+      (the network half is host-side), and a compromised guest can leave the
+      report out. Package-registry traffic (a hostile package's install output).
+      A tool call issued in the same round as the call that taints the turn (the
+      ledger is read when the call arrives). The taint stamp on a note tells the
+      operator where it came from; it does not stop the model from being
+      steered inside the turn that read the text, and approving a note is a
+      judgement the operator makes on text an injection may have shaped.
+    - **What the operator can see and undo.** Deleting a note (by an agent or
+      the operator) moves it to `notes/.trash/` (500 entries kept, restorable
+      from `/api/memory/trash`; the directory sits inside the memory dir, so the
+      backup sync carries it). Every agent deletion, proposal, refusal and tagged
+      journal line raises a security event (`memory_deleted`, `memory_proposed`,
+      `memory_refused`, `journal_unverified`; `warn` for a proposal, a refusal or
+      a binding note's deletion, `info` audit lines otherwise); approving a
+      proposal raises `memory_approved`. A proposal is rejected with one call; a tagged journal
+      line is approved by editing the tag out, or deleted like any line.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -630,7 +699,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Exfil via allowed host (HTTP/S) | High | **Medium** | Policy + volume/entropy/cadence anomaly + auto-cut cap rate & shape; low-and-slow within limits is the residual. **The primary new risk.** |
 | HTTPS payload exfil / no injection | High | Medium | Host/bytes/cadence still watched + cuttable; payload opaque until MITM lands. Authenticated HTTPS via host tools. |
 | DNS covert channel | Medium | Medium | Forced through logged host resolver + entropy alert; tunnelling physically possible. |
-| Memory poisoning / laundering | Critical | Low–Med | Persisted taint + static approved:false keep it out of binding context; semantic influence on tainted context remains. |
+| Memory poisoning / laundering | Critical | **Medium** | Notes: agent-written = pending until approved, writes onto binding notes are proposals, deletes go to a trash with an audit event, unreadable frontmatter fails closed. Other channels into the prompt are NOT all approval-gated (residual #23: project files written with `write_file` are ungated). Taint is a warning and a partial gate, and its coverage has known gaps. Semantic influence on tainted context remains. |
 | Generated-code backdoor | Critical | **Medium-High** | Advisory gates + git history only — no pre-landing human review since 2026-07-20; execution stays guest-only and commits stay gated. Release gate (planned) is the compensating control. |
 | Secret exposure | Critical | Very Low | No secrets in guest; wire injection AND web_read substitution are grant-scoped per project (profile `secrets` + project grants, a project revoke wins; the web path ignored grants until 2026-09-26); service boxes never get injection; key never crosses to a non-DeepSeek endpoint. |
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. Holds for every project without LAN access (the default); the next row covers one that has it on. |

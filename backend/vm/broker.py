@@ -37,23 +37,45 @@ class TurnEnvelope:
     # agents/<slug>/memory is this turn's notes dir (own_memory agents only);
     # host-derived from the definition, restored into runtime.agent_memory
     memory_slug: str | None = None
+    # the op that delegated to this one (spawn_agent, deploy_agents, a plan
+    # item...), read host-side from the operation scope when the turn opens
+    # (vm.turn.run_agent_turn), never from the guest. release_turn hands this
+    # turn's taint up to it: the parent is about to read the child's report.
+    parent_op: str | None = None
 
 
 _envelopes: dict[str, TurnEnvelope] = {}
 
 
 def register_turn(env: TurnEnvelope) -> None:
+    proj = env.active_project
+    if proj and not any(e.active_project == proj for e in _envelopes.values()):
+        # nothing live on this project: a taint from an earlier turn is not this
+        # turn's business (see _dirty_projects)
+        _dirty_projects.discard(proj)
     _envelopes[env.op_id] = env
+    if env.parent_op and env.parent_op in _tainted:
+        # a child starts as tainted as the parent that briefed it: its task text
+        # may be the parent's paraphrase of a web page
+        _taint_op(env.op_id, _nav_tainted.get(env.parent_op))
     # attribute the guest's egress (which carries no op_id) to this turn's project
     from .. import egress
     egress.set_context(env.active_project, env.op_id, env.conversation_id)
 
 
 def release_turn(op_id: str) -> None:
-    _envelopes.pop(op_id, None)
+    env = _envelopes.pop(op_id, None)
+    parent = env.parent_op if env is not None else None
+    if parent and parent != op_id and op_id in _tainted and parent in _envelopes:
+        # a child that read untrusted content hands the taint up: its report is
+        # about to become a tool result in the parent's context. (A parent that
+        # already ended is skipped: nothing would ever clear the entry.)
+        mark_tainted(parent, _nav_tainted.get(op_id))
+        _from_children[parent] = _from_children.get(parent, 0) + 1
     _tainted.discard(op_id)          # forget the turn's taint history too
     _nav_tainted.pop(op_id, None)
     _taint_src.pop(op_id, None)
+    _from_children.pop(op_id, None)
     # ...and hand egress attribution back to whatever turn is still running, or
     # to nobody. Leaving it set meant a finished project kept policing the
     # guest's later traffic.
@@ -167,13 +189,30 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               # (agent-written, network-facing) service printed
                               "service_logs"})
 
+# ...and whole families by prefix. The projector verbs return text an MCP
+# server wrote (backend/mcp.py: results are data, and tainted); a new verb
+# added under the same prefix is covered without anyone remembering this list.
+_UNTRUSTED_PREFIXES = ("projector_",)
+
 # Tools that promote content INTO a trusted store the agent later relies on.
 # memory_write is the one such store the guest can reach through the broker
 # (git goes via the commit gate — operator-gated, not guest-brokered; file
 # writes land direct but are scanned + advisory-flagged in writes.apply_write).
 # A promotion made in a turn that has already consumed untrusted content is the
 # laundering path this guards.
-_PROMOTION_TOOLS = frozenset({"memory_write"})
+#
+# journal_update is the second: project.md is loaded whole into every prompt and
+# its summary feeds the all-projects rollup. In a tainted turn the handler tags
+# the line [unverified] and assembly leaves it out (memory.strip_unverified).
+_PROMOTION_TOOLS = frozenset({"memory_write", "journal_update"})
+
+# Tools that write text into a trusted channel with no tag to hold it back: an
+# agent definition's description rides every prompt (memory.agents_index) and
+# its prompt runs unattended once spawned or scheduled. A turn that has read
+# untrusted content does not get to write or rewrite one; the operator can, in
+# the Agents tab, or ask again in a fresh message. (schedule_update needs no
+# entry: its rows are created paused and wait for the operator's approval.)
+_REFUSED_WHEN_TAINTED = frozenset({"create_agent"})
 
 # op_ids that have consumed untrusted tool output this turn. The static memory
 # rule (agent notes are approved:false until the operator promotes them) is the
@@ -189,6 +228,21 @@ _nav_tainted: dict[str, str] = {}
 # quarantined and refused does not depend on it.
 _taint_src: dict[str, list[tuple[str, str | None]]] = {}
 _WEB_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize", "research"})
+# Projects on which a turn became tainted since the project was last idle. A
+# turn's own entry dies with it (release_turn), but the guest's write buffer can
+# be pulled AFTER that (the commit gate flushes it): the files in it were still
+# written by a tainted turn. workspace_xfer.apply_guest_writes reads this.
+_dirty_projects: set[str] = set()
+# op_id -> how many tainted children have ended under it (release_turn). The
+# delegating call's result is annotated when this moved during the call.
+_from_children: dict[str, int] = {}
+
+_CHILD_TAINT_NOTE = (
+    "\n\n[taint: an agent you delegated to read untrusted content (a web page, a "
+    "search, a file, a message or a screen), so this report is derived from it. "
+    "From here on this turn is treated like one that read the web: anything you "
+    "save to memory is quarantined until the operator approves it, and "
+    "unverified text does not become a standing rule.]")
 
 
 def _nav_source(name: str) -> str | None:
@@ -231,12 +285,71 @@ def taint_sources(op_id: str) -> list[tuple[str, str | None]]:
 
 
 def classify_taint(name: str) -> str:
-    return "untrusted" if name in _UNTRUSTED_TOOLS else "trusted"
+    return ("untrusted" if name in _UNTRUSTED_TOOLS
+            or name.startswith(_UNTRUSTED_PREFIXES) else "trusted")
 
 
 def op_tainted(op_id: str) -> bool:
     """Whether this operation has consumed untrusted tool output yet."""
     return op_id in _tainted
+
+
+def _taint_op(op_id: str, source: str | None = None,
+              detail: str | None = None) -> None:
+    """The one place a turn joins the ledger. `source` is a memory.TAINT_KINDS
+    kind (it labels the quarantine note); "desk" / "desk_shell" / "browser" also
+    record that a screen or a page did it (_nav_tainted)."""
+    _tainted.add(op_id)
+    if source in ("desk", "desk_shell", "browser"):
+        _nav_tainted.setdefault(op_id, "desk" if source == "desk_shell" else source)
+    _note_source(op_id, source, detail)
+    env = _envelopes.get(op_id)
+    if env is not None and env.active_project:
+        _dirty_projects.add(env.active_project)
+
+
+def project_tainted(slug: str | None, *, consume: bool = False) -> bool:
+    """Was a turn on this project tainted while it was live, or since the
+    project was last idle? `consume` resets the since-idle half (one pull of the
+    guest's write buffer takes it)."""
+    if not slug:
+        return False
+    live = any(e.active_project == slug and e.op_id in _tainted
+               for e in _envelopes.values())
+    pending = slug in _dirty_projects
+    if consume:
+        _dirty_projects.discard(slug)
+    return live or pending
+
+
+async def taint_from_egress(att: dict, host: str | None = None) -> None:
+    """The egress proxy just allowed a connection for `att` (its attribution):
+    bytes from the network are about to enter the guest, so whatever the turns
+    on that project print next (a curl, a git clone, a fetched page) is
+    untrusted, and run_code has no broker hop to say so. Taints every live turn
+    of the project, since with turns overlapping on one guest the proxy cannot
+    tell which of them asked. A package registry does not count: `pip install`
+    and `npm install` would otherwise taint every build."""
+    from .. import egress
+    if att.get("kind") not in ("shared", "project"):
+        return          # a service box's own traffic is not a turn's; nor is an image build's
+    if host and egress._host_matches(egress._norm(host), list(egress.IMAGE_BUILD_HOSTS)):
+        return
+    proj = att.get("project")
+    ops = {att.get("op_id")} if att.get("op_id") else set()
+    if proj and not egress.is_unattributed(proj):
+        ops |= {e["op_id"] for e in egress.contexts_matching(
+            lambda e: bool(e["op_id"]) and e["project"] == proj)}
+    for op in ops:
+        env = _envelopes.get(op)
+        if env is None or op in _tainted:
+            continue
+        _taint_op(op, "web")
+        try:
+            from . import persist
+            await persist.on_taint(env.active_project)
+        except Exception:  # noqa: BLE001 — the proxy must never fail over this
+            pass
 
 
 def mark_tainted(op_id: str, source: str | None = None,
@@ -255,10 +368,7 @@ def mark_tainted(op_id: str, source: str | None = None,
     "desk" / "browser" also record that a screen or a page did it (see
     _nav_tainted)."""
     if op_id:
-        _tainted.add(op_id)
-        if source in ("desk", "desk_shell", "browser"):
-            _nav_tainted.setdefault(op_id, "desk" if source == "desk_shell" else source)
-        _note_source(op_id, source, detail)
+        _taint_op(op_id, source, detail)
 
 
 async def broker_dispatch(op_id: str, name: str, args: dict,
@@ -313,17 +423,26 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
         blocked = await permissions.gate(name, args)
         if blocked is not None:
             return {"result": blocked, "taint": "trusted"}
+        if name in _REFUSED_WHEN_TAINTED and was_tainted:
+            from .. import memory
+            await memory.audit("memory_refused", "warn",
+                               f"{name} refused: this turn had read untrusted content",
+                               {"tool": name})
+            return {"result": (
+                f"error: refused — this turn read untrusted content (a web page, a search, "
+                f"a file, a message or a screen), and {name} writes text that rides future "
+                "prompts and runs unattended. Tell the operator what you wanted; they can do "
+                "it in the Agents tab, or ask you again in a new message."),
+                "taint": "trusted"}
+        kids_before = _from_children.get(op_id, 0)
         result = await registry.dispatch(name, args)
         result, img = imageresult.split(result)
         # tier-4 (post-dispatch): stamp taint into the ledger, and mark a
         # laundering promotion on the result the model sees.
         if classify_taint(name) == "untrusted":
-            _tainted.add(op_id)
-            if _nav_source(name):
-                _nav_tainted.setdefault(op_id, _nav_source(name))
             comp = args.get("computer") if isinstance(args, dict) else None
-            _note_source(op_id, taint_kind(name),
-                         comp if name.startswith("desk_") else None)
+            _taint_op(op_id, taint_kind(name),
+                      comp if name.startswith("desk_") else None)
         if op_id in _tainted and not was_tainted:
             # this call is what tainted the turn (a web read, or a peer message
             # via mark_tainted). Its project's /persist goes read-only at the
@@ -334,6 +453,8 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
         if launder and not result.startswith("error:"):
             from .. import memory
             result += memory.quarantine_note(sources_then)
+        if _from_children.get(op_id, 0) > kids_before and not result.startswith("error:"):
+            result += _CHILD_TAINT_NOTE
         out = {"result": result, "taint": classify_taint(name)}
         wire = img.wire(_IMG_WIRE_CAP) if img is not None else None
         if wire is not None:

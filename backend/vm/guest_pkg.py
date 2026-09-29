@@ -26,6 +26,9 @@ _COPY_MODULES = {
     # which tools run in the guest: the guest registry routes by it, this file
     # ships the handlers by it, so both read the one list
     "backend/agent/tools/inguest.py": "backend/agent/tools/inguest.py",
+    # which file reads count as reading untrusted text (MEM-09): pure, the
+    # guest registry asks it after every in-guest tool call
+    "backend/agent/tools/taintcheck.py": "backend/agent/tools/taintcheck.py",
     # what the model is shown (tool sections) and the playbooks that ride them:
     # the loop decides both, so a guest turn must decide them the same way
     "backend/agent/tools/toolsections.py": "backend/agent/tools/toolsections.py",

@@ -103,6 +103,246 @@ def notes_dir():
     return settings.memory_dir / "notes"
 
 
+# --- trash and proposals -----------------------------------------------------
+# Both live in dot-directories INSIDE the notes dir: the prompt assembly, the
+# tools and the operator's file listing all glob `*.md` one level down or skip
+# dot-dirs, so nothing in them can be read as a note, and backups (which sync
+# the whole memory dir) carry them along.
+TRASH = ".trash"
+PROPOSALS = ".proposals"
+TRASH_CAP = 500                      # entries kept; the oldest go first
+_TRASH_ID = re.compile(r"^\d{8}T\d{6}Z(?:-\d+)?__[^/\\]+$")
+
+
+def trash_dir(notes=None):
+    return (notes or notes_dir()) / TRASH
+
+
+def proposal_path(stem: str, notes=None):
+    return (notes or notes_dir()) / PROPOSALS / f"{stem}.md"
+
+
+class ProposalChanged(Exception):
+    """The proposal is not the one the operator was looking at."""
+
+
+class ProposalStale(Exception):
+    """The note itself changed after the proposal was made."""
+
+
+def sha256_text(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def read_proposal(stem: str, notes=None) -> dict | None:
+    """The pending proposal for a note, or None: {meta, body, text, sha256}."""
+    p = proposal_path(stem, notes)
+    try:
+        text = p.read_text()
+    except OSError:
+        return None
+    meta, body = parse_note(text)
+    return {"meta": meta, "body": body, "text": text, "sha256": sha256_text(text)}
+
+
+def reject_proposal(stem: str, notes=None) -> bool:
+    p = proposal_path(stem, notes)
+    if not p.is_file():
+        return False
+    p.unlink()
+    return True
+
+
+def approve_proposal(stem: str, *, sha256: str | None = None, force: bool = False,
+                     notes=None) -> None:
+    """Make a proposal the note. The operator's call, so it clears the taint
+    stamp the way promote does: they read the diff. `sha256` binds the approval
+    to the exact text they read (ProposalChanged if the agent wrote again since);
+    a note that was edited after the proposal began needs `force` (ProposalStale).
+    The note stays binding: approved, with the proposal's body and description
+    and every other key it already had (a `rules:` list, say)."""
+    import yaml
+    notes = notes or notes_dir()
+    prop = read_proposal(stem, notes)
+    if prop is None:
+        raise FileNotFoundError(stem)
+    if sha256 and sha256 != prop["sha256"]:
+        raise ProposalChanged(stem)
+    path = notes / f"{stem}.md"
+    base_meta = {}
+    if path.is_file():
+        base_text = path.read_text()
+        want = prop["meta"].get("base_sha256")
+        if want and want != sha256_text(base_text) and not force:
+            raise ProposalStale(stem)
+        base_meta = parse_note(base_text)[0]
+    meta = {"source": "agent", "approved": True}
+    for k, v in base_meta.items():
+        if k not in ("source", "approved", "taint", "_bad_frontmatter",
+                     "proposal_for", "base_sha256"):
+            meta[k] = v
+    if prop["meta"].get("description"):
+        meta["description"] = str(prop["meta"]["description"])
+    fm = yaml.safe_dump(meta, default_flow_style=False, sort_keys=False,
+                        allow_unicode=True, width=1 << 20).strip()
+    notes.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\n{fm}\n---\n{prop['body'].rstrip()}\n")
+    proposal_path(stem, notes).unlink(missing_ok=True)
+
+
+def proposal_view(stem: str, notes=None) -> dict | None:
+    """What the Memory page needs to review one proposal."""
+    import difflib
+    notes = notes or notes_dir()
+    prop = read_proposal(stem, notes)
+    if prop is None:
+        return None
+    path = notes / f"{stem}.md"
+    base_text, base_meta, base_body = None, {}, ""
+    if path.is_file():
+        try:
+            base_text = path.read_text()
+            base_meta, base_body = parse_note(base_text)
+        except OSError:
+            base_text = None
+    want = prop["meta"].get("base_sha256")
+    diff = "".join(difflib.unified_diff(
+        base_body.splitlines(True), prop["body"].splitlines(True),
+        "current", "proposed"))
+    return {"name": stem,
+            "description": str(prop["meta"].get("description") or ""),
+            "taint": note_taint(prop["meta"]),
+            "base_exists": base_text is not None,
+            "stale": bool(base_text is not None and want and want != sha256_text(base_text)),
+            "sha256": prop["sha256"], "base_sha256": want,
+            "base_description": str(base_meta.get("description") or ""),
+            "base_body": base_body, "body": prop["body"],
+            "diff": diff[:20000]}
+
+
+def list_proposals(notes=None) -> list[dict]:
+    d = proposal_path("x", notes).parent
+    if not d.is_dir():
+        return []
+    return [v for p in sorted(d.glob("*.md"))
+            if (v := proposal_view(p.stem, notes)) is not None]
+
+
+def _trash_file(tid: str, notes, suffix: str = ".md"):
+    """The trash file for an id from a URL or a listing: anything that is not
+    exactly the shape we mint is refused before it touches a path."""
+    if not isinstance(tid, str) or not _TRASH_ID.match(tid) or tid.split("__", 1)[1] in ("", ".", ".."):
+        raise ValueError("bad trash id")
+    return trash_dir(notes) / f"{tid}{suffix}"
+
+
+def trash_note(stem: str, notes=None) -> str:
+    """Move notes/<stem>.md, and its pending proposal if it has one, into the
+    trash. Returns the trash id. Nothing is ever unlinked outright: deleting a
+    note is undoable. FileNotFoundError when neither file exists."""
+    from datetime import datetime, timezone
+    notes = notes or notes_dir()
+    src, prop = notes / f"{stem}.md", proposal_path(stem, notes)
+    if not src.is_file() and not prop.is_file():
+        raise FileNotFoundError(stem)
+    dest_dir = trash_dir(notes)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    tid, n = f"{stamp}__{stem}", 1
+    while (dest_dir / f"{tid}.md").exists() or (dest_dir / f"{tid}.proposal.md").exists():
+        n += 1
+        tid = f"{stamp}-{n}__{stem}"
+    if src.is_file():
+        src.replace(dest_dir / f"{tid}.md")
+    else:                                    # only a proposal existed: keep it as the entry
+        prop.replace(dest_dir / f"{tid}.md")
+        prop = None
+    if prop is not None and prop.is_file():
+        prop.replace(dest_dir / f"{tid}.proposal.md")
+    _trim_trash(dest_dir)
+    return tid
+
+
+def _trim_trash(d) -> None:
+    entries = sorted(p for p in d.glob("*.md") if not p.name.endswith(".proposal.md"))
+    for p in entries[:max(0, len(entries) - TRASH_CAP)]:
+        p.unlink(missing_ok=True)
+        p.with_name(p.stem + ".proposal.md").unlink(missing_ok=True)
+
+
+def list_trash(notes=None) -> list[dict]:
+    """Trashed notes, newest first."""
+    d = trash_dir(notes)
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.glob("*.md"), reverse=True):
+        if p.name.endswith(".proposal.md") or not _TRASH_ID.match(p.stem):
+            continue
+        stamp, name = p.stem.split("__", 1)
+        try:
+            meta, _ = parse_note(p.read_text())
+            size = p.stat().st_size
+        except OSError:
+            continue
+        s = stamp.split("-")[0]
+        out.append({"id": p.stem, "name": name, "size": size,
+                    "deleted_at": f"{s[:4]}-{s[4:6]}-{s[6:8]}T{s[9:11]}:{s[11:13]}:{s[13:15]}Z",
+                    "source": str(meta.get("source", "operator")),
+                    "taint": note_taint(meta),
+                    "has_proposal": p.with_name(p.stem + ".proposal.md").is_file()})
+    return out
+
+
+def restore_trash(tid: str, notes=None) -> str:
+    """Put a trashed note back (with its proposal, if the name is free of one).
+    Returns the note name. ValueError for a malformed id, FileNotFoundError for
+    an unknown one, FileExistsError when a note of that name exists now: a
+    restore never overwrites."""
+    notes = notes or notes_dir()
+    src = _trash_file(tid, notes)
+    if not src.is_file():
+        raise FileNotFoundError(tid)
+    name = tid.split("__", 1)[1]
+    dest = notes / f"{name}.md"
+    if dest.exists():
+        raise FileExistsError(name)
+    notes.mkdir(parents=True, exist_ok=True)
+    src.replace(dest)
+    tprop = _trash_file(tid, notes, ".proposal.md")
+    if tprop.is_file():
+        pdest = proposal_path(name, notes)
+        if pdest.exists():
+            tprop.unlink()               # a newer proposal is already waiting
+        else:
+            pdest.parent.mkdir(parents=True, exist_ok=True)
+            tprop.replace(pdest)
+    return name
+
+
+async def audit(kind: str, severity: str, summary: str, detail: dict | None = None) -> None:
+    """One security event for something an agent (or the operator) did to memory.
+    Best-effort: the action stands even if the alert cannot be written. Skipped
+    in an incognito turn, where the notes dir is a throwaway. Names the run that
+    did it so the Review Center can point at the conversation."""
+    from . import runtime
+    if runtime.ephemeral.get():
+        return
+    try:
+        from . import security
+        from .db import get_db
+        db = await get_db()
+        try:
+            await security.raise_event(
+                db, kind=kind, severity=severity, summary=summary,
+                detail={**(detail or {}), "conversation_id": runtime.conversation_id.get()})
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — never fail the memory action over its alert
+        pass
+
+
 def _context_file(slug: str):
     return settings.projects_dir / slug / ".context.json"
 
@@ -408,13 +648,50 @@ def read_project_md(slug: str) -> str:
     return path.read_text() if path.exists() else ""
 
 
+# A journal entry written in a turn that had read untrusted content carries this
+# tag. project.md is loaded whole into every turn's prompt and its summary feeds
+# the all-projects rollup that rides EVERY turn, so a tagged line is kept in the
+# file (the operator sees it, git shows it) but left out of both until the
+# operator removes the tag: that edit is their approval.
+UNVERIFIED_MARK = "[unverified]"
+_UNVERIFIED_LINE = re.compile(r"^[ \t]*-[ \t]+\d{4}-\d{2}-\d{2}[ \t]+\[unverified\]", re.M)
+SUMMARY_MAX = 300           # chars of a project's summary in the rollup
+AGENT_DESC_MAX = 200        # chars of an agent's description in the index
+
+
+def flat_line(text, limit: int) -> str:
+    """One short line of plain text: control characters dropped, every run of
+    whitespace (newlines included) a single space, cut at `limit`. What text
+    that is not the operator's may look like when it rides the prompt."""
+    s = "".join(" " if ch.isspace() else ch for ch in str(text or "")
+                if ch.isspace() or ch.isprintable())
+    s = " ".join(s.split())
+    return s if len(s) <= limit else s[:limit - 1].rstrip() + "…"
+
+
+def strip_unverified(text: str) -> tuple[str, int]:
+    """(text without its [unverified] journal lines, how many were removed)."""
+    kept, dropped = [], 0
+    for ln in text.split("\n"):
+        if _UNVERIFIED_LINE.match(ln):
+            dropped += 1
+        else:
+            kept.append(ln)
+    return "\n".join(kept), dropped
+
+
 def extract_summary(project_md: str) -> str:
-    """First paragraph of the '## Summary' section, for the thin all-projects rollup."""
+    """First paragraph of the '## Summary' section, for the thin all-projects
+    rollup: ONE line of at most SUMMARY_MAX chars, no headings or control
+    characters (a 30 KB summary used to ride every turn of every project), and
+    never a line an untrusted turn wrote."""
     m = re.search(r"^## Summary\s*\n(.*?)(?=\n## |\Z)", project_md, re.M | re.S)
     if not m:
         return "(no summary)"
-    text = m.group(1).strip()
-    return text.split("\n\n")[0].strip() or "(no summary)"
+    lines = [ln for ln in strip_unverified(m.group(1))[0].split("\n")
+             if not ln.lstrip().startswith("#")]
+    text = "\n".join(lines).strip()
+    return flat_line(text.split("\n\n")[0], SUMMARY_MAX) or "(no summary)"
 
 
 async def refresh_all_projects(db: aiosqlite.Connection) -> None:
@@ -482,7 +759,9 @@ def agents_index() -> str:
                 meta = yaml.safe_load(fm) or {}
             except (IndexError, yaml.YAMLError, OSError):
                 meta = {}
-            desc = meta.get("description") or "(no description)"
+            # an agent can write its own description (create_agent): one capped
+            # line of plain text, whatever it holds
+            desc = flat_line(meta.get("description"), AGENT_DESC_MAX) or "(no description)"
             rosters.append(f"- {md.parent.name}: {desc}")
     if not rosters:
         return ""
@@ -541,12 +820,38 @@ def parse_note(text: str) -> tuple[dict, str]:
     return meta, m.group(2).strip()
 
 
+def strip_leading_frontmatter(text: str) -> tuple[str | None, str]:
+    """(description, body) for text an AGENT wrote as a note body. A leading
+    `---` block in it is not ours: nested under the frontmatter the tool writes,
+    it would ride the prompt as noise once the note is approved. It is removed,
+    and its `description` (when it parses and has one) is handed back so the
+    caller can use it if the model gave none. A `---` line that never closes is
+    content (a horizontal rule), and stays."""
+    lead = (text or "").lstrip("﻿").lstrip()
+    if not lead.startswith("---"):
+        return None, text
+    m = _FRONTMATTER.match(lead)
+    if not m:
+        return None, text
+    import yaml
+    desc = None
+    try:
+        meta = yaml.safe_load(m.group(1))
+        if isinstance(meta, dict) and meta.get("description"):
+            desc = str(meta["description"])
+    except yaml.YAMLError:
+        pass
+    return desc, m.group(2).strip()
+
+
 def note_taint(meta: dict) -> str:
     """'untrusted' if the note carries a persisted taint stamp (it was written in
     a turn that had consumed untrusted content), else 'trusted'. Set by the
     memory_write handler off the broker's runtime taint ledger; cleared only by
-    the operator's promote action."""
-    return "untrusted" if str(meta.get("taint", "")).lower() == "untrusted" else "trusted"
+    the operator's promote action. ANY non-empty stamp counts ('untrusted',
+    'mcp:projector', a hand-typed 'yes'): a reader that only knew one spelling
+    would treat every other as clean."""
+    return "untrusted" if meta.get("taint") else "trusted"
 
 
 def note_trusted(meta: dict) -> bool:
@@ -637,45 +942,98 @@ def memory_block() -> str:
     return "\n\n".join(out)
 
 
+# What reads as a behavioural rule. Whole words: 'hate' is not in 'whatever',
+# 'must' is not in 'mustard'. `only` counts at the start of a line or right after
+# an instruction verb ("Only use metric", "Use only apt"); mid-sentence it is a
+# fact ("the lab is only on the LAN"). A heading is never a rule, but the list
+# items under one that names a rule word are (## Never / ## Things I hate /
+# ## Always).
+_RULE_HINT = re.compile(
+    r"\b(never|always|avoid|don['’]?t|do not|must|prefer|pet peeves?|hates?|dislikes?)\b", re.I)
+_RULE_LEAD = re.compile(
+    r"^(?:(?:use|reply|answer|respond|write|speak|keep|include|show|give|call|run|ask)\s+)?only\b",
+    re.I)
+_HEAD_NEG = re.compile(
+    r"\b(never|avoid|don['’]?t|do not|hates?|hated|dislikes?|pet peeves?)\b", re.I)
+_HEAD_POS = re.compile(r"\b(always|must)\b", re.I)
+_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(\S.*)$")
+RULE_MAX = 300           # chars of one rule in the tail
+_EM_RULE = ('Never use em dashes. Wrong: "fast, cheap — pick one". '
+            'Right: "fast, cheap, pick one".')
+
+
+def _shape_rule(ln: str) -> str:
+    low = ln.lower()
+    # "X pet peeve: Y" -> an imperative "Avoid Y"
+    if "pet peeve" in low and ":" in ln:
+        ln = ln.split(":", 1)[1].strip()
+        low = ln.lower()
+        if not low.startswith(("never", "avoid", "don't", "dont", "no ")):
+            ln = "Avoid " + ln
+    # negative examples beat bare prohibitions on this model
+    if "em dash" in low:
+        return _EM_RULE
+    return flat_line(ln, RULE_MAX)
+
+
+def note_rules(meta: dict, body: str) -> list[str]:
+    """The rules one TRUSTED note contributes to the tail. `rules:` in its
+    frontmatter, when a list, is the operator saying exactly which lines they are
+    and is used verbatim; otherwise the body is read for rule-shaped lines."""
+    explicit = meta.get("rules")
+    if isinstance(explicit, list):
+        return [flat_line(r, RULE_MAX) for r in explicit if isinstance(r, str) and r.strip()]
+    out, mode = [], None
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            head = line.lstrip("#").strip()
+            mode = ("avoid" if _HEAD_NEG.search(head)
+                    else "always" if _HEAD_POS.search(head) else None)
+            continue
+        m = _BULLET.match(raw)
+        item = (m.group(1) if m else line.strip("-*# ")).strip()
+        if not item:
+            continue
+        if _RULE_HINT.search(item) or _RULE_LEAD.match(item):
+            out.append(_shape_rule(item))
+        elif m and mode == "avoid":
+            plain = item.lower().startswith(("no ", "not ", "without "))
+            out.append(flat_line(item if plain else "Avoid " + item, RULE_MAX))
+        elif m and mode == "always":
+            out.append(flat_line("Always: " + item, RULE_MAX))
+    return out
+
+
 def standing_rules_tail() -> str:
     """Restate the operator's hard preferences at the very END of the system
     prompt. Models weigh the start and end of context heavily and lose the
     middle ("lost in the middle"), so a single rule buried mid-prompt gets
     ignored. This compact imperative restatement is the bottom slice of the
     "task sandwich" — empirically it's what makes constraints actually stick on
-    deepseek-v4-flash (0/5 em-dash violations with it, ~2/5 without)."""
+    deepseek-v4-flash (0/5 em-dash violations with it, ~2/5 without).
+
+    Sources: trusted notes with 'pref' or 'rule' in the name, and any trusted
+    note that says `rules: true` (or gives a `rules:` list) in its frontmatter;
+    `rules: false` opts a note out. Only rule-shaped lines belong here: plain
+    facts (Editor:, Shell:) stay up top in standing memory and would only
+    dilute it."""
     notes = settings.memory_dir / "notes"
-    files = ([p for p in sorted(notes.glob("*.md"))
-              if "pref" in p.stem.lower() or "rule" in p.stem.lower()]
-             if notes.exists() else [])
-    # only lines that read as behavioural rules belong in the tail; plain facts
-    # (Editor:, Shell:) stay up top in standing memory and would only dilute it
-    HINTS = ("never", "always", "avoid", "don't", "dont", "must", "only",
-             "prefer", "pet peeve", "hate", "dislike")
     rules = []
-    for p in files:
+    for p in (sorted(notes.glob("*.md")) if notes.exists() else []):
         try:
             meta, body = parse_note(p.read_text())
         except OSError:
             continue
         if not note_trusted(meta):
             continue  # an unapproved agent note must not reach the binding tail
-        for ln in body.splitlines():
-            ln = ln.strip("-*# ").strip()
-            low = ln.lower()
-            if not ln or not any(h in low for h in HINTS):
-                continue
-            # "X pet peeve: Y" -> an imperative "Avoid Y"
-            if "pet peeve" in low and ":" in ln:
-                ln = ln.split(":", 1)[1].strip()
-                low = ln.lower()
-                if not low.startswith(("never", "avoid", "don't", "dont", "no ")):
-                    ln = "Avoid " + ln
-            # negative examples beat bare prohibitions on this model
-            if "em dash" in low:
-                ln = 'Never use em dashes. Wrong: "fast, cheap — pick one". ' \
-                     'Right: "fast, cheap, pick one".'
-            rules.append(ln)
+        flag = meta.get("rules")
+        named = "pref" in p.stem.lower() or "rule" in p.stem.lower()
+        if flag is False or not (named or flag):
+            continue
+        rules.extend(note_rules(meta, body))
     if not rules:
         return ""
     out = ["# Operator rules (non-negotiable): apply to THIS reply",
@@ -744,7 +1102,12 @@ def _active_project_blocks(slug: str) -> list[str]:
     budget = settings.project_context_budget_tokens
     blocks: list[str] = []
     used = 0
-    project_md = read_project_md(slug)
+    project_md, withheld = strip_unverified(read_project_md(slug))
+    if project_md.strip() and withheld:
+        project_md = (project_md.rstrip() + f"\n\n({withheld} journal "
+                      f"entr{'y' if withheld == 1 else 'ies'} from turns that read untrusted "
+                      f"content withheld: marked {UNVERIFIED_MARK} in project.md until the "
+                      "operator removes the tag.)\n")
     if project_md:
         text = f"# Active project (loaded into central context): {slug}\n\n{project_md}"
         blocks.append(text)

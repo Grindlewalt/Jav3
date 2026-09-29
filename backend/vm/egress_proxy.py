@@ -33,7 +33,7 @@ import httpx
 
 from .. import egress, egress_auto, secrets as secrets_mod
 from .. import anomaly, lanaccess, security, websec
-from . import boxes, boxnet
+from . import boxes, boxnet, broker
 from ..config import settings
 from ..db import get_db
 
@@ -368,6 +368,7 @@ async def _handle_connect(host, port, cr, cw, att: dict | None = None):
         await cw.drain(); cw.close()
         await _record(host, "CONNECT", None, 0, 0, verdict, reason, att)
         return
+    await broker.taint_from_egress(att, host)     # bytes from outside are about to arrive
     try:
         # a LAN-access target dials the address it was judged on (pin)
         orr, orw = await asyncio.open_connection(pin or host, int(port))
@@ -397,6 +398,7 @@ async def _handle_http(method, host, port, head, cr, cw, att: dict | None = None
         await cw.drain(); cw.close()
         await _record(host, method, None, 0, 0, verdict, reason, att)
         return
+    await broker.taint_from_egress(att, host)     # bytes from outside are about to arrive
     # read any remaining request body up to Content-Length
     body = b""
     cl = re.search(rb"\r\nContent-Length:\s*(\d+)", head, re.I)
