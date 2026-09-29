@@ -190,7 +190,19 @@ _UNTRUSTED_PREFIXES = ("projector_",)
 # writes land direct but are scanned + advisory-flagged in writes.apply_write).
 # A promotion made in a turn that has already consumed untrusted content is the
 # laundering path this guards.
-_PROMOTION_TOOLS = frozenset({"memory_write"})
+#
+# journal_update is the second: project.md is loaded whole into every prompt and
+# its summary feeds the all-projects rollup. In a tainted turn the handler tags
+# the line [unverified] and assembly leaves it out (memory.strip_unverified).
+_PROMOTION_TOOLS = frozenset({"memory_write", "journal_update"})
+
+# Tools that write text into a trusted channel with no tag to hold it back: an
+# agent definition's description rides every prompt (memory.agents_index) and
+# its prompt runs unattended once spawned or scheduled. A turn that has read
+# untrusted content does not get to write or rewrite one; the operator can, in
+# the Agents tab, or ask again in a fresh message. (schedule_update needs no
+# entry: its rows are created paused and wait for the operator's approval.)
+_REFUSED_WHEN_TAINTED = frozenset({"create_agent"})
 
 # op_ids that have consumed untrusted tool output this turn. The static memory
 # rule (agent notes are approved:false until the operator promotes them) is the
@@ -302,6 +314,17 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
         blocked = await permissions.gate(name, args)
         if blocked is not None:
             return {"result": blocked, "taint": "trusted"}
+        if name in _REFUSED_WHEN_TAINTED and was_tainted:
+            from .. import memory
+            await memory.audit("memory_refused", "warn",
+                               f"{name} refused: this turn had read untrusted content",
+                               {"tool": name})
+            return {"result": (
+                f"error: refused — this turn read untrusted content (a web page, a search, "
+                f"a file, a message or a screen), and {name} writes text that rides future "
+                "prompts and runs unattended. Tell the operator what you wanted; they can do "
+                "it in the Agents tab, or ask you again in a new message."),
+                "taint": "trusted"}
         kids_before = _from_children.get(op_id, 0)
         result = await registry.dispatch(name, args)
         result, img = imageresult.split(result)

@@ -606,13 +606,50 @@ def read_project_md(slug: str) -> str:
     return path.read_text() if path.exists() else ""
 
 
+# A journal entry written in a turn that had read untrusted content carries this
+# tag. project.md is loaded whole into every turn's prompt and its summary feeds
+# the all-projects rollup that rides EVERY turn, so a tagged line is kept in the
+# file (the operator sees it, git shows it) but left out of both until the
+# operator removes the tag: that edit is their approval.
+UNVERIFIED_MARK = "[unverified]"
+_UNVERIFIED_LINE = re.compile(r"^[ \t]*-[ \t]+\d{4}-\d{2}-\d{2}[ \t]+\[unverified\]", re.M)
+SUMMARY_MAX = 300           # chars of a project's summary in the rollup
+AGENT_DESC_MAX = 200        # chars of an agent's description in the index
+
+
+def flat_line(text, limit: int) -> str:
+    """One short line of plain text: control characters dropped, every run of
+    whitespace (newlines included) a single space, cut at `limit`. What text
+    that is not the operator's may look like when it rides the prompt."""
+    s = "".join(" " if ch.isspace() else ch for ch in str(text or "")
+                if ch.isspace() or ch.isprintable())
+    s = " ".join(s.split())
+    return s if len(s) <= limit else s[:limit - 1].rstrip() + "…"
+
+
+def strip_unverified(text: str) -> tuple[str, int]:
+    """(text without its [unverified] journal lines, how many were removed)."""
+    kept, dropped = [], 0
+    for ln in text.split("\n"):
+        if _UNVERIFIED_LINE.match(ln):
+            dropped += 1
+        else:
+            kept.append(ln)
+    return "\n".join(kept), dropped
+
+
 def extract_summary(project_md: str) -> str:
-    """First paragraph of the '## Summary' section, for the thin all-projects rollup."""
+    """First paragraph of the '## Summary' section, for the thin all-projects
+    rollup: ONE line of at most SUMMARY_MAX chars, no headings or control
+    characters (a 30 KB summary used to ride every turn of every project), and
+    never a line an untrusted turn wrote."""
     m = re.search(r"^## Summary\s*\n(.*?)(?=\n## |\Z)", project_md, re.M | re.S)
     if not m:
         return "(no summary)"
-    text = m.group(1).strip()
-    return text.split("\n\n")[0].strip() or "(no summary)"
+    lines = [ln for ln in strip_unverified(m.group(1))[0].split("\n")
+             if not ln.lstrip().startswith("#")]
+    text = "\n".join(lines).strip()
+    return flat_line(text.split("\n\n")[0], SUMMARY_MAX) or "(no summary)"
 
 
 async def refresh_all_projects(db: aiosqlite.Connection) -> None:
@@ -680,7 +717,9 @@ def agents_index() -> str:
                 meta = yaml.safe_load(fm) or {}
             except (IndexError, yaml.YAMLError, OSError):
                 meta = {}
-            desc = meta.get("description") or "(no description)"
+            # an agent can write its own description (create_agent): one capped
+            # line of plain text, whatever it holds
+            desc = flat_line(meta.get("description"), AGENT_DESC_MAX) or "(no description)"
             rosters.append(f"- {md.parent.name}: {desc}")
     if not rosters:
         return ""
@@ -968,7 +1007,12 @@ def _active_project_blocks(slug: str) -> list[str]:
     budget = settings.project_context_budget_tokens
     blocks: list[str] = []
     used = 0
-    project_md = read_project_md(slug)
+    project_md, withheld = strip_unverified(read_project_md(slug))
+    if project_md.strip() and withheld:
+        project_md = (project_md.rstrip() + f"\n\n({withheld} journal "
+                      f"entr{'y' if withheld == 1 else 'ies'} from turns that read untrusted "
+                      f"content withheld: marked {UNVERIFIED_MARK} in project.md until the "
+                      "operator removes the tag.)\n")
     if project_md:
         text = f"# Active project (loaded into central context): {slug}\n\n{project_md}"
         blocks.append(text)
