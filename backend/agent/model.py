@@ -2,6 +2,7 @@
 and the gateway (key policy, budget, ledger) lives in front of it. `providers.resolve` routes each
 call — `provider/model` -> endpoint, key, wire kind — and the non-OpenAI
 wire formats live in adapters.py."""
+import contextvars
 import json
 import re
 from typing import AsyncIterator
@@ -112,20 +113,30 @@ def _redact_images(messages: list[dict]) -> list[dict]:
     return out
 
 
+# The box a gateway-served call came from. The gateway (vm/gateway_server.py)
+# sets it around model.complete so the ledger row can say which box spent the
+# key; None = a host-side call.
+call_box_id: contextvars.ContextVar = contextvars.ContextVar("jav3_call_box", default=None)
+
+
 async def record_model_call(conversation_id: int | None, model_name: str,
                             usage: dict | None, messages: list[dict],
-                            tools: list[dict] | None) -> None:
+                            tools: list[dict] | None,
+                            op_id: str | None = None,
+                            box_id: str | None = None) -> None:
     """Ledger every API call: exact usage always (the Logs cost tab sums
     this — usage_log only covers chat turns, this covers everything), plus
     the raw message array when the operator flipped capture on. Incognito
     records usage unattributed (spend is real money) but never content.
-    Must never fail the model call — best effort by design."""
+    `op_id` / `box_id` say which operation and which box made the call (the
+    Security > Calls view); an incognito turn drops the op_id, which names its
+    conversation. Must never fail the model call — best effort by design."""
     from ..db import get_db, get_state
     from .. import runtime
     u = usage or {}
     ephemeral = runtime.ephemeral.get()
     if ephemeral:
-        conversation_id = None
+        conversation_id, op_id = None, None
     db = await get_db()
     try:
         context = None
@@ -134,12 +145,14 @@ async def record_model_call(conversation_id: int | None, model_name: str,
                                   "n_tools": len(tools or [])})
         await db.execute(
             "INSERT INTO model_calls (conversation_id, model, input_tokens, "
-            "output_tokens, cache_hit, cache_miss, context) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "output_tokens, cache_hit, cache_miss, context, op_id, box_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (conversation_id, model_name,
              u.get("prompt_tokens", 0), u.get("completion_tokens", 0),
              u.get("prompt_cache_hit_tokens", 0),
-             u.get("prompt_cache_miss_tokens", 0), context))
+             u.get("prompt_cache_miss_tokens", 0), context,
+             str(op_id)[:80] if op_id else None,
+             str(box_id)[:80] if box_id else None))
         # retention: usage rows are tiny and kept forever; context blobs are
         # the heavy part and age out
         await db.execute(
@@ -463,7 +476,9 @@ class ModelGateway:
             budget.add(usage or {}, cache_weight=_cache_weight(route))
         try:
             await record_model_call(conversation_id, route.model_id, usage,
-                                    messages, tools)
+                                    messages, tools,
+                                    op_id=op_id or budget_mod.active_op_id.get(),
+                                    box_id=call_box_id.get())
         except Exception:  # noqa: BLE001 — the ledger must never fail a call
             pass
         yield final

@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_calls(db)
         await db.commit()
     finally:
         await db.close()
@@ -792,6 +793,29 @@ async def _add_columns(db: aiosqlite.Connection, table: str,
     for col, decl in cols:
         if col not in have:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+async def _migrate_calls(db: aiosqlite.Connection) -> None:
+    """The Security > Calls view (how the model key is used): each model_calls
+    row learns which operation and which box it served, and the gateway's
+    refusals get a small log of their own. Idempotent and additive."""
+    await _add_columns(db, "model_calls", (
+        # the gateway op that made the call (chat:<cid>, guest:<cid>, a job
+        # id); NULL for incognito turns, whose op_id would name the chat
+        ("op_id", "TEXT"),
+        # the box the call came from (guest_turn's bound box); NULL = host-side
+        ("box_id", "TEXT")))
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS gateway_refusals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL DEFAULT (datetime('now')),
+            op_name TEXT,                -- the gateway op asked for (model_call, ...)
+            reason TEXT NOT NULL,        -- unknown_op_id, wrong_box, budget_exceeded, ...
+            box_id TEXT,                 -- the caller's box, when the host knows it
+            project_slug TEXT
+        )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gateway_refusals_ts ON gateway_refusals(ts)")
 
 
 async def _migrate_boxes(db: aiosqlite.Connection) -> None:

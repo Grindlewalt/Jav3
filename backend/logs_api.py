@@ -255,3 +255,92 @@ async def transcript(cid: int):
         }
     finally:
         await db.close()
+
+
+# --- Security > Calls: how the model key is used ------------------------------
+# Every model call the host made (the model_calls ledger: which op, which box,
+# the token bill) and every request the gateway turned away, on one timeline.
+
+CALLS_LIMIT = 300
+
+
+def _key_hosts(models) -> list[str]:
+    """Host names the provider key can be sent to: the default model's provider,
+    plus the provider of every model named explicitly in `models`. Only
+    providers that hold a real key count. Never the key, or a URL path."""
+    from urllib.parse import urlparse
+    hosts: set[str] = set()
+    names = [None] + [m for m in models if m and providers.split_id(m)[0]]
+    for name in names:
+        try:
+            route = providers.resolve(name)
+        except providers.ProviderError:
+            continue
+        if route.key and route.key != "local" and not route.key_error:
+            host = urlparse(route.base_url).hostname
+            if host:
+                hosts.add(host)
+    return sorted(hosts)
+
+
+@router.get("/calls")
+async def calls_log(hours: int = 24, conversation_id: int | None = None,
+                    limit: int = CALLS_LIMIT):
+    """The window's model calls and gateway refusals merged by time, newest
+    first (capped), with totals over the whole window. `conversation_id` keeps
+    that conversation's calls only: a refusal names no conversation, so none
+    are listed then."""
+    hours = max(1, min(hours, 24 * 365))
+    limit = max(1, min(limit, 500))
+    since = f"-{hours} hours"
+    where, args = "m.created_at >= datetime('now', ?)", [since]
+    if conversation_id is not None:
+        where += " AND m.conversation_id = ?"
+        args.append(conversation_id)
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT m.model, COUNT(*) n, COALESCE(SUM(m.cache_hit),0) ch, "
+            "COALESCE(SUM(m.cache_miss),0) cm, COALESCE(SUM(m.output_tokens),0) o "
+            f"FROM model_calls m WHERE {where} GROUP BY m.model", args)
+        by_model = [dict(r) for r in await cur.fetchall()]
+        cur = await db.execute(
+            "SELECT m.id, m.created_at AS ts, m.model, m.op_id, m.box_id, "
+            "m.conversation_id, m.input_tokens, m.output_tokens, m.cache_hit, "
+            "m.cache_miss, (m.context IS NOT NULL) AS has_context, "
+            "p.slug AS project_slug FROM model_calls m "
+            "LEFT JOIN conversations c ON c.id = m.conversation_id "
+            "LEFT JOIN projects p ON p.id = c.project_id "
+            f"WHERE {where} ORDER BY m.id DESC LIMIT ?", (*args, limit))
+        calls = [dict(r) for r in await cur.fetchall()]
+        refusals, n_refused = [], 0
+        if conversation_id is None:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM gateway_refusals WHERE ts >= datetime('now', ?)",
+                (since,))
+            n_refused = (await cur.fetchone())[0]
+            cur = await db.execute(
+                "SELECT id, ts, op_name, reason, box_id, project_slug "
+                "FROM gateway_refusals WHERE ts >= datetime('now', ?) "
+                "ORDER BY id DESC LIMIT ?", (since, limit))
+            refusals = [dict(r) for r in await cur.fetchall()]
+        capture = await get_state(db, CAPTURE_STATE_KEY) == "1"
+    finally:
+        await db.close()
+    for r in calls:
+        r["kind"] = "call"
+        r["has_context"] = bool(r["has_context"])
+        r["cost_usd"] = round(_cost_usd(r["cache_hit"], r["cache_miss"],
+                                        r["output_tokens"], r["model"]), 6)
+    for r in refusals:
+        r["kind"] = "refused"
+    rows = sorted(calls + refusals, key=lambda r: (r["ts"] or "", r["kind"], r["id"]),
+                  reverse=True)[:limit]
+    n_calls = sum(m["n"] for m in by_model)
+    cost = sum(_cost_usd(m["ch"], m["cm"], m["o"], m["model"]) for m in by_model)
+    return {"hours": hours, "conversation_id": conversation_id,
+            "key_hosts": _key_hosts([m["model"] for m in by_model]),
+            "totals": {"calls": n_calls, "cost_usd": round(cost, 4),
+                       "refused": n_refused},
+            "rows": rows, "truncated": n_calls + n_refused > len(rows),
+            "capture_context": capture}
