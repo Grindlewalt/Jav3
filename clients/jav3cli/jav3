@@ -8611,12 +8611,17 @@ def build_tui(base: str, token: str, **kw):
                                       hint="enter pins this chat to it") or ""
                 if not arg:
                     return
-            if arg == NEW_PROJECT:
+            made = arg == NEW_PROJECT
+            if made:
                 arg = await self._new_project() or ""
                 if not arg:
                     return
             mode = arg if arg in ("none", "follow") else "pin"
             slug = arg if mode == "pin" else None
+            if slug is not None and not made:
+                slug = await self._known_project(slug)
+                if not slug:
+                    return
             if self.cid is not None:
                 body = {"mode": mode}
                 if slug:
@@ -9190,10 +9195,42 @@ def build_tui(base: str, token: str, **kw):
             name = (await self.push_screen_wait(Ask("New project name")) or "").strip()
             if not name:
                 return None
+            return await self._create_project(name)
+
+        async def _create_project(self, name: str) -> str:
             r = await self.api("POST", "/api/projects", json={"name": name})
             await self.refresh_options()
             self.push_notice(f"created project {r.get('slug', name)}", "done", toast=False)
             return r.get("slug") or name
+
+        async def _known_project(self, name: str) -> str | None:
+            """The slug of the project `name` means: as typed, or by its display
+            name, or (nothing matching) after asking whether to create it. None when
+            the operator says no. A name that matches nothing used to pin the chat to
+            a project that did not exist, and the first message then failed with a 404."""
+            if self.full_access:
+                rows = (await self.api("GET", "/api/projects")).get("projects") or []
+            else:
+                await self.refresh_options()        # one may have been made elsewhere
+                rows = (self.options or {}).get("projects", [])
+            known = {p["slug"]: p.get("name") or "" for p in rows if p.get("slug")}
+            if name in known:
+                return name
+            low = name.lower()
+            hit = next((sl for sl, nm in known.items() if sl.lower() == low
+                        or (nm and nm.lower() == low)), None)
+            if hit:
+                return hit
+            if not self.full_access:
+                have = ", ".join(sorted(known)[:8]) + (" …" if len(known) > 8 else "")
+                raise CliError(f"no project named {name!r}" + (f" — you have: {have}" if known
+                                                                else "")
+                               + " (making one needs /login with your password)")
+            if not await self.push_screen_wait(Confirm(
+                    f"No project named {name!r}. Create it?",
+                    "It becomes this chat's project.")):
+                return None
+            return await self._create_project(name)
 
         async def c_orchestrate(self, arg: str) -> None:
             if not arg:

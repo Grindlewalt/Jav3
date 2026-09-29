@@ -103,3 +103,64 @@ async def test_an_exact_argument_comes_before_the_ones_that_only_begin_with_it()
         assert app.popup_items[0] == ("arg", "alpha") and ("arg", "alpha2") in app.popup_items
         await pilot.press("enter")
         assert await wait_for(lambda: app.project == "alpha")
+
+
+# --- /project: a name that is not a project (TUI-03) -----------------------------------------
+
+async def test_project_refuses_a_name_that_does_not_exist_and_lists_the_real_ones():
+    srv, app = await boot(projects=["alpha", "beta"])
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/project brandnew")
+        assert await wait_for(lambda: any("no project named 'brandnew'" in n for n in notes(app)))
+        text = " ".join(notes(app))
+        assert "alpha, beta" in text and "/login" in text
+        assert app.project is None and app.project_mode != "pin"
+
+
+async def test_project_takes_a_slug_a_display_name_or_a_new_one_made_elsewhere():
+    srv, app = await boot(projects=["alpha", "beta"])
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/project ALPHA")
+        assert await wait_for(lambda: app.project == "alpha")
+        srv.projects.append("gamma")                    # made in the web app meanwhile
+        app.dispatch("/project gamma")
+        assert await wait_for(lambda: app.project == "gamma")
+
+
+async def test_the_pickers_typed_name_is_checked_the_same_way():
+    srv, app = await boot(projects=["alpha"])
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/project")
+        assert await wait_for(lambda: top(app) == "Picker")
+        await pilot.press("t")
+        await pilot.press(*"brandnew")
+        await pilot.press("enter")
+        assert await wait_for(lambda: any("no project named" in n for n in notes(app)))
+        assert app.project is None
+
+
+async def _full_app(projects):
+    srv = FakeServer(projects=projects, full=True)
+    app = jav3.build_tui("http://h:1", jav3.SESSION_PREFIX + "jwt", transport=srv.transport())
+    return srv, app
+
+
+async def test_with_full_access_an_unknown_name_offers_to_create_it():
+    srv, app = await _full_app(["alpha"])
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.4)
+        assert app.full_access
+        app.dispatch("/project brandnew")
+        assert await wait_for(lambda: top(app) == "Confirm")
+        assert "brandnew" in str(app.screen.question) and "Create" in str(app.screen.question)
+        await pilot.press("n")
+        await pilot.pause(0.3)
+        assert app.project is None and srv.created == []
+        app.dispatch("/project brandnew")
+        assert await wait_for(lambda: top(app) == "Confirm")
+        await pilot.press("y")
+        assert await wait_for(lambda: app.project == "brandnew")
+        assert srv.created == [{"name": "brandnew"}]
