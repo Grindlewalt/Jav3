@@ -4038,9 +4038,12 @@ a:has(> .nav-dot) { position: relative; }
 
 /* boxes at a glance (/vms: doing now, idle timers, history, leftovers, build logs) */
 .bx-idle-policy { margin-top: calc(-1 * var(--sp-3)); }
+/* every row is its own grid: fixed tracks keep the columns lined up whether a
+   row has three buttons or four (they wrap inside the last track) */
 .bx-glance .bx-tr {
-  grid-template-columns: minmax(170px, 1.6fr) minmax(170px, 2fr) minmax(120px, 1.1fr)
-    minmax(90px, 0.9fr) minmax(150px, 1.4fr) 60px minmax(200px, auto); }
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 2fr) minmax(0, 1.1fr)
+    minmax(0, 0.9fr) minmax(0, 1.3fr) 52px 300px; }
+.bx-glance .bx-actions { flex-wrap: wrap; }
 .bx-glance .bx-tr.open { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .bx-now { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
 .bx-turn { display: flex; flex-direction: column; min-width: 0; }
@@ -4060,7 +4063,10 @@ a:has(> .nav-dot) { position: relative; }
 .bx-lastbuild { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
 .bx-log-full { max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 .bx-building-card .bx-log-btn { order: 99; margin-left: auto; }
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
+  .bx-glance .bx-th { display: none; }
   .bx-glance .bx-tr { grid-template-columns: 1fr 1fr; }
-  .bx-glance .bx-tr > .bx-now { grid-column: 1 / -1; }
+  .bx-glance .bx-tr > .bx-box, .bx-glance .bx-tr > .bx-now,
+  .bx-glance .bx-tr > .bx-actions { grid-column: 1 / -1; }
+  .bx-glance .bx-tr > .bx-actions { justify-content: flex-start; }
 }
