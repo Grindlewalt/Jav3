@@ -990,3 +990,150 @@ def test_drag_path_moves_in_steps_and_ends_on_target():
     assert p[-1] == (120, 60) and len(p) == 12 and p[0] == (10, 5)
     short = jd.drag_path(5, 5, 6, 5)
     assert short[-1] == (6, 5) and len(set(short)) == len(short)
+
+
+# --- macOS in-process capture (native calls mocked) ---------------------------------------
+
+from types import SimpleNamespace as _NS
+from unittest import mock as _mock
+
+_mac = pytest.mark.skipif(sys.platform != "darwin", reason="macOS capture path")
+
+
+def _mac_backend(native=(2560, 1600), screen=None, access=True):
+    b = object.__new__(jd.MacBackend)
+    b.cheap_thumb = True
+    b._dids = {"main": 7}
+    b.Pt = lambda x, y: _NS(x=x, y=y)
+    b.CGRect = lambda o, s: (o.x, o.y, s.x, s.y)
+    b.bin = {"screencapture": "/usr/sbin/screencapture", "sips": "/usr/bin/sips"}
+    b.cg = _mock.MagicMock()
+    b.cg.CGPreflightScreenCaptureAccess.return_value = access
+    b.cg.CGDisplayCreateImageForRect.return_value = 99
+    b.cg.CGImageGetWidth.return_value = native[0]
+    b.cg.CGImageGetHeight.return_value = native[1]
+    b.cf, b.imageio, b.ct = _mock.MagicMock(), _mock.MagicMock(), _mock.MagicMock()
+    b.imageio.CGImageDestinationFinalize.return_value = True
+    b.ct.string_at.return_value = b"JPEG"
+    b._jpeg_uti = 1
+    b.screen_state = lambda: screen or {"locked": False, "asleep": False}
+    return b
+
+
+MON = jd.Monitor(name="main", x=0, y=0, w=1280, h=800)
+
+
+@_mac
+def test_cg_image_uses_whole_monitor_or_the_region_in_monitor_points():
+    b = _mac_backend()
+    img, nw, nh = b._cg_image(MON, None)
+    assert (img, nw, nh) == (99, 2560, 1600)
+    assert b.cg.CGDisplayCreateImageForRect.call_args[0] == (7, (0, 0, 1280, 800))
+    b._cg_image(MON, (100, 50, 300, 200))
+    assert b.cg.CGDisplayCreateImageForRect.call_args[0] == (7, (100, 50, 300, 200))
+
+
+@_mac
+def test_cg_image_declines_without_permission_display_or_picture_and_refuses_locked():
+    assert _mac_backend(access=False)._cg_image(MON, None) is None
+    b = _mac_backend()
+    b._dids = {}
+    assert b._cg_image(MON, None) is None
+    b = _mac_backend()
+    b.cg.CGDisplayCreateImageForRect.return_value = None
+    assert b._cg_image(MON, None) is None
+    b = _mac_backend(screen={"locked": True, "asleep": False})
+    with pytest.raises(jd.DeskError):
+        b._cg_image(MON, None)
+
+
+@_mac
+def test_cg_thumbnail_scales_the_long_edge_to_thumb_edge_as_pgm():
+    b = _mac_backend((2560, 1600))
+    seen = {}
+
+    def draw(img, tw, th, grey):
+        seen.update(tw=tw, th=th, grey=grey)
+        return 5, bytes(tw * th)
+    b._draw = draw
+    t = b._cg_thumbnail(MON, None)
+    assert (seen["tw"], seen["th"], seen["grey"]) == (160, 100, True)
+    assert t.startswith(b"P5\n160 100\n255\n") and len(t) == len(b"P5\n160 100\n255\n") + 16000
+    b.cg.CGImageRelease.assert_called_with(99)
+    b.cg.CGContextRelease.assert_called_with(5)
+
+
+@_mac
+def test_cg_screenshot_target_size_full_frame_and_zoom():
+    b = _mac_backend((2560, 1600))
+    seen = []
+    b._draw = lambda img, tw, th, grey: (seen.append((tw, th)) or 5, None)
+    assert b._cg_screenshot(MON, None) == b"JPEG"
+    assert seen[-1] == (jd.LONG_EDGE, 800)                    # 2x native -> long edge 1280
+    b = _mac_backend((600, 400))                              # region already at native size
+    seen.clear()
+    b._draw = lambda img, tw, th, grey: (seen.append((tw, th)) or 5, None)
+    assert b._cg_screenshot(MON, (0, 0, 300, 200)) is not None
+    want = max(jd.zoom_size(300, 200, 600 / 300))
+    assert max(seen[-1]) == want and seen[-1][0] / seen[-1][1] == pytest.approx(1.5, rel=0.02)
+    b.cg.CGImageRelease.assert_any_call(99)
+
+
+@_mac
+def test_cg_screenshot_none_when_bitmap_context_fails():
+    b = _mac_backend()
+    b._draw = lambda *a, **k: (None, None)
+    assert b._cg_screenshot(MON, None) is None
+    b.cg.CGImageRelease.assert_called_with(99)
+
+
+def _fake_run(calls):
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0].endswith("screencapture"):
+            Path(argv[-1]).write_bytes(b"jpegbytes")
+        elif argv[0].endswith("sips"):
+            out = argv[argv.index("--out") + 1] if "--out" in argv else argv[-1]
+            Path(out).write_bytes(b"resized")
+    return run
+
+
+@_mac
+def test_screenshot_falls_back_to_screencapture_and_sips_when_in_process_fails(monkeypatch):
+    b = _mac_backend()
+    b._cg_screenshot = lambda mon, rect: None
+    calls = []
+    monkeypatch.setattr(jd, "run_argv", _fake_run(calls))
+    monkeypatch.setattr(jd, "image_size", lambda d: (2560, 1600))
+    out = b.screenshot(jd.Monitor(name="main", x=10, y=20, w=1280, h=800), (5, 6, 100, 80))
+    assert calls[0][:4] == ["/usr/sbin/screencapture", "-x", "-R", "15,26,100,80"]
+    assert calls[1][:2] == ["/usr/bin/sips", "-Z"] and out == b"resized"
+
+
+@_mac
+def test_screenshot_falls_back_when_in_process_bytes_are_not_an_image(monkeypatch):
+    b = _mac_backend()
+    b._cg_screenshot = lambda mon, rect: b"garbage"
+    calls = []
+    monkeypatch.setattr(jd, "run_argv", _fake_run(calls))
+    monkeypatch.setattr(jd, "image_size", lambda d: None if d == b"garbage" else (1280, 800))
+    b.screenshot(MON)
+    assert calls[0][0] == "/usr/sbin/screencapture"
+    assert len(calls) == 1                                    # already at target: no sips
+
+
+@_mac
+def test_thumbnail_falls_back_to_bmp_and_a_locked_screen_is_refused(monkeypatch):
+    b = _mac_backend()
+    b._cg_thumbnail = lambda mon, rect: None
+    calls = []
+    monkeypatch.setattr(jd, "run_argv", _fake_run(calls))
+    monkeypatch.setattr(jd, "image_size", lambda d: (2560, 1600))
+    assert b.thumbnail(MON) == b"resized"
+    sips = calls[1]
+    assert sips[:2] == ["/usr/bin/sips", "-z"] and sips[2:4] == ["100", "160"]
+    assert "bmp" in sips
+    b = _mac_backend(screen={"locked": True, "asleep": False})
+    b._cg_thumbnail = lambda mon, rect: None
+    with pytest.raises(jd.DeskError):
+        b.thumbnail(MON)
