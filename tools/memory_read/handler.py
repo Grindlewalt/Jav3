@@ -1,7 +1,7 @@
 import re
 
 from backend.memory import (note_description, note_taint, note_trusted, notes_dir,
-                            parse_note)
+                            parse_note, proposal_path, read_proposal)
 
 
 def _safe_name(name: str) -> str:
@@ -21,14 +21,16 @@ def _taint_turn() -> None:
     broker.mark_tainted(budget_mod.active_op_id.get())
 
 
-def _list_line(stem: str, meta: dict, body: str) -> str:
+def _list_line(stem: str, meta: dict, body: str, notes) -> str:
     if note_taint(meta) == "untrusted":
         # its description is free text derived from untrusted content: name only,
         # the same rule the prompt's own index applies
         return f"{stem} [pending approval, from untrusted content: read it to see the text]"
     desc = note_description(meta, body)
     line = f"{stem} — {desc}" if desc else stem
-    return line if note_trusted(meta) else f"{line} [pending approval]"
+    if not note_trusted(meta):
+        return f"{line} [pending approval]"
+    return f"{line} [change pending approval]" if proposal_path(stem, notes).is_file() else line
 
 
 async def run(name: str | None = None) -> str:
@@ -40,7 +42,7 @@ async def run(name: str | None = None) -> str:
         lines = []
         for p in files:
             meta, body = parse_note(p.read_text())
-            lines.append(_list_line(p.stem, meta, body))
+            lines.append(_list_line(p.stem, meta, body, notes))
         return "\n".join(lines)
     path = notes / f"{_safe_name(name)}.md"
     if not path.exists():
@@ -51,4 +53,12 @@ async def run(name: str | None = None) -> str:
     meta, _ = parse_note(text)
     if note_taint(meta) == "untrusted":
         _taint_turn()
+    prop = read_proposal(path.stem, notes)
+    if prop is not None:
+        # a change an agent (maybe this one) proposed; the note above is what
+        # is binding. Its text can come from untrusted content like any other.
+        if note_taint(prop["meta"]) == "untrusted":
+            _taint_turn()
+        text += ("\n\n[A change to this note is pending the operator's approval on the "
+                 "Memory page. It is NOT binding yet. The proposed note:]\n" + prop["body"] + "\n")
     return text

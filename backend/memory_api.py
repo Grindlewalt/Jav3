@@ -5,9 +5,11 @@ from pydantic import BaseModel
 from .auth import require_user
 from .config import settings
 from .fsutil import list_tree, read_text_or_binary, safe_join
-from .memory import (audit, ensure_memory_seeds, estimate_tokens, list_trash,
+from .memory import (ProposalChanged, ProposalStale, approve_proposal, audit,
+                     ensure_memory_seeds, estimate_tokens, list_proposals, list_trash,
                      note_description, note_taint, note_trusted, notes_dir, parse_note,
-                     promote_note, restore_trash, trash_note)
+                     promote_note, proposal_path, proposal_view, reject_proposal,
+                     restore_trash, trash_note)
 
 router = APIRouter(prefix="/api/memory", tags=["memory"],
                    dependencies=[Depends(require_user)])
@@ -66,7 +68,9 @@ async def list_notes():
                         "source": str(meta.get("source", "operator")),
                         "approved": bool(meta.get("approved")),
                         "taint": note_taint(meta),
-                        "trusted": note_trusted(meta)})
+                        "trusted": note_trusted(meta),
+                        # an agent's change waiting for review (GET /proposals)
+                        "proposal": proposal_path(p.stem, nd).is_file()})
     return {"notes": out}
 
 
@@ -100,6 +104,58 @@ async def delete_note(name: str):
     await audit("memory_deleted", "info", f"memory note '{name}' deleted by the operator",
                 {"note": name, "by": "operator", "trash_id": tid})
     return {"ok": True, "name": name, "trash_id": tid}
+
+
+class Approve(BaseModel):
+    # the sha256 the page showed: approving binds to the text the operator read
+    sha256: str | None = None
+    # apply over a note that was edited after the proposal began
+    force: bool = False
+
+
+@router.get("/proposals")
+async def proposals():
+    """Agent changes to notes that are binding, waiting for review. Each carries
+    a diff against the note as it is now."""
+    return {"items": list_proposals()}
+
+
+@router.get("/proposals/{name}")
+async def proposal(name: str):
+    view = proposal_view(_check_name(name))
+    if view is None:
+        raise HTTPException(status_code=404, detail="no proposal for that note")
+    return view
+
+
+@router.post("/proposals/{name}/approve")
+async def approve(name: str, body: Approve | None = None):
+    body = body or Approve()
+    name = _check_name(name)
+    try:
+        approve_proposal(name, sha256=body.sha256, force=body.force)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="no proposal for that note") from None
+    except ProposalChanged:
+        raise HTTPException(
+            status_code=409,
+            detail="the proposal changed since you opened it (the agent wrote again); "
+                   "reload and review it") from None
+    except ProposalStale:
+        raise HTTPException(
+            status_code=409,
+            detail="the note was edited after this proposal began; the approval would "
+                   "overwrite that edit. Reject it, or approve with force") from None
+    await audit("memory_approved", "info", f"proposed change to note '{name}' approved",
+                {"note": name, "by": "operator"})
+    return {"ok": True, "name": name}
+
+
+@router.post("/proposals/{name}/reject")
+async def reject(name: str):
+    if not reject_proposal(_check_name(name)):
+        raise HTTPException(status_code=404, detail="no proposal for that note")
+    return {"ok": True, "name": name}
 
 
 @router.get("/trash")

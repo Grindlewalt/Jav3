@@ -80,6 +80,113 @@ def proposal_path(stem: str, notes=None):
     return (notes or notes_dir()) / PROPOSALS / f"{stem}.md"
 
 
+class ProposalChanged(Exception):
+    """The proposal is not the one the operator was looking at."""
+
+
+class ProposalStale(Exception):
+    """The note itself changed after the proposal was made."""
+
+
+def sha256_text(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def read_proposal(stem: str, notes=None) -> dict | None:
+    """The pending proposal for a note, or None: {meta, body, text, sha256}."""
+    p = proposal_path(stem, notes)
+    try:
+        text = p.read_text()
+    except OSError:
+        return None
+    meta, body = parse_note(text)
+    return {"meta": meta, "body": body, "text": text, "sha256": sha256_text(text)}
+
+
+def reject_proposal(stem: str, notes=None) -> bool:
+    p = proposal_path(stem, notes)
+    if not p.is_file():
+        return False
+    p.unlink()
+    return True
+
+
+def approve_proposal(stem: str, *, sha256: str | None = None, force: bool = False,
+                     notes=None) -> None:
+    """Make a proposal the note. The operator's call, so it clears the taint
+    stamp the way promote does: they read the diff. `sha256` binds the approval
+    to the exact text they read (ProposalChanged if the agent wrote again since);
+    a note that was edited after the proposal began needs `force` (ProposalStale).
+    The note stays binding: approved, with the proposal's body and description
+    and every other key it already had (a `rules:` list, say)."""
+    import yaml
+    notes = notes or notes_dir()
+    prop = read_proposal(stem, notes)
+    if prop is None:
+        raise FileNotFoundError(stem)
+    if sha256 and sha256 != prop["sha256"]:
+        raise ProposalChanged(stem)
+    path = notes / f"{stem}.md"
+    base_meta = {}
+    if path.is_file():
+        base_text = path.read_text()
+        want = prop["meta"].get("base_sha256")
+        if want and want != sha256_text(base_text) and not force:
+            raise ProposalStale(stem)
+        base_meta = parse_note(base_text)[0]
+    meta = {"source": "agent", "approved": True}
+    for k, v in base_meta.items():
+        if k not in ("source", "approved", "taint", "_bad_frontmatter",
+                     "proposal_for", "base_sha256"):
+            meta[k] = v
+    if prop["meta"].get("description"):
+        meta["description"] = str(prop["meta"]["description"])
+    fm = yaml.safe_dump(meta, default_flow_style=False, sort_keys=False,
+                        allow_unicode=True, width=1 << 20).strip()
+    notes.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\n{fm}\n---\n{prop['body'].rstrip()}\n")
+    proposal_path(stem, notes).unlink(missing_ok=True)
+
+
+def proposal_view(stem: str, notes=None) -> dict | None:
+    """What the Memory page needs to review one proposal."""
+    import difflib
+    notes = notes or notes_dir()
+    prop = read_proposal(stem, notes)
+    if prop is None:
+        return None
+    path = notes / f"{stem}.md"
+    base_text, base_meta, base_body = None, {}, ""
+    if path.is_file():
+        try:
+            base_text = path.read_text()
+            base_meta, base_body = parse_note(base_text)
+        except OSError:
+            base_text = None
+    want = prop["meta"].get("base_sha256")
+    diff = "".join(difflib.unified_diff(
+        base_body.splitlines(True), prop["body"].splitlines(True),
+        "current", "proposed"))
+    return {"name": stem,
+            "description": str(prop["meta"].get("description") or ""),
+            "taint": note_taint(prop["meta"]),
+            "base_exists": base_text is not None,
+            "stale": bool(base_text is not None and want and want != sha256_text(base_text)),
+            "sha256": prop["sha256"], "base_sha256": want,
+            "base_description": str(base_meta.get("description") or ""),
+            "base_body": base_body, "body": prop["body"],
+            "diff": diff[:20000]}
+
+
+def list_proposals(notes=None) -> list[dict]:
+    d = proposal_path("x", notes).parent
+    if not d.is_dir():
+        return []
+    return [v for p in sorted(d.glob("*.md"))
+            if (v := proposal_view(p.stem, notes)) is not None]
+
+
 def _trash_file(tid: str, notes, suffix: str = ".md"):
     """The trash file for an id from a URL or a listing: anything that is not
     exactly the shape we mint is refused before it touches a path."""
