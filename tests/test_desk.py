@@ -966,6 +966,44 @@ async def test_elements_are_rendered_in_window_groups(env):
         await fd.stop()
 
 
+async def test_background_windows_say_how_much_is_shown(env):
+    els = [{"id": 1, "role": "button", "label": "New Document", "x": 200, "y": 600,
+            "w": 120, "h": 30, "src": "ax", "window": "TextEdit: Open"},
+           {"id": 2, "role": "button", "label": "", "x": 14, "y": 37, "w": 14, "h": 14,
+            "src": "ax", "window": "Discord: Switch Device"},
+           {"id": 3, "role": "button", "label": "Zoom", "x": 50, "y": 37, "w": 14, "h": 14,
+            "src": "ax", "window": "Discord: Switch Device"},
+           {"id": 4, "role": "textfield", "label": "Search", "x": 500, "y": 37, "w": 200,
+            "h": 24, "src": "ax", "window": "Discord: Switch Device"},
+           {"id": 5, "role": "button", "label": "Back", "x": 900, "y": 300, "w": 20,
+            "h": 20, "src": "ax", "window": "Finder: big"}]
+    wins = [{"window": "Discord: Switch Device", "background": True, "shown": 3,
+             "total": 41},
+            {"window": "Finder: big", "background": True, "shown": 1, "total": 400,
+             "more": True},
+            {"window": "junk", "background": True, "shown": 9, "total": 2},   # dropped
+            "junk"]
+    fd = await _nav(env, elements=els, windows=wins)
+    try:
+        text = await _tool("desk_screenshot")()
+        assert "  — TextEdit: Open —" in text
+        assert "  — Discord: Switch Device (background, 3 of 41 shown) —" in text
+        assert "  — Finder: big (background, 1 of 400+ shown) —" in text
+        assert fd.reqs[-1]["params"].get("walk") is None       # front is the default
+        _free(env)
+        await _tool("desk_screenshot")(elements="all")
+        assert fd.reqs[-1]["params"]["walk"] == "all"
+        assert "elements" not in fd.reqs[-1]["params"]
+        _free(env)
+        for off in (False, "false"):
+            await _tool("desk_screenshot")(elements=off)
+            assert fd.reqs[-1]["params"]["elements"] is False
+            _free(env)
+        assert (await _tool("desk_screenshot")(elements="some")).startswith("error:")
+    finally:
+        await fd.stop()
+
+
 async def test_changed_by_elements_only_is_named(env):
     fd = await _nav(env, changed=True, pixels_changed=False, elements_changed=True)
     try:

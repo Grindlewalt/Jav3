@@ -584,10 +584,15 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
                 raise DeskError("monitor must be a name or index")
             p["monitor"] = str(m)[:32]
         el = params.get("elements")
-        if el is not None and not isinstance(el, bool):
-            raise DeskError("elements must be true or false")
+        if isinstance(el, str) and el.strip().lower() in ("true", "false", "all", "front"):
+            el = {"true": True, "front": True, "false": False}.get(el.strip().lower(), "all")
+        if el is not None and not isinstance(el, bool) and el != "all":
+            raise DeskError('elements must be true, false or "all"')
         if el is False:
             p["elements"] = False       # true is the default; old clients never see it
+        elif el == "all":
+            p["walk"] = "all"           # every window in full; the default caps
+                                        # background windows (an old client ignores it)
         reg = params.get("region")
         if reg not in (None, "", {}, []):
             reg = _region(reg)
@@ -834,6 +839,32 @@ def _clean_elements(raw) -> list[dict]:
     return out
 
 
+def _clean_windows(raw) -> dict:
+    """The client's background-window counts: {group: (shown, total, more)}.
+    Malformed entries are dropped (the header then just names the window)."""
+    out: dict = {}
+    if not isinstance(raw, list):
+        return out
+    for w in raw[:64]:
+        if not isinstance(w, dict) or w.get("background") is not True:
+            continue
+        name = _clean_str(w.get("window"), 80)
+        shown, total = w.get("shown"), w.get("total")
+        if name and _isint(shown) and _isint(total) and 0 <= shown <= total <= 100_000:
+            out[name] = (shown, total, w.get("more") is True)
+    return out
+
+
+def _group_header(group: str, windows: dict) -> str:
+    """`— Discord: Switch Device (background, 3 of 41 shown) —`; a front
+    window, the menu bar or an old client's group is just its name."""
+    bg = windows.get(group)
+    if bg is None:
+        return f"  — {group or 'other'} —"
+    shown, total, more = bg
+    return f"  — {group} (background, {shown} of {total}{'+' if more else ''} shown) —"
+
+
 def _visible_centre(e: dict, w: int, h: int) -> tuple[int, int] | None:
     """The centre of the part of an element's box inside the image, or None
     when none of it is. A half-visible button is clicked where it shows."""
@@ -867,7 +898,8 @@ def _store_frame(d: Desk, res: dict, img: dict, op: str | None) -> dict:
          "region": region, "cursor": cursor,
          "elements": _clean_elements(res.get("elements")),
          "src": res.get("elements_src") if res.get("elements_src") in ELEMENT_SRCS else None,
-         "note": _clean_str(res.get("elements_note"), 200)}
+         "note": _clean_str(res.get("elements_note"), 200),
+         "windows": _clean_windows(res.get("windows"))}
     d.frame = f
     if region is None:
         d.full_frames[f["monitor"]] = {"w": f["w"], "h": f["h"], "index": f["index"],
@@ -948,7 +980,7 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
             for e in sorted(shown, key=lambda e: e["id"]):
                 if e.get("window", "") != group:
                     group = e.get("window", "")
-                    lines.append(f"  — {group or 'other'} —")
+                    lines.append(_group_header(group, f.get("windows") or {}))
                 lines.append(_element_line(e, w, h))
         else:
             lines += [_element_line(e, w, h) for e in shown]

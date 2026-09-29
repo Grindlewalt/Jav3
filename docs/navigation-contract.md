@@ -37,7 +37,15 @@ S->C req {id, verb:"screenshot", params:{
                                    # monitor (the server has it); the client crops
                                    # that screen rect at native resolution and
                                    # fits it to LONG_EDGE (upscale capped at 3x)
-    elements?: bool                # default true; false skips the tree walk
+    elements?: bool,               # default true; false skips the tree walk
+    walk?: "front"|"all"           # default front: the frontmost app's windows
+                                   # and the menu bar in full; every other window
+                                   # at most 8 buttons/fields (no rows), none at
+                                   # all when the front window covers it. "all"
+                                   # walks every window in full. The tool maps
+                                   # desk_screenshot(elements=true|false|"all")
+                                   # to front | elements:false | all; an old
+                                   # client ignores walk
 }}
 ```
 
@@ -57,6 +65,9 @@ C->S res {id, ok:true, text,
                  window?: str} ],                  # "menu bar" or "<App>: <title>";
                                                    # the server groups the list by it
     elements_src: "ax"|"atspi"|"uia"|"none",
+    windows?: [ {window: str, background: true,   # walk=front: per capped window,
+                 shown: int, total: int,          # how many are listed of how many
+                 more?: bool} ],                  # (more: total is a lower bound)
     elements_note?: str,                      # why none: "no Accessibility
                                               # permission", "AT-SPI not
                                               # installed", ...
@@ -137,6 +148,8 @@ elements (click by id; coordinates are pixels of this image):
 changed: yes, settled in 420 ms                                  | after an input verb
 ```
   Cap at 150 elements, in-view first, then say "+N more (zoom in with region)".
+  Elements are grouped by window under `  — <window> —`; a capped background
+  window reads `  — Discord: Switch Device (background, 3 of 41 shown) —`.
 - `desk_click(x?, y?, element?, target?, button, count, computer?)`: exactly
   one of `(x, y)`, `element`, `target`.
   - `element`: centre of the registry box from the latest frame of that desk.

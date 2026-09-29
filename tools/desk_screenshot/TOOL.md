@@ -19,8 +19,9 @@ parameters:
         w: {type: integer}
         h: {type: integer}
     elements:
-      type: boolean
-      description: false skips the element list (default true).
+      description: '"true" (default) lists the front app''s windows and the menu bar in full and at most 8 buttons/fields of each background window; "all" lists every window in full; "false" skips the list.'
+      type: string
+      enum: ["true", "false", "all"]
     computer:
       type: string
       description: Which connected computer (name). Omit when only one is connected.

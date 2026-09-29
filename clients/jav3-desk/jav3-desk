@@ -515,9 +515,23 @@ def _intersects(a: tuple, b: tuple) -> bool:
         and b[1] < a[1] + a[3]
 
 
+# roles a background window may show (its buttons and fields; never list rows)
+BG_ROLES = ("button", "textfield", "combobox", "checkbox", "radio", "toggle", "tab", "link")
+BG_SHOWN = 8              # a background window lists at most this many elements
+BG_NODES = 400            # ...and its walk visits at most this many nodes
+
+
+def _contains(outer: tuple | None, inner: tuple | None) -> bool:
+    return bool(outer and inner and inner[2] > 0 and inner[3] > 0
+                and outer[0] <= inner[0] and outer[1] <= inner[1]
+                and inner[0] + inner[2] <= outer[0] + outer[2]
+                and inner[1] + inner[3] <= outer[1] + outer[3])
+
+
 def walk_tree(roots, read, clip: tuple, deadline: float, *,
               max_depth: int = ELEMENTS_DEPTH, cap: int = ELEMENTS_CAP,
-              groups: list | None = None, name_roots: bool = False
+              groups: list | None = None, name_roots: bool = False,
+              kinds: list | None = None, windows: dict | None = None
               ) -> tuple[list[dict], bool]:
     """Depth-first over an accessibility tree, source-agnostic: `read(node)`
     returns {role (already ours, "" = structural, "text" = static text or a
@@ -530,25 +544,75 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
 
     Every element carries the `window` it belongs to (the group its root
     names): `groups[i]` for root i when given, else the root's own
-    info["window"], else (name_roots) its label; no group, no key."""
+    info["window"], else (name_roots) its label; no group, no key.
+
+    `kinds[i]` is "front" (the frontmost
+    app's windows), "menu" (its menu bar) or "background". Front and menu
+    roots (and roots of no kind) are walked in full. A background window
+    whose box lies inside the first front window's is covered and
+    contributes nothing; any other lists at most BG_SHOWN of its buttons
+    and fields (no rows) from a walk of at most BG_NODES nodes. `windows`,
+    when given, receives per background group {"shown", "total", "more"}:
+    how many it lists of how many the full walk would have (a lower bound
+    when `more`: the node cap cut it)."""
     out: list[dict] = []
     seen: set = set()
     roots = list(roots)
     names = list(groups or []) + [None] * len(roots)
-    stack = [(r, 0, None, 0, names[i]) for i, r in reversed(list(enumerate(roots)))]
-    while stack:
+    kinds = list(kinds or []) + [None] * len(roots)
+    front_box = None
+    for i, root in enumerate(roots):
         if time.monotonic() > deadline or len(out) >= cap:
             return out, True
-        node, depth, owner, owner_depth, group = stack.pop()
         try:
-            info = read(node)
-        except Exception:  # noqa: BLE001 — one dead node must not end the walk
+            info = read(root)
+        except Exception:  # noqa: BLE001 — one dead window must not end the walk
             continue
         if not info or info.get("hidden"):
             continue
-        if depth == 0 and group is None:
-            group = info.get("window") or (
-                (info.get("label") or "window") if name_roots else None)
+        group = names[i] or info.get("window") or (
+            (info.get("label") or "window") if name_roots else None)
+        kind = kinds[i]
+        if kind == "front" and front_box is None:
+            front_box = info.get("box")
+        bg = kind == "background"
+        if bg and _contains(front_box, info.get("box")):
+            continue
+        st = {"shown": 0, "total": 0, "more": False}
+        partial = _walk_one(info, read, clip, deadline, out, seen, group,
+                            max_depth, cap, st if bg else None)
+        if bg and windows is not None and st["total"]:
+            w = windows.setdefault(str(group or "")[:80],
+                                   {"shown": 0, "total": 0, "more": False})
+            w["shown"] += st["shown"]
+            w["total"] += st["total"]
+            w["more"] = w["more"] or st["more"]
+        if partial:
+            return out, True
+    return out, False
+
+
+def _walk_one(info: dict, read, clip, deadline, out: list, seen: set, group,
+              max_depth: int, cap: int, bg: dict | None) -> bool:
+    """One root (already read) into `out`; True when the deadline or the cap
+    cut it. `bg` (a background window's counters) limits what is kept."""
+    stack = [(None, 0, None, 0)]
+    nodes = 0
+    while stack:
+        if time.monotonic() > deadline or len(out) >= cap:
+            return True
+        node, depth, owner, owner_depth = stack.pop()
+        if node is not None:
+            if bg is not None and nodes >= BG_NODES:
+                bg["more"] = True
+                return False
+            try:
+                info = read(node)
+            except Exception:  # noqa: BLE001 — one dead node must not end the walk
+                continue
+            if not info or info.get("hidden"):
+                continue
+        nodes += 1
         box = info.get("box")
         if box and box[2] > 0 and box[3] > 0 and not _intersects(box, clip):
             continue
@@ -561,26 +625,33 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
             continue
         if role in ROLES and box and box[2] > 0 and box[3] > 0:
             key = (role, tuple(round(v) for v in box))
+            label = (info.get("label") or "").strip()[:200]
             if key not in seen:
                 seen.add(key)
-                label = (info.get("label") or "").strip()[:200]
-                el = {"role": role, "label": label, "box": box}
-                v = info.get("value")
-                if v not in (None, "") and str(v) != label:
-                    el["value"] = str(v)[:200]
-                if info.get("focused"):
-                    el["focused"] = True
-                if info.get("enabled") is False:
-                    el["enabled"] = False
-                if group:
-                    el["window"] = str(group)[:80]
-                out.append(el)
-                if not label:
-                    owner, owner_depth = len(out) - 1, depth
+                keep = True
+                if bg is not None:
+                    if label or role not in _NEEDS_LABEL:
+                        bg["total"] += 1
+                    keep = role in BG_ROLES and bg["shown"] < BG_SHOWN
+                    bg["shown"] += keep
+                if keep:
+                    el = {"role": role, "label": label, "box": box}
+                    v = info.get("value")
+                    if v not in (None, "") and str(v) != label:
+                        el["value"] = str(v)[:200]
+                    if info.get("focused"):
+                        el["focused"] = True
+                    if info.get("enabled") is False:
+                        el["enabled"] = False
+                    if group:
+                        el["window"] = str(group)[:80]
+                    out.append(el)
+                    if not label:
+                        owner, owner_depth = len(out) - 1, depth
         if depth < max_depth:
             for c in reversed(list(info.get("children") or ())):
-                stack.append((c, depth + 1, owner, owner_depth, group))
-    return out, False
+                stack.append((c, depth + 1, owner, owner_depth))
+    return False
 
 
 def elements_sig(els: list[dict]) -> str:
@@ -631,7 +702,11 @@ class ElementSource:
     def unavailable(self) -> str | None:
         return self.note
 
-    def collect(self, clip: tuple, deadline: float) -> tuple[list[dict], bool]:
+    def collect(self, clip: tuple, deadline: float, walk: str = "front",
+                windows: dict | None = None) -> tuple[list[dict], bool]:
+        """`walk` "front" caps background windows (walk_tree's kinds), "all"
+        walks every window in full; `windows` receives the background
+        groups' {"shown", "total", "more"}."""
         return [], False
 
     def focused(self) -> dict | None:
@@ -657,8 +732,10 @@ class FakeElementSource(ElementSource):
     def unavailable(self):
         return self.note or None
 
-    def collect(self, clip, deadline):
-        return walk_tree(self.roots, lambda n: n, clip, deadline)
+    def collect(self, clip, deadline, walk="front", windows=None):
+        kinds = None if walk == "all" else [r.get("kind") for r in self.roots]
+        return walk_tree(self.roots, lambda n: n, clip, deadline, kinds=kinds,
+                         windows=windows)
 
 
 TYPED_TAIL = 40           # read-back compares at most this many trailing characters
@@ -870,11 +947,13 @@ class MacAXSource(ElementSource):
         self._keep.append(out.value)
         return ax_info(dict(zip(self.ATTRS, (self.py(v) for v in self.py(out.value)))))
 
-    def roots(self) -> tuple[list, list[str]]:
-        """(root elements, their group names): each window as "<App>:
-        <title>" (or just the app), the front app's menu bar as "menu bar"."""
+    def roots(self) -> tuple[list, list[str], list[str]]:
+        """(root elements, their group names, their kinds): each window as
+        "<App>: <title>" (or just the app), the front app's menu bar as
+        "menu bar"; the focused app's windows are "front", its menu bar
+        "menu", every other app's windows "background"."""
         c, ax, cf = self.ct, self.ax, self.cf
-        out, pids, groups = [], [], []
+        out, pids, groups, kinds = [], [], [], []
         sysw = ax.AXUIElementCreateSystemWide()
         self._keep.append(sysw)
         app = self.attr(sysw, "AXFocusedApplication")
@@ -901,12 +980,14 @@ class MacAXSource(ElementSource):
                 title = self.py(self.attr(w, "AXTitle"))
                 out.append(w)
                 groups.append(f"{app_name}: {title}" if title else app_name)
+                kinds.append("front" if i == 0 else "background")
             if i == 0:
                 mb = self.attr(a, "AXMenuBar")
                 if mb:
                     out.append(mb)
                     groups.append(MENU_BAR)
-        return out, groups
+                    kinds.append("menu")
+        return out, groups, kinds
 
     FOCUS_CAP = 200_000
     AX_NO_VALUE = -25212
@@ -974,21 +1055,33 @@ class MacAXSource(ElementSource):
             self._keep = []
             self._lock.release()
 
-    def collect(self, clip, deadline):
+    def collect(self, clip, deadline, walk="front", windows=None):
         """One walk at a time: screenshots run concurrently in worker
         threads, and `_keep` (the CF objects released after a walk) must not
         be shared. A second caller waits inside the same budget, then gives up."""
         if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             return [], True
         try:
-            roots, groups = self.roots()
-            return walk_tree(roots, self.read, clip, deadline, groups=groups)
+            roots, groups, kinds = self.roots()
+            return walk_tree(roots, self.read, clip, deadline, groups=groups,
+                             kinds=None if walk == "all" else kinds, windows=windows)
         finally:
             for o in self._keep:
                 if o:
                     self.cf.CFRelease(o)
             self._keep = []
             self._lock.release()
+
+
+def _walk_windows(wins, states, read, clip, deadline, walk, windows):
+    """AT-SPI: the active window first and walked in full ("front"); the
+    others are background windows unless walk == "all"."""
+    active = [("active" in states(w)) for w in wins]
+    order = sorted(range(len(wins)), key=lambda i: not active[i])
+    kinds = None if walk == "all" else ["front" if active[i] else "background"
+                                        for i in order]
+    return walk_tree([wins[i] for i in order], read, clip, deadline, name_roots=True,
+                     kinds=kinds, windows=windows)
 
 
 class GiAtspiSource(ElementSource):
@@ -1020,7 +1113,7 @@ class GiAtspiSource(ElementSource):
         return atspi_info(acc.get_role_name(), acc.get_name(), acc.get_description(),
                           self._states(acc), ext, kids)
 
-    def collect(self, clip, deadline):
+    def collect(self, clip, deadline, walk="front", windows=None):
         desk = self.A.get_desktop(0)
         wins = []
         for i in range(desk.get_child_count()):
@@ -1029,8 +1122,7 @@ class GiAtspiSource(ElementSource):
                 w = app.get_child_at_index(j)
                 if w:
                     wins.append(w)
-        wins.sort(key=lambda w: "active" not in self._states(w))
-        return walk_tree(wins, self.read, clip, deadline, name_roots=True)
+        return _walk_windows(wins, self._states, self.read, clip, deadline, walk, windows)
 
 
 class DbusAtspiSource(ElementSource):
@@ -1081,15 +1173,14 @@ class DbusAtspiSource(ElementSource):
                           self._prop(node, "Name"), self._prop(node, "Description"),
                           self._states(node), ext, self._kids(node))
 
-    def collect(self, clip, deadline):
+    def collect(self, clip, deadline, walk="front", windows=None):
         wins = []
         for app in self._kids(("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root")):
             try:
                 wins += self._kids(app)
             except Exception:  # noqa: BLE001 — an app that went away
                 continue
-        wins.sort(key=lambda w: "active" not in self._states(w))
-        return walk_tree(wins, self.read, clip, deadline, name_roots=True)
+        return _walk_windows(wins, self._states, self.read, clip, deadline, walk, windows)
 
 
 def atspi_source() -> ElementSource:
@@ -1199,6 +1290,7 @@ def validate(verb: str, p: dict, frame: Frame | None, apps: dict,
             out["region"] = {"x": _num(r, "x", 0, 100_000), "y": _num(r, "y", 0, 100_000),
                              "w": _num(r, "w", 4, 100_000), "h": _num(r, "h", 4, 100_000)}
         out["elements"] = p.get("elements", True) is not False
+        out["walk"] = "all" if p.get("walk") == "all" else "front"
         return out
     if verb == "wait":
         if p.get("mode", "stable") not in ("stable", "change"):
@@ -2263,6 +2355,7 @@ class Session:
         self.frame: Frame | None = None
         self.full: dict[str, Frame] = {}          # last full-frame shot per monitor
         self.elements: ElementSource | None = None
+        self.walk = "front"                       # the last screenshot's walk
         self.grants = {"screen": False, "input": False, "shell": "off"}
         self.apps = local_apps()
         self.deny = backend.deny_keys()
@@ -2318,9 +2411,11 @@ class Session:
         raise DeskError(f"no monitor {monitor!r} (have: {', '.join(m.name for m in ms)}); "
                         f'use monitor="{ms[0].name if ms else 'main'}" or an index from 1')
 
-    def _elements(self, frame: Frame) -> dict:
+    def _elements(self, frame: Frame, walk: str | None = None) -> dict:
         """The element list for `frame`, within ELEMENTS_BUDGET_S; never
-        raises (a broken accessibility API costs the list, not the shot)."""
+        raises (a broken accessibility API costs the list, not the shot).
+        `walk` (default: what the last screenshot asked) "front" caps the
+        background windows, "all" walks every window in full."""
         if self.elements is None:
             try:
                 self.elements = self.b.elements_source()
@@ -2331,12 +2426,24 @@ class Session:
             why = es.unavailable()
             if why:
                 return {"elements": [], "elements_src": "none", "elements_note": why}
+            wins: dict = {}
             raw, partial = es.collect(frame.screen_rect(),
-                                      time.monotonic() + ELEMENTS_BUDGET_S)
+                                      time.monotonic() + ELEMENTS_BUDGET_S,
+                                      walk or self.walk, wins)
         except Exception as e:  # noqa: BLE001
             return {"elements": [], "elements_src": "none",
                     "elements_note": f"accessibility tree failed ({type(e).__name__})"}
-        out = {"elements": build_elements(raw, frame, es.src), "elements_src": es.src}
+        els = build_elements(raw, frame, es.src)
+        out = {"elements": els, "elements_src": es.src}
+        if wins:
+            # background windows: how many of their elements are listed of
+            # how many there are (the server says so in the group header)
+            shown: dict = {}
+            for e in els:
+                shown[e.get("window")] = shown.get(e.get("window"), 0) + 1
+            out["windows"] = [{"window": g, "background": True, "shown": shown.get(g, 0),
+                               "total": w["total"], **({"more": True} if w["more"] else {})}
+                              for g, w in wins.items()]
         if partial:
             out["elements_note"] = "partial"
         return out
@@ -2421,6 +2528,7 @@ class Session:
     def execute(self, verb: str, p: dict) -> dict:
         """Blocking: runs in a worker thread."""
         if verb == "screenshot":
+            self.walk = p.get("walk", "front")
             out = self._shot(p.get("monitor"), p.get("region"), p.get("elements", True))
             img = out["image"]
             what = f" zoomed on {out['frame']['region']}" if out["frame"]["region"] else ""

@@ -450,11 +450,13 @@ def test_validate_new_verbs_and_screenshot_params():
                 {"timeout_ms": "5"}):
         with pytest.raises(jd.DeskError):
             jd.validate("wait", bad, None, {})
-    assert jd.validate("screenshot", {}, None, {}) == {"elements": True}
+    assert jd.validate("screenshot", {}, None, {}) == {"elements": True, "walk": "front"}
+    assert jd.validate("screenshot", {"walk": "all"}, None, {})["walk"] == "all"
+    assert jd.validate("screenshot", {"walk": "rm -rf"}, None, {})["walk"] == "front"
     got = jd.validate("screenshot", {"region": {"x": 1, "y": 2, "w": 30, "h": 40},
                                      "elements": False, "monitor": 1}, None, {})
     assert got == {"monitor": "1", "region": {"x": 1, "y": 2, "w": 30, "h": 40},
-                   "elements": False}
+                   "elements": False, "walk": "front"}
     for bad in ({"x": 1, "y": 2, "w": 3, "h": 40}, {"x": -1, "y": 0, "w": 9, "h": 9},
                 [1, 2, 3, 4], {"x": 1, "y": 2, "w": 30}):
         with pytest.raises(jd.DeskError):
@@ -719,6 +721,76 @@ def test_elements_are_grouped_by_window_then_reading_order():
     # a tree without window names keeps plain reading order and no key
     raw, _ = jd.FakeElementSource(TREE).collect((0, 0, 2560, 1600), 1e18)
     assert all("window" not in e for e in raw)
+
+
+def _three_windows():
+    """The third trial's screen, recorded: TextEdit in front, Discord behind
+    it but sticking out (3 buttons, 2 fields, 36 channel rows), a Finder
+    window entirely under TextEdit's, and the menu bar."""
+    textedit = {"role": "", "kind": "front", "window": "TextEdit: Untitled",
+                "box": (100, 100, 1200, 800), "children": [
+                    {"role": "button", "label": "New Document", "box": (200, 700, 120, 30)},
+                    {"role": "textfield", "label": "", "box": (120, 140, 1100, 500)}]}
+    discord = {"role": "", "kind": "background", "window": "Discord: Switch Device",
+               "box": (900, 50, 1600, 1200), "children": [
+                   {"role": "button", "label": "", "box": (914, 60, 14, 14)},
+                   {"role": "button", "label": "", "box": (932, 60, 14, 14)},
+                   {"role": "button", "label": "Zoom", "box": (950, 60, 14, 14)},
+                   {"role": "textfield", "label": "Search", "box": (1400, 60, 300, 24)},
+                   {"role": "textfield", "label": "Message", "box": (1400, 1200, 900, 40)},
+                   {"role": "", "box": (900, 100, 300, 1100), "children": [
+                       {"role": "listitem", "label": f"#channel-{i}",
+                        "box": (910, 110 + i * 28, 280, 26)} for i in range(36)]}]}
+    finder = {"role": "", "kind": "background", "window": "Finder: benchmark-game",
+              "box": (300, 200, 600, 400), "children": [
+                  {"role": "button", "label": "Back", "box": (310, 210, 20, 20)},
+                  {"role": "listitem", "label": "notes.txt", "box": (320, 300, 400, 20)}]}
+    menu = {"role": "", "kind": "menu", "window": "menu bar", "box": (0, 0, 2560, 24),
+            "children": [{"role": "menuitem", "label": "File", "box": (108, 0, 37, 21)}]}
+    return [textedit, menu, discord, finder]
+
+
+def test_background_windows_are_capped_and_covered_ones_dropped():
+    roots = _three_windows()
+    wins: dict = {}
+    raw, partial = jd.FakeElementSource(roots).collect((0, 0, 2560, 1600), 1e18,
+                                                       "front", wins)
+    by = {}
+    for e in raw:
+        by.setdefault(e["window"], []).append(e["label"])
+    assert not partial
+    assert by["TextEdit: Untitled"] == ["New Document", ""]       # front: all of it
+    assert by["menu bar"] == ["File"]
+    assert by["Discord: Switch Device"] == ["", "", "Zoom", "Search", "Message"]
+    assert "Finder: benchmark-game" not in by                     # covered: nothing
+    assert wins == {"Discord: Switch Device": {"shown": 5, "total": 41, "more": False}}
+    # at most BG_SHOWN, buttons and fields only
+    roots[2]["children"][:0] = [{"role": "button", "label": f"b{i}",
+                                 "box": (1000 + i * 20, 70, 16, 16)} for i in range(10)]
+    wins = {}
+    raw, _ = jd.FakeElementSource(roots).collect((0, 0, 2560, 1600), 1e18, "front", wins)
+    assert len([e for e in raw if e["window"].startswith("Discord")]) == jd.BG_SHOWN
+    assert wins["Discord: Switch Device"]["total"] == 51
+    # walk="all": every window in full, no counts
+    wins = {}
+    raw, _ = jd.FakeElementSource(roots).collect((0, 0, 2560, 1600), 1e18, "all", wins)
+    assert len([e for e in raw if e["window"].startswith("Discord")]) == 51
+    assert any(e["window"].startswith("Finder") for e in raw) and wins == {}
+
+
+async def test_screenshot_walk_front_or_all_reports_background_counts(cfg):
+    b = NavBackend(tree=_three_windows())
+    s = jd.Session(b, "a", "t")
+    s.grants = {"screen": True, "input": False, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "1", "verb": "screenshot", "params": {}})
+    r = ws.sent[-1]
+    assert r["windows"] == [{"window": "Discord: Switch Device", "background": True,
+                             "shown": 5, "total": 41}]
+    assert len(r["elements"]) == 2 + 1 + 5
+    await s.handle(ws, {"id": "2", "verb": "screenshot", "params": {"walk": "all"}})
+    r = ws.sent[-1]
+    assert "windows" not in r and len(r["elements"]) == 2 + 1 + 41 + 1 + 1
 
 
 async def test_wait_and_drag(cfg, monkeypatch):
