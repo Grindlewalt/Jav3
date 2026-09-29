@@ -823,14 +823,14 @@ def test_background_windows_are_capped_and_covered_ones_dropped():
     assert by["menu bar"] == ["File"]
     assert by["Discord: Switch Device"] == ["", "", "Zoom", "Search", "Message"]
     assert "Finder: benchmark-game" not in by                     # covered: nothing
-    assert wins == {"Discord: Switch Device": {"shown": 5, "total": 41, "more": False}}
+    assert wins == {"Discord: Switch Device": {"shown": 5, "total": 13, "more": False}}  # rows under TextEdit are not counted
     # at most BG_SHOWN, buttons and fields only
     roots[2]["children"][:0] = [{"role": "button", "label": f"b{i}",
                                  "box": (1000 + i * 20, 70, 16, 16)} for i in range(10)]
     wins = {}
     raw, _ = jd.FakeElementSource(roots).collect((0, 0, 2560, 1600), 1e18, "front", wins)
     assert len([e for e in raw if e["window"].startswith("Discord")]) == jd.BG_SHOWN
-    assert wins["Discord: Switch Device"]["total"] == 51
+    assert wins["Discord: Switch Device"]["total"] == 23
     # walk="all": every window in full, no counts
     wins = {}
     raw, _ = jd.FakeElementSource(roots).collect((0, 0, 2560, 1600), 1e18, "all", wins)
@@ -846,7 +846,7 @@ async def test_screenshot_walk_front_or_all_reports_background_counts(cfg):
     await s.handle(ws, {"id": "1", "verb": "screenshot", "params": {}})
     r = ws.sent[-1]
     assert r["windows"] == [{"window": "Discord: Switch Device", "background": True,
-                             "shown": 5, "total": 41}]
+                             "shown": 5, "total": 13}]
     assert len(r["elements"]) == 2 + 1 + 5
     await s.handle(ws, {"id": "2", "verb": "screenshot", "params": {"walk": "all"}})
     r = ws.sent[-1]
@@ -1289,3 +1289,19 @@ def test_session_state_carries_unknown_lock_through():
     c.b = _NS(screen_state=lambda: {"locked": "yes", "asleep": 1})
     assert c.state() == {"locked": False, "asleep": False}
     assert jd.screen_refusal({"locked": None, "asleep": False}) is None
+
+
+def test_controls_under_a_window_in_front_are_not_listed():
+    """NAV-05: a window behind a dialog, only partly covered, lists the
+    controls that stay reachable and not those whose centre is under the dialog."""
+    dialog = {"role": "", "kind": "front", "window": "Mail: Send?",
+              "box": (400, 300, 800, 500), "children": [
+                  {"role": "button", "label": "Cancel", "box": (500, 700, 80, 30)},
+                  {"role": "button", "label": "Send", "box": (900, 700, 80, 30)}]}
+    behind = {"role": "", "kind": "background", "window": "Mail: Inbox",
+              "box": (100, 100, 900, 600), "children": [
+                  {"role": "button", "label": "Delete All", "box": (500, 350, 100, 30)},
+                  {"role": "button", "label": "Archive", "box": (120, 120, 80, 30)}]}
+    raw, _ = jd.FakeElementSource([dialog, behind]).collect((0, 0, 2560, 1600), 1e18)
+    assert [(e["window"], e["label"]) for e in raw] == [
+        ("Mail: Send?", "Cancel"), ("Mail: Send?", "Send"), ("Mail: Inbox", "Archive")]

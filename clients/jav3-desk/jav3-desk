@@ -573,6 +573,7 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
     names = list(groups or []) + [None] * len(roots)
     kinds = list(kinds or []) + [None] * len(roots)
     front_box = None
+    above: list[tuple] = []     # boxes of the windows walked before this one
     for i, root in enumerate(roots):
         if time.monotonic() > deadline or len(out) >= cap:
             return out, True
@@ -592,7 +593,10 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
             continue
         st = {"shown": 0, "total": 0, "more": False}
         partial = _walk_one(info, read, clip, deadline, out, seen, group,
-                            max_depth, cap, st if bg else None)
+                            max_depth, cap, st if bg else None,
+                            above if kind in ("front", "background") else None)
+        if kind in ("front", "background") and info.get("box"):
+            above.append(tuple(info["box"]))
         if bg and windows is not None and st["total"]:
             w = windows.setdefault(str(group or "")[:80],
                                    {"shown": 0, "total": 0, "more": False})
@@ -605,9 +609,12 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
 
 
 def _walk_one(info: dict, read, clip, deadline, out: list, seen: set, group,
-              max_depth: int, cap: int, bg: dict | None) -> bool:
+              max_depth: int, cap: int, bg: dict | None,
+              above: list | None = None) -> bool:
     """One root (already read) into `out`; True when the deadline or the cap
-    cut it. `bg` (a background window's counters) limits what is kept."""
+    cut it. `bg` (a background window's counters) limits what is kept.
+    `above` are the boxes of windows in front of this one: a control whose
+    centre lies under one of them cannot be clicked and is not listed."""
     stack = [(None, 0, None, 0)]
     nodes = 0
     until = time.monotonic() + BG_TIME_S
@@ -639,7 +646,11 @@ def _walk_one(info: dict, read, clip, deadline, out: list, seen: set, group,
         if role in ROLES and box and box[2] > 0 and box[3] > 0:
             key = (role, tuple(round(v) for v in box))
             label = (info.get("label") or "").strip()[:200]
-            if key not in seen:
+            cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
+            if above and any(a[0] <= cx < a[0] + a[2] and a[1] <= cy < a[1] + a[3]
+                             for a in above):
+                pass        # under a window in front: not reachable
+            elif key not in seen:
                 seen.add(key)
                 keep = True
                 if bg is not None:
