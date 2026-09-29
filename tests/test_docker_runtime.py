@@ -470,6 +470,15 @@ class FakeCLI:
             fmt = args[2]
             if "Pid" in fmt:
                 return 0, "4242\n", ""
+            if "jav3.box" in fmt:
+                # leftovers._containers: jav3-p-other is another install's
+                # (its socket mount is not under this server's vm_dir)
+                def row(name, src):
+                    return (f"/{name}\t1\t{name[5:]}\texited\t"
+                            + json.dumps([{"Type": "bind", "Source": src}]))
+                mine = str(settings.vm_dir / "sock" / "10")
+                return 0, "\n".join([row("jav3-p-alpha", mine), row("jav3-p-ghost", mine),
+                                     row("jav3-p-other", "/elsewhere/sock/10")]) + "\n", ""
             return (0, "true\n", "") if self.alive else (1, "", "no such container")
         if cmd == "rm":
             self.alive = False
@@ -478,7 +487,7 @@ class FakeCLI:
             return 0, json.dumps({"MemUsage": "12.5MiB / 512MiB", "CPUPerc": "3.25%",
                                   "PIDs": "7"}) + "\n", ""
         if cmd == "ps":
-            return 0, "jav3-p-alpha\njav3-p-ghost\n", ""
+            return 0, "jav3-p-alpha\njav3-p-ghost\njav3-p-other\n", ""
         return 0, "", ""
 
     def ran(self, cmd):
@@ -684,6 +693,7 @@ async def test_reap_orphans(harness):
     gone = await dr.reap_orphans()
     assert gone == ["jav3-p-alpha", "jav3-p-ghost"]      # none registered+running
     assert ["rm", "--force", "jav3-p-ghost"] in fake.calls
+    assert ["rm", "--force", "jav3-p-other"] not in fake.calls   # another install's
 
 
 def test_allocate_refuses_docker_when_disabled(monkeypatch):
