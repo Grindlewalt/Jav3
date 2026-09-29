@@ -400,7 +400,9 @@ async def run_turn(
                 else:
                     final = event
         except BudgetExceeded as e:
-            yield {"type": "final", "content": f"(stopped: {e})"}
+            # "stop" names why the turn ended without an answer, for a caller
+            # that must not mistake it for a failed attempt (plan._settle)
+            yield {"type": "final", "content": f"(stopped: {e})", "stop": "budget"}
             return
 
         assert final is not None

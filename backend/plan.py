@@ -925,7 +925,12 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                 for iid, t in list(tasks.items()):
                     if t.done():
                         tasks.pop(iid)
-                        await _settle(plan, idx[iid], t, meta.pop(iid), job_id)
+                        if await _settle(plan, idx[iid], t, meta.pop(iid), job_id) and not pausing:
+                            pausing = True
+                            plan["paused_reason"] = ("the token budget ran out mid-item "
+                                                     f"({iid} is back to todo, no attempt spent)")
+                            bus.publish(job_id, {"type": "node_status", "node_id": root_id,
+                                                 "status": "pausing"})
                 # after settling, so a dependency that just failed for the last
                 # time blocks its dependants in the same tick the run may end on
                 for it in propagate_blocked(plan):
@@ -1020,7 +1025,8 @@ async def _notify_paused(slug: str, plan: dict) -> None:
             await security.raise_event(
                 db, kind="plan_paused", severity="warn", project=slug,
                 summary=(f"Plan '{plan['title'][:60]}' paused at "
-                         f"{plan['tokens_used']:,} tokens for your review"),
+                         f"{plan['tokens_used']:,} tokens for your review "
+                         f"({plan.get('paused_reason') or 'token checkpoint'})"),
                 detail={"tokens_used": plan["tokens_used"], "pause_at": plan["pause_at"],
                         "root_id": plan.get("root_id")})
         finally:
@@ -1063,18 +1069,39 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
         _live_items.pop(m.get("cid"), None)
 
 
-async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -> None:
-    """Check a finished attempt off — or schedule its retry."""
+def _budget_stop(it: dict, plan: dict, final: str, cid, job_id: str) -> None:
+    """An attempt the token budget stopped is neither a failure nor a spent
+    attempt: nothing was wrong with the item, the run ran out of room. The
+    item goes back to todo with the attempt handed back, and _drive pauses the
+    run for the operator (the same wait as the token checkpoint) instead of
+    re-spawning it into the same spent budget: five items burned nine attempts
+    in eight seconds that way (2026-09-27)."""
+    it["attempts"] = max(0, it.get("attempts", 1) - 1)
+    it["status"], it["report"] = "todo", None
+    it["last_error"] = "token budget spent before the item could finish"
+    it.setdefault("history", []).append(
+        {"attempt": it["attempts"] + 1, "outcome": "budget", "error": it["last_error"],
+         "progress": " ".join(final.split())[-SUMMARY_CHARS // 2:],
+         "conversation_id": cid, "at": _now()})
+    it["history"] = it["history"][-HISTORY_KEEP:]
+    _emit_item(job_id, it)
+
+
+async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -> bool:
+    """Check a finished attempt off — or schedule its retry. Returns True when
+    the attempt was stopped by the token budget: the caller pauses the run."""
     cid = m.get("cid")
     if t.cancelled():
-        return                              # whoever cancelled it already set the status
+        return False                        # whoever cancelled it already set the status
     exc = t.exception()
-    if isinstance(exc, BudgetExceeded):
-        raise exc                           # the run is over, not just this item
+    result = (t.result() or {}) if exc is None else {}
+    if isinstance(exc, BudgetExceeded) or result.get("stop") == "budget":
+        _budget_stop(it, plan, result.get("final") or "", cid, job_id)
+        return True
     rep = it.get("report") or {}
     final = ""
     if exc is None:
-        final = (t.result() or {}).get("final") or ""
+        final = result.get("final") or ""
     if exc is not None:
         status, err, summary = "failed", f"{type(exc).__name__}: {exc}", None
     elif rep.get("status"):
@@ -1108,6 +1135,7 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
                                  "rollup": it["result_summary"] or ""})
         else:
             bus.publish(job_id, {"type": "error", "node_id": cid, "message": err or status})
+    return False
 
 
 async def _nudge(root_id: int, it: dict, m: dict) -> None:
