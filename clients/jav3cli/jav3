@@ -4881,21 +4881,122 @@ def build_tui(base: str, token: str, **kw):
         return (f"{s // 86400}d{s % 86400 // 3600}h" if s >= 86400 else
                 f"{s // 3600}h{s % 3600 // 60}m" if s >= 3600 else f"{s // 60}m{s % 60}s")
 
+    def _mins(s) -> str:
+        """45s, 4m, 1h05m: the idle-timer words (backend boxes._mins)."""
+        s = max(0, int(_num(s) or 0))
+        return (f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600
+                else f"{s // 3600}h{s % 3600 // 60:02d}m")
+
+    def _local_ts(v) -> str:
+        """MM-DD HH:MM in local time, from epoch seconds or a UTC
+        'YYYY-MM-DD HH:MM:SS' (SQLite datetime('now')); '' when unreadable."""
+        try:
+            if isinstance(v, (int, float)):
+                t = float(v)
+            else:
+                import calendar
+                t = calendar.timegm(time.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S"))
+            return time.strftime("%m-%d %H:%M", time.localtime(t))
+        except (TypeError, ValueError, OverflowError):
+            return ""
+
+    def _box_timer(r) -> str:
+        """BACKLOG "Idle timers on /vms box rows": a project box says
+        `· idle 4m (stops at 10m)`, the shared box `· scrub after Nm` (N = the
+        minutes left) while vm_idle_scrub_seconds > 0. Nothing while a turn
+        runs in it or it is stopped."""
+        if r.get("state") != "running" or r.get("idle_s") is None or not r.get("stop_after_s"):
+            return ""
+        if r.get("stop_action") == "stop":
+            return (f" [$text-muted]· idle {_mins(r['idle_s'])} "
+                    f"(stops at {_mins(r['stop_after_s'])})[/]")
+        if r.get("stop_action") == "scrub":
+            left = r.get("stops_in_s")
+            if left is None:
+                left = max(0, int(_num(r["stop_after_s"]) or 0) - int(_num(r["idle_s"]) or 0))
+            return f" [$text-muted]· scrub after {_mins(left)}[/]"
+        return ""
+
+    def _box_turns(r) -> list[dict]:
+        return [t for t in _jlist(r.get("now")) if isinstance(t, dict)]
+
+    def _turn_text(t: dict, width: int = 40) -> str:
+        """`#42 fix the build shell npm test`: the turn, its title, its tool."""
+        cid = t.get("conversation_id")
+        out = f"[b]{'#' + str(cid) if cid else 'a turn'}[/]"
+        if t.get("title"):
+            out += f" {_esc(_short(t['title'], width))}"
+        if t.get("project"):
+            out += f" [$text-muted]⌂ {_esc(t['project'])}[/]"
+        tool = t.get("tool") if isinstance(t.get("tool"), dict) else {}
+        if tool.get("name"):
+            out += f" [$secondary]{_esc(tool['name'])}[/]"
+            if tool.get("detail"):
+                out += f" [$text-muted]{_esc(_short(tool['detail'], width))}[/]"
+        return out
+
+    def _box_now(r) -> str:
+        """What the box is doing now, for the one-line row."""
+        now = _box_turns(r)
+        if not now:
+            return ""
+        more = f" [$text-muted]+{len(now) - 1} more[/]" if len(now) > 1 else ""
+        return f" [$text-muted]·[/] {_turn_text(now[0], 32)}{more}"
+
+    _BOX_EV_COL = {"started": "$success", "restarted": "$success", "stopped": "$text-muted",
+                   "idle_stopped": "$text-muted", "wiped": "$warning", "nuked": "$warning",
+                   "destroyed": "$warning", "crashed": "$error", "error": "$error"}
+
+    def _box_event_line(ev: dict) -> str:
+        """One history line: `● 09-28 14:03 IDLE-STOPPED idle 11m … by reaper`."""
+        name = str(ev.get("event") or "?")
+        col = _BOX_EV_COL.get(name, "$text-muted")
+        word = name.replace("_", "-").upper()
+        why = f" {_esc(_short(ev['reason'], 90))}" if ev.get("reason") else ""
+        who = f" [$text-muted]by {_esc(str(ev['actor']))}[/]" if ev.get("actor") else ""
+        return (f"[{col}]●[/] [$text-muted]{_local_ts(ev.get('created_at'))}[/] "
+                f"[{col} b]{word:<12}[/]{why}{who}")
+
+    def _box_state_word(r) -> tuple[str, str]:
+        """(colour, word): running | starting | failed | stopped."""
+        st, act = r.get("state") or "?", r.get("activity")
+        if act == "failed":
+            return "$error", "failed"
+        if act == "starting":
+            return "$warning", "starting"
+        return ("$success" if st == "running" else "$text-muted"), st
+
     def _row_box(e) -> str:
         r = e["raw"]
         st = r.get("state") or "?"
-        col = "$success" if st == "running" else "$text-muted"
+        col, word = _box_state_word(r)
         img = r.get("image") or {}
-        up = (f" up {_uptime(r.get('uptime_s'))} · rss {_bytes(r.get('rss_bytes'))}B · cpu "
+        projs = [str(p) for p in _jlist(r.get("projects"))] or (
+            [str(r["project"])] if r.get("project") else [])
+        where = (f" ⌂ {_esc(projs[0])}" + (f" +{_esc(','.join(projs[1:]))}" if projs[1:] else "")
+                 if projs else "")
+        up = (f" · up {_uptime(r.get('uptime_s'))} · rss {_bytes(r.get('rss_bytes'))}B · cpu "
               f"{_num(r.get('cpu_pct')) or 0:.0f}%" if st == "running" else "")
-        busy = f" · {r.get('inflight')} turn(s)" if r.get("inflight") else ""
-        return (f"[{col}]●[/] [b]{_esc(r.get('id') or '?')}[/] [$text-muted]"
-                f"{_esc(r.get('kind') or '')}"
-                f"{' ⌂ ' + _esc(r['project']) if r.get('project') else ''}"
-                f"{' · ' + _esc(r['placement']) if r.get('placement') else ''}[/] "
-                f"{_runtime_tag(r.get('runtime'))} [{col}]{_esc(st)}[/] [$text-muted]"
+        busy = (f" [$accent]{r.get('inflight')} turn{'s' * (r.get('inflight') != 1)}[/]"
+                if r.get("inflight") and not _box_turns(r) else "")
+        err = (f" [$error]✗ {_esc(_short(r['last_error'], 50))}[/]"
+               if r.get("last_error") else "")
+        last = r.get("last_event") if isinstance(r.get("last_event"), dict) else None
+        was = (f" [$text-muted]· {_esc(str(last.get('event') or '').replace('_', '-'))} "
+               f"{_local_ts(last.get('created_at'))}[/]"
+               if st != "running" and last and not err else "")
+        return (f"[{col}]●[/] [b]{_esc(r.get('id') or '?')}[/] {_runtime_tag(r.get('runtime'))} "
+                f"[$text-muted]{_esc(r.get('kind') or '')}{where}[/] [{col}]{_esc(word)}[/]"
+                f"{_box_timer(r)}{_box_now(r)}{busy}{err}{was} [$text-muted]· "
                 f"{r.get('mem_mb') or '?'}MB · {_esc(img.get('variant') or 'main')}"
-                f"{' v' + str(img['version']) if img.get('version') else ''}{up}{busy}[/]")
+                f"{' v' + str(img['version']) if img.get('version') else ''}{up}[/]")
+
+    def _row_leftover(e) -> str:
+        r = e["raw"]
+        mark = "[$warning]▲[/]" if r.get("cleanable") else "[$text-muted]△[/]"
+        size = f" · {_bytes(r['bytes'])}B" if r.get("bytes") else ""
+        return (f"{mark} [b]{_esc(r.get('name') or '?')}[/] [$text-muted]"
+                f"{_esc(r.get('type') or '')}{size} · {_esc(_short(r.get('why') or '', 90))}[/]")
 
     def _row_variant(e) -> str:
         r = e["raw"]
@@ -4919,26 +5020,38 @@ def build_tui(base: str, token: str, **kw):
                 f"{_esc(', '.join(map(str, inuse))) if inuse else 'no box'}"
                 f"{' · older recipe' if r.get('stale_recipe') else ''}[/]")
 
-    _ROWS.update({"box": _row_box, "variant": _row_variant, "version": _row_version})
+    _ROWS.update({"box": _row_box, "variant": _row_variant, "version": _row_version,
+                  "leftover": _row_leftover})
 
     class VmsScreen(SecurityScreen):
         """/vms: Boxes · Images · Catalogue. The Security screen's frame (tabs,
-        list, detail, plain keys) over /api/vm/boxes, /api/vm/images and
-        /api/packages. Every action asks first; chat-only logins are locked."""
+        list, detail, plain keys) over /api/vm/boxes, /api/vm/leftovers,
+        /api/vm/images and /api/packages. Boxes refresh live (the rows update in
+        place, the cursor stays on its box). Every action asks first; chat-only
+        logins are locked."""
 
         TABS = ("boxes", "images", "catalogue")
         LABELS = {"boxes": "Boxes", "images": "Images", "catalogue": "Catalogue"}
         EMPTY = {"boxes": "no boxes", "images": "no image variants",
                  "catalogue": "no package requests"}
         COUNTED = ("catalogue",)
-        FOOT = {"boxes": "[$primary]s[/] start / stop  [$primary]d[/] destroy",
-                "images": "[$primary]b[/] build a new version",
+        FOOT = {"boxes": "[$primary]enter[/] history  [$primary]s[/] start / stop  "
+                         "[$primary]r[/] restart  [$primary]x[/] nuke shared  "
+                         "[$primary]d[/] destroy  [$primary]c[/] clean leftovers",
+                "images": "[$primary]b[/] build a new version  [$primary]l[/] build log",
                 "catalogue": "[$primary]y[/] approve  [$primary]n[/] reject"}
+        BINDINGS = [Binding("x", "nuke", show=False), Binding("c", "clean", show=False)]
+        DEFAULT_CSS = """
+        VmsScreen #sec-sub { max-height: 6; }
+        """
 
         def __init__(self, tab: str = "boxes") -> None:
             super().__init__(tab)
             self.tab = tab if tab in self.TABS else "boxes"
             self.vm: dict = {}
+            self.leftovers: dict = {}            # GET /api/vm/leftovers
+            self.hist_box: str | None = None     # enter: the box whose history shows
+            self.hist: list[dict] = []
 
         def counts(self) -> dict:
             pend = sum((e["raw"].get("status") or "pending") == "pending"
@@ -4946,13 +5059,35 @@ def build_tui(base: str, token: str, **kw):
             return {"catalogue": pend if self.loaded["catalogue"] else None}
 
         async def _load_boxes(self):
-            r = await self._get("boxes", "boxes", "/api/vm/boxes", "")
+            hist = self.hist_box
+            r, lo, ev = await asyncio.gather(
+                self._get("boxes", "boxes", "/api/vm/boxes", ""),
+                self._get("boxes", "leftovers", "/api/vm/leftovers", "", quiet404=True),
+                self._get("boxes", "history", f"/api/vm/boxes/{hist}/events", "events",
+                          quiet404=True, params={"limit": 30})
+                if hist else asyncio.sleep(0))
+            if hist and ev is not None and hist == self.hist_box:
+                self.hist = [x for x in ev if isinstance(x, dict)]
+            if lo is not None:
+                self.leftovers = lo
             if r is None:
                 return None
-            self.vm.update(enabled=r.get("enabled"), budget=r.get("budget") or {})
+            self.vm.update(enabled=r.get("enabled"), budget=r.get("budget") or {},
+                           idle=r.get("idle") or {})
             self.runtimes = r.get("runtimes") or {}
-            return [{"type": "box", "key": f"X{b.get('id')}", "raw": b}
-                    for b in r.get("boxes") or []]
+            return self.box_entries(r.get("boxes") or [], self.leftovers)
+
+        @staticmethod
+        def box_entries(rows, leftovers) -> list[dict]:
+            """The boxes, then (when there are any) what they left behind."""
+            out = [{"type": "box", "key": f"X{b.get('id')}", "raw": b} for b in rows]
+            items = [i for i in _jlist((leftovers or {}).get("items")) if isinstance(i, dict)]
+            if items:
+                out.append({"type": "group", "key": "Gleft",
+                            "raw": {"slug": "leftovers (no box owns them)"}})
+                out += [{"type": "leftover", "key": f"L{i.get('id')}", "raw": i}
+                        for i in items]
+            return out
 
         async def _load_images(self):
             r = await self._get("images", "images", "/api/vm/images", "")
@@ -4982,6 +5117,39 @@ def build_tui(base: str, token: str, **kw):
                                     x["ts"]), reverse=False)
             return out
 
+        # -- drawing -------------------------------------------------------------------
+
+        async def rebuild(self) -> None:
+            """In place when the same rows are shown (a live refresh changes
+            timers and states, not which boxes exist): no remount, no flicker,
+            the cursor stays on its box. Otherwise the frame's full rebuild."""
+            shown = [] if self.locked else self.shown()
+            keys = [e["key"] for e in shown]
+            rows = list(self.query(SecRow))
+            if (not shown or not self.loaded[self.tab] or self.locked
+                    or [w.key for w in rows] != keys):
+                await super().rebuild()
+                return
+            async with self._lock:
+                marks = [self.row_markup(e, True) for e in shown]
+                prev = self._sig[4] if self._sig and len(self._sig) > 4 else ()
+                for i, (w, m) in enumerate(zip(rows, marks)):
+                    if i >= len(prev) or prev[i] != m:
+                        w.update(m)
+                self._sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys),
+                             tuple(marks))
+                self.refresh_sel()
+                self.render_chrome()
+
+        def render_chrome(self) -> None:
+            super().render_chrome()
+            if self.tab == "boxes" and not self.locked:
+                # r restarts here; the list refreshes itself
+                common = (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
+                          "[$primary]↑↓[/] select  [$primary]esc[/] back  "
+                          "[$text-muted](live)[/]")
+                self.query_one("#sec-foot", Static).update(f"{self.FOOT['boxes']}   {common}")
+
         def vms_sub(self) -> str:
             if self.tab == "boxes":
                 b = self.vm.get("budget") or {}
@@ -4993,7 +5161,8 @@ def build_tui(base: str, token: str, **kw):
                         f"{b.get('ram_mb_cap', '?')} MB · boxes {b.get('boxes', '?')}/"
                         f"{b.get('boxes_cap', '?')} · project boxes "
                         f"{b.get('project_boxes', '?')}/{b.get('project_boxes_cap', '?')} "
-                        "(reservations count, running or not)[/]\n" + self.runtimes_markup())
+                        "(reservations count, running or not)[/]\n"
+                        + self.idle_markup() + self.runtimes_markup())
             if self.tab == "images":
                 bd = self.vm.get("build") or {}
                 tail = [str(x) for x in _jlist(bd.get("log_tail"))]
@@ -5007,6 +5176,25 @@ def build_tui(base: str, token: str, **kw):
                         "makes a new version, never changes one in use[/]")
             return ("[$text-muted]packages the agents asked for and the operator added; "
                     "an approved one goes into its variant's next version[/]")
+
+        def idle_markup(self) -> str:
+            """When the reaper acts, and what was left behind (one line)."""
+            idle = self.vm.get("idle") or {}
+            bits = []
+            if idle.get("project_stop_s") and self.vm.get("enabled"):
+                bits.append(f"project boxes stop after {_mins(idle['project_stop_s'])} idle")
+            if idle.get("shared_scrub_s"):
+                bits.append(f"the shared box is scrubbed after {_mins(idle['shared_scrub_s'])} idle")
+            elif idle:
+                bits.append("the shared box is never scrubbed (vm_idle_scrub_seconds 0)")
+            line = f"[$text-muted]{' · '.join(bits)}[/]" if bits else ""
+            lo = _jlist(self.leftovers.get("items"))
+            n = sum(1 for i in lo if isinstance(i, dict) and i.get("cleanable"))
+            if lo:
+                line += ((" " if line else "") + f"[$warning]{len(lo)} leftover"
+                         f"{'s' * (len(lo) != 1)} no box owns[/]"
+                         + (" [$text-muted]— c cleans[/]" if n else ""))
+            return line + "\n" if line else ""
 
         def runtimes_markup(self) -> str:
             rt = self.runtimes or {}
@@ -5036,15 +5224,35 @@ def build_tui(base: str, token: str, **kw):
         def _detail_box(self, e) -> str:
             r = e["raw"]
             st = r.get("state")
+            shared = r.get("id") == "shared"
             net, disk, img = r.get("net") or {}, r.get("disk") or {}, r.get("image") or {}
-            keys = ("[$primary]s[/] " + ("stop" if st == "running" else "start")
-                    + "   [$primary]d[/] destroy" + (" (stop only)" if r.get("id") == "shared"
-                                                     else ""))
-            return "\n".join([
+            keys = ("[$primary]enter[/] " + ("hide history" if self.hist_box == r.get("id")
+                                              else "history")
+                    + "   [$primary]s[/] " + ("stop" if st == "running" else "start")
+                    + ("   [$primary]r[/] restart" if st == "running" else "")
+                    + ("   [$primary]x[/] nuke" if shared else "   [$primary]d[/] destroy"))
+            col, word = _box_state_word(r)
+            projs = [str(p) for p in _jlist(r.get("projects"))]
+            now = _box_turns(r)
+            if now:
+                doing = [f"doing now: {_turn_text(t, 60)}"
+                         + (f" [$text-muted](tool for {_mins(time.time() - t['tool']['since'])})[/]"
+                            if isinstance(t.get("tool"), dict) and _num(t["tool"].get("since"))
+                            else "") for t in now]
+            elif st == "running":
+                timer = _box_timer(r).replace(" [$text-muted]· ", "[$text-muted]", 1)
+                doing = ["doing now: nothing (idle)" + (f"  {timer}" if timer else "")]
+            else:
+                doing = []
+            last = r.get("last_event") if isinstance(r.get("last_event"), dict) else None
+            lines = [
                 keys, "",
-                f"[b]{_esc(r.get('id') or '?')}[/] {_esc(r.get('kind') or '')} "
-                f"{_esc(r.get('project') or '')}  cid {r.get('cid')}  state "
-                f"[b]{_esc(st or '?')}[/]",
+                f"[b]{_esc(r.get('id') or '?')}[/] {_esc(r.get('kind') or '')}"
+                + (f" ⌂ {_esc(', '.join(projs))}" if projs else "")
+                + f"  cid {r.get('cid')}  [{col} b]{_esc(word or '?')}[/]"
+                + (f" [$text-muted]since {_local_ts(r['started_at'])}[/]"
+                   if r.get("started_at") else ""),
+                *doing,
                 f"runtime: {_runtime_tag(r.get('runtime'))}"
                 + ("  [$text-muted]a container shares the host kernel[/]"
                    if r.get("runtime") == "docker" else "")
@@ -5052,14 +5260,38 @@ def build_tui(base: str, token: str, **kw):
                    if r.get("runtime") == "docker" else ""),
                 f"image {_esc(img.get('variant') or 'main')} "
                 f"{_esc(str(img.get('version') or '(active version)'))}  RAM "
-                f"{r.get('mem_mb') or '?'} MB  rss {_bytes(r.get('rss_bytes'))}B  cpu "
+                f"{r.get('mem_mb') or '?'} MB"
+                + (f" (costs {r['ram_cost_mb']} MB of the budget)"
+                   if r.get("ram_cost_mb") and r.get("ram_cost_mb") != r.get("mem_mb") else "")
+                + f"  rss {_bytes(r.get('rss_bytes'))}B  cpu "
                 f"{_num(r.get('cpu_pct')) or 0:.1f}%  up {_uptime(r.get('uptime_s'))}",
                 f"disk: overlay {_bytes(disk.get('overlay_bytes'))}B, data "
                 f"{_bytes(disk.get('data_bytes'))}B",
                 f"net: {_esc(net.get('tap') or '?')} host {_esc(net.get('host_ip') or '?')} "
                 f"guest {_esc(net.get('guest_ip') or '?')}",
                 (f"service #{r.get('service_id')} · placement {_esc(r.get('placement') or '?')}"
-                 if r.get("service_id") or r.get("placement") else "")])
+                 if r.get("service_id") or r.get("placement") else ""),
+                (f"[$error b]last error:[/] {_esc(str(r['last_error']))}"
+                 if r.get("last_error") else ""),
+                ("last: " + _box_event_line(last) if last and self.hist_box != r.get("id")
+                 else "")]
+            if self.hist_box == r.get("id"):
+                lines += ["", "[b]history[/] [$text-muted](newest first)[/]"]
+                lines += [_box_event_line(x) for x in self.hist] or [
+                    "[$text-muted]no history yet[/]"]
+            return "\n".join(x for x in lines if x is not None)
+
+        def _detail_leftover(self, e) -> str:
+            r = e["raw"]
+            head = ("[$primary]c[/] clean every cleanable leftover" if r.get("cleanable")
+                    else "[$text-muted]listed only: never removed automatically[/]")
+            d = r.get("detail") if isinstance(r.get("detail"), dict) else {}
+            return "\n".join([
+                head, "",
+                f"[b]{_esc(r.get('name') or '?')}[/] {_esc(r.get('type') or '')}"
+                + (f"  {_bytes(r['bytes'])}B" if r.get("bytes") else ""),
+                _esc(r.get("why") or ""),
+                "[$text-muted]" + _esc("  ".join(f"{k} {v}" for k, v in d.items())) + "[/]"])
 
         def _build_log(self, variant) -> list[str]:
             """The build's log tail, when the last (or running) build is this
@@ -5071,22 +5303,28 @@ def build_tui(base: str, token: str, **kw):
             head = ("build running, " + str(bd.get("phase") or "…") if bd.get("running")
                     else "last build")
             return (["", f"[b]{_esc(head)}[/] [$text-muted](log tail, untrusted builder "
-                     "output)[/]"] + [_esc(x) for x in tail[-15:]])
+                     "output; l shows the whole log)[/]"] + [_esc(x) for x in tail[-15:]])
 
         def _detail_variant(self, e) -> str:
             r = e["raw"]
             pk = _jlist(r.get("layer_packages"))
+            lb = r.get("last_build") if isinstance(r.get("last_build"), dict) else None
             return "\n".join([
-                "[$primary]b[/] build a new version", "",
+                "[$primary]b[/] build a new version   [$primary]l[/] build log", "",
                 f"[b]{_esc(r.get('name') or '?')}[/] from {_esc(r.get('from') or 'base')}"
                 f"{'  builtin' if r.get('builtin') else ''}  min RAM "
                 f"{r.get('min_mem_mb') or '?'} MB"
-                + (f"  [$warning b]needs a build[/]" if r.get("needs_build") else ""),
+                + ("  [$warning b]needs a build[/]" if r.get("needs_build") else ""),
                 "used by: " + (_esc(", ".join(_jlist(r.get("used_by")))) or "no project"),
                 "layer packages: " + (_esc(", ".join(
                     " ".join(str(p.get(k) or "") for k in ("manager", "package", "version")
                              ).strip() if isinstance(p, dict) else str(p) for p in pk))
                     or "none"),
+                (f"last build: v{_esc(str(lb.get('version')))} "
+                 + ("[$success]built[/]" if lb.get("ok") else
+                    f"[$error]failed[/] {_esc(str(lb.get('error') or ''))}")
+                 + f" [$text-muted]{_esc(str(lb.get('finished_at') or ''))}[/]"
+                 if lb else "last build: none"),
                 f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}",
                 "", _esc(str(r.get("recipe") or ""))] + self._build_log(r.get("name")))
 
@@ -5094,7 +5332,7 @@ def build_tui(base: str, token: str, **kw):
             r = e["raw"]
             return "\n".join([
                 "[$primary]b[/] build a new version of "
-                f"{_esc(r.get('variant') or '?')}", "",
+                f"{_esc(r.get('variant') or '?')}   [$primary]l[/] this version's build log", "",
                 f"[b]{_esc(r.get('variant') or '?')} v{_esc(str(r.get('version')))}[/] on base "
                 f"{_esc(str(r.get('base_version') or '?'))}"
                 + ("  [$primary b]active[/]" if r.get("active") else ""),
@@ -5106,6 +5344,8 @@ def build_tui(base: str, token: str, **kw):
                  + ("  [$warning]an older recipe than the variant's[/]"
                     if r.get("stale_recipe") else ""))]
                 + self._build_log(r.get("variant")))
+
+        # -- keys ------------------------------------------------------------------------
 
         def action_approve(self) -> None:
             if self.tab == "catalogue":
@@ -5126,6 +5366,42 @@ def build_tui(base: str, token: str, **kw):
         def action_build(self) -> None:
             if self.tab == "images":
                 self._act(self._build())
+
+        async def action_reload(self) -> None:
+            if self.tab == "boxes":
+                self._act(self._box_restart())      # r restarts; the list is live
+            elif not self.locked:
+                await self.load(self.tab)
+
+        def action_nuke(self) -> None:
+            if self.tab == "boxes":
+                self._act(self._nuke())
+
+        def action_clean(self) -> None:
+            if self.tab == "boxes":
+                self._act(self._clean())
+
+        def action_logs(self) -> None:
+            if self.tab == "images":
+                self._act(self._image_log())
+
+        async def action_enter(self) -> None:
+            if self.tab != "boxes" or self.locked:
+                return
+            b = self._box()
+            if b is None:
+                return
+            if self.hist_box == b.get("id"):
+                self.hist_box, self.hist = None, []
+                self.refresh_sel()
+                return
+            self.hist_box, self.hist = b.get("id"), []
+            self.refresh_sel()
+            await self.load("boxes")               # fetches the history with the rows
+
+        def _note(self, markup: str) -> None:
+            self.status = markup
+            self.render_chrome()
 
         async def _pkg_verdict(self, yes: bool) -> None:
             e = self.selected()
@@ -5162,6 +5438,46 @@ def build_tui(base: str, token: str, **kw):
             if ok:
                 await self._send("POST", f"/api/vm/boxes/{bid}/{verb}", f"{verb}: {bid}")
 
+        async def _box_restart(self) -> None:
+            b = self._box()
+            if b is None:
+                return
+            bid = b.get("id")
+            if b.get("state") != "running":
+                self._note(f"[$warning]{_esc(bid)} is stopped: s starts it[/]")
+                return
+            busy = (f" {b.get('inflight')} turn(s) running in it are cut off."
+                    if b.get("inflight") else "")
+            fresh = "container" if b.get("runtime") == "docker" else "overlay"
+            if await self._confirm(
+                    f"Restart box {bid}?",
+                    f"Stops it and boots it again from a fresh {fresh}: anything written "
+                    f"inside it since it booted is gone. Project files live on the host and "
+                    f"are not touched.{busy}"):
+                await self._send("POST", f"/api/vm/boxes/{bid}/restart", f"restarted {bid}")
+
+        async def _nuke(self) -> None:
+            """BACKLOG "Nuke from /vms": x on the shared-box row."""
+            b = self._box()
+            if b is None:
+                return
+            if b.get("id") != "shared":
+                self._note("[$warning]x nukes the shared box: d destroys a project box[/]")
+                return
+            if b.get("inflight"):
+                n = b.get("inflight")
+                self._note(f"[$warning]{n} turn{'s' * (n != 1)} in flight — wait for "
+                           f"{'them' if n != 1 else 'it'} to finish before nuking[/]")
+                return
+            if not await self._confirm(
+                    "Nuke the shared box?",
+                    "Its overlay disk is discarded and it reboots fresh from the golden image."):
+                return
+            if await self._send("POST", "/api/vm/nuke", "nuked the shared box",
+                                json={"confirm": True}):
+                ver = str(self.last.get("image_version") or "?")
+                self._note(f"[$success]nuked the shared box — fresh from main {_esc(ver)}[/]")
+
         async def _box_destroy(self) -> None:
             b = self._box()
             if b is None:
@@ -5169,12 +5485,14 @@ def build_tui(base: str, token: str, **kw):
             bid = b.get("id")
             if bid == "shared":
                 q, detail = ("Stop the shared box?",
-                             "The shared box cannot be destroyed; this stops it.")
+                             "The shared box cannot be destroyed; this stops it (x nukes it).")
             else:
+                busy = (f" {b.get('inflight')} turn(s) running in it are cut off."
+                        if b.get("inflight") else "")
                 q = f"Destroy box {bid}?"
                 detail = ("Stops it, releases its reservation and deletes its directory "
                           "(overlay, EFI vars, console log). Its data disk is kept unless "
-                          "you say so next.")
+                          f"you say so next.{busy}")
             if not await self._confirm(q, detail):
                 return
             wipe = False
@@ -5184,6 +5502,34 @@ def build_tui(base: str, token: str, **kw):
                     "y deletes it for good; n (or esc) keeps it.")))
             await self._send("POST", f"/api/vm/boxes/{bid}/destroy", f"destroyed {bid}",
                              json={"confirm": True, "delete_data": wipe})
+
+        async def _clean(self) -> None:
+            items = [i for i in _jlist(self.leftovers.get("items"))
+                     if isinstance(i, dict) and i.get("cleanable")]
+            if not items:
+                self._note("[$text-muted]no leftovers to clean[/]")
+                return
+            names = ", ".join(str(i.get("name")) for i in items[:5])
+            more = f" and {len(items) - 5} more" if len(items) > 5 else ""
+            n = len(items)
+            if not await self._confirm(
+                    f"Clean {n} leftover{'s' * (n != 1)}?",
+                    f"Removes {names}{more}. Only what this server identifies as its own "
+                    "(Jav3's container label and its own box directories); each is checked "
+                    "again first. Network interfaces are listed, never removed."):
+                return
+            if await self._send("POST", "/api/vm/leftovers/clean", "cleaned",
+                                json={"confirm": True}):
+                gone = _jlist(self.last.get("removed"))
+                bad = [x for x in _jlist(self.last.get("failed")) if isinstance(x, dict)]
+                self.leftovers = self.last.get("left") or self.leftovers
+                self.entries["boxes"] = self.box_entries(
+                    [e["raw"] for e in self.entries["boxes"] if e["type"] == "box"],
+                    self.leftovers)
+                await self.rebuild()
+                self._note(f"[$success]cleaned {len(gone)} leftover{'s' * (len(gone) != 1)}[/]"
+                           + "".join(f"  [$error]{_esc(str(x.get('id')))}: "
+                                     f"{_esc(str(x.get('error')))}[/]" for x in bad))
 
         async def _build(self) -> None:
             e = self.selected()
@@ -5200,6 +5546,35 @@ def build_tui(base: str, token: str, **kw):
                     "version. Minutes on the Pi; boxes switch to it at their next boot."):
                 await self._send("POST", f"/api/vm/images/{name}/build",
                                  f"building {name}", json={"confirm": True})
+
+        async def _image_log(self) -> None:
+            """l: the whole build log of the selected variant (its running or
+            newest finished build) or version, in a pane. Builder output is
+            untrusted: shown as text."""
+            e = self.selected()
+            if e is None or e["type"] not in ("variant", "version"):
+                return
+            if e["type"] == "variant":
+                name, ver = e["raw"].get("name"), None
+            else:
+                name, ver = e["raw"].get("variant"), e["raw"].get("version")
+            r = await self._get("images", "build log", f"/api/vm/images/{name}/log", "",
+                                quiet404=True, params={"version": ver} if ver else {})
+            if r is None:
+                self._note(f"[$text-muted]no build log for {_esc(str(name))}"
+                           f"{' v' + _esc(str(ver)) if ver else ''}[/]")
+                return
+            state = ("running" + (f", {r.get('phase')}" if r.get("phase") else "")
+                     if r.get("running") else "built" if r.get("ok") else "failed")
+            lines = [str(x) for x in _jlist(r.get("lines"))]
+            head = (f"[b]{_esc(str(name))} v{_esc(str(r.get('version') or '?'))}[/] "
+                    f"[{'$warning' if r.get('running') else '$success' if r.get('ok') else '$error'}]"
+                    f"{_esc(state)}[/]"
+                    + (f"  [$error]{_esc(str(r['error']))}[/]" if r.get("error") else "")
+                    + f"\n[$text-muted]{len(lines)} line{'s' * (len(lines) != 1)} · builder "
+                    "output, untrusted: shown as text[/]")
+            body = "\n".join(_esc(x) for x in lines) or "[$text-muted](empty)[/]"
+            await self.app.push_screen_wait(View(f"Build log · {name}", f"{head}\n\n{body}"))
 
     class Palette(Provider):
         """Every slash command in ctrl+p."""
