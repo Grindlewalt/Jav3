@@ -100,7 +100,7 @@ async def test_pending_notes_are_still_edited_in_place(tmp_env):
 
 async def test_new_notes_are_still_created_in_place(tmp_env):
     out = await _handler().run("brand-new", "hello", mode="replace")
-    assert out == "memory note 'brand-new' written" and _prop("brand-new") is None
+    assert out.startswith("memory note 'brand-new' saved") and _prop("brand-new") is None
 
 
 async def test_appends_accumulate_in_one_proposal(tmp_env):

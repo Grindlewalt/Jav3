@@ -34,7 +34,7 @@ async def test_a_changed_name_is_reported(tmp_env):
 
 async def test_a_clean_name_gets_no_rename_notice(tmp_env):
     out = await _handler().run("clean-name", "body", mode="replace")
-    assert out == "memory note 'clean-name' written" or "pending" in out
+    assert out.startswith("memory note 'clean-name' saved")
     assert "normalised" not in out and "normalized" not in out
 
 
@@ -53,7 +53,7 @@ async def test_unknown_mode_is_an_error(tmp_env, mode):
 
 async def test_mode_spelling_is_normalised_and_none_means_append(tmp_env):
     h = _handler()
-    assert "written" in await h.run("n", "one", mode="Replace ")
+    assert "saved" in await h.run("n", "one", mode="Replace ")
     assert "appended" in await h.run("n", "two", mode=None)
     assert "appended" in await h.run("n", "three")           # the default
 
@@ -125,3 +125,34 @@ async def test_append_onto_non_string_description_does_not_crash(tmp_env, raw, k
     meta, body = memory.parse_note(_text("n"))
     assert meta["description"] == kept
     assert "old" in body and "more" in body
+
+
+# --- MEM-04: the result says the note is pending ------------------------------
+
+async def test_a_saved_note_is_reported_pending_not_written(tmp_env):
+    h = _handler()
+    out = await h.run("prefs", "Editor: helix", mode="replace", description="editor")
+    assert "PENDING" in out and "Memory page" in out
+    assert "not in your context" in out and "rules" in out
+    assert "written" not in out
+    again = await h.run("prefs", "No bullet lists")
+    assert again.startswith("appended to memory note 'prefs'") and "PENDING" in again
+
+
+async def test_an_incognito_save_says_nothing_waits_for_approval(tmp_env):
+    from backend import runtime
+    tok = runtime.ephemeral.set(True)
+    try:
+        out = await _handler().run("scratch", "x", mode="replace")
+    finally:
+        runtime.ephemeral.reset(tok)
+    assert "incognito" in out and "PENDING" not in out
+
+
+def test_the_tool_text_says_notes_are_pending_and_kept_current():
+    from backend.agent.tools.registry import SPEC_NOTES_MAX
+    text = (settings.tools_dir / "memory_write" / "TOOL.md").read_text()
+    body = text.split("---\n", 2)[2]
+    assert "PENDING" in body and "Memory page" in body and len(body) <= SPEC_NOTES_MAX
+    assert "always-loaded memory index" not in text        # false for a pending note
+    assert "never append under a claim that is now false" in body

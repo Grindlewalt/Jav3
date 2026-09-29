@@ -61,6 +61,24 @@ async def _refused_event(note: str, src: str, hit: str) -> None:
 
 _MODES = ("append", "replace", "delete")
 
+# What every save of an agent's own note must tell the model. The note is stamped
+# `approved: false`, so prompt assembly lists it by name only and it never reaches
+# the rules; the agent used to be told "written" and then told the operator their
+# preference was now in effect.
+_PENDING = ("It is PENDING: not in your context, your index or your rules until "
+            "the operator approves it on the Memory page. Tell them it is waiting; "
+            "do not say the preference is in effect.")
+
+
+def _saved(verb: str, label: str) -> str:
+    """The result of a write that lands as the agent's own, pending, note."""
+    from backend import runtime
+    if runtime.ephemeral.get():
+        # an incognito turn writes to a throwaway dir: nothing waits for approval
+        return (f"{verb} {label} for this incognito chat only: it is gone when the "
+                "chat ends and the operator never sees it.")
+    return f"{verb} {label}. {_PENDING}"
+
 
 def _label(stem: str, name: str) -> str:
     """The note as the model should name it from now on: when the name it gave
@@ -102,7 +120,7 @@ async def _propose(stem, label, mode, description, content, op_taint, notes,
                        {"note": stem, "mode": mode, "tainted": bool(taint)})
     return (f"note {label} is one the operator wrote or approved, so it is unchanged "
             "and still binding. Your change is saved as a proposal that takes effect "
-            "only when the operator approves it. Tell them.")
+            "only when the operator approves it on the Memory page. Tell them.")
 
 
 async def _delete(stem: str, name: str, notes, path) -> str:
@@ -201,11 +219,11 @@ async def run(name: str, content: str, mode: str | None = "append",
             except OSError:
                 pass
         path.write_text(_with_frontmatter(description, content, taint=op_taint or prior))
-        return f"memory note {label} written"
+        return _saved("memory note", f"{label} saved")
     # append: keep (or update) the existing frontmatter, never duplicate it, and
     # carry the taint forward (a new untrusted write escalates a clean note).
     meta, body = parse_note(path.read_text())
     desc = description or meta.get("description")
     taint = op_taint or meta.get("taint")
     path.write_text(_with_frontmatter(desc, body + "\n\n" + content.strip(), taint=taint))
-    return f"appended to memory note {label}"
+    return _saved("appended to memory note", label)

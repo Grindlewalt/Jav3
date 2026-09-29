@@ -113,7 +113,7 @@ async def test_memory_write_read_roundtrip(tmp_env):
     read = load("memory_read").run
     out = await write("Deploy Notes", "use git, not scp",
                       description="how code reaches the Pi")
-    assert "written" in out
+    assert "saved" in out and "PENDING" in out
     listing = await read()
     assert "deploy-notes — how code reaches the Pi" in listing
     await write("deploy-notes", "also: restart after pull")

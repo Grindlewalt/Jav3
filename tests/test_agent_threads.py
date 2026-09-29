@@ -572,7 +572,7 @@ async def test_own_memory_uses_a_private_notes_dir(client, monkeypatch, tmp_env)
                                            {"name": "Lesson", "content": "private"})
     finally:
         broker.release_turn(env.op_id)
-    assert "written" in out["result"]
+    assert "saved" in out["result"]
     assert (tmp_env / "agents" / "builder" / "memory" / "lesson.md").is_file()
     assert not (tmp_env / "memory" / "notes" / "lesson.md").exists()
     notes = (await client.get("/api/agents/builder/memory")).json()["notes"]
