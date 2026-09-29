@@ -987,6 +987,12 @@ def _esc(s: str) -> str:
     return s + "​" if s.endswith("\\") else s
 
 
+# Diff lines carry a 12% tint of green / red behind them. That is a blend: on a 256-colour
+# terminal it rounds to whatever the palette has (olive, black) and in an ANSI theme
+# it cannot be blended at all (red text on a red block). The app clears this then.
+DIFF_TINT = True
+
+
 def tool_body(name: str, args, ok: bool | None, result: str | None,
               expanded: bool) -> tuple[str | None, int]:
     """The block under a tool's title, as Textual markup, and how many lines were
@@ -1011,9 +1017,9 @@ def tool_body(name: str, args, ok: bool | None, result: str | None,
             if ln.startswith("@@"):
                 out.append("[$text-muted]⋯[/]")
             elif ln.startswith("+"):
-                out.append(f"[$success on $success 12%]{_esc(ln)}[/]")
+                out.append(f"[$success{' on $success 12%' if DIFF_TINT else ''}]{_esc(ln)}[/]")
             elif ln.startswith("-"):
-                out.append(f"[$error on $error 12%]{_esc(ln)}[/]")
+                out.append(f"[$error{' on $error 12%' if DIFF_TINT else ''}]{_esc(ln)}[/]")
             else:
                 out.append(f"[$text-muted]{_esc(ln)}[/]")
         lines, more = clip(out)
@@ -5424,8 +5430,9 @@ def build_tui(base: str, token: str, **kw):
                 warning="#ffaf00", error="#ff6b6b", success="#5fd787", dark=True))
             for spec in jav3_theme_specs(truecolor):
                 self.add_theme(spec)
+            from dataclasses import replace
             for theme in kept.values():
-                self.add_theme(theme)
+                self.add_theme(replace(theme, **THEME_TUNE.get(theme.name, {})))
             self.builtin_themes = {n.lower() for n in self.available_themes} | {
                 THEME_PREVIEW}
             customs, errors = load_custom_themes(self.builtin_themes)
@@ -5436,6 +5443,7 @@ def build_tui(base: str, token: str, **kw):
             settings = self._load_settings()
             self.theme = settings.get("theme") if settings.get("theme") in \
                 self.available_themes else "jav3"
+            self.watch_theme(self.theme)         # set even when the theme did not change
             self.sidebar_pref = settings.get("sidebar")
             self._load_history()
             self.log_view.anchor()
@@ -5913,6 +5921,8 @@ def build_tui(base: str, token: str, **kw):
             self.refresh_chrome()
 
         def watch_theme(self, theme: str) -> None:
+            global DIFF_TINT
+            DIFF_TINT = getattr(self, "truecolor", True) and not self.current_theme.ansi
             if self.is_mounted:
                 for tv in self.query(ToolView):
                     tv.redraw()
@@ -7828,7 +7838,7 @@ JAV3_THEMES = {
                        foreground="#ffaf00", background=("#0c0900", "#121212"),
                        surface=("#1a1406", "#262626"), panel=("#2a200a", "#3a3a3a"),
                        warning="#ffff5f", error="#ff5f5f", success="#d7d75f", dark=True),
-    "jav3-solarized": dict(primary="#0087d7", secondary="#5f5faf", accent="#00afaf",
+    "jav3-solarized": dict(primary="#5fafd7", secondary="#8787d7", accent="#00afaf",
                            foreground="#a8a8a8", background=("#002b36", "#1c1c1c"),
                            surface=("#073642", "#262626"), panel=("#0b4250", "#3a3a3a"),
                            warning="#af8700", error="#d75f5f", success="#87af00",
@@ -7837,6 +7847,23 @@ JAV3_THEMES = {
                         foreground="#d7d7af", background=("#0f1a12", "#121212"),
                         surface=("#16241a", "#262626"), panel=("#1f3324", "#3a3a3a"),
                         warning="#d7af00", error="#d75f5f", success="#87d75f", dark=True),
+}
+
+
+# Built-ins whose own palette reads badly on these screens (theme_problems finds
+# them: pale warnings on a light background, a surface the same grey as the
+# background so dialogs vanish, a dark blue used as text). Truecolor values laid
+# over the Textual theme; tests/test_cli_themes.py holds every theme to the checks.
+THEME_TUNE = {
+    "textual-dark": dict(primary="#3a94e6", secondary="#386e96"),
+    "textual-light": dict(surface="#d3d3d3", panel="#c6c6c6", accent="#a36a1c",
+                          warning="#a36a1c", success="#37864f"),
+    "dracula": dict(surface="#353742", panel="#44475a"),
+    "monokai": dict(surface="#34352f", panel="#43443f"),
+    "flexoki": dict(primary="#66a0c8", secondary="#3aa99f", accent="#8b7ec8",
+                    warning="#d0a215", error="#d14d41", success="#879a39"),
+    "rose-pine-dawn": dict(surface="#ebe5df", panel="#dad4ce", accent="#be7470",
+                           warning="#b17728"),
 }
 
 
@@ -7972,6 +7999,37 @@ def resolved_theme_spec(theme) -> dict:
     return d
 
 
+def _block_text_contrast(fed, shown) -> float:
+    """Contrast of the label Textual writes on a block of colour `fed` (white when
+    the colour is dark by its own measure, else black) against what is shown."""
+    dark = (0.299 * fed[0] + 0.587 * fed[1] + 0.114 * fed[2]) / 255 < 0.5
+    return _contrast((238,) * 3 if dark else (8,) * 3, shown)
+
+
+def theme_problems(spec: dict) -> list[str]:
+    """Why a theme will read badly, worded for the editor's hint line; empty when
+    it is fine. `spec` has every colour spelled out (resolved_theme_spec)."""
+    if spec.get("ansi"):
+        return []
+    c = {k: _hex_rgb(spec[k]) for k in THEME_ROLES}
+    out = []
+    for role, need in (("foreground", 4.5), ("primary", 3), ("secondary", 3), ("accent", 3),
+                       ("warning", 3), ("error", 3), ("success", 3)):
+        r = _contrast(c[role], c["background"])
+        if r < need:
+            out.append(f"{role} is hard to read on the background ({r:.1f}:1, want {need})")
+    r = _block_text_contrast(c["primary"], c["primary"])
+    if r < 4:
+        out.append(f"selected rows are hard to read: the label on primary is {r:.1f}:1")
+    for a, b in (("background", "surface"), ("surface", "panel")):
+        if abs(_lab(c[a])[0] - _lab(c[b])[0]) < 4:
+            out.append(f"{a} and {b} are almost the same, so dialogs blend in")
+    for a, b in (("error", "warning"), ("error", "success"), ("warning", "success")):
+        if _delta_e(c[a], c[b]) < 18:
+            out.append(f"{a} and {b} look alike")
+    return out
+
+
 def terminal_theme_spec(spec: dict, truecolor: bool) -> dict:
     """`spec` (resolved_theme_spec, or a validated theme file) ready for this
     terminal; as is on truecolor, snapped and checked on 256 colours."""
@@ -8003,7 +8061,7 @@ def terminal_theme_spec(spec: dict, truecolor: bool) -> dict:
             pick = min(room, key=lambda c: abs(c[2][0] - want))
         surf[k] = pick
         out[k] = _rgb_hex(pick[1])
-    bg, sf = surf["background"][0], surf["surface"][0]
+    bg, sf, pn = (surf[k][0] for k in ("background", "surface", "panel"))
     # 2. the colours that are read on those surfaces; the verdict trio must also
     # stay apart (as far apart as the theme made them, up to a clear margin)
     chosen: dict[str, tuple] = {}
@@ -8018,13 +8076,15 @@ def terminal_theme_spec(spec: dict, truecolor: bool) -> dict:
         return True
 
     def reads(role, c) -> bool:
-        need = 7.0 if role == "foreground" else 3.0
-        if _contrast(c[0], bg) < need or _contrast(c[0], sf) < min(need, 4.5):
+        if role == "foreground":
+            return (_contrast(c[0], bg) >= 7 and _contrast(c[0], sf) >= 4.5
+                    and _contrast(c[0], pn) >= 4.5)
+        if _contrast(c[0], bg) < 3 or _contrast(c[0], sf) < 3:
             return False
+        if role in ("primary", "secondary", "accent") and _contrast(c[0], pn) < 3:
+            return False      # headings and hints sit on the panel too
         if role == "primary":     # the selection block: Textual writes white or black on it
-            text = (238,) * 3 if (0.299 * c[1][0] + 0.587 * c[1][1] + 0.114 * c[1][2]) / 255 < 0.5 \
-                else (8,) * 3
-            return _contrast(text, c[0]) >= 4.5
+            return _block_text_contrast(c[1], c[0]) >= 4.5
         return True
 
     for role in ("primary", "error", "success", "warning", "accent", "secondary", "foreground"):
