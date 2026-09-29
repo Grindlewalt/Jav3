@@ -328,8 +328,8 @@ async def test_new_below_hint_while_scrolled_up(cfg):
         feed.send(*[{"type": "tool", "id": f"b{i}", "name": "read_file",
                      "args": {"path": f"g{i}"}} for i in range(4)])
         assert await _until(pilot, lambda: len(app.query("ToolView")) == 34)
-        assert await _until(pilot, lambda: hint.display)
-        assert "4 new below" in _plain(hint)
+        # the hint is redrawn on the tick, so it may say 1, 2, 3 on the way
+        assert await _until(pilot, lambda: hint.display and "4 new below" in _plain(hint))
         await pilot.click("#new-hint")             # jumps back down and follows again
         assert await _until(pilot, lambda: not hint.display)
         feed.send({"type": "final", "content": "done", "conversation_id": 9})
