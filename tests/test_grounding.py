@@ -705,3 +705,54 @@ def test_score_model_counts_rejected_answers_as_misses():
     box = (0, 0, 40, 40)
     row = grounding.score_model("p/m", [(0.0, 0.0, 0.9)], [box], [(1280, 800)], [10], 0)
     assert row["hit_rate"] == 0.0
+
+
+def _cands(monkeypatch, ids):
+    monkeypatch.setattr(grounding, "candidates", lambda: [
+        {"id": i, "label": i, "price_in": None, "price_out": None} for i in ids])
+
+
+def _row(model, conv, hit=0.9, **kw):
+    return {"model": model, "hit_rate": hit, "unusable": False, "convention": conv,
+            "n": 5, "probed_at": "2026-09-01T00:00:00Z", **kw}
+
+
+async def test_subset_probe_keeps_other_rows_and_their_convention(tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a", "p/b"])
+    _write_state({"ranking": [_row("p/a", "k1000"), _row("p/b", "px", 0.8)],
+                  "probed_at": "2026-09-01T00:00:00Z", "pinned": "p/b"})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}'))
+    ranking = await grounding.run_probe(["p/a"], targets=3)
+    by = {r["model"]: r for r in ranking}
+    assert set(by) == {"p/a", "p/b"}
+    assert by["p/b"]["probed_at"] == "2026-09-01T00:00:00Z" and not by["p/b"]["stale"]
+    assert by["p/b"]["convention"] == "px" and by["p/b"]["hit_rate"] == 0.8
+    assert by["p/a"]["probed_at"] > "2026-09-01T00:00:00Z"
+    st = json.loads(grounding._path().read_text())
+    assert st["probed_at"] == by["p/a"]["probed_at"]
+    assert len(st["ranking"]) == 2
+
+
+async def test_pinned_model_keeps_its_measured_convention_after_subset_probe(
+        tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a", "p/b"])
+    _write_state({"ranking": [_row("p/a", "px"), _row("p/b", "unit", 0.8)],
+                  "probed_at": "x", "pinned": "p/b"})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}'))
+    await grounding.run_probe(["p/a"], targets=3)
+    assert grounding._resolve() == ("p/b", "unit")
+
+
+async def test_stale_rows_are_marked_and_never_auto_selected(tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a", "p/c"])
+    _write_state({"ranking": [_row("p/gone", "px", 0.99), _row("p/a", "px", 0.6)],
+                  "probed_at": "x", "pinned": ""})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}'))
+    ranking = await grounding.run_probe(["p/c"], targets=3)
+    by = {r["model"]: r for r in ranking}
+    assert by["p/gone"]["stale"] is True and by["p/a"]["stale"] is False
+    assert ranking[-1]["model"] == "p/gone"
+    assert grounding._resolve()[0] != "p/gone"
+    _write_state({"ranking": [by["p/gone"]], "pinned": ""})
+    with pytest.raises(grounding.NotConfigured):
+        grounding._resolve()

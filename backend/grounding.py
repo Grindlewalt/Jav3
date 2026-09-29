@@ -191,7 +191,7 @@ def _resolve() -> tuple[str, str]:
         conv = e.get("convention") if e else None
         return pinned, conv if conv in CONVENTIONS else DEFAULT_CONVENTION
     for e in st["ranking"]:
-        if not e.get("unusable") and e.get("model"):
+        if not e.get("unusable") and not e.get("stale") and e.get("model"):
             conv = e.get("convention")
             return e["model"], conv if conv in CONVENTIONS else DEFAULT_CONVENTION
     raise NotConfigured("no grounding model configured")
@@ -630,9 +630,28 @@ def rank(rows: list[dict]) -> list[dict]:
     def key(r):
         cost = r.get("cost_per_1k")
         p95 = r.get("p95_ms")
-        return (bool(r.get("unusable")), -r.get("hit_rate", 0.0),
+        return (bool(r.get("stale")), bool(r.get("unusable")), -r.get("hit_rate", 0.0),
                 cost is None, cost or 0.0, p95 is None, p95 or 0)
     return sorted(rows, key=key)
+
+
+def merge_ranking(st: dict, new_rows: list[dict], now: str) -> list[dict]:
+    """The stored ranking after a probe of `new_rows`' models: those rows are
+    replaced (stamped probed_at=now), every other stored row is kept with its
+    own probed_at (the stored top-level one for rows from before per-row
+    stamps), and a kept row whose model is no longer a candidate is marked
+    stale: true (never auto-selected). Re-ranked."""
+    probed = {r["model"] for r in new_rows}
+    live = {c["id"] for c in candidates()}
+    out = []
+    for r in new_rows:
+        out.append({**r, "probed_at": now, "stale": r["model"] not in live})
+    for r in st.get("ranking") or []:
+        if r.get("model") in probed or not r.get("model"):
+            continue
+        out.append({**r, "probed_at": r.get("probed_at") or st.get("probed_at"),
+                    "stale": r["model"] not in live})
+    return rank(out)
 
 
 async def _probe_one(job: dict, model_id: str, fixtures: list[dict],
@@ -726,8 +745,10 @@ async def run_probe(models: list[str] | None = None, *, targets: int | None = No
     ranking = rank(rows)
     if save:
         st = _load()
+        now = _now()
+        ranking = merge_ranking(st, rows, now)
         st["ranking"] = ranking
-        st["probed_at"] = _now()
+        st["probed_at"] = now
         _save(st)
     return ranking
 
@@ -745,12 +766,14 @@ async def _run(job: dict) -> None:
         rows = []
         for mid in job["models"]:
             rows.append(await _probe_one(job, mid, fixtures, order))
-        ranking = rank(rows)
         st = _load()
+        now = _now()
+        ranking = merge_ranking(st, rows, now)
         st["ranking"] = ranking
-        st["probed_at"] = _now()
+        st["probed_at"] = now
         _save(st)
-        winner = next((r["model"] for r in ranking if not r["unusable"]), None)
+        winner = next((r["model"] for r in ranking
+                       if not r["unusable"] and not r.get("stale")), None)
         job["winner"] = winner
         await _event(
             f"model finder finished: {winner} is the grounding model"

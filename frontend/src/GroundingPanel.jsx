@@ -112,7 +112,7 @@ export default function GroundingPanel() {
                 <table className="sbd-table">
                   <thead>
                     <tr><th>Model</th><th>Hits</th><th>Median px</th><th>p95 ms</th>
-                      <th>$/1k</th><th>Coords</th><th /></tr>
+                      <th>$/1k</th><th>Coords</th><th>Measured</th><th /></tr>
                   </thead>
                   <tbody>
                     {data.ranking.map((r) => (
@@ -126,7 +126,10 @@ export default function GroundingPanel() {
                         <td>{num(r.p95_ms)}</td>
                         <td>{money(r.cost_per_1k)}</td>
                         <td>{CONV[r.convention] || r.convention}</td>
+                        <td className="dim small" title={r.probed_at || ''}>
+                          {r.probed_at ? ago(r.probed_at) : ''}</td>
                         <td>
+                          {r.stale && <Tag tone="error">stale</Tag>}
                           {r.unusable && <Tag tone="error">unusable</Tag>}
                           {r.errors > 0 && (
                             <span className="dim small" title={r.last_error || ''}>
