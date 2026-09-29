@@ -458,6 +458,7 @@ function AlertRow({ a, onAck, onOpen }) {
 // scrolls. No tab paints a heading of its own.
 export default function Review() {
   const count = useContext(PendingCountContext)
+  const { pathname } = useLocation()
   return (
     <Page variant="fill" title="Security" className="review-shell"
           actions={(
@@ -470,7 +471,11 @@ export default function Review() {
               { to: '/security/secrets', label: 'Secrets' },
             ]} />
           )}>
-      <div className="review-body"><Outlet /></div>
+      <div className="review-body">
+        {/* one line on what this tab is, in the tab's own column */}
+        {ledeFor(SECURITY_LEDES, pathname) && <p className="tab-lede dim">{ledeFor(SECURITY_LEDES, pathname)}</p>}
+        <Outlet />
+      </div>
     </Page>
   )
 }

@@ -4,7 +4,7 @@ its node test."""
 import httpx
 import pytest
 
-from backend import egress
+from backend import egress, security
 from backend.auth import hash_password
 from backend.db import get_db, init_db
 from backend.main import app
@@ -60,6 +60,108 @@ async def test_summary_approval_in_another_project_does_not_unblock(client, db):
     assert s["denied"] == 1 and s["allowed"] == 1
     s = (await client.get("/api/egress/summary", params={"project": "a"})).json()
     assert s["denied"] == 1 and s["allowed"] == 0
+
+
+# --- WEB-02: an alert can be allowed, not only acknowledged --------------------
+
+async def _proc_alert(db, exe="/usr/local/bin/job", unit="weekly-job.service", pid=7,
+                      box="shared"):
+    return await security.raise_event(
+        db, kind="unexpected_process", severity="warn",
+        summary=f"Unexpected process in box {box}: {exe}", cause=f"{box}:{exe}:{unit}:{pid}",
+        detail={"box_id": box, "pid": pid, "exe": exe, "cmd": f"{exe} changelog",
+                "unit": unit, "user": "root", "baseline": "builtin"})
+
+
+def _box():
+    import types
+    return types.SimpleNamespace(image=("main", None))
+
+
+async def test_allow_program_baselines_it_and_acks_its_twins(client, db):
+    from backend.vm import procview
+    a = await _proc_alert(db, pid=7)
+    b = await _proc_alert(db, pid=8)                       # same program, same unit
+    c = await _proc_alert(db, exe="/usr/bin/python3", pid=9)   # another program, same unit
+    r = await client.post(f"/api/security/events/{a}/baseline", json={"scope": "program"})
+    assert r.status_code == 200 and r.json()["ok"] and r.json()["acknowledged"] == 2
+    base = await procview.baseline_for(db, _box())
+    assert base.matches("/usr/local/bin/job", "weekly-job.service")
+    assert not base.matches("/usr/bin/python3", "weekly-job.service")   # not the unit
+    assert not base.matches("/usr/local/bin/job", "evil.service")
+    left = [e["id"] for e in await security.list_events(db, unacknowledged_only=True)
+            if e["kind"] == "unexpected_process"]
+    assert left == [c] and b != c
+    # the change itself is on the audit trail, as a record (no ping)
+    audit = [e for e in await security.list_events(db) if e["kind"] == "proc_baseline_changed"]
+    assert len(audit) == 1 and audit[0]["severity"] == "info"
+    assert audit[0]["acknowledged"]          # a record, not a queue item
+
+
+async def test_allow_unit_covers_every_program_in_it(client, db):
+    from backend.vm import procview
+    a = await _proc_alert(db)
+    c = await _proc_alert(db, exe="/usr/bin/python3", pid=9)
+    r = await client.post(f"/api/security/events/{a}/baseline", json={"scope": "unit"})
+    assert r.status_code == 200 and r.json()["acknowledged"] == 2 and c
+    base = await procview.baseline_for(db, _box())
+    assert base.matches("/usr/bin/anything", "weekly-job.service")
+    assert not base.matches("/usr/bin/anything", "other.service")
+
+
+async def test_allowed_list_can_be_read_and_taken_back(client, db):
+    from backend.vm import procview
+    a = await _proc_alert(db)
+    await client.post(f"/api/security/events/{a}/baseline", json={"scope": "program"})
+    got = (await client.get("/api/security/baseline")).json()["entries"]
+    assert [(e["exe"], e["unit"], e["by"]) for e in got] \
+        == [("/usr/local/bin/job", "weekly-job.service", "operator")]
+    r = await client.post("/api/security/baseline/remove",
+                          json={"exe": "/usr/local/bin/job", "unit": "weekly-job.service"})
+    assert r.status_code == 200
+    assert not (await procview.baseline_for(db, _box())).matches(
+        "/usr/local/bin/job", "weekly-job.service")
+    assert (await client.post("/api/security/baseline/remove",
+                              json={"exe": "/usr/local/bin/job",
+                                    "unit": "weekly-job.service"})).status_code == 404
+
+
+@pytest.mark.parametrize("exe,unit,scope,why", [
+    ("/usr/bin/python3", "jarvis-guest.service", "program", "guest server"),   # never baselined
+    ("/usr/bin/x", "jav3-svc-4.service", "unit", "approved service"),
+    ("/usr/bin/python3", "", "program", "interpreter"),                  # would hide any implant
+    ("/usr/bin/x", "", "unit", "no unit"),
+    ("/usr/bin/*", "a.service", "program", "no patterns"),
+    ("", "a.service", "program", "no program"),
+])
+async def test_allow_refuses_what_would_hide_too_much(client, db, exe, unit, scope, why):
+    from backend.vm import procview
+    eid = await security.raise_event(
+        db, kind="unexpected_process", severity="warn", summary="x",
+        detail={"box_id": "shared", "exe": exe, "unit": unit})
+    r = await client.post(f"/api/security/events/{eid}/baseline", json={"scope": scope})
+    assert r.status_code == 400, why
+    assert await procview.operator_entries(db) == []
+
+
+async def test_allow_only_for_process_alerts(client, db):
+    eid = await security.raise_event(db, kind="secret_leak", severity="critical", summary="x")
+    assert (await client.post(f"/api/security/events/{eid}/baseline",
+                              json={"scope": "program"})).status_code == 400
+    assert (await client.post("/api/security/events/99999/baseline",
+                              json={"scope": "program"})).status_code == 404
+
+
+async def test_process_board_names_the_program_and_fills_the_what_column(client, db):
+    a = await _proc_alert(db, pid=7)
+    await _proc_alert(db, exe="/usr/bin/python3", pid=9)
+    board = (await client.get(f"/api/security/events/{a}/context")).json()
+    facts = {r["label"]: r for s in board["sections"] if s["type"] == "facts" for r in s["rows"]}
+    assert facts["Program"]["value"] == "/usr/local/bin/job"
+    assert facts["Started by unit"]["value"] == "weekly-job.service"
+    assert "stock Debian" in facts["Baseline"]["hint"]           # 'builtin' explained
+    table = [s for s in board["sections"] if s["type"] == "table"][0]
+    assert table["rows"][0][2] == "/usr/bin/python3 in weekly-job.service"   # What
 
 
 # --- WEB-07: "Allow once" is an hour, on no list, and the host comes back ------

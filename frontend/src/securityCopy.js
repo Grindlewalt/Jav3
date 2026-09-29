@@ -79,3 +79,63 @@ export const PICK_BODY = (host, verb) => `${host} was requested from the shared 
   + (verb === 'once'
     ? 'Pick the project that may reach it for the next hour.'
     : "Pick the project whose always-allow list it should go on.")
+
+// ---- the Persistent tab's words (WEB-06) ------------------------------------------
+
+export const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+
+export const PERSISTENT_LEGEND = [
+  ['service', 'a service you approved, running as approved'],
+  ['run_code', "left running by the agent's run_code tool"],
+  ['unexpected', 'not on the box\'s baseline, and neither a service nor run_code'],
+  ['stale', 'the box has not reported lately, so its list may be out of date'],
+  ['built-in baseline', "no baseline was recorded for this box's image, so \"expected\" means "
+    + 'a short built-in list of stock Debian services'],
+  ['guest / host', 'guest is what the box says it sent (↑) and received (↓); host is what '
+    + 'Jav3 measured itself, on the proxy or the port relay'],
+  ['verified', 'guest and host numbers agree'],
+  ['unverified', 'Jav3 has no measurement of its own for this connection'],
+  ['mismatch', 'the two disagree by more than a few percent: the box may be misreporting'],
+  ['unowned connection', 'the host saw a connection from the box that no reported process '
+    + 'owns: something may be hiding from the box\'s process list'],
+]
+
+export const PERSISTENT_EMPTY_ODD = 'Nothing unexpected in any box.'
+export const PERSISTENT_EMPTY_ALL = 'No box is reporting yet. Boxes appear here while they run.'
+export const REPORTED_NEVER = 'has not reported yet'
+
+// ---- allowing a process from its alert (WEB-02) ----------------------------------
+
+// One entry of the operator's allowed list ({exe, unit, by, at}) as a line:
+// exe "*" is a whole unit.
+export function allowedLine(e) {
+  const unit = e?.unit || ''
+  const what = e?.exe === '*' ? `everything in ${unit}` : `${e?.exe}${unit ? ` in ${unit}` : ''}`
+  const at = String(e?.at || '').slice(0, 10)
+  return { what, when: [e?.by, at].filter(Boolean).join(' · ') }
+}
+
+const UNDO_WHERE = 'You can take it off again under Security, Persistent, "Allowed from alerts".'
+
+// The confirm for "Allow this program" / "Allow the whole unit". `d` is the
+// alert's detail ({exe, unit}); scope is 'program' | 'unit'.
+export function baselineAsk(d, scope) {
+  const exe = d?.exe || 'this program'
+  const unit = d?.unit || ''
+  if (scope === 'unit') {
+    return {
+      title: `Allow everything ${unit} runs?`,
+      body: `${unit} joins the process baseline of every box, so nothing it starts is `
+        + 'flagged as unexpected again, here or in the Persistent tab. Alerts already '
+        + `waiting for it are cleared. Only do this for a system service you recognise. ${UNDO_WHERE}`,
+      confirm: 'Allow the unit',
+    }
+  }
+  return {
+    title: `Allow ${exe}${unit ? ` in ${unit}` : ''}?`,
+    body: 'It joins the process baseline of every box and stops alerting, here and in the '
+      + 'Persistent tab. Alerts already waiting for it are cleared. '
+      + `${unit ? `Other programs in ${unit} still alert. ` : ''}${UNDO_WHERE}`,
+    confirm: 'Allow this program',
+  }
+}

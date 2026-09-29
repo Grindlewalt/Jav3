@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
 import { Button, EmptyState, Input, Modal, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { VMS_LEDES, ledeFor } from '../securityCopy.js'
 import { ago, ts } from '../format.js'
 import {
   boxEvents, cleanLeftovers, destroyBox, followBoxes, listBoxes, listLeftovers, nukeShared,
@@ -39,6 +40,7 @@ import {
 
 
 export default function Vms() {
+  const { pathname } = useLocation()
   return (
     <Page variant="fill" title="VMs" className="review-shell"
           actions={(
@@ -48,7 +50,11 @@ export default function Vms() {
               { to: '/vms/catalogue', label: 'Catalogue' },
             ]} />
           )}>
-      <div className="review-body"><Outlet /></div>
+      <div className="review-body">
+        {/* one line on what this tab is, in the tab's own column */}
+        {ledeFor(VMS_LEDES, pathname) && <p className="tab-lede dim">{ledeFor(VMS_LEDES, pathname)}</p>}
+        <Outlet />
+      </div>
     </Page>
   )
 }

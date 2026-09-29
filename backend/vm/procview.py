@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..config import settings
+from ..db import get_state, set_state
 from . import boxes
 
 log = logging.getLogger(__name__)
@@ -301,7 +302,92 @@ async def _baseline_path_from_db(db, box) -> Path | None:
     return Path(r[0]) if r and r[0] else None
 
 
+# What the operator allowed from an alert ("Allow this program" / "Allow the
+# whole unit" on the evidence board), kept beside the image's own baseline and
+# laid over it. One list for every box: a stock Debian unit is stock everywhere.
+OPERATOR_KEY = "proc_baseline_operator"
+OPERATOR_CAP = 500
+# programs that would hide any implant written in them if allowed on their own:
+# they may only be allowed inside a named unit
+INTERPRETERS = re.compile(r"^(python[0-9.]*|perl|ruby|node|nodejs|php|lua|sh|bash|dash|zsh|"
+                          r"busybox|env|sudo|su|nc|ncat|socat)$")
+
+
+class BaselineError(ValueError):
+    pass
+
+
+async def operator_entries(db) -> list[dict]:
+    try:
+        raw = await get_state(db, OPERATOR_KEY)
+        data = json.loads(raw) if raw else []
+    except Exception:  # noqa: BLE001 — a bad blob is an empty list, never a crash
+        return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict) and isinstance(e.get("exe"), str)
+            and isinstance(e.get("unit", ""), str)]
+
+
+def check_operator_entry(exe: str, unit: str) -> None:
+    """Refuse an allowance that would hide more than the operator meant."""
+    exe, unit = (exe or "").strip(), (unit or "").strip()
+    if not exe or len(exe) > 300:
+        raise BaselineError("this alert names no program to allow")
+    if unit and (_NEVER_BASELINE_UNITS.match(unit) or not _UNIT_NAME.match(unit)):
+        raise BaselineError(f"{unit} cannot be allowed: it is the box's own guest "
+                            "server or an approved service, which are never baselined")
+    if exe == "*":
+        if not unit:
+            raise BaselineError("a whole-unit allowance needs a unit, and this process has none")
+        return
+    if any(c in exe + unit for c in "*?["):
+        raise BaselineError("a program is allowed by its exact path, no patterns")
+    if not unit and INTERPRETERS.match(exe.rsplit("/", 1)[-1]):
+        raise BaselineError(f"{exe} is an interpreter: allowing it with no unit would hide "
+                            "anything written in it, so allow it inside a unit or not at all")
+
+
+async def add_operator_entry(db, exe: str, unit: str, by: str = "operator") -> dict:
+    """Add one (exe, unit) pair, exe "*" meaning everything in the unit. Returns
+    {exe, unit, added}; `added` is False when it was already there."""
+    exe, unit = (exe or "").strip(), (unit or "").strip()
+    check_operator_entry(exe, unit)
+    cur = await operator_entries(db)
+    if any(e["exe"] == exe and e.get("unit", "") == unit for e in cur):
+        return {"exe": exe, "unit": unit, "added": False}
+    if len(cur) >= OPERATOR_CAP:
+        raise BaselineError(f"the allowed list is full ({OPERATOR_CAP} entries)")
+    cur.append({"exe": exe, "unit": unit, "by": by,
+                "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")})
+    await set_state(db, OPERATOR_KEY, json.dumps(cur))
+    await db.commit()
+    return {"exe": exe, "unit": unit, "added": True}
+
+
+async def remove_operator_entry(db, exe: str, unit: str) -> bool:
+    cur = await operator_entries(db)
+    keep = [e for e in cur if not (e["exe"] == exe and e.get("unit", "") == (unit or ""))]
+    if len(keep) == len(cur):
+        return False
+    await set_state(db, OPERATOR_KEY, json.dumps(keep))
+    await db.commit()
+    return True
+
+
+def _overlay(base: Baseline, extra: list[dict]) -> Baseline:
+    more = parse_baseline(extra, source=base.source)
+    return Baseline(base.exact | more.exact, base.patterns + more.patterns, base.source)
+
+
 async def baseline_for(db, box) -> Baseline:
+    """The box image's baseline plus what the operator allowed from alerts."""
+    b = await _image_baseline_for(db, box)
+    extra = await operator_entries(db) if db is not None else []
+    return _overlay(b, extra) if extra else b
+
+
+async def _image_baseline_for(db, box) -> Baseline:
     path = None
     for fn in _baseline_resolvers:
         try:

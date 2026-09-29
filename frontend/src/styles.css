@@ -4207,3 +4207,14 @@ a:has(> .nav-dot) { position: relative; }
 .rev-egress { flex-wrap: wrap; row-gap: var(--sp-3); }
 .rev-egress-btns { display: flex; gap: var(--sp-3); flex-shrink: 0; }
 .rev-egress-btns button { padding: 4px 12px; font-size: var(--fs-md); }
+.sbd-more { margin-top: var(--sp-3); }
+.bx-legend-fold { margin: 0 0 var(--sp-5); }
+.bx-legend-fold summary { cursor: pointer; }
+.bx-legend-list { margin: var(--sp-3) 0 0; display: grid; gap: var(--sp-2) var(--sp-6); grid-template-columns: max-content minmax(0, 1fr); }
+.bx-legend-list div { display: contents; }
+.bx-legend-list dt { color: var(--text); }
+.bx-legend-list dd { margin: 0; color: var(--dim); }
+.allowed-procs { margin: 0 0 var(--sp-5); }
+.allowed-procs > summary { cursor: pointer; color: var(--dim); }
+.review-body > .tab-lede { margin: 0 auto var(--sp-6); flex-shrink: 0; font-size: var(--fs-md); }
+.sbd-table td:last-child { white-space: nowrap; }

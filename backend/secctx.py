@@ -261,15 +261,27 @@ async def _related(db: aiosqlite.Connection, ev: dict, *, path: str | None = Non
         if ((path and p == path) or (host and r["_d"].get("host") == host)
                 or (not path and not host)):
             out["same"].append(r)
-    out["same"] = out["same"][:12]
+    # the board's table shows the first dozen and folds the rest behind "show all"
+    out["same"] = out["same"][:60]
     return out
+
+
+def _what(d: dict) -> str:
+    """The one thing an alert row is about: the trigger, host, or (a process
+    alert) the program and the unit that ran it."""
+    if d.get("trigger") or d.get("host"):
+        return str(d.get("trigger") or d.get("host"))
+    prog = d.get("exe") or d.get("path")
+    if prog and d.get("unit"):
+        return f"{prog} in {d['unit']}"
+    return str(prog or d.get("unit") or "")
 
 
 def _related_table(title: str, rows: list[dict], *, subject: str) -> dict | None:
     if not rows:
         return None
     body = [[_iso(_ts(r["created_at"])) or r["created_at"], r["severity"],
-             (r.get("_d") or {}).get("trigger") or (r.get("_d") or {}).get("host") or "",
+             _what(r.get("_d") or {}),
              r["summary"], "seen" if r["acknowledged"] else "waiting"]
             for r in rows]
     return _table(title, ["When", "Severity", "What", "Summary", "State"], body,
@@ -768,6 +780,49 @@ async def _login_board(db, ev, detail, add) -> dict:
     return brief
 
 
+# --- unexpected_process ------------------------------------------------------
+
+_BASELINE_WORDS = {
+    "image": "recorded when this box's image was built: what was already running then",
+    "builtin": "no baseline was recorded for this image, so \"expected\" means a short "
+               "built-in list of stock Debian services (systemd, cron, dbus, logging, "
+               "and the apt, man-db and fstrim timers)",
+}
+
+
+async def _process_board(db, ev, detail, add) -> dict:
+    """A program running in a box that is not on the box's baseline. The board
+    says what the baseline is and lists the same alerts elsewhere; the way to
+    stop it alerting (Allow this program / the whole unit) is a button on the
+    page, POST /api/security/events/{id}/baseline."""
+    async def facts():
+        base = str(detail.get("baseline") or "")
+        return _facts("The process", [
+            ["Box", detail.get("box_id")],
+            ["Program", detail.get("exe")],
+            ["Command line", detail.get("cmd")],
+            ["Process id", detail.get("pid")],
+            ["Started by unit", detail.get("unit") or "none (not under systemd)"],
+            ["User", detail.get("user")],
+            ["Baseline", base or None, _BASELINE_WORDS.get(base)],
+            ["Raised", f"{_iso(_ts(ev.get('created_at')))} "
+                       f"({_ago(_ts(ev.get('created_at')))})"],
+        ])
+
+    await add(facts)
+    rel = await _related(db, ev)
+    await add(lambda: _related_table("Other unexpected-process alerts", rel["same"],
+                                     subject="processes in boxes"))
+    return {
+        "title": "A program outside the box's baseline is running",
+        "why": "It is not on the box's baseline list, and it was not started as an "
+               "approved service or by run_code.",
+        "checks": ["Is it stock Debian housekeeping (apt, man-db, fstrim, logrotate)? Then "
+                   "allow it below and it stops alerting.",
+                   "If you do not recognise it, read the command line above, then what "
+                   "the agent was doing just before (Logs, Transcripts)."]}
+
+
 # --- fallback ----------------------------------------------------------------
 
 async def _generic_board(db, ev, detail, add) -> dict:
@@ -798,7 +853,7 @@ async def _generic_board(db, ev, detail, add) -> dict:
 
 
 _BOARDS = {"write_flag": _write_board, "egress_anomaly": _egress_board,
-           "login_failed": _login_board}
+           "login_failed": _login_board, "unexpected_process": _process_board}
 
 
 async def build_board(db: aiosqlite.Connection, ev: dict) -> dict:

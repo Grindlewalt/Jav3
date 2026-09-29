@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { useAsk } from './ask.jsx'
 import { human, sevClass } from './format.js'
+import { notify, notifyError } from './notify.js'
+import { baselineAsk } from './securityCopy.js'
 
 // The evidence board for one security alert. A card on the Security page says
 // "write flag: network_call in fetch.py"; this is where the operator finds out
@@ -110,10 +113,16 @@ function Files({ s }) {
   )
 }
 
+// A table longer than a dozen rows shows the first dozen and folds the rest
+// behind "show all N" (the related-alerts table can run to fifty).
+const TABLE_ROWS = 12
+
 function Table({ s }) {
+  const [all, setAll] = useState(false)
   if (!s.rows.length) {
     return <div className="dim small">{s.empty || 'nothing recorded'}</div>
   }
+  const rows = all ? s.rows : s.rows.slice(0, TABLE_ROWS)
   return (
     <div className="sbd-tablewrap">
       <table className="sbd-table">
@@ -121,11 +130,16 @@ function Table({ s }) {
           <tr>{s.cols.map((c) => <th key={c}>{c}</th>)}</tr>
         </thead>
         <tbody>
-          {s.rows.map((r, i) => (
+          {rows.map((r, i) => (
             <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>
           ))}
         </tbody>
       </table>
+      {s.rows.length > TABLE_ROWS && (
+        <button type="button" className="ghost small sbd-more" onClick={() => setAll(!all)}>
+          {all ? `show the first ${TABLE_ROWS}` : `show all ${s.rows.length}`}
+        </button>
+      )}
     </div>
   )
 }
@@ -169,6 +183,27 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
 
   const ev = board?.event || seed || {}
   const sev = sevClass(ev.severity)
+  const ask = useAsk()
+  const [busy, setBusy] = useState(false)
+
+  // An unexpected-process alert can be allowed, not only acknowledged: the
+  // program (in its unit), or everything its unit runs, joins the baseline so
+  // it stops alerting. The server refuses what would hide too much.
+  const proc = ev.kind === 'unexpected_process' && board?.detail?.exe ? board.detail : null
+  async function allow(scope) {
+    const q = baselineAsk(proc, scope)
+    if (!await ask.confirm(q.title, { body: q.body, confirmLabel: q.confirm })) return
+    setBusy(true)
+    try {
+      const r = await api(`/api/security/events/${ev.id}/baseline`, {
+        method: 'POST', body: JSON.stringify({ scope }) })
+      notify(`Allowed. ${r.acknowledged} alert${r.acknowledged === 1 ? '' : 's'} cleared.`,
+             { life: 8 })
+      window.dispatchEvent(new Event('jarvis-files-changed'))
+      onClose()
+    } catch (e) { notifyError(e) }
+    setBusy(false)
+  }
 
   return (
     <div className="sbd-scrim" onClick={onClose}>
@@ -229,8 +264,20 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
           </span>
           <span className="grow" />
           <button className="ghost" onClick={onClose}>Close</button>
+          {proc && proc.unit && (
+            <button className="ghost" disabled={busy} onClick={() => allow('unit')}
+                    title={`Allow everything ${proc.unit} runs, in every box`}>
+              Allow the whole unit</button>
+          )}
+          {proc && (
+            <button className="ghost" disabled={busy} onClick={() => allow('program')}
+                    title="Stop alerting on this program in this unit, in every box">
+              Allow this program</button>
+          )}
           {onAck && !ev.acknowledged && (
-            <button onClick={() => { onAck(ev.id); onClose() }}>Acknowledge</button>
+            <button onClick={() => { onAck(ev.id); onClose() }}
+                    title="Mark it seen. The same program raises a new alert the next time a box boots.">
+              Acknowledge</button>
           )}
         </div>
       </div>
