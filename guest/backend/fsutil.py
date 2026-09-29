@@ -6,6 +6,11 @@ from pathlib import Path
 
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "dist"}
 
+# What file listings hide. dist/ is build output the operator and the renderer
+# need to see (a built game failed to open 4 times: dist/ was hidden); it stays
+# out of the code index via SKIP_DIRS.
+LIST_SKIP_DIRS = SKIP_DIRS - {"dist"}
+
 
 def safe_join(base: Path, rel: str) -> Path:
     """Resolve rel against base, refusing anything that escapes base."""
@@ -65,7 +70,7 @@ def list_tree(base: Path) -> list[dict]:
         if p.is_dir():
             continue
         parts = p.relative_to(base).parts
-        if any(part in SKIP_DIRS or part.startswith(".") for part in parts[:-1]):
+        if any(part in LIST_SKIP_DIRS or part.startswith(".") for part in parts[:-1]):
             continue
         if p.name.startswith(".") and p.name != ".gitkeep":
             continue
