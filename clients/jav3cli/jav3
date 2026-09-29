@@ -2601,7 +2601,7 @@ def build_tui(base: str, token: str, **kw):
             if self.ate and self.inert():
                 return "just opened: keys go back to your prompt for a moment"
             return (f"↑↓ move · {pick}" + (" · space toggles" if multi else "")
-                    + " · type your own answer · enter confirms · esc skips")
+                    + " · or type · enter confirms · esc skips")
 
         def _draw(self) -> None:
             head, rows = self.markup(self.ev, self.qs, self.i, self.cur, self.sel,
@@ -2609,6 +2609,8 @@ def build_tui(base: str, token: str, **kw):
             self.query_one("#ask-head", Static).update(head)
             self.query_one("#ask-opts", Static).update(rows)
             self.query_one("#ask-foot", Static).update(f"[$text-muted]{_esc(self._foot_text())}[/]")
+            inp = self.query_one("#ask-text", Input)
+            inp.display = self.cur == self._free_row() or bool(self._text())
             self._fit()
 
         def _fit(self) -> None:
@@ -2619,13 +2621,25 @@ def build_tui(base: str, token: str, **kw):
             height, width = self.app.size.height, self.app.size.width
             inner = max(20, min(72, int(width * 0.9)) - 4)
             foot = -(-len(self._foot_text()) // inner)
-            fixed = (len(self.opts) + 1) + 1 + 2 + foot + 1          # rows, gap, input, foot
+            typing = self.query_one("#ask-text", Input).display
+            # "2. ( ) " leads each option, and a long label wraps onto more rows
+            rows = sum(max(1, -(-(7 + len(label)) // inner))
+                       for label in [*self.opts, self.free_label])
+            fixed = rows + 1 + (2 if typing else 0) + foot + 1      # options, gaps, input, foot
             room = max(4, height - 2 - 2 - fixed)                     # gutter, dialog padding
             self.query_one("#dialog").styles.max_height = max(8, height - 2)
             self.query_one("#ask-top").styles.max_height = room
 
         def _free_row(self) -> int:
             return len(self.opts)
+
+        def _focus_text(self):
+            """The free-text line is only on screen while it is in use: the row
+            in the list already says what it is for."""
+            inp = self.query_one("#ask-text", Input)
+            inp.display = True
+            inp.focus()
+            return inp
 
         def _pick(self, j: int) -> None:
             if j >= len(self.opts):
@@ -2641,7 +2655,7 @@ def build_tui(base: str, token: str, **kw):
             self.cur = max(0, min(self._free_row(), self.cur + d))
             inp = self.query_one("#ask-text", Input)
             if self.cur == self._free_row():
-                inp.focus()
+                self._focus_text()
             elif inp.has_focus:
                 self.set_focus(None)
 
@@ -2653,7 +2667,7 @@ def build_tui(base: str, token: str, **kw):
                 if self.cur < len(self.opts):
                     self.sel = {self.cur}
                 else:
-                    self.query_one("#ask-text", Input).focus()
+                    self._focus_text()
                     return
             self.answers.append({"selected": [self.opts[j] for j in sorted(self.sel)],
                                  "text": typed or None})
@@ -2694,14 +2708,12 @@ def build_tui(base: str, token: str, **kw):
                 if self.cur < len(self.opts):
                     self._pick(self.cur)
                 else:
-                    self.query_one("#ask-text", Input).focus()
+                    self._focus_text()
             elif event.is_printable and event.character:
                 # typing jumps to the free-text option and picks it
                 event.stop()
-                inp = self.query_one("#ask-text", Input)
                 self.cur = self._free_row()
-                inp.focus()
-                inp.insert_text_at_cursor(event.character)
+                self._focus_text().insert_text_at_cursor(event.character)
             else:
                 return
             self._draw()
