@@ -899,8 +899,8 @@ async def destroy(box: Box, *, delete_data: bool = False,
     if box.is_shared:
         await stop(box)
         return
-    async with boxlog.action(box, "destroyed", reason=(
-            reason or "") + (" (data deleted)" if delete_data else "") or None):
+    why = " ".join(x for x in (reason, "(data deleted)" if delete_data else None) if x)
+    async with boxlog.action(box, "destroyed", reason=why or None):
         await stop(box)
         if delete_data:
             for fn in list(_data_deleters):
