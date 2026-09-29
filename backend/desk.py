@@ -522,11 +522,11 @@ def _tainted(op: str | None) -> bool:
     return bool(op) and broker.op_tainted(op)
 
 
-def _taint(source: str = "desk") -> None:
+def _taint(name: str | None = None, source: str = "desk") -> None:
     op = budget_mod.active_op_id.get()
     if op:
         from .vm import broker
-        broker.mark_tainted(str(op), source)
+        broker.mark_tainted(str(op), source, name)
 
 
 def _rate(q: collections.deque, per_s: int) -> bool:
@@ -1193,7 +1193,7 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     # whatever comes back — a screen, shell output, even the client's error
     # text — was written by that machine, not by us. The broker also taints by
     # tool name; this covers a desk action reached any other way.
-    _taint()
+    _taint(d.name)
     timeout = CALL_TIMEOUT_S + (p["timeout_ms"] / 1000 if verb == "wait" else 0)
     try:
         res = await _call(d, verb, p, timeout)
@@ -1276,7 +1276,7 @@ async def _shell(d: Desk, p: dict, g: dict, op: str | None) -> str:
                      detail={"device_id": d.device_id, "cmd": p["cmd"][:1000],
                              "cwd": p.get("cwd"), "approver": approver,
                              "tainted": _tainted(op)})
-        _taint()        # after the trust decision: its own output can't un-trust it
+        _taint(d.name)  # after the trust decision: its own output can't un-trust it
         wire = {**p, "mode": mode}
         if mode == "argv":
             wire["argv"] = argv

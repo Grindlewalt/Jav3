@@ -203,3 +203,20 @@ async def test_broker_sets_nav_taint_only_after_desk_or_browser(tmp_env):
         broker.release_turn("op-nav")
     assert seen == [None, None, "desk"]
     assert "op-nav" not in broker._nav_tainted
+
+
+def test_quarantine_note_wording_per_source():
+    from backend import memory
+    assert memory.taint_phrase("desk", "grant-mac-desk") == \
+        'read the screen of "grant-mac-desk" (desk)'
+    assert memory.taint_phrase("desk", 'a "b"') == "read the screen of \"a 'b'\" (desk)"
+    assert memory.taint_phrase("web") == "read a web page"
+    assert memory.taint_phrase("browser").endswith("(browser)")
+    assert memory.taint_phrase("local").endswith("(local)")
+    n = memory.quarantine_note([("desk", "grant-mac-desk")])
+    assert 'turn that already read the screen of "grant-mac-desk" (desk). It is ' \
+        "quarantined" in n and "web/research" not in n
+    assert "operator reviews and approves it" in n
+    assert "already read a web page and read a page in the operator's browser" in \
+        memory.quarantine_note([("web", None), ("browser", None)])
+    assert "already consumed untrusted external content." in memory.quarantine_note([])
