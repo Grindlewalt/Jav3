@@ -10,13 +10,20 @@
 // functions (the same ones its buttons call) or the same endpoint the
 // component that owns the feature calls. Nothing here is a new API.
 //
-// env: { host, work, navigate, say, later, afterRender, setNextChat, openDump }
+// env: { host, work, auth, navigate, say, later, afterRender, setNextChat, openDump }
 //   host   what Chat.jsx passes to useSlash (see useSlash.jsx)
 //   work   WorkContext: { openWindow, closeWindow, project }
+//   auth   AuthContext: { user, logout }
+//
+// run() may also return { card, rows } — a titled list of [label, value] rows
+// (/status) — instead of a line. What the terminal client has and this app
+// does not is answered from terminal.js, one line each.
 
 import { api } from '../api.js'
+import { listBoxes } from '../boxes/api/vms.js'
 import { loadModel, modelCaption, modelOption, setModel } from '../modelInfo.js'
 import { transcriptMarkdown } from './parse.js'
+import { statusRows, toggleToolRows } from './status.js'
 
 // the Work page's window (card) types — the board's PANEL_TYPES
 export const WINDOW_TYPES = [
@@ -43,6 +50,12 @@ const SECURITY_TABS = [
   ['secrets', 'secrets and key grants'],
 ]
 
+const VMS_TABS = [
+  ['boxes', 'running and reserved boxes'],
+  ['images', 'variants and versions'],
+  ['catalogue', 'package requests'],
+]
+
 const need = (cond, msg) => { if (!cond) throw new Error(msg) }
 
 function currentConvo(host) {
@@ -54,6 +67,13 @@ function projectOptions(host, extra = []) {
     ...extra,
     ...host.projects.map((p) => ({ value: p.slug, label: p.name, meta: p.slug })),
   ]
+}
+
+// the project this chat is (or will be) pinned to, as words
+function projectLabel(h) {
+  const c = currentConvo(h)
+  return c?.project_slug ? c.project_slug
+    : h.pendingProject || (c?.project_locked ? 'none' : 'follows the loaded project')
 }
 
 function lastOf(host, role) {
@@ -101,6 +121,34 @@ export const COMMANDS = [
       env.host.setInput('/')
       return '↑↓ move · Tab completes · Enter runs · Esc closes · //text sends a message '
         + 'that starts with a slash · Enter while a turn runs messages the agent'
+    },
+  },
+  {
+    name: 'status', busyOk: true,
+    help: 'server, chat, model, usage, boxes',
+    run: async (_, env) => {
+      const h = env.host
+      const c = currentConvo(h)
+      // each read is best-effort: a card with a missing row beats no card
+      const [me, m, info, boxes] = await Promise.all([
+        api('/api/auth/me').catch(() => null),
+        loadModel().catch(() => null),
+        h.conversationId ? api(`/api/conversations/${h.conversationId}/info`).catch(() => null)
+          : null,
+        listBoxes().catch(() => null),
+      ])
+      const id = info?.model || m?.active
+      return {
+        card: 'Status',
+        rows: statusRows({
+          origin: window.location.origin, user: me?.username || env.auth?.user?.username,
+          chat: h.conversationId ? { id: h.conversationId, title: c?.summary || info?.title }
+            : null,
+          temporary: h.temporary,
+          model: id ? { id, label: modelOption(m, id).label } : null,
+          project: projectLabel(h), info, boxes,
+        }),
+      }
     },
   },
   {
@@ -188,11 +236,7 @@ export const COMMANDS = [
     ]),
     run: async (arg, env) => {
       const h = env.host
-      if (!arg) {
-        const c = currentConvo(h)
-        return c?.project_slug ? `project: ${c.project_slug}`
-          : `project: ${h.pendingProject || (c?.project_locked ? 'none' : 'follow')}`
-      }
+      if (!arg) return `project: ${projectLabel(h)}`
       if (arg === 'none' || arg === 'follow') {
         await h.pickProject(arg, '')
         return `project: ${arg}`
@@ -313,6 +357,41 @@ export const COMMANDS = [
     },
   },
   {
+    name: 'details', aliases: ['tools'], busyOk: true,
+    help: 'expand or collapse every tool row in this chat',
+    run: () => {
+      const { opened, closed } = toggleToolRows(
+        document.querySelector('.chat-layout .messages') || document)
+      if (!opened && !closed) return 'no finished tool rows in this chat yet'
+      return opened ? `expanded ${opened} tool row${opened === 1 ? '' : 's'}`
+        : `collapsed ${closed} tool row${closed === 1 ? '' : 's'}`
+    },
+  },
+  {
+    name: 'detach', busyOk: true,
+    help: 'drop pending !command output (terminal client)',
+    run: () => 'nothing to detach — !command output is the terminal client’s; the web '
+      + 'composer has no shell attachments',
+  },
+  {
+    name: 'editor', busyOk: true,
+    help: 'the composer is the editor here ($EDITOR is the terminal client’s)',
+    run: () => {
+      document.querySelector('.composer-inner textarea')?.focus()
+      return 'the composer is the editor here — Shift+Enter starts a new line; the '
+        + 'terminal client’s /editor opens $EDITOR'
+    },
+  },
+  {
+    name: 'web', busyOk: true,
+    help: 'this chat’s link in the web app',
+    run: (_, env) => {
+      const id = env.host.conversationId
+      return id ? `you’re in the web app — this chat: ${window.location.origin}/c/${id}`
+        : 'you’re in the web app already — /web in the terminal client opens its chat here'
+    },
+  },
+  {
     name: 'orchestration', aliases: ['orchestrate'], usage: '[project]',
     help: 'brain-dump a problem; an orchestrator sends agents at it',
     args: (env) => projectOptions(env.host),
@@ -332,6 +411,16 @@ export const COMMANDS = [
       const tab = (arg || 'queue').toLowerCase()
       need(SECURITY_TABS.some(([t]) => t === tab), `no Security tab “${arg}”`)
       env.navigate(tab === 'queue' ? '/security' : `/security/${tab}`)
+    },
+  },
+  {
+    name: 'vms', usage: '[boxes|images|catalogue]', busyOk: true,
+    help: 'boxes, images and the package catalogue',
+    args: () => VMS_TABS.map(([value, meta]) => ({ value, label: value, meta })),
+    run: (arg, env) => {
+      const tab = (arg || 'boxes').toLowerCase()
+      need(VMS_TABS.some(([t]) => t === tab), `no VMs tab “${arg}”`)
+      env.navigate(tab === 'boxes' ? '/vms' : `/vms/${tab}`)
     },
   },
   {
@@ -362,5 +451,28 @@ export const COMMANDS = [
     help: 'close the focused window',
     // no id: the Work layout closes the focused one
     run: (_, env) => { env.work.closeWindow(env.work.focused ?? undefined) },
+  },
+  {
+    name: 'login', busyOk: true,
+    help: 'who is signed in (the web app asks for the password itself)',
+    run: (_, env) => {
+      const who = env.auth?.user?.username
+      return who ? `signed in as ${who} — /logout yes signs out of this browser`
+        : 'not signed in — the login page takes the password'
+    },
+  },
+  {
+    name: 'logout', usage: '[yes]',
+    help: 'sign out of this browser',
+    args: (env) => [{ value: 'yes', label: 'yes',
+                      meta: `sign out ${env.auth?.user?.username || ''}`.trim() }],
+    run: async (arg, env) => {
+      // a slip of the finger costs a login and any draft: ask once
+      if (arg !== 'yes') {
+        return `signed in as ${env.auth?.user?.username || '?'} — /logout yes signs out of `
+          + 'this browser'
+      }
+      await env.auth.logout()
+    },
   },
 ]
