@@ -4098,8 +4098,8 @@ a:has(> .nav-dot) { position: relative; }
    shrink-wrapped, it widened with every label and every line and the text
    under it jumped sideways. */
 .msg.assistant .bubble:has(.tool-row, .tool-fold, .activity-group, .typing) {
-  min-width: min(100%, 30rem); }
-.msg-avatar.thinking + .bubble { min-width: min(100%, 30rem); }
+  min-width: min(30rem, calc(100% - 43px)); }   /* 43 = avatar + gap */
+.msg-avatar.thinking + .bubble { min-width: min(30rem, calc(100% - 43px)); }
 
 /* the dock: what rides with the composer while a turn runs */
 .composer .turn-status, .composer .ask-card {
@@ -4144,10 +4144,16 @@ a:has(> .nav-dot) { position: relative; }
    chat sits beside windows */
 .chat-toolbar { flex-wrap: wrap; row-gap: 4px; }
 .chat-toolbar > .chat-title, .chat-toolbar > .grow { flex: 1 1 140px; min-width: 0; }
-.chat-meta { margin-left: auto; }
+.chat-meta { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+.chat-meta .proj-pick { flex-shrink: 0; max-width: 100%; }
 
 /* job trees: how the job stands, and a failure that reads as one */
 .run-summary { padding: 0 2px 4px; }
 .run-live { color: var(--green); }
 .run-failed { color: var(--red); }
 .run-err { color: var(--red); font-size: 11.5px; min-width: 0; max-width: 45%; }
+
+/* plan panel: how the run stands */
+.plan-progress { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.plan-failed { color: var(--red); }
+.plan-item.running { box-shadow: inset 2px 0 0 var(--accent); }

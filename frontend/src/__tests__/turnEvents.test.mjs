@@ -4,7 +4,7 @@ import test from 'node:test'
 import {
   activityMark, applyTurnEvent, atBottom, clipText, errorLine, exitNote, failTurn, finishTurn,
   fmtCost, fmtElapsed, fmtMs, foldParts, keyArg, makeTurnFolder, newTurn, patchStreaming,
-  streamingIndex, toolLine, turnStats,
+  readerLeft, streamingIndex, toolLine, turnStats,
 } from '../turnEvents.js'
 
 const turn = () => newTurn('hi', 1000)[1]
@@ -202,7 +202,7 @@ test('a long run folds its older finished rows and keeps the newest', () => {
   assert.equal(foldParts(parts.slice(0, 5), { keep: 4 }).length, 5)
 })
 
-test('errors, running calls, jobs and text never fold, and split a fold', () => {
+test('errors, running calls and jobs never fold, and split a fold; narration folds with its calls', () => {
   const parts = [
     done('a'), done('b'), done('c'), { kind: 'tool', id: 'bad', done: true, ok: false },
     done('d'), done('e'), done('f'), { kind: 'text', text: 'note' },
@@ -210,12 +210,16 @@ test('errors, running calls, jobs and text never fold, and split a fold', () => 
     { kind: 'tool', id: 'live', done: false }, done('j'),
   ]
   const out = foldParts(parts, { keep: 1, min: 3 })
-  assert.deepEqual(out.map((p) => p.kind), ['fold', 'tool', 'fold', 'text', 'fold', 'job', 'tool', 'tool'])
+  assert.deepEqual(out.map((p) => p.kind), ['fold', 'tool', 'fold', 'job', 'tool', 'tool'])
   assert.equal(out[1].id, 'bad')
   assert.deepEqual(out[0].parts.map((p) => p.id), ['a', 'b', 'c'])
+  assert.deepEqual(out[2].parts.map((p) => p.id ?? p.kind), ['d', 'e', 'f', 'text', 'g', 'h', 'i'])
   // folding is stable: more rows after it keep the same first row, so the same key
   const more = foldParts([...parts, done('k')], { keep: 1, min: 3 })
   assert.equal(more[0].key, out[0].key)
+  // the reply (text after the last call) never folds
+  const reply = foldParts([done('a'), done('b'), done('c'), done('d'), { kind: 'text', text: 'the answer' }], { keep: 1, min: 3 })
+  assert.equal(reply.at(-1).kind, 'text')
 })
 
 test('following the bottom', () => {
@@ -223,4 +227,15 @@ test('following the bottom', () => {
   assert.equal(atBottom(860, 100, 1000), true)     // within the slack
   assert.equal(atBottom(500, 100, 1000), false)
   assert.equal(atBottom(0, 100, 100), true)        // nothing to scroll
+})
+
+test('the reader leaves only by scrolling up themselves', () => {
+  // wheeled up, not at the end: left
+  assert.equal(readerLeft({ top: 300, last: 900, bottom: false, sinceInput: 50 }), true)
+  // the position moved up with nobody touching it (rows folded, content shrank): not left
+  assert.equal(readerLeft({ top: 300, last: 900, bottom: false, sinceInput: 5000 }), false)
+  // back at the end: never left
+  assert.equal(readerLeft({ top: 900, last: 950, bottom: true, sinceInput: 10 }), false)
+  // touched it but did not move up
+  assert.equal(readerLeft({ top: 900, last: 900, bottom: false, sinceInput: 10 }), false)
 })

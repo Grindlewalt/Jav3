@@ -166,6 +166,7 @@ const JobRow = memo(function JobRow({ part }) {
 const FoldRow = memo(function FoldRow({ parts }) {
   const [open, setOpen] = useState(false)
   const ms = parts.reduce((t, p) => t + (p.ms || 0), 0)
+  const steps = parts.filter((p) => p.kind === 'tool').length
   return (
     <div className="tool-fold">
       <div className="tool-fold-head" role="button" tabIndex={0} aria-expanded={open}
@@ -175,10 +176,12 @@ const FoldRow = memo(function FoldRow({ parts }) {
            }}>
         <span className={`chev ${open ? 'open' : ''}`} aria-hidden="true">›</span>
         <span className="tool-ok">✓</span>
-        <span>{parts.length} earlier steps</span>
+        <span>{steps} earlier step{steps === 1 ? '' : 's'}</span>
         {ms > 0 && <span className="tool-ms">{fmtMs(ms)}</span>}
       </div>
-      {open && parts.map((p, i) => <ToolRow key={p.id ?? i} part={p} />)}
+      {open && parts.map((p, i) => (p.kind === 'text'
+        ? <Text key={`ft${i}`} text={p.text} />
+        : <ToolRow key={p.id ?? i} part={p} />))}
     </div>
   )
 })

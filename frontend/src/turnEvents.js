@@ -302,8 +302,8 @@ export function clipText(s, max = 4000) {
 
 // A long run is a wall of rows. While it streams, the finished, uneventful
 // ones far behind the newest fold into a single "N earlier steps" line, so the
-// screen holds what is happening now. Errors, running calls, jobs and text
-// never fold. Returns display items: the part itself, or
+// screen holds what is happening now. Errors, running calls and jobs never
+// fold, and neither does anything within `keep` calls of the newest. Returns display items: the part itself, or
 // { kind: 'fold', key, parts } standing for a run of them.
 export function foldParts(parts = [], { keep = 6, min = 3 } = {}) {
   // how many tool rows sit after each index
@@ -313,7 +313,10 @@ export function foldParts(parts = [], { keep = 6, min = 3 } = {}) {
     after[i] = seen
     if (parts[i].kind === 'tool') seen += 1
   }
-  const foldable = (p, i) => p.kind === 'tool' && p.done && p.ok !== false && after[i] >= keep
+  // narration between the calls folds with them (it is gone from the finished
+  // message anyway); a text run with no call behind it is the reply, and stays
+  const foldable = (p, i) => after[i] >= keep
+    && (p.kind === 'text' || (p.kind === 'tool' && p.done && p.ok !== false))
   const out = []
   let run = []
   const close = () => {
@@ -334,4 +337,12 @@ export function foldParts(parts = [], { keep = 6, min = 3 } = {}) {
 // Is the reader at (or within `slack` px of) the end of a scroller?
 export function atBottom(scrollTop, clientHeight, scrollHeight, slack = 48) {
   return scrollHeight - (scrollTop + clientHeight) <= slack
+}
+
+// Did the reader scroll away from the end? The position went up while they
+// were touching the scroller (`sinceInput`, ms since the last wheel, touch, key
+// or scrollbar press) and it is not at the end. The position going up alone is
+// not enough: folding rows into one line shrinks the content and moves it.
+export function readerLeft({ top, last, bottom, sinceInput, within = 700 }) {
+  return !bottom && top < last - 2 && sinceInput < within
 }
