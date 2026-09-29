@@ -912,6 +912,23 @@ def test_mac_apps_come_from_the_installed_bundles(cfg, tmp_path):
     assert jd.local_apps("darwin", mac_dirs=dirs) == {"Mine": ["/usr/bin/true"]}
 
 
+def test_desk_apps_override_drops_terminals_and_status_says_so(cfg, capsys):
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "desk-apps.json").write_text(json.dumps({
+        "Mine": ["/usr/bin/true"], "Terminal": ["/usr/bin/open", "-a", "Terminal"],
+        "iTerm2": ["/usr/bin/open", "-a", "iTerm"], "Script Editor": ["x"],
+        "My Terminal Tool": ["y"]}))
+    assert jd.local_apps("darwin") == {"Mine": ["/usr/bin/true"]}
+    kept, dropped = jd.apps_override()
+    assert kept == {"Mine": ["/usr/bin/true"]}
+    assert dropped == ["Terminal", "iTerm2", "Script Editor", "My Terminal Tool"]
+    jd.cmd_status(type("A", (), {"backend": None})())
+    out = capsys.readouterr().out
+    assert [ln for ln in out.splitlines() if ln.startswith("apps:")] == [
+        "apps:    desk-apps.json entries not offered (a terminal or script runner is shell "
+        "by other means): Terminal, iTerm2, Script Editor, My Terminal Tool"]
+
+
 def test_linux_apps_add_desktop_entries(cfg, tmp_path, monkeypatch):
     d = tmp_path / "apps"
     d.mkdir()
