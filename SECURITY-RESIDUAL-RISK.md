@@ -452,6 +452,55 @@ a watched, policy-gated, cuttable pipe to the internet.
       false), not OS input: some sites ignore them, and no debugger
       permission is taken to do better.
 
+19. **Captured model context (raw-context capture, on by default,
+    2026-09-29).** Every model call's exact message array is stored in
+    `model_calls.context` (`backend/ctxstore.py`). It has been on by default
+    since the F4 merge: no state row means capturing, and only the switch in
+    Logs > Cost turns it off. It covers every call the host makes to the
+    model, including the ones a box's loop makes through the gateway and the
+    utility calls (chat naming, summaries). What is stored is what was sent:
+    the system prompt (with the memory notes, `project.md` and agent
+    definition assembled into it), the whole history, and every tool result
+    the model read: file contents, shell output, `web_read` text. Images are
+    replaced by a size placeholder. Each call is a zlib frame or a delta
+    against the conversation's previous call (a full frame at least every 24
+    calls). It is compressed, not encrypted, and lives in the same SQLite
+    file as everything else on the host. Blobs are nulled after
+    `context_capture_keep_days` (7; Logs offers 1, 3, 7, 14 or 30). The pass
+    runs at most every ten minutes after a model call and hourly from the
+    storage watch, and a delta chain goes as a unit, when its newest call is
+    past the cutoff. Token counts and costs are kept. What is closed: capture
+    is host-side (a guest has no route to it); the read route
+    (`/api/logs/calls/{id}/context`) and the switch and retention controls are
+    cookie-session only, so a chat or desk device token cannot reach them; a
+    storage notice fires when captured bytes pass a threshold. What
+    deliberately remains:
+    - **A second copy of everything the model saw, for days.** Capture does
+      no scrubbing of its own. Whatever reached the model is kept as it was
+      sent: a secret the operator pasted into a chat, a value sitting in a
+      file the agent read, personal data in a fetched page. Anyone who can
+      read the database file reads it.
+    - **Deleting a chat does not delete it.** Chat delete removes the
+      conversation, its messages and tool calls, not its `model_calls` rows.
+      The context stays until retention nulls it. The shortest retention
+      offered is one day, and turning capture off stops new capture without
+      removing what is stored (the prune control deletes what is older than N
+      days, N at least 1).
+    - **Backups carry it.** The database snapshot goes to the backup remote
+      unencrypted (see the backup row below), so a captured blob lives as long
+      as that backup does, whatever the retention.
+    - **Incognito is not excluded for turns that run in a box (open,
+      2026-09-29).** `record_model_call` stores no content, and drops the
+      conversation and op ids, only when `runtime.ephemeral` is set in the
+      calling task. Host-side calls set it. The gateway serves a box's calls
+      from its own task and never sets it from the turn's envelope, and chat
+      turns always run through `guest_turn`. So an incognito chat's system
+      prompt and tool results are captured under the id of a conversation that
+      is then deleted, and age out with the rest. Confirmed by driving
+      `handle_conn` with an ephemeral envelope. The fix is to set
+      `runtime.ephemeral` from `broker.get_turn(op_id)` in the gateway's
+      `_handle_model_call`; delete this bullet when it lands.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -479,6 +528,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Web origin (CSRF / agent HTML) | Critical | Low | One global scheme+host+port same-origin gate for every cookie state change and WebSocket; agent files served sandboxed/inert. Residual = a missing-Origin non-browser client holding the cookie. |
 | Host-side project runner | Critical | Medium | Executes on the host by design; same-origin gated and audited per run. Existence is the operator's decision. |
 | Backup contents and destination | High | Medium | DB snapshot (incl. bcrypt hashes) uploaded unencrypted; secrets only through rclone crypt; destination changes raise a security event; rclone binary constrained; git hooks never restored. |
+| Captured model context (`backend/ctxstore.py`, on by default) | High | **Medium** | Host-side only; read route, switch and retention are cookie-session only; blobs age out after 7 days by default (1-30 chosen in Logs); images redacted. Residual: an unscrubbed, compressed second copy of everything the model saw (system prompt, memory, tool results) that outlives its chat (chat delete leaves it), rides in the unencrypted DB backup, and, until fixed, includes incognito turns that run in a box (#19). |
 | Computer use (`jav3-desk`) | Critical | **Medium** | Desk-scoped token, server-side per-computer grants under a client ceiling (shell off until allowed at the keyboard), screenshot-before-input, rate limits, audit, taint with shell falling back to asking. Residual = on-screen prompt injection steering granted Input, and Input reaching a terminal. |
 | Browser use (`jav3-browser`) | Critical | **Medium** | Browser-scoped token (first-frame, socket only), per-browser per-project Read/Act grants (none by default), own unfocused window and own tabs only, per-site consent in the extension, action notification with Cancel, Pause, closed verb list checked both sides, read-before-act, secret-value and Jav3-host refusals, taint like web_read, audit. Residual = acting with the operator's sessions on allowed sites outside the egress proxy, page prompt injection steering granted Act, host-level (not page-level) consent. |
 | `/local` chats (agent file + shell tools on the `jav3` client's machine) | Critical | **Medium** | Opt-in per chat at the client; the server can only ask over the turn's stream, the client executes. Writes, edits and commands wait for y / a (always, per kind, this session) / n at that keyboard; reads never ask and may reach any path the operator's user can. Only the actor that opened the chat may answer a call; unanswered calls time out (15 min) and die with stop; args carrying a stored secret are refused; results are capped, secret-scrubbed and taint the turn. Residual = a prompt-injected turn reading local files the operator never meant to share (they go to the model provider), and "always" for shell turning every later command in that session into an unattended one. |
