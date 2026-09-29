@@ -5742,6 +5742,8 @@ def build_tui(base: str, token: str, **kw):
                             async for ev in aiter_sse(r.aiter_lines()):
                                 if ev.get("type") == "agent_run_done":
                                     self._agent_notice(ev)
+                                elif ev.get("type") == "storage_warning":
+                                    self.push_notice("◆ " + _short(ev.get("summary") or "storage is filling up", 300), "warn")
                 except (httpx.HTTPError, ValueError):
                     pass
                 await asyncio.sleep(backoff)
