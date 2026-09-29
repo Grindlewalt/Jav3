@@ -880,6 +880,19 @@ async def test_second_click_of_a_batch_on_old_ids_is_refused(env, monkeypatch):
         await fd.stop()
 
 
+def test_a_part_of_a_label_is_not_a_match():
+    def el(i, label, role="button"):
+        return {"id": i, "role": role, "label": label, "x": 0, "y": 0, "w": 9, "h": 9}
+    book, delete = el(1, "Book now"), el(2, "Delete account")
+    assert desk._match_label([book], "OK") is None
+    assert desk._match_label([delete], "Delete") is None
+    assert desk._match_label([delete], "delete account button") is delete
+    assert desk._match_label([book, delete], "Button Book now") is book
+    assert desk._match_label([el(3, "Save As…")], "save as") is not None
+    assert desk._match_label([el(4, "OK"), el(5, "ok")], "ok") is None       # two: doubt
+    assert desk._match_label([el(6, "Button")], "button") is not None        # the label IS the word
+
+
 async def test_click_by_target_label_then_grounding(env, monkeypatch):
     from backend import grounding
     fd = await _nav(env)

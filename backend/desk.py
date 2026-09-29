@@ -1054,20 +1054,28 @@ def took_line(timing) -> str | None:
 
 def _match_label(els: list[dict], target: str) -> dict | None:
     """A registry element the description names without doubt: a unique exact
-    (case-insensitive) label, also as "label role" / "role label" ("Save
-    button"); else a unique element whose label contains the description.
-    Two matches is doubt: the caller asks grounding, which sees the picture."""
-    t = target.strip().lower()
-    if not t:
+    (case-insensitive) WHOLE label, also with a leading or trailing role word
+    ("Save button", "field Search"). A part of a label is not a match: "OK" is
+    not "Book now", "Delete" is not "Delete account". Two matches, or none,
+    is doubt: the caller asks grounding, which sees the picture."""
+    tw = _label_words(target)
+    while len(tw) > 1 and tw[0] in _ROLE_WORDS:
+        tw = tw[1:]
+    while len(tw) > 1 and tw[-1] in _ROLE_WORDS:
+        tw = tw[:-1]
+    if not tw:
         return None
-    exact = [e for e in els if e["label"] and t in (e["label"].lower(),
-             f"{e['label']} {e['role']}".lower(), f"{e['role']} {e['label']}".lower())]
-    if len(exact) == 1:
-        return exact[0]
-    if exact:
-        return None
-    sub = [e for e in els if e["label"] and t in e["label"].lower()]
-    return sub[0] if len(sub) == 1 else None
+    whole = [e for e in els if e["label"] and _label_words(e["label"]) == tw]
+    return whole[0] if len(whole) == 1 else None
+
+
+_ROLE_WORDS = frozenset(("button", "link", "field", "textfield", "tab", "menu", "menuitem",
+                         "checkbox", "radio", "toggle", "slider", "combobox", "item",
+                         "icon", "input", "box"))
+
+
+def _label_words(s: str) -> list[str]:
+    return re.findall(r"\w+", str(s).casefold())
 
 
 async def _resolve_point(d: Desk, verb: str, params: dict) -> tuple[dict, dict | None]:
