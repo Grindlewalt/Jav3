@@ -1,8 +1,9 @@
 // node frontend/src/__tests__/securityCopy.test.mjs
 import assert from 'node:assert/strict'
 import {
-  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE,
-  allowedLine, baselineAsk, decidedText, ledeFor, plural, secretChecklist,
+  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, AUTO_REVIEW_LEDE,
+  PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
+  decidedText, ledeFor, plural, secretChecklist, tallyLine,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -72,5 +73,21 @@ cl = secretChecklist(choices, ['CF_ACCESS_CLIENT_ID', 'GONE_KEY'], false)
 assert.deepEqual(cl.list, ['CF_ACCESS_CLIENT_ID', 'GONE_KEY', 'NEWS_API_KEY'])
 assert.equal(cl.hidden, 1)
 assert.ok(cl.infra.has('CF_ACCESS_CLIENT_ID'))
+
+// WEB-09: Auto review says what it does, that it costs tokens and that it can be undone;
+// the two "Auto" features have different names; the tally has no jargon
+const lede = AUTO_REVIEW_LEDE.join(' ')
+assert.match(lede, /no tools/)
+assert.match(lede, /costs tokens/)
+assert.match(lede, /can be undone/)
+assert.match(lede, /always-allow list/)
+assert.match(AUTO_ALLOW_LABEL, /experimental/)
+assert.notEqual(AUTO_ALLOW_LABEL.toLowerCase().replace(/[^a-z]/g, ''), 'autoreview')
+assert.match(AUTO_ALLOW_LEDE, /Different from Auto review/)
+assert.equal(tallyLine({ examined: 3, allowed: 1, acked: 1, flagged: 1 }),
+  'looked at 3 items, allowed 1 site, cleared 1 alert, flagged 1 for you')
+assert.equal(tallyLine({ examined: 1, allowed: 0, acked: 2, flagged: 0, error: 'x' }),
+  'looked at 1 item, allowed 0 sites, cleared 2 alerts, flagged 0 for you (stopped early)')
+for (const jargon of ['unreviewed', 'acked', ' seen']) assert.ok(!lede.includes(jargon), jargon)
 
 console.log('securityCopy ok')

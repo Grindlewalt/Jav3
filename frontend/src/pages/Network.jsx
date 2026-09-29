@@ -4,7 +4,8 @@ import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { useEgressDecide } from '../EgressDecide.jsx'
 import {
-  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, DENY_TIP, REFUSED_TAG, WAITING_LEDE,
+  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, DENY_TIP, REFUSED_TAG,
+  WAITING_LEDE,
 } from '../securityCopy.js'
 import { human, tsShort } from '../format.js'
 import { Link } from 'react-router-dom'
@@ -29,9 +30,6 @@ import {
 // plain text nodes, never markup.
 
 const FEED_CAP = 300
-
-// The operator's wording, verbatim — this is the whole disclaimer.
-const AUTO_LABEL = 'Auto (test only — can make mistakes; you can leave it on)'
 
 // egress_events.verdict -> what the row says, and the Tag that says it. Three
 // words only: allowed, blocked, cut. Auto decisions keep their manual twin's
@@ -133,8 +131,9 @@ function AutoToggle({ project, onChange }) {
       : 'this project only'
   return (
     <div className="net-auto">
-      <Toggle checked={!!mode?.effective} disabled={!mode} label={AUTO_LABEL}
-              onText={AUTO_LABEL} offText={AUTO_LABEL} onChange={flip} />
+      <Toggle checked={!!mode?.effective} disabled={!mode} label={AUTO_ALLOW_LABEL}
+              onText={AUTO_ALLOW_LABEL} offText={AUTO_ALLOW_LABEL} onChange={flip}
+              title={AUTO_ALLOW_LEDE} />
       <span className="dim small">{scope}</span>
     </div>
   )
@@ -198,11 +197,11 @@ function Waiting({ project, names, showProject, lastTry, tick, onDecided }) {
               {p.refused && <span className="dim small net-refused">{p.refused}</span>}
               <span className="net-actions">
                 {!p.refused && <>
-                  <Button onClick={() => decide(p, 'allow')} title={ALLOW_ALWAYS_TIP(label)}>
+                  <Button variant="ghost" onClick={() => decide(p, 'allow')} title={ALLOW_ALWAYS_TIP(label)}>
                     {needsProject(p) && !project ? 'Allow always…' : 'Allow always'}</Button>
                   <Button variant="ghost" onClick={() => decide(p, 'once')} title={ALLOW_ONCE_TIP}>
                     Allow 1 h</Button></>}
-                <Button onClick={() => decide(p, 'deny')} title={DENY_TIP}>Deny</Button>
+                <Button variant="ghost" onClick={() => decide(p, 'deny')} title={DENY_TIP}>Deny</Button>
               </span>
             </li>
           )
@@ -670,6 +669,7 @@ export function NetworkPanel({ slug }) {
         <AutoToggle project={slug} onChange={bump} />
         <Counts project={slug} tick={tick} />
       </div>
+      <p className="dim small net-lede">{AUTO_ALLOW_LEDE}</p>
       <Waiting project={slug} names={{}} lastTry={lastTry} tick={tick} onDecided={bump} />
       <Decisions feed={feed.slice(0, 60)} names={{}} onChanged={bump} />
       <PolicyLists project={slug} names={{}} projects={[]} tick={tick} onChanged={bump} />
@@ -711,6 +711,7 @@ export default function Network() {
         <AutoToggle project={filter} onChange={bump} />
         <Counts project={filter} tick={tick} />
       </div>
+      <p className="dim small net-lede">{AUTO_ALLOW_LEDE}</p>
 
       <Waiting project={filter} names={names} showProject={!filter}
                lastTry={lastTry} tick={tick} onDecided={bump} />

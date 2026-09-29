@@ -4218,3 +4218,4 @@ a:has(> .nav-dot) { position: relative; }
 .allowed-procs > summary { cursor: pointer; color: var(--dim); }
 .review-body > .tab-lede { margin: 0 auto var(--sp-6); flex-shrink: 0; font-size: var(--fs-md); }
 .sbd-table td:last-child { white-space: nowrap; }
+.triage-lede { margin: 0 0 var(--sp-3); max-width: 80ch; }

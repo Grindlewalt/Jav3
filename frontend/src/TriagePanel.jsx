@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ts } from './format.js'
+import {
+  AUTO_REVIEW_LEDE, AUTO_REVIEW_OFF_TIP, AUTO_REVIEW_ON_TIP, tallyLine,
+} from './securityCopy.js'
 import { notifyError } from './notify.js'
 import { Button, Toggle } from './components/index.js'
 
@@ -15,9 +18,9 @@ import { Button, Toggle } from './components/index.js'
 //
 // It wears the same section head as the queues below it (sbx-sec-head → h3 +
 // count chip + right-aligned actions) so the page reads as one list of things
-// rather than a foreign card sitting on top of one. The explanatory paragraph
-// is deliberately gone: it explained the feature every single visit, which is
-// a one-time need.
+// rather than a foreign card sitting on top of one. The two-line explanation
+// under the head is back (WEB-09): what reviews, what it may approve, that it
+// costs tokens, where undo is. It is short enough to read every visit.
 //
 // "Review now" only exists when something is untriaged — the sweeper keeps
 // that at zero, so a permanently greyed button was the whole card's read.
@@ -72,23 +75,20 @@ export default function TriagePanel() {
         {/* the switch sits against the heading it names, not among the
             actions: "Auto review [on] Auto" reads as one setting */}
         <Toggle checked={!!s.enabled} onChange={toggle} label="Auto review"
-                onText="Auto" offText="Manual"
-                title={s.enabled
-                  ? 'sweeps unreviewed queue items on its own every few '
-                    + 'minutes'
-                  : 'nothing is swept on its own — use Review now'} />
+                onText="On" offText="Off"
+                title={s.enabled ? AUTO_REVIEW_ON_TIP : AUTO_REVIEW_OFF_TIP} />
         {/* "clear" only when nothing is waiting on anyone: an item the
             reviewer flagged is reviewed, but it is not clear — it is waiting
             on the operator, so the flag count stands in for the chip */}
-        {untriaged > 0 && <span className="sec-count">{untriaged} unreviewed</span>}
+        {untriaged > 0 && <span className="sec-count">{untriaged} not reviewed yet</span>}
         {flagged > 0 && (
-          <span className="tag triage-flag">{flagged} flagged below</span>)}
+          <span className="tag triage-flag">{flagged} flagged for you below</span>)}
         {untriaged === 0 && flagged === 0 && (
           <span className="sec-count clear">clear</span>)}
         {(untriaged > 0 || s.running) && (
           <div className="sec-actions">
             <Button variant="ghost" disabled={busy || s.running}
-                    title={`run auto review over the ${untriaged} unreviewed item(s) now`}
+                    title={`run Auto review over the ${untriaged} item(s) not reviewed yet, now`}
                     onClick={() => act('/api/reviewer/run')}>
               {s.running ? 'Running…' : 'Review now'}
             </Button>
@@ -96,12 +96,11 @@ export default function TriagePanel() {
         )}
       </div>
 
+      {AUTO_REVIEW_LEDE.map((t) => <p key={t} className="dim small triage-lede">{t}</p>)}
+
       {last && (
         <div className="dim small triage-tally">
-          Last sweep {ts(last.finished_at || last.started_at)}
-          {' · '}{last.examined} seen{' · '}{last.allowed} allowed
-          {' · '}{last.acked} acked{' · '}{last.flagged} flagged
-          {last.error && ' · stopped early'}
+          Last run {ts(last.finished_at || last.started_at)}: {tallyLine(last)}
         </div>
       )}
 
@@ -110,13 +109,13 @@ export default function TriagePanel() {
           <button className="triage-log-toggle" type="button"
                   onClick={() => setLogOpen((o) => !o)}>
             <span className={logOpen ? 'chev open' : 'chev'} aria-hidden="true">›</span>
-            Auto-handled recently ({s.recent_auto.length}) — undoable
+            Handled by Auto review recently ({s.recent_auto.length}), each can be undone
           </button>
           {logOpen && s.recent_auto.map((l) => (
             <div key={`l${l.id}`} className="sbx-row triage-row">
               <div className="grow" style={{ minWidth: 0 }}>
                 <div className="ellipsis" title={l.subject}>
-                  <span className="tag done">{l.action === 'approved' ? 'allowed' : 'acked'}</span>
+                  <span className="tag done">{l.action === 'approved' ? 'allowed' : 'cleared'}</span>
                   {' '}<span className="mono">{l.subject}</span>
                   {l.project_slug && <span className="tag">{l.project_slug}</span>}
                 </div>

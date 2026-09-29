@@ -154,3 +154,35 @@ export function secretChecklist(choices, held, showInfra) {
   const hidden = [...infra].filter((n) => !showInfra && !held.includes(n)).length
   return { list, infra, hidden }
 }
+
+// ---- Auto review (the queue's model reviewer) and Network's auto-allow (WEB-09) ---
+// Two different features that both said "Auto": the reviewer sweeps the queue
+// after the fact (backend/reviewer.py), the auto-allow judges a site the moment
+// a box asks (backend/egress_auto.py). Named apart, each explained on screen.
+
+export const AUTO_REVIEW_LEDE = [
+  'A separate model with no tools reads new items every few minutes. It puts well-known '
+    + "sites on their project's always-allow list and clears routine alerts; anything else "
+    + 'it flags for you. It only touches projects whose profile allows it.',
+  'It uses the model, so each run costs tokens, up to a cap per run. It never handles '
+    + 'alerts about processes, secrets, or service and package requests. Everything it does '
+    + 'is listed below, and each action can be undone.',
+]
+
+export const AUTO_REVIEW_ON_TIP = 'On: sweeps new items on its own every few minutes'
+export const AUTO_REVIEW_OFF_TIP = 'Off: nothing is swept on its own; use Review now'
+
+// "Last run: looked at 3 items, allowed 1 site, cleared 1 alert, flagged 1 for you"
+export function tallyLine(last) {
+  const n = last?.examined || 0
+  return `looked at ${plural(n, 'item')}, allowed ${plural(last?.allowed || 0, 'site')}, `
+    + `cleared ${plural(last?.acked || 0, 'alert')}, flagged ${last?.flagged || 0} for you`
+    + (last?.error ? ' (stopped early)' : '')
+}
+
+// Network's switch: what it is called and what it does
+export const AUTO_ALLOW_LABEL = 'Auto-allow new sites (experimental, can be wrong)'
+export const AUTO_ALLOW_LEDE = 'When on, a site no list covers is judged the moment a box asks. '
+  + 'Well-known sites are let through for 7 days, odd-looking ones are blocked, and the '
+  + 'rest go to the model; a "not sure" waits for you. Different from Auto review on the '
+  + 'Queue tab, which sweeps this list a few minutes later.'

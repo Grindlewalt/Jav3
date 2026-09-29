@@ -349,6 +349,7 @@ export function ReviewQueue({ slug }) {
                   <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
                 {!slug && p.project_slug && !needsProject(p) && <span className="tag">{p.project_slug}</span>}
                 {needsProject(p) && <span className="tag pending" title="you pick the project when you allow it">no project</span>}
+                {p.refused && <span className="dim small net-refused">{p.refused}</span>}
                 <span className="rev-egress-btns">
                   {!p.refused && <>
                     <Button variant="ghost" title={ALLOW_ALWAYS_TIP(needsProject(p) ? '' : projLabel(p.project_slug))}
