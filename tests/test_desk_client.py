@@ -576,7 +576,8 @@ async def test_screenshot_carries_elements_frame_and_zoom(cfg, monkeypatch):
     await s.handle(ws, {"id": "4", "verb": "click", "params": {"x": 360, "y": 260}})
     r = ws.sent[-1]
     assert r["ok"] and ("move", 320 + 180, 200 + 130) in b.calls
-    assert r["frame"]["region"] == {"x": 160, "y": 100, "w": 320, "h": 200}   # zoom kept
+    assert r["frame"]["region"] is None                # NAV-07: the zoom ended
+    assert (r["image"]["w"], r["image"]["h"]) == (1280, 800) and "zoom ended" in r["note"]
     # elements=false skips the walk and says so
     await s.handle(ws, {"id": "5", "verb": "screenshot",
                         "params": {"monitor": "HDMI-A-1", "elements": False}})
@@ -742,7 +743,6 @@ async def test_an_action_reuses_the_last_responses_walk_and_thumbnail(cfg, monke
     monkeypatch.setattr(jd, "PRE_REUSE_S", 2.0)
     await s.handle(ws, {"id": "4", "verb": "screenshot",
                         "params": {"region": {"x": 0, "y": 0, "w": 640, "h": 400}}})
-    s.pre["key"] = ("DP-1", None)
     n = src.walks
     await s.handle(ws, {"id": "5", "verb": "click", "params": {"x": 10, "y": 10}})
     assert src.walks == n + 2
@@ -1305,3 +1305,29 @@ def test_controls_under_a_window_in_front_are_not_listed():
     raw, _ = jd.FakeElementSource([dialog, behind]).collect((0, 0, 2560, 1600), 1e18)
     assert [(e["window"], e["label"]) for e in raw] == [
         ("Mail: Send?", "Cancel"), ("Mail: Send?", "Send"), ("Mail: Inbox", "Archive")]
+
+
+async def test_a_change_outside_the_zoom_is_seen_and_the_zoom_ends(cfg, monkeypatch):
+    """NAV-07: an input verb taken from a zoomed frame lands by the zoomed
+    pixels, but `changed` is judged on the whole monitor and the auto-shot
+    is the whole monitor."""
+    monkeypatch.setattr(jd, "SETTLE_S", 0)
+    monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)
+    b = NavBackend()
+    thumbs = []
+    real_thumb = b.thumbnail
+    b.thumbnail = lambda mon, rect=None: thumbs.append(rect) or real_thumb(mon, rect)
+    s = jd.Session(b, "a", "t")
+    s.grants = {"screen": True, "input": True, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "1", "verb": "screenshot", "params": {}})
+    await s.handle(ws, {"id": "2", "verb": "screenshot",
+                        "params": {"region": {"x": 160, "y": 100, "w": 320, "h": 200}}})
+    thumbs.clear()
+    b.thumbs = [b"A", b"A", b"A"]
+    await s.handle(ws, {"id": "3", "verb": "click", "params": {"x": 360, "y": 260}})
+    r = ws.sent[-1]
+    assert ("move", 320 + 180, 200 + 130) in b.calls          # zoomed pixels still land
+    assert thumbs and all(t is None for t in thumbs)          # judged on the whole screen
+    assert r["frame"]["region"] is None and s.frame.rect is None
+    assert "zoom ended" in r["note"]

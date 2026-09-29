@@ -765,6 +765,8 @@ class FakeElementSource(ElementSource):
 TYPED_TAIL = 40           # read-back compares at most this many trailing characters
 
 
+ZOOM_ENDED_NOTE = ("the zoom ended: this is the whole screen again (a zoom is a look "
+                   "at the last screenshot, not a mode)")
 SHOT_LOST_NOTE = ("the action was sent but the screen could not be captured afterwards — "
                   "take desk_screenshot before repeating it")
 TYPED_DIFF_NOTE = ("typed; the field now reads differently from what was typed "
@@ -2865,8 +2867,8 @@ class Session:
             return None
 
     def settle(self, before: bytes | None, floor: float = SETTLE_S,
-               ceiling_s: float = SETTLE_MAX_S, until_change: bool = False
-               ) -> tuple[bool | None, int]:
+               ceiling_s: float = SETTLE_MAX_S, until_change: bool = False,
+               frame: Frame | None = None) -> tuple[bool | None, int]:
         """A.4: after `floor`, capture thumbnails until two consecutive match
         (or, until_change, until one differs from `before` and then settles),
         up to `ceiling_s`. Returns (changed vs `before` — None when unknown,
@@ -2877,7 +2879,7 @@ class Session:
         self.settled_thumb = None
         if floor > 0:
             time.sleep(floor)
-        f = self.frame
+        f = frame or self.frame
         prev = self._thumb(f)
         if until_change:
             while thumbs_match(before, prev) and time.monotonic() - t0 < ceiling_s:
@@ -2939,20 +2941,28 @@ class Session:
                            if getattr(self.b, "cheap_thumb", False) else None)
             return {"ok": True, "text": f"screenshot {img['w']}x{img['h']}{what}", **out}
         f = self.frame
+        # A zoom is a look, not a mode: the coordinates of this action are in
+        # the zoomed frame `f`, but what changed and what comes back are the
+        # whole monitor `g`.
+        g = f
+        if f is not None and f.rect:
+            g = self.full.get(f.monitor.name) or f
         if verb == "wait":
-            before = self._thumb(f)
+            before = self._thumb(g)
             changed, ms = self.settle(before, floor=0, ceiling_s=p["timeout_ms"] / 1000,
-                                      until_change=p["mode"] == "change")
+                                      until_change=p["mode"] == "change", frame=g)
             out = {"ok": True, "text": f"wait {p['mode']}: "
                    f"{'changed' if changed else 'no change'} after {ms} ms",
                    "changed": changed, "settled_ms": ms}
             if changed is None:
                 del out["changed"]
-            shot = self._auto_shot(f)
+            shot = self._auto_shot(g)
             self._remember(self.frame, shot, self.settled_thumb)
+            if g is not f:
+                out["note"] = ZOOM_ENDED_NOTE
             out.update(shot)
             return out
-        sig_before, before = self._before(f)
+        sig_before, before = self._before(g)
         typing_before = self._focus() if verb == "type" else None
         if verb in ("move", "click") or (verb == "scroll" and "x" in p):
             self.b.move(*f.to_screen(p["x"], p["y"]))
@@ -2973,20 +2983,23 @@ class Session:
             else:
                 subprocess.Popen(self.apps[p["app"]], shell=False, start_new_session=True,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        changed, ms = self.settle(before, floor=SETTLE_S * (3 if verb == "open" else 1))
+        changed, ms = self.settle(before, floor=SETTLE_S * (3 if verb == "open" else 1),
+                                  frame=g)
         # the post-action comparisons use the SETTLED screen: the auto-shot
         # (taken now) or, without one, a fresh walk
         # The input is already posted: nothing below may turn this into an
         # error that invites the model to repeat it.
         note = None
         try:
-            shot = self._auto_shot(f) if p.get("screenshot_after") else None
+            shot = self._auto_shot(g) if p.get("screenshot_after") else None
+            if shot is not None and g is not f:
+                note = ZOOM_ENDED_NOTE
         except Exception:  # noqa: BLE001
             shot, note = None, SHOT_LOST_NOTE
         settled = self.settled_thumb
         els_changed = None
         try:
-            after = shot if shot is not None else self._elements(f) if f is not None else {}
+            after = shot if shot is not None else self._elements(g) if g is not None else {}
         except Exception:  # noqa: BLE001 — a second signal only
             after = {}
         sig_after = self._sig_of(after)
@@ -3010,7 +3023,7 @@ class Session:
                 out.update(ok=False, err=why)
                 if shot is None:                      # the model sees where it went
                     try:
-                        shot = self._auto_shot(f)
+                        shot = self._auto_shot(g)
                         settled = None                # the thumb predates this shot
                     except Exception:  # noqa: BLE001
                         note = note or SHOT_LOST_NOTE
@@ -3021,7 +3034,7 @@ class Session:
             out.update(shot)
             self._remember(self.frame, shot, settled)
         else:
-            self._remember(f, after, settled)
+            self._remember(g, after, settled)
         return out
 
     def _sig(self, frame: Frame | None) -> str | None:
