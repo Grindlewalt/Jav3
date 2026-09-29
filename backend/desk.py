@@ -21,9 +21,9 @@ Wire protocol (JSON text frames, `type` on every one):
     C->S res      {id, ok, text, image?:{mime,w,h,b64}, err?,
                    frame?:{monitor, index, count, region, screen:{w,h}},
                    elements?:[{id, role, label, x, y, w, h, src, value?,
-                               focused?, enabled?}],
+                               focused?, enabled?, window?}],
                    elements_src?, elements_note?, cursor?:{x,y},
-                   changed?, settled_ms?}
+                   changed?, pixels_changed?, elements_changed?, settled_ms?}
     S->C kill     {reason}              Stop / revoke: drop input now
     C->S ping  -> S->C pong             every 20 s; silent 60 s = dropped
 
@@ -74,6 +74,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import dataclasses
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -90,7 +91,9 @@ from .db import get_db
 
 # --- limits -------------------------------------------------------------------
 
-FRESH_FRAME_S = 60          # input needs a screenshot of that desk this recent
+ROUND_GAP_S = 0.5           # a result younger than this cannot have been read yet:
+                            # a call that follows it is in the same batch
+FRESH_FRAME_S = 60         # input needs a screenshot of that desk this recent
 INPUT_PER_S = 10            # per desk
 SHOTS_PER_S = 2             # per desk
 CALL_TIMEOUT_S = 30         # one non-shell action, round trip
@@ -104,6 +107,8 @@ IDLE_DROP_S = 60            # a socket silent this long is dropped
 IMAGE_B64_CAP = 6_000_000   # a res frame's image, base64 chars
 EVENT_DEDUP_S = 60          # refusals / rate trips: one event per burst
 SESSION_EVENT_GAP_S = 600   # reconnect blips don't each raise start/stop
+APPS_KEEP = 200             # desk_open app names from hello (the client caps the same)
+APPS_SHOWN = 30             # named in a refusal; the rest are counted
 ELEMENTS_KEEP = 1000        # element registry per frame (the client caps at 400)
 ELEMENTS_SHOWN = 150        # listed to the model, in-view first
 WAIT_MAX_MS = 10_000        # desk_wait
@@ -157,8 +162,12 @@ class Desk:
     send_lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
     turns: dict = dataclasses.field(default_factory=dict)   # conversation id -> monotonic
     grants: dict = dataclasses.field(default_factory=dict)  # cached from get_grants
-    locked: bool = False               # from the client's hello / latest state frame
+    locked: bool | None = False        # from the client's hello / latest state frame;
+                                       # None = the client could not tell (not refused)
     asleep: bool = False
+    serial: int = 0                    # frame serial counter (monotonic per desk)
+    # [(serial, monotonic)]: frames whose result went back to the model
+    delivered: list = dataclasses.field(default_factory=list)
 
     @property
     def ceiling(self) -> dict:
@@ -370,8 +379,8 @@ def _clean_hello(hello: dict) -> dict:
                          if isinstance(m.get(k), (int, float, str))
                          and not isinstance(m.get(k), bool)})
     ceil = hello.get("ceiling") if isinstance(hello.get("ceiling"), dict) else {}
-    apps = [a for a in (hello.get("apps") or [])[:64]
-            if isinstance(a, str) and _APP_RE.match(a)]
+    raw_apps = hello.get("apps") if isinstance(hello.get("apps"), list) else []
+    apps = [a for a in raw_apps[:APPS_KEEP] if isinstance(a, str) and _APP_RE.match(a)]
     return {"v": hello.get("v") if isinstance(hello.get("v"), int) else 0,
             "host": s(hello.get("host"), 128), "platform": s(hello.get("platform"), 32),
             "session": s(hello.get("session"), 32), "backend": s(hello.get("backend"), 32),
@@ -390,7 +399,7 @@ async def attach(device_id: int, name: str, ws, hello: dict) -> Desk:
         except Exception:  # noqa: BLE001
             pass
     d = Desk(device_id=device_id, name=name, ws=ws, hello=_clean_hello(hello))
-    d.locked, d.asleep = hello.get("locked") is True, hello.get("asleep") is True
+    d.locked, d.asleep = _lock_flag(hello), hello.get("asleep") is True
     d.grants = await get_grants(device_id)
     _desks[device_id] = d
     await d.send(_wire_grants(d.grants))
@@ -440,7 +449,7 @@ def on_frame(d: Desk, msg: dict) -> dict | None:
                               for k in ("screen", "input", "shell")}
         return None
     if t == "state":
-        d.locked, d.asleep = msg.get("locked") is True, msg.get("asleep") is True
+        d.locked, d.asleep = _lock_flag(msg), msg.get("asleep") is True
         return None
     if t == "res":
         fut = d.pending.get(msg.get("id")) if isinstance(msg.get("id"), str) else None
@@ -514,16 +523,44 @@ def _op_key() -> str | None:
     return f"conv:{cid}" if cid is not None else None
 
 
+CAPTURE_LOCKED_ERR = ("the screen could not be captured — it is probably locked or "
+                      "asleep; ask the operator to unlock it")
+# What a client that never sends locked / asleep reports when a capture is
+# refused by a lock screen or a sleeping display: "<tool> failed: <stderr>".
+# macOS screencapture says exactly the first; the Linux tools (grim, maim,
+# scrot, ImageMagick import) fail with these wordings when nothing can be read.
+_CAPTURE_TOOLS = ("screencapture", "grim", "maim", "scrot", "import", "gnome-screenshot")
+_CAPTURE_FAILS = ("could not create image from display", "screencopy", "failed to",
+                  "unable to", "can't grab", "cannot grab")
+
+
+def _capture_failure(err: str) -> str | None:
+    """The friendly sentence for a raw capture-tool failure, else None."""
+    low = err.strip().lower()
+    for tool in _CAPTURE_TOOLS:
+        if low.startswith(tool + " failed:") and any(f in low for f in _CAPTURE_FAILS):
+            return CAPTURE_LOCKED_ERR
+    return None
+
+
+def _lock_flag(msg: dict) -> bool | None:
+    """True = locked, None = the client said "unknown" (an explicit null: a
+    Linux box whose locker reports nothing), False = unlocked or never sent.
+    Unknown is not refused: the capture itself then says what is wrong."""
+    v = msg.get("locked")
+    return True if v is True else None if ("locked" in msg and v is None) else False
+
+
 def _tainted(op: str | None) -> bool:
     from .vm import broker
     return bool(op) and broker.op_tainted(op)
 
 
-def _taint(source: str = "desk") -> None:
+def _taint(name: str | None = None, source: str = "desk") -> None:
     op = budget_mod.active_op_id.get()
     if op:
         from .vm import broker
-        broker.mark_tainted(str(op), source)
+        broker.mark_tainted(str(op), source, name)
 
 
 def _rate(q: collections.deque, per_s: int) -> bool:
@@ -538,8 +575,9 @@ def _rate(q: collections.deque, per_s: int) -> bool:
 
 def _int(params: dict, k: str, lo: int, hi: int, default=None) -> int:
     v = params.get(k, default)
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        raise DeskError(f"{k} must be a number")
+    if (isinstance(v, bool) or not isinstance(v, (int, float))
+            or (isinstance(v, float) and v != v) or v in (float("inf"), float("-inf"))):
+        raise DeskError(f"{k} must be a whole number")
     v = int(v)
     if not lo <= v <= hi:
         raise DeskError(f"{k}={v} is outside {lo}..{hi}")
@@ -581,10 +619,15 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
                 raise DeskError("monitor must be a name or index")
             p["monitor"] = str(m)[:32]
         el = params.get("elements")
-        if el is not None and not isinstance(el, bool):
-            raise DeskError("elements must be true or false")
+        if isinstance(el, str) and el.strip().lower() in ("true", "false", "all", "front"):
+            el = {"true": True, "front": True, "false": False}.get(el.strip().lower(), "all")
+        if el is not None and not isinstance(el, bool) and el != "all":
+            raise DeskError('elements must be true, false or "all"')
         if el is False:
             p["elements"] = False       # true is the default; old clients never see it
+        elif el == "all":
+            p["walk"] = "all"           # every window in full; the default caps
+                                        # background windows (an old client ignores it)
         reg = params.get("region")
         if reg not in (None, "", {}, []):
             reg = _region(reg)
@@ -656,10 +699,7 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
                 raise DeskError("only http(s) URLs can be opened")
             p["url"] = url
         elif isinstance(app, str) and app.strip():
-            if app.strip() not in apps:
-                raise DeskError(f"{app!r} is not one of the apps this computer "
-                                f"offers: {', '.join(apps) or 'none'}")
-            p["app"] = app.strip()
+            p["app"] = offered_app(app, apps)
         else:
             raise DeskError("open needs a url or an app")
     elif verb == "shell":
@@ -676,6 +716,29 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
     if verb in INPUT_VERBS:
         p["screenshot_after"] = params.get("screenshot_after", True) is not False
     return p
+
+
+def offered_app(app: str, apps: list[str]) -> str:
+    """The hello's name for `app` (exact, else case-insensitive), or a
+    refusal that lists what is offered: the closest names first, then the
+    rest alphabetically, cut at APPS_SHOWN."""
+    want = app.strip()
+    if want in apps:
+        return want
+    for a in apps:
+        if a.lower() == want.lower():
+            return a
+    if not apps:
+        raise DeskError(f"{want!r} is not one of the apps this computer offers: none")
+    close = difflib.get_close_matches(want.lower(), [a.lower() for a in apps], n=5,
+                                      cutoff=0.6)
+    close_names = [a for c in close for a in apps if a.lower() == c][:5]
+    order = close_names + sorted((a for a in apps if a not in close_names), key=str.lower)
+    shown = order[:APPS_SHOWN]
+    s = ", ".join(shown)
+    if len(order) > len(shown):
+        s += f" …and {len(order) - len(shown)} more; ask for the exact app name"
+    raise DeskError(f"{want!r} is not one of the apps this computer offers: {s}")
 
 
 def _audit_params(verb: str, p: dict) -> dict:
@@ -803,9 +866,38 @@ def _clean_elements(raw) -> list[dict]:
             el["focused"] = True
         if e.get("enabled") is False:
             el["enabled"] = False
+        win = _clean_str(e.get("window"), 80)
+        if win:
+            el["window"] = win
         seen.add(eid)
         out.append(el)
     return out
+
+
+def _clean_windows(raw) -> dict:
+    """The client's background-window counts: {group: (shown, total, more)}.
+    Malformed entries are dropped (the header then just names the window)."""
+    out: dict = {}
+    if not isinstance(raw, list):
+        return out
+    for w in raw[:64]:
+        if not isinstance(w, dict) or w.get("background") is not True:
+            continue
+        name = _clean_str(w.get("window"), 80)
+        shown, total = w.get("shown"), w.get("total")
+        if name and _isint(shown) and _isint(total) and 0 <= shown <= total <= 100_000:
+            out[name] = (shown, total, w.get("more") is True)
+    return out
+
+
+def _group_header(group: str, windows: dict) -> str:
+    """`— Discord: Switch Device (background, 3 of 41 shown) —`; a front
+    window, the menu bar or an old client's group is just its name."""
+    bg = windows.get(group)
+    if bg is None:
+        return f"  — {group or 'other'} —"
+    shown, total, more = bg
+    return f"  — {group} (background, {shown} of {total}{'+' if more else ''} shown) —"
 
 
 def _visible_centre(e: dict, w: int, h: int) -> tuple[int, int] | None:
@@ -832,7 +924,8 @@ def _store_frame(d: Desk, res: dict, img: dict, op: str | None) -> dict:
               if isinstance(cur, dict) and _isnum(cur.get("x")) and _isnum(cur.get("y"))
               else None)
     idx, cnt = fr.get("index"), fr.get("count")
-    f = {"w": img["w"], "h": img["h"], "at": time.monotonic(), "op": op,
+    d.serial += 1
+    f = {"serial": d.serial, "w": img["w"], "h": img["h"], "at": time.monotonic(), "op": op,
          "data": img["data"], "mime": img["mime"], "hash": img["hash"],
          "monitor": _clean_str(fr.get("monitor") if isinstance(fr.get("monitor"), str)
                                else str(fr.get("monitor") or ""), 64),
@@ -841,7 +934,8 @@ def _store_frame(d: Desk, res: dict, img: dict, op: str | None) -> dict:
          "region": region, "cursor": cursor,
          "elements": _clean_elements(res.get("elements")),
          "src": res.get("elements_src") if res.get("elements_src") in ELEMENT_SRCS else None,
-         "note": _clean_str(res.get("elements_note"), 200)}
+         "note": _clean_str(res.get("elements_note"), 200),
+         "windows": _clean_windows(res.get("windows"))}
     d.frame = f
     if region is None:
         d.full_frames[f["monitor"]] = {"w": f["w"], "h": f["h"], "index": f["index"],
@@ -876,8 +970,16 @@ def _element_line(e: dict, w: int, h: int) -> str:
     return s
 
 
+def changed_line(changed: bool, elements_only: bool = False) -> str:
+    """`changed: yes` / `no`; `yes (elements)` when the pixels compared equal
+    but the element list moved (a dim overlay, a list that re-rendered)."""
+    return f"changed: {'yes' if changed else 'no'}" + (
+        " (elements)" if changed and elements_only else "")
+
+
 def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None = None,
-                 settled_ms: int | None = None, asked_elements: bool = True) -> str:
+                 settled_ms: int | None = None, asked_elements: bool = True,
+                 elements_only: bool = False) -> str:
     """The frame as text for the model (contract B): where it is, the cursor,
     the numbered elements (in-view first, capped), and — after an input verb —
     whether the screen changed."""
@@ -896,6 +998,8 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
             if others:
                 head += "; others: " + ", ".join(_q(_clean_str(o, 64)) for o in others)
             head += ")"
+    if f.get("serial"):
+        head += f" — frame {f['serial']}"
     lines = [head]
     if same:
         lines.append("(same as the previous screenshot)")
@@ -908,7 +1012,16 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
         rest = [e for e in els if not _visible_centre(e, w, h)]
         shown = (inview + rest)[:ELEMENTS_SHOWN]
         lines.append("elements (click by id; coordinates are pixels of this image):")
-        lines += [_element_line(e, w, h) for e in shown]
+        if any(e.get("window") for e in shown):
+            # grouped by window, as the client numbered them: a header per group
+            group = None
+            for e in sorted(shown, key=lambda e: e["id"]):
+                if e.get("window", "") != group:
+                    group = e.get("window", "")
+                    lines.append(_group_header(group, f.get("windows") or {}))
+                lines.append(_element_line(e, w, h))
+        else:
+            lines += [_element_line(e, w, h) for e in shown]
         if len(els) > len(shown):
             lines.append(f"  +{len(els) - len(shown)} more (zoom in with region)")
     elif not asked_elements:
@@ -917,29 +1030,52 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
         why = f.get("note") or "this computer reported none"
         lines.append(f"(no elements: {why} — click by coordinates)")
     if changed is not None:
-        s = f"changed: {'yes' if changed else 'no'}"
+        s = changed_line(changed, elements_only)
         if settled_ms is not None:
             s += f", settled in {settled_ms} ms"
         lines.append(s)
     return "\n".join(lines)
 
 
+def took_line(timing) -> str | None:
+    """`took 1.6 s (settle 1.3, elements 0.2)` from the client's per-phase
+    timing (ms); None when an old client sent none or it is malformed."""
+    if not isinstance(timing, dict) or not _isnum(timing.get("total_ms")):
+        return None
+    total = timing["total_ms"]
+    if not 0 <= total <= 3_600_000:
+        return None
+    parts = [f"{name} {timing[k] / 1000:.1f}" for k, name in
+             (("settle_ms", "settle"), ("elements_ms", "elements"), ("capture_ms", "capture"))
+             if _isnum(timing.get(k)) and 0 < timing[k] <= total and
+             (k != "capture_ms" or timing[k] >= 500)]
+    return f"took {total / 1000:.1f} s" + (f" ({', '.join(parts)})" if parts else "")
+
+
 def _match_label(els: list[dict], target: str) -> dict | None:
     """A registry element the description names without doubt: a unique exact
-    (case-insensitive) label, also as "label role" / "role label" ("Save
-    button"); else a unique element whose label contains the description.
-    Two matches is doubt: the caller asks grounding, which sees the picture."""
-    t = target.strip().lower()
-    if not t:
+    (case-insensitive) WHOLE label, also with a leading or trailing role word
+    ("Save button", "field Search"). A part of a label is not a match: "OK" is
+    not "Book now", "Delete" is not "Delete account". Two matches, or none,
+    is doubt: the caller asks grounding, which sees the picture."""
+    tw = _label_words(target)
+    while len(tw) > 1 and tw[0] in _ROLE_WORDS:
+        tw = tw[1:]
+    while len(tw) > 1 and tw[-1] in _ROLE_WORDS:
+        tw = tw[:-1]
+    if not tw:
         return None
-    exact = [e for e in els if e["label"] and t in (e["label"].lower(),
-             f"{e['label']} {e['role']}".lower(), f"{e['role']} {e['label']}".lower())]
-    if len(exact) == 1:
-        return exact[0]
-    if exact:
-        return None
-    sub = [e for e in els if e["label"] and t in e["label"].lower()]
-    return sub[0] if len(sub) == 1 else None
+    whole = [e for e in els if e["label"] and _label_words(e["label"]) == tw]
+    return whole[0] if len(whole) == 1 else None
+
+
+_ROLE_WORDS = frozenset(("button", "link", "field", "textfield", "tab", "menu", "menuitem",
+                         "checkbox", "radio", "toggle", "slider", "combobox", "item",
+                         "icon", "input", "box"))
+
+
+def _label_words(s: str) -> list[str]:
+    return re.findall(r"\w+", str(s).casefold())
 
 
 async def _resolve_point(d: Desk, verb: str, params: dict) -> tuple[dict, dict | None]:
@@ -1000,16 +1136,74 @@ async def _resolve_point(d: Desk, verb: str, params: dict) -> tuple[dict, dict |
     if loc is None:
         raise DeskError(f"could not find {_q(tgt)} on the latest screenshot; click by "
                         "element id or coordinates, or zoom with region")
-    return {**rest, "x": int(loc.x), "y": int(loc.y)}, {
-        "how": "grounded", "target": tgt, "model": loc.model,
-        "confidence": round(float(loc.confidence), 2)}
+    gx, gy = int(loc.x), int(loc.y)
+    under = _element_at(f.get("elements") or [], gx, gy)
+    via = {"how": "grounded", "target": tgt, "model": loc.model,
+           "confidence": round(float(loc.confidence), 2)}
+    if under is not None:
+        # the grounding model is a guess from pixels; the accessibility tree
+        # says what is really there. A named control that has nothing to do
+        # with the description is a wrong click on something else.
+        via["under"] = f"[{under['id']}] {under['role']} {_q(under['label'])}".rstrip()
+        if under["label"] and not (_content_words(under["label"]) & _content_words(tgt)):
+            raise DeskError(f"the grounding model pointed at {via['under']}, which does "
+                            f"not match {_q(tgt)} — click by element id instead")
+    elif f.get("elements"):
+        via["under"] = None
+    return {**rest, "x": gx, "y": gy}, via
+
+
+_FILLER = frozenset(("the", "a", "an", "of", "in", "on", "to", "for", "and", "at", "this"))
+
+
+def _content_words(s: str) -> set[str]:
+    return {w for w in _label_words(s) if w not in _ROLE_WORDS and w not in _FILLER}
+
+
+def _element_at(els: list[dict], x: int, y: int) -> dict | None:
+    """The smallest listed element whose box holds the image point."""
+    hit = [e for e in els if e["x"] <= x < e["x"] + max(1, e["w"])
+           and e["y"] <= y < e["y"] + max(1, e["h"])]
+    return min(hit, key=lambda e: e["w"] * e["h"]) if hit else None
+
+
+def _stale_frame(d: Desk, params: dict) -> str | None:
+    """The refusal text when an element id or a coordinate refers to a frame
+    that is no longer the desk's latest, else None. The model names the frame
+    (`frame`); when it does not, it means the last frame whose result had
+    already been returned to it before this round began - a result returned a
+    moment ago (ROUND_GAP_S) is one the model has not read, so the second call
+    of a batch is refused instead of clicking whatever is now at that id."""
+    f = d.frame
+    if f is None or not f.get("serial"):
+        return None
+    el = params.get("element")
+    ref = params.get("frame")
+    if ref not in (None, ""):
+        try:
+            ref = int(str(ref).strip())
+        except ValueError:
+            raise DeskError(f"frame must be a frame number like 17, not {str(ref)[:40]!r}")
+    else:
+        cut = time.monotonic() - ROUND_GAP_S
+        seen = [n for n, t in d.delivered if t <= cut]
+        ref = seen[-1] if seen else None
+    if ref is None or ref == f["serial"]:
+        return None
+    what = (f"element {str(el).strip().strip('[]')[:12]} was" if el not in (None, "")
+            else "the coordinates were")
+    return (f"{what} listed in frame {ref}, but the screen is now frame "
+            f"{f['serial']} — use the ids from the latest result, or take desk_screenshot")
 
 
 def _via_line(verb: str, via: dict, p: dict) -> str:
     at = f"at {p.get('x')},{p.get('y')}"
     if via["how"] == "grounded":
+        there = ("" if "under" not in via else
+                 f"; element there: {via['under']}" if via["under"]
+                 else "; no listed element at that point")
         return (f"{_PAST[verb]} {_q(via['target'])} {at} (grounded by {via['model']}, "
-                f"confidence {via['confidence']:.2f})")
+                f"confidence {via['confidence']:.2f}{there})")
     return f"{_PAST[verb]} [{via['element']}] {via['role']} {_q(via['label'])} {at}"
 
 
@@ -1077,17 +1271,34 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         # for. Everything after this sees only a coordinate action.
         asked = {k: params[k] for k in ("element", "target") if params.get(k) not in (None, "")}
         try:
+            if (params.get("element") not in (None, "") or params.get("x") is not None
+                    or params.get("y") is not None):
+                late = _stale_frame(d, params)
+                if late:
+                    raise DeskError(late)
+            params = {k: v for k, v in params.items() if k != "frame"}
             params, via = await _resolve_point(d, verb, params)
         except DeskError as e:
             await _audit(d, verb, asked, False, str(e))
             return f"error: {e}"
     elif "element" in params or "target" in params:
         return await _refuse(d, verb, {}, f"{verb} does not take an element or target")
+    elif verb == "drag":
+        try:
+            late = _stale_frame(d, params) if cap == "input" else None
+        except DeskError as e:
+            late = str(e)
+        if late:
+            await _audit(d, verb, {}, False, late)
+            return f"error: {late}"
+    params = {k: v for k, v in params.items() if k != "frame"}
     try:
         p = validate(verb, params, d.frame, d.hello.get("apps") or [],
                      full=_full_for(d, params.get("monitor")) if verb == "screenshot" else None)
     except DeskError as e:
         return await _refuse(d, verb, _audit_via(via), str(e))
+    except Exception:  # noqa: BLE001 — a parameter validate did not foresee is a refusal, not a crash
+        return await _refuse(d, verb, _audit_via(via), "those parameters could not be used")
     ap = {**p, **_audit_via(via)}          # the audit row: the point AND how it was chosen
     if cap == "input" and not _rate(d.input_times, INPUT_PER_S):
         return await _refuse(d, verb, ap, f"rate limit: over {INPUT_PER_S} input "
@@ -1103,7 +1314,7 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     # whatever comes back — a screen, shell output, even the client's error
     # text — was written by that machine, not by us. The broker also taints by
     # tool name; this covers a desk action reached any other way.
-    _taint()
+    _taint(d.name)
     timeout = CALL_TIMEOUT_S + (p["timeout_ms"] / 1000 if verb == "wait" else 0)
     try:
         res = await _call(d, verb, p, timeout)
@@ -1115,11 +1326,18 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     err = res.get("err") if isinstance(res.get("err"), str) else ""
     await _audit(d, verb, ap, ok, None if ok else (err or "failed"))
     if not ok:
-        return f"error: {(err or 'the computer refused')[:500]}"
+        text = (f"error: {_capture_failure(err)}" if _capture_failure(err)
+                else f"error: {(err or 'the computer refused')[:500]}")
+        # a refusal ends here; a failed action that still carries the screen
+        # (desk_type whose text did not appear) shows it under the error
+        if verb not in INPUT_VERBS or _image(res) is None:
+            return text
     # `changed` means "since before this action": only input verbs and wait
     # have a before. On a plain screenshot it would be noise.
     changed = (res.get("changed") if isinstance(res.get("changed"), bool)
                and verb != "screenshot" else None)
+    elements_only = (changed is True and res.get("elements_changed") is True
+                     and res.get("pixels_changed") is False)
     settled = res.get("settled_ms")
     settled = int(settled) if _isnum(settled) and 0 <= settled <= 600_000 else None
     prev_hash = (d.frame or {}).get("hash")
@@ -1133,15 +1351,18 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     if via is not None:
         head.append(_via_line(verb, via, p))
     head.append(text[:2000] or f"{verb} done")
+    took = took_line(res.get("timing")) if verb in INPUT_VERBS else None
     if f is None:
         if changed is not None:
-            head.append(f"changed: {'yes' if changed else 'no'}")
-        return "\n".join(head)
+            head.append(changed_line(changed, elements_only))
+        return "\n".join(head + ([took] if took else []))
     body = render_frame(d, f, same=verb == "screenshot" and prev_hash == f["hash"],
                         changed=changed, settled_ms=settled,
-                        asked_elements=p.get("elements", True))
+                        asked_elements=p.get("elements", True), elements_only=elements_only)
+    d.delivered = (d.delivered + [(f["serial"], time.monotonic())])[-8:]
     return imageresult.with_inline(
-        "\n".join([*head, body, f"[{d.name}: screenshot {img['w']}x{img['h']} attached]"]),
+        "\n".join([*head, body, *([took] if took else []),
+                   f"[{d.name}: screenshot {img['w']}x{img['h']} attached]"]),
         b64=img["b64"], mime=img["mime"], caption=_caption(d, img))
 
 
@@ -1178,7 +1399,7 @@ async def _shell(d: Desk, p: dict, g: dict, op: str | None) -> str:
                      detail={"device_id": d.device_id, "cmd": p["cmd"][:1000],
                              "cwd": p.get("cwd"), "approver": approver,
                              "tainted": _tainted(op)})
-        _taint()        # after the trust decision: its own output can't un-trust it
+        _taint(d.name, "desk_shell")  # after the trust decision: its own output can't un-trust it
         wire = {**p, "mode": mode}
         if mode == "argv":
             wire["argv"] = argv

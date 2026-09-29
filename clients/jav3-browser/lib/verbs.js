@@ -22,6 +22,8 @@ export const WAIT_CAP_MS = 10000;         // bounded retry budget on read_page
 export const MAX_FRAME_INDEX = 999;
 export const MAX_ELEMENT_N = 100000;
 export const OPTION_CAP = 500;
+// read_page: auto = candidates when < 8 interactive elements are in view
+export const READ_MODES = Object.freeze(['auto', 'all', 'interactive']);
 
 export class VerbError extends Error {
   constructor(msg, code) { super(msg); if (code) this.code = code; }
@@ -37,6 +39,31 @@ function int(params, k, lo, hi, dflt) {
   if (typeof v !== 'number' || !Number.isInteger(v)) throw new VerbError(`${k} must be a whole number`);
   if (v < lo || v > hi) throw new VerbError(`${k}=${v} is outside ${lo}..${hi}`);
   return v;
+}
+
+function coord(params, k) {
+  const v = params[k];
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new VerbError(`${k} must be a number`);
+  if (v < 0 || v > 100000) throw new VerbError(`${k}=${v} is outside 0..100000`);
+  return v;
+}
+
+// Screenshot pixels per CSS px: captureVisibleTab returns the viewport at
+// device pixels, so image width / viewport width (devicePixelRatio x zoom);
+// the reported devicePixelRatio when the viewport is unknown. The server
+// divides a screenshot point by this to get the CSS px clickAt wants.
+export function shotScale(imgW, imgH, viewport) {
+  const vw = viewport && Number(viewport.w), vh = viewport && Number(viewport.h);
+  const dpr = viewport && Number(viewport.dpr) > 0 ? Number(viewport.dpr) : 1;
+  const x = imgW > 0 && vw > 0 ? imgW / vw : dpr;
+  const y = imgH > 0 && vh > 0 ? imgH / vh : x;
+  return { x, y };
+}
+
+// A screenshot point -> CSS px of the viewport (what the server does before
+// sending x, y; mirrored here so both sides agree and node can test it).
+export function toCssPoint(x, y, scale) {
+  return { x: Math.round((x / scale.x) * 10) / 10, y: Math.round((y / scale.y) * 10) / 10 };
 }
 
 export function hostOf(url) {
@@ -71,6 +98,19 @@ export function isDenied(host, denyHosts) {
 // frame index comes from the last read_page of that tab and <n> is the
 // element's number within that frame. A bare integer means the top frame.
 // -> { frame, n, id } (canonical string) or throws VerbError.
+// One change signature for a tab from its frames' signatures ("hex8:count"
+// each, top frame first): a hash of them joined, and the summed count.
+export function combineSigs(sigs) {
+  const ok = (sigs || []).filter(x => typeof x === 'string' && /^[0-9a-f]{8}:\d{1,7}$/.test(x));
+  if (!ok.length) return null;
+  if (ok.length === 1) return ok[0];
+  let h = 0x811c9dc5;
+  const j = ok.join('|');
+  for (let i = 0; i < j.length; i++) { h ^= j.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  const n = ok.reduce((a, x) => a + Number(x.split(':')[1]), 0);
+  return ('0000000' + h.toString(16)).slice(-8) + ':' + Math.min(n, 9999999);
+}
+
 export function parseElementId(v) {
   if (typeof v === 'number' && Number.isInteger(v) && !Number.isNaN(v)) {
     if (v < 1 || v > MAX_ELEMENT_N) throw new VerbError(`element ${v} is out of range`);
@@ -150,6 +190,30 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
       if (params.selector.length > 200) throw new VerbError('selector is too long');
       p.selector = params.selector.trim();
     }
+    if (params.mode !== undefined) {
+      if (!READ_MODES.includes(params.mode)) throw new VerbError(`mode must be one of ${READ_MODES.join(', ')}`);
+      p.mode = params.mode;
+    }
+  } else if (verb === 'click') {
+    // exactly one of element / (x, y); x, y are CSS px of the top frame's
+    // viewport (the server converted them from screenshot pixels)
+    const hasXY = params.x !== undefined || params.y !== undefined;
+    const hasEl = params.element !== undefined && params.element !== null;
+    if (hasXY === hasEl) throw new VerbError('give exactly one of element or x, y');
+    if (hasEl) p.element = parseElementId(params.element).id;
+    else {
+      p.x = coord(params, 'x'); p.y = coord(params, 'y');
+      // what the screenshot showed at that point (top frame only: a subframe's
+      // point is an <iframe>, which clickAt refuses anyway)
+      const ex = params.expect;
+      if (ex && typeof ex === 'object' && typeof ex.id === 'string') {
+        const id = parseElementId(ex.id);
+        if (id.frame === 0) p.expect = { n: id.n, label: typeof ex.label === 'string' ? ex.label.slice(0, 80) : '' };
+      }
+    }
+  } else if (verb === 'type') {
+    // no element: type into whatever has focus
+    if (params.element !== undefined && params.element !== null) p.element = parseElementId(params.element).id;
   } else if (ELEMENT_VERBS.includes(verb)) p.element = parseElementId(params.element).id;
   if (verb === 'type') {
     if (typeof params.text !== 'string' || !params.text) throw new VerbError('text is required');

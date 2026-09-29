@@ -170,3 +170,119 @@ test('re-injection keeps one instance', async () => {
   await import('../lib/dom.js?again');
   assert.equal(globalThis.__jav3Dom, before);
 });
+
+// --- candidates (no button markup) -------------------------------------------------------
+
+test('candidate reasons: pointer where it starts, click attrs, tabindex, short leaf text', () => {
+  const R = D.candidateReason;
+  assert.equal(R({ tag: 'div', cursor: 'pointer', parentCursor: 'auto' }), 'pointer');
+  // inherited pointer (a <span> inside a pointer <div>) is not another button
+  assert.equal(R({ tag: 'span', cursor: 'pointer', parentCursor: 'pointer' }), '');
+  assert.equal(R({ tag: 'span', cursor: 'pointer', parentCursor: 'pointer', leafish: true, text: 'Go' }), 'text');
+  for (const a of ['onclick', 'ng-click', '(click)', 'jsaction', 'data-action-click', 'data-onclick', '@click']) {
+    assert.equal(R({ tag: 'mat-card', attrs: ['class', a] }), 'attr', a);
+  }
+  assert.equal(R({ tag: 'div', attrs: ['data-id', 'class'] }), '');
+  assert.equal(R({ tag: 'div', tabindex: '0' }), 'tabindex');
+  assert.equal(R({ tag: 'div', tabindex: '-1' }), '');
+  assert.equal(R({ tag: 'div', leafish: true, text: '  Start   assignment ' }), 'text');
+  assert.equal(R({ tag: 'div', leafish: true, text: 'x'.repeat(61) }), '');
+  assert.equal(R({ tag: 'div', leafish: false, text: 'Start' }), '');
+  assert.equal(R({ tag: 'script', cursor: 'pointer', parentCursor: 'auto' }), '');
+  assert.equal(R({ tag: 'path', attrs: ['onclick'] }), '');
+});
+
+test('candidate visibility: display, visibility, opacity', () => {
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'visible', opacity: '1' }), true);
+  assert.equal(D.styleVisible({ display: 'none', visibility: 'visible', opacity: '1' }), false);
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'hidden', opacity: '1' }), false);
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'visible', opacity: '0' }), false);
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'visible', opacity: '0.4' }), true);
+});
+
+test('candidate dedupe by box containment: a button keeps its label, a card gives way', () => {
+  const b = (x, y, w, h) => ({ x, y, w, h });
+  // div.btn "Start assignment" holding its <span> label -> the div only
+  const btn = [{ box: b(10, 10, 200, 40), text: 'Start assignment' },
+               { box: b(20, 20, 120, 20), text: 'Start assignment' }];
+  assert.deepEqual(D.dedupeContained(btn), [0]);
+  // a long-text card holding two short controls -> the controls
+  const card = [{ box: b(0, 0, 500, 300), text: 'Assignment 4 due Friday. '.repeat(5) },
+                { box: b(10, 250, 80, 30), text: 'Open' },
+                { box: b(100, 250, 80, 30), text: 'Skip' }];
+  assert.deepEqual(D.dedupeContained(card), [1, 2]);
+  // a text-only toolbar does not swallow its ng-click icon (a real signal)
+  const bar = [{ box: b(0, 0, 1280, 40), text: '☰ DeltaMath', why: 'text' },
+               { box: b(8, 8, 24, 24), text: '☰', why: 'attr' },
+               { box: b(40, 8, 90, 20), text: 'DeltaMath', why: 'text' }];
+  assert.deepEqual(D.dedupeContained(bar), [1, 2]);
+  // a pointer button still keeps its text-only label out
+  assert.deepEqual(D.dedupeContained([{ box: b(0, 0, 100, 30), text: 'Go', why: 'pointer' },
+                                      { box: b(5, 5, 20, 20), text: 'Go', why: 'text' }]), [0]);
+  // same box twice -> the first; disjoint boxes -> both
+  assert.deepEqual(D.dedupeContained([{ box: b(0, 0, 9, 9), text: 'a' }, { box: b(0, 0, 9, 9), text: 'a' }]), [0]);
+  assert.deepEqual(D.dedupeContained([{ box: b(0, 0, 9, 9), text: 'a' }, { box: b(20, 0, 9, 9), text: 'b' }]), [0, 1]);
+});
+
+test('candidates skip what is already listed, including through shadow hosts', () => {
+  const btn = { tagName: 'BUTTON' };
+  const sr = { nodeType: 11, parentNode: null, host: btn };
+  const inner = { tagName: 'SPAN', parentNode: sr };
+  assert.equal(D.insideAny(inner, new Set([btn])), true);
+  assert.equal(D.insideAny({ tagName: 'DIV', parentNode: null }, new Set([btn])), false);
+  assert.equal(D.leafish({ children: [] }), true);
+  assert.equal(D.leafish({ children: [{ children: [] }, { children: [] }] }), true);
+  assert.equal(D.leafish({ children: [{ children: [{}] }] }), false);
+  assert.equal(D.CAND_CAP, 150);
+});
+
+// --- realistic clicks ---------------------------------------------------------------------
+
+test('click sequence: the order and fields a real left click has', () => {
+  const seq = D.clickSequence(120.5, 40);
+  assert.deepEqual(seq.map(s => s.type), ['pointerover', 'pointerenter', 'mouseover', 'pointermove',
+    'pointerdown', 'mousedown', 'focus', 'pointerup', 'mouseup', 'click']);
+  for (const s of seq.filter(s => s.init)) {
+    assert.equal(s.init.clientX, 120.5); assert.equal(s.init.clientY, 40);
+    assert.equal(s.init.button, 0); assert.equal(s.init.composed, true);
+    assert.equal(s.init.bubbles, s.type !== 'pointerenter', s.type);
+    if (s.ctor === 'PointerEvent') {
+      assert.equal(s.init.pointerType, 'mouse'); assert.equal(s.init.isPrimary, true);
+    }
+  }
+  const by = t => seq.find(s => s.type === t);
+  assert.equal(by('pointerdown').init.buttons, 1);
+  assert.equal(by('mousedown').init.buttons, 1);
+  assert.equal(by('pointerup').init.buttons, 0);
+  assert.equal(by('click').ctor, 'MouseEvent');
+  assert.equal(by('click').init.detail, 1);
+  assert.equal(by('focus').ctor, null);
+});
+
+// --- F5: click through an overlay ---------------------------------------------------
+test('isCovered: only an unrelated element on top counts as an overlay', () => {
+  const inner = { contains: () => false };
+  const btn = { contains: n => n === inner };
+  const wrapper = { contains: n => n === btn || n === wrapper };
+  const overlay = { contains: () => false };
+  assert.equal(D.isCovered(btn, btn), false);       // itself
+  assert.equal(D.isCovered(btn, inner), false);     // a part of it
+  assert.equal(D.isCovered(btn, wrapper), false);   // a wrapper of it
+  assert.equal(D.isCovered(btn, null), false);
+  assert.equal(D.isCovered(btn, overlay), true);
+});
+
+test('pointMoved: the element still under the point, or a page that shifted', () => {
+  const inner = { tagName: 'SPAN', contains: () => false };
+  const btn = { tagName: 'BUTTON', contains: n => n === inner };
+  const wrapper = { tagName: 'DIV', contains: n => n === btn || n === wrapper };
+  const banner = { tagName: 'DIV', contains: () => false };
+  const body = { tagName: 'BODY', contains: () => true };
+  assert.equal(D.pointMoved(btn, btn), false);
+  assert.equal(D.pointMoved(btn, inner), false);      // a part of it
+  assert.equal(D.pointMoved(btn, wrapper), false);    // a wrapper of it
+  assert.equal(D.pointMoved(btn, banner), true);      // a banner pushed in
+  assert.equal(D.pointMoved(btn, body), true);        // it left; only the page is there
+  assert.equal(D.pointMoved(null, btn), true);        // it is gone
+  assert.equal(D.pointMoved(btn, null), true);
+});

@@ -9,11 +9,15 @@
 // A missing element returns { ok: false, code: 'stale' }; the server turns that
 // into "element fN:M is no longer on the page — browser_read_page again".
 
-export function readPage(maxChars, selector) {
+// mode: 'auto' (candidates when fewer than 8 interactive elements are in
+// view in this frame; the server applies the same rule across all frames),
+// 'all' (always), 'interactive' (never).
+export function readPage(maxChars, selector, mode) {
   const D = globalThis.__jav3Dom;
   D.deepEach(document, e => { if (e.hasAttribute(D.ATTR)) e.removeAttribute(D.ATTR); });
   const all = D.collect(document, window);
   const kept = D.orderInViewFirst(all, 300);
+  const box = r => ({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) });
   const els = kept.map((c, i) => {
     const el = c.el, r = c.r, n = i + 1;
     el.setAttribute(D.ATTR, String(n));
@@ -33,8 +37,7 @@ export function readPage(maxChars, selector) {
     }
     const e = {
       n, tag, type, role, name, text,
-      box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
-      inView: c.inView,
+      box: box(r), inView: c.inView,
     };
     if (value) e.value = value;
     if (!name && !text) e.icon = true;              // icon-only: kept, flagged
@@ -47,6 +50,23 @@ export function readPage(maxChars, selector) {
     }
     return e;
   });
+  // Candidates: elements with no button markup that look clickable (a
+  // cursor:pointer <div>, an ng-click <span>, short leaf text). Same id space
+  // and data-jav3-id tagging, numbered after the interactive ones, so
+  // click/type/hover work on them unchanged.
+  const inViewCount = kept.filter(c => c.inView).length;
+  if (mode === 'all' || (mode !== 'interactive' && inViewCount < 8)) {
+    const cands = D.collectCandidates(document, window, all.map(c => c.el));
+    cands.forEach((c, i) => {
+      const n = kept.length + i + 1;
+      c.el.setAttribute(D.ATTR, String(n));
+      const name = D.clean(D.accessibleName(c.el), 80);
+      const e = { n, kind: 'candidate', tag: c.el.tagName.toLowerCase(), type: '', role: '',
+                  name, text: '', box: box(c.r), inView: c.inView, why: c.why };
+      if (!name) e.icon = true;
+      els.push(e);
+    });
+  }
   const raw = document.body ? document.body.innerText : '';
   const body = raw.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
   let probed = null;
@@ -61,14 +81,19 @@ export function readPage(maxChars, selector) {
   });
   return { url: location.href, title: document.title,
            text: body.slice(0, maxChars + 1), elements: els, probed, iframes,
-           sig: D.signature(raw, all.length),
+           sig: D.signature(raw, all.length, D.formState(document)),
            viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 } };
+}
+
+// The top frame's viewport, reported with each tab screenshot.
+export function viewportInfo() {
+  return { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 };
 }
 
 // The same signature readPage reports, without re-labelling anything.
 export function pageSig() {
   const D = globalThis.__jav3Dom;
-  return D.signature(document.body ? document.body.innerText : '', D.collect(document, window).length);
+  return D.signature(document.body ? document.body.innerText : '', D.collect(document, window).length, D.formState(document));
 }
 
 // Resolve when the DOM has had no mutations for quietMs, or at timeoutMs.
@@ -89,13 +114,49 @@ export function domQuiet(timeoutMs, quietMs) {
   });
 }
 
-export function clickEl(id) {
-  const el = globalThis.__jav3Dom.findJav3(document, id);
+// A realistic pointer/mouse sequence at the element's centre, dispatched on
+// whatever is on top there (lib/dom.js realClick), so framework listeners on
+// plain <div>s (pointerdown, mousedown, click) all fire.
+export async function clickEl(id) {
+  const D = globalThis.__jav3Dom;
+  const el = D.findJav3(document, id);
   if (!el) return { ok: false, code: 'stale' };
-  el.scrollIntoView({ block: 'center', inline: 'center' });
-  if (typeof el.focus === 'function') el.focus();
-  el.click();
-  return { ok: true };
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  const r = el.getBoundingClientRect();
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const hit = D.deepPoint(document, x, y) || el;
+  return D.realClick(window, document, hit, x, y, el);
+}
+
+// A click at (x, y), CSS px of the top frame's viewport (the server converts
+// from screenshot pixels).
+// `expect` ({n, label}, a top-frame element) is what the screenshot showed at
+// the point: if something else is under it now, refuse instead of clicking.
+export async function clickAt(x, y, expect) {
+  const D = globalThis.__jav3Dom;
+  if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) {
+    return { ok: false, err: `${x},${y} is outside the page (${window.innerWidth}x${window.innerHeight} CSS px); take a new browser_screenshot_tab` };
+  }
+  const hit = D.deepPoint(document, x, y);
+  if (expect && D.pointMoved(D.findJav3(document, expect.n), hit)) {
+    return { ok: false, code: 'moved', err: 'the page moved since the screenshot — ' + JSON.stringify(expect.label || 'the element') + ' is no longer at that point; browser_screenshot_tab again' };
+  }
+  if (!hit) return { ok: false, err: 'nothing on the page at that point' };
+  if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
+    return { ok: false, code: 'frame', err: 'that point is inside an iframe; browser_read_page and click its element by id (f1:…)' };
+  }
+  return D.realClick(window, document, hit, x, y, null);
+}
+
+// browser_type with no element: into whatever has focus.
+export function typeActive(text, submit) {
+  const D = globalThis.__jav3Dom;
+  const el = D.deepActive(document);
+  if (!el || el === document.body || el === document.documentElement) {
+    return { ok: false, code: 'no_focus', err: 'nothing is focused on that page — click the field first (browser_click by id or by x, y), then type' };
+  }
+  if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') return { ok: true, inFrame: true };
+  return D.typeInto(window, document, el, text, submit);
 }
 
 export function typeEl(id, text, submit) {
@@ -107,6 +168,9 @@ export function typeEl(id, text, submit) {
     document.execCommand('selectAll', false, null);
     document.execCommand('insertText', false, text);
   } else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      return { ok: false, err: 'that is a ' + el.type + '; use browser_click to change it' };
+    }
     if (el.type === 'password' || el.type === 'file') {
       return { ok: false, err: 'Jav3 does not type into password or file fields' };
     }
@@ -209,8 +273,12 @@ export function keyPress(combo) {
         document.execCommand('insertLineBreak') || document.execCommand('insertText', false, '\n');
         did = 'new line';
       } else if (tag === 'INPUT' && el.form) {
-        if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
-        did = 'submitted the form';
+        if (!D.implicitSubmit(el.form)) {
+          did = 'no submit (the form has several fields and no submit button)';
+        } else {
+          if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
+          did = 'submitted the form';
+        }
       } else if (el && el.matches && el.matches('a[href], button, summary, [role=button], [role=link], [role=menuitem], [role=tab], [role=option]')) {
         el.click(); did = 'activated ' + desc(el);
       }

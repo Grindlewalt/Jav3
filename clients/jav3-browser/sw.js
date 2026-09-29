@@ -5,10 +5,10 @@
 // notification with Cancel on every action, Pause, Disconnect.
 import {
   VerbError, validate, hostOf, isDenied, siteDecision, describe,
-  parseLoginLine, baseUrl, wsUrl, parseElementId, frameConsentNeeded, shouldAdopt,
+  parseLoginLine, baseUrl, wsUrl, parseElementId, combineSigs, frameConsentNeeded, shouldAdopt, shotScale,
 } from './lib/verbs.js';
 import {
-  readPage, pageSig, domQuiet, clickEl, typeEl, selectEl, hoverEl, keyPress, scrollToEl, scrollPage,
+  readPage, pageSig, domQuiet, clickEl, clickAt, typeActive, viewportInfo, typeEl, selectEl, hoverEl, keyPress, scrollToEl, scrollPage,
 } from './lib/page.js';
 
 const ASK_TIMEOUT_MS = 60000;
@@ -278,7 +278,7 @@ async function tabFrames(tabId) {
 // Read every frame of the tab and stitch the results. Element numbers are local
 // to each frame; here they gain a frame index ("f2:5"). The frame map is kept
 // so a later click/type/scroll_to_element can resolve an id to its frameId.
-async function readAllFrames(tabId, maxChars, selector) {
+async function readAllFrames(tabId, maxChars, selector, mode) {
   const frames = await tabFrames(tabId);
   const map = [];
   const elements = [];
@@ -288,10 +288,11 @@ async function readAllFrames(tabId, maxChars, selector) {
   let topText = '';
   let selectorFound = false;
   let sig = null, viewport = null, iframes = [];
+  const frameSigs = [];
   // Share the text budget: the main frame gets it; subframes add elements only.
   for (const f of frames) {
     let r;
-    try { r = await inject(tabId, readPage, [f.frameId === 0 ? maxChars : 0, selector || ''], f.frameId); }
+    try { r = await inject(tabId, readPage, [f.frameId === 0 ? maxChars : 0, selector || '', mode || 'auto'], f.frameId); }
     catch { r = null; }
     if (!r) continue;
     const host = hostOf(r.url) || hostOf(f.url) || '';
@@ -299,6 +300,7 @@ async function readAllFrames(tabId, maxChars, selector) {
       title = r.title || ''; topText = r.text || '';
       sig = r.sig || null; viewport = r.viewport || null; iframes = r.iframes || [];
     }
+    if (r.sig) frameSigs.push(r.sig);
     if (r.probed) selectorFound = true;
     map.push({ index, frameId: f.frameId, url: r.url || f.url || '', host });
     frameOut.push({ index, host, url: r.url || f.url || '',
@@ -312,8 +314,8 @@ async function readAllFrames(tabId, maxChars, selector) {
   await saveFrames(tabId, map);
   const i = await info(tabId);
   return { data: { tab: tabId, url: i.url, title: title || i.title, text: topText,
-                   elements, frames: frameOut, sig, viewport },
-           selectorFound, count: elements.length };
+                   elements, frames: frameOut, sig: combineSigs(frameSigs) || sig, viewport },
+           selectorFound, count: elements.filter(e => e.kind !== 'candidate').length };
 }
 
 // Where a direct child frame of the top page sits in the top viewport: the
@@ -330,7 +332,12 @@ function frameOffset(f, iframes) {
 // quiet; null when the page cannot be scripted right now (mid-navigation).
 async function settleSig(tabId, settleMs) {
   try { if (settleMs) await inject(tabId, domQuiet, [settleMs, QUIET_MS], 0); } catch { /* navigating */ }
-  try { return await inject(tabId, pageSig, [], 0); } catch { return null; }
+  // every frame the extension may read, so a change inside an iframe counts
+  const sigs = [];
+  for (const f of (await tabFrames(tabId)).slice(0, 20)) {
+    try { sigs.push(await inject(tabId, pageSig, [], f.frameId)); } catch { /* frame gone */ }
+  }
+  return combineSigs(sigs);
 }
 
 function pageErr(r, verb) {
@@ -423,14 +430,14 @@ async function run(verb, p, c) {
     const started = Date.now();
     let quiet = null;
     if (p.wait_ms) { try { quiet = await inject(p.tab, domQuiet, [p.wait_ms, QUIET_MS], 0); } catch { quiet = null; } }
-    let out = await readAllFrames(p.tab, p.max_chars, p.selector);
+    let out = await readAllFrames(p.tab, p.max_chars, p.selector, p.mode);
     while (p.wait_ms && Date.now() - started < p.wait_ms) {
       const enough = (p.min_elements ? out.count >= p.min_elements : false) ||
         (p.selector ? out.selectorFound : false) ||
         (!p.min_elements && !p.selector);
       if (enough) break;
       await new Promise(r => setTimeout(r, 350));
-      out = await readAllFrames(p.tab, p.max_chars, p.selector);
+      out = await readAllFrames(p.tab, p.max_chars, p.selector, p.mode);
     }
     return { data: { ...out.data, ...(quiet ? { quiet: !!quiet.quiet } : {}) } };
   }
@@ -443,7 +450,12 @@ async function run(verb, p, c) {
     const bmp = await createImageBitmap(blob);
     const img = { mime: 'image/jpeg', w: bmp.width, h: bmp.height, b64: url.split(',', 2)[1] };
     bmp.close();
-    return { data: await info(p.tab), image: img };
+    // the viewport and scale, so the server can turn a point on this picture
+    // into CSS px for browser_click(tab, x, y)
+    let viewport = null;
+    try { viewport = await inject(p.tab, viewportInfo, [], 0); } catch { viewport = null; }
+    const scale = shotScale(img.w, img.h, viewport);
+    return { data: { ...(await info(p.tab)), viewport, scale }, image: img };
   }
   if (verb === 'scroll') {
     const r = await inject(p.tab, scrollPage, [p.pages]);
@@ -475,6 +487,33 @@ async function run(verb, p, c) {
     return { data: { ...(await info(p.tab)), opened: openedSince(since, p.tab), text: r.text || '',
                      sig: await settleSig(p.tab, SETTLE_MS) } };
   }
+  if ((verb === 'click' && p.element === undefined) || (verb === 'type' && p.element === undefined)) {
+    // a coordinate click (top frame, CSS px) or typing into the focused
+    // element (the frame the last click/type went into when focus is an
+    // <iframe>), like key
+    const since = Date.now();
+    const prev = await focusedWindow();
+    let r;
+    if (verb === 'click') {
+      r = await inject(p.tab, clickAt, [p.x, p.y, p.expect || null], 0);
+      if (r && r.ok) await saveFocusFrame(p.tab, 0);
+    } else {
+      r = await inject(p.tab, typeActive, [p.text, p.submit], 0);
+      if (r && r.inFrame) {
+        const fid = await loadFocusFrame(p.tab);
+        const f = (await loadFrames(p.tab)).find(m => m.frameId === fid);
+        if (fid == null || !f) throw new VerbError('the focus is inside a frame Jav3 has not clicked into; click the field first');
+        if (frameConsentNeeded(host, f.host)) await allowed(f.url, c);
+        r = await inject(p.tab, typeActive, [p.text, p.submit], fid);
+      }
+    }
+    if (!r || !r.ok || r.inFrame) throw pageErr(r, verb);
+    await new Promise(res => setTimeout(res, 300));
+    await waitLoad(p.tab);
+    await giveFocusBack(prev, tab.windowId);
+    return { data: { ...(await info(p.tab)), opened: openedSince(since, p.tab), text: r.text || '',
+                     sig: await settleSig(p.tab, SETTLE_MS) } };
+  }
   // element-bound verbs: click, type, select, hover, scroll_to_element. Resolve
   // the id to its frame from the last read of this tab.
   const el = await resolveElement(p.tab, p.element);
@@ -491,6 +530,10 @@ async function run(verb, p, c) {
   else if (verb === 'select') r = await inject(p.tab, selectEl, [el.n, p.value ?? null, p.label ?? null], el.frameId);
   else if (verb === 'hover') r = await inject(p.tab, hoverEl, [el.n], el.frameId);
   else r = await inject(p.tab, scrollToEl, [el.n], el.frameId);
+  if (r && r.code === 'covered') {
+    const cid = `f${parseElementId(p.element).frame}:${r.cover}`;
+    throw new VerbError(`element ${p.element} is covered by another element (${JSON.stringify(String(r.coverName || 'element'))}) — dismiss it first or click the covering element ${cid}`, 'covered');
+  }
   if (!r || !r.ok) throw pageErr(r, verb);
   if (verb === 'click' || verb === 'type' || verb === 'select') await saveFocusFrame(p.tab, el.frameId);
   if (verb !== 'scroll_to_element' && verb !== 'hover') { await new Promise(res => setTimeout(res, 300)); await waitLoad(p.tab); }

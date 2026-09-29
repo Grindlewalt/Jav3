@@ -16,6 +16,9 @@ parameters:
       type: integer
     y:
       type: integer
+    frame:
+      type: integer
+      description: Frame number from the header of the result the ids or coordinates came from ("frame 17"). Optional; an action on an older frame is refused.
     computer:
       type: string
       description: Which connected computer (name). Omit when only one is connected.

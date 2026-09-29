@@ -97,6 +97,24 @@ its `browser`-scoped device token in the first frame. That token opens nothing
 else: chat, the desk socket and every Settings route refuse it. See
 `backend/browser.py` and SECURITY-RESIDUAL-RISK.md #18.
 
+## Versions
+
+Reload the extension after an update (`chrome://extensions` → Reload); Settings
+shows a reload hint while the browser reports an older build than the server
+ships (currently **0.5.0**).
+
+- **0.5.0** — a click no longer activates a button through a cookie or consent
+  overlay (the covering element is named, with its id); `changed` also sees
+  typed text, selects, checkboxes, aria state and iframe changes; typing into a
+  checkbox is refused and Enter only submits when the browser would; a click by
+  screenshot coordinates is refused when the page moved a different element
+  under that point since the screenshot. Every action verb (click, type,
+  select, hover, key) needs 0.5.0; reading, scrolling, screenshots and tab
+  verbs still work on an older build, and the refusal says to reload.
+- **0.4.0** — real pointer clicks, clicks by screenshot coordinates, typing
+  into the focused element.
+- **0.3.0** — select, hover, key, back and forward.
+
 ## Test
 
     node --test clients/jav3-browser/test/*.test.mjs

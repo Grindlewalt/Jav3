@@ -191,15 +191,42 @@ async def test_broker_sets_nav_taint_only_after_desk_or_browser(tmp_env):
     import backend.vm.broker as b
     orig = b.registry.dispatch
     b.registry.dispatch = fake_dispatch
-    broker.register_turn(broker.TurnEnvelope(op_id="op-nav"))
+    broker.register_turn(broker.TurnEnvelope(op_id="op-nav-mem"))
     try:
-        await broker.broker_dispatch("op-nav", "memory_write", {})
-        broker.mark_tainted("op-nav")                  # web-ish taint
-        await broker.broker_dispatch("op-nav", "memory_write", {})
-        broker.mark_tainted("op-nav", "desk")
-        await broker.broker_dispatch("op-nav", "memory_write", {})
+        await broker.broker_dispatch("op-nav-mem", "memory_write", {})
+        broker.mark_tainted("op-nav-mem")                  # web-ish taint
+        await broker.broker_dispatch("op-nav-mem", "memory_write", {})
+        broker.mark_tainted("op-nav-mem", "desk")
+        await broker.broker_dispatch("op-nav-mem", "memory_write", {})
     finally:
         b.registry.dispatch = orig
-        broker.release_turn("op-nav")
+        broker.release_turn("op-nav-mem")
     assert seen == [None, None, "desk"]
-    assert "op-nav" not in broker._nav_tainted
+    assert "op-nav-mem" not in broker._nav_tainted
+
+
+def test_quarantine_note_wording_per_source():
+    from backend import memory
+    assert memory.taint_phrase("desk", "grant-mac-desk") == \
+        'read the screen of "grant-mac-desk" (desk)'
+    assert memory.taint_phrase("desk", 'a "b"') == "read the screen of \"a 'b'\" (desk)"
+    assert memory.taint_phrase("web") == "read a web page"
+    assert memory.taint_phrase("browser").endswith("(browser)")
+    assert memory.taint_phrase("local").endswith("(local)")
+    n = memory.quarantine_note([("desk", "grant-mac-desk")])
+    assert 'turn that already read the screen of "grant-mac-desk" (desk). It is ' \
+        "quarantined" in n and "web/research" not in n
+    assert "operator reviews and approves it" in n
+    assert "already read a web page and read a page in the operator's browser" in \
+        memory.quarantine_note([("web", None), ("browser", None)])
+    assert "already consumed untrusted external content." in memory.quarantine_note([])
+
+
+def test_quarantine_note_names_shell_output_separately():
+    from backend import memory
+    from backend.vm import broker
+    assert memory.taint_phrase("desk_shell", "grant-mac-desk") == \
+        'read shell output from "grant-mac-desk" (desk shell)'
+    assert memory.taint_phrase("desk_shell") == "read shell output from a computer (desk shell)"
+    assert broker.taint_kind("desk_shell") == "desk_shell"
+    assert broker.taint_kind("desk_click") == "desk"

@@ -41,7 +41,7 @@ A locked screen or a sleeping display is reported, not fought: the hello and
 a `state {locked, asleep}` frame (sent when it changes, polled every
 STATE_POLL_S) carry it, and screenshot / wait / input verbs are refused with
 one sentence asking the operator to unlock or wake it (macOS: CGSession +
-CGDisplayIsAsleep; Linux: loginctl LockedHint when logind knows the session).
+CGDisplayIsAsleep; Linux: logind LockedHint, then the ScreenSaver D-Bus; unknown = null).
 
 Files, in $XDG_CONFIG_HOME/jav3 (default ~/.config/jav3), dir 0700:
   desk.json          {"address", "token"} 0600
@@ -56,6 +56,7 @@ import argparse
 import asyncio
 import base64
 import getpass
+import hashlib
 import json
 import os
 import platform
@@ -72,6 +73,8 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
+import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -84,12 +87,19 @@ LONG_EDGE = 1280          # screenshots are downscaled to this long edge
 SETTLE_S = 0.3            # settle floor after an input action (A.4 minimum)
 SETTLE_MAX_S = 3.0        # settle ceiling: a clock or a video never "settles"
 SETTLE_POLL_S = 0.08      # between thumbnails while settling
-THUMB_EDGE = 64           # settle compares thumbnails this big (long edge)
+THUMB_EDGE = 160          # settle compares thumbnails this big (long edge): at 64
+                          # a translucent overlay (Spotlight) was a handful of pixels
+PIXEL_TOL = 8             # grey levels a thumbnail pixel may move and still "match"
 ZOOM_MAX = 3.0            # a zoom upscales at most this much over native pixels
 ELEMENTS_BUDGET_S = 1.5   # the accessibility walk never blocks a screenshot longer
+PRE_REUSE_S = 3.0         # an input verb reuses the last response's walk + thumbnail
+                          # as its "before" when they are younger than this. 3 s, not
+                          # 2: in the live trial the gaps between actions were 2.1-2.5 s,
+                          # so a 2 s window never applied
 ELEMENTS_CAP = 400
 ELEMENTS_DEPTH = 12
 ROW_PX = 40               # reading order: rows of this many image px, then x
+MENU_BAR = "menu bar"     # the group name of the menu bar (listed first)
 WAIT_MAX_MS = 10_000
 TEXT_CAP = 2000
 OUTPUT_CAP = 16_000
@@ -99,6 +109,9 @@ LOCKED_ERR = "the screen is locked — ask the operator to unlock it"
 ASLEEP_ERR = "the display is asleep — ask the operator to wake it"
 UNIT_NAME = "jav3-desk.service"
 LABEL = "local.jav3.desk"
+
+
+log = logging.getLogger("jav3-desk")
 
 
 class DeskError(Exception):
@@ -442,8 +455,9 @@ def decode_thumb(data: bytes) -> tuple[int, int, bytes] | None:
 
 def thumbs_match(a: bytes | None, b: bytes | None) -> bool:
     """Same screen, for settle's purposes. Decodable thumbnails (raw pixels)
-    match when at most 1 in 400 pixels differ by more than 24 grey levels, so
-    a blinking caret does not keep the screen "changing"; anything else is
+    match when at most 1 in 400 pixels differ by more than PIXEL_TOL grey
+    levels, so a blinking caret does not keep the screen "changing" but a
+    dim overlay on a dark window does count; anything else is
     byte-equal (a JPEG of the same pixels is the same bytes, but a caret blink
     reads as a change — the SETTLE_MAX_S ceiling bounds that)."""
     if a is None or b is None:
@@ -454,7 +468,7 @@ def thumbs_match(a: bytes | None, b: bytes | None) -> bool:
     if not da or not db or da[:2] != db[:2]:
         return False
     n = len(da[2])
-    diff = sum(1 for p, q in zip(da[2], db[2]) if abs(p - q) > 24)
+    diff = sum(1 for p, q in zip(da[2], db[2]) if abs(p - q) > PIXEL_TOL)
     return diff <= max(1, n // 400)
 
 
@@ -510,8 +524,25 @@ def _intersects(a: tuple, b: tuple) -> bool:
         and b[1] < a[1] + a[3]
 
 
+# roles a background window may show (its buttons and fields; never list rows)
+BG_ROLES = ("button", "textfield", "combobox", "checkbox", "radio", "toggle", "tab", "link")
+BG_SHOWN = 8              # a background window lists at most this many elements
+BG_NODES = 400            # ...and its walk visits at most this many nodes
+BG_TIME_S = 0.15          # ...within this long (a sluggish background app, System
+                          # Settings at 150-250 ms a node, must not eat the budget)
+
+
+def _contains(outer: tuple | None, inner: tuple | None) -> bool:
+    return bool(outer and inner and inner[2] > 0 and inner[3] > 0
+                and outer[0] <= inner[0] and outer[1] <= inner[1]
+                and inner[0] + inner[2] <= outer[0] + outer[2]
+                and inner[1] + inner[3] <= outer[1] + outer[3])
+
+
 def walk_tree(roots, read, clip: tuple, deadline: float, *,
-              max_depth: int = ELEMENTS_DEPTH, cap: int = ELEMENTS_CAP
+              max_depth: int = ELEMENTS_DEPTH, cap: int = ELEMENTS_CAP,
+              groups: list | None = None, name_roots: bool = False,
+              kinds: list | None = None, windows: dict | None = None
               ) -> tuple[list[dict], bool]:
     """Depth-first over an accessibility tree, source-agnostic: `read(node)`
     returns {role (already ours, "" = structural, "text" = static text or a
@@ -520,20 +551,81 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
     global coordinates, partial). A subtree whose box is off `clip` is
     skipped; static text becomes the label of the nearest unlabeled control
     above it (within 3 levels) and is never listed itself. Stops at the
-    deadline or the cap with partial=True."""
+    deadline or the cap with partial=True.
+
+    Every element carries the `window` it belongs to (the group its root
+    names): `groups[i]` for root i when given, else the root's own
+    info["window"], else (name_roots) its label; no group, no key.
+
+    `kinds[i]` is "front" (the frontmost
+    app's windows), "menu" (its menu bar) or "background". Front and menu
+    roots (and roots of no kind) are walked in full. A background window
+    whose box lies inside the first front window's is covered and
+    contributes nothing; any other lists at most BG_SHOWN of its buttons
+    and fields (no rows) from a walk of at most BG_NODES nodes and BG_TIME_S
+    seconds. `windows`,
+    when given, receives per background group {"shown", "total", "more"}:
+    how many it lists of how many the full walk would have (a lower bound
+    when `more`: the node or time cap cut it)."""
     out: list[dict] = []
     seen: set = set()
-    stack = [(r, 0, None, 0) for r in reversed(list(roots))]
-    while stack:
+    roots = list(roots)
+    names = list(groups or []) + [None] * len(roots)
+    kinds = list(kinds or []) + [None] * len(roots)
+    front_box = None
+    for i, root in enumerate(roots):
         if time.monotonic() > deadline or len(out) >= cap:
             return out, True
-        node, depth, owner, owner_depth = stack.pop()
         try:
-            info = read(node)
-        except Exception:  # noqa: BLE001 — one dead node must not end the walk
+            info = read(root)
+        except Exception:  # noqa: BLE001 — one dead window must not end the walk
             continue
         if not info or info.get("hidden"):
             continue
+        group = names[i] or info.get("window") or (
+            (info.get("label") or "window") if name_roots else None)
+        kind = kinds[i]
+        if kind == "front" and front_box is None:
+            front_box = info.get("box")
+        bg = kind == "background"
+        if bg and _contains(front_box, info.get("box")):
+            continue
+        st = {"shown": 0, "total": 0, "more": False}
+        partial = _walk_one(info, read, clip, deadline, out, seen, group,
+                            max_depth, cap, st if bg else None)
+        if bg and windows is not None and st["total"]:
+            w = windows.setdefault(str(group or "")[:80],
+                                   {"shown": 0, "total": 0, "more": False})
+            w["shown"] += st["shown"]
+            w["total"] += st["total"]
+            w["more"] = w["more"] or st["more"]
+        if partial:
+            return out, True
+    return out, False
+
+
+def _walk_one(info: dict, read, clip, deadline, out: list, seen: set, group,
+              max_depth: int, cap: int, bg: dict | None) -> bool:
+    """One root (already read) into `out`; True when the deadline or the cap
+    cut it. `bg` (a background window's counters) limits what is kept."""
+    stack = [(None, 0, None, 0)]
+    nodes = 0
+    until = time.monotonic() + BG_TIME_S
+    while stack:
+        if time.monotonic() > deadline or len(out) >= cap:
+            return True
+        node, depth, owner, owner_depth = stack.pop()
+        if node is not None:
+            if bg is not None and (nodes >= BG_NODES or time.monotonic() > until):
+                bg["more"] = True
+                return False
+            try:
+                info = read(node)
+            except Exception:  # noqa: BLE001 — one dead node must not end the walk
+                continue
+            if not info or info.get("hidden"):
+                continue
+        nodes += 1
         box = info.get("box")
         if box and box[2] > 0 and box[3] > 0 and not _intersects(box, clip):
             continue
@@ -546,30 +638,51 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
             continue
         if role in ROLES and box and box[2] > 0 and box[3] > 0:
             key = (role, tuple(round(v) for v in box))
+            label = (info.get("label") or "").strip()[:200]
             if key not in seen:
                 seen.add(key)
-                label = (info.get("label") or "").strip()[:200]
-                el = {"role": role, "label": label, "box": box}
-                v = info.get("value")
-                if v not in (None, "") and str(v) != label:
-                    el["value"] = str(v)[:200]
-                if info.get("focused"):
-                    el["focused"] = True
-                if info.get("enabled") is False:
-                    el["enabled"] = False
-                out.append(el)
-                if not label:
-                    owner, owner_depth = len(out) - 1, depth
+                keep = True
+                if bg is not None:
+                    if label or role not in _NEEDS_LABEL:
+                        bg["total"] += 1
+                    keep = role in BG_ROLES and bg["shown"] < BG_SHOWN
+                    bg["shown"] += keep
+                if keep:
+                    el = {"role": role, "label": label, "box": box}
+                    v = info.get("value")
+                    if v not in (None, "") and str(v) != label:
+                        el["value"] = str(v)[:200]
+                    if info.get("focused"):
+                        el["focused"] = True
+                    if info.get("enabled") is False:
+                        el["enabled"] = False
+                    if group:
+                        el["window"] = str(group)[:80]
+                    out.append(el)
+                    if not label:
+                        owner, owner_depth = len(out) - 1, depth
         if depth < max_depth:
             for c in reversed(list(info.get("children") or ())):
                 stack.append((c, depth + 1, owner, owner_depth))
-    return out, False
+    return False
+
+
+def elements_sig(els: list[dict]) -> str:
+    """What the element list says, independent of order and position: the
+    count and the multiset of (role, label). Two frames with the same sig
+    show the same controls."""
+    h = hashlib.sha256(str(len(els)).encode())
+    for k in sorted(f"{e.get('role')}\x1f{e.get('label')}" for e in els):
+        h.update(b"\x1e" + k.encode(errors="replace"))
+    return h.hexdigest()[:16]
 
 
 def build_elements(raw: list[dict], frame: Frame, src: str) -> list[dict]:
     """Global boxes -> image-pixel boxes of THIS image (crop + scale), clipped;
-    elements outside dropped; unlabeled rows dropped; ids 1..N in reading
-    order (rows of ROW_PX image px, then x)."""
+    elements outside dropped; unlabeled rows dropped; ids 1..N global,
+    grouped by window (the menu bar first, then windows in the order the
+    source listed them: front to back), in reading order within a group
+    (rows of ROW_PX image px, then x)."""
     out = []
     for e in raw:
         if not e["label"] and e["role"] in _NEEDS_LABEL:
@@ -579,11 +692,14 @@ def build_elements(raw: list[dict], frame: Frame, src: str) -> list[dict]:
             continue
         el = {"role": e["role"], "label": e["label"], "x": b[0], "y": b[1],
               "w": b[2], "h": b[3], "src": src}
-        for k in ("value", "focused", "enabled"):
+        for k in ("value", "focused", "enabled", "window"):
             if k in e:
                 el[k] = e[k]
         out.append(el)
-    out.sort(key=lambda e: (e["y"] // ROW_PX, e["x"], e["y"]))
+    rank: dict = {MENU_BAR: -1}
+    for e in out:
+        rank.setdefault(e.get("window"), len(rank))
+    out.sort(key=lambda e: (rank[e.get("window")], e["y"] // ROW_PX, e["x"], e["y"]))
     return [{"id": i, **e} for i, e in enumerate(out[:ELEMENTS_CAP], 1)]
 
 
@@ -599,23 +715,112 @@ class ElementSource:
     def unavailable(self) -> str | None:
         return self.note
 
-    def collect(self, clip: tuple, deadline: float) -> tuple[list[dict], bool]:
+    def collect(self, clip: tuple, deadline: float, walk: str = "front",
+                windows: dict | None = None) -> tuple[list[dict], bool]:
+        """`walk` "front" caps background windows (walk_tree's kinds), "all"
+        walks every window in full; `windows` receives the background
+        groups' {"shown", "total", "more"}."""
         return [], False
+
+    def focused(self) -> dict | None:
+        """The element with keyboard focus: {role (ours), label, value (str or
+        None), selected, secure, truncated}; {} when nothing has focus; None
+        when this source cannot tell (then typing is not read back)."""
+        return None
 
 
 class FakeElementSource(ElementSource):
     """Tests: a recorded tree of dicts ({role, label, box, children, ...},
-    roles already ours) walked by the real walker."""
+    roles already ours) walked by the real walker; `focus` is what
+    focused() answers (a dict, {} or None, or a callable returning one)."""
 
-    def __init__(self, roots: list[dict], src: str = "ax", note: str | None = None):
+    def __init__(self, roots: list[dict], src: str = "ax", note: str | None = None,
+                 focus=None):
         super().__init__(note or "")
-        self.roots, self.src = roots, src
+        self.roots, self.src, self.focus = roots, src, focus
+
+    def focused(self):
+        return self.focus() if callable(self.focus) else self.focus
 
     def unavailable(self):
         return self.note or None
 
-    def collect(self, clip, deadline):
-        return walk_tree(self.roots, lambda n: n, clip, deadline)
+    def collect(self, clip, deadline, walk="front", windows=None):
+        kinds = None if walk == "all" else [r.get("kind") for r in self.roots]
+        return walk_tree(self.roots, lambda n: n, clip, deadline, kinds=kinds,
+                         windows=windows)
+
+
+TYPED_TAIL = 40           # read-back compares at most this many trailing characters
+
+
+SHOT_LOST_NOTE = ("the action was sent but the screen could not be captured afterwards — "
+                  "take desk_screenshot before repeating it")
+TYPED_DIFF_NOTE = ("typed; the field now reads differently from what was typed "
+                   "(autocomplete or formatting?) — check the screenshot before retyping")
+
+
+def _fold(s: str) -> str:
+    """Comparable form of field text: NFKC, case-folded, whitespace collapsed."""
+    return " ".join(unicodedata.normalize("NFKC", s).split()).casefold()
+
+
+def _field_text(focus: dict) -> str:
+    value, sel = focus.get("value"), focus.get("selected")
+    return _fold(f"{value if isinstance(value, str) else ''} "
+                 f"{sel if isinstance(sel, str) else ''}")
+
+
+def typed_result(text: str, focus: dict | None, changed: bool | None = None,
+                 before: dict | None = None) -> tuple[str | None, str | None]:
+    """Did `text` land in the focused field? (error, note). (None, None) = yes,
+    or cannot tell (no reader, a secure field, a newline/tab that may have
+    submitted or moved focus, a value too long to read). The text was typed
+    whatever this says, so the error is only for "it visibly went nowhere":
+    the field's value did not change and the screen did not change. A field
+    that changed but does not hold the text (autocomplete, reformatting,
+    masking, auto-capitalise) is a note, not an error: an error invites a
+    retype, and the text would land twice. `before` is the focused element
+    before typing; without it a value lacking the text stays an error.
+    Never quotes the field's value — only its role and label."""
+    if focus is None or any(c in text for c in "\n\r\t"):
+        return None, None
+    want = _fold(text)
+    if not want:
+        return None, None
+    if not focus:
+        if changed is True:
+            return None, None
+        return ("typed text did not appear: nothing on this computer has keyboard "
+                "focus — click the field first, then type"), None
+    role = focus.get("role") or "element"
+    label = " ".join(str(focus.get("label") or "").split())[:60]
+    what = f"{role} {label}".strip().replace('"', "'")
+    value = focus.get("value")
+    if focus.get("secure") or focus.get("truncated"):
+        return None, None
+    if role not in ("textfield", "combobox") and not isinstance(value, str):
+        if changed is True:
+            return None, None
+        return (f'typed text did not appear: the focused element is not a text field '
+                f'("{what}") — click the field first, then type'), None
+    hay = _field_text(focus)
+    if want[-TYPED_TAIL:] in hay:
+        return None, None
+    if before is not None:
+        if hay != _field_text(before):
+            return None, TYPED_DIFF_NOTE
+        if changed is True:
+            return None, None
+    return (f'typed text did not appear in the focused field ("{what}") — click the '
+            f"field first, then type"), None
+
+
+def typed_check(text: str, focus: dict | None, changed: bool | None = None,
+                before: dict | None = None) -> str | None:
+    """The error half of typed_result (None when it landed, cannot be told, or
+    only differs from what was typed)."""
+    return typed_result(text, focus, changed, before)[0]
 
 
 def ax_info(v: dict) -> dict:
@@ -633,7 +838,10 @@ def ax_info(v: dict) -> dict:
                  or (val if isinstance(val, str) and role != "textfield" else "")
                  or v.get("AXPlaceholderValue") or v.get("AXHelp") or "")
     pos, size = v.get("AXPosition"), v.get("AXSize")
-    return {"role": role, "label": label,
+    # a closed menu (every menu bar item has one) is 0x0 with all its items
+    # below it: skipping it saves the menu bar most of its nodes
+    hidden = v.get("AXRole") == "AXMenu" and bool(size) and not (size[0] and size[1])
+    return {"role": role, "label": label, "hidden": hidden,
             "value": val if role in ("textfield", "checkbox", "radio", "slider",
                                      "combobox", "toggle") else None,
             "focused": v.get("AXFocused") is True, "enabled": v.get("AXEnabled"),
@@ -670,9 +878,12 @@ class MacAXSource(ElementSource):
              "AXPlaceholderValue", "AXPosition", "AXSize", "AXFocused", "AXEnabled",
              "AXChildren")
     OTHER_APPS = 6
+    AX_TIMEOUT_S = 0.25       # per AX message during a walk: a hung app costs this
+    AX_CANNOT_COMPLETE = -25204
 
     def __init__(self):
         super().__init__("")
+        self._hung: set[int] = set()
         import ctypes
         import ctypes.util
         c = self.ct = ctypes
@@ -722,6 +933,7 @@ class MacAXSource(ElementSource):
         self.T["AXValue"] = ax.AXValueGetTypeID()
         self._keep: list = []
         self._s: dict = {}
+        self._arrays: dict = {}
         self._lock = threading.Lock()
         names = [self.cfstr(a) for a in self.ATTRS]
         arr = (vp * len(names))(*names)
@@ -739,7 +951,7 @@ class MacAXSource(ElementSource):
             return "no Accessibility permission"
         return None
 
-    def py(self, obj):
+    def py(self, obj, cap: int = 400):
         """A CF object -> Python (str, bool, float, list of borrowed refs,
         (a, b) for an AXValue point/size); None for anything else, including
         the AXError values CopyMultiple puts in place of missing attributes."""
@@ -751,7 +963,7 @@ class MacAXSource(ElementSource):
             n = cf.CFStringGetLength(obj)
             buf = c.create_string_buffer(n * 4 + 1)
             if cf.CFStringGetCString(obj, buf, len(buf), 0x08000100):
-                return buf.value.decode(errors="replace")[:400]
+                return buf.value.decode(errors="replace")[:cap]
             return ""
         if t == self.T["Boolean"]:
             return bool(cf.CFBooleanGetValue(obj))
@@ -778,17 +990,50 @@ class MacAXSource(ElementSource):
         return out.value
 
     def read(self, el) -> dict:
-        """One IPC per node (CopyMultipleAttributeValues), not one per attr."""
+        """One IPC per node (CopyMultipleAttributeValues), not one per attr.
+        An app that timed out once in this walk is skipped for the rest of it
+        (a hung app would otherwise cost AX_TIMEOUT_S per node)."""
+        pid = self.ct.c_int32()
+        if self._hung and self.ax.AXUIElementGetPid(el, self.ct.byref(pid)) == 0 \
+                and pid.value in self._hung:
+            return {}
         out = self.ct.c_void_p()
-        if self.ax.AXUIElementCopyMultipleAttributeValues(
-                el, self.attr_array, 0, self.ct.byref(out)) != 0 or not out.value:
+        err = self.ax.AXUIElementCopyMultipleAttributeValues(
+            el, self.attr_array, 0, self.ct.byref(out))
+        if err == self.AX_CANNOT_COMPLETE:
+            if self.ax.AXUIElementGetPid(el, self.ct.byref(pid)) == 0:
+                self._hung.add(pid.value)
+            return {}
+        if err != 0 or not out.value:
             return {}
         self._keep.append(out.value)
         return ax_info(dict(zip(self.ATTRS, (self.py(v) for v in self.py(out.value)))))
 
-    def roots(self) -> list:
+    def multi(self, el, names: tuple) -> dict:
+        """Several attributes in one IPC: {name: python value}."""
+        arr = self._arrays.get(names)
+        if arr is None:
+            c = self.ct
+            vals = (c.c_void_p * len(names))(*[self.cfstr(n) for n in names])
+            cb = c.addressof(c.c_char.in_dll(self.cf, "kCFTypeArrayCallBacks"))
+            arr = self._arrays[names] = self.cf.CFArrayCreate(None, vals, len(names), cb)
+        out = self.ct.c_void_p()
+        if self.ax.AXUIElementCopyMultipleAttributeValues(el, arr, 0,
+                                                          self.ct.byref(out)) != 0 \
+                or not out.value:
+            return {}
+        self._keep.append(out.value)
+        # element-valued attributes stay raw (borrowed, alive while `out` is)
+        return {n: v if n in ("AXWindows", "AXMenuBar") else self.py(v)
+                for n, v in zip(names, self.py(out.value) or [])}
+
+    def roots(self, deadline: float = float("inf")) -> tuple[list, list[str], list[str]]:
+        """(root elements, their group names, their kinds): each window as
+        "<App>: <title>" (or just the app), the front app's menu bar as
+        "menu bar"; the focused app's windows are "front", its menu bar
+        "menu", every other app's windows "background"."""
         c, ax, cf = self.ct, self.ax, self.cf
-        out, pids = [], []
+        out, pids, groups, kinds = [], [], [], []
         sysw = ax.AXUIElementCreateSystemWide()
         self._keep.append(sysw)
         app = self.attr(sysw, "AXFocusedApplication")
@@ -805,32 +1050,131 @@ class MacAXSource(ElementSource):
                 if layer == 0 and pid and int(pid) not in pids:
                     pids.append(int(pid))
         for i, pid in enumerate(pids[:1 + self.OTHER_APPS]):
+            if time.monotonic() > deadline:
+                break
             a = ax.AXUIElementCreateApplication(pid)
             if not a:
                 continue
             self._keep.append(a)
-            ax.AXUIElementSetMessagingTimeout(a, 0.25)   # a hung app costs 0.25 s, not 6
-            out += self.py(self.attr(a, "AXWindows")) or []
+            ax.AXUIElementSetMessagingTimeout(a, self.AX_TIMEOUT_S)
+            v = self.multi(a, ("AXTitle", "AXWindows", "AXMenuBar"))
+            if not v:
+                continue                                   # hung or gone: next app
+            app_name = v.get("AXTitle") if isinstance(v.get("AXTitle"), str) else ""
+            app_name = app_name or f"app {pid}"
+            wins = self.py(v.get("AXWindows")) or []
+            for w in wins if isinstance(wins, list) else []:
+                title = self.py(self.attr(w, "AXTitle"))
+                out.append(w)
+                groups.append(f"{app_name}: {title}" if title else app_name)
+                kinds.append("front" if i == 0 else "background")
             if i == 0:
-                mb = self.attr(a, "AXMenuBar")
-                if mb:
+                mb = v.get("AXMenuBar")
+                if mb and self.cf.CFGetTypeID(mb) != self.T["AXValue"]:
                     out.append(mb)
-        return out
+                    groups.append(MENU_BAR)
+                    kinds.append("menu")
+        return out, groups, kinds
 
-    def collect(self, clip, deadline):
-        """One walk at a time: screenshots run concurrently in worker
-        threads, and `_keep` (the CF objects released after a walk) must not
-        be shared. A second caller waits inside the same budget, then gives up."""
-        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            return [], True
+    FOCUS_CAP = 200_000
+    AX_NO_VALUE = -25212
+
+    def _attr_err(self, el, name: str):
+        out = self.ct.c_void_p()
+        err = self.ax.AXUIElementCopyAttributeValue(el, self.cfstr(name), self.ct.byref(out))
+        if err == 0 and out.value:
+            self._keep.append(out.value)
+        return err, out.value if err == 0 else None
+
+    def _front_app(self):
+        """The app owning the front-most normal on-screen window."""
+        info = self.cg.CGWindowListCopyWindowInfo(1 | 16, 0)
+        if not info:
+            return None
+        self._keep.append(info)
+        for d in self.py(info) or []:
+            layer = self.py(self.cf.CFDictionaryGetValue(d, self.cfstr("kCGWindowLayer")))
+            pid = self.py(self.cf.CFDictionaryGetValue(d, self.cfstr("kCGWindowOwnerPID")))
+            if layer == 0 and pid:
+                a = self.ax.AXUIElementCreateApplication(int(pid))
+                if a:
+                    self._keep.append(a)
+                    self.ax.AXUIElementSetMessagingTimeout(a, 0.5)
+                return a
+        return None
+
+    def focused(self):
+        """AXFocusedUIElement of the system: role, label, AXValue (read in
+        full up to FOCUS_CAP), AXSelectedText. None without permission or
+        when a walk holds the lock too long."""
+        if self.unavailable() or not self._lock.acquire(timeout=1.0):
+            return None
         try:
-            return walk_tree(self.roots(), self.read, clip, deadline)
+            sysw = self.ax.AXUIElementCreateSystemWide()
+            self._keep.append(sysw)
+            self.ax.AXUIElementSetMessagingTimeout(sysw, 0.5)
+            err, el = self._attr_err(sysw, "AXFocusedUIElement")
+            if err:
+                # the system-wide query can fail outright (CannotComplete);
+                # ask the front app instead. Only "no value" means no focus.
+                app = self.attr(sysw, "AXFocusedApplication") or self._front_app()
+                if not app:
+                    return None
+                err, el = self._attr_err(app, "AXFocusedUIElement")
+            if err == self.AX_NO_VALUE:
+                return {}
+            if err or not el:
+                return None
+            v = {n: self.py(self.attr(el, n), self.FOCUS_CAP) for n in
+                 ("AXRole", "AXSubrole", "AXTitle", "AXDescription",
+                  "AXPlaceholderValue", "AXValue", "AXSelectedText")}
+            val = v["AXValue"] if isinstance(v["AXValue"], str) else None
+            return {"role": ax_role(v["AXRole"], v["AXSubrole"]) or str(v["AXRole"] or ""),
+                    "label": v["AXTitle"] or v["AXDescription"] or v["AXPlaceholderValue"]
+                    or "",
+                    "value": val, "selected": v["AXSelectedText"],
+                    "secure": v["AXSubrole"] == "AXSecureTextField",
+                    "truncated": val is not None and len(val) >= self.FOCUS_CAP}
         finally:
             for o in self._keep:
                 if o:
                     self.cf.CFRelease(o)
             self._keep = []
             self._lock.release()
+
+    def collect(self, clip, deadline, walk="front", windows=None):
+        """One walk at a time: screenshots run concurrently in worker
+        threads, and `_keep` (the CF objects released after a walk) must not
+        be shared. A second caller waits inside the same budget, then gives up."""
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return [], True
+        try:
+            # the global AX timeout: child elements do not inherit the app
+            # element's, and the default is 6 s per message
+            sysw = self.ax.AXUIElementCreateSystemWide()
+            self._keep.append(sysw)
+            self.ax.AXUIElementSetMessagingTimeout(sysw, self.AX_TIMEOUT_S)
+            self._hung = set()
+            roots, groups, kinds = self.roots(deadline)
+            return walk_tree(roots, self.read, clip, deadline, groups=groups,
+                             kinds=None if walk == "all" else kinds, windows=windows)
+        finally:
+            for o in self._keep:
+                if o:
+                    self.cf.CFRelease(o)
+            self._keep = []
+            self._lock.release()
+
+
+def _walk_windows(wins, states, read, clip, deadline, walk, windows):
+    """AT-SPI: the active window first and walked in full ("front"); the
+    others are background windows unless walk == "all"."""
+    active = [("active" in states(w)) for w in wins]
+    order = sorted(range(len(wins)), key=lambda i: not active[i])
+    kinds = None if walk == "all" else ["front" if active[i] else "background"
+                                        for i in order]
+    return walk_tree([wins[i] for i in order], read, clip, deadline, name_roots=True,
+                     kinds=kinds, windows=windows)
 
 
 class GiAtspiSource(ElementSource):
@@ -862,7 +1206,7 @@ class GiAtspiSource(ElementSource):
         return atspi_info(acc.get_role_name(), acc.get_name(), acc.get_description(),
                           self._states(acc), ext, kids)
 
-    def collect(self, clip, deadline):
+    def collect(self, clip, deadline, walk="front", windows=None):
         desk = self.A.get_desktop(0)
         wins = []
         for i in range(desk.get_child_count()):
@@ -871,8 +1215,7 @@ class GiAtspiSource(ElementSource):
                 w = app.get_child_at_index(j)
                 if w:
                     wins.append(w)
-        wins.sort(key=lambda w: "active" not in self._states(w))
-        return walk_tree(wins, self.read, clip, deadline)
+        return _walk_windows(wins, self._states, self.read, clip, deadline, walk, windows)
 
 
 class DbusAtspiSource(ElementSource):
@@ -923,15 +1266,14 @@ class DbusAtspiSource(ElementSource):
                           self._prop(node, "Name"), self._prop(node, "Description"),
                           self._states(node), ext, self._kids(node))
 
-    def collect(self, clip, deadline):
+    def collect(self, clip, deadline, walk="front", windows=None):
         wins = []
         for app in self._kids(("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root")):
             try:
                 wins += self._kids(app)
             except Exception:  # noqa: BLE001 — an app that went away
                 continue
-        wins.sort(key=lambda w: "active" not in self._states(w))
-        return walk_tree(wins, self.read, clip, deadline)
+        return _walk_windows(wins, self._states, self.read, clip, deadline, walk, windows)
 
 
 def atspi_source() -> ElementSource:
@@ -1041,6 +1383,7 @@ def validate(verb: str, p: dict, frame: Frame | None, apps: dict,
             out["region"] = {"x": _num(r, "x", 0, 100_000), "y": _num(r, "y", 0, 100_000),
                              "w": _num(r, "w", 4, 100_000), "h": _num(r, "h", 4, 100_000)}
         out["elements"] = p.get("elements", True) is not False
+        out["walk"] = "all" if p.get("walk") == "all" else "front"
         return out
     if verb == "wait":
         if p.get("mode", "stable") not in ("stable", "change"):
@@ -1094,8 +1437,8 @@ def validate(verb: str, p: dict, frame: Frame | None, apps: dict,
             if not _URL_RE.match(url):
                 raise DeskError("only http(s) URLs")
             out["url"] = url
-        elif isinstance(app, str) and app in apps:
-            out["app"] = app
+        elif app_named(apps, app):
+            out["app"] = app_named(apps, app)
         else:
             raise DeskError("open needs an http(s) url or one of this computer's apps")
         return out
@@ -1152,6 +1495,7 @@ class Backend:
     name = "?"
     session = "?"
     needs: tuple[str, ...] = ()
+    cheap_thumb = False       # thumbnail() is in-process (tens of ms, no subprocess)
 
     def __init__(self):
         self.bin = {n: find_bin(n) for n in self.needs + self.optional()}
@@ -1209,6 +1553,10 @@ class Backend:
         subprocess.Popen([opener, url], shell=False, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
 
+    def secure_input(self) -> bool:
+        """Is another app holding secure keyboard entry (macOS)?"""
+        return False
+
     def deny_keys(self) -> set[str]:
         return set()
 
@@ -1233,20 +1581,94 @@ def screen_refusal(state: dict) -> str | None:
     return None
 
 
-def logind_locked() -> bool:
-    """systemd-logind's LockedHint for this session (set by most lockers via
-    `loginctl lock-session` or the idle hint). False when there is no
-    loginctl, no session, or the answer is anything but yes."""
-    lc = find_bin("loginctl")
-    if not lc:
-        return False
-    sid = os.environ.get("XDG_SESSION_ID") or "auto"
+def _probe(argv: list[str], env: dict | None = None) -> str | None:
+    """stdout of one short read-only command, None when it is missing,
+    fails, or times out. The default runner of linux_locked (tests pass a fake)."""
     try:
-        r = subprocess.run([lc, "show-session", sid, "-p", "LockedHint", "--value"],
-                           shell=False, capture_output=True, text=True, timeout=2)
+        r = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=2,
+                           env=env)
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return r.returncode == 0 and r.stdout.strip() == "yes"
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _logind_hint(lc: str, run, uid: int, environ) -> bool | None:
+    """LockedHint of this session, found by XDG_SESSION_ID or else by the
+    user's active graphical session (a systemd --user service has no
+    XDG_SESSION_ID). True / False when a session answered, None when none did."""
+    sids = [environ["XDG_SESSION_ID"]] if environ.get("XDG_SESSION_ID") else []
+    if not sids:
+        listing = run([lc, "list-sessions", "--no-legend"]) or ""
+        for line in listing.splitlines():
+            f = line.split()
+            if len(f) >= 2 and f[1] == str(uid):
+                sids.append(f[0])
+    seen = None
+    for sid in sids:
+        out = run([lc, "show-session", sid, "-p", "Type", "-p", "State",
+                   "-p", "LockedHint"])
+        if out is None:
+            continue
+        kv = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+        if not environ.get("XDG_SESSION_ID") and (
+                kv.get("Type") not in ("x11", "wayland", "mir")
+                or kv.get("State") not in ("active", "online")):
+            continue                                  # a tty / ssh session
+        if kv.get("LockedHint") == "yes":
+            return True
+        if kv.get("LockedHint") == "no":
+            seen = False
+    return seen
+
+
+def _screensaver_active(run, environ, uid: int) -> bool | None:
+    """The freedesktop ScreenSaver's GetActive over the session bus (gdbus,
+    else dbus-send); None when neither tool nor any answering service exists."""
+    env = dict(environ)
+    sock = f"/run/user/{uid}/bus"
+    if not env.get("DBUS_SESSION_BUS_ADDRESS") and os.path.exists(sock):
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={sock}"
+    services = (("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver"),
+                ("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver"))
+    gd, ds = find_bin("gdbus"), find_bin("dbus-send")
+    for dest, path in services:
+        if gd:
+            out = run([gd, "call", "--session", "--dest", dest, "--object-path", path,
+                       "--method", f"{dest}.GetActive"], env)
+        elif ds:
+            out = run([ds, "--session", f"--dest={dest}", "--print-reply", path,
+                       f"{dest}.GetActive"], env)
+        else:
+            return None
+        if out and "true" in out.lower().split("boolean")[-1]:
+            return True
+        if out and "false" in out.lower():
+            return False
+    return None
+
+
+def linux_locked(run=None, environ=None, uid: int | None = None) -> bool | None:
+    """Whether the Linux session is locked: True / False, or None = unknown.
+    logind's LockedHint first (session by XDG_SESSION_ID, else the user's
+    graphical session); "yes" is believed at once. Many lockers never set it,
+    so "no" (or no session) goes on to the ScreenSaver D-Bus GetActive. With
+    no D-Bus answer, a session that said "no" reads unlocked; no session and
+    no answer at all is None, never a guess of False."""
+    run = run or _probe
+    environ = os.environ if environ is None else environ
+    uid = os.getuid() if uid is None else uid
+    lc = find_bin("loginctl")
+    hint = _logind_hint(lc, run, uid, environ) if lc else None
+    if hint is True:
+        return True
+    dbus = _screensaver_active(run, environ, uid)
+    if dbus is not None:
+        return dbus
+    return hint
+
+
+def logind_locked() -> bool | None:
+    return linux_locked()
 
 
 def drag_path(x0: int, y0: int, x1: int, y1: int, n: int = 12) -> list[tuple[int, int]]:
@@ -1708,8 +2130,9 @@ class MacBackend(Backend):
         self.cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.cg.CGEventSetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                                         ctypes.c_int64]
+        # UniChar* (UTF-16 units), not wchar_t* (UTF-32 on macOS)
         self.cg.CGEventKeyboardSetUnicodeString.argtypes = [
-            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p]
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_uint16)]
         self.cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
         self.cf.CFRelease.argtypes = [ctypes.c_void_p]
         self.cg.CGGetActiveDisplayList.argtypes = [ctypes.c_uint32,
@@ -1739,6 +2162,127 @@ class MacBackend(Backend):
         self.cf.CFNumberGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
         self.pos = (0, 0)
         self._ax: ElementSource | None = None
+        self._dids: dict[str, int] = {}
+        try:
+            self._cg_thumb_setup()
+            self.cheap_thumb = True
+        except (OSError, AttributeError):
+            self.cheap_thumb = False
+
+    def _cg_thumb_setup(self) -> None:
+        """In-process thumbnails: CGDisplayCreateImageForRect drawn into a
+        THUMB_EDGE grey bitmap — ~40 ms against ~200-400 ms for screencapture
+        + sips, twice or more per action while settling."""
+        ct, cg, vp = self.ct, self.cg, self.ct.c_void_p
+
+        class Rect(ct.Structure):
+            _fields_ = [("origin", self.Pt), ("size", self.Pt)]
+        self.CGRect = Rect
+        cg.CGDisplayCreateImageForRect.restype = vp
+        cg.CGDisplayCreateImageForRect.argtypes = [ct.c_uint32, Rect]
+        cg.CGColorSpaceCreateDeviceGray.restype = vp
+        cg.CGBitmapContextCreate.restype = vp
+        cg.CGBitmapContextCreate.argtypes = [vp, ct.c_size_t, ct.c_size_t, ct.c_size_t,
+                                             ct.c_size_t, vp, ct.c_uint32]
+        cg.CGContextDrawImage.argtypes = [vp, Rect, vp]
+        cg.CGContextSetInterpolationQuality.argtypes = [vp, ct.c_int]
+        cg.CGContextRelease.argtypes = [vp]
+        cg.CGImageRelease.argtypes = [vp]
+        cg.CGPreflightScreenCaptureAccess.restype = ct.c_bool
+        cg.CGImageGetWidth.restype = ct.c_size_t
+        cg.CGImageGetWidth.argtypes = [vp]
+        cg.CGImageGetHeight.restype = ct.c_size_t
+        cg.CGImageGetHeight.argtypes = [vp]
+        cg.CGColorSpaceCreateDeviceRGB.restype = vp
+        cg.CGBitmapContextCreateImage.restype = vp
+        cg.CGBitmapContextCreateImage.argtypes = [vp]
+        self._grey = cg.CGColorSpaceCreateDeviceGray()
+        self._rgb = cg.CGColorSpaceCreateDeviceRGB()
+        io = self.imageio = ct.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ImageIO.framework/ImageIO")
+        io.CGImageDestinationCreateWithData.restype = vp
+        io.CGImageDestinationCreateWithData.argtypes = [vp, vp, ct.c_size_t, vp]
+        io.CGImageDestinationAddImage.argtypes = [vp, vp, vp]
+        io.CGImageDestinationFinalize.restype = ct.c_bool
+        io.CGImageDestinationFinalize.argtypes = [vp]
+        cf = self.cf
+        cf.CFDataCreateMutable.restype = vp
+        cf.CFDataCreateMutable.argtypes = [vp, ct.c_long]
+        cf.CFDataGetLength.restype = ct.c_long
+        cf.CFDataGetLength.argtypes = [vp]
+        cf.CFDataGetBytePtr.restype = vp
+        cf.CFDataGetBytePtr.argtypes = [vp]
+        self._jpeg_uti = cf.CFStringCreateWithCString(None, b"public.jpeg", 0x08000100)
+
+    def _cg_image(self, mon: Monitor, rect):
+        """(CGImage, native w, h) of the monitor or `rect` (points relative
+        to it), captured in process; None when this path cannot vouch for
+        the picture: no display id yet, or no Screen Recording permission
+        (the image would then hold only the wallpaper). The caller releases."""
+        did = self._dids.get(mon.name)
+        if not self.cheap_thumb or did is None or not self.cg.CGPreflightScreenCaptureAccess():
+            return None
+        why = screen_refusal(self.screen_state())
+        if why:
+            raise DeskError(why)
+        x, y, w, h = (0, 0, mon.w, mon.h) if rect is None else rect
+        img = self.cg.CGDisplayCreateImageForRect(
+            did, self.CGRect(self.Pt(x, y), self.Pt(w, h)))
+        if not img:
+            return None
+        return img, self.cg.CGImageGetWidth(img), self.cg.CGImageGetHeight(img)
+
+    def _draw(self, img, tw: int, th: int, grey: bool):
+        """`img` scaled into a fresh tw x th bitmap context: (ctx, buffer)."""
+        n = 1 if grey else 4
+        buf = (self.ct.c_uint8 * (tw * th * n))()
+        # RGB: kCGImageAlphaNoneSkipLast (5); grey: kCGImageAlphaNone (0)
+        ctx = self.cg.CGBitmapContextCreate(buf, tw, th, 8, tw * n,
+                                            self._grey if grey else self._rgb,
+                                            0 if grey else 5)
+        if not ctx:
+            return None, None
+        self.cg.CGContextSetInterpolationQuality(ctx, 2 if grey else 3)
+        self.cg.CGContextDrawImage(ctx, self.CGRect(self.Pt(0, 0), self.Pt(tw, th)), img)
+        return ctx, buf
+
+    def _cg_screenshot(self, mon: Monitor, rect) -> bytes | None:
+        """The screenshot as a JPEG, captured, scaled and encoded in process
+        (CoreGraphics + ImageIO): no screencapture, no sips, no temp file."""
+        got = self._cg_image(mon, rect)
+        if got is None:
+            return None
+        img, nw, nh = got
+        ctx = out = data = dest = None
+        try:
+            if rect is None:
+                target = min(LONG_EDGE, max(nw, nh))
+            else:
+                target = max(zoom_size(rect[2], rect[3], max(nw, nh) / max(rect[2], rect[3])))
+            k = target / max(nw, nh, 1)
+            tw, th = max(1, round(nw * k)), max(1, round(nh * k))
+            ctx, _buf = self._draw(img, tw, th, grey=False)
+            if not ctx:
+                return None
+            out = self.cg.CGBitmapContextCreateImage(ctx)
+            data = self.cf.CFDataCreateMutable(None, 0)
+            dest = self.imageio.CGImageDestinationCreateWithData(data, self._jpeg_uti, 1, None)
+            if not (out and data and dest):
+                return None
+            self.imageio.CGImageDestinationAddImage(dest, out, None)
+            if not self.imageio.CGImageDestinationFinalize(dest):
+                return None
+            return self.ct.string_at(self.cf.CFDataGetBytePtr(data),
+                                     self.cf.CFDataGetLength(data))
+        finally:
+            for o in (dest, data):
+                if o:
+                    self.cf.CFRelease(o)
+            if out:
+                self.cg.CGImageRelease(out)
+            if ctx:
+                self.cg.CGContextRelease(ctx)
+            self.cg.CGImageRelease(img)
 
     def _post(self, ev) -> None:
         self.cg.CGEventPost(0, ev)          # kCGHIDEventTap
@@ -1759,6 +2303,7 @@ class MacBackend(Backend):
             out.append(Monitor(name="main" if d == main else f"display-{i + 1}",
                                x=int(r.origin.x), y=int(r.origin.y),
                                w=int(r.size.x), h=int(r.size.y)))
+            self._dids[out[-1].name] = d
         return out
 
     def _locked(self) -> bool:
@@ -1801,6 +2346,10 @@ class MacBackend(Backend):
         return image_size(Path(f).read_bytes()[:65536]) or (w, h)
 
     def screenshot(self, mon, rect=None):
+        """In process when it can (_cg_screenshot); else screencapture + sips."""
+        data = self._cg_screenshot(mon, rect)
+        if data is not None and image_size(data):
+            return data
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "s.jpg")
             nw, nh = self._capture(mon, rect, f)
@@ -1812,8 +2361,32 @@ class MacBackend(Backend):
                 run_argv([self.bin["sips"], "-Z", str(target), f])
             return Path(f).read_bytes()
 
+    def _cg_thumbnail(self, mon: Monitor, rect) -> bytes | None:
+        """A binary PGM (P5) of the monitor or `rect` at THUMB_EDGE, drawn in
+        process; None when _cg_image cannot vouch for the picture."""
+        got = self._cg_image(mon, rect)
+        if got is None:
+            return None
+        img, nw, nh = got
+        ctx = None
+        try:
+            k = THUMB_EDGE / max(nw, nh, 1)
+            tw, th = max(1, round(nw * k)), max(1, round(nh * k))
+            ctx, buf = self._draw(img, tw, th, grey=True)
+            if not ctx:
+                return None
+            return b"P5\n%d %d\n255\n" % (tw, th) + bytes(buf)
+        finally:
+            if ctx:
+                self.cg.CGContextRelease(ctx)
+            self.cg.CGImageRelease(img)
+
     def thumbnail(self, mon, rect=None):
-        """An uncompressed BMP from sips (decodable without a library)."""
+        """In process (CoreGraphics, a PGM) when it can; else an uncompressed
+        BMP from screencapture + sips (decodable without a library)."""
+        t = self._cg_thumbnail(mon, rect)
+        if t is not None:
+            return t
         with tempfile.TemporaryDirectory() as d:
             f, t = os.path.join(d, "s.jpg"), os.path.join(d, "t.bmp")
             nw, nh = self._capture(mon, rect, f)
@@ -1867,13 +2440,53 @@ class MacBackend(Backend):
     def scroll(self, dx, dy):
         self._post(self.cg.CGEventCreateScrollWheelEvent(None, 1, 2, -dy, -dx))
 
+    _SHIFTED = {**{c.upper(): c for c in "abcdefghijklmnopqrstuvwxyz"},
+                "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7",
+                "*": "8", "(": "9", ")": "0", "?": "slash", "<": "comma", ">": "period",
+                "_": "minus", "+": "equal"}
+    _PLAIN = {" ": "space", ".": "period", ",": "comma", "/": "slash", "-": "minus",
+              "=": "equal"}
+
+    def _source(self):
+        """A private HID-state event source, so posted keys carry their own
+        modifier state instead of whatever the operator is holding."""
+        if getattr(self, "_src", None) is None:
+            self.cg.CGEventSourceCreate.restype = self.ct.c_void_p
+            self.cg.CGEventSourceCreate.argtypes = [self.ct.c_int32]
+            self._src = self.cg.CGEventSourceCreate(1) or None   # HIDSystemState
+        return self._src
+
     def type_text(self, text):
+        """Each character is a key down/up pair posted to the HID tap
+        (kCGHIDEventTap, as every event here) with the character attached
+        (CGEventKeyboardSetUnicodeString, as UTF-16 units) and the matching
+        US key code when there is one, so apps that read the key code see
+        the same key; flags are set explicitly (shift or none), never
+        inherited from keys the operator is holding."""
+        src = self._source()
         for ch in text:
+            name = self._PLAIN.get(ch) or self._SHIFTED.get(ch) or ch
+            known = ch.isascii() and name in self._KEYCODES
+            code = self._KEYCODES[name] if known else 0
+            flags = self._FLAGS["shift"] if known and ch in self._SHIFTED else 0
+            units = ch.encode("utf-16-le")
+            buf = (self.ct.c_uint16 * (len(units) // 2)).from_buffer_copy(units)
             for down in (True, False):
-                ev = self.cg.CGEventCreateKeyboardEvent(None, 0, down)
-                self.cg.CGEventKeyboardSetUnicodeString(ev, 1, ch)
+                ev = self.cg.CGEventCreateKeyboardEvent(src, code, down)
+                self.cg.CGEventSetFlags(ev, flags)
+                self.cg.CGEventKeyboardSetUnicodeString(ev, len(buf), buf)
                 self._post(ev)
+                time.sleep(0.004)
             time.sleep(0.008)
+
+    def secure_input(self) -> bool:
+        try:
+            carbon = self.ct.cdll.LoadLibrary(
+                "/System/Library/Frameworks/Carbon.framework/Carbon")
+            carbon.IsSecureEventInputEnabled.restype = self.ct.c_bool
+            return bool(carbon.IsSecureEventInputEnabled())
+        except (OSError, AttributeError):
+            return False
 
     def key(self, combo):
         *mods, k = combo.split("+")
@@ -1928,25 +2541,127 @@ def detect_backend(env=os.environ, plat=sys.platform) -> str:
                     "WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE SWAYSOCK")
 
 
-def local_apps(plat=sys.platform) -> dict[str, list[str]]:
-    """name -> argv for desk_open app=. From desk-apps.json if present, else
-    the browsers/editors found here. A terminal is deliberately not offered
-    by default: opening one and typing into it would be shell by other means."""
+MAC_APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utilities",
+                "~/Applications")
+LINUX_APP_DIRS = ("/usr/share/applications",)
+APPS_CAP = 200            # names offered in hello (the server keeps as many)
+_APP_NAME_RE = re.compile(r"[A-Za-z0-9 ._+-]{1,64}")      # the server's rule too
+# never offered, whatever is installed: a terminal or a script runner, opened
+# and typed into, is shell by other means (shell has its own grant)
+NOT_OFFERED = frozenset({
+    "terminal", "iterm", "iterm2", "warp", "alacritty", "kitty", "wezterm", "ghostty",
+    "hyper", "tabby", "script editor", "automator", "shortcuts", "xterm", "uxterm",
+    "konsole", "gnome-terminal", "xfce4-terminal", "terminator", "tilix", "foot",
+    "console", "gnome-console", "kgx", "ptyxis", "lxterminal", "mate-terminal",
+    "qterminal", "rxvt", "urxvt", "st", "cool-retro-term", "yakuake", "guake"})
+
+
+def _offerable(name: str) -> bool:
+    return bool(_APP_NAME_RE.fullmatch(name)) and name.lower() not in NOT_OFFERED \
+        and "terminal" not in name.lower()
+
+
+def mac_bundles(dirs=MAC_APP_DIRS) -> list[str]:
+    """The .app bundles directly inside `dirs` (one level, no recursion),
+    names without the extension, sorted case-insensitively, one per name,
+    at most APPS_CAP."""
+    seen: dict[str, str] = {}
+    for d in dirs:
+        try:
+            names = os.listdir(os.path.expanduser(d))
+        except OSError:
+            continue
+        for n in names:
+            if n.endswith(".app") and not n.startswith("."):
+                n = n[:-4]
+                if _offerable(n):
+                    seen.setdefault(n.lower(), n)
+    return sorted(seen.values(), key=str.lower)[:APPS_CAP]
+
+
+def desktop_entries(dirs=LINUX_APP_DIRS) -> dict[str, str]:
+    """Name -> desktop-file id of the launchable, visible, non-terminal
+    entries in `dirs` (flat, no recursion)."""
+    out: dict[str, str] = {}
+    have: set[str] = set()
+    for d in dirs:
+        try:
+            files = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for fn in files:
+            if not fn.endswith(".desktop"):
+                continue
+            try:
+                text = Path(d, fn).read_text(errors="replace")[:65536]
+            except OSError:
+                continue
+            kv: dict[str, str] = {}
+            in_entry = False
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("["):
+                    in_entry = line == "[Desktop Entry]"
+                elif in_entry and "=" in line:
+                    k, v = line.split("=", 1)
+                    kv.setdefault(k.strip(), v.strip())
+            if kv.get("Type", "Application") != "Application" \
+                    or kv.get("NoDisplay", "").lower() == "true" \
+                    or kv.get("Hidden", "").lower() == "true" \
+                    or kv.get("Terminal", "").lower() == "true" \
+                    or "TerminalEmulator" in kv.get("Categories", ""):
+                continue
+            name = kv.get("Name", "")
+            if _offerable(name) and name.lower() not in have:
+                out[name] = fn[:-len(".desktop")]
+                have.add(name.lower())
+    return out
+
+
+def local_apps(plat=sys.platform, *, mac_dirs=MAC_APP_DIRS,
+               linux_dirs=LINUX_APP_DIRS) -> dict[str, list[str]]:
+    """name -> argv for desk_open app=. From desk-apps.json if present (the
+    operator's list, as is), else what is installed here: on macOS every
+    .app bundle in the usual folders, launched with `open -a <Name>`; on
+    Linux the browsers/editors found on PATH plus the .desktop entries
+    (through gtk-launch, when it exists). A terminal or script runner is
+    never offered by default: opening one and typing into it would be shell
+    by other means."""
     try:
         raw = json.loads(_path("desk-apps.json").read_text())
         return {k: v for k, v in raw.items()
-                if isinstance(k, str) and re.fullmatch(r"[A-Za-z0-9 ._+-]{1,64}", k)
+                if isinstance(k, str) and _APP_NAME_RE.fullmatch(k)
                 and isinstance(v, list) and v and all(isinstance(a, str) for a in v)}
     except (OSError, ValueError, AttributeError):
         pass
     if plat == "darwin":
-        return {n: ["/usr/bin/open", "-a", n] for n in ("Safari", "Finder", "Notes")}
+        return {n: ["/usr/bin/open", "-a", n] for n in mac_bundles(mac_dirs)}
     apps = {}
     for n in ("firefox", "chromium", "google-chrome", "code", "nautilus", "thunar"):
         p = find_bin(n)
         if p:
             apps[n] = [p]
+    launcher = find_bin("gtk-launch")
+    if launcher:
+        have = {k.lower() for k in apps}
+        for name, did in desktop_entries(linux_dirs).items():
+            if len(apps) >= APPS_CAP:
+                break
+            if name.lower() not in have:
+                apps[name] = [launcher, did]
+                have.add(name.lower())
     return apps
+
+
+def app_named(apps: dict, name) -> str | None:
+    """The offered app `name` refers to: exact, else case-insensitive."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    name = name.strip()
+    if name in apps:
+        return name
+    low = name.lower()
+    return next((k for k in apps if k.lower() == low), None)
 
 
 # --- the connection ------------------------------------------------------------------------------
@@ -1958,6 +2673,12 @@ class Session:
         self.frame: Frame | None = None
         self.full: dict[str, Frame] = {}          # last full-frame shot per monitor
         self.elements: ElementSource | None = None
+        self.walk = "front"                       # the last screenshot's walk
+        # what the last response showed, as the next input verb's "before":
+        # {"at", "key": (monitor, rect), "sig", "thumb"}; see _before()
+        self.pre: dict | None = None
+        self.settled_thumb: bytes | None = None   # settle's last capture
+        self.tm: dict = {}                        # this request's phase timings (ms)
         self.grants = {"screen": False, "input": False, "shell": "off"}
         self.apps = local_apps()
         self.deny = backend.deny_keys()
@@ -1975,7 +2696,10 @@ class Session:
             st = self.b.screen_state()
         except Exception:  # noqa: BLE001
             st = {}
-        return {"locked": st.get("locked") is True, "asleep": st.get("asleep") is True}
+        # locked: True / False, or None = unknown (Linux with no answer)
+        lk = st.get("locked", False)
+        return {"locked": lk if lk is None or isinstance(lk, bool) else False,
+                "asleep": st.get("asleep") is True}
 
     def hello(self) -> dict:
         try:
@@ -2013,25 +2737,49 @@ class Session:
         raise DeskError(f"no monitor {monitor!r} (have: {', '.join(m.name for m in ms)}); "
                         f'use monitor="{ms[0].name if ms else 'main'}" or an index from 1')
 
-    def _elements(self, frame: Frame) -> dict:
+    def _elements(self, frame: Frame, walk: str | None = None) -> dict:
         """The element list for `frame`, within ELEMENTS_BUDGET_S; never
-        raises (a broken accessibility API costs the list, not the shot)."""
+        raises (a broken accessibility API costs the list, not the shot).
+        `walk` (default: what the last screenshot asked) "front" caps the
+        background windows, "all" walks every window in full."""
         if self.elements is None:
             try:
                 self.elements = self.b.elements_source()
             except Exception as e:  # noqa: BLE001
                 self.elements = ElementSource(f"accessibility unavailable ({type(e).__name__})")
         es = self.elements
+        t0 = time.monotonic()
+        try:
+            return self._walk(es, frame, walk)
+        finally:
+            self._tick("elements_ms", t0)
+
+    def _tick(self, phase: str, t0: float) -> None:
+        self.tm[phase] = self.tm.get(phase, 0) + int((time.monotonic() - t0) * 1000)
+
+    def _walk(self, es: ElementSource, frame: Frame, walk: str | None) -> dict:
         try:
             why = es.unavailable()
             if why:
                 return {"elements": [], "elements_src": "none", "elements_note": why}
+            wins: dict = {}
             raw, partial = es.collect(frame.screen_rect(),
-                                      time.monotonic() + ELEMENTS_BUDGET_S)
+                                      time.monotonic() + ELEMENTS_BUDGET_S,
+                                      walk or self.walk, wins)
         except Exception as e:  # noqa: BLE001
             return {"elements": [], "elements_src": "none",
                     "elements_note": f"accessibility tree failed ({type(e).__name__})"}
-        out = {"elements": build_elements(raw, frame, es.src), "elements_src": es.src}
+        els = build_elements(raw, frame, es.src)
+        out = {"elements": els, "elements_src": es.src}
+        if wins:
+            # background windows: how many of their elements are listed of
+            # how many there are (the server says so in the group header)
+            shown: dict = {}
+            for e in els:
+                shown[e.get("window")] = shown.get(e.get("window"), 0) + 1
+            out["windows"] = [{"window": g, "background": True, "shown": shown.get(g, 0),
+                               "total": w["total"], **({"more": True} if w["more"] else {})}
+                              for g, w in wins.items()]
         if partial:
             out["elements_note"] = "partial"
         return out
@@ -2049,7 +2797,9 @@ class Session:
                 raise DeskError(f"no full screenshot of {mon.name!r} yet; region is in "
                                 "the pixels of that one — take it first")
             rect, region = region_rect(full, region)
+        t0 = time.monotonic()
         data = self.b.screenshot(mon) if rect is None else self.b.screenshot(mon, rect)
+        self._tick("capture_ms", t0)
         size = image_size(data)
         if size is None:
             raise DeskError("the screenshot tool returned something that is not an image")
@@ -2095,6 +2845,7 @@ class Session:
         pixels where the tool can emit them (grim ppm, ImageMagick pgm, sips
         bmp), else a full JPEG compared byte-for-byte (see thumbs_match)."""
         t0 = time.monotonic()
+        self.settled_thumb = None
         if floor > 0:
             time.sleep(floor)
         f = self.frame
@@ -2111,14 +2862,52 @@ class Session:
                 break
             prev = cur
         changed = None if before is None or cur is None else not thumbs_match(before, cur)
+        self.settled_thumb = cur
+        self._tick("settle_ms", t0)
         return changed, int((time.monotonic() - t0) * 1000)
 
     def execute(self, verb: str, p: dict) -> dict:
-        """Blocking: runs in a worker thread."""
+        """Blocking: runs in a worker thread. The response carries `timing`
+        {capture_ms, settle_ms, elements_ms, total_ms}, also logged at debug."""
+        self.tm = {"capture_ms": 0, "settle_ms": 0, "elements_ms": 0}
+        t0 = time.monotonic()
+        out = self._execute(verb, p)
+        self._tick("total_ms", t0)
+        timing = dict(self.tm)
+        log.debug("%s: %s", verb, " ".join(f"{k}={v}" for k, v in timing.items()))
+        return {**out, "timing": timing}
+
+    def _remember(self, f: Frame | None, res: dict, thumb: bytes | None) -> None:
+        """Keep what this response showed (element sig + thumbnail of the
+        screen it describes) as the next input verb's "before"."""
+        if f is None:
+            self.pre = None
+            return
+        self.pre = {"at": time.monotonic(), "key": (f.monitor.name, f.rect),
+                    "sig": self._sig_of(res), "thumb": thumb}
+
+    def _before(self, f: Frame | None) -> tuple[str | None, bytes | None]:
+        """(element sig, thumbnail) of the screen right before an action. The
+        last response's, when it is under PRE_REUSE_S old and of this same
+        frame: the model acted on that screen, and walking it again costs a
+        second tree walk per action. Else a fresh walk and capture."""
+        pre, self.pre = self.pre, None
+        if (pre is not None and f is not None
+                and time.monotonic() - pre["at"] < PRE_REUSE_S
+                and pre["key"] == (f.monitor.name, f.rect)):
+            return pre["sig"], pre["thumb"] if pre["thumb"] is not None else self._thumb(f)
+        sig = self._sig(f)
+        return sig, self._thumb(f)
+
+    def _execute(self, verb: str, p: dict) -> dict:
         if verb == "screenshot":
+            self.walk = p.get("walk", "front")
             out = self._shot(p.get("monitor"), p.get("region"), p.get("elements", True))
             img = out["image"]
             what = f" zoomed on {out['frame']['region']}" if out["frame"]["region"] else ""
+            # a cheap thumbnail now saves the next action a capture before it
+            self._remember(self.frame, out, self._thumb(self.frame)
+                           if getattr(self.b, "cheap_thumb", False) else None)
             return {"ok": True, "text": f"screenshot {img['w']}x{img['h']}{what}", **out}
         f = self.frame
         if verb == "wait":
@@ -2130,9 +2919,12 @@ class Session:
                    "changed": changed, "settled_ms": ms}
             if changed is None:
                 del out["changed"]
-            out.update(self._auto_shot(f))
+            shot = self._auto_shot(f)
+            self._remember(self.frame, shot, self.settled_thumb)
+            out.update(shot)
             return out
-        before = self._thumb(f)
+        sig_before, before = self._before(f)
+        typing_before = self._focus() if verb == "type" else None
         if verb in ("move", "click") or (verb == "scroll" and "x" in p):
             self.b.move(*f.to_screen(p["x"], p["y"]))
         if verb == "click":
@@ -2153,12 +2945,86 @@ class Session:
                 subprocess.Popen(self.apps[p["app"]], shell=False, start_new_session=True,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         changed, ms = self.settle(before, floor=SETTLE_S * (3 if verb == "open" else 1))
-        out = {"ok": True, "text": f"{verb} done", "changed": changed, "settled_ms": ms}
-        if changed is None:
-            del out["changed"]
-        if p.get("screenshot_after"):
-            out.update(self._auto_shot(f))
+        # the post-action comparisons use the SETTLED screen: the auto-shot
+        # (taken now) or, without one, a fresh walk
+        # The input is already posted: nothing below may turn this into an
+        # error that invites the model to repeat it.
+        note = None
+        try:
+            shot = self._auto_shot(f) if p.get("screenshot_after") else None
+        except Exception:  # noqa: BLE001
+            shot, note = None, SHOT_LOST_NOTE
+        settled = self.settled_thumb
+        els_changed = None
+        try:
+            after = shot if shot is not None else self._elements(f) if f is not None else {}
+        except Exception:  # noqa: BLE001 — a second signal only
+            after = {}
+        sig_after = self._sig_of(after)
+        if sig_before is not None and sig_after is not None:
+            els_changed = sig_after != sig_before
+        out = {"ok": True, "text": f"{verb} done", "settled_ms": ms}
+        if changed is not None:
+            out["pixels_changed"] = changed
+        if els_changed is not None:
+            out["elements_changed"] = els_changed
+        if changed is not None or els_changed is not None:
+            out["changed"] = bool(changed) or bool(els_changed)
+        changed = out.get("changed")
+        if verb == "type":
+            why, diff_note = typed_result(p["text"], self._focus(), changed, typing_before)
+            note = note or diff_note
+            if why:
+                if self._secure():
+                    why += (" (secure keyboard entry is on in another app, which "
+                            "blocks typed keys)")
+                out.update(ok=False, err=why)
+                if shot is None:                      # the model sees where it went
+                    try:
+                        shot = self._auto_shot(f)
+                        settled = None                # the thumb predates this shot
+                    except Exception:  # noqa: BLE001
+                        note = note or SHOT_LOST_NOTE
+        if note and out.get("ok") is not False:
+            out["note"] = note
+            out["text"] = f"{out['text']}\nnote: {note}"
+        if shot is not None:
+            out.update(shot)
+            self._remember(self.frame, shot, settled)
+        else:
+            self._remember(f, after, settled)
         return out
+
+    def _sig(self, frame: Frame | None) -> str | None:
+        """elements_sig of what the tree shows in `frame` now; None when there
+        is no tree or the walk was partial (a cut list proves nothing)."""
+        if frame is None:
+            return None
+        try:
+            return self._sig_of(self._elements(frame))
+        except Exception:  # noqa: BLE001 — a second signal only
+            return None
+
+    @staticmethod
+    def _sig_of(res: dict) -> str | None:
+        if res.get("elements_src", "none") == "none" or res.get("elements_note"):
+            return None
+        return elements_sig(res.get("elements") or [])
+
+    def _focus(self) -> dict | None:
+        """The focused element, from the element source; None = cannot tell."""
+        try:
+            if self.elements is None:
+                self.elements = self.b.elements_source()
+            return self.elements.focused()
+        except Exception:  # noqa: BLE001 — a broken reader never fails the typing
+            return None
+
+    def _secure(self) -> bool:
+        try:
+            return self.b.secure_input()
+        except Exception:  # noqa: BLE001
+            return False
 
     def _auto_shot(self, f: Frame | None) -> dict:
         """The screenshot an input verb returns: same monitor, same zoom."""
@@ -2307,6 +3173,9 @@ def cmd_run(args) -> int:
     creds = load_credentials()
     if not creds:
         raise DeskError("not logged in — run: jav3-desk login")
+    # JAV3_DESK_DEBUG=1: per-request phase timings (capture, settle, elements)
+    logging.basicConfig(level=logging.DEBUG if os.environ.get("JAV3_DESK_DEBUG")
+                        else logging.WARNING, format="jav3-desk: %(message)s")
     b = BACKENDS[args.backend or detect_backend()]()
     _write_private("desk.pid", str(os.getpid()).encode())
     print(f"jav3-desk: {b.name} backend, server {base_url(args.server or creds['address'])}",
@@ -2396,7 +3265,8 @@ def cmd_status(args) -> int:
     print(f"paused:  {'yes' if paused() else 'no'}")
     try:
         st = BACKENDS[args.backend or detect_backend()]().screen_state()
-        print(f"screen:  {'locked' if st.get('locked') else 'unlocked'}, display "
+        lk = st.get("locked")
+        print(f"screen:  {'unknown' if lk is None else 'locked' if lk else 'unlocked'}, display "
               f"{'asleep' if st.get('asleep') else 'awake'}")
     except Exception as e:  # noqa: BLE001 — status reports, never dies
         print(f"screen:  unknown ({e})")

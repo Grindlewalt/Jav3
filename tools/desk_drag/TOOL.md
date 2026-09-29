@@ -24,6 +24,9 @@ parameters:
     button:
       type: string
       enum: [left, right, middle]
+    frame:
+      type: integer
+      description: Frame number from the header of the result the coordinates came from ("frame 17"). Optional; an action on an older frame is refused.
     computer:
       type: string
       description: Which connected computer (name). Omit when only one is connected.

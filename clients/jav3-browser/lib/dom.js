@@ -8,7 +8,7 @@
 // injection) and as an ES module (import). It installs globalThis.__jav3Dom
 // once per realm; the IIFE keeps re-injection free of redeclaration errors.
 (function () {
-  const V = 2;
+  const V = 5;
   if (globalThis.__jav3Dom && globalThis.__jav3Dom.v === V) return;
 
   const ATTR = 'data-jav3-id';
@@ -75,6 +75,305 @@
       out.push({ el, r, inView: r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw });
     });
     return out;
+  }
+
+  // --- candidates: likely-clickable elements with no button markup ---------------------
+  // Framework apps (DeltaMath's Angular) wire click listeners onto plain
+  // <div>/<span>/<mat-*> elements: no button, link or role, so `collect` finds
+  // nothing. These helpers pick out what a person would still read as a button.
+
+  const CAND_CAP = 150;
+  const CAND_RAW_CAP = 2000;           // before dedupe (pairwise, so bounded)
+  const CAND_TEXT_MAX = 60;
+  const CAND_SKIP = new Set(['html', 'head', 'body', 'script', 'style', 'noscript', 'template',
+    'meta', 'link', 'title', 'br', 'hr', 'iframe', 'frame', 'option', 'optgroup', 'path', 'g',
+    'defs', 'use', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'tspan', 'stop',
+    'clippath', 'lineargradient', 'radialgradient', 'mask', 'symbol']);
+
+  // A click-handler attribute: onclick, ng-click, (click), jsaction, v-on:click,
+  // @click, data-*click* (data-action-click, data-onclick, ...).
+  function isClickAttr(name) {
+    const n = String(name || '').toLowerCase();
+    return n === 'onclick' || n === 'ng-click' || n === '(click)' ||
+      n === 'jsaction' || n === 'v-on:click' || n === '@click' ||
+      (n.startsWith('data-') && n.includes('click'));
+  }
+
+  // Computed style says the element is drawn at all (display/visibility/opacity).
+  function styleVisible(st) {
+    if (!st) return false;
+    if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return false;
+    return parseFloat(st.opacity) !== 0;
+  }
+
+  // Why an element looks clickable, from facts the caller gathered:
+  // {tag, cursor, parentCursor, attrs:[names], tabindex:"0"|null, text, leafish}
+  // -> 'pointer' | 'attr' | 'tabindex' | 'text' | ''.
+  // cursor:pointer is inherited, so only the element where it STARTS counts
+  // (its parent is not pointer): every <span> inside a pointer <div> is not
+  // another button.
+  function candidateReason(f) {
+    if (!f || CAND_SKIP.has(String(f.tag || '').toLowerCase())) return '';
+    if (f.cursor === 'pointer' && f.parentCursor !== 'pointer') return 'pointer';
+    if ((f.attrs || []).some(isClickAttr)) return 'attr';
+    if (f.tabindex != null && /^\s*\d+\s*$/.test(String(f.tabindex))) return 'tabindex';
+    const t = clean(f.text, 200);
+    if (f.leafish && t.length >= 1 && t.length <= CAND_TEXT_MAX) return 'text';
+    return '';
+  }
+
+  const boxHolds = (a, b, slack = 1) =>
+    a.x - slack <= b.x && a.y - slack <= b.y &&
+    a.x + a.w + slack >= b.x + b.w && a.y + a.h + slack >= b.y + b.h;
+
+  // Dedupe by box containment. items: [{box:{x,y,w,h}, text, why}] in
+  // document order. When one box holds another: an outer box picked only for
+  // its short text gives way to an inner one with a real signal (pointer,
+  // click attribute, tabindex) — a toolbar "☰ DeltaMath" must not swallow its
+  // ng-click menu icon; otherwise a short-text outer box (button-sized: text
+  // <= 60 chars) wins and the inner one is its label, and a long-text outer
+  // box is a container (a card, a list) that gives way to the controls
+  // inside it. Equal boxes: the first wins. -> kept indices, in order.
+  function dedupeContained(items) {
+    const drop = new Set();
+    const strong = it => !!it.why && it.why !== 'text';
+    for (let i = 0; i < items.length; i++) {
+      for (let j = 0; j < items.length; j++) {
+        if (i === j || drop.has(i) || drop.has(j)) continue;
+        const a = items[i].box, b = items[j].box;
+        if (!boxHolds(a, b)) continue;
+        if (boxHolds(b, a)) { drop.add(Math.max(i, j)); continue; }
+        if (!strong(items[i]) && strong(items[j])) drop.add(i);
+        else drop.add(clean(items[i].text, 200).length <= CAND_TEXT_MAX ? j : i);
+      }
+    }
+    return items.map((_, i) => i).filter(i => !drop.has(i));
+  }
+
+  // Is `el` inside (or equal to) one of the already-listed interactive
+  // elements? Walks up through open shadow roots to their hosts.
+  function insideAny(el, set) {
+    for (let n = el; n; n = n.parentNode || n.host) {
+      if (set.has(n)) return true;
+    }
+    return false;
+  }
+
+  // Near-leaf: no child elements, or up to 3 that have none themselves.
+  function leafish(el) {
+    const kids = el.children || [];
+    if (kids.length > 3) return false;
+    for (const k of kids) if (k.children && k.children.length) return false;
+    return true;
+  }
+
+  // The DOM half: visible elements not inside a listed interactive one, with
+  // a candidate reason; deduped; in view first; capped. -> [{el, r, inView, why}]
+  function collectCandidates(doc, win, listed) {
+    const vw = win.innerWidth, vh = win.innerHeight;
+    const set = new Set(listed || []);
+    const raw = [];
+    deepEach(doc, el => {
+      if (raw.length >= CAND_RAW_CAP) return false;
+      const tag = String(el.tagName || '').toLowerCase();
+      if (CAND_SKIP.has(tag) || insideAny(el, set)) return;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      const st = win.getComputedStyle(el);
+      if (!styleVisible(st)) return;
+      const parent = el.parentElement || (el.parentNode && el.parentNode.host) || null;
+      const lf = leafish(el);
+      const why = candidateReason({
+        tag, cursor: st.cursor, parentCursor: parent ? win.getComputedStyle(parent).cursor : '',
+        attrs: el.getAttributeNames ? el.getAttributeNames() : [],
+        tabindex: el.getAttribute ? el.getAttribute('tabindex') : null,
+        text: lf ? (el.innerText || '') : '', leafish: lf,
+      });
+      if (!why) return;
+      raw.push({ el, r, why, text: el.innerText || '',
+                 inView: r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw,
+                 box: { x: r.left, y: r.top, w: r.width, h: r.height } });
+    });
+    return orderInViewFirst(dedupeContained(raw).map(i => raw[i]), CAND_CAP);
+  }
+
+  // --- realistic clicks -------------------------------------------------------------
+
+  // The events a real left click produces at (x, y), CSS px of the frame's
+  // viewport, in the order Chrome fires them. Pure: the caller adds `view`
+  // and dispatches. {type:'focus'} is a step, not an event: focus moves
+  // there unless the mousedown was cancelled.
+  function clickSequence(x, y) {
+    const at = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y,
+                 screenX: x, screenY: y, button: 0 };
+    const ptr = { pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1 };
+    const P = (type, extra) => ({ ctor: 'PointerEvent', type, init: { ...at, ...ptr, buttons: 0, ...extra } });
+    const M = (type, extra) => ({ ctor: 'MouseEvent', type, init: { ...at, buttons: 0, ...extra } });
+    return [
+      P('pointerover'),
+      P('pointerenter', { bubbles: false, cancelable: false }),
+      M('mouseover'),
+      P('pointermove'),
+      P('pointerdown', { buttons: 1, pressure: 0.5 }),
+      M('mousedown', { buttons: 1, detail: 1 }),
+      { ctor: null, type: 'focus', init: null },
+      P('pointerup', { pressure: 0 }),
+      M('mouseup', { detail: 1 }),
+      M('click', { detail: 1 }),
+    ];
+  }
+
+  // elementFromPoint, descending into open shadow roots (overlay-aware: what
+  // is on top at that point is what a real click hits).
+  function deepPoint(doc, x, y) {
+    let el = doc.elementFromPoint(x, y);
+    while (el && el.shadowRoot) {
+      const d = el.shadowRoot.elementFromPoint(x, y);
+      if (!d || d === el) break;
+      el = d;
+    }
+    return el;
+  }
+
+  const FOCUSABLE = 'a[href], button, input, select, textarea, summary, [tabindex], ' +
+    '[contenteditable=""], [contenteditable=true]';
+  const ACTIVATABLE = 'a[href], button, input[type=submit]';
+
+  function describeEl(x) {
+    if (!x || !x.tagName) return 'the page';
+    const n = clean(accessibleName(x), 40);
+    return x.tagName.toLowerCase() + (n ? ' ' + JSON.stringify(n) : '');
+  }
+
+  // Is `hit` (what is on top at the element's centre) a different, unrelated
+  // element - an overlay - rather than the element, a part of it, or a wrapper?
+  function isCovered(el, hit) {
+    if (!el || !hit || hit === el) return false;
+    if (el.contains && el.contains(hit)) return false;
+    if (hit.contains && hit.contains(el)) return false;
+    return true;
+  }
+
+  // A coordinate click that named the element the screenshot showed there
+  // (`el`, null when it is gone): has the page moved, i.e. is something else
+  // under the point now? The page's root (body / html) under the point means the
+  // element left, even though it is technically an ancestor.
+  function pointMoved(el, hit) {
+    if (!el || !hit) return true;
+    const t = hit.tagName;
+    if (hit !== el && (t === 'BODY' || t === 'HTML')) return true;
+    return isCovered(el, hit);
+  }
+
+  // Give the covering element an id in the same space as read_page's, so the
+  // model can click it. -> the number.
+  function tagCover(doc, hit) {
+    const t = (hit.closest && hit.closest(FOCUSABLE)) || hit;
+    const cur = t.getAttribute(ATTR);
+    if (cur) return { n: Number(cur), el: t };
+    let max = 0;
+    deepEach(doc, e => { const v = Number(e.getAttribute && e.getAttribute(ATTR)); if (v > max) max = v; });
+    t.setAttribute(ATTR, String(max + 1));
+    return { n: max + 1, el: t };
+  }
+
+  // Dispatch clickSequence on `hit` (what is at the point); `el` is the element
+  // the model asked for (null for a coordinate click). -> Promise<{ok, text}>
+  async function realClick(win, doc, hit, x, y, el) {
+    const want = el || hit;
+    let got = false;
+    const mark = () => { got = true; };
+    want.addEventListener('click', mark, true);
+    let changed = false;
+    const mo = new win.MutationObserver(() => { changed = true; });
+    mo.observe(doc, { subtree: true, childList: true, attributes: true, characterData: true });
+    const url = win.location.href;
+    let downCancelled = false, pointerCancelled = false;
+    for (const s of clickSequence(x, y)) {
+      if (s.type === 'focus') {
+        if (downCancelled) continue;
+        const f = hit.closest ? hit.closest(FOCUSABLE) : null;
+        if (f && typeof f.focus === 'function') f.focus({ preventScroll: true });
+        else if (doc.activeElement && doc.activeElement !== doc.body && doc.activeElement.blur) doc.activeElement.blur();
+        continue;
+      }
+      // a cancelled pointerdown suppresses the compatibility mouse events
+      if (pointerCancelled && (s.type === 'mousedown' || s.type === 'mouseup')) continue;
+      const Ctor = s.ctor === 'PointerEvent' && typeof win.PointerEvent === 'function' ? win.PointerEvent : win.MouseEvent;
+      const notCancelled = hit.dispatchEvent(new Ctor(s.type, { ...s.init, view: win }));
+      if (!notCancelled && s.type === 'pointerdown') pointerCancelled = true;
+      if (!notCancelled && s.type === 'mousedown') downCancelled = true;
+    }
+    await new Promise(r => setTimeout(r, 150));
+    mo.disconnect();
+    want.removeEventListener('click', mark, true);
+    changed = changed || win.location.href !== url;
+    let text = 'clicked ' + describeEl(want);
+    if (el && hit !== el && !(el.contains && el.contains(hit))) {
+      text += `; the point was covered by ${describeEl(hit)}, which got the click`;
+    }
+    // el.click() as a last resort, and only when (a) nothing changed within
+    // 150 ms and (b) the element never saw the dispatched click (an overlay or
+    // a sticky header took it). A dispatched click that DID reach a link or
+    // button already ran its default action (navigation, form submit), so
+    // clicking again would submit twice or undo a toggle; and it is limited
+    // to native activatable elements because el.click() on a <div> does
+    // nothing the dispatched sequence did not already do.
+    const act = el && el.matches && el.matches(ACTIVATABLE) ? el : null;
+    if (act && !changed && !got) {
+      // an overlay (a consent modal) took the click: a person could not click
+      // through it, so neither may the agent
+      if (isCovered(act, hit)) {
+        const c = tagCover(doc, hit);
+        return { ok: false, code: 'covered', cover: c.n, coverName: clean(accessibleName(c.el), 40) || c.el.tagName.toLowerCase(),
+                 err: 'element is covered by another element' };
+      }
+      act.click();
+      text += '; nothing reacted, so it was activated directly';
+    }
+    return { ok: true, text };
+  }
+
+  // Type into an element that already has focus (no element id): key events
+  // around the insertion so framework listeners see typing. Inputs/textareas:
+  // insert at the caret via the prototype value setter + an input event;
+  // contenteditable: execCommand('insertText').
+  function typeInto(win, doc, el, text, submit) {
+    const tag = el.tagName;
+    if (tag === 'INPUT' && (el.type === 'password' || el.type === 'file')) {
+      return { ok: false, err: 'Jav3 does not type into password or file fields' };
+    }
+    const field = tag === 'TEXTAREA' ||
+      (tag === 'INPUT' && !/^(button|submit|reset|checkbox|radio|file|image|range|color|hidden)$/i.test(el.type));
+    if (!field && !el.isContentEditable) {
+      return { ok: false, err: `the focused element (${describeEl(el)}) is not a text field; click the field first` };
+    }
+    const init = { key: text.length === 1 ? text : 'Unidentified', bubbles: true, cancelable: true,
+                   composed: true, view: win };
+    if (el.dispatchEvent(new win.KeyboardEvent('keydown', init))) {
+      el.dispatchEvent(new win.KeyboardEvent('keypress', { ...init, charCode: text.charCodeAt(0) }));
+      if (field) {
+        const v = String(el.value || '');
+        let a = v.length, b = v.length;
+        try { if (el.selectionStart != null) { a = el.selectionStart; b = el.selectionEnd; } } catch { /* no caret */ }
+        const proto = tag === 'INPUT' ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v.slice(0, a) + text + v.slice(b));
+        el.dispatchEvent(new win.InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      } else {
+        doc.execCommand('insertText', false, text);
+      }
+    }
+    el.dispatchEvent(new win.KeyboardEvent('keyup', init));
+    if (field) el.dispatchEvent(new win.Event('change', { bubbles: true }));
+    if (submit) {
+      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
+      el.dispatchEvent(new win.KeyboardEvent('keydown', opts));
+      el.dispatchEvent(new win.KeyboardEvent('keyup', opts));
+      if (el.form) {
+        if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
+      }
+    }
+    return { ok: true, text: `typed ${text.length} character(s) into ${describeEl(el)}` };
   }
 
   // --- accessible names -------------------------------------------------------------
@@ -221,7 +520,59 @@
     return ('0000000' + h.toString(16)).slice(-8);
   }
 
-  function signature(text, count) { return hashText(text) + ':' + (count | 0); }
+  // What the user could see change without the page text changing: form values
+  // (hashed, never sent), checked / selected state, aria-expanded/selected/checked.
+  // A password contributes only "empty or not". -> one short hash string.
+  function formState(doc) {
+    const parts = [];
+    deepEach(doc, el => {
+      const t = el.tagName;
+      if (t === 'INPUT') {
+        const ty = String(el.type || 'text').toLowerCase();
+        if (ty === 'password') parts.push(el.value ? 'p1' : 'p0');
+        else if (ty === 'checkbox' || ty === 'radio') parts.push(el.checked ? 'c1' : 'c0');
+        else if (ty === 'file') parts.push('f' + ((el.files && el.files.length) | 0));
+        else parts.push('v' + hashText(el.value));
+      } else if (t === 'TEXTAREA') {
+        parts.push('v' + hashText(el.value));
+      } else if (t === 'SELECT') {
+        const sel = [];
+        for (const o of (el.options || [])) if (o.selected) sel.push(o.value);
+        parts.push('s' + hashText(sel.join('\u0001')));
+      }
+      if (el.getAttribute) {
+        for (const a of ARIA_STATE) {
+          const v = el.getAttribute(a);
+          if (v !== null && v !== undefined) parts.push(a + v);
+        }
+      }
+    });
+    return hashText(parts.join('|'));
+  }
+  const ARIA_STATE = ['aria-expanded', 'aria-selected', 'aria-checked'];
+
+  const TEXTLIKE = ['text', 'search', 'url', 'tel', 'email', 'password', 'date', 'month', 'week',
+    'time', 'datetime-local', 'number'];
+  // The browser's implicit-submission rule for Enter in a form field: submit
+  // when the form has an enabled submit button, or, with none, when it has at
+  // most one text-like field.
+  function implicitSubmit(form) {
+    if (!form || !form.elements) return false;
+    let textish = 0;
+    for (const f of Array.from(form.elements)) {
+      const t = String(f.tagName || '').toUpperCase();
+      const ty = String(f.type || '').toLowerCase();
+      const isSubmit = (t === 'BUTTON' && (ty === 'submit' || ty === '')) ||
+                       (t === 'INPUT' && (ty === 'submit' || ty === 'image'));
+      if (isSubmit) return !f.disabled;
+      if (t === 'INPUT' && TEXTLIKE.includes(ty || 'text')) textish++;
+    }
+    return textish <= 1;
+  }
+
+  function signature(text, count, form) {
+    return hashText(String(text || '') + (form ? '\u0000' + form : '')) + ':' + (count | 0);
+  }
 
   // --- key combos (mirrors normalize_combo in backend/browser.py and the desk) ----------
 
@@ -303,5 +654,7 @@
     v: V, ATTR, SEL, TABBABLE, clean, deepEach, collect, deepFind, findJav3, deepActive,
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
+    CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
+    collectCandidates, formState, implicitSubmit, clickSequence, deepPoint, realClick, isCovered, pointMoved, typeInto, describeEl,
   };
 })();

@@ -621,7 +621,7 @@ async def fetch_tool() -> str:
         # own words are not untrusted input.
         from .agent import budget as budget_mod
         from .vm import broker
-        broker.mark_tainted(budget_mod.active_op_id.get())
+        broker.mark_tainted(budget_mod.active_op_id.get(), "peer")
     return render(rows)
 
 

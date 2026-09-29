@@ -45,6 +45,9 @@ if [ "$BUILD" = 1 ]; then
   ssh "$PI" 'cd ~/jarvis/frontend && npm run build 2>&1 | tail -2'
 fi
 
+echo "==> requirements"
+ssh "$PI" 'cd ~/jarvis && new=$(sha256sum requirements.txt | cut -d" " -f1) && if [ "$new" = "$(cat .venv/.requirements.sha256 2>/dev/null)" ]; then echo "    requirements unchanged: skipped pip install"; else .venv/bin/pip install -q -r requirements.txt && echo "$new" > .venv/.requirements.sha256 && echo "    requirements changed: installed"; fi'
+
 echo "==> restart"
 ssh "$PI" 'systemctl --user restart jarvis'
 sleep 8

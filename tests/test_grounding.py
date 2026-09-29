@@ -18,12 +18,18 @@ from backend.db import get_db, init_db
 from backend.main import app
 
 PIL = pytest.importorskip("PIL")
+_REAL_CANDIDATES = grounding.candidates
 
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     grounding.reset_for_tests()
     monkeypatch.setattr(settings, "grounding_model", "")
+    # every model the tests name is an enabled candidate unless a test says otherwise
+    monkeypatch.setattr(grounding, "candidates", lambda: [
+        {"id": i, "label": i, "price_in": None, "price_out": None}
+        for i in ("p/bad", "p/good", "p/other", "p/m", "p/a", "p/b", "p/c", "p/k",
+                  "p/err", "p/slow", "p/zzz", "q/cfg")])
     yield
     grounding.reset_for_tests()
 
@@ -360,6 +366,7 @@ async def test_run_probe_refine_reports_first_and_refined(tmp_env, monkeypatch, 
 # --- candidates + probe ------------------------------------------------------------------
 
 def test_candidates_filters_enabled_vision_models(monkeypatch):
+    monkeypatch.setattr(grounding, "candidates", _REAL_CANDIDATES)
     def fake(include_models=True):
         return [
             {"id": "a", "label": "A", "enabled": True, "needs_base_url": False,
@@ -661,3 +668,172 @@ async def test_client_extra_merges_but_never_overrides_protected(tmp_env, monkey
     # no extra = today's payload, no thinking field
     [ev async for ev in m.complete(msgs, model_name="deepseek-flash")]
     assert "thinking" not in sent[1]["payload"]
+
+
+@pytest.mark.parametrize("conv,answer,reason", [
+    ("px", '{"x": -1, "y": -1, "confidence": 0.9}', "negative"),
+    ("px", '{"x": 100, "y": -5, "confidence": 0.9}', "negative"),
+    ("px", '{"x": 1300, "y": 100, "confidence": 0.9}', "outside the image"),
+    ("px", '{"x": 100, "y": 900, "confidence": 0.9}', "outside the image"),
+    ("k1000", '{"x": 1200, "y": 100, "confidence": 0.9}', "outside 0-1000"),
+    ("unit", '{"x": 640, "y": 400, "confidence": 0.9}', "outside 0-1"),
+    ("px", '{"x": 300, "y": 300, "confidence": 0}', "confidence"),
+    ("px", '{"x": 300, "y": 300, "confidence": 0.1}', "confidence"),
+    ("px", '{"x": 0, "y": 0, "confidence": 0.9}', "top-left"),
+    ("k1000", '{"x": 0, "y": 0, "confidence": 0.9}', "top-left"),
+])
+async def test_locate_rejects_out_of_range_low_confidence_and_corner(
+        tmp_env, monkeypatch, caplog, conv, answer, reason):
+    _write_state({"ranking": [{"model": "p/m", "hit_rate": 0.9, "unusable": False,
+                               "convention": conv}]})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete(answer))
+    with caplog.at_level("INFO", logger="backend.grounding"):
+        assert await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x",
+                                      refine=False) is None
+    assert any(reason in r.getMessage() and "p/m" in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_locate_accepts_normal_and_edge_slack_answers(tmp_env, monkeypatch):
+    _write_state({"ranking": [{"model": "p/m", "hit_rate": 0.9, "unusable": False,
+                               "convention": "px"}]})
+    png = gf.fixture(0)["png"]
+    monkeypatch.setattr(model_mod.model, "complete",
+                        _fake_complete('{"x": 300, "y": 200, "confidence": 0.2}'))
+    loc = await grounding.locate(png, 1280, 800, "x", refine=False)
+    assert (loc.x, loc.y) == (300, 200)
+    monkeypatch.setattr(model_mod.model, "complete",
+                        _fake_complete('{"x": 1282, "y": 802}'))
+    loc = await grounding.locate(png, 1280, 800, "x", refine=False)
+    assert (loc.x, loc.y) == (1279, 799)          # within 2 px: clamped, accepted
+
+
+def test_score_model_counts_rejected_answers_as_misses():
+    box = (0, 0, 40, 40)
+    row = grounding.score_model("p/m", [(0.0, 0.0, 0.9)], [box], [(1280, 800)], [10], 0)
+    assert row["hit_rate"] == 0.0
+
+
+def _cands(monkeypatch, ids):
+    monkeypatch.setattr(grounding, "candidates", lambda: [
+        {"id": i, "label": i, "price_in": None, "price_out": None} for i in ids])
+
+
+def _row(model, conv, hit=0.9, **kw):
+    return {"model": model, "hit_rate": hit, "unusable": False, "convention": conv,
+            "n": 5, "probed_at": "2026-09-01T00:00:00Z", **kw}
+
+
+async def test_subset_probe_keeps_other_rows_and_their_convention(tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a", "p/b"])
+    _write_state({"ranking": [_row("p/a", "k1000"), _row("p/b", "px", 0.8)],
+                  "probed_at": "2026-09-01T00:00:00Z", "pinned": "p/b"})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}'))
+    ranking = await grounding.run_probe(["p/a"], targets=3)
+    by = {r["model"]: r for r in ranking}
+    assert set(by) == {"p/a", "p/b"}
+    assert by["p/b"]["probed_at"] == "2026-09-01T00:00:00Z" and not by["p/b"]["stale"]
+    assert by["p/b"]["convention"] == "px" and by["p/b"]["hit_rate"] == 0.8
+    assert by["p/a"]["probed_at"] > "2026-09-01T00:00:00Z"
+    st = json.loads(grounding._path().read_text())
+    assert st["probed_at"] == by["p/a"]["probed_at"]
+    assert len(st["ranking"]) == 2
+
+
+async def test_pinned_model_keeps_its_measured_convention_after_subset_probe(
+        tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a", "p/b"])
+    _write_state({"ranking": [_row("p/a", "px"), _row("p/b", "unit", 0.8)],
+                  "probed_at": "x", "pinned": "p/b"})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}'))
+    await grounding.run_probe(["p/a"], targets=3)
+    assert grounding._resolve() == ("p/b", "unit")
+
+
+async def test_stale_rows_are_marked_and_never_auto_selected(tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a", "p/c"])
+    _write_state({"ranking": [_row("p/gone", "px", 0.99), _row("p/a", "px", 0.6)],
+                  "probed_at": "x", "pinned": ""})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}'))
+    ranking = await grounding.run_probe(["p/c"], targets=3)
+    by = {r["model"]: r for r in ranking}
+    assert by["p/gone"]["stale"] is True and by["p/a"]["stale"] is False
+    assert ranking[-1]["model"] == "p/gone"
+    assert grounding._resolve()[0] != "p/gone"
+    _write_state({"ranking": [by["p/gone"]], "pinned": ""})
+    with pytest.raises(grounding.NotConfigured):
+        grounding._resolve()
+
+
+async def test_disabled_pin_is_skipped_for_the_next_usable_ranked_row(tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a"])
+    _write_state({"ranking": [_row("p/a", "k1000", 0.7)], "pinned": "p/off"})
+    seen = []
+    monkeypatch.setattr(model_mod.model, "complete",
+                        _fake_complete('{"x": 500, "y": 500}', seen))
+    loc = await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x", refine=False)
+    assert loc.model == "p/a" and loc.convention == "k1000"
+    assert [c["model_name"] for c in seen] == ["p/a"]
+
+
+async def test_disabled_top_row_and_pin_with_nothing_left_raises_naming_it(
+        tmp_env, monkeypatch):
+    _cands(monkeypatch, [])
+    seen = []
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}', seen))
+    _write_state({"ranking": [_row("p/a", "px")], "pinned": "p/off"})
+    with pytest.raises(grounding.NotConfigured, match="p/off"):
+        await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    _write_state({"ranking": [_row("p/a", "px")], "pinned": ""})
+    with pytest.raises(grounding.NotConfigured, match="p/a"):
+        await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    monkeypatch.setattr(settings, "grounding_model", "q/cfg")
+    with pytest.raises(grounding.NotConfigured, match="q/cfg"):
+        await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    assert seen == []
+
+
+def _capture_events(monkeypatch):
+    got = []
+
+    async def fake_event(summary, detail, kind="grounding_probe"):
+        got.append((kind, summary, detail))
+    monkeypatch.setattr(grounding, "_event", fake_event)
+    return got
+
+
+async def test_locate_raises_an_image_sent_event_without_the_image_or_text(
+        tmp_env, monkeypatch):
+    _write_state({"ranking": [_row("p/m", "px")]})
+    got = _capture_events(monkeypatch)
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 50, "y": 60}'))
+    png = gf.fixture(0)["png"]
+    await grounding.locate(png, 1280, 800, "the secret button", op_id="op9", refine=False)
+    sent = [g for g in got if g[0] == "grounding_image_sent"]
+    assert len(sent) == 1
+    d = sent[0][2]
+    assert d == {"model": "p/m", "provider": "p", "width": 1280, "height": 800,
+                 "bytes": len(png), "op_id": "op9"}
+    assert "secret" not in json.dumps(sent[0])
+
+
+async def test_probe_fixture_calls_raise_no_image_sent_event(tmp_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(grounding, "STATE_DIR", tmp_path / "s")
+    got = _capture_events(monkeypatch)
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 50, "y": 60}'))
+    await grounding.run_probe(["p/m"], targets=3)
+    await grounding._run({"id": "j", "models": ["p/m"], "by": "t", "running": True})
+    assert got and all(g[0] == "grounding_probe" for g in got)
+
+
+def test_score_model_records_mean_confidence_of_hits_and_misses():
+    box = (100, 100, 40, 40)
+    answers = [(120.0, 120.0, 0.9), (130.0, 110.0, 0.7),      # hits
+               (600.0, 600.0, 0.4), (700.0, 300.0, 0.2),      # misses
+               None]                                          # error: no confidence
+    row = grounding.score_model("p/m", answers, [box] * 5, [(1280, 800)] * 5,
+                                [10] * 4, 1)
+    assert row["convention"] == "px"
+    assert row["conf_hit"] == 0.8 and row["conf_miss"] == 0.3
+    empty = grounding.score_model("p/m", [None], [box], [(1280, 800)], [], 1)
+    assert empty["conf_hit"] is None and empty["conf_miss"] is None

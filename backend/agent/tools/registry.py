@@ -314,7 +314,7 @@ def _dispatch_imported(entry: dict, args: dict) -> str:
                 "Only the operator can grant it, on the Tools page.")
     from ...vm import broker
     from .. import budget as budget_mod
-    broker.mark_tainted(budget_mod.active_op_id.get())
+    broker.mark_tainted(budget_mod.active_op_id.get(), "skill")
     return imported.render_body(entry["name"], entry.get("body", ""), args)
 
 
