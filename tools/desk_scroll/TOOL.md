@@ -3,6 +3,8 @@ name: desk_scroll
 description: Scroll on the connected computer; returns the screen afterwards.
 when_to_use: To bring more of a page or list into view.
 enabled: true
+section: desk
+action: scroll
 requires_desk: true
 parameters:
   type: object

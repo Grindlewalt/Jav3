@@ -3,6 +3,7 @@ name: music_play
 description: Play music — searches the operator's library, finds the best match, and plays it. One call.
 when_to_use: Whenever they ask for music by name. Just pass what they said in `query`; do not search first.
 enabled: true
+section: media
 parameters:
   type: object
   properties:

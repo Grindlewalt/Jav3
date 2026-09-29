@@ -3,6 +3,8 @@ name: desk_wait
 description: Wait on the connected computer until the screen is still (stable) or until it changes (change); returns the screen afterwards.
 when_to_use: After an action that starts something slow (a page load, an app launch, a progress bar), instead of taking screenshots in a loop.
 enabled: true
+section: desk
+action: wait
 requires_desk: true
 parameters:
   type: object

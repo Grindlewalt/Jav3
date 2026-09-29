@@ -3,6 +3,8 @@ name: desk_open
 description: Open a URL in the connected computer's browser, or launch one of the apps it offers; returns the screen afterwards.
 when_to_use: To start a task on that computer faster than clicking to it.
 enabled: true
+section: desk
+action: open
 requires_desk: true
 parameters:
   type: object

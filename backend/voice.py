@@ -427,9 +427,11 @@ class VoiceSession:
             system = (f"{system}\n\n{VOICE_PROMPT}\n\n{VOICE_CAPABILITIES}"
                       f"\n\n{LOCAL_PROMPT}")
             system += await voice_library_prompt()
-            tools = openai_tool_specs(
+            # as the loop shows them (toolsections), so the prefix matches
+            from .agent.tools import toolsections
+            tools = toolsections.View(openai_tool_specs(
                 [e for e in load_registry() if e["name"] in LOCAL_TOOLS],
-                notes_max=LOCAL_NOTES_MAX)
+                notes_max=LOCAL_NOTES_MAX)).wire()
             async for _ in Model().complete(
                     [{"role": "system", "content": system},
                      {"role": "user", "content": "."}],

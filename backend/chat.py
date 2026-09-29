@@ -12,11 +12,11 @@ from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, op
 from .agent import budget
 from .agent.model import model
 from .agent.loop import db_tool_sink
+from .agent.tools import toolsections
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
 from .auth import require_actor
 from .config import settings
 from .db import get_db, open_conversation
-from . import navplaybook
 from .memory import (assemble_system_prompt, estimate_tokens,
                      get_active_project, standing_rules_tail)
 # module level, not function level: it is the turn's single loop entry now, and
@@ -591,6 +591,37 @@ async def _project_autonomy(db, slug: str) -> str | None:
     return row["autonomy"] if row else None
 
 
+# how far back a conversation's tool calls keep their sections loaded
+PRELOAD_RECENT_CALLS = 200
+
+
+async def _preload_sections(db, conversation_id: int, specs: list[dict],
+                            active: str | None) -> set[str]:
+    """Tool sections to show from a turn's first round: the ones this
+    conversation already used (so a loaded section stays loaded from turn to
+    turn, and the tool list, part of the cached prefix, stays put), and git
+    when the project pushes to the host's Gitea. Only ever narrows what the
+    model must ask for; the granted set is unchanged."""
+    names: set[str] = set()
+    async with db.execute(
+            "SELECT tool, args FROM tool_calls WHERE conversation_id = ? "
+            "ORDER BY id DESC LIMIT ?", (conversation_id, PRELOAD_RECENT_CALLS)) as cur:
+        for row in await cur.fetchall():
+            names.add(row["tool"])
+            if row["tool"] == toolsections.META:       # tools(section=...) rows
+                try:
+                    sec = json.loads(row["args"] or "{}").get("section")
+                except (ValueError, AttributeError):
+                    sec = None
+                names.update(s.strip() for s in str(sec or "").split(",") if s.strip())
+    secs = toolsections.sections_for(names, specs)
+    if active:
+        from . import gitea
+        if gitea.enabled():
+            secs.add("git")
+    return secs
+
+
 async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
                         before_id: int, active: str | None) -> None:
     """F5 interim: if this turn mutated its project and never called
@@ -815,9 +846,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 entries, notes_max=LOCAL_NOTES_MAX if tools_only else None)
         finally:
             runtime.local_turn.reset(ltoken)
-        # computer-use / browser playbook: only on turns actually offered
-        # desk_* or browser_* tools (they are withheld unless one is connected)
-        system_prompt = navplaybook.append_to(system_prompt, tools)
+        # tool sections (agent/tools/toolsections.py): the loop shows the core
+        # tools and loads the rest on demand; sections this conversation has
+        # already used, and git on a Gitea-backed project, load from the start.
+        # The computer-use / browser playbooks ride their sections (the loop).
+        tools = toolsections.mark_load(
+            tools, await _preload_sections(db, conversation_id, tools, active))
         # tier-2 compaction: summary (if any) + verbatim tail, compacting
         # first when the effective context window demands it. The voice local
         # tier also gets past turns' TOOL work replayed: a 4B reading a history

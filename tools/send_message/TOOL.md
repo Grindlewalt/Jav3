@@ -3,6 +3,8 @@ name: send_message
 description: Send a message to another agent that is working right now, and to agents that are not (it waits in their inbox). Use it to coordinate instead of duplicating work.
 when_to_use: When another running agent needs to know something you just learned, when you are about to touch a file or area another agent is working in, when you need an answer only another agent has, or to hand a peer a correction. Not for reporting to the operator — that is your final reply.
 enabled: true
+section: agents
+core: true
 parameters:
   type: object
   properties:

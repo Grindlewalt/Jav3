@@ -3,6 +3,8 @@ name: browser_screenshot_tab
 description: Take a screenshot of one of Jav3's own browser tabs.
 when_to_use: When the layout or an image matters; browser_read_page is cheaper for text.
 enabled: true
+section: browser
+action: screenshot
 requires_browser: true
 parameters:
   type: object

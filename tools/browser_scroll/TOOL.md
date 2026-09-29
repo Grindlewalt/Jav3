@@ -3,6 +3,8 @@ name: browser_scroll
 description: Scroll a Jav3 browser tab by whole screens.
 when_to_use: To reach content further down (or up) before reading or taking a screenshot.
 enabled: true
+section: browser
+action: scroll
 requires_browser: true
 parameters:
   type: object

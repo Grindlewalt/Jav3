@@ -3,6 +3,8 @@ name: desk_move
 description: Move the pointer on the connected computer (hover), onto an element id or a point; returns the screen afterwards.
 when_to_use: To reveal a tooltip or hover menu seen in the latest desk_screenshot.
 enabled: true
+section: desk
+action: move
 requires_desk: true
 parameters:
   type: object

@@ -1,6 +1,5 @@
-"""Navigation playbook: a short operating procedure appended to the system
-prompt on turns that are offered the computer-use (desk_*) or browser
-(browser_*) tools, so the model uses element ids, zoom, the keyboard and the
+"""Navigation playbook: a short operating procedure shown with the
+computer-use (desk) and browser tools whenever they are loaded, so the model uses element ids, zoom, the keyboard and the
 `changed:` line in the right order instead of guessing pixels.
 
 Distilled from docs/navigation-contract.md and published computer-use
@@ -8,29 +7,32 @@ practice (Anthropic's computer-use guidance: screenshot after every step and
 judge it, keyboard for dropdowns and scrollbars, zoom for small targets;
 OSWorld failure modes: stale targets, submitting without checking, looping on
 the same click). Each block stays under ~220 words: it rides every turn that
-offers the tools.
+loads the tools.
 
-The system prompt is assembled on the host and handed to the guest whole, so
-there is no guest copy of this module to keep in step.
+Each block rides its tool section (backend/agent/tools/toolsections.py): in
+the system prompt when the section is loaded from the first round, or in the
+result that loads it mid-turn. The loop does that, in the host and in the
+guest alike, so this module is copied verbatim into the guest package
+(backend/vm/guest_pkg.py): keep it pure.
 """
 from __future__ import annotations
 
 from typing import Iterable
 
 _DESK = (
-    "Operating the connected computer (desk_* tools). Start with "
-    "desk_screenshot and read its element list before acting. Act by id: "
-    "desk_click(element=N). Use target=\"...\" only when the thing has no id, "
+    "Operating the connected computer (the desk tool). Start with "
+    "desk(action=\"screenshot\") and read its element list before acting. Act "
+    "by id: desk(action=\"click\", element=N). Use target=\"...\" only when the thing has no id, "
     "and x/y coordinates only as a last resort; for anything small, first zoom "
-    "with desk_screenshot(region=...) and click from the zoomed frame. Ids "
+    "with the screenshot action's region=... and click from the zoomed frame. Ids "
     "belong to the latest screenshot only; every action returns a new one. "
     "After every action read its changed: line and the new elements. If "
     "nothing changed, do not repeat the same click: zoom in, use the keyboard "
-    "(desk_key), or scroll. Prefer keyboard shortcuts for menus, dropdowns and "
+    "(action=\"key\"), or scroll. Prefer keyboard shortcuts for menus, dropdowns and "
     "scrollbars. Batch obvious sequences (click a field, type, press Return) "
     "but stop at the first surprise and look again. After an action that "
     "starts something slow (a page load, an app launch), call "
-    "desk_wait(mode=\"change\") instead of screenshotting in a loop. Before "
+    "desk(action=\"wait\", mode=\"change\") instead of screenshotting in a loop. Before "
     "saying a task is done, verify the result on screen, or with a file or "
     "shell check when you have one. If a screenshot fails (locked screen, no "
     "permission, disconnected), stop and tell the operator what is needed; "
@@ -41,14 +43,14 @@ _DESK = (
 )
 
 _BROWSER = (
-    "Operating a browser tab (browser_* tools). Start with browser_read_page "
-    "and act by the element ids it lists (\"f0:12\"). Use browser_select for a "
-    "<select>, browser_key for Enter, Tab and Escape, and browser_hover only "
+    "Operating a browser tab (the browser tool). Start with action=\"read\" "
+    "and act by the element ids it lists (\"f0:12\"). Use action=\"select\" for "
+    "a <select>, action=\"key\" for Enter, Tab and Escape, and action=\"hover\" only "
     "for menus or tooltips that open on hover. Read the page again after any "
     "navigation, after a hover, and whenever an id is reported stale; ids from "
     "an older read are not valid. Watch the changed: line after each action; "
     "if nothing changed, do not repeat the same action: re-read, try the "
-    "keyboard, or scroll the element into view. Use browser_screenshot_tab "
+    "keyboard, or scroll the element into view. Use action=\"screenshot\" "
     "only when the text list is not enough (a canvas, a chart, the visual "
     "layout). For a cookie or consent banner, find its button by label and "
     "click it. Never type credentials or secrets the operator did not put in "
@@ -67,14 +69,24 @@ def browser_block() -> str:
     return _BROWSER
 
 
+def block(key: str) -> str:
+    """The playbook for a tool section's `guide` key ("desk" or "browser")."""
+    return {"desk": _DESK, "browser": _BROWSER}.get(key, "")
+
+
+def _family(name: str, fam: str) -> bool:
+    return name == fam or name.startswith(fam + "_")
+
+
 def for_tools(tool_names: Iterable[str]) -> str:
-    """The blocks that apply to a turn offered `tool_names`, joined by a blank
+    """The blocks that apply to a turn offered `tool_names` (the desk_* and
+    browser_* tools, or the merged desk / browser tools), joined by a blank
     line; "" when neither family is offered."""
     names = list(tool_names)
     blocks = []
-    if any(n.startswith("desk_") for n in names):
+    if any(_family(n, "desk") for n in names):
         blocks.append(_DESK)
-    if any(n.startswith("browser_") for n in names):
+    if any(_family(n, "browser") for n in names):
         blocks.append(_BROWSER)
     return "\n\n".join(blocks)
 

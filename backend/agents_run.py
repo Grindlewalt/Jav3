@@ -29,7 +29,7 @@ from .chat import INTERRUPTED_MARKER
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import assemble_system_prompt, get_active_project
-from . import navplaybook
+from .agent.tools import toolsections
 
 router = APIRouter(prefix="/api/agents", tags=["agents"],
                    dependencies=[Depends(require_user)])
@@ -90,9 +90,16 @@ def agent_exclusions(agent: dict) -> set[str]:
     Skills compile into the SAME registry as tools (registry.py:_sources), so
     there is one namespace to exclude from — `skills_exclude` was declared and
     stored for a long time while biting nothing. Every path that trims an
-    agent's tools (runs, spawned children, chat threads) goes through here."""
-    return (set(agent.get("tools_exclude") or [])
-            | set(agent.get("skills_exclude") or []))
+    agent's tools (runs, spawned children, chat threads) goes through here.
+
+    A merged tool's or a section's name (tools/*/TOOL.md `section:`, e.g.
+    "browser" or "media") stands for every tool in it; the old per-tool names
+    keep meaning just that tool."""
+    names = (set(agent.get("tools_exclude") or [])
+             | set(agent.get("skills_exclude") or []))
+    if names & set(toolsections.SECTIONS):
+        names = toolsections.expand_names(names, load_registry())
+    return names
 
 
 def memory_slug(agent: dict) -> str | None:
@@ -361,7 +368,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         tools = _agent_tools(agent, await _project_autonomy(db, active))
         if extra_tools:
             tools = tools + _internal_specs(extra_tools)
-        system_prompt = navplaybook.append_to(system_prompt, tools)
+        # the desk / browser playbooks ride their tool sections (the loop)
         mdl, burl = _agent_overrides(agent)
         cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
@@ -475,7 +482,6 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
                            "agent": agent["name"], "agent_slug": agent.get("slug")})
         system_prompt = await _agent_system_prompt(db, agent, active=active)
         tools = _agent_tools(agent, await _project_autonomy(db, active))
-        system_prompt = navplaybook.append_to(system_prompt, tools)
         mdl, burl = _agent_overrides(agent)
         # max_iterations used to be honoured headless and ignored here, so one
         # definition ran two caps depending on who started it. An interactive

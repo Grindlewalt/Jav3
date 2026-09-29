@@ -1,5 +1,7 @@
-"""The navigation playbook rides the system prompt only on turns offered the
-desk_* / browser_* tools, stays short, and reaches the assembled prompt."""
+"""The navigation playbook rides its tool section (the desk / browser tools):
+it stays short, names the merged tools' actions, and reaches the model through
+the loop when the section loads (tests/test_tool_sections.py), never through
+the host's assembled prompt."""
 import asyncio
 import contextlib
 
@@ -40,12 +42,12 @@ def test_blocks_follow_offered_tools():
 
 def test_key_guidance_present():
     desk = navplaybook.desk_block()
-    for s in ("desk_screenshot", "element=", "target=", "region", "changed:",
-              "desk_key", "desk_wait", "untrusted"):
+    for s in ('desk(action="screenshot")', "element=", "target=", "region", "changed:",
+              'action="key"', 'desk(action="wait"', "untrusted"):
         assert s in desk, s
     browser = navplaybook.browser_block()
-    for s in ("browser_read_page", "browser_select", "browser_key",
-              "browser_hover", "browser_screenshot_tab", "stale", "changed:",
+    for s in ('action="read"', 'action="select"', 'action="key"',
+              'action="hover"', 'action="screenshot"', "stale", "changed:",
               "secrets store", "untrusted"):
         assert s in browser, s
 
@@ -102,10 +104,12 @@ async def _turn(client, monkeypatch, *, desk_on):
     return seen
 
 
-async def test_assembled_prompt_has_desk_block_only_when_offered(client, monkeypatch):
+async def test_desk_tools_granted_only_when_offered_playbook_left_to_the_loop(
+        client, monkeypatch):
     seen = await _turn(client, monkeypatch, desk_on=True)
     assert any(n.startswith("desk_") for n in seen["tools"])
-    assert navplaybook.desk_block() in seen["system_prompt"]
+    # the loop shows it with the desk section (a "hi" turn does not load it)
+    assert navplaybook.desk_block() not in seen["system_prompt"]
     assert navplaybook.browser_block() not in seen["system_prompt"]
 
     seen = await _turn(client, monkeypatch, desk_on=False)

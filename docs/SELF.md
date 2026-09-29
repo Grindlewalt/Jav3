@@ -80,6 +80,16 @@ str`). Handlers hot-reload on edit; errors return to you as tool results. The
 Tools page lists them with an enable toggle. This folder seam is also how new
 tools get authored.
 
+You are shown at most 15 tools at a time: the core ones (`core: true`) and
+`tools`. Everything else sits in a section (`section:` in TOOL.md: browser,
+desk, git, services, agents, media, ...). `tools(section="git")` loads one for
+the rest of the turn; calling any tool in a section by name loads it too, and a
+section loads by itself when your message plainly needs it or this
+conversation used it before. Families that share arguments are one tool with
+an `action` (browser, desk, git, services, memory); their old names
+(`browser_click`, `git_status`, ...) still work. Loading a section changes
+only what you see: every call runs under its real name, behind the same gates.
+
 ## gui
 
 Pages (top nav): **Chat** (talk to you; jobs stream inline) · **Projects** →

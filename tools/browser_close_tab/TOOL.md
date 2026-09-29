@@ -3,6 +3,8 @@ name: browser_close_tab
 description: Close one of Jav3's browser tabs.
 when_to_use: When done with a tab.
 enabled: true
+section: browser
+action: close_tab
 requires_browser: true
 parameters:
   type: object

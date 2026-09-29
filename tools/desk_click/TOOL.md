@@ -3,6 +3,8 @@ name: desk_click
 description: Click on the connected computer's screen, by element id, by description or at a point; returns the screen afterwards.
 when_to_use: To press a button, focus a field or select something you can see in the latest desk_screenshot. Prefer element (the [id] from its element list); use target when the thing has no id; x/y last.
 enabled: true
+section: desk
+action: click
 requires_desk: true
 parameters:
   type: object

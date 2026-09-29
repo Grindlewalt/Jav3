@@ -3,6 +3,7 @@ name: clap_tracks
 description: The double-clap song list — the tracks that start instantly on 👏👏, no model in the loop. Add, remove, or just see the list, in one call.
 when_to_use: When the operator wants a song added to or dropped from the clap / startup-music list, or asks what is on it. To actually play something use music_play.
 enabled: true
+section: media
 parameters:
   type: object
   properties:

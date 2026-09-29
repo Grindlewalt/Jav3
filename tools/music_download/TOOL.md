@@ -3,6 +3,7 @@ name: music_download
 description: Rip a track from YouTube into the operator's self-hosted library (TARMAC) with yt-dlp. Returns a job to poll.
 when_to_use: When they ask you to add, save, download or "get" a song into their library from a YouTube or YouTube Music link.
 enabled: true
+section: media
 parameters:
   type: object
   properties:

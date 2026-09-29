@@ -3,6 +3,7 @@ name: local_read_file
 description: Read a text file on the operator's computer (a /local chat), with line numbers.
 when_to_use: Before editing a local file, or to look at code, config or notes in the local working directory.
 enabled: true
+section: local
 requires_local: true
 read_only: true
 parameters:

@@ -2,6 +2,7 @@
 name: inbox_fetch
 description: Internal. Drains the running turn's inbox of messages other agents addressed to it. The ReAct loop calls this between iterations; the model is never offered it.
 enabled: false
+section: system
 parameters:
   type: object
   properties: {}

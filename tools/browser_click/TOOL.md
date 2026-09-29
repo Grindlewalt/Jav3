@@ -3,6 +3,8 @@ name: browser_click
 description: Click an element (by number from browser_read_page) in a Jav3 browser tab.
 when_to_use: To follow a link or press a button you saw in the latest browser_read_page of that tab.
 enabled: true
+section: browser
+action: click
 requires_browser: true
 parameters:
   type: object

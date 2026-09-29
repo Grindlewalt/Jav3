@@ -3,6 +3,7 @@ name: spawn_temp_agent
 description: Spawn a disposable copy of yourself for one task — you write its role prompt, it runs once and is gone. No roster entry (use create_agent only for roles worth keeping). It reports back, and if it built something durable it leaves a memory note of what and how.
 when_to_use: A one-off subtask no saved agent covers — offloading a build or investigation to a worker instead of doing it inline. Set duplicate=true ONLY when the task truly needs your full context (memory notes, user profile, all-projects, roster); the lean default is much cheaper per iteration.
 enabled: true
+section: agents
 parameters:
   type: object
   properties:

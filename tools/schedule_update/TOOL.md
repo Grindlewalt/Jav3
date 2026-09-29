@@ -3,6 +3,7 @@ name: schedule_update
 description: Propose a recurring schedule (a task run daily at a time, or every N minutes, headlessly — as yourself or as a named agent), list existing schedules, pause one, or retract a proposal that is still awaiting approval. New schedules start PAUSED until the operator approves them.
 when_to_use: The operator asks for something recurring ("read the news every morning", "check X every hour"). If the job needs a specialized role, create_agent first, then propose the schedule — and tell the operator it is waiting on their approval.
 enabled: true
+section: schedules
 parameters:
   type: object
   properties:

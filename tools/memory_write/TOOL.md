@@ -3,6 +3,9 @@ name: memory_write
 description: Save, update or delete a durable note in your memory (survives every restart and VM nuke).
 when_to_use: Facts, preferences and decisions worth remembering beyond this conversation. Also for consolidating — merging or deleting stale notes.
 enabled: true
+section: memory
+core: true
+action: write
 parameters:
   type: object
   properties:

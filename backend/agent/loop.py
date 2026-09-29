@@ -18,7 +18,7 @@ from ..memory import standing_rules_tail
 from . import imageresult
 from .budget import BudgetExceeded
 from .model import model
-from .tools import registry
+from .tools import registry, toolsections
 
 # Tools that mutate durable state: their results are the model's record of
 # what it changed, so eviction never touches them (reads are disposable,
@@ -342,9 +342,16 @@ async def run_turn(
         system_prompt, history, tools, self_check, inject_rules)
     if waiting:
         yield {"type": "inbox", "text": waiting}
+    # what the model is SHOWN: the core tools, the `tools` meta-tool and any
+    # loaded section (toolsections.py). `tools` stays the granted set; a call
+    # still dispatches under its real name, so no gate sees anything new.
+    view = toolsections.View(tools, history)
+    guides = view.start_guides()
+    if guides:
+        messages[0] = {**messages[0], "content": f"{messages[0]['content']}\n\n{guides}"}
 
     n_iter = max_iterations or settings.max_react_iterations
-    offered = {t["function"]["name"] for t in (tools or [])}
+    offered = view.granted()
     has_todo = "todo_update" in offered
     has_research = "research" in offered
     web_calls = 0                # hand-rolled web gathering calls this turn
@@ -370,7 +377,7 @@ async def run_turn(
         # on the final allowed round — or once the dead-end breaker trips —
         # drop tools so the model must produce an answer from what it has
         # instead of another tool call it can't act on
-        call_tools = None if (i == n_iter - 1 or force_conclude) else (tools or None)
+        call_tools = None if (i == n_iter - 1 or force_conclude) else (view.wire() or None)
         final: dict | None = None
         try:
             async for event in model.complete(
@@ -432,16 +439,33 @@ async def run_turn(
             turn["provider_blocks"] = final["provider_blocks"]
         messages.append(turn)
         parsed = []
+        # per call: (note for its result, error that replaces its dispatch),
+        # from mapping what the model called onto the real tool
+        mapped: dict[int, tuple[str, str | None]] = {}
         for tc in final["tool_calls"]:
             name = tc["function"]["name"]
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 args = {}
+            if not view.is_meta(name):
+                # a merged tool's action -> its real tool; an unloaded section
+                # loads; a name outside the granted set never dispatches
+                name, args, note, err = view.resolve(name, args)
+                mapped[id(tc)] = (note, err)
             parsed.append((tc, name, args))
             yield {"type": "tool", "id": tc["id"], "name": name, "args": args}
 
-        async def _run_one(name: str, args: dict, call_id=None) -> str:
+        async def _run_one(name: str, args: dict, call_id=None, tc=None) -> str:
+            if view.is_meta(name):
+                return view.meta_call(args)
+            note, err = mapped.get(id(tc), ("", None))
+            if err is not None:
+                return err
+            result = await _dispatch_one(name, args, call_id)
+            return result + note if note and isinstance(result, str) else result
+
+        async def _dispatch_one(name: str, args: dict, call_id=None) -> str:
             blocked = _guard_blind_edit(conversation_id, name, args)
             if blocked is not None:
                 return blocked
@@ -473,11 +497,12 @@ async def run_turn(
         # a round whose calls are ALL flagged read-only runs them concurrently
         # (three reads cost one round-trip, not three); anything unflagged is
         # assumed to write — fail closed — and keeps the serial path
-        if len(parsed) > 1 and all(n in read_only for _, n, _ in parsed):
+        if len(parsed) > 1 and all(n in read_only or view.is_meta(n)
+                                   for _, n, _ in parsed):
             results = await asyncio.gather(
-                *(_run_one(n, a, tc.get("id")) for tc, n, a in parsed))
+                *(_run_one(n, a, tc.get("id"), tc) for tc, n, a in parsed))
         else:
-            results = [await _run_one(n, a, tc.get("id")) for tc, n, a in parsed]
+            results = [await _run_one(n, a, tc.get("id"), tc) for tc, n, a in parsed]
 
         # DB writes + message appends stay sequential and ordered — the single
         # aiosqlite connection must never be used concurrently
@@ -504,9 +529,11 @@ async def run_turn(
             yield {"type": "tool_result", "id": tc["id"], "name": name,
                    "ok": not result.startswith(("error:", "duplicate call:")),
                    "result": result[:10_000]}
+            if view.is_meta(name):
+                continue             # loading tools changes nothing out there
             if name in read_only:
                 seen_calls[(name, json.dumps(args, sort_keys=True))] = tool_msgs[-1]
-            else:
+            elif mapped.get(id(tc), ("", None))[1] is None:
                 seen_calls.clear()   # a mutating call may invalidate any read
             err_streak = err_streak + 1 if failed else 0
             if name in WEB_HANDROLLED:

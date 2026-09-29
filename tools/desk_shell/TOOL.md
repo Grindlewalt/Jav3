@@ -3,6 +3,8 @@ name: desk_shell
 description: Run a shell command on the operator's connected computer and return its output.
 when_to_use: When a command is the direct way to do it on that computer (list files, check a process, run a script) rather than clicking.
 enabled: true
+section: desk
+action: shell
 requires_desk: shell
 parameters:
   type: object

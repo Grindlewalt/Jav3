@@ -3,6 +3,8 @@ name: git_push_request
 description: Put the project's current changes up for the operator's review as a pull request on the host's Gitea. The host commits your changes onto a fresh agent/* branch, pushes it, and opens a PR into main. Nothing reaches main until the operator approves (merges) it.
 when_to_use: When a piece of work is ready for the operator to review and merge. This is the ONLY way to push — never run git push, git remote or git credential commands yourself (the box has no credentials and its git state is discarded).
 enabled: true
+section: git
+action: push
 requires_project: true
 parameters:
   type: object
