@@ -19,6 +19,7 @@ from ..agent import budget as budget_mod
 from ..agent.budget import BudgetExceeded
 from ..agent.model import ModelError, call_box_id, model
 from ..config import settings
+from .. import runtime
 from . import boxes, broker, gateway_log
 
 # kind -> fn(box) -> tar.gz bytes (WP3 registers "service", WP5 "builder").
@@ -99,6 +100,10 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
     conversation_id = req.get("conversation_id")
     # the ledger row for this call names the box that spent the key
     box_tok = call_box_id.set(box.id if box is not None else boxes.op_box(op_id))
+    # an incognito turn's calls record usage only, never context: the turn's
+    # envelope says so; this handler runs outside the turn's own context
+    env = broker.get_turn(op_id)
+    eph_tok = runtime.ephemeral.set(bool(env is not None and env.ephemeral))
     try:
         async for ev in model.complete(messages, tools=tools,
                                         conversation_id=conversation_id,
@@ -117,6 +122,7 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
                                  "error": type(e).__name__, "message": str(e) or repr(e)})
     finally:
         call_box_id.reset(box_tok)
+        runtime.ephemeral.reset(eph_tok)
 
 
 async def _handle_tool_broker_call(loop, conn, req: dict, box=None) -> None:

@@ -362,3 +362,28 @@ async def test_calls_endpoint_needs_a_login(tmp_env):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         assert (await c.get("/api/logs/calls")).status_code == 401
+
+
+async def test_an_incognito_guest_turn_stores_no_context(gw, monkeypatch):
+    """The gateway serves a guest's call outside the turn's own context, so it
+    must take 'incognito' from the turn's envelope: before, an incognito chat's
+    system prompt and tool results were captured and outlived the chat."""
+    from backend import runtime
+    _script(monkeypatch)
+    box = boxes.allocate("project", project="homelab")
+    for op, eph in (("guest:7", True), ("guest:8", False)):
+        bmod.register(op, Budget(10**9, 10**9))
+        broker.register_token(op, "tok")
+        broker.register_turn(broker.TurnEnvelope(op_id=op, active_project="homelab",
+                                                 ephemeral=eph))
+        boxes.bind_op(op, box, "homelab")
+        try:
+            await _send({"op": "model_call", "op_id": op, "op_token": "tok",
+                         "conversation_id": 7, "messages": MSGS}, box=box)
+        finally:
+            _done(op)
+    rows = await _q("SELECT op_id, conversation_id, context FROM model_calls ORDER BY id")
+    assert rows[0]["context"] is None and rows[0]["conversation_id"] is None
+    assert rows[0]["op_id"] is None
+    assert rows[1]["context"] is not None and rows[1]["op_id"] == "guest:8"
+    assert runtime.ephemeral.get() is False        # reset after the served call
