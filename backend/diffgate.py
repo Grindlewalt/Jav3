@@ -18,13 +18,62 @@ tripped it, so the Review Center can show the operator the actual code instead
 of a bag of matched substrings (see `secctx.py`). Removal triggers have no
 location — nothing was added to point at — so they omit the key.
 
+new_import counts a module only when it could come from outside the project:
+not a relative import (`./x.js`, `from . import x`), not the language's own
+standard library or Node's builtins, EXCEPT the standard modules that open
+sockets or run programs (socket, subprocess, http, child_process, net, ...),
+which always count. The Python pattern runs on Python files only: on a .mjs
+file it read `import test from 'node:test'` as a module named `test`. On the Pi
+(2026-09-27) 242 new_import flags were almost all relative, stdlib or builtin.
+
 `scan()` is pure and fully unit-testable.
 """
 import math
 import re
+import sys
 
 _PY_IMPORT = re.compile(r'^\s*(?:import\s+([\w.]+)|from\s+([\w.]+)\s+import)')
 _JS_IMPORT = re.compile(r'''import\s.+from\s+["']([^"']+)["']|require\(\s*["']([^"']+)["']''')
+_PY_EXT = {".py"}
+_JS_EXT = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+
+# the standard library is not a supply chain, but these reach the network,
+# run programs or load code by name, so adding one is still worth a flag
+_PY_STDLIB = frozenset(getattr(sys, "stdlib_module_names", ()))
+_PY_SENSITIVE = frozenset({
+    "socket", "ssl", "http", "urllib", "ftplib", "smtplib", "poplib", "imaplib",
+    "telnetlib", "xmlrpc", "socketserver", "subprocess", "ctypes", "pty",
+    "webbrowser", "importlib", "runpy", "code", "codeop", "marshal"})
+_NODE_BUILTINS = frozenset({
+    "assert", "assert/strict", "async_hooks", "buffer", "child_process", "cluster",
+    "console", "constants", "crypto", "dgram", "diagnostics_channel", "dns",
+    "dns/promises", "domain", "events", "fs", "fs/promises", "http", "http2", "https",
+    "inspector", "module", "net", "os", "path", "path/posix", "path/win32",
+    "perf_hooks", "process", "punycode", "querystring", "readline",
+    "readline/promises", "repl", "sea", "sqlite", "stream", "stream/consumers",
+    "stream/promises", "stream/web", "string_decoder", "sys", "test", "test/reporters",
+    "timers", "timers/promises", "tls", "trace_events", "tty", "url", "util",
+    "util/types", "v8", "vm", "wasi", "worker_threads", "zlib"})
+_NODE_SENSITIVE = frozenset({
+    "child_process", "cluster", "dgram", "dns", "dns/promises", "http", "http2",
+    "https", "inspector", "module", "net", "tls", "vm", "worker_threads"})
+
+
+def _external_py(mod: str) -> bool:
+    """A top-level Python module name that may come from outside the project."""
+    if not mod:                          # `from . import x` / `from .m import x`
+        return False
+    return mod not in _PY_STDLIB or mod in _PY_SENSITIVE
+
+
+def _external_js(spec: str) -> bool:
+    """A JS import specifier that may come from outside the project."""
+    if not spec or spec.startswith((".", "/")):
+        return False
+    name = spec[5:] if spec.startswith("node:") else spec
+    if name in _NODE_BUILTINS:
+        return name in _NODE_SENSITIVE
+    return True
 _NET = re.compile(
     r'socket\.socket|socket\.create_connection|create_connection|requests\.'
     r'(?:get|post|put|patch|delete|request|head)|httpx\.|aiohttp|urllib\.request|'
@@ -62,15 +111,25 @@ def _added_lines(old: str, new: str) -> list[tuple[int, str]]:
             if ln.strip() and ln.strip() not in old_set]
 
 
-def _imports(lines: list[tuple[int, str]]) -> dict[str, list[int]]:
-    """module -> the added line numbers that import it."""
+def _imports(lines: list[tuple[int, str]], ext: str = "") -> dict[str, list[int]]:
+    """module -> the added line numbers that import it, for modules that may
+    come from outside the project. A file that is neither Python nor JS/TS
+    (shell, YAML, ...) keeps the old behaviour: both patterns, no filtering."""
+    py = ext in _PY_EXT or ext not in _JS_EXT
+    js = ext in _JS_EXT or ext not in _PY_EXT
+    known = ext in _PY_EXT or ext in _JS_EXT
     mods: dict[str, list[int]] = {}
     for n, ln in lines:
-        m = _PY_IMPORT.match(ln)
+        m = _PY_IMPORT.match(ln) if py else None
         if m:
-            mods.setdefault((m.group(1) or m.group(2)).split(".")[0], []).append(n)
-        for jm in _JS_IMPORT.finditer(ln):
-            mods.setdefault(jm.group(1) or jm.group(2), []).append(n)
+            top = (m.group(1) or m.group(2)).split(".")[0]
+            if not known or _external_py(top):
+                mods.setdefault(top, []).append(n)
+        if js:
+            for jm in _JS_IMPORT.finditer(ln):
+                spec = jm.group(1) or jm.group(2)
+                if not known or _external_js(spec):
+                    mods.setdefault(spec, []).append(n)
     return {m: ns for m, ns in mods.items() if m}
 
 
@@ -99,7 +158,7 @@ def scan(old_text: str, new_text: str, path: str) -> list[dict]:
     added = _added_lines(old_text, new_text)
     flags: list[dict] = []
 
-    new_mods = _imports(added)
+    new_mods = _imports(added, ext)
     if new_mods:
         flags.append({"trigger": "new_import",
                       "detail": {"modules": sorted(new_mods),

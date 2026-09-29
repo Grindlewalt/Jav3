@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_secnotify(db)
         await db.commit()
     finally:
         await db.close()
@@ -861,6 +862,22 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
         " set_by TEXT,"
         " updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         " CHECK (mode <> 'join' OR box_id IS NOT NULL))")
+
+
+async def _migrate_secnotify(db: aiosqlite.Connection) -> None:
+    """Coalesced security events (backend/security.py): a repeat of the same
+    kind + project + cause + severity while the first is still unacknowledged
+    bumps `count` and `last_seen` on that row instead of adding (and pinging)
+    another. `cause` is the coalescing key, the summary unless the raise site
+    names one. Old rows read as count 1, last_seen NULL (= created_at)."""
+    await _add_columns(db, "security_events", (
+        ("count", "INTEGER NOT NULL DEFAULT 1"),
+        ("last_seen", "TEXT"),
+        ("cause", "TEXT"),
+    ))
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_security_events_cause "
+        "ON security_events(kind, cause, acknowledged)")
 
 
 async def get_state(db: aiosqlite.Connection, key: str) -> str | None:
