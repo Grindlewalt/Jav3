@@ -3,6 +3,7 @@ name: local_edit_file
 description: Replace exact text in a file on the operator's computer (a /local chat). Waits for the operator's approval.
 when_to_use: Changing part of an existing local file. Read it first so `find` matches exactly.
 enabled: true
+section: local
 requires_local: true
 parameters:
   type: object

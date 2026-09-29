@@ -3,6 +3,7 @@ name: orchestrate
 description: Turn a big ask — a dump of requirements, notes or a spec — into an explicit, saved checklist of work items and run a team of agents through it, one agent per item, dependencies respected, siblings coordinating by message.
 when_to_use: When the operator hands over a large multi-part task (a spec, "build X with A, B and C", a long list) that is too big for one turn and has parts that can proceed in parallel. For one focused sub-task use spawn_agent; for web research use research.
 enabled: true
+section: agents
 requires_project: true
 parameters:
   type: object

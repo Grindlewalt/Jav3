@@ -3,6 +3,8 @@ name: list_files
 description: List all files in the active project.
 when_to_use: To see what exists before reading, editing or running anything.
 enabled: true
+section: files
+core: true
 requires_project: true
 read_only: true
 parameters:

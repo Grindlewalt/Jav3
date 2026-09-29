@@ -3,6 +3,8 @@ name: browser_select
 description: Choose an option in a native <select> dropdown (by id from browser_read_page) in a Jav3 browser tab, by its visible label or its value.
 when_to_use: When browser_read_page lists a select line with its options and you need a different option. For custom dropdowns (role=combobox, listbox divs) click to open them and click the option instead.
 enabled: true
+section: browser
+action: select
 requires_browser: true
 parameters:
   type: object

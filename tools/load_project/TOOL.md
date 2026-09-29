@@ -3,6 +3,7 @@ name: load_project
 description: Switch the active project — loads its project.md into your context and points all file/run/todo tools at it.
 when_to_use: When the operator asks you to work on a different project, or a task belongs to another project.
 enabled: true
+section: project
 parameters:
   type: object
   properties:

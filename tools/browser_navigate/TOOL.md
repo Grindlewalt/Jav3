@@ -3,6 +3,8 @@ name: browser_navigate
 description: Load a URL in one of Jav3's browser tabs.
 when_to_use: To go somewhere else in a tab you opened.
 enabled: true
+section: browser
+action: navigate
 requires_browser: true
 parameters:
   type: object

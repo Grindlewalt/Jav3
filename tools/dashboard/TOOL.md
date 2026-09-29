@@ -3,6 +3,7 @@ name: dashboard
 description: Create an interactive HTML dashboard in the active project. Writes a single self-contained .html file under dashboards/; it renders immediately in the project workspace Renderer panel.
 when_to_use: When the operator asks for a dashboard, chart, visualization, or any interactive HTML view of project data.
 enabled: true
+section: project
 requires_project: true
 parameters:
   type: object

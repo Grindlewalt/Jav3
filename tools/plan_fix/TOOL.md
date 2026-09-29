@@ -3,6 +3,7 @@ name: plan_fix
 description: Repair the project's plan run instead of handing its failures to the operator — re-dispatch a failed or blocked item with guidance, edit an item's brief or dependencies, add an item, or skip one. Relaunches the run if it had stopped.
 when_to_use: As soon as plan_status shows an item failed or blocked. Work out the cause first (its error, how far it got, the files it wrote), then retry with guidance that removes that cause, or edit/add/skip to change the plan itself.
 enabled: false
+section: plans
 requires_project: true
 parameters:
   type: object

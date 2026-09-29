@@ -3,6 +3,8 @@ name: ask_user
 description: Ask the operator 1-6 questions, each with 2-5 short answer options, and wait for the answer. The operator can also type a free answer or skip.
 when_to_use: When you need the operator's input or a clarifying decision you cannot make yourself (which of several reasonable approaches, a missing requirement, a preference). Not for things you can find out with your own tools, and not to ask permission for routine work.
 enabled: true
+section: system
+core: true
 parameters:
   type: object
   properties:

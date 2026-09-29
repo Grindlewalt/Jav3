@@ -3,6 +3,8 @@ name: desk_key
 description: Press a key or shortcut on the connected computer (e.g. Return, ctrl+l, super+shift+Tab); returns the screen afterwards.
 when_to_use: To submit, navigate or use a keyboard shortcut.
 enabled: true
+section: desk
+action: key
 requires_desk: true
 parameters:
   type: object

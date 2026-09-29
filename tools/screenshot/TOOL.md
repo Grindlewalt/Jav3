@@ -3,6 +3,7 @@ name: screenshot
 description: Take a screenshot inside the sandbox box, of a web page (url mode, headless chromium) or of a GUI app you start (app mode, a virtual display), and look at it.
 when_to_use: Checking what a page or app you built actually renders (a local dev server, a generated HTML file served locally, a GUI). Needs the `desktop` image variant.
 enabled: true
+section: project
 requires_settings: [vm_boxes_enabled]
 parameters:
   type: object

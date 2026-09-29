@@ -3,6 +3,8 @@ name: browser_read_page
 description: Read a Jav3 browser tab across every frame — its text and a list of links, buttons and fields, each with an id like "f0:12", role, visible text, size/position and whether it is in view.
 when_to_use: Before browser_click / browser_type / browser_scroll_to_element (they need a read of that tab from this turn), or to read a page. One read now covers the top page and every iframe (including cross-origin sign-in widgets).
 enabled: true
+section: browser
+action: read
 requires_browser: true
 parameters:
   type: object

@@ -3,6 +3,8 @@ name: desk_type
 description: Type text into whatever has focus on the connected computer; returns the screen afterwards.
 when_to_use: After clicking into a field in the latest desk_screenshot.
 enabled: true
+section: desk
+action: type
 requires_desk: true
 parameters:
   type: object

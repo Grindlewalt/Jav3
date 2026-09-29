@@ -3,6 +3,8 @@ name: desk_drag
 description: Press at one point on the connected computer's screen, drag to another and release; returns the screen afterwards.
 when_to_use: To move a slider, a window, a file onto a folder, or select text by dragging, seen in the latest desk_screenshot.
 enabled: true
+section: desk
+action: drag
 requires_desk: true
 parameters:
   type: object

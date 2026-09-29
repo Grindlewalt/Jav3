@@ -3,6 +3,8 @@ name: browser_type
 description: Type text into a field (by number from browser_read_page) in a Jav3 browser tab.
 when_to_use: To fill a search box or form field you saw in the latest browser_read_page of that tab.
 enabled: true
+section: browser
+action: type
 requires_browser: true
 parameters:
   type: object

@@ -3,6 +3,8 @@ name: browser_key
 description: Press a key or key combo on the focused element of a Jav3 browser tab — Enter, Escape, Tab, shift+Tab, arrows, ctrl+a, a single letter.
 when_to_use: To submit with Enter, close a popup with Escape, move between fields with Tab, or drive arrow-key widgets. Click or type into a field first so it has focus. Use browser_type for text.
 enabled: true
+section: browser
+action: key
 requires_browser: true
 parameters:
   type: object

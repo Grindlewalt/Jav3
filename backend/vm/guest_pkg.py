@@ -22,6 +22,10 @@ _COPY_MODULES = {
     "backend/codeindex.py": "backend/codeindex.py",
     "backend/agent/tools/todostore.py": "backend/agent/tools/todostore.py",
     "backend/agent/tools/argcheck.py": "backend/agent/tools/argcheck.py",
+    # what the model is shown (tool sections) and the playbooks that ride them:
+    # the loop decides both, so a guest turn must decide them the same way
+    "backend/agent/tools/toolsections.py": "backend/agent/tools/toolsections.py",
+    "backend/navplaybook.py": "backend/navplaybook.py",
 }
 
 # clean tools that run IN the guest (against the pushed workspace); their handler

@@ -3,6 +3,7 @@ name: projector_universe
 description: Drive the universe simulation on the projector — pause or resume it, skip the opening, aim a surface at a different zoom level, or point it at something interesting.
 when_to_use: When the operator asks about or wants to change what the space simulation is doing on the wall.
 enabled: true
+section: projector
 requires_settings: [mcp_projector_url, mcp_projector_token]
 parameters:
   type: object

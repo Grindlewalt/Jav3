@@ -3,6 +3,7 @@ name: local_list_files
 description: List files and directories on the operator's computer (a /local chat).
 when_to_use: Finding your way around the local working directory.
 enabled: true
+section: local
 requires_local: true
 read_only: true
 parameters:

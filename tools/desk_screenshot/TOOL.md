@@ -3,6 +3,8 @@ name: desk_screenshot
 description: Take a screenshot of the operator's connected computer and look at it, with a numbered list of the clickable elements on it; can zoom into a region.
 when_to_use: Before any click/type/key on that computer (input is refused without a screenshot from this turn), to see what is on its screen, or with region to zoom into small text or dense controls.
 enabled: true
+section: desk
+action: screenshot
 requires_desk: true
 parameters:
   type: object

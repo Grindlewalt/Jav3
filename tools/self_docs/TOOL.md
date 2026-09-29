@@ -3,6 +3,7 @@ name: self_docs
 description: Your own technical manual — how Jav3 works (architecture, memory, secrets, egress, GUI, tools, multi-agent). No args = section list; section=... returns that section.
 when_to_use: Before explaining how you work, debugging your own behavior (a refused write, a secret that won't inject, a missing panel), or answering the operator's questions about the system. Read the relevant section instead of guessing.
 enabled: true
+section: system
 parameters:
   type: object
   properties:

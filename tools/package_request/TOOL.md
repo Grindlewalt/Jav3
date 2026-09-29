@@ -3,6 +3,7 @@ name: package_request
 description: Ask the operator to add a package permanently to this project's sandbox image (apt, pip or npm). Filed for approval; nothing is installed now.
 when_to_use: Only when a tool is needed on EVERY run and a per-run `pip install`/`npm install` in run_code is not enough (it is wiped after each turn). Never for one-off use.
 enabled: true
+section: project
 requires_settings: [vm_boxes_enabled]
 parameters:
   type: object
