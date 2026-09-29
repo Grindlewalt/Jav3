@@ -21,7 +21,7 @@ Wire protocol (JSON text frames, `type` on every one):
     C->S res      {id, ok, text, image?:{mime,w,h,b64}, err?,
                    frame?:{monitor, index, count, region, screen:{w,h}},
                    elements?:[{id, role, label, x, y, w, h, src, value?,
-                               focused?, enabled?}],
+                               focused?, enabled?, window?}],
                    elements_src?, elements_note?, cursor?:{x,y},
                    changed?, pixels_changed?, elements_changed?, settled_ms?}
     S->C kill     {reason}              Stop / revoke: drop input now
@@ -826,6 +826,9 @@ def _clean_elements(raw) -> list[dict]:
             el["focused"] = True
         if e.get("enabled") is False:
             el["enabled"] = False
+        win = _clean_str(e.get("window"), 80)
+        if win:
+            el["window"] = win
         seen.add(eid)
         out.append(el)
     return out
@@ -939,7 +942,16 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
         rest = [e for e in els if not _visible_centre(e, w, h)]
         shown = (inview + rest)[:ELEMENTS_SHOWN]
         lines.append("elements (click by id; coordinates are pixels of this image):")
-        lines += [_element_line(e, w, h) for e in shown]
+        if any(e.get("window") for e in shown):
+            # grouped by window, as the client numbered them: a header per group
+            group = None
+            for e in sorted(shown, key=lambda e: e["id"]):
+                if e.get("window", "") != group:
+                    group = e.get("window", "")
+                    lines.append(f"  — {group or 'other'} —")
+                lines.append(_element_line(e, w, h))
+        else:
+            lines += [_element_line(e, w, h) for e in shown]
         if len(els) > len(shown):
             lines.append(f"  +{len(els) - len(shown)} more (zoom in with region)")
     elif not asked_elements:

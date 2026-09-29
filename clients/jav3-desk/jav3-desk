@@ -93,6 +93,7 @@ ELEMENTS_BUDGET_S = 1.5   # the accessibility walk never blocks a screenshot lon
 ELEMENTS_CAP = 400
 ELEMENTS_DEPTH = 12
 ROW_PX = 40               # reading order: rows of this many image px, then x
+MENU_BAR = "menu bar"     # the group name of the menu bar (listed first)
 WAIT_MAX_MS = 10_000
 TEXT_CAP = 2000
 OUTPUT_CAP = 16_000
@@ -515,7 +516,8 @@ def _intersects(a: tuple, b: tuple) -> bool:
 
 
 def walk_tree(roots, read, clip: tuple, deadline: float, *,
-              max_depth: int = ELEMENTS_DEPTH, cap: int = ELEMENTS_CAP
+              max_depth: int = ELEMENTS_DEPTH, cap: int = ELEMENTS_CAP,
+              groups: list | None = None, name_roots: bool = False
               ) -> tuple[list[dict], bool]:
     """Depth-first over an accessibility tree, source-agnostic: `read(node)`
     returns {role (already ours, "" = structural, "text" = static text or a
@@ -524,20 +526,29 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
     global coordinates, partial). A subtree whose box is off `clip` is
     skipped; static text becomes the label of the nearest unlabeled control
     above it (within 3 levels) and is never listed itself. Stops at the
-    deadline or the cap with partial=True."""
+    deadline or the cap with partial=True.
+
+    Every element carries the `window` it belongs to (the group its root
+    names): `groups[i]` for root i when given, else the root's own
+    info["window"], else (name_roots) its label; no group, no key."""
     out: list[dict] = []
     seen: set = set()
-    stack = [(r, 0, None, 0) for r in reversed(list(roots))]
+    roots = list(roots)
+    names = list(groups or []) + [None] * len(roots)
+    stack = [(r, 0, None, 0, names[i]) for i, r in reversed(list(enumerate(roots)))]
     while stack:
         if time.monotonic() > deadline or len(out) >= cap:
             return out, True
-        node, depth, owner, owner_depth = stack.pop()
+        node, depth, owner, owner_depth, group = stack.pop()
         try:
             info = read(node)
         except Exception:  # noqa: BLE001 — one dead node must not end the walk
             continue
         if not info or info.get("hidden"):
             continue
+        if depth == 0 and group is None:
+            group = info.get("window") or (
+                (info.get("label") or "window") if name_roots else None)
         box = info.get("box")
         if box and box[2] > 0 and box[3] > 0 and not _intersects(box, clip):
             continue
@@ -561,12 +572,14 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
                     el["focused"] = True
                 if info.get("enabled") is False:
                     el["enabled"] = False
+                if group:
+                    el["window"] = str(group)[:80]
                 out.append(el)
                 if not label:
                     owner, owner_depth = len(out) - 1, depth
         if depth < max_depth:
             for c in reversed(list(info.get("children") or ())):
-                stack.append((c, depth + 1, owner, owner_depth))
+                stack.append((c, depth + 1, owner, owner_depth, group))
     return out, False
 
 
@@ -582,8 +595,10 @@ def elements_sig(els: list[dict]) -> str:
 
 def build_elements(raw: list[dict], frame: Frame, src: str) -> list[dict]:
     """Global boxes -> image-pixel boxes of THIS image (crop + scale), clipped;
-    elements outside dropped; unlabeled rows dropped; ids 1..N in reading
-    order (rows of ROW_PX image px, then x)."""
+    elements outside dropped; unlabeled rows dropped; ids 1..N global,
+    grouped by window (the menu bar first, then windows in the order the
+    source listed them: front to back), in reading order within a group
+    (rows of ROW_PX image px, then x)."""
     out = []
     for e in raw:
         if not e["label"] and e["role"] in _NEEDS_LABEL:
@@ -593,11 +608,14 @@ def build_elements(raw: list[dict], frame: Frame, src: str) -> list[dict]:
             continue
         el = {"role": e["role"], "label": e["label"], "x": b[0], "y": b[1],
               "w": b[2], "h": b[3], "src": src}
-        for k in ("value", "focused", "enabled"):
+        for k in ("value", "focused", "enabled", "window"):
             if k in e:
                 el[k] = e[k]
         out.append(el)
-    out.sort(key=lambda e: (e["y"] // ROW_PX, e["x"], e["y"]))
+    rank: dict = {MENU_BAR: -1}
+    for e in out:
+        rank.setdefault(e.get("window"), len(rank))
+    out.sort(key=lambda e: (rank[e.get("window")], e["y"] // ROW_PX, e["x"], e["y"]))
     return [{"id": i, **e} for i, e in enumerate(out[:ELEMENTS_CAP], 1)]
 
 
@@ -852,9 +870,11 @@ class MacAXSource(ElementSource):
         self._keep.append(out.value)
         return ax_info(dict(zip(self.ATTRS, (self.py(v) for v in self.py(out.value)))))
 
-    def roots(self) -> list:
+    def roots(self) -> tuple[list, list[str]]:
+        """(root elements, their group names): each window as "<App>:
+        <title>" (or just the app), the front app's menu bar as "menu bar"."""
         c, ax, cf = self.ct, self.ax, self.cf
-        out, pids = [], []
+        out, pids, groups = [], [], []
         sysw = ax.AXUIElementCreateSystemWide()
         self._keep.append(sysw)
         app = self.attr(sysw, "AXFocusedApplication")
@@ -876,12 +896,17 @@ class MacAXSource(ElementSource):
                 continue
             self._keep.append(a)
             ax.AXUIElementSetMessagingTimeout(a, 0.25)   # a hung app costs 0.25 s, not 6
-            out += self.py(self.attr(a, "AXWindows")) or []
+            app_name = self.py(self.attr(a, "AXTitle")) or f"app {pid}"
+            for w in self.py(self.attr(a, "AXWindows")) or []:
+                title = self.py(self.attr(w, "AXTitle"))
+                out.append(w)
+                groups.append(f"{app_name}: {title}" if title else app_name)
             if i == 0:
                 mb = self.attr(a, "AXMenuBar")
                 if mb:
                     out.append(mb)
-        return out
+                    groups.append(MENU_BAR)
+        return out, groups
 
     FOCUS_CAP = 200_000
     AX_NO_VALUE = -25212
@@ -956,7 +981,8 @@ class MacAXSource(ElementSource):
         if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             return [], True
         try:
-            return walk_tree(self.roots(), self.read, clip, deadline)
+            roots, groups = self.roots()
+            return walk_tree(roots, self.read, clip, deadline, groups=groups)
         finally:
             for o in self._keep:
                 if o:
@@ -1004,7 +1030,7 @@ class GiAtspiSource(ElementSource):
                 if w:
                     wins.append(w)
         wins.sort(key=lambda w: "active" not in self._states(w))
-        return walk_tree(wins, self.read, clip, deadline)
+        return walk_tree(wins, self.read, clip, deadline, name_roots=True)
 
 
 class DbusAtspiSource(ElementSource):
@@ -1063,7 +1089,7 @@ class DbusAtspiSource(ElementSource):
             except Exception:  # noqa: BLE001 — an app that went away
                 continue
         wins.sort(key=lambda w: "active" not in self._states(w))
-        return walk_tree(wins, self.read, clip, deadline)
+        return walk_tree(wins, self.read, clip, deadline, name_roots=True)
 
 
 def atspi_source() -> ElementSource:

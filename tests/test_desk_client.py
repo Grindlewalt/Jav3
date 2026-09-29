@@ -686,6 +686,41 @@ async def test_changed_uses_the_settled_frame_and_the_element_list(cfg, monkeypa
     assert "elements_changed" in r                   # the walk ran without a shot too
 
 
+def test_elements_are_grouped_by_window_then_reading_order():
+    """The trial's frame: the menu bar (y 0-21) and Brave's tab strip (y 8-43)
+    share the first 40-px band and used to interleave."""
+    frame = jd.Frame(jd.Monitor("main", 0, 0, 1280, 800), 1280, 800)
+    brave = {"role": "", "window": "Brave: benchmarks", "box": (0, 0, 1280, 800),
+             "children": [
+                 {"role": "tab", "label": "Docs", "box": (153, 8, 189, 35)},
+                 {"role": "button", "label": "Close", "box": (17, 8, 14, 14)},
+                 {"role": "button", "label": "Reload", "box": (71, 40, 25, 25)}]}
+    menu = {"role": "", "window": "menu bar", "box": (0, 0, 1280, 24), "children": [
+        {"role": "menuitem", "label": "File", "box": (108, 0, 37, 21)},
+        {"role": "menuitem", "label": "Apple", "box": (24, 0, 30, 21)}]}
+    spot = {"role": "", "window": "Spotlight", "box": (390, 160, 500, 40), "children": [
+        {"role": "textfield", "label": "Spotlight Search", "box": (400, 170, 480, 29)}]}
+    raw, partial = jd.FakeElementSource([brave, menu, spot]).collect(
+        (0, 0, 1280, 800), 1e18)
+    els = jd.build_elements(raw, frame, "ax")
+    assert [(e["id"], e["window"], e["label"]) for e in els] == [
+        (1, "menu bar", "Apple"), (2, "menu bar", "File"),
+        (3, "Brave: benchmarks", "Close"), (4, "Brave: benchmarks", "Docs"),
+        (5, "Brave: benchmarks", "Reload"), (6, "Spotlight", "Spotlight Search")]
+    # explicit group names (the macOS source) win; AT-SPI names roots by label
+    raw, _ = jd.walk_tree([{"role": "", "label": "Editor", "box": (0, 0, 9, 9),
+                            "children": [{"role": "button", "label": "OK",
+                                          "box": (1, 1, 5, 5)}]}],
+                          lambda n: n, (0, 0, 100, 100), 1e18, name_roots=True)
+    assert raw[0]["window"] == "Editor"
+    raw, _ = jd.walk_tree([brave], lambda n: n, (0, 0, 1280, 800), 1e18,
+                          groups=["Brave: other title"])
+    assert {e["window"] for e in raw} == {"Brave: other title"}
+    # a tree without window names keeps plain reading order and no key
+    raw, _ = jd.FakeElementSource(TREE).collect((0, 0, 2560, 1600), 1e18)
+    assert all("window" not in e for e in raw)
+
+
 async def test_wait_and_drag(cfg, monkeypatch):
     monkeypatch.setattr(jd, "SETTLE_S", 0)
     monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)

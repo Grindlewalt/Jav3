@@ -935,6 +935,37 @@ async def test_wait_and_drag(env):
         await fd.stop()
 
 
+async def test_elements_are_rendered_in_window_groups(env):
+    els = [{"id": 1, "role": "menuitem", "label": "Apple", "x": 24, "y": 0, "w": 30, "h": 21,
+            "src": "ax", "window": "menu bar"},
+           {"id": 2, "role": "menuitem", "label": "File", "x": 108, "y": 0, "w": 37, "h": 21,
+            "src": "ax", "window": "menu bar"},
+           {"id": 3, "role": "tab", "label": "Docs", "x": 153, "y": 8, "w": 189, "h": 35,
+            "src": "ax", "window": "Brave: sonnet benchmarks"},
+           {"id": 4, "role": "button", "label": "Reload", "x": 71, "y": 40, "w": 25,
+            "h": 25, "src": "ax", "window": "Brave: sonnet benchmarks"},
+           {"id": 5, "role": "textfield", "label": "Spotlight Search", "x": 400, "y": 170,
+            "w": 480, "h": 29, "src": "ax", "window": "Spotlight"}]
+    fd = await _nav(env, elements=els)
+    try:
+        text = await _tool("desk_screenshot")()
+        body = text.split("elements (click by id; coordinates are pixels of this image):\n")[1]
+        assert body.splitlines()[:8] == [
+            "  — menu bar —",
+            '  [1] menuitem "Apple" @ 39,10 30x21',
+            '  [2] menuitem "File" @ 126,10 37x21',
+            "  — Brave: sonnet benchmarks —",
+            '  [3] tab "Docs" @ 247,25 189x35',
+            '  [4] button "Reload" @ 83,52 25x25',
+            "  — Spotlight —",
+            '  [5] textfield "Spotlight Search" @ 640,184 480x29']
+        # an old client (no window) renders flat, as before
+        fd.answer = rich()
+        assert "  — " not in await _tool("desk_screenshot")()
+    finally:
+        await fd.stop()
+
+
 async def test_changed_by_elements_only_is_named(env):
     fd = await _nav(env, changed=True, pixels_changed=False, elements_changed=True)
     try:
