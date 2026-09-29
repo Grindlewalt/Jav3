@@ -7208,6 +7208,10 @@ def build_tui(base: str, token: str, **kw):
                     self.notify(f"theme {name} saved in {themes_dir()}")
                 return
             if word == "export":
+                src = self.theme_src.get(self.theme) or self.current_theme
+                if src.ansi:
+                    raise CliError(f"{src.name} uses the terminal's own colours, so there is "
+                                   "no #rrggbb to export — /theme create starts one")
                 d = self.current_theme_dict()
                 if d["name"].lower() in self.builtin_themes:
                     d["name"] = (d["name"][:35] + "-copy")

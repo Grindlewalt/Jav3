@@ -295,6 +295,23 @@ async def test_theme_editor_fits_80x24_and_the_mode_toggle_works(cfg):
         assert await _until(pilot, lambda: app.theme == "jav3")
 
 
+async def test_theme_editor_preview_follows_every_keystroke_not_just_the_first(cfg):
+    app = _app("true")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.2)
+        app.dispatch("/theme create")
+        assert await _modal(pilot, app, "ThemeEditor")
+        ed = app.screen
+        main = app.screen_stack[0]
+        seen = []
+        for v in ("#303040", "#403030", "#304030"):
+            ed.query_one("#th-background").value = v
+            await pilot.pause(0.15)
+            seen.append(main.styles.background.hex[:7].lower())
+        assert seen == ["#303040", "#403030", "#304030"]
+        await pilot.press("escape")
+
+
 async def test_theme_editor_hint_warns_about_hard_to_read_colours(cfg):
     app = _app()
     async with app.run_test(size=(80, 24)) as pilot:
@@ -342,6 +359,16 @@ async def test_every_theme_exports_and_imports_back_the_same(cfg, tmp_path, colo
             assert app.theme == "rt " + name
             back = app.current_theme_dict()
             assert back == {**exported, "name": "rt " + name}
+
+
+async def test_an_ansi_theme_says_it_has_nothing_to_export(cfg, tmp_path):
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.2)
+        await app.c_theme("ansi-dark")
+        with pytest.raises(jav3.CliError, match="terminal's own colours"):
+            await app.c_theme(f"export {tmp_path / 'a.json'}")
+        assert not (tmp_path / "a.json").exists()
 
 
 async def test_a_created_theme_survives_export_delete_import(cfg, tmp_path):
