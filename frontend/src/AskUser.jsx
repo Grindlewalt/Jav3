@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import {
-  answerBody, foldAsks, freeLabel, initAsk, keyToAction, MODE_HINT, nextMode,
+  answerBody, foldAsks, freeLabel, initAsk, initialMode, keyToAction, MODE_HINT, MODE_LABEL, nextMode,
   PERMISSION_MODES, reduceAsk,
 } from './askUser.js'
 
@@ -132,12 +132,15 @@ function AskCard({ ev, cid, compact, onDone }) {
   )
 }
 
+const MODE_KEY = 'jav3.permission_mode'   // the last mode picked here: where a new chat starts
+
 // The chat toolbar's permission-mode selector, stored per conversation
 // (PUT /api/chat/{cid}/permission_mode). Before the chat exists the choice is
 // held here and sent with the first message (`permission_mode`).
 export function PermissionModeSelect({ cid, value, onChange }) {
   async function set(mode) {
     onChange(mode)
+    try { localStorage.setItem(MODE_KEY, mode) } catch { /* private mode */ }
     if (cid == null) return
     try {
       await api(`/api/chat/${cid}/permission_mode`,
@@ -145,17 +148,19 @@ export function PermissionModeSelect({ cid, value, onChange }) {
     } catch { /* the next open re-reads it */ }
   }
   return (
-    <select className="perm-mode" value={value} title={MODE_HINT[value]}
+    <select className={`perm-mode ${value}`} value={value} title={MODE_HINT[value]}
             aria-label="permission mode" onChange={(e) => set(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Tab' && e.shiftKey) { e.preventDefault(); set(nextMode(value)) } }}>
-      {PERMISSION_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
+      {PERMISSION_MODES.map((m) => <option key={m} value={m}>{MODE_LABEL[m]}</option>)}
     </select>
   )
 }
 
 // the conversation's mode, re-read when the chat changes
 export function usePermissionMode(cid) {
-  const [mode, setMode] = useState('yolo')
+  const [mode, setMode] = useState(() => {
+    try { return initialMode(localStorage.getItem(MODE_KEY)) } catch { return 'yolo' }
+  })
   useEffect(() => {
     if (cid == null) return
     let live = true
