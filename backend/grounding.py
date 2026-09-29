@@ -183,17 +183,33 @@ def _entry(st: dict, model_id: str) -> dict | None:
 
 
 def _resolve() -> tuple[str, str]:
-    """(model id, convention) or NotConfigured."""
+    """(model id, convention) or NotConfigured. The pinned / configured model,
+    else the best usable ranked row, but only a model that is STILL a current
+    candidate (enabled, vision, key set) ever receives a screenshot: a
+    disabled pin falls through to the next usable ranked row, and with none
+    left NotConfigured names the disabled model."""
     st = _load()
     pinned = (settings.grounding_model or "").strip() or st["pinned"]
+    live = {c["id"] for c in candidates()}
+    disabled = None
     if pinned:
-        e = _entry(st, pinned)
-        conv = e.get("convention") if e else None
-        return pinned, conv if conv in CONVENTIONS else DEFAULT_CONVENTION
+        if pinned in live:
+            e = _entry(st, pinned)
+            conv = e.get("convention") if e else None
+            return pinned, conv if conv in CONVENTIONS else DEFAULT_CONVENTION
+        disabled = pinned
+        log.info("grounding: %s is no longer an enabled image-capable model; "
+                 "skipping it", pinned)
     for e in st["ranking"]:
         if not e.get("unusable") and not e.get("stale") and e.get("model"):
+            if e["model"] not in live:
+                disabled = disabled or e["model"]
+                continue
             conv = e.get("convention")
             return e["model"], conv if conv in CONVENTIONS else DEFAULT_CONVENTION
+    if disabled:
+        raise NotConfigured(f"grounding model {disabled} is disabled or no longer "
+                            "available (Settings → Providers); no other usable model")
     raise NotConfigured("no grounding model configured")
 
 

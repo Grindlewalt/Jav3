@@ -18,12 +18,18 @@ from backend.db import get_db, init_db
 from backend.main import app
 
 PIL = pytest.importorskip("PIL")
+_REAL_CANDIDATES = grounding.candidates
 
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     grounding.reset_for_tests()
     monkeypatch.setattr(settings, "grounding_model", "")
+    # every model the tests name is an enabled candidate unless a test says otherwise
+    monkeypatch.setattr(grounding, "candidates", lambda: [
+        {"id": i, "label": i, "price_in": None, "price_out": None}
+        for i in ("p/bad", "p/good", "p/other", "p/m", "p/a", "p/b", "p/c", "p/k",
+                  "p/err", "p/slow", "p/zzz", "q/cfg")])
     yield
     grounding.reset_for_tests()
 
@@ -360,6 +366,7 @@ async def test_run_probe_refine_reports_first_and_refined(tmp_env, monkeypatch, 
 # --- candidates + probe ------------------------------------------------------------------
 
 def test_candidates_filters_enabled_vision_models(monkeypatch):
+    monkeypatch.setattr(grounding, "candidates", _REAL_CANDIDATES)
     def fake(include_models=True):
         return [
             {"id": "a", "label": "A", "enabled": True, "needs_base_url": False,
@@ -756,3 +763,31 @@ async def test_stale_rows_are_marked_and_never_auto_selected(tmp_env, monkeypatc
     _write_state({"ranking": [by["p/gone"]], "pinned": ""})
     with pytest.raises(grounding.NotConfigured):
         grounding._resolve()
+
+
+async def test_disabled_pin_is_skipped_for_the_next_usable_ranked_row(tmp_env, monkeypatch):
+    _cands(monkeypatch, ["p/a"])
+    _write_state({"ranking": [_row("p/a", "k1000", 0.7)], "pinned": "p/off"})
+    seen = []
+    monkeypatch.setattr(model_mod.model, "complete",
+                        _fake_complete('{"x": 500, "y": 500}', seen))
+    loc = await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x", refine=False)
+    assert loc.model == "p/a" and loc.convention == "k1000"
+    assert [c["model_name"] for c in seen] == ["p/a"]
+
+
+async def test_disabled_top_row_and_pin_with_nothing_left_raises_naming_it(
+        tmp_env, monkeypatch):
+    _cands(monkeypatch, [])
+    seen = []
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete('{"x": 5, "y": 5}', seen))
+    _write_state({"ranking": [_row("p/a", "px")], "pinned": "p/off"})
+    with pytest.raises(grounding.NotConfigured, match="p/off"):
+        await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    _write_state({"ranking": [_row("p/a", "px")], "pinned": ""})
+    with pytest.raises(grounding.NotConfigured, match="p/a"):
+        await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    monkeypatch.setattr(settings, "grounding_model", "q/cfg")
+    with pytest.raises(grounding.NotConfigured, match="q/cfg"):
+        await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x")
+    assert seen == []
