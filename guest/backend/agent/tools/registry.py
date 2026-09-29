@@ -15,14 +15,9 @@ import socket
 from ... import boxinfo, turnctx
 from ...config import settings
 from .. import imageresult
+from .inguest import GATED_IN_GUEST, IN_GUEST_TOOLS   # shipped from the host (guest_pkg _COPY_MODULES)
 
 HOST_CID = socket.VMADDR_CID_HOST          # 2
-
-# tools safe to run in the disposable guest against the pushed workspace
-IN_GUEST_TOOLS = frozenset({"read_file", "list_files", "search_codebase",
-                            "crawl_codebase", "write_file", "edit_file",
-                            "dashboard", "todo_update", "run_code",
-                            "screenshot"})
 
 # the model's id for the call being dispatched (set by loop.py around
 # dispatch). Forwarded on tool_broker_call so a host handler can name the call
@@ -58,9 +53,8 @@ def read_only_names(entries=None) -> frozenset[str]:
     return turnctx.read_only.get()
 
 
-# in-guest tools the conversation's permission mode may hold for the operator
-# (backend/permissions.py): the host decides, over the broker, before they run
-GATED_IN_GUEST = frozenset({"write_file", "edit_file", "run_code"})
+# the gate answers for GATED_IN_GUEST (inguest.py): the host decides, over the broker,
+# whether the conversation's permission mode holds the call for the operator
 PERMISSION_GATE = "permission_gate"
 
 

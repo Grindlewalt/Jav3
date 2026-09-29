@@ -434,3 +434,71 @@ def test_a_body_over_the_cap_is_cut_with_a_marker():
     assert notes == "x" * registry.SPEC_NOTES_MAX + "…"
     (spec,) = registry.openai_tool_specs([e], notes_max=50)      # the local voice tier
     assert spec["function"]["description"].endswith("x" * 50 + "…")
+
+
+# --- TOOLS-08: one list of in-guest tools, read by the host and the guest ---
+
+def test_the_guest_registry_reads_the_shared_in_guest_list():
+    """guest_pkg ships handlers by the list and the guest routes calls by it. Two
+    literals meant a tool in one but not the other was shipped and never routed
+    to, or routed to a host with no handler for it (run_code lives only in the guest)."""
+    src = (ROOT / "guest/backend/agent/tools/registry.py").read_text()
+    assert "from .inguest import" in src
+    assert not re.search(r"^(IN_GUEST_TOOLS|GATED_IN_GUEST)\s*=", src, re.M), (
+        "the guest registry defines its own tool list again")
+    from backend.vm import guest_pkg
+    assert "backend/agent/tools/inguest.py" in guest_pkg._COPY_MODULES
+
+
+def test_shipped_handlers_are_exactly_the_in_guest_tools(monkeypatch):
+    import io
+    import tarfile
+
+    from backend.agent.tools import inguest
+    from backend.config import settings
+    from backend.vm import guest_pkg
+    assert guest_pkg.IN_GUEST_TOOLS is inguest.IN_GUEST_TOOLS
+    for boxes, want in ((True, set(inguest.IN_GUEST_TOOLS)),
+                        (False, set(inguest.IN_GUEST_TOOLS) - inguest.BOX_ONLY_TOOLS)):
+        monkeypatch.setattr(settings, "vm_boxes_enabled", boxes)
+        with tarfile.open(fileobj=io.BytesIO(guest_pkg.build_package_tar()), mode="r:gz") as t:
+            names = t.getnames()
+        shipped = {n.split("/")[1] for n in names
+                   if n.startswith("tools/") and n.endswith("/handler.py")}
+        assert shipped == want
+        assert "backend/agent/tools/inguest.py" in names        # the guest registry imports it
+
+
+def test_the_extracted_guest_registry_routes_by_the_shared_list(tmp_path, monkeypatch):
+    """The real package, imported the way the guest does (the vsock constant is
+    Linux-only, so it is faked to let this run on a Mac)."""
+    import subprocess
+    import sys
+
+    from backend.config import settings
+    from backend.vm import guest_pkg
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    pkg = tmp_path / "pkg.tgz"
+    pkg.write_bytes(guest_pkg.build_package_tar())
+    code = ("import socket, sys, tarfile\n"
+            "socket.VMADDR_CID_HOST = 2\n"
+            "tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')\n"
+            "sys.path.insert(0, sys.argv[2])\n"
+            "import backend.agent.tools.registry as r\n"
+            "from backend.agent.tools import inguest\n"
+            "assert inguest.__file__.startswith(sys.argv[2])\n"
+            "assert r.IN_GUEST_TOOLS is inguest.IN_GUEST_TOOLS\n"
+            "assert r.GATED_IN_GUEST is inguest.GATED_IN_GUEST\n"
+            "assert 'run_code' in r.IN_GUEST_TOOLS\n")
+    out = subprocess.run([sys.executable, "-S", "-c", code, str(pkg), str(tmp_path / "x")],
+                         cwd=tmp_path, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr[-600:]
+
+
+def test_every_in_guest_tool_has_a_host_folder_and_the_gate_list_agrees():
+    from backend import permissions
+    from backend.agent.tools import inguest
+    for name in inguest.IN_GUEST_TOOLS:
+        assert (ROOT / "tools" / name / "handler.py").is_file(), name
+    assert inguest.GATED_IN_GUEST <= set(inguest.IN_GUEST_TOOLS)
+    assert inguest.GATED_IN_GUEST == permissions.IN_GUEST_GATED
