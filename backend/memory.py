@@ -130,6 +130,11 @@ class ProposalStale(Exception):
     """The note itself changed after the proposal was made."""
 
 
+class NoteChanged(Exception):
+    """The note is not the text the operator was looking at (the agent wrote
+    to it, or they edited it elsewhere, since the page loaded it)."""
+
+
 def sha256_text(text: str) -> str:
     import hashlib
     return hashlib.sha256(text.encode()).hexdigest()
@@ -319,6 +324,42 @@ def restore_trash(tid: str, notes=None) -> str:
             pdest.parent.mkdir(parents=True, exist_ok=True)
             tprop.replace(pdest)
     return name
+
+
+def pending_counts(notes=None) -> dict:
+    """What waits on the operator in memory: agent notes not yet approved, and
+    agent changes proposed to notes that are binding. The Memory nav badge."""
+    notes = notes or notes_dir()
+    n = 0
+    for p in (notes.glob("*.md") if notes.is_dir() else ()):
+        try:
+            if not note_trusted(parse_note(p.read_text())[0]):
+                n += 1
+        except OSError:
+            continue
+    d = proposal_path("x", notes).parent
+    props = len(list(d.glob("*.md"))) if d.is_dir() else 0
+    return {"notes": n, "proposals": props, "total": n + props}
+
+
+def notify_pending(name: str, proposal: bool = False) -> None:
+    """One toast for one NEW pending note (or proposal): "Jav3 saved a note that
+    waits for you". On the shared notices stream, so it is never a security event
+    (agents write notes all day; that would bury the real ones). Not sent for an
+    incognito turn: its notes are thrown away. Best-effort."""
+    from . import runtime
+    if runtime.ephemeral.get():
+        return
+    try:
+        from . import bus
+        from .agents_run import NOTICE_CHAN
+        bus.publish(NOTICE_CHAN, {
+            "type": "memory_pending",
+            "title": ("Jav3 proposed a change to a note" if proposal
+                      else "Jav3 saved a note for your approval"),
+            "summary": flat_line(name, 80), "to": "/memory"})
+    except Exception:  # noqa: BLE001 — the note stands whether or not the toast does
+        pass
 
 
 async def audit(kind: str, severity: str, summary: str, detail: dict | None = None) -> None:
@@ -870,14 +911,20 @@ def note_trusted(meta: dict) -> bool:
     return bool(meta.get("approved"))
 
 
-def promote_note(name: str) -> bool:
+def promote_note(name: str, notes=None, sha256: str | None = None) -> bool:
     """Operator promotes an agent/tainted note to trusted context: approved=true
-    and the taint stamp removed. Returns False if there is no such note."""
+    and the taint stamp removed. Returns False if there is no such note.
+    `sha256` binds the approval to the text the operator read (the page sends the
+    hash it was shown): NoteChanged if the file is different now, because a
+    scheduled run may have appended after they opened it."""
     import yaml
-    p = notes_dir() / f"{name}.md"
+    p = (notes or notes_dir()) / f"{name}.md"
     if not p.is_file():
         return False
-    meta, body = parse_note(p.read_text())
+    text = p.read_text()
+    if sha256 and sha256 != sha256_text(text):
+        raise NoteChanged(name)
+    meta, body = parse_note(text)
     meta["approved"] = True
     meta.pop("taint", None)
     meta.pop("_bad_frontmatter", None)   # the rewrite below repairs it

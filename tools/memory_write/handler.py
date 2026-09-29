@@ -114,6 +114,8 @@ async def _propose(stem, label, mode, description, content, op_taint, notes,
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(_with_frontmatter(desc, new_body, taint=taint,
                                    extra={"proposal_for": stem, "base_sha256": base_sha}))
+    if cur is None:
+        memory.notify_pending(stem, proposal=True)
     await memory.audit("memory_proposed", "warn",
                        f"an agent proposed a change to note '{stem}'"
                        + (" (written after untrusted content)" if taint else ""),
@@ -218,7 +220,10 @@ async def run(name: str, content: str, mode: str | None = "append",
                 prior = parse_note(path.read_text())[0].get("taint")
             except OSError:
                 pass
+        was_pending = path.exists()
         path.write_text(_with_frontmatter(description, content, taint=op_taint or prior))
+        if not was_pending:
+            memory.notify_pending(stem)
         return _saved("memory note", f"{label} saved")
     # append: keep (or update) the existing frontmatter, never duplicate it, and
     # carry the taint forward (a new untrusted write escalates a clean note).
