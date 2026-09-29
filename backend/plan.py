@@ -1212,7 +1212,9 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
 2. Monitor: call plan_status with wait_seconds (e.g. 300). It returns when an
    item changes state, a message arrives for you, or the wait runs out, and
    shows every item's status, its agent's conversation id, and its result or
-   error. Keep calling it until the run is finished.
+   error. Keep calling it until the run is finished. This is the only way to
+   wait: run_code with a sleep is refused (it blocks, dies at 300 s and cannot
+   see the plan).
 3. Steer running items: send_message to item:<id> (or its conversation id) to
    correct, unblock or inform it the moment you see it drift.
 4. Fix every failed or blocked item, right away, with plan_fix:

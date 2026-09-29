@@ -173,6 +173,37 @@ async def test_turn_stats_count_recoveries_retries_and_the_cap(tmp_env, monkeypa
     assert st["rounds"] == 3
 
 
+# --- RUNS-14: an orchestrator waits with plan_status, not sleep in run_code ---------
+
+async def test_orchestrator_sleep_in_run_code_points_to_plan_status(tmp_env, monkeypatch):
+    """conv 500: 16 run_code calls began 'sleep 240-285' (one hit the 300 s
+    kill), while plan_status(wait_seconds) wakes on any change or message."""
+    ran = []
+
+    async def dispatch(name, args):
+        ran.append((name, args))
+        return "ok"
+    model = ScriptedModel([[("run_code", {"command": "sleep 240; ls dist"})],
+                           [("run_code", {"command": "sleep 5; ls dist"})],
+                           [("run_code", {"code": "import time\ntime.sleep(280)\nprint(1)"})]])
+    events = await run(monkeypatch, model, dispatch,
+                       tools=("run_code", "plan_status"), read_only=())
+    results = [e["result"] for e in events if e["type"] == "tool_result"]
+    assert results[0].startswith("error:") and "plan_status" in results[0]
+    assert "wait_seconds" in results[0]
+    assert results[1] == "ok"                      # a short pause is fine
+    assert results[2].startswith("error:")         # python's time.sleep too
+    assert [n for n, _a in ran] == ["run_code"]
+
+
+async def test_sleep_in_run_code_is_fine_without_plan_status(tmp_env, monkeypatch):
+    async def dispatch(name, args):
+        return "ok"
+    model = ScriptedModel([[("run_code", {"command": "sleep 240"})]])
+    events = await run(monkeypatch, model, dispatch, tools=("run_code",), read_only=())
+    assert [e["result"] for e in events if e["type"] == "tool_result"] == ["ok"]
+
+
 async def test_a_budget_stop_shows_in_the_stats(tmp_env, monkeypatch):
     class Spent:
         async def complete(self, messages, tools=None, **kw):

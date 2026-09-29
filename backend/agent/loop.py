@@ -123,6 +123,29 @@ def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None
             "retry the edit.")
 
 
+_LEADING_SLEEP = re.compile(
+    r"^\s*(?:sleep\s+(\d+)|(?:import\s+time\s*[;\n]\s*)?time\.sleep\(\s*(\d+))", re.I)
+MAX_ORCH_SLEEP = 60
+
+
+def _guard_orchestrator_sleep(name: str, args: dict, offered) -> str | None:
+    """An orchestrator (the turn holds plan_status) that starts a run_code call
+    with a long sleep is polling the wrong way: conv 500 spent ~4,000 s in 16
+    'sleep 240-285' calls, one killed at run_code's 300 s limit, and none of
+    them could see the plan or wake for a message. plan_status(wait_seconds)
+    does both."""
+    if name != "run_code" or "plan_status" not in offered:
+        return None
+    m = _LEADING_SLEEP.match(str(args.get("command") or args.get("code") or ""))
+    secs = int(next((g for g in (m.groups() if m else ()) if g), 0))
+    if secs <= MAX_ORCH_SLEEP:
+        return None
+    return (f"error: don't wait with run_code (sleep {secs}): it blocks a round, dies at "
+            "300 s and cannot see the plan. Call plan_status with wait_seconds (up to "
+            "600); it returns as soon as an item changes state or a message arrives "
+            "for you. To check files, run the check itself without the sleep.")
+
+
 def db_tool_sink(db, conversation_id: int):
     """The standard persistence sink for run_turn: record each tool call to the
     tool_calls table (result truncated for storage). run_turn holds no db handle
@@ -525,7 +548,8 @@ async def _run_turn(
             return result + note if note and isinstance(result, str) else result
 
         async def _dispatch_one(name: str, args: dict, call_id=None) -> str:
-            blocked = _guard_blind_edit(conversation_id, name, args)
+            blocked = (_guard_blind_edit(conversation_id, name, args)
+                       or _guard_orchestrator_sleep(name, args, offered))
             if blocked is not None:
                 return blocked
             if name in read_only:
