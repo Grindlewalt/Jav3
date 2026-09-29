@@ -1582,7 +1582,8 @@ def _stoppable(actor: dict, only: set[int] | None = None,
     return turns, runs, plans
 
 
-def _bulk_stop(targets, dry_run: bool) -> dict:
+def _bulk_stop(targets, dry_run: bool, tree: set[int] | None = None,
+               all_asks: bool = False) -> dict:
     turns, runs, plans = targets
     if not dry_run:
         from . import agents_run
@@ -1595,6 +1596,12 @@ def _bulk_stop(targets, dry_run: bool) -> dict:
                 t.cancel()
         for s in plans:
             plan_mod.stop_run(s)
+        # asks parked by agents beneath what was stopped (a node in a box has no
+        # turn or run of its own to cancel) would otherwise wait out their hour
+        if all_asks:
+            operator_ask.cancel_all()
+        else:
+            operator_ask.cancel_tree({*turns, *runs, *(tree or ())})
     return {"count": len(turns) + len(runs) + len(plans), "dry_run": dry_run,
             "conversations": turns + runs, "plans": plans}
 
@@ -1605,7 +1612,8 @@ async def stop_all_turns(body: BulkStop | None = None,
     """Stop every running turn the caller may stop (a device: its own chat
     turns; the operator: everything). dry_run only counts."""
     body = body or BulkStop()
-    return _bulk_stop(_stoppable(actor), body.dry_run)
+    return _bulk_stop(_stoppable(actor), body.dry_run,
+                      all_asks=not actor.get("is_device"))
 
 
 @router.post("/chat/stop-project")
@@ -1622,7 +1630,8 @@ async def stop_project_turns(body: ProjectStop, actor: dict = Depends(require_ac
             ids = {r["id"] for r in await cur.fetchall()}
     finally:
         await db.close()
-    return _bulk_stop(_stoppable(actor, ids, body.project), body.dry_run)
+    return _bulk_stop(_stoppable(actor, ids, body.project), body.dry_run,
+                      tree=None if actor.get("is_device") else ids)
 
 
 @router.post("/chat")

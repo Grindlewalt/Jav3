@@ -502,6 +502,48 @@ def iter_sse(lines):
         yield json.loads("\n".join(buf))
 
 
+def net_error_text(e: Exception) -> str:
+    """A network error in words: '[Errno 104] Connection reset by peer' and 'All
+    connection attempts failed' say nothing about what to do."""
+    if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return "nothing answers there (is the server running?)"
+    if isinstance(e, httpx.TransportError):
+        return "the connection dropped (the server may be restarting)"
+    return str(e) or type(e).__name__
+
+
+def reflow(text: str) -> str:
+    """Join the lines of a hard-wrapped paragraph (a brief the server wrapped at
+    72 columns) so the terminal wraps it once, at its own width. Lists, headings,
+    code and indented lines keep their breaks."""
+    out, para = [], []
+
+    def flush():
+        if para:
+            out.append(" ".join(x.strip() for x in para))
+            para.clear()
+
+    keep = re.compile(r"^\s*([-*+•>#]|\d+[.)]|```|\|)|^\s{2,}\S")
+    fenced = False
+    for ln in text.splitlines():
+        if ln.lstrip().startswith("```"):
+            flush()
+            fenced = not fenced
+            out.append(ln)
+        elif fenced:
+            out.append(ln)
+        elif not ln.strip():
+            flush()
+            out.append("")
+        elif keep.match(ln):
+            flush()
+            out.append(ln)
+        else:
+            para.append(ln)
+    flush()
+    return "\n".join(out)
+
+
 def _short(v, n: int = 80) -> str:
     s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
     s = " ".join(s.split())
@@ -660,6 +702,9 @@ NOT_LOGGED_IN = ("not logged in — /login: paste the line from Settings → Add
                  "(chat only), or use your password (full access)")
 SESSION_LOST = "not logged in (session expired, or token revoked) — /login"
 NEW_PROJECT = "+new"               # the /project picker's "+ New project" row
+DIALOG_GRACE = 0.6                 # seconds a dialog that opens by itself takes no keys,
+                                   # and how long the operator must pause typing after
+DIALOG_MAX_INERT = 3.0             # ... but never longer than this in all
 
 
 def tui_available() -> bool:
@@ -1314,14 +1359,51 @@ class Command:
         self.busy_ok, self.takes_arg, self.leader = busy_ok, takes_arg, leader
 
 
+def ask_view(ev: dict, question: str) -> tuple[str, str]:
+    """(headline, detail markup) for an ask. A permission ask's headline already
+    names the command or the path and its detail repeats it, so each is said once:
+    `Run in the VM` over the command, `Write a.txt` over what goes into it, the
+    old and new text of an edit in red and green."""
+    detail = str(ev.get("detail") or "").strip("\n")
+    if not detail:
+        return question, ""
+    cut = len(detail) > 2000
+    lines = detail[:2000].splitlines()
+    tool = ev.get("tool") if ev.get("kind") == "permission" else None
+    head, contents = question, False
+    if tool == "run_code" and question.startswith("Run in the VM: "):
+        cmd = question[len("Run in the VM: "):].rstrip("…").strip()
+        if " ".join(detail.split()).startswith(cmd):
+            head = "Run in the VM"
+    elif tool in ("write_file", "edit_file"):
+        path = question.split(" ", 1)[1] if " " in question else ""
+        if path and lines[0].strip() == path:
+            lines, contents = lines[1:], tool == "write_file"
+    out = ["[$text-muted]contents[/]"] if contents else []
+    if contents and not lines:
+        lines = ["(empty file)"]
+    for ln in lines:
+        if tool == "edit_file" and ln.startswith("- "):
+            out.append(f"[$error]{_esc(ln)}[/]")
+        elif tool == "edit_file" and ln.startswith("+ "):
+            out.append(f"[$success]{_esc(ln)}[/]")
+        else:
+            out.append(f"[$text-muted]{_esc(ln)}[/]")
+    if cut:
+        out.append("[$text-muted]…[/]")
+    return head, "\n".join(out)
+
+
 # --- /local: the agent's file and shell tools, run on this machine ----------------------
 #
 # `/local` makes the next new chat a local session: the model still runs through
 # the server (which keeps the key), but its local_* tools come back to THIS client
 # as `local_tool` events on the turn's stream, run here in the directory `jav3`
 # was launched from, and are answered with POST /api/chat/<id>/local_result.
-# Reads run at once; writes, edits and shell commands ask the operator first
-# (y once, a for the rest of the session, n no). Everything the server sends is a
+# Reads inside that directory run at once; a read, list or search outside it, and
+# writes, edits and shell commands, ask the operator first (y once, a for the rest
+# of the session, or for that folder; n no), and keys, tokens and the client's own
+# login are refused outright (LOCAL_DENY_*). Everything the server sends is a
 # request, never a command: arguments are checked here, errors come back as text,
 # and nothing runs without the approval callback saying so.
 
@@ -1337,6 +1419,21 @@ LOCAL_SKIP_DIRS = frozenset({".git", ".hg", ".svn", "node_modules", "__pycache__
                              ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
                              ".ruff_cache", ".next", ".cache", "dist", "build",
                              ".idea", ".DS_Store"})
+
+
+# Places a local tool never reads, lists, searches or writes, whatever the operator
+# answers: keys, tokens, browser profiles, this client's own login. Under the home
+# directory, and a few absolute paths. `.env` files outside the working directory too.
+LOCAL_DENY_HOME = (".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/jav3", ".config/gcloud",
+                   ".config/gh", ".docker/config.json", ".netrc", ".npmrc", ".pypirc",
+                   ".git-credentials", ".password-store", ".mozilla", ".config/google-chrome",
+                   ".config/chromium", ".config/BraveSoftware", "Library/Keychains",
+                   "Library/Cookies", "Library/Application Support/Google/Chrome",
+                   "Library/Application Support/Firefox",
+                   "Library/Application Support/BraveSoftware",
+                   "Library/Application Support/Microsoft Edge")
+LOCAL_DENY_ABS = ("/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/sudoers.d", "/etc/ssh")
+LOCAL_ENV_SAMPLES = (".example", ".sample", ".template", ".dist")
 
 
 class LocalError(Exception):
@@ -1361,13 +1458,22 @@ class LocalExecutor:
     `approve(kind, summary)` is asked before every write ("write"), edit
     ("edit") and command ("shell") and returns "yes", "always" (this kind, for
     the rest of this executor's life) or "no"; it may be a coroutine function.
-    With no callback nothing that changes anything runs. Reads never ask."""
+    With no callback nothing that changes anything runs. Reads inside the working
+    directory never ask; a read, list or search outside it asks too ("read"; `a`
+    remembers that folder, not every folder), and a short list of secret places
+    (LOCAL_DENY_*) is refused outright."""
 
     def __init__(self, cwd, approve=None, shell: str | None = None):
         self.cwd = Path(cwd).expanduser().resolve()
         self.approve = approve
         self.shell = shell or os.environ.get("SHELL") or "/bin/sh"
         self.always: set[str] = set()
+        self.read_ok: list[tuple[Path, bool]] = []     # (folder, everything beneath it)
+        home = Path.home()
+        self._deny = [(home / rel).resolve() for rel in LOCAL_DENY_HOME]
+        self._deny += [Path(a).resolve() for a in LOCAL_DENY_ABS]
+        with contextlib.suppress(OSError, RuntimeError):
+            self._deny.append(config_dir().resolve())
 
     async def run(self, name: str, args) -> tuple[bool, str]:
         fn = {"local_read_file": self.read_file, "local_write_file": self.write_file,
@@ -1407,8 +1513,31 @@ class LocalExecutor:
         rel = self._show(path)
         return rel if rel != str(path) else f"{path}  (outside {self.cwd})"
 
-    async def _ask(self, kind: str, summary: str) -> None:
-        if kind in self.always:
+    def _inside(self, p: Path) -> bool:
+        return p == self.cwd or self.cwd in p.parents
+
+    def _denied(self, p: Path) -> str | None:
+        """Why no local tool may touch p, or None."""
+        for d in self._deny:
+            if p == d or d in p.parents:
+                return (f"{self._show(p)} is one of the places this client never lets an "
+                        "agent touch (keys, tokens, browser profiles, its own login); "
+                        "the operator can open it themselves.")
+        name = p.name
+        if (name == ".env" or name.startswith(".env.")) and not name.endswith(LOCAL_ENV_SAMPLES) \
+                and not self._inside(p):
+            return (f"{self._show(p)} is a .env file outside {self.cwd}; agents do not "
+                    "read those here.")
+        return None
+
+    def _refuse_denied(self, p: Path) -> None:
+        why = self._denied(p)
+        if why:
+            raise LocalError(why)
+
+    async def _ask(self, kind: str, summary: str, outside: bool = False) -> None:
+        # outside the working directory "always" does not carry: each write there asks
+        if kind in self.always and not outside:
             return
         if self.approve is None:
             raise LocalError(f"not approved: no one is here to approve a {kind}")
@@ -1420,6 +1549,32 @@ class LocalExecutor:
         elif ans != "yes":
             raise LocalError(f"the operator did not approve this {kind}. Do not retry "
                              "it; say what you wanted to do and ask.")
+
+    async def _may_read(self, p: Path, what: str, tree: bool) -> None:
+        """Refuse the secret places; ask about anything outside the working
+        directory (`tree`: it covers everything beneath p, as a listing or a
+        search does). `always` remembers the folder, not every folder."""
+        self._refuse_denied(p)
+        if self._inside(p):
+            return
+        base = p if tree else p.parent
+        for d, deep in self.read_ok:
+            if (p == d or d in p.parents) if deep else (p.parent == d or p == d):
+                return
+        if self.approve is None:
+            raise LocalError("not approved: no one is here to approve a read outside "
+                             f"{self.cwd}")
+        summary = (f"{what}\n(outside {self.cwd})\n"
+                   f"folder: {base}" + ("  and everything beneath it" if tree else ""))
+        ans = self.approve("read", summary)
+        if asyncio.iscoroutine(ans) or isinstance(ans, asyncio.Future):
+            ans = await ans
+        if ans == "always":
+            self.read_ok.append((base, tree))
+        elif ans != "yes":
+            raise LocalError("the operator did not approve this read outside the working "
+                             "directory. Do not retry it; say what you wanted to look at "
+                             "and ask.")
 
     @staticmethod
     def _read_text(path: Path) -> str:
@@ -1448,6 +1603,7 @@ class LocalExecutor:
 
     async def read_file(self, path, offset=1, limit=2000) -> str:
         p = self._path(path)
+        await self._may_read(p, f"read {p}", False)
         text = await asyncio.to_thread(self._read_text, p)
         lines = text.splitlines()
         start = max(1, int(offset or 1))
@@ -1465,6 +1621,7 @@ class LocalExecutor:
         if not isinstance(content, str):
             raise LocalError("content must be a string")
         p = self._path(path)
+        self._refuse_denied(p)
         if p.is_dir():
             raise LocalError(f"{p} is a directory")
         old = await asyncio.to_thread(self._read_text, p) if p.exists() else None
@@ -1474,7 +1631,7 @@ class LocalExecutor:
                        + self._diff(p, "", content))
         else:
             summary = f"overwrite {self._where(p)}\n" + self._diff(p, old, content)
-        await self._ask("write", summary)
+        await self._ask("write", summary, outside=not self._inside(p))
         p.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(p.write_text, content, encoding="utf-8")
         verb = "created" if old is None else "wrote"
@@ -1486,6 +1643,7 @@ class LocalExecutor:
         if not isinstance(replace, str):
             raise LocalError("replace must be a string")
         p = self._path(path)
+        self._refuse_denied(p)
         old = await asyncio.to_thread(self._read_text, p)
         n = old.count(find)
         if n == 0:
@@ -1495,7 +1653,8 @@ class LocalExecutor:
             raise LocalError(f"find text occurs {n} times in {self._show(p)}; add context "
                              "so it is unique, or pass all: true")
         new = old.replace(find, replace) if all else old.replace(find, replace, 1)
-        await self._ask("edit", f"edit {self._where(p)}\n" + self._diff(p, old, new))
+        await self._ask("edit", f"edit {self._where(p)}\n" + self._diff(p, old, new),
+                        outside=not self._inside(p))
         await asyncio.to_thread(p.write_text, new, encoding="utf-8")
         return f"edited {self._show(p)} ({n if all else 1} replacement{'s' if all and n > 1 else ''})"
 
@@ -1511,7 +1670,7 @@ class LocalExecutor:
             for k in kids:
                 if len(out) >= LOCAL_LIST_MAX:
                     return
-                if k.name in LOCAL_SKIP_DIRS:
+                if k.name in LOCAL_SKIP_DIRS or self._denied(k):
                     continue
                 isdir = k.is_dir() and not k.is_symlink()
                 out.append(f"{'  ' * level}{k.name}{'/' if isdir else ''}")
@@ -1522,6 +1681,7 @@ class LocalExecutor:
 
     async def list_files(self, path=".", depth=2) -> str:
         p = self._path(path or ".")
+        await self._may_read(p, f"list {p}", True)
         if not p.is_dir():
             raise LocalError(f"not a directory: {p}")
         depth = max(1, min(int(depth or 2), 6))
@@ -1542,9 +1702,11 @@ class LocalExecutor:
                 yield from files
                 return
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = sorted(d for d in dirnames if d not in LOCAL_SKIP_DIRS)
+                dirnames[:] = sorted(d for d in dirnames if d not in LOCAL_SKIP_DIRS
+                                     and not self._denied(Path(dirpath) / d))
                 for f in sorted(filenames):
-                    yield Path(dirpath) / f
+                    if not self._denied(Path(dirpath) / f):
+                        yield Path(dirpath) / f
 
         for f in each():
             try:
@@ -1567,6 +1729,7 @@ class LocalExecutor:
         if not isinstance(query, str) or not query:
             raise LocalError("query must be non-empty text")
         p = self._path(path or ".")
+        await self._may_read(p, f"search {p} for {query!r}", True)
         if not p.exists():
             raise LocalError(f"no such path: {p}")
         if regex:
@@ -2325,6 +2488,38 @@ def build_tui(base: str, token: str, **kw):
         def action_cancel(self) -> None:
             self.dismiss(None)
 
+    class Inert:
+        """A dialog that can open by itself while the operator is typing (an
+        agent's ask, a /local approval) takes no keys until they pause: the tail
+        of a sentence must not answer a question they have not seen. Printable
+        keys it turns away go back to the prompt they were typed at; enter and
+        esc are dropped. Each turned-away key restarts the pause, up to a limit."""
+
+        GRACE = DIALOG_GRACE
+        MAX_INERT = DIALOG_MAX_INERT
+
+        def _opened(self) -> None:
+            self.opened = self._last_key = time.monotonic()
+            self.ate = False
+
+        def inert(self) -> bool:
+            if self.GRACE <= 0:
+                return False
+            now = time.monotonic()
+            return now - self.opened < self.MAX_INERT and now - self._last_key < self.GRACE
+
+        def swallow(self, event) -> bool:
+            """True when this key was turned away."""
+            if not self.inert():
+                return False
+            self._last_key = time.monotonic()
+            self.ate = True
+            event.stop()
+            event.prevent_default()
+            if event.is_printable and event.character:
+                self.app.type_ahead(event.character)
+            return True
+
     class Confirm(ModalScreen):
         BINDINGS = [Binding("y,enter", "yes", show=False),
                     Binding("n,escape", "no", show=False)]
@@ -2355,24 +2550,23 @@ def build_tui(base: str, token: str, **kw):
             if not self._early():
                 self.dismiss(False)
 
-    class LocalApprove(ModalScreen):
-        """/local: may this write, edit or command run on this machine?"""
+    class LocalApprove(Inert, ModalScreen):
+        """/local: may this read, write, edit or command run on this machine?"""
 
         BINDINGS = [Binding("y,enter", "answer('yes')", show=False),
                     Binding("a", "answer('always')", show=False),
                     Binding("n,escape", "answer('no')", show=False)]
 
-        GRACE = 0.6      # seconds: it opens mid-turn, often while the operator
-                         # types a message; a stray y, a or enter must not approve
-
         def __init__(self, kind: str, summary: str) -> None:
             super().__init__()
             self.kind, self.summary = kind, summary
-            self.opened = time.monotonic()
+            self._opened()
 
         def compose(self) -> ComposeResult:
             what = {"shell": "Run this command here?", "write": "Write this file?",
-                    "edit": "Make this edit?"}.get(self.kind, f"Allow this {self.kind}?")
+                    "edit": "Make this edit?",
+                    "read": "Read this outside the working directory?"
+                    }.get(self.kind, f"Allow this {self.kind}?")
             lines = []
             for ln in self.summary.splitlines():
                 style = ("$success" if ln.startswith("+") and not ln.startswith("+++")
@@ -2384,39 +2578,47 @@ def build_tui(base: str, token: str, **kw):
                              f"{_esc(self.kind)} on this machine[/]")
                 with VerticalScroll(id="approve-body"):
                     yield Static("\n".join(lines))
-                yield Static(f"\n[$primary]y[/] yes   [$primary]a[/] always "
-                             f"({_esc(self.kind)}, this session)   "
+                always = ("[$primary]a[/] always for this folder" if self.kind == "read" else
+                          f"[$primary]a[/] always ({_esc(self.kind)}, this session)")
+                yield Static(f"\n[$primary]y[/] yes   {always}   "
                              "[$text-muted]n / esc[/] no")
 
+        def on_key(self, event) -> None:
+            self.swallow(event)
+
         def action_answer(self, what: str) -> None:
-            if time.monotonic() - self.opened >= self.GRACE:
+            if not self.inert():
                 self.dismiss(what)
 
-    class AskUser(ModalScreen):
+    class AskUser(Inert, ModalScreen):
         """ask_user / a permission ask (backend/operator_ask.py): the agent's
         questions, one at a time. ↑ ↓ move, 1-5 pick, space toggles (multi),
         typing goes to the free-text last option (and picks it), enter
-        confirms and moves on, esc skips the whole ask. Dismisses with a list
-        of {selected, text} answers, None (skipped) or "gone" (answered or
-        closed elsewhere: ask_done)."""
+        confirms and moves on, esc skips the whole ask, pgup/pgdn scroll a long
+        command. Says which agent asks and how many more asks wait behind this
+        one. Dismisses with a list of {selected, text} answers, None (skipped)
+        or "gone" (answered or closed elsewhere: ask_done)."""
 
         BINDINGS = [Binding("escape", "skip", show=False)]
-        GRACE = 0.6      # opens mid-turn while the operator may be typing
         AUTO_FOCUS = None    # open on the options, not the free-text line
         DEFAULT_CSS = """
         AskUser { align: center middle; background: $background 60%; }
+        #ask-top { height: auto; }
         #ask-opts { margin-top: 1; }
-        #ask-text { margin-top: 1; }
+        #ask-text { margin-top: 1; border: none; background: $panel; padding: 0 1;
+                    height: 1; }
+        #ask-text:focus { border: none; }
         #ask-foot { margin-top: 1; }
         """
 
-        def __init__(self, ev: dict) -> None:
+        def __init__(self, ev: dict, who: str = "", waiting: int = 0) -> None:
             super().__init__()
-            self.ev = ev
+            self.ev, self.who, self.waiting = ev, who, waiting
             self.qs = [q for q in ev.get("questions") or [] if isinstance(q, dict)]
             self.free_label = ev.get("free_text_label") or "Type something…"
             self.i, self.answers = 0, []
-            self.opened = time.monotonic()
+            self.resolved = self.gone = False
+            self._opened()
             self._reset()
 
         def _reset(self) -> None:
@@ -2432,7 +2634,8 @@ def build_tui(base: str, token: str, **kw):
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog"):
-                yield Static("", id="ask-head")
+                with VerticalScroll(id="ask-top"):
+                    yield Static("", id="ask-head")
                 yield Static("", id="ask-opts")
                 yield Input(placeholder=self.free_label, id="ask-text")
                 yield Static("", id="ask-foot")
@@ -2444,28 +2647,68 @@ def build_tui(base: str, token: str, **kw):
             self._draw()
             self.set_focus(None)
             self.call_after_refresh(self.set_focus, None)
+            if self.GRACE > 0:
+                self.set_timer(self.GRACE + 0.05, self._draw)     # the "just opened" note goes
+
+        def on_resize(self, event) -> None:
+            self._fit()
+
+        def dismiss(self, result=None):
+            """Once: a second dismiss (an ask_done racing an answer) would pop
+            whatever dialog sits on top now."""
+            if self.resolved:
+                from textual.await_complete import AwaitComplete
+                return AwaitComplete.nothing()
+            self.resolved = True
+            return super().dismiss(result)
+
+        def close_gone(self) -> None:
+            """ask_done: the server settled this ask. Buried under another dialog
+            it closes when that one is answered (on_screen_resume)."""
+            if self.resolved:
+                return
+            self.gone = True
+            if self.app.screen is self:
+                self.dismiss("gone")
+
+        def on_screen_resume(self) -> None:
+            if self.gone:
+                self.dismiss("gone")
+
+        def set_waiting(self, n: int) -> None:
+            if n != self.waiting:
+                self.waiting = n
+                if self.is_mounted and self.qs:
+                    self._draw()
 
         def _text(self) -> str:
             return self.query_one("#ask-text", Input).value.strip()
 
         @staticmethod
         def markup(ev: dict, qs: list, i: int, cur: int, sel: set, typed: str,
-                   free_label: str) -> tuple[str, str]:
+                   free_label: str, who: str = "", waiting: int = 0) -> tuple[str, str]:
             """(head, options) markup for question i; pure, for tests."""
             q = qs[i]
             opts = [str(o) for o in q.get("options") or []]
             multi = bool(q.get("multi_select"))
             if ev.get("kind") == "permission":
-                who = "[$warning b]Permission[/]"
+                title = "[$warning b]Permission[/]"
                 if ev.get("reason"):
-                    who += f"  [$text-muted]{_esc(str(ev['reason']))}[/]"
+                    title += f"  [$text-muted]{_esc(str(ev['reason']))}[/]"
             else:
-                who = "[$accent b]The agent asks[/]"
+                title = "[$accent b]The agent asks[/]"
             if len(qs) > 1:
-                who += f"  [$text-muted]{i + 1}/{len(qs)}[/]"
-            head = f"{who}\n[b]{_esc(str(q.get('question') or ''))}[/]"
-            if ev.get("detail"):
-                head += f"\n[$text-muted]{_esc(_short(str(ev['detail']), 600))}[/]"
+                title += f"  [$text-muted]{i + 1}/{len(qs)}[/]"
+            head = title
+            if who or waiting:
+                line = f"[$text-muted]from[/] {_esc(who)}" if who else ""
+                if waiting:
+                    line += ("  " if line else "") + f"[$accent]{waiting} more waiting[/]"
+                head += "\n" + line
+            question, detail = ask_view(ev, str(q.get("question") or ""))
+            head += f"\n[b]{_esc(question)}[/]"
+            if detail:
+                head += "\n" + detail
             rows = []
             for j, label in enumerate(opts + [free_label]):
                 on = (j in sel) if j < len(opts) else bool(typed)
@@ -2476,18 +2719,52 @@ def build_tui(base: str, token: str, **kw):
                 rows.append(f"[reverse]{line}[/]" if j == cur else line)
             return head, "\n".join(rows)
 
+        def _foot_text(self) -> str:
+            n = len(self.opts)
+            multi = bool(self.q.get("multi_select"))
+            pick = f"1-{n} pick" if n > 1 else "1 picks"
+            if self.ate and self.inert():
+                return "just opened: keys go back to your prompt for a moment"
+            return (f"↑↓ move · {pick}" + (" · space toggles" if multi else "")
+                    + " · or type · enter confirms · esc skips")
+
         def _draw(self) -> None:
             head, rows = self.markup(self.ev, self.qs, self.i, self.cur, self.sel,
-                                     self._text(), self.free_label)
+                                     self._text(), self.free_label, self.who, self.waiting)
             self.query_one("#ask-head", Static).update(head)
             self.query_one("#ask-opts", Static).update(rows)
-            multi = bool(self.q.get("multi_select"))
-            self.query_one("#ask-foot", Static).update(
-                "[$text-muted]↑↓ move · 1-5 pick" + (" · space toggles" if multi else "")
-                + " · type to answer in your own words · enter confirms · esc skips[/]")
+            self.query_one("#ask-foot", Static).update(f"[$text-muted]{_esc(self._foot_text())}[/]")
+            inp = self.query_one("#ask-text", Input)
+            inp.display = self.cur == self._free_row() or bool(self._text())
+            self._fit()
+
+        def _fit(self) -> None:
+            """The options and the key line stay on screen whatever the command
+            is: what is left of the terminal goes to the head, which scrolls."""
+            if not self.is_mounted or not self.qs:
+                return
+            height, width = self.app.size.height, self.app.size.width
+            inner = max(20, min(72, int(width * 0.9)) - 4)
+            foot = -(-len(self._foot_text()) // inner)
+            typing = self.query_one("#ask-text", Input).display
+            # "2. ( ) " leads each option, and a long label wraps onto more rows
+            rows = sum(max(1, -(-(7 + len(label)) // inner))
+                       for label in [*self.opts, self.free_label])
+            fixed = rows + 1 + (2 if typing else 0) + foot + 1      # options, gaps, input, foot
+            room = max(4, height - 2 - 2 - fixed)                     # gutter, dialog padding
+            self.query_one("#dialog").styles.max_height = max(8, height - 2)
+            self.query_one("#ask-top").styles.max_height = room
 
         def _free_row(self) -> int:
             return len(self.opts)
+
+        def _focus_text(self):
+            """The free-text line is only on screen while it is in use: the row
+            in the list already says what it is for."""
+            inp = self.query_one("#ask-text", Input)
+            inp.display = True
+            inp.focus()
+            return inp
 
         def _pick(self, j: int) -> None:
             if j >= len(self.opts):
@@ -2503,19 +2780,19 @@ def build_tui(base: str, token: str, **kw):
             self.cur = max(0, min(self._free_row(), self.cur + d))
             inp = self.query_one("#ask-text", Input)
             if self.cur == self._free_row():
-                inp.focus()
+                self._focus_text()
             elif inp.has_focus:
                 self.set_focus(None)
 
         def _confirm(self) -> None:
-            if time.monotonic() - self.opened < self.GRACE:
+            if self.inert():
                 return
             typed = self._text()
             if not self.sel and not typed:
                 if self.cur < len(self.opts):
                     self.sel = {self.cur}
                 else:
-                    self.query_one("#ask-text", Input).focus()
+                    self._focus_text()
                     return
             self.answers.append({"selected": [self.opts[j] for j in sorted(self.sel)],
                                  "text": typed or None})
@@ -2530,8 +2807,16 @@ def build_tui(base: str, token: str, **kw):
             self._draw()
 
         def on_key(self, event) -> None:
+            if self.swallow(event):
+                self._draw()
+                return
             key = event.key
             typing = self.query_one("#ask-text", Input).has_focus
+            if key in ("pageup", "pagedown"):
+                event.stop()
+                top = self.query_one("#ask-top")
+                (top.scroll_page_up if key == "pageup" else top.scroll_page_down)(animate=False)
+                return
             if key in ("up", "down"):
                 event.stop()
                 self._move(-1 if key == "up" else 1)
@@ -2548,14 +2833,12 @@ def build_tui(base: str, token: str, **kw):
                 if self.cur < len(self.opts):
                     self._pick(self.cur)
                 else:
-                    self.query_one("#ask-text", Input).focus()
+                    self._focus_text()
             elif event.is_printable and event.character:
                 # typing jumps to the free-text option and picks it
                 event.stop()
-                inp = self.query_one("#ask-text", Input)
                 self.cur = self._free_row()
-                inp.focus()
-                inp.insert_text_at_cursor(event.character)
+                self._focus_text().insert_text_at_cursor(event.character)
             else:
                 return
             self._draw()
@@ -2574,7 +2857,8 @@ def build_tui(base: str, token: str, **kw):
             self._confirm()
 
         def action_skip(self) -> None:
-            self.dismiss(None)
+            if not self.inert():
+                self.dismiss(None)
 
     class Ask(ModalScreen):
         """One line of input; `secret` hides it (the login line is a credential)."""
@@ -6383,6 +6667,7 @@ def build_tui(base: str, token: str, **kw):
             self.queue: list[str] = []
             self.pending: list = []          # QueuedMsg posted mid-turn, not yet delivered
             self.orchestrator = False        # this chat is an orchestrator (/orchestration)
+            self.child_of: int | None = None   # this view is an agent under that conversation
             self.attachments: list[str] = []
             self.last_user: str | None = None
             self.last_reply = ""
@@ -6397,6 +6682,7 @@ def build_tui(base: str, token: str, **kw):
             self.hist_pos: int | None = None
             self.hist_draft = ""
             self.popup_items: list[tuple[str, str]] = []   # (kind, value)
+            self.arg_deliberate = False     # the argument menu was opened by Tab or ↑ ↓
             self.initial = (resume, cont, prompt)
             self.client = None
             self.commands = self._commands()
@@ -6747,7 +7033,7 @@ def build_tui(base: str, token: str, **kw):
             try:
                 r = await self.client.request(method, path, **kw)
             except httpx.HTTPError as e:
-                raise CliError(f"could not reach {self.base}: {e}")
+                raise CliError(f"could not reach {self.base}: {net_error_text(e)}")
             if r.is_redirect:
                 raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
             if r.status_code == 401:
@@ -6912,6 +7198,7 @@ def build_tui(base: str, token: str, **kw):
                     "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
                     "[$text]ctrl+x l[/]    [$text-muted]sessions[/]\n"
                     "[$text]ctrl+x m[/]    [$text-muted]models[/]\n"
+                    "[$text]ctrl+x u[/]    [$text-muted]permissions: make agents ask first[/]\n"
                     "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
             show = self.sidebar_shown()        # hidden unless the operator opened it
             self.query_one("#sidebar").display = show
@@ -7130,8 +7417,9 @@ def build_tui(base: str, token: str, **kw):
             # sending means following the reply, wherever the transcript was scrolled
             self.log_view.scroll_end(animate=False)
             self.unseen = 0
+            um = UserMsg(_esc(text))
             try:
-                await self.mount_log(UserMsg(_esc(text)))
+                await self.mount_log(um)
                 message, attached, skipped = expand_attachments(text)
                 for a in attached:
                     await self.note(f"attached {a}")
@@ -7141,17 +7429,51 @@ def build_tui(base: str, token: str, **kw):
                     message += "\n\n" + "\n\n".join(self.attachments)
                     self.attachments = []
                 self.last_user = text
+                await self._explain_permissions()
                 body = self._body(message)
                 self.turn.local = bool(body.get("local"))
                 await self._post(body)
+                t = self.turn
+                if t is not None and not (t.done or t.failed or t.idle or t.interrupted
+                                          or self.stop_requested):
+                    # the stream closed cleanly with no final: a server going down
+                    raise httpx.RemoteProtocolError("the stream ended without a final")
             except CliError as e:
                 await self.note(str(e), "error")
+                if self.turn is not None and self.turn.cid is None:
+                    # refused before the turn began (a 404, a 409, a login): nothing
+                    # was sent, so the words go back where they were typed
+                    self._not_sent(um, [text])
             except httpx.HTTPError as e:
-                await self.note(f"connection to {self.base} failed: {e}", "error")
+                await self._lost_connection(e, text, um)
             finally:
                 await self._end_turn()
             if self.queue and not self.busy:
                 self.send(self.queue.pop(0))
+
+        def _not_sent(self, um, texts: list[str]) -> None:
+            """Put messages back in the prompt, ahead of what is typed there now."""
+            if um is not None and um.is_mounted:
+                um.add_class("failed")
+            ed = self.editor
+            ed.text = "\n".join(texts + ([ed.text] if ed.text else []))
+            ed.move_cursor(ed.document.end)
+
+        async def _lost_connection(self, e: Exception, text: str, um) -> None:
+            """The stream broke, or the server never answered: one line saying which,
+            and the message (with any typed while it ran) back in the prompt."""
+            started = self.turn is not None and self.turn.cid is not None
+            if not started or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                line = (f"can't reach {self.base}: {net_error_text(e)}. Your message was "
+                        "not sent; it is back in the prompt.")
+            elif isinstance(e, httpx.TransportError):
+                line = ("the server went away mid-turn (restarting?). Your message is back "
+                        "in the prompt; if the turn kept running, /sessions shows it.")
+            else:
+                line = f"connection to {self.base} failed: {e}"
+            await self.note(line, "error")
+            back, self.queue = [text, *self.queue], []
+            self._not_sent(um if not started else None, back)
 
         async def _post(self, body: dict) -> None:
             async with self.client.stream("POST", "/api/chat", json=body) as r:
@@ -7175,7 +7497,10 @@ def build_tui(base: str, token: str, **kw):
         async def _consume(self, lines) -> bool:
             """Render a stream; True if it carried anything but `idle`."""
             seen = False
+            turn = self.turn
             async for ev in aiter_sse(lines):
+                if self.turn is not turn:
+                    break          # this view moved on: the rest belongs to a turn no longer here
                 seen = seen or ev.get("type") != "idle"
                 if await self.handle_event(ev):
                     break
@@ -7201,7 +7526,7 @@ def build_tui(base: str, token: str, **kw):
                                                json={"text": message})
                 except httpx.HTTPError as e:
                     self._unpend(w)
-                    w.fail(f"not sent: {e}")
+                    w.fail(f"not sent: {net_error_text(e)}")
                     continue
                 if r.status_code in (404, 405, 409):
                     # 409 no_turn_running: it just ended. 404/405: a server without
@@ -7395,10 +7720,19 @@ def build_tui(base: str, token: str, **kw):
         # permission modes (backend/permissions.py): shift+tab cycles, stored per
         # conversation; a chat not created yet sends it with its first message
         PERM_MODES = ("yolo", "auto", "ask")
-        PERM_HINT = {"yolo": "everything runs in the VM without asking",
+        PERM_HINT = {"yolo": "everything runs in the VM without asking (the default)",
                      "auto": "a cheap judge reviews each write/run; risky ones ask you",
                      "ask": "every write/run asks you first"}
         perm_mode = "yolo"
+
+        async def _explain_permissions(self) -> None:
+            """Once, the first time a turn starts with the default: what the chip in
+            the prompt's corner means and how to change it."""
+            if self.perm_mode != "yolo" or self._load_settings().get("perm_explained"):
+                return
+            self._save_settings(perm_explained=True)
+            await self.note("permissions: yolo — agents run in the VM without asking. "
+                            "shift+tab or /permissions makes them ask first.")
 
         def _perm_label(self) -> str:
             col = {"yolo": "$text-muted", "auto": "$accent", "ask": "$warning"}[self.perm_mode]
@@ -7406,9 +7740,29 @@ def build_tui(base: str, token: str, **kw):
 
         def cycle_permission(self) -> None:
             modes = self.PERM_MODES
-            self.perm_mode = modes[(modes.index(self.perm_mode) + 1) % len(modes)]
+            self.set_permission(modes[(modes.index(self.perm_mode) + 1) % len(modes)])
+
+        def set_permission(self, mode: str) -> None:
+            self.perm_mode = mode
+            self._save_settings(perm_explained=True)
             self.refresh_chrome()
             self.run_worker(self._save_perm_mode(self.cid, self.perm_mode), group="perm")
+
+        async def c_permissions(self, arg: str) -> None:
+            """/permissions [yolo|auto|ask]: whether agents ask before they write or
+            run something. shift+tab cycles the same three from the prompt."""
+            if not arg:
+                rows = [(m, f"{m}  (the default)" if m == "yolo" else m, self.PERM_HINT[m]
+                         .replace(" (the default)", "")) for m in self.PERM_MODES]
+                arg = await self.pick("Permissions", rows, self.perm_mode,
+                                      hint="shift+tab cycles these · set per chat") or ""
+                if not arg:
+                    return
+            mode = arg.strip().lower()
+            if mode not in self.PERM_MODES:
+                raise CliError(f"permissions: {arg!r} is not one of "
+                               f"{', '.join(self.PERM_MODES)}")
+            self.set_permission(mode)
 
         async def _save_perm_mode(self, cid, mode: str) -> None:
             if cid is not None and not self.ephemeral:
@@ -7429,42 +7783,95 @@ def build_tui(base: str, token: str, **kw):
                 self.perm_mode = r["mode"]
                 self.refresh_chrome()
 
+        def _ask_who(self, ev: dict, cid: int | None) -> str:
+            """Who is asking, for the dialog: this chat, or the agent by its title
+            (the server names it) and id."""
+            n = ev.get("conversation_id")
+            if n in (None, cid):
+                return "this chat"
+            title = " ".join(str(ev.get("agent") or "").split())
+            return f"{_short(title, 50)} #{n}" if title else f"agent #{n}"
+
+        def _asks_done(self) -> dict:
+            """Ask ids this client has settled lately: a copy of the same event that
+            arrives late (two channels carry it) is not a new question."""
+            done = self.__dict__.setdefault("_asks_seen", {})
+            now = time.monotonic()
+            for k in [k for k, t in done.items() if now - t > 120]:
+                del done[k]
+            return done
+
+        def _ask_recount(self) -> None:
+            """Tell the dialog on screen how many asks wait behind it."""
+            asks = self.__dict__.get("_asks", {})
+            waiting = sum(1 for e in asks.values() if e["scr"] is None and not e["gone"])
+            for e in asks.values():
+                if e["scr"] is not None:
+                    e["scr"].set_waiting(waiting)
+
         async def _ask_user(self, ev: dict, cid: int | None) -> None:
-            """ask_user / a permission ask: show the dialog once per ask id and
-            POST the answer to the conversation this view is on (the asker or
-            an ancestor that showed it)."""
+            """ask_user / a permission ask: one dialog at a time, in the order the
+            asks came, each naming the agent that asks; the answer is POSTed to the
+            conversation this view is on (the asker or an ancestor that showed it).
+            An ask the server has settled (ask_done) before its turn never gets a
+            dialog."""
             aid = ev.get("id")
             asks = self.__dict__.setdefault("_asks", {})
-            if cid is None or not aid or aid in asks:
+            if cid is None or not aid or aid in asks or aid in self._asks_done():
                 return
-            asks[aid] = None
+            ent = asks[aid] = {"ev": ev, "scr": None, "gone": False}
+            self._ask_recount()
+            lock = self.__dict__.setdefault("_ask_lock", asyncio.Lock())
+            settled = False
             try:
-                if ev.get("conversation_id") not in (None, cid):
-                    await self.note(f"? agent #{ev['conversation_id']} is asking you")
-                scr = AskUser(ev)
-                asks[aid] = scr
-                self.bell()
-                res = await self.push_screen_wait(scr)
-                if res == "gone":
-                    return
-                body = ({"id": aid, "skipped": True} if res is None
-                        else {"id": aid, "answers": res})
-                try:
-                    await self.api("POST", f"/api/chat/{cid}/answer", json=body)
-                except CliError as e:
-                    await self.note(f"answer not delivered: {e}", "error")
+                async with lock:
+                    if ent["gone"]:
+                        settled = True
+                        return
+                    who = self._ask_who(ev, cid)
+                    if ev.get("conversation_id") not in (None, cid):
+                        await self.note(f"? {who} is asking you")
+                    scr = AskUser(ev, who)
+                    ent["scr"] = scr
+                    self._ask_recount()
+                    self.bell()
+                    res = await self.push_screen_wait(scr)
+                    ent["scr"] = None
+                    if res == "gone":
+                        settled = True
+                        return
+                    body = ({"id": aid, "skipped": True} if res is None
+                            else {"id": aid, "answers": res})
+                    try:
+                        await self.api("POST", f"/api/chat/{cid}/answer", json=body)
+                        settled = True
+                    except CliError as e:
+                        # the server still holds the ask: a re-attached view gets it again
+                        await self.note(f"answer not delivered: {e}", "error")
             finally:
-                asks[aid] = False
+                asks.pop(aid, None)
+                if settled:
+                    self._asks_done()[aid] = time.monotonic()
+                self._ask_recount()
 
         def _ask_gone(self, aid) -> None:
             """ask_done: answered elsewhere (the web, another view), timed out
-            or stopped; close our copy if it is still open."""
-            scr = self.__dict__.get("_asks", {}).get(aid)
-            if scr:
-                try:
-                    scr.dismiss("gone")
-                except Exception:  # noqa: BLE001 — already closing
-                    pass
+            or stopped: drop it from the queue, or close its dialog."""
+            ent = self.__dict__.get("_asks", {}).get(aid)
+            if ent is None:
+                return
+            ent["gone"] = True
+            if ent["scr"] is not None:
+                ent["scr"].close_gone()
+            self._ask_recount()
+
+        def type_ahead(self, text: str) -> None:
+            """Keys a dialog turned away because it had just opened go back to the
+            prompt they were typed at (when that prompt is what is behind it)."""
+            base = [s for s in self.screen_stack if not isinstance(s, ModalScreen)]
+            if base and base[-1] is self.screen_stack[0]:
+                with contextlib.suppress(Exception):
+                    base[-1].query_one("#editor", Editor).insert(text)
 
         async def local_approve(self, kind: str, summary: str):
             """yes / always / no (None: closed with ctrl+c) from the operator."""
@@ -7567,8 +7974,8 @@ def build_tui(base: str, token: str, **kw):
                         t.footer.update(self._footer_markup(t))
             await self.refresh_info()
 
-        async def _stop_remote(self) -> None:
-            cid = self.turn.cid if self.turn and self.turn.cid else self.cid
+        async def _stop_remote(self, cid: int | None = None) -> None:
+            cid = cid or (self.turn.cid if self.turn and self.turn.cid else self.cid)
             if cid is None:
                 return
             try:
@@ -7588,7 +7995,8 @@ def build_tui(base: str, token: str, **kw):
                 ed.move_cursor(ed.document.end)
                 self.queue.clear()
             if self.turn and self.turn.cid is not None:
-                self.run_worker(self._stop_remote(), group="stop")
+                # the id is taken now: a stop that runs late must not hit the next turn
+                self.run_worker(self._stop_remote(self.turn.cid), group="stop")
             # no start event yet: on_event("start") sends the stop when the id arrives
 
         async def attach(self, cid: int) -> None:
@@ -7608,7 +8016,7 @@ def build_tui(base: str, token: str, **kw):
                         if await self._consume(r.aiter_lines()):
                             break
             except httpx.HTTPError as e:
-                await self.note(f"lost the stream: {e}", "error")
+                await self.note(f"lost the stream: {net_error_text(e)}", "error")
             finally:
                 await self._end_turn()
             await self._drain_queue()
@@ -7710,6 +8118,7 @@ def build_tui(base: str, token: str, **kw):
             items: list[tuple[str, str, str]] = []     # (kind, value, label markup)
             if text.startswith("/") and "\n" not in text:
                 if " " not in text:
+                    self.arg_deliberate = False
                     q = text[1:].lower()
                     for name, cmd in self.unique_commands():
                         if name.startswith(q):
@@ -7723,6 +8132,9 @@ def build_tui(base: str, token: str, **kw):
                         if value.startswith(arg) or (arg and arg.lower() in meta.lower()):
                             items.append(("arg", value, f"{_esc(value)}  "
                                           f"[$text-muted]{_esc(meta)}[/]"))
+                    # what was typed, when it is an option, before the ones that only
+                    # begin with it: /sessions 5 must not become /sessions 50
+                    items.sort(key=lambda it: it[1] != arg)
             else:
                 word = self._word_before_cursor()
                 if word.startswith("@"):
@@ -7773,8 +8185,10 @@ def build_tui(base: str, token: str, **kw):
                     self.hide_popup()
                     self.history_step(-1)
                 else:
+                    self.arg_deliberate = True
                     pop.action_cursor_up()
             elif key == "down":
+                self.arg_deliberate = True
                 pop.action_cursor_down()
             elif key in ("tab", "enter"):
                 i = pop.highlighted or 0
@@ -7788,12 +8202,14 @@ def build_tui(base: str, token: str, **kw):
             ed = self.editor
             if kind == "cmd":
                 cmd = self.commands[value]
-                if cmd.takes_arg:
+                if cmd.takes_arg and not submit:
+                    # Tab opens the argument menu; Enter runs the command as typed
+                    # (its bare form opens its own picker), never option 0 of a menu
+                    # nobody asked for
                     ed.text = f"/{value} "
                     ed.move_cursor(ed.document.end)
+                    self.arg_deliberate = True
                     self.update_popup()
-                    if not self.popup_open() and submit and not self.arg_options(value):
-                        self.hide_popup()
                     return
                 ed.text = f"/{value}"
                 ed.move_cursor(ed.document.end)
@@ -7802,7 +8218,15 @@ def build_tui(base: str, token: str, **kw):
                     ed.post_message(Editor.Submitted(ed.text))
                 return
             if kind == "arg":
-                head = ed.text.partition(" ")[0]
+                head, _, typed = ed.text.partition(" ")
+                if submit and not typed.strip() and not self.arg_deliberate:
+                    # Enter on a menu that opened because of a typed space: the
+                    # command as typed, not its first option
+                    ed.text = head
+                    ed.move_cursor(ed.document.end)
+                    self.hide_popup()
+                    ed.post_message(Editor.Submitted(ed.text))
+                    return
                 ed.text = f"{head} {value}"
                 ed.move_cursor(ed.document.end)
                 self.hide_popup()
@@ -7852,6 +8276,8 @@ def build_tui(base: str, token: str, **kw):
 
         def action_ctrl_c(self) -> None:
             if isinstance(self.screen, ModalScreen):
+                if getattr(self.screen, "inert", lambda: False)():
+                    return          # opened a moment ago while they typed: not an answer
                 self.screen.dismiss(None)
                 return
             if isinstance(self.screen, (AgentsScreen, SecurityScreen)):
@@ -7879,6 +8305,10 @@ def build_tui(base: str, token: str, **kw):
                 self._leader_off()
             elif self.popup_open():
                 self.hide_popup()
+            elif self.child_of is not None and not self.editor.text:
+                # someone else's agent: the habit from the other screens (esc back)
+                # must not stop it. ctrl+c or /stop does that.
+                self.run_worker(self._back_to_parent(), group="nav")
             elif self.busy:
                 if time.monotonic() - self.esc_armed < 2:
                     self.esc_armed = 0.0
@@ -7907,7 +8337,8 @@ def build_tui(base: str, token: str, **kw):
             running, its live stream (typing then messages it mid-turn)."""
             await self._leave_turn()
             try:
-                await self.open_conversation(node["id"], running=bool(node.get("running")))
+                await self.open_conversation(node["id"], running=bool(node.get("running")),
+                                             parent=node.get("parent_id"))
             except CliError as e:
                 await self.note(str(e), "error")
                 return
@@ -7915,6 +8346,17 @@ def build_tui(base: str, token: str, **kw):
                 self.orchestrator = True
             if node.get("title"):
                 self.title_text = self.title_text or node["title"]
+            self.refresh_chrome()
+
+        async def _back_to_parent(self) -> None:
+            parent = self.child_of
+            if parent is None:
+                return
+            await self._leave_turn()
+            try:
+                await self.open_conversation(parent)
+            except CliError as e:
+                await self.note(str(e), "error")
             self.refresh_chrome()
 
         async def _leave_turn(self) -> None:
@@ -7997,6 +8439,10 @@ def build_tui(base: str, token: str, **kw):
                                   "import custom themes", "[name|create|export [path]|"
                                   "import <path>]",
                                   takes_arg=True, busy_ok=True, leader="t"),
+                "permissions": Command(self.c_permissions, "ask before agents write or run "
+                                       "(yolo · auto · ask); shift+tab cycles",
+                                       "[yolo|auto|ask]", takes_arg=True, busy_ok=True,
+                                       leader="u"),
                 "temp": Command(self.c_temp, "toggle temporary chats (nothing saved)"),
                 "local": Command(self.c_local, "toggle local chats (files and shell here, "
                                  "in this directory)"),
@@ -8057,7 +8503,8 @@ def build_tui(base: str, token: str, **kw):
                                 ("providers", "provider"),
                                 ("orchestrate", "orchestration"),
                                 ("review", "security"),
-                                ("stop-project", "stop-a")):
+                                ("stop-project", "stop-a"), ("perms", "permissions"),
+                                ("mode", "permissions")):
                 c[alias] = c[name]
             return c
 
@@ -8100,6 +8547,8 @@ def build_tui(base: str, token: str, **kw):
                         ("default", "default <format> [location]"),
                         ("svg", "colours, opens in a browser"), ("txt", "plain text"),
                         ("png", "needs cairosvg")]
+            if fn == self.c_permissions:
+                return [(m, self.PERM_HINT[m]) for m in self.PERM_MODES]
             if fn == self.c_login:
                 return [("password", "full access"), ("line", "chat only")]
             if fn == self.c_security:
@@ -8127,6 +8576,8 @@ def build_tui(base: str, token: str, **kw):
             lines += ["", "## Keys", "", "| key | |", "|---|---|"]
             for k, v in [("enter", "send (while a turn runs: the agent gets it at its "
                                    "next step)"),
+                         ("shift+tab", "permissions: yolo (the default: agents run in the VM "
+                                       "without asking) → auto → ask; /permissions picks"),
                          ("← (empty prompt)", "agents screen: everything working, "
                                               "across projects"),
                          ("/security (ctrl+x v)", "queue · network · logs · secrets · "
@@ -8174,6 +8625,7 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_new(self, arg: str = "") -> None:
             self.cid, self.title_text, self.last_reply = None, None, ""
+            self.child_of = None
             self.shown_model, self.info, self.todos = None, None, []
             self.orchestrator = False
             await self.show_home()
@@ -8206,9 +8658,11 @@ def build_tui(base: str, token: str, **kw):
                 arg = str(hits[0]["id"])
             await self.open_conversation(int(arg))
 
-        async def open_conversation(self, cid: int, running: bool = False) -> None:
+        async def open_conversation(self, cid: int, running: bool = False,
+                                    parent: int | None = None) -> None:
             r = await self.api("GET", f"/api/conversations/{cid}/messages")
             self.cid, self.ephemeral = cid, False
+            self.child_of = parent          # an agent's chat: esc goes back to its parent
             self.orchestrator = r.get("kind") == "orchestrator" or r.get("mode") == "orchestrate"
             meta = next((cv for cv in self.convs if cv.get("id") == cid), {})
             self.title_text = meta.get("summary")
@@ -8223,7 +8677,10 @@ def build_tui(base: str, token: str, **kw):
                 await self.note(f"… {len(msgs) - 60} earlier messages (/export has them all)")
             for m in msgs[-60:]:
                 if m["role"] == "user":
-                    await self.log_view.mount(UserMsg(_esc(m.get("content") or "")))
+                    body = m.get("content") or ""
+                    # an agent's brief is server-wrapped text: let the terminal wrap it
+                    await self.log_view.mount(UserMsg(_esc(reflow(body) if self.child_of
+                                                           else body)))
                     continue
                 for a in m.get("activity") or []:
                     tv = ToolView(a["name"], a.get("args"), ok=a.get("ok"),
@@ -8246,7 +8703,9 @@ def build_tui(base: str, token: str, **kw):
                 for a in r.get("pending_activity") or []:
                     await self.log_view.mount(ToolView(a["name"], a.get("args"), ok=a.get("ok"),
                                                        result=a.get("result"), done=True))
-                await self.note("a turn is running — attached", "warn")
+                await self.note("a turn is running — attached" + (
+                    f" · esc goes back to #{self.child_of}, ctrl+c stops it"
+                    if self.child_of else ""), "warn")
                 self.run_worker(self.attach(cid), group="turn")
 
         async def c_model(self, arg: str) -> None:
@@ -8297,12 +8756,17 @@ def build_tui(base: str, token: str, **kw):
                                       hint="enter pins this chat to it") or ""
                 if not arg:
                     return
-            if arg == NEW_PROJECT:
+            made = arg == NEW_PROJECT
+            if made:
                 arg = await self._new_project() or ""
                 if not arg:
                     return
             mode = arg if arg in ("none", "follow") else "pin"
             slug = arg if mode == "pin" else None
+            if slug is not None and not made:
+                slug = await self._known_project(slug)
+                if not slug:
+                    return
             if self.cid is not None:
                 body = {"mode": mode}
                 if slug:
@@ -8428,7 +8892,8 @@ def build_tui(base: str, token: str, **kw):
             if self.local:
                 await self.c_new()
                 self.notify(f"local: new chats work in {os.getcwd()} on this machine; "
-                            "writes and commands ask you first", severity="warning")
+                            "reads outside it, writes and commands ask you first",
+                            severity="warning")
             else:
                 self.notify("local off — new chats use the server's sandbox")
             self.refresh_chrome()
@@ -8875,10 +9340,42 @@ def build_tui(base: str, token: str, **kw):
             name = (await self.push_screen_wait(Ask("New project name")) or "").strip()
             if not name:
                 return None
+            return await self._create_project(name)
+
+        async def _create_project(self, name: str) -> str:
             r = await self.api("POST", "/api/projects", json={"name": name})
             await self.refresh_options()
             self.push_notice(f"created project {r.get('slug', name)}", "done", toast=False)
             return r.get("slug") or name
+
+        async def _known_project(self, name: str) -> str | None:
+            """The slug of the project `name` means: as typed, or by its display
+            name, or (nothing matching) after asking whether to create it. None when
+            the operator says no. A name that matches nothing used to pin the chat to
+            a project that did not exist, and the first message then failed with a 404."""
+            if self.full_access:
+                rows = (await self.api("GET", "/api/projects")).get("projects") or []
+            else:
+                await self.refresh_options()        # one may have been made elsewhere
+                rows = (self.options or {}).get("projects", [])
+            known = {p["slug"]: p.get("name") or "" for p in rows if p.get("slug")}
+            if name in known:
+                return name
+            low = name.lower()
+            hit = next((sl for sl, nm in known.items() if sl.lower() == low
+                        or (nm and nm.lower() == low)), None)
+            if hit:
+                return hit
+            if not self.full_access:
+                have = ", ".join(sorted(known)[:8]) + (" …" if len(known) > 8 else "")
+                raise CliError(f"no project named {name!r}" + (f" — you have: {have}" if known
+                                                                else "")
+                               + " (making one needs /login with your password)")
+            if not await self.push_screen_wait(Confirm(
+                    f"No project named {name!r}. Create it?",
+                    "It becomes this chat's project.")):
+                return None
+            return await self._create_project(name)
 
         async def c_orchestrate(self, arg: str) -> None:
             if not arg:
