@@ -97,6 +97,9 @@ Element rules:
   has none). Depth cap 12, count cap 400 before the server's own cap.
 - `id` is 1..N in reading order (rows of 40 image px, then x). Ids are only
   valid for the frame they came with.
+- The frame SERIAL is the server's, not the client's: `desk.py` numbers every
+  stored frame (`frame 17`, monotonic per desk) so an old client needs nothing
+  new. See B for how ids and coordinates are tied to it.
 - `label` is the accessible name, else title, else value, else help text; empty
   labels are kept only for icon-only controls (src tells the model it is real).
 - The tree walk must never block a screenshot: 1.5 s budget, then return what
@@ -132,6 +135,18 @@ skipped for the rest of that walk. On macOS the screenshot and the
 thumbnails are captured in process (CoreGraphics + ImageIO), with
 screencapture + sips as the fallback.
 
+Once an input verb has been sent, the client never answers it with an error
+that invites a repeat: a failed post-action capture is `ok` with `note: the
+action was sent but the screen could not be captured afterwards — take
+desk_screenshot before repeating it` (also appended to `text`), and a typing
+read-back that finds the field changed but not holding the text (compared
+NFKC, case-folded, whitespace-collapsed) is `ok` with `note: typed; the field
+now reads differently from what was typed (autocomplete or formatting?) —
+check the screenshot before retyping`. The typing error is kept for the field
+AND the screen both unchanged. `desk-apps.json` entries pass the same
+terminal / script-runner exclusion as the installed-app list;
+`jav3-desk status` names any dropped entry.
+
 ### A.5 Locked screen / sleeping display
 
 `hello` carries `locked` and `asleep` (booleans), and the client sends
@@ -145,6 +160,14 @@ asleep, screenshot / wait / input verbs are refused on both sides with
 `the display is asleep — ask the operator to wake it`; `GET /api/desk` shows
 both flags. An old client never sends them and reads as awake.
 
+`locked: null` (in `hello` or a `state` frame, sent explicitly) means
+UNKNOWN: a Linux box whose locker reports nothing (logind by session, then the
+ScreenSaver D-Bus, are tried first). The server does not refuse on unknown and
+`jav3-desk status` prints `screen:  unknown`; the capture itself then says what
+is wrong (a raw `screencapture failed: could not create image from display`
+from an older client reads as `the screen could not be captured - it is
+probably locked or asleep`). An omitted `locked` is `false`, as before.
+
 ## B. Desk server (backend/desk.py) and tools (tools/desk_*)
 
 - Per desk, keep the latest frame: image bytes, w, h, monitor, region, and the
@@ -152,7 +175,7 @@ both flags. An old client never sends them and reads as awake.
 - Render the screenshot text for the model as:
 
 ```
-screen 1280x800 of "DP-1" (monitor 1 of 2; others: "HDMI-A-1")   | or: zoomed region 400,300 320x200 of "DP-1", shown at 1280x800
+screen 1280x800 of "DP-1" (monitor 1 of 2; others: "HDMI-A-1") — frame 17   | or: zoomed region 400,300 320x200 of "DP-1", shown at 1280x800 — frame 17
 cursor at 612,388
 elements (click by id; coordinates are pixels of this image):
   [1] button "Save" @ 640,410 80x28
@@ -169,12 +192,36 @@ changed: yes, settled in 420 ms                                  | after an inpu
   - `element`: centre of the registry box from the latest frame of that desk.
     Unknown id -> `error: element 14 is not in the latest screenshot — take
     desk_screenshot again`.
-  - `target` (a short description, "the Save button in the dialog"): first an
-    exact case-insensitive label match or a unique substring match on the
-    registry; else `grounding.locate(image, w, h, target)` on the latest
+  - `frame` (optional on click / move / scroll / drag): the serial from the
+    header of the result the ids or coordinates were read from. An `element`
+    id or an (x, y) from any frame but the desk's latest is refused:
+    `error: element 9 was listed in frame 17, but the screen is now frame 18
+    — use the ids from the latest result, or take desk_screenshot`
+    (`the coordinates were listed in frame 17, ...` for x, y). When `frame`
+    is omitted it means the last frame whose result had already been returned
+    to the model before this round began: a result returned less than
+    `ROUND_GAP_S` (0.5 s) ago cannot have been read, so the second call of a
+    batch (`desk_click(element=5)` then `desk_click(element=9)`) is refused
+    instead of clicking whatever is now id 9. `target` is not checked (it
+    names a thing, not an id).
+  - `target` (a short description, "the Save button in the dialog"): first a
+    WHOLE-label match on the registry (case-insensitive, punctuation ignored,
+    one leading/trailing role word such as button / link / field / tab / menu
+    dropped: "Save button" = "Save", but "OK" is not "Book now" and "Delete"
+    is not "Delete account"; two matches is doubt); else `grounding.locate(image, w, h, target)` on the latest
     frame. Report how it was resolved in the result's first line:
     `clicked [12] button "Save" at 640,410` /
-    `clicked "Save button" at 640,410 (grounded by <model>, confidence 0.82)`.
+    `clicked "Save button" at 640,410 (grounded by <model>, confidence 0.82;
+    element there: [12] button "Save")`. A grounded point is checked against
+    the latest registry: the smallest listed element whose box holds it is
+    named as above; if its label shares no word (role words and articles
+    ignored) with the description the click is REFUSED: `error: the grounding
+    model pointed at [31] button "Delete account", which does not match "Save
+    button" — click by element id instead`; with no listed element there it
+    clicks and says `; no listed element at that point` in place of the
+    element (nothing is said when the registry is empty).
+    Non-finite or non-numeric coordinates are refused (`x must be a whole
+    number`), as is any parameter error `validate` did not foresee.
     `grounding.NotConfigured` -> `error: no grounding model; click by element
     id or coordinates, or run "Find grounding model" in Settings`.
   - Everything still goes through `act()`: grants, ceiling, fresh frame, rate,
