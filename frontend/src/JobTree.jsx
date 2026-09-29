@@ -37,7 +37,9 @@ export default function JobTree({ cid, onFinal }) {
       if (ev.type === 'node_status') up(ev.node_id, { status: ev.status })
       if (ev.type === 'tool') up(ev.node_id, { tool: ev.name })
       if (ev.type === 'node_done') up(ev.node_id, { status: 'done', rollup: ev.rollup, tool: null })
-      if (ev.type === 'error') up(ev.node_id, { status: 'error', tool: ev.message })
+      // the failure is its own field: it was stored in `tool` and drawn as if
+      // the agent were running a tool called by the error's text
+      if (ev.type === 'error') up(ev.node_id, { status: 'error', tool: null, err: ev.message })
       if (ev.type === 'job_final') {
         ended = true; setLive(false); stop?.(); onFinalRef.current?.()
       }
@@ -49,9 +51,22 @@ export default function JobTree({ cid, onFinal }) {
     return () => stop()
   }, [cid])
 
+  // one line that says how the job stands, so a long tree needs no counting
+  const all = order.map((id) => nodes[id]).filter(Boolean)
+  const failed = all.filter((n) => n.status === 'error').length
+  const finished = all.filter((n) => n.status === 'done' || n.rollup).length
+  const working = all.length - failed - finished
   return (
     <div className="run-tree" style={{ padding: '4px 2px' }}>
-      {live && <div className="dim small">● live</div>}
+      <div className="run-summary dim small">
+        {live ? <span className="run-live">● live</span> : <span>finished</span>}
+        {all.length === 0
+          ? <span>{live ? ' · waiting for agents…' : ' · no agents recorded'}</span>
+          : <span> · {all.length} agent{all.length === 1 ? '' : 's'}
+              {live && working > 0 ? ` · ${working} working` : ''}
+              {finished > 0 ? ` · ${finished} done` : ''}</span>}
+        {failed > 0 && <span className="run-failed"> · {failed} failed</span>}
+      </div>
       {order.map((id) => {
         const n = nodes[id]; if (!n) return null
         const tag = STATUS_TAG[n.status] || (n.rollup ? 'done' : 'planning')
@@ -62,6 +77,7 @@ export default function JobTree({ cid, onFinal }) {
               <span className={`tag ${tag}`}>{n.kind}</span>
               <span className="grow ellipsis">{n.title}</span>
               {n.tool && <span className="run-activity">⚙ {n.tool}</span>}
+              {n.err && <span className="run-err ellipsis" title={n.err}>{n.err}</span>}
               <span className={`run-dot ${tag}`} />
               {n.rollup && <span className="dim">{open[id] ? '▾' : '▸'}</span>}
             </div>

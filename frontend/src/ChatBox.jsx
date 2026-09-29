@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
-import { applyTurnEvent, finishTurn, MessageBody } from './ToolActivity.jsx'
+import { MessageBody } from './ToolActivity.jsx'
+import { activityMark, makeTurnFolder, newTurn } from './turnEvents.js'
+import { useFollow } from './useFollow.js'
+import TurnStatus from './TurnStatus.jsx'
 import { useAsk } from './ask.jsx'
 import { AskPanel, PermissionModeSelect, useOperatorAsks, usePermissionMode } from './AskUser.jsx'
 import Button from './components/Button.jsx'
@@ -30,8 +33,13 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
-  const bottomRef = useRef(null)
+  const scrollRef = useRef(null)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
+  // which thread this box shows, as a counter: switching or leaving one bumps
+  // it, and a stream started under an earlier value is stale and says nothing
+  const gen = useRef(0)
+  const folder = useRef(null)
+  if (!folder.current) folder.current = makeTurnFolder((fn) => setMessages(fn))
   const ask = useAsk()
   const asks = useOperatorAsks(cid)          // ask_user / permission asks
   const [permMode, setPermMode] = usePermissionMode(cid)
@@ -49,26 +57,11 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
   }, [])
 
   // shared by the live POST stream and a resumed background-turn tail
-  function handleTurnEvent(ev) {
+  // (turnEvents.makeTurnFolder folds the events into the transcript)
+  function handleTurnEvent(ev, mine = gen.current) {
+    if (mine !== gen.current) return
     asks.onEvent(ev)
-    if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
-        return copy
-      })
-    if (ev.type === 'final')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
-        return copy
-      })
-    if (ev.type === 'error')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = { role: 'error', content: ev.message }
-        return copy
-      })
+    folder.current.handle(ev)
   }
 
   const refresh = () =>
@@ -94,6 +87,10 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
   }
 
   function newChat(as = '') {
+    tailAbort.current?.abort()
+    folder.current.cancel()
+    gen.current += 1
+    setBusy(false)
     setShowHistory(false)
     setNewMenu(false)
     setNewAs(as)
@@ -111,18 +108,22 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     refresh()
   }
 
-  useEffect(() => {
-    // scroll ONLY the message list — scrollIntoView walks every scrollable
-    // ancestor and yanked the whole workspace board to the bottom on stream
-    const box = bottomRef.current?.parentElement
-    if (box) box.scrollTop = box.scrollHeight
-  }, [messages])
+  // follow the stream unless the reader scrolled up (scroll ONLY the message
+  // list — scrollIntoView walks every scrollable ancestor and yanked the whole
+  // workspace board to the bottom on stream)
+  const follow = useFollow(scrollRef, { mark: activityMark(messages), resetKey: cid })
+  const followRun = follow.follow
+  useLayoutEffect(() => { followRun() }, [messages, followRun])
 
-  async function open(id) {
+  async function open(id, attempt = 0) {
     tailAbort.current?.abort()
+    folder.current.cancel()
+    const mine = ++gen.current
     setCid(id)
+    setBusy(false)   // an abandoned send or tail no longer speaks for this thread
     if (!id) { setMessages([]); setThreadAs(''); return }
     const r = await api(`/api/conversations/${id}/messages`)
+    if (mine !== gen.current) return   // a slower answer for a thread already left
     setMessages(r.messages)
     setThreadAs(r.agent_slug || '')
     if (!r.running) return
@@ -130,18 +131,39 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     // seeding the placeholder with the tool calls it already made
     setBusy(true)
     const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: seed }])
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true,
+                                parts: seed, t0: Date.now() }])
     const ctl = new AbortController()
     tailAbort.current = ctl
+    let settled = false
     try {
       await tailStream(`/api/chat/${id}/stream`, (ev) => {
         if (ev.type === 'idle') {
-          api(`/api/conversations/${id}/messages`).then((r2) => setMessages(r2.messages))
+          settled = true
+          api(`/api/conversations/${id}/messages`).then((r2) => {
+            if (mine === gen.current) setMessages(r2.messages)
+          })
           return
         }
-        handleTurnEvent(ev)
+        if (ev.type === 'final' || ev.type === 'error') settled = true
+        handleTurnEvent(ev, mine)
       }, ctl.signal)
-    } catch { /* tail aborted; messages reload on next open */ }
+    } catch { /* tail aborted or dropped */ }
+    if (mine !== gen.current) return
+    folder.current.flush()
+    if (!settled && attempt < 3) {
+      // ended without an ending: the turn may still be going — look again
+      // instead of leaving a spinner that never resolves
+      await new Promise((ok) => { setTimeout(ok, 800 * (attempt + 1)) })
+      if (mine === gen.current) open(id, attempt + 1)
+      return
+    }
+    if (!settled) {
+      try {
+        const r2 = await api(`/api/conversations/${id}/messages`)
+        if (mine === gen.current) setMessages(r2.messages)
+      } catch { /* offline: the placeholder stays until the next open */ }
+    }
     setBusy(false)
   }
 
@@ -159,8 +181,12 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     // clear the bar NOW — the message visibly left; it comes back on failure
     setInput('')
     const wasNew = cid === null
-    setMessages((m) => [...m, { role: 'user', content: text },
-                        { role: 'assistant', content: '', streaming: true, parts: [] }])
+    const mine = gen.current
+    let started = false   // a `start` arrived: the turn began
+    let settled = false   // a `final` or `error` arrived: it ended
+    let liveCid = cid
+    setMessages((m) => [...m, ...newTurn(text)])
+    follow.jump()   // sending is a request to see the answer
     try {
       await chatStream(
         // a NEW conversation is created pre-pinned to this board's project, so
@@ -173,27 +199,44 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
           agent: wasNew && newAs ? newAs : undefined,
           permission_mode: wasNew ? permMode : undefined },
         (ev) => {
+          if (mine !== gen.current) return
           if (ev.type === 'start') {
+            started = true
+            liveCid = ev.conversation_id
             setCid(ev.conversation_id)
             if (wasNew) setThreadAs(ev.agent_slug || newAs)
             if (wasNew && projectSlug) refresh()
           }
-          handleTurnEvent(ev)
+          if (ev.type === 'final' || ev.type === 'error') settled = true
+          handleTurnEvent(ev, mine)
         },
       )
-      if (!projectSlug) refresh()
     } catch (err) {
-      setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'turn_in_progress') {
+      if (mine !== gen.current) return   // the thread was left; the turn runs regardless
+      folder.current.flush()
+      if (started && !err.status) {
+        settled = false   // the connection dropped mid-turn; it is still running server-side
+      } else {
+        // refused before anything streamed: drop the optimistic pair, keep the draft
+        setMessages((m) => m.slice(0, -2))
         setInput(text)
         setMessages((m) => [...m, { role: 'error',
-          content: 'a turn is still running in this chat — wait for it to finish' }])
-      } else {
-        setInput(text)
-        setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
+          content: err.status === 409 && err.detail === 'turn_in_progress'
+            ? 'a turn is still running in this chat — wait for it to finish'
+            : (err.detail || String(err)) }])
+        setBusy(false)
+        return
       }
     }
+    if (mine !== gen.current) return
+    folder.current.flush()
+    if (!settled) {
+      // no ending arrived: pick the turn back up rather than leave a spinner
+      if (liveCid) { open(liveCid); return }
+      folder.current.handle({ type: 'error', message: 'the connection dropped mid-turn' })
+    }
     setBusy(false)
+    if (!projectSlug) refresh()
   }
 
   const current = convos.find((c) => c.id === cid)
@@ -240,7 +283,8 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
           ))}
         </ul>
       )}
-      <div className="messages compact">
+      <div className="cb-msgs">
+      <div className="messages compact" ref={scrollRef}>
         {messages.length === 0 && (
           <EmptyState pad>
             {projectSlug ? `chat with ${whoName} about this project` : 'say hi'}
@@ -253,8 +297,15 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
               : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
           </div>
         ))}
-        <div ref={bottomRef} />
       </div>
+      {!follow.pinned && messages.length > 0 && (
+        <button type="button" className="follow-pill" onClick={follow.jump}>
+          {follow.away > 0 ? `${follow.away} new` : 'latest'} <span aria-hidden="true">↓</span>
+        </button>
+      )}
+      </div>
+      <TurnStatus busy={busy} messages={messages} cid={cid} compact
+                  waiting={asks.asks.length > 0} />
       <AskPanel asks={asks} cid={cid} compact />
       <form className="row" onSubmit={(e) => { e.preventDefault(); send() }}>
         <textarea className="grow" rows={2} value={input}
