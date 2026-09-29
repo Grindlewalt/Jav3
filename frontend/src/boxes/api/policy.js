@@ -51,8 +51,10 @@ export const promoteAuto = (id) => post(`/api/egress/auto/${enc(id)}/promote`)
 // The waiting queue. An UNATTRIBUTED row (shared box, no turn) needs the
 // operator to name the project whose list it goes on: {project}; without it
 // the host answers 409.
-export const approvePending = (id, project = null) =>
-  post(`/api/egress/pending/${enc(id)}/approve`, project ? { project } : {})
+// `once`: let it through for an hour and write no list.
+export const approvePending = (id, project = null, { once = false } = {}) =>
+  post(`/api/egress/pending/${enc(id)}/approve`,
+    { ...(project ? { project } : {}), ...(once ? { once: true } : {}) })
 export const rejectPending = (id) => call(`/api/egress/pending/${enc(id)}/reject`, { method: 'POST' })
 // Allow a host that is not waiting (an auto-deny). -> {ok, host, added_to};
 // a project is required (409 {"detail":"needs_project"} otherwise).

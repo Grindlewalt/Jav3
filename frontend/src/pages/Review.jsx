@@ -1,12 +1,19 @@
 import { useContext, useEffect, useState } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { Link, Outlet, useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
+import Posture from '../Posture.jsx'
+import ScrollHint from '../ScrollHint.jsx'
+import { useEgressDecide } from '../EgressDecide.jsx'
 import { PendingCountContext } from '../Notices.jsx'
-import { notifyError } from '../notify.js'
+import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { sevClass, ts } from '../format.js'
+import {
+  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, ASKS_LEDE, DENY_TIP, FAULTS_LEDE, REFUSED_TAG, askAge,
+  askKindText, faultText, ledeFor, SECURITY_LEDES,
+} from '../securityCopy.js'
 import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
@@ -15,7 +22,6 @@ import { SERVICES_POLL_MS, followServices, listServices } from '../boxes/api/ser
 import { listPackages } from '../boxes/api/packages.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import { listImages } from '../boxes/api/images.js'
-import { approvePending, rejectPending } from '../boxes/api/policy.js'
 import { needsProject } from '../boxes/logic.js'
 import {
   PackageApprove, PackageSummary, ServiceRequest, usePackageReject,
@@ -43,6 +49,7 @@ export function ReviewQueue({ slug }) {
   const [gitReqs, setGitReqs] = useState({})                 // slug -> [pending requests]
   const [pending, setPending] = useState([])                 // egress host approvals
   const [alerts, setAlerts] = useState([])                   // unacknowledged security events
+  const [asks, setAsks] = useState([])                       // questions waiting in chats
   const [busy, setBusy] = useState(false)
   const [board, setBoard] = useState(null)   // {id, seed} — the open evidence board
   // the boxes requests (WP3 services, WP5 packages). Either route may not
@@ -84,6 +91,12 @@ export function ReviewQueue({ slug }) {
     api(`/api/egress/pending${slug ? `?project=${encodeURIComponent(slug)}` : ''}`)
       .then((r) => setPending(r.pending || [])).catch(() => {})
   }
+  // questions an agent is blocked on in a chat: the nav badge counts them, so
+  // the page lists them (with a link to answer), or the badge runs one ahead
+  function loadAsks() {
+    if (slug) return
+    api('/api/notifications').then((r) => setAsks(r.asks || [])).catch(() => {})
+  }
   function loadAlerts() {
     api('/api/security/events?unacknowledged=true').then((r) => {
       let evs = r.events || []
@@ -124,7 +137,7 @@ export function ReviewQueue({ slug }) {
     // service requests ride topic `services` (below) with a slow fallback
     // poll; everything else keeps the 12 s refresh
     const refresh = () => {
-      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadPkgReqs()
+      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadPkgReqs(); loadAsks()
     }
     refresh()
     loadSvcReqs()
@@ -168,28 +181,9 @@ export function ReviewQueue({ slug }) {
     } catch (e) { notifyError(e) }
     setBusy(false)
   }
-  // An unattributed row (shared box, no project) is approved onto a project's
-  // list the operator names; the host answers 409 without one.
-  async function egressAct(p, verb) {
-    try {
-      if (verb === 'approve') {
-        let proj = null
-        if (needsProject(p)) {
-          const choices = (slugs || []).filter((x) => !x.startsWith('__'))
-          const got = await ask.prompt(`${p.host} came from no project. Whose list should it go on?`
-            + (choices.length ? ` (${choices.join(', ')})` : ''), slug || (choices.length === 1 ? choices[0] : ''),
-          { confirmLabel: 'Allow' })
-          proj = (got || '').trim()
-          if (!proj) return
-          if (choices.length && !choices.includes(proj)) { notifyError(new Error(`no project "${proj}"`)); return }
-        }
-        await approvePending(p.id, proj)
-      } else {
-        await rejectPending(p.id)
-      }
-      loadEgress()
-    } catch (e) { notifyError(e) }
-  }
+  // Allow always / Allow 1 h / Deny, the same three words and the same project
+  // picker as the Network tab (an unattributed row is put on a project you choose)
+  const { decide: egressAct, picker } = useEgressDecide(loadEgress, { project: slug || null, names })
   async function ackAlert(id) {
     try { await api(`/api/security/events/${id}/ack`, { method: 'POST' })
       setAlerts((a) => a.filter((x) => x.id !== id)) }
@@ -197,44 +191,55 @@ export function ReviewQueue({ slug }) {
   }
 
   // bulk verdicts — the queues reached hundreds; one server call each.
-  // approve trains the allowlist for every host, so it confirms hardest.
+  // Allow all trains the allowlist for every host, so it confirms hardest.
   const BULK_ASK = {
-    approve: (n) => `Approve all ${n} hosts? Every one is added to the allowlist `
-      + '— including the ⚑ flagged ones.',
-    reject: (n) => `Reject all ${n} hosts? They stay blocked and re-queue if hit again.`,
-    dismiss: (n) => `Dismiss all ${n} hosts? No verdict — the queue just clears; `
-      + 'a host that is hit again comes back.',
+    approve: (n) => `Allow all ${n} sites? Each goes on its project's always-allow list, `
+      + 'including the ⚑ flagged ones. Addresses that can never be allowed, like the Jav3 '
+      + 'host, are skipped.',
+    reject: (n) => `Deny all ${n} sites? They stay blocked and come back if a box asks again.`,
+    dismiss: (n) => `Clear all ${n} sites from this list? No decision is recorded; `
+      + 'a site a box asks for again comes back.',
   }
+  const BULK_LABEL = { approve: 'Allow all', reject: 'Deny all', dismiss: 'Clear list' }
   async function egressBulk(action) {
     if (!await ask.confirm(BULK_ASK[action](pending.length),
-                           { confirmLabel: `${action[0].toUpperCase()}${action.slice(1)} all`,
+                           { confirmLabel: BULK_LABEL[action],
                              danger: action !== 'dismiss' })) return
     setBusy(true)
     try {
-      await api('/api/egress/pending/bulk', {
+      const r = await api('/api/egress/pending/bulk', {
         method: 'POST',
         body: JSON.stringify({ action, project: slug || null }) })
+      if (r?.skipped) notify(`${r.skipped} skipped: they cannot be allowed`, { life: 8 })
       loadEgress()
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (e) { notifyError(e) }
     setBusy(false)
   }
-  async function ackAllAlerts() {
-    if (!await ask.confirm(`Acknowledge all ${alerts.length} alerts?`,
-                           { confirmLabel: 'Acknowledge all' })) return
+  // Agent reports (harness_fault) are a list of their own: the alerts' bulk
+  // acknowledge leaves them alone, and they have their own "Resolve all".
+  async function ackAllAlerts(only) {
+    const n = (only ? faults : secAlerts).length
+    if (!await ask.confirm(only ? `Mark all ${n} agent reports resolved?`
+                                : `Acknowledge all ${n} alerts?`,
+                           { confirmLabel: only ? 'Resolve all' : 'Acknowledge all' })) return
     setBusy(true)
     try {
-      await api('/api/security/events/ack_all', { method: 'POST' })
+      await api(`/api/security/events/ack_all?${only ? 'only' : 'exclude'}=harness_fault`,
+                { method: 'POST' })
       loadAlerts()
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (e) { notifyError(e) }
     setBusy(false)
   }
 
+  const faults = alerts.filter((a) => a.kind === 'harness_fault')
+  const secAlerts = alerts.filter((a) => a.kind !== 'harness_fault')
   const multi = !slug && (slugs?.length || 0) > 1
   const projLabel = (s) => names[s] || s
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
   const total = alerts.length + gitTotal + pending.length + svcReqs.length + pkgReqs.length
+    + asks.length
 
   if (!slugs) return <div className="dim center-pad">…</div>
 
@@ -331,61 +336,115 @@ export function ReviewQueue({ slug }) {
         </section>
       )}
 
-      {/* ---- egress host approvals ---- */}
-      {pending.length > 0 && (
+      {/* ---- questions in chats: answered there, listed here so the count matches ---- */}
+      {asks.length > 0 && (
         <section className="sbx-sec">
           <div className="sbx-sec-head">
-            <h3>Egress hosts</h3>
-            <span className="sec-count">{pending.length}</span>
-            <div className="sec-actions">
-              <button className="ghost" disabled={busy}
-                      title="add every host to the allowlist"
-                      onClick={() => egressBulk('approve')}>✓ Approve all</button>
-              <button className="ghost danger" disabled={busy}
-                      title="keep every host blocked"
-                      onClick={() => egressBulk('reject')}>✕ Reject all</button>
-              <button className="ghost" disabled={busy}
-                      title="clear the queue without a verdict"
-                      onClick={() => egressBulk('dismiss')}>Dismiss all</button>
-            </div>
+            <h3>Questions in chats</h3>
+            <span className="sec-count">{asks.length}</span>
           </div>
+          <p className="dim small net-lede">{ASKS_LEDE}</p>
           <ul className="staged-list rev-list">
-            {pending.map((p) => (
-              <li key={p.id}>
-                <span className="tag pending">{p.hit_count}×</span>
-                <span className="grow ellipsis" title={p.host}>{p.host}</span>
-                {p.triage_verdict === 'flag' && (
-                  <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
-                {!slug && p.project_slug && !needsProject(p) && <span className="tag">{p.project_slug}</span>}
-                {needsProject(p) && <span className="tag pending" title="pick the project on approve">unattributed</span>}
-                <button className="win-btn ok" title={needsProject(p) ? 'approve host for a project…' : 'approve host'}
-                        onClick={() => egressAct(p, 'approve')}>✓</button>
-                <button className="win-btn" title="reject host"
-                        onClick={() => egressAct(p, 'reject')}>✕</button>
+            {asks.map((k) => (
+              <li key={k.id} className="rev-egress">
+                <span className="tag pending">{askKindText(k.kind)}</span>
+                <span className="grow ellipsis" title={k.question}>{k.question}</span>
+                <span className="dim small">{askAge(k.age_s)}</span>
+                <Link className="small" to={`/c/${k.conversation_id}`}>
+                  Open chat #{k.conversation_id}</Link>
               </li>
             ))}
           </ul>
         </section>
       )}
 
+      {/* ---- egress host approvals ---- */}
+      {pending.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Sites boxes asked for</h3>
+            <span className="sec-count">{pending.length}</span>
+            <div className="sec-actions">
+              <button className="ghost" disabled={busy}
+                      title="put every site on its project's always-allow list"
+                      onClick={() => egressBulk('approve')}>Allow all</button>
+              <button className="ghost danger" disabled={busy}
+                      title="keep every site blocked"
+                      onClick={() => egressBulk('reject')}>Deny all</button>
+              <button className="ghost" disabled={busy}
+                      title="empty the list without deciding anything"
+                      onClick={() => egressBulk('dismiss')}>Clear list</button>
+            </div>
+          </div>
+          <p className="dim small net-lede">A box tried to reach these and no list covers them,
+            so they were blocked. "Allow always" adds the site to that project's always-allow
+            list for good; "Allow 1 h" lets it through for an hour and writes no list.</p>
+          <ul className="staged-list rev-list">
+            {pending.map((p) => (
+              <li key={p.id} className="rev-egress">
+                <span className="tag pending">{p.hit_count}×</span>
+                <span className="grow ellipsis" title={p.host}>{p.host}</span>
+                {p.refused && <span className="tag error" title={p.refused}>{REFUSED_TAG}</span>}
+                {p.triage_verdict === 'flag' && (
+                  <span className="tag triage-flag" title={p.triage_reason}>⚑ {p.triage_reason}</span>)}
+                {!slug && p.project_slug && !needsProject(p) && <span className="tag">{p.project_slug}</span>}
+                {needsProject(p) && <span className="tag pending" title="you pick the project when you allow it">no project</span>}
+                {p.refused && <span className="dim small net-refused">{p.refused}</span>}
+                <span className="rev-egress-btns">
+                  {!p.refused && <>
+                    <Button variant="ghost" title={ALLOW_ALWAYS_TIP(needsProject(p) ? '' : projLabel(p.project_slug))}
+                            onClick={() => egressAct(p, 'allow')}>Allow always</Button>
+                    <Button variant="ghost" title={ALLOW_ONCE_TIP}
+                            onClick={() => egressAct(p, 'once')}>Allow 1 h</Button></>}
+                  <Button variant="ghost" title={DENY_TIP} onClick={() => egressAct(p, 'deny')}>Deny</Button>
+                </span>
+              </li>
+            ))}
+          </ul>
+          {picker}
+        </section>
+      )}
+
       {/* ---- security alerts ---- */}
-      {alerts.length > 0 && (
+      {secAlerts.length > 0 && (
         <section className="sbx-sec">
           <div className="sbx-sec-head">
             <h3>Security alerts</h3>
-            <span className="sec-count">{alerts.length}</span>
+            <span className="sec-count">{secAlerts.length}</span>
             {/* ack_all is global — inside a single project's Workspace panel it
                 would silently clear other projects' alerts, so it stays off */}
             {!slug && (
               <div className="sec-actions">
                 <button className="ghost" disabled={busy}
-                        title="mark every alert as seen"
-                        onClick={ackAllAlerts}>Acknowledge all</button>
+                        title="mark every alert as seen (agent reports stay)"
+                        onClick={() => ackAllAlerts(false)}>Acknowledge all</button>
               </div>
             )}
           </div>
-          {alerts.map((a) => (
+          {secAlerts.map((a) => (
             <AlertRow key={a.id} a={a} onAck={ackAlert}
+                      onOpen={() => setBoard({ id: a.id, seed: a })} />
+          ))}
+        </section>
+      )}
+
+      {/* ---- what agents reported about Jav3's own tools: not security alerts ---- */}
+      {faults.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Agent reports</h3>
+            <span className="sec-count">{faults.length}</span>
+            {!slug && (
+              <div className="sec-actions">
+                <button className="ghost" disabled={busy}
+                        title="mark every agent report resolved"
+                        onClick={() => ackAllAlerts(true)}>Resolve all</button>
+              </div>
+            )}
+          </div>
+          <p className="dim small net-lede">{FAULTS_LEDE}</p>
+          {faults.map((a) => (
+            <FaultRow key={a.id} a={a} onAck={ackAlert}
                       onOpen={() => setBoard({ id: a.id, seed: a })} />
           ))}
         </section>
@@ -445,6 +504,37 @@ function AlertRow({ a, onAck, onOpen }) {
   )
 }
 
+// One agent report: which tool, which chat, what went wrong. The chat link is
+// the point (a report with no way back to the turn that hit it is a riddle);
+// "Mark resolved" is the honest name for what the button does.
+function FaultRow({ a, onAck, onOpen }) {
+  const d = a.detail && typeof a.detail === 'object' ? a.detail : {}
+  return (
+    <div className="sbx-row sev-info">
+      <div className="grow rev-alert-main">
+        <div className="sbx-verdict-top rev-alert-top">
+          {d.tool && <span className="tag mono">{d.tool}</span>}
+          {a.project_slug && <span className="tag">{a.project_slug}</span>}
+          {d.conversation_id && (
+            <Link className="small" to={`/c/${d.conversation_id}`}
+                  title="open the chat where this happened">chat #{d.conversation_id}</Link>)}
+          <span className="dim small">{ts(a.created_at)}</span>
+        </div>
+        <button type="button" className="rev-alert-open" onClick={onOpen}
+                title="the whole report">
+          <span className="rev-alert-summary">{faultText(a.summary, d.tool)}</span>
+        </button>
+      </div>
+      <div className="sbx-right">
+        <button className="ghost" onClick={onOpen}>Inspect</button>
+        <button className="ghost" onClick={() => onAck(a.id)}
+                title="You have dealt with it, or noted the bug. It leaves this list.">
+          Mark resolved</button>
+      </div>
+    </div>
+  )
+}
+
 // ---- the shell ----
 // Security (the page once called Review) is a layout route (routes.jsx): this
 // is the <h1> and the tab strip, and the tabs are real URLs — /security,
@@ -462,19 +552,24 @@ function AlertRow({ a, onAck, onOpen }) {
 // scrolls. No tab paints a heading of its own.
 export default function Review() {
   const count = useContext(PendingCountContext)
+  const { pathname } = useLocation()
   return (
     <Page variant="fill" title="Security" className="review-shell"
           actions={(
-            <Tabs label="Security sections" items={[
+            <ScrollHint><Tabs label="Security sections" items={[
               { to: '/security', end: true, label: 'Queue', count },
               { to: '/security/persistent', label: 'Persistent' },
               { to: '/security/network', label: 'Network' },
               { to: '/security/profiles', label: 'Profiles' },
               { to: '/security/logs', label: 'Logs' },
               { to: '/security/secrets', label: 'Secrets' },
-            ]} />
+            ]} /></ScrollHint>
           )}>
-      <div className="review-body"><Outlet /></div>
+      <div className="review-body">
+        {/* one line on what this tab is, in the tab's own column */}
+        {ledeFor(SECURITY_LEDES, pathname) && <p className="tab-lede dim">{ledeFor(SECURITY_LEDES, pathname)}</p>}
+        <Outlet />
+      </div>
     </Page>
   )
 }
@@ -483,6 +578,7 @@ export default function Review() {
 export function ReviewHome() {
   return (
     <div className="review-page">
+      <Posture />
       <TriagePanel />
       <ReviewQueue />
     </div>

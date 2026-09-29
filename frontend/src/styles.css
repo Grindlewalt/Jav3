@@ -4198,3 +4198,62 @@ a:has(> .nav-dot) { position: relative; }
 .plan-progress { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .plan-failed { color: var(--red); }
 .plan-item.running { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Security pages: plain-language pass (backlog B5, WEB-02..23) */
+.net-lede { margin: 0 0 var(--sp-4); max-width: 80ch; }
+.net-wait { flex-wrap: wrap; row-gap: var(--sp-3); }
+.net-wait-meta { flex: 1 1 220px; }
+.net-refused { flex: 1 1 100%; }
+.rev-egress { flex-wrap: wrap; row-gap: var(--sp-3); }
+.rev-egress-btns { display: flex; gap: var(--sp-3); flex-shrink: 0; }
+.rev-egress-btns button { padding: 4px 12px; font-size: var(--fs-md); }
+.sbd-more { margin-top: var(--sp-3); }
+.bx-legend-fold { margin: 0 0 var(--sp-5); }
+.bx-legend-fold summary { cursor: pointer; }
+.bx-legend-list { margin: var(--sp-3) 0 0; display: grid; gap: var(--sp-2) var(--sp-6); grid-template-columns: max-content minmax(0, 1fr); }
+.bx-legend-list div { display: contents; }
+.bx-legend-list dt { color: var(--text); }
+.bx-legend-list dd { margin: 0; color: var(--dim); }
+.allowed-procs { margin: 0 0 var(--sp-5); }
+.allowed-procs > summary { cursor: pointer; color: var(--dim); }
+.review-body > .tab-lede { margin: 0 auto var(--sp-6); flex-shrink: 0; font-size: var(--fs-md); }
+.sbd-table td:last-child { white-space: nowrap; }
+.triage-lede { margin: 0 0 var(--sp-3); max-width: 80ch; }
+.voice-mic-err { max-width: 46ch; line-height: 1.5; }
+.perm-mode.yolo { color: var(--amber); }
+@media (max-width: 640px) { .perm-mode { max-width: 11em; text-overflow: ellipsis; } }
+.bx-seg.loose { background-image: repeating-linear-gradient(135deg, transparent 0 4px, rgba(0, 0, 0, 0.35) 4px 7px); }
+.bx-warn-details { margin-top: var(--sp-3); }
+.bx-warn-details > summary { cursor: pointer; }
+.posture { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-7); margin: 0 0 var(--sp-6); font-size: var(--fs-md); }
+.posture-item { color: var(--text); text-decoration: none; }
+.posture-item:hover b { text-decoration: underline; }
+.posture-item.warn b { color: var(--amber); }
+/* the scrolling Security tab strip: a fade and an arrow on the side with more (WEB-18) */
+.scroll-hint { position: relative; min-width: 0; max-width: 100%; align-self: center; display: flex; }
+.scroll-hint > .tabs { flex: 1 1 auto; }
+.scroll-hint::before, .scroll-hint::after { content: ''; position: absolute; top: 1px; bottom: 1px;
+  width: 30px; pointer-events: none; opacity: 0; transition: opacity 0.15s;
+  display: flex; align-items: center; color: var(--dim); font-size: var(--fs-lg); }
+.scroll-hint::before { content: '\2039'; left: 1px; justify-content: flex-start; padding-left: 8px;
+  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+  background: linear-gradient(to right, var(--bg-soft) 35%, transparent); }
+.scroll-hint::after { content: '\203A'; right: 1px; justify-content: flex-end; padding-right: 8px;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  background: linear-gradient(to left, var(--bg-soft) 35%, transparent); }
+.scroll-hint.more-left::before, .scroll-hint.more-right::after { opacity: 1; }
+@media (max-width: 640px) {
+  .page-shell > .page-head > .scroll-hint { flex: 1 1 100%; }
+}
+/* below 1100px the boxes table has no header row: each cell carries its own label (WEB-18) */
+@media (max-width: 1100px) {
+  .bx-glance .bx-tr > [data-label]::before { content: attr(data-label); display: block;
+    margin-bottom: 2px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--dim); }
+}
+.builtin-list { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.builtin-list li { display: block; }
+.builtin-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); }
+.builtin-desc { margin-top: var(--sp-2); }
+.builtin-why { margin-top: var(--sp-2); color: var(--amber); }
+.logs-new { margin: 0 0 var(--sp-3); width: 100%; }

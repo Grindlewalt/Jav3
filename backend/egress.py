@@ -219,6 +219,41 @@ async def get_policy(db: aiosqlite.Connection, slug: str | None) -> dict:
 # deny list, cut) is a standing decision the guesser must never second-guess.
 NOT_LISTED = "host not on the allowlist (queued for approval)"
 
+# A host that no allowlist entry can ever open. The proxy denies these without
+# queueing them, and an old queued row (or a bulk approve) refuses them, so the
+# queue never offers an Allow that would do nothing (WEB-08: the box gateway
+# 10.201.0.1 sat in "Waiting for you" beside pypi.org).
+HOST_REFUSED = "that is the Jav3 host itself: boxes are never let through to it"
+PRIVATE_REFUSED = ("a private or reserved address: boxes reach the LAN only through "
+                   "the project's LAN access, so an allowlist entry would do nothing")
+
+
+def unreachable_reason(host: str) -> str | None:
+    """Why this host can never be allowed from a box, or None for a normal
+    site. Only IPv4 literals qualify (a name is judged by the allowlist as
+    ever), and the ranges are the ones LAN access itself refuses or accepts
+    (backend/lanaccess.py): the host's own addresses, loopback and the box
+    network get the first message; other private and reserved ones the second."""
+    import ipaddress
+    from . import lanaccess
+    h = _norm(host).strip("[]")
+    try:
+        a = ipaddress.ip_address(h)
+    except ValueError:
+        return None
+    if a.is_loopback:
+        return HOST_REFUSED
+    if a.version == 6:
+        if a.ipv4_mapped is None:
+            return None
+        a = a.ipv4_mapped
+    if (a in lanaccess.BOX_NET or a.is_loopback or str(a) in lanaccess.host_ips()
+            or any(a in n for n in lanaccess._host_nets())):
+        return HOST_REFUSED
+    if any(a in n for n, _ in lanaccess.FORBIDDEN_NETS) or any(a in n for n in lanaccess.RFC1918):
+        return PRIVATE_REFUSED
+    return None
+
 
 async def decide(db: aiosqlite.Connection, slug: str | None, host: str) -> tuple[str, str]:
     """(verdict, reason) for one host. verdict in {allow, deny, cut}.
@@ -325,17 +360,21 @@ async def auto_allows_today(db: aiosqlite.Connection, slug: str) -> int:
     so revoking does not refill the cap."""
     async with db.execute(
             "SELECT COUNT(*) AS n FROM egress_auto_allow WHERE project_slug = ? "
-            "AND created_at > datetime('now', '-1 day')", (slug,)) as cur:
+            "AND rule != 'once' AND created_at > datetime('now', '-1 day')", (slug,)) as cur:
         return (await cur.fetchone())["n"]
 
 
+ONCE_HOURS = 1     # "Allow once": how long the operator's one-off allow lasts
+
+
 async def add_auto(db: aiosqlite.Connection, slug: str, host: str, *, rule: str,
-                   reason: str) -> dict:
-    days = max(1, int(settings.egress_auto_ttl_days))
+                   reason: str, hours: int | None = None) -> dict:
+    span = (f"+{int(hours)} hours" if hours
+            else f"+{max(1, int(settings.egress_auto_ttl_days))} days")
     cur = await db.execute(
         "INSERT INTO egress_auto_allow(project_slug, host, rule, reason, expires_at) "
         "VALUES (?, ?, ?, ?, datetime('now', ?))",
-        (slug, host.lower(), rule, reason, f"+{days} days"))
+        (slug, host.lower(), rule, reason, span))
     await db.commit()
     async with db.execute("SELECT expires_at FROM egress_auto_allow WHERE id = ?",
                           (cur.lastrowid,)) as c:
@@ -648,6 +687,9 @@ async def approve_host(db: aiosqlite.Connection, pending_id: int,
     if r is None:
         return {"ok": False, "error": "no such pending host"}
     slug = r["project_slug"]
+    why = unreachable_reason(r["host"])
+    if why:
+        return {"ok": False, "error": f"{r['host']} cannot be allowed: {why}"}
     if is_unattributed(slug):
         if is_unattributed(project):
             return {"ok": False, "error": UNATTRIBUTED, "needs_project": True}
@@ -659,6 +701,38 @@ async def approve_host(db: aiosqlite.Connection, pending_id: int,
     if r["status"] != "approved":
         await note_approved(db, slug, r["host"], by)
     return {"ok": True, "host": r["host"], "added_to": target}
+
+
+async def approve_host_once(db: aiosqlite.Connection, pending_id: int,
+                            project: str | None = None) -> dict:
+    """Let a queued host through for ONCE_HOURS without touching any list: a
+    time-boxed, exact-host entry for the one project (the auto-allow table, rule
+    'once'). The queue row is dismissed rather than approved, so the host comes
+    back here when the hour is up and it is hit again."""
+    async with db.execute("SELECT project_slug, host FROM egress_pending WHERE id = ?",
+                          (pending_id,)) as cur:
+        r = await cur.fetchone()
+    if r is None:
+        return {"ok": False, "error": "no such pending host"}
+    why = unreachable_reason(r["host"])
+    if why:
+        return {"ok": False, "error": f"{r['host']} cannot be allowed: {why}"}
+    slug = r["project_slug"]
+    if is_unattributed(slug):
+        if is_unattributed(project):
+            return {"ok": False, "error": UNATTRIBUTED, "needs_project": True}
+        slug = project
+    if is_reserved(slug):
+        return {"ok": False, "error": RESERVED}
+    got = await add_auto(db, slug, r["host"], rule="once", hours=ONCE_HOURS,
+                         reason=f"you allowed it once, for {ONCE_HOURS} hour")
+    await db.execute("UPDATE egress_pending SET status='dismissed', "
+                     "decided_at=datetime('now'), auto_verdict=NULL WHERE id = ?",
+                     (pending_id,))
+    await db.commit()
+    await record_event(db, slug=slug, host=r["host"], verdict="approved",
+                       reason=f"allowed once by you, until {got['expires_at']} UTC")
+    return {"ok": True, "host": r["host"], "until": got["expires_at"], "project": slug}
 
 
 async def reject_host(db: aiosqlite.Connection, pending_id: int) -> dict:
@@ -685,7 +759,7 @@ async def bulk_pending(db: aiosqlite.Connection, action: str,
     if action == "approve":
         keep = []
         for r in rows:
-            if is_unattributed(r["project_slug"]):
+            if is_unattributed(r["project_slug"]) or unreachable_reason(r["host"]):
                 skipped += 1
                 continue
             await _append_host(db, r["project_slug"], r["host"])
@@ -715,7 +789,10 @@ async def list_pending(db: aiosqlite.Connection, slug: str | None = None) -> lis
     # reviewer-flagged hosts first — those are the ones actually waiting on a human
     q += " ORDER BY (triage_verdict = 'flag') DESC, last_seen DESC"
     async with db.execute(q, args) as cur:
-        return [dict(r) for r in await cur.fetchall()]
+        rows = [dict(r) for r in await cur.fetchall()]
+    for r in rows:
+        r["refused"] = unreachable_reason(r["host"])
+    return rows
 
 
 async def set_lists(db: aiosqlite.Connection, slug: str, *, allow: list[str] | None = None,

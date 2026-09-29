@@ -10,7 +10,7 @@ import Player from './Player.jsx'
 import AppRoutes from './routes.jsx'
 import {
   MoreIcon, NAV_ITEMS, NavIcon, NavItem, NavList, NavSlotContext, OVERFLOW_ITEMS,
-  PRIMARY_ITEMS,
+  PRIMARY_ITEMS, useTabTitle,
 } from './nav.jsx'
 import { AuthContext } from './auth.jsx'
 import Menu from './components/Menu.jsx'
@@ -212,6 +212,7 @@ export default function App() {
 
   // toasts + the pending count that lives on the Review nav link
   const notices = useNotices(!!user)
+  useTabTitle(location.pathname, notices.count)
   const vmDot = useVmDot(!!user)
 
   // close both menus whenever the route changes

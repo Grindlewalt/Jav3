@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Modal, Tag } from '../components/index.js'
 import { missing } from './http.js'
+import { dockerLead } from '../securityCopy.js'
 
 // Load a thing, poll it, and tell "the backend has no such route yet"
 // (`unavailable`) apart from an ordinary failure (`error`).
@@ -87,12 +88,16 @@ export function RuntimeStatus({ runtimes, compact = false }) {
       </div>
       {docker.available && (docker.weak || docker.warnings.length > 0) && (
         <div className="bx-warn-box">
-          {docker.weak && <span className="warn"><b>Weak isolation</b> — a docker box would run
-            without a user namespace.</span>}
-          {docker.warnings.length > 0 && (
-            <ul className="bx-warnings">
-              {docker.warnings.map((w, i) => <li key={i} className="warn">{w}</li>)}
-            </ul>)}
+          <span className="warn">{dockerLead(docker)}</span>
+          <details className="bx-warn-details">
+            <summary className="dim">Details</summary>
+            {docker.weak && <div className="warn"><b>Weak isolation</b>: a docker box would run
+              without a user namespace.</div>}
+            {docker.warnings.length > 0 && (
+              <ul className="bx-warnings">
+                {docker.warnings.map((w, i) => <li key={i} className="warn">{w}</li>)}
+              </ul>)}
+          </details>
         </div>
       )}
     </div>

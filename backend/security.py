@@ -227,10 +227,20 @@ async def acknowledge(db: aiosqlite.Connection, event_id: int) -> dict:
     return {"ok": True}
 
 
-async def acknowledge_all(db: aiosqlite.Connection) -> dict:
-    """Operator bulk-clear — the queue reached hundreds in practice."""
+async def acknowledge_all(db: aiosqlite.Connection, *, only: str | None = None,
+                          exclude: str | None = None) -> dict:
+    """Operator bulk-clear — the queue reached hundreds in practice. `only` /
+    `exclude` name one kind: the Queue keeps agent reports (harness_fault) in
+    a list of their own, cleared apart from the alerts."""
+    where, args = "acknowledged=0", []
+    if only:
+        where += " AND kind = ?"
+        args.append(only)
+    if exclude:
+        where += " AND kind != ?"
+        args.append(exclude)
     cur = await db.execute("UPDATE security_events SET acknowledged=1, "
-                           "acknowledged_at=datetime('now') WHERE acknowledged=0")
+                           f"acknowledged_at=datetime('now') WHERE {where}", args)
     await db.commit()
     return {"ok": True, "done": cur.rowcount}
 
@@ -280,9 +290,11 @@ async def record_harness_fault(db: aiosqlite.Connection, *, tried: str,
     await db.commit()
     fault_id = cur.lastrowid
     head = (tool + ": " if tool else "") + went_wrong
+    if len(head) > 160:                 # the whole text is in the detail (the board shows it)
+        head = head[:159].rstrip() + "…"
     await raise_event(
         db, kind="harness_fault", severity="info",
-        project=project, summary=f"Harness fault reported: {head[:160]}",
+        project=project, summary=f"Harness fault reported: {head}",
         detail={"fault_id": fault_id, "conversation_id": conversation_id,
                 "tool": tool, "tried": tried, "went_wrong": went_wrong,
                 "expected": expected, "severity": severity})

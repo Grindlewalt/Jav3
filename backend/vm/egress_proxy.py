@@ -293,6 +293,11 @@ async def _authorize_target(host: str, port: str | None = None,
         lan = await _lan_verdict(db, slug, host, port, att)
         if lan is not None:
             return lan
+        # an address no allowlist entry can open (the box gateway, loopback, a
+        # LAN address without LAN access): denied outright, never queued
+        why = egress.unreachable_reason(host)
+        if why:
+            return "deny", f"refused: {why}", None
         if att["kind"] == "service":
             # deny-by-default on the approved service's hosts; never auto mode
             verdict, reason = await egress.decide_service(db, att["project"],

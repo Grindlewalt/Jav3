@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, EmptyState, Input, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import {
-  assignProfile, createProfile, deleteProfile, listProfiles, makeDefaultProfile, secretNames,
+  assignProfile, createProfile, deleteProfile, listProfiles, makeDefaultProfile, secretChoices,
   updateProfile,
 } from '../boxes/api/profiles.js'
 import { listImages } from '../boxes/api/images.js'
@@ -14,6 +14,7 @@ import {
   profilePayload, RUNS_IN, runsIn, runsInText, validateProfile, withNetworkMode, withRunsIn,
 } from '../boxes/logic.js'
 import { LoadError, ProjectList, RuntimeStatus, Unavailable, useLoad } from '../boxes/ui.jsx'
+import { secretChecklist } from '../securityCopy.js'
 
 // Security > Profiles: a project's whole security posture in one named row —
 // which secrets it may have, how its egress is judged, whether its alerts are
@@ -45,7 +46,7 @@ export default function Profiles() {
   const ask = useAsk()
 
   useEffect(() => {
-    secretNames().then(setSecrets).catch(() => {})
+    secretChoices().then(setSecrets).catch(() => {})
     listImages().then((r) => { if (r.variants.length) setVariants(r.variants.map((v) => v.name)) })
       .catch(() => {})
     listProjects().then((ps) => setProjects(assignableProjects(ps))).catch(() => {})
@@ -92,12 +93,16 @@ export default function Profiles() {
                 <span className="small">
                   New sites: {newSitesText(p)}
                   {' · '}{(p.allow_hosts || []).length} always allowed
-                  {' · '}{(p.deny_hosts || []).length} blocked
+                  {' · '}{(p.deny_hosts || []).length} always blocked
                 </span>
                 <span className="small">
                   Secrets: {(p.secrets || []).length ? p.secrets.join(', ') : 'none'}
-                  {' · '}Default for its projects: {runsInText(p)}
-                  {p.auto_handle ? ' · auto-handles alerts' : ''}
+                  {' · '}<span title="where the project's boxes run unless the project picks its own under Network, Runs in">
+                    Runs in: {runsInText(p)}</span>
+                </span>
+                <span className="small">
+                  Auto review: {p.auto_handle
+                    ? 'may handle its alerts and site requests' : 'leaves everything to you'}
                 </span>
                 <span className="dim small">used by: <ProjectList slugs={p.projects} empty="no project" /></span>
                 {deleteBlock(p) && <span className="dim small">cannot delete: {deleteBlock(p)}</span>}
@@ -141,6 +146,14 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
   const [busy, setBusy] = useState(false)
   const [tried, setTried] = useState(false)
   const isNew = initial.id == null
+  const formRef = useRef(null)
+  // the form opens below the list (and the Projects section): bring it up, or
+  // Edit / Duplicate / New look like dead buttons on a tall page (WEB-05).
+  // Keyed on `initial`, which is a new object per click, so a second click on
+  // the same profile scrolls back to it too.
+  useEffect(() => {
+    formRef.current?.scrollIntoView({ block: 'start' })
+  }, [initial])
   const set = (k, v) => setP((x) => ({ ...x, [k]: v }))
   const patch = (o) => setP((x) => ({ ...x, ...o }))
   const full = { ...p, allow_hosts: parseHosts(allowText), deny_hosts: parseHosts(denyText) }
@@ -148,8 +161,12 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
   const ok = Object.keys(errs).length === 0
   const show = (k) => (tried || k === 'hosts' ? errs[k] : null)
   // secret names known to the server, plus any the profile names that were
-  // since deleted (so they can be seen and unticked)
-  const secretList = [...new Set([...secrets, ...(p.secrets || [])])].sort()
+  // since deleted (so they can be seen and unticked). Infrastructure secrets
+  // (the Cloudflare Access token, Jav3's own credentials) stay out of the list
+  // until asked for, unless this profile already holds one (WEB-20).
+  const [showInfra, setShowInfra] = useState(false)
+  const held = p.secrets || []
+  const { list: secretList, infra, hidden: hiddenInfra } = secretChecklist(secrets, held, showInfra)
   const net = networkMode(p)
   const where = runsIn(p)
 
@@ -180,7 +197,7 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
   }
 
   return (
-    <form className="sbx-card bx-form bx-prof-form" onSubmit={save}>
+    <form ref={formRef} className="sbx-card bx-form bx-prof-form" onSubmit={save}>
       <div className="sbx-sec-head">
         <h3>{isNew ? 'New profile' : `Edit ${initial.name}`}{initial.is_default ? ' (the default)' : ''}</h3>
       </div>
@@ -209,18 +226,30 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
         {show('hosts') && <span className="error small">{errs.hosts}</span>}
 
         <div className="field">
-          <span>Secrets it can have <span className="dim small">(names only — values never leave the host)</span></span>
+          <span>Secrets it can have <span className="dim small">(names only, values never
+            leave the host; a granted secret is added to requests this profile's boxes send
+            to the sites the secret is bound to)</span></span>
           {secretList.length === 0 && <span className="dim small">no secrets stored</span>}
           <div className="bx-checks">
             {secretList.map((s) => (
               <label key={s} className="check-row">
-                <input type="checkbox" checked={(p.secrets || []).includes(s)}
+                <input type="checkbox" checked={held.includes(s)}
                        onChange={(e) => set('secrets', e.target.checked
-                         ? [...(p.secrets || []), s] : (p.secrets || []).filter((x) => x !== s))} />
+                         ? [...held, s] : held.filter((x) => x !== s))} />
                 <span className="mono small">{s}</span>
+                {infra.has(s) && (
+                  <Tag tone="pending" title="opens Jav3's own infrastructure, not a third-party service">
+                    infrastructure</Tag>)}
               </label>
             ))}
           </div>
+          {(hiddenInfra > 0 || showInfra) && (
+            <label className="check-row small">
+              <input type="checkbox" checked={showInfra}
+                     onChange={(e) => setShowInfra(e.target.checked)} />
+              <span className="dim">Also show infrastructure secrets{hiddenInfra > 0 ? ` (${hiddenInfra} hidden)` : ''}:
+                the Cloudflare Access token and Jav3's own credentials. A project rarely needs them.</span>
+            </label>)}
         </div>
 
         <div className="field">
@@ -285,10 +314,10 @@ function ProfileForm({ initial, secrets, variants, runtimes, budget, names, onCa
           </label>
           <label className="check-row">
             <input type="checkbox" checked={!!p.auto_handle} onChange={(e) => set('auto_handle', e.target.checked)} />
-            <span>Auto-handle alerts</span>
+            <span>Let Auto review handle this profile's alerts and site requests</span>
           </label>
           <details className="field-hint">
-            <summary>which alerts are never auto-handled</summary>
+            <summary>which alerts Auto review never handles</summary>
             {NEVER_AUTO}
           </details>
         </div>

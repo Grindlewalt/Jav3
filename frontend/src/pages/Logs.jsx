@@ -4,6 +4,7 @@ import Md from '../Md.jsx'
 import { ago, human, ts } from '../format.js'
 import { notify, notifyError } from '../notify.js'
 import { Button, EmptyState, Select, Tabs, Toggle } from '../components/index.js'
+import { mergeConvos } from '../logsList.js'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
 // message and every tool call with its args and result — plus the numbers that
@@ -327,16 +328,31 @@ export default function Logs() {
   const [view, setView] = useState('logs')   // 'logs' | 'cost'
   const selectedRef = useRef(null)
   const inFlight = useRef(false)
+  const shownRef = useRef(null)            // the list on screen, for the merge below
+  const latestRef = useRef(null)           // the server's newest list, behind the pill
+  const [fresh, setFresh] = useState(0)    // conversations that appeared since, not yet shown
 
-  // one request at a time: a tick that finds the last one still out skips,
-  // and a hidden tab does not ask at all
+  // one request at a time: a tick that finds the last one still out skips.
+  // A hidden tab does not POLL, but its first load still runs (it used to stay
+  // on "loading…" until the tab was shown and the next tick came round), and
+  // becoming visible refreshes at once (WEB-22).
   const refresh = () => {
-    if (inFlight.current || document.hidden) return
+    if (inFlight.current || (document.hidden && shownRef.current !== null)) return
     inFlight.current = true
     api('/api/logs/conversations')
-      .then((r) => setConvos(r.conversations || []))
+      .then((r) => {
+        const m = mergeConvos(shownRef.current, r.conversations || [])
+        latestRef.current = r.conversations || []
+        shownRef.current = m.list
+        setConvos(m.list); setFresh(m.newCount)
+      })
       .catch(() => setConvos((c) => c ?? []))
       .finally(() => { inFlight.current = false })
+  }
+  // new conversations are counted behind a pill, not slid in under the pointer
+  const showFresh = () => {
+    shownRef.current = latestRef.current
+    setConvos(latestRef.current); setFresh(0)
   }
 
   // only the transcripts view shows the list, so only it polls
@@ -344,7 +360,9 @@ export default function Logs() {
     if (view !== 'logs') return undefined
     refresh()
     const t = setInterval(refresh, POLL_MS)
-    return () => clearInterval(t)
+    const onShow = () => { if (!document.hidden) refresh() }
+    document.addEventListener('visibilitychange', onShow)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onShow) }
   }, [view]) // eslint-disable-line
 
   function open(id) {
@@ -384,6 +402,9 @@ export default function Logs() {
       ) : (
         <div className="split-layout logs-split" id="logs-panel" role="tabpanel">
           <aside className="logs-aside">
+            {fresh > 0 && (
+              <button type="button" className="ghost small logs-new" onClick={showFresh}>
+                {fresh} new conversation{fresh === 1 ? '' : 's'}: show</button>)}
             <ul className="file-list">
               {(convos || []).map((c) => {
                 const { title, tag } = cleanTitle(c.summary, c.id)

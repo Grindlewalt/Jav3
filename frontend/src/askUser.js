@@ -11,6 +11,20 @@ export const MODE_HINT = {
   auto: 'a cheap judge reviews each write/run; risky ones ask you',
   ask: 'every write/run asks you first',
 }
+// What the picker shows. The bare word says nothing to someone who has not read
+// the docs, and this is the most important switch in the product: the meaning
+// sits in the option, not only in a tooltip (WEB-15). The mode is still the
+// first word, so a keyboard user typing "a" still lands on auto.
+export const MODE_LABEL = {
+  yolo: 'yolo: runs without asking',
+  auto: 'auto: a judge checks, risky asks you',
+  ask: 'ask: asks before every write or run',
+}
+
+// A new chat starts in the mode you last picked on this browser, else yolo (the
+// server's own default): a choice you made is not thrown away, and the picker
+// always shows the mode and what it means.
+export const initialMode = (stored) => (PERMISSION_MODES.includes(stored) ? stored : 'yolo')
 
 export function nextMode(mode) {
   const i = PERMISSION_MODES.indexOf(mode)

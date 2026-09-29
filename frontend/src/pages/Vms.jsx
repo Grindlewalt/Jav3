@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
 import { Button, EmptyState, Input, Modal, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import {
+  NEEDS_BUILD_WHY, VMS_LEDES, dockerMemoryUnlimited, ledeFor, plural, ramLabel, variantBuilds,
+  variantSource,
+} from '../securityCopy.js'
 import { ago, ts } from '../format.js'
 import {
   boxEvents, cleanLeftovers, destroyBox, followBoxes, listBoxes, listLeftovers, nukeShared,
@@ -39,6 +43,7 @@ import {
 
 
 export default function Vms() {
+  const { pathname } = useLocation()
   return (
     <Page variant="fill" title="VMs" className="review-shell"
           actions={(
@@ -48,7 +53,11 @@ export default function Vms() {
               { to: '/vms/catalogue', label: 'Catalogue' },
             ]} />
           )}>
-      <div className="review-body"><Outlet /></div>
+      <div className="review-body">
+        {/* one line on what this tab is, in the tab's own column */}
+        {ledeFor(VMS_LEDES, pathname) && <p className="tab-lede dim">{ledeFor(VMS_LEDES, pathname)}</p>}
+        <Outlet />
+      </div>
     </Page>
   )
 }
@@ -70,6 +79,8 @@ export function Boxes() {
   const [histTick, setHistTick] = useState(0)
 
   const boxes = useMemo(() => sortBoxes(data?.boxes), [data])
+  // a Docker box's RAM figure is a request the kernel may not honour (WEB-11)
+  const noLimit = dockerMemoryUnlimited(data?.runtimes)
   const reloadLeft = left.reload
   // box_up / box_down / box_event on the shared stream: refetch (the poll is
   // the fallback); a history event also refreshes the open history
@@ -86,7 +97,7 @@ export function Boxes() {
       else if (verb === 'destroy') await destroyBox(box.id, flag)
       else if (verb === 'nuke') {
         if (box.inflight > 0) {
-          notify(`${box.inflight} turn(s) in flight — wait for them to finish before nuking.`)
+          notify(`${plural(box.inflight, 'turn')} in flight: wait for ${box.inflight === 1 ? 'it' : 'them'} to finish before nuking.`)
           return
         }
         const s = await nukeShared()
@@ -113,7 +124,7 @@ export function Boxes() {
           (<code>vm_boxes_enabled</code>): every project runs in the one shared box.</div>
       )}
 
-      <Budget data={data} />
+      <Budget data={data} noLimit={noLimit} />
       {data && !data.legacy && <RuntimeStatus runtimes={data.runtimes} />}
       {data?.idle && <div className="dim small bx-idle-policy">{idlePolicy(data.idle, data.enabled)}</div>}
 
@@ -137,6 +148,7 @@ export function Boxes() {
           )}
           {boxes.map((b) => (
             <BoxRow key={b.id} b={b} legacy={data?.legacy} open={open === b.id}
+                    unlimited={noLimit && b.runtime === 'docker'}
                     histTick={histTick}
                     onToggle={() => setOpen((o) => (o === b.id ? null : b.id))}
                     onVerb={(verb) => setDlg({ verb, box: b })} />
@@ -172,7 +184,7 @@ const STOPS_OTHER = { service: 'stays up (its services)', builder: 'when the bui
 // One box: where it runs, what it is doing, when the reaper acts on it, what
 // it costs, and its actions. Agent-supplied strings (titles, tool arguments,
 // errors) are text nodes.
-function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
+function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
   const up = b.state === 'running'
   const word = activityWord(b)
   const turns = doingNow(b)
@@ -195,7 +207,7 @@ function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
             {b.last_error && <span className="error small bx-row-err">{b.last_error}</span>}
           </span>
         </span>
-        <span role="cell" className="bx-now small">
+        <span role="cell" className="bx-now small" data-label="Doing now">
           {turns.length > 0 ? turns.map((t) => (
             <span key={t.key} className="bx-turn">
               <span><b>{t.head}</b>{t.title ? ` ${t.title}` : ''}
@@ -206,7 +218,7 @@ function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
             </span>
           )) : (
             <span className={word === 'failed' ? 'error' : 'dim'}>
-              {word === 'busy' ? `${b.inflight} turn(s)` : word}
+              {word === 'busy' ? plural(b.inflight, 'turn') : word}
               {!up && last && (
                 <span title={last.reason || undefined}>
                   {' · '}{eventWord(last)} {localTime(last.created_at)}
@@ -214,7 +226,7 @@ function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
             </span>
           )}
         </span>
-        <span role="cell" className="small">
+        <span role="cell" className="small" data-label="Stops">
           {timer
             ? <span className={timer.tone === 'pending' ? 'warn' : ''} title={timer.title}>{timer.text}</span>
             : up && b.stop_after_s && b.inflight > 0
@@ -222,15 +234,18 @@ function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
                   {b.stop_action === 'scrub' ? 'scrub' : 'stop'} after {mins(b.stop_after_s)} idle</span>
               : <span className="dim">{up ? (STOPS_OTHER[b.kind] || '–') : '–'}</span>}
         </span>
-        <span role="cell"><RuntimeTag runtime={b.runtime} /></span>
-        <span role="cell" className="small">
+        <span role="cell" data-label="Runtime"><RuntimeTag runtime={b.runtime} /></span>
+        <span role="cell" className="small" data-label="Image · RAM · CPU">
           <span className="mono">{b.image?.variant || 'main'}{b.image?.version ? ` v${String(b.image.version).replace(/^v/, '')}` : ''}</span>
-          <span className="dim"> · {mb(b.mem_mb)}</span>
+          <span className="dim" title={unlimited
+            ? 'the kernel on this machine ignores Docker memory limits, so this box can use all of the RAM'
+            : undefined}> · {ramLabel(mb(b.mem_mb), unlimited)}</span>
           {b.rss_bytes != null && <span className="dim"> ({bytes(b.rss_bytes)} used)</span>}
           {b.cpu_pct != null && <span className="dim"> · {b.cpu_pct}%</span>}
           {b.restart_needed && <Tag tone="pending" title="a newer image is waiting for its next boot">restart to update</Tag>}
         </span>
-        <span role="cell" className="small" title={b.started_at ? `since ${localTime(b.started_at)}` : undefined}>
+        <span role="cell" className="small" data-label="Up"
+              title={b.started_at ? `since ${localTime(b.started_at)}` : undefined}>
           {up ? uptime(b.uptime_s) : '–'}</span>
         <span role="cell" className="bx-actions">
           {up
@@ -344,7 +359,7 @@ function Leftovers({ data, error, onDone, onRefresh }) {
   )
 }
 
-function Budget({ data }) {
+function Budget({ data, noLimit }) {
   const b = data?.budget
   if (!data) return null
   const cap = b?.ram_mb_cap || 0
@@ -370,11 +385,16 @@ function Budget({ data }) {
       </div>
       <div className="bx-bar" role="img"
            aria-label={`${used} of ${scale} MB reserved`}>
-        {segs.map((s) => (
-          <span key={s.id} className={`bx-seg k-${s.kind}${s.running ? ' on' : ''}`}
-                style={{ width: `${Math.min(100, (s.mb / scale) * 100)}%` }}
-                title={`${s.id}: ${s.mb} MB${s.running ? '' : ' (reserved, stopped)'}`} />
-        ))}
+        {segs.map((s) => {
+          // a Docker box with no enforced limit is hatched: its MB is what was
+          // asked for, not what it is held to
+          const loose = noLimit && (data.boxes || []).find((x) => x.id === s.id)?.runtime === 'docker'
+          return (
+            <span key={s.id} className={`bx-seg k-${s.kind}${s.running ? ' on' : ''}${loose ? ' loose' : ''}`}
+                  style={{ width: `${Math.min(100, (s.mb / scale) * 100)}%` }}
+                  title={`${s.id}: ${loose ? `no limit (${s.mb} MB not enforced)` : `${s.mb} MB`}${s.running ? '' : ' (reserved, stopped)'}`} />
+          )
+        })}
       </div>
       <div className="bx-legend dim small">
         <span><i className="k-shared" /> shared</span>
@@ -382,6 +402,8 @@ function Budget({ data }) {
         <span><i className="k-service" /> service</span>
         <span><i className="k-builder" /> builder</span>
         <span>faded = reserved but stopped (every reservation counts)</span>
+        {noLimit && (data?.boxes || []).some((x) => x.runtime === 'docker')
+          && <span>hatched = Docker box with no enforced limit</span>}
       </div>
     </section>
   )
@@ -574,6 +596,8 @@ export function Images() {
   const [bs, setBs] = useState(null)       // the build panel: logic.buildState
   const [dlg, setDlg] = useState(null)
   const [log, setLog] = useState(null)     // {variant, version}: the build log dialog
+  const [base, setBase] = useState(null)     // the base image's status (BaseImage and `main`)
+  useEffect(() => { vmStatus().then(setBase).catch(() => setBase(null)) }, [])
 
   // seed from the REST read; the `vm-images` topic on the shared stream
   // carries the rest (start, boot, log lines, done, resolved)
@@ -596,7 +620,7 @@ export function Images() {
 
   return (
     <div className="bx-page">
-      <BaseImage onLog={() => setLog({ variant: 'base', version: null })} />
+      <BaseImage s={base} onLog={() => setLog({ variant: 'base', version: null })} />
       {unavailable && <Unavailable what="The image manager" />}
       <LoadError error={error} />
       {bs && (bs.running || bs.last || bs.log.length > 0) && (
@@ -605,7 +629,7 @@ export function Images() {
         <div className="sbx-sec-head"><h3>Variants</h3>
           <span className="sec-count">{data?.variants.length ?? '…'}</span></div>
         {(data?.variants || []).map((v) => (
-          <Variant key={v.name} v={v} building={building}
+          <Variant key={v.name} v={v} building={building} baseVersion={base?.image_version}
                    onBuild={() => setDlg(v)}
                    onLog={(version) => setLog({ variant: v.name, version })} />
         ))}
@@ -662,7 +686,7 @@ function BuildPanel({ bs, onLog }) {
   )
 }
 
-function Variant({ v, building, onBuild, onLog }) {
+function Variant({ v, building, baseVersion, onBuild, onLog }) {
   const versions = v.versions || []
   const lb = v.last_build
   const [docker, setDocker] = useState(null)
@@ -675,13 +699,13 @@ function Variant({ v, building, onBuild, onLog }) {
       <div className="bx-variant-head">
         <b className="mono">{v.name}</b>
         {v.builtin && <Tag>built-in</Tag>}
-        {v.needs_build && <Tag tone="pending" title="its recipe changed since the active version was built">
-          needs a build</Tag>}
-        <span className="dim small">from {v.from}</span>
+        {v.needs_build && <Tag tone="pending" title={NEEDS_BUILD_WHY}>needs a build</Tag>}
+        <span className="dim small">{variantSource(v)}</span>
         {v.min_mem_mb ? <span className="dim small">· needs ≥ {mb(v.min_mem_mb)}</span> : null}
         <span className="grow" />
         <Button variant="ghost" disabled={building} onClick={onBuild}>Build new version</Button>
       </div>
+      {v.needs_build && <div className="dim small">Needs a build: {NEEDS_BUILD_WHY}.</div>}
       <div className="small bx-used">used by: <ProjectList slugs={v.used_by} empty="no project" /></div>
       <div className="small bx-lastbuild">
         {lb
@@ -706,7 +730,7 @@ function Variant({ v, building, onBuild, onLog }) {
         {docker?.dockerfile != null && <pre className="mono small">{docker.dockerfile}</pre>}
       </details>
       {versions.length === 0
-        ? <div className="dim small">never built</div>
+        ? <div className="dim small">{variantBuilds(v, baseVersion)}</div>
         : (
           <ul className="staged-list rev-list bx-versions">
             {versions.map((x) => (
@@ -732,12 +756,10 @@ function Variant({ v, building, onBuild, onLog }) {
 }
 
 // The shared guest's golden image and its rebuild, kept from the old VM chip.
-function BaseImage({ onLog }) {
-  const [s, setS] = useState(null)
+function BaseImage({ s, onLog }) {
   const [busy, setBusy] = useState(false)
   const [hasLog, setHasLog] = useState(false)   // a rebuild ran since the app started
   const ask = useAsk()
-  useEffect(() => { vmStatus().then(setS).catch(() => setS(null)) }, [])
   useEffect(() => { imageLog('base').then(() => setHasLog(true)).catch(() => setHasLog(false)) }, [busy])
   if (!s) return null
   async function rebuild() {

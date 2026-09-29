@@ -11,10 +11,13 @@ same-origin gated like every control-plane state change. Every write is a
   POST   /api/profiles/{id}/default     mark it the default for new/unassigned projects
   PUT    /api/projects/{slug}/profile   {profile_id}
 """
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from . import profiles
+from . import secrets as secrets_store
 from .auth import require_user
 from .db import get_db
 
@@ -53,6 +56,21 @@ def _actor(user: dict) -> str:
 
 def _fail(e: profiles.ProfileError):
     raise HTTPException(status_code=e.status, detail=str(e))
+
+
+# Secrets that open the operator's OWN infrastructure (the Cloudflare Access
+# service token in front of Jav3, Jav3's own credentials, the host's Gitea), as
+# opposed to a third-party API a project might really need. Judged by name: the
+# profile form hides these unless the operator asks to see them (WEB-20).
+INFRASTRUCTURE = re.compile(r"^(CF_ACCESS_|CLOUDFLARE_|JARVIS_|JAV3_|GITEA_)")
+
+
+@router.get("/secret-choices")
+async def secret_choices():
+    """The names a profile may be granted, each marked `infrastructure` or not.
+    Names only: no value, no tail."""
+    return {"secrets": [{"name": n, "infrastructure": bool(INFRASTRUCTURE.match(n))}
+                        for n in sorted(secrets_store.load())]}
 
 
 @router.get("")

@@ -27,3 +27,11 @@ export async function secretNames() {
   const list = Array.isArray(r) ? r : (r.secrets || [])
   return list.map((s) => (typeof s === 'string' ? s : s.name)).filter(Boolean)
 }
+
+// The names a profile may be granted, each marked `infrastructure` (the
+// Cloudflare Access token and Jav3's own credentials, judged by name on the
+// host). Names only, no tail. -> [{name, infrastructure}]
+export async function secretChoices() {
+  const r = await get('/api/profiles/secret-choices')
+  return (r.secrets || []).filter((s) => s && s.name)
+}
