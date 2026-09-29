@@ -5,7 +5,7 @@
 // notification with Cancel on every action, Pause, Disconnect.
 import {
   VerbError, validate, hostOf, isDenied, siteDecision, describe,
-  parseLoginLine, baseUrl, wsUrl, parseElementId, frameConsentNeeded, shouldAdopt, shotScale,
+  parseLoginLine, baseUrl, wsUrl, parseElementId, combineSigs, frameConsentNeeded, shouldAdopt, shotScale,
 } from './lib/verbs.js';
 import {
   readPage, pageSig, domQuiet, clickEl, clickAt, typeActive, viewportInfo, typeEl, selectEl, hoverEl, keyPress, scrollToEl, scrollPage,
@@ -288,6 +288,7 @@ async function readAllFrames(tabId, maxChars, selector, mode) {
   let topText = '';
   let selectorFound = false;
   let sig = null, viewport = null, iframes = [];
+  const frameSigs = [];
   // Share the text budget: the main frame gets it; subframes add elements only.
   for (const f of frames) {
     let r;
@@ -299,6 +300,7 @@ async function readAllFrames(tabId, maxChars, selector, mode) {
       title = r.title || ''; topText = r.text || '';
       sig = r.sig || null; viewport = r.viewport || null; iframes = r.iframes || [];
     }
+    if (r.sig) frameSigs.push(r.sig);
     if (r.probed) selectorFound = true;
     map.push({ index, frameId: f.frameId, url: r.url || f.url || '', host });
     frameOut.push({ index, host, url: r.url || f.url || '',
@@ -312,7 +314,7 @@ async function readAllFrames(tabId, maxChars, selector, mode) {
   await saveFrames(tabId, map);
   const i = await info(tabId);
   return { data: { tab: tabId, url: i.url, title: title || i.title, text: topText,
-                   elements, frames: frameOut, sig, viewport },
+                   elements, frames: frameOut, sig: combineSigs(frameSigs) || sig, viewport },
            selectorFound, count: elements.filter(e => e.kind !== 'candidate').length };
 }
 
@@ -330,7 +332,12 @@ function frameOffset(f, iframes) {
 // quiet; null when the page cannot be scripted right now (mid-navigation).
 async function settleSig(tabId, settleMs) {
   try { if (settleMs) await inject(tabId, domQuiet, [settleMs, QUIET_MS], 0); } catch { /* navigating */ }
-  try { return await inject(tabId, pageSig, [], 0); } catch { return null; }
+  // every frame the extension may read, so a change inside an iframe counts
+  const sigs = [];
+  for (const f of (await tabFrames(tabId)).slice(0, 20)) {
+    try { sigs.push(await inject(tabId, pageSig, [], f.frameId)); } catch { /* frame gone */ }
+  }
+  return combineSigs(sigs);
 }
 
 function pageErr(r, verb) {

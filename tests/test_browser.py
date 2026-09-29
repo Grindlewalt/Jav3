@@ -919,3 +919,38 @@ async def test_covered_element_error_reaches_the_model_verbatim(env, monkeypatch
             broker._tainted.discard("op-cov")
     finally:
         await fe.stop()
+
+
+async def test_changed_yes_after_type_and_select_when_only_form_state_moved(env, monkeypatch):
+    """The extension's signature now covers form values and every frame; the
+    server reports `changed: yes` whenever it moves, text unchanged or not."""
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()
+    state = {"sig": "0000abcd:3"}
+
+    async def answer(m):
+        res = await FakeExt.default_answer(m)
+        if m["verb"] == "type":
+            state["sig"] = "1111aaaa:3"      # same text and count, the input's value moved
+        if m["verb"] == "select":
+            state["sig"] = "2222bbbb:3"
+        if m["verb"] != "screenshot_tab":
+            res["data"]["sig"] = state["sig"]
+        return res
+    fe.answer = answer
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-sig")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            r = await _tool("browser_type")(tab=7, element="f0:1", text="hello")
+            assert r.rstrip().endswith("changed: yes"), r
+            r = await _tool("browser_select")(tab=7, element="f0:2", value="b")
+            assert r.rstrip().endswith("changed: yes"), r
+            r = await _tool("browser_hover")(tab=7, element="f0:2")
+            assert r.rstrip().endswith("changed: no"), r
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-sig")
+    finally:
+        await fe.stop()

@@ -98,6 +98,19 @@ export function isDenied(host, denyHosts) {
 // frame index comes from the last read_page of that tab and <n> is the
 // element's number within that frame. A bare integer means the top frame.
 // -> { frame, n, id } (canonical string) or throws VerbError.
+// One change signature for a tab from its frames' signatures ("hex8:count"
+// each, top frame first): a hash of them joined, and the summed count.
+export function combineSigs(sigs) {
+  const ok = (sigs || []).filter(x => typeof x === 'string' && /^[0-9a-f]{8}:\d{1,7}$/.test(x));
+  if (!ok.length) return null;
+  if (ok.length === 1) return ok[0];
+  let h = 0x811c9dc5;
+  const j = ok.join('|');
+  for (let i = 0; i < j.length; i++) { h ^= j.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  const n = ok.reduce((a, x) => a + Number(x.split(':')[1]), 0);
+  return ('0000000' + h.toString(16)).slice(-8) + ':' + Math.min(n, 9999999);
+}
+
 export function parseElementId(v) {
   if (typeof v === 'number' && Number.isInteger(v) && !Number.isNaN(v)) {
     if (v < 1 || v > MAX_ELEMENT_N) throw new VerbError(`element ${v} is out of range`);

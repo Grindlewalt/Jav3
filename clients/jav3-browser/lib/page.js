@@ -81,7 +81,7 @@ export function readPage(maxChars, selector, mode) {
   });
   return { url: location.href, title: document.title,
            text: body.slice(0, maxChars + 1), elements: els, probed, iframes,
-           sig: D.signature(raw, all.length),
+           sig: D.signature(raw, all.length, D.formState(document)),
            viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1 } };
 }
 
@@ -93,7 +93,7 @@ export function viewportInfo() {
 // The same signature readPage reports, without re-labelling anything.
 export function pageSig() {
   const D = globalThis.__jav3Dom;
-  return D.signature(document.body ? document.body.innerText : '', D.collect(document, window).length);
+  return D.signature(document.body ? document.body.innerText : '', D.collect(document, window).length, D.formState(document));
 }
 
 // Resolve when the DOM has had no mutations for quietMs, or at timeoutMs.
@@ -163,6 +163,9 @@ export function typeEl(id, text, submit) {
     document.execCommand('selectAll', false, null);
     document.execCommand('insertText', false, text);
   } else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      return { ok: false, err: 'that is a ' + el.type + '; use browser_click to change it' };
+    }
     if (el.type === 'password' || el.type === 'file') {
       return { ok: false, err: 'Jav3 does not type into password or file fields' };
     }
@@ -265,8 +268,12 @@ export function keyPress(combo) {
         document.execCommand('insertLineBreak') || document.execCommand('insertText', false, '\n');
         did = 'new line';
       } else if (tag === 'INPUT' && el.form) {
-        if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
-        did = 'submitted the form';
+        if (!D.implicitSubmit(el.form)) {
+          did = 'no submit (the form has several fields and no submit button)';
+        } else {
+          if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
+          did = 'submitted the form';
+        }
       } else if (el && el.matches && el.matches('a[href], button, summary, [role=button], [role=link], [role=menuitem], [role=tab], [role=option]')) {
         el.click(); did = 'activated ' + desc(el);
       }

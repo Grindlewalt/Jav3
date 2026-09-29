@@ -509,7 +509,59 @@
     return ('0000000' + h.toString(16)).slice(-8);
   }
 
-  function signature(text, count) { return hashText(text) + ':' + (count | 0); }
+  // What the user could see change without the page text changing: form values
+  // (hashed, never sent), checked / selected state, aria-expanded/selected/checked.
+  // A password contributes only "empty or not". -> one short hash string.
+  function formState(doc) {
+    const parts = [];
+    deepEach(doc, el => {
+      const t = el.tagName;
+      if (t === 'INPUT') {
+        const ty = String(el.type || 'text').toLowerCase();
+        if (ty === 'password') parts.push(el.value ? 'p1' : 'p0');
+        else if (ty === 'checkbox' || ty === 'radio') parts.push(el.checked ? 'c1' : 'c0');
+        else if (ty === 'file') parts.push('f' + ((el.files && el.files.length) | 0));
+        else parts.push('v' + hashText(el.value));
+      } else if (t === 'TEXTAREA') {
+        parts.push('v' + hashText(el.value));
+      } else if (t === 'SELECT') {
+        const sel = [];
+        for (const o of (el.options || [])) if (o.selected) sel.push(o.value);
+        parts.push('s' + hashText(sel.join('\u0001')));
+      }
+      if (el.getAttribute) {
+        for (const a of ARIA_STATE) {
+          const v = el.getAttribute(a);
+          if (v !== null && v !== undefined) parts.push(a + v);
+        }
+      }
+    });
+    return hashText(parts.join('|'));
+  }
+  const ARIA_STATE = ['aria-expanded', 'aria-selected', 'aria-checked'];
+
+  const TEXTLIKE = ['text', 'search', 'url', 'tel', 'email', 'password', 'date', 'month', 'week',
+    'time', 'datetime-local', 'number'];
+  // The browser's implicit-submission rule for Enter in a form field: submit
+  // when the form has an enabled submit button, or, with none, when it has at
+  // most one text-like field.
+  function implicitSubmit(form) {
+    if (!form || !form.elements) return false;
+    let textish = 0;
+    for (const f of Array.from(form.elements)) {
+      const t = String(f.tagName || '').toUpperCase();
+      const ty = String(f.type || '').toLowerCase();
+      const isSubmit = (t === 'BUTTON' && (ty === 'submit' || ty === '')) ||
+                       (t === 'INPUT' && (ty === 'submit' || ty === 'image'));
+      if (isSubmit) return !f.disabled;
+      if (t === 'INPUT' && TEXTLIKE.includes(ty || 'text')) textish++;
+    }
+    return textish <= 1;
+  }
+
+  function signature(text, count, form) {
+    return hashText(String(text || '') + (form ? '\u0000' + form : '')) + ':' + (count | 0);
+  }
 
   // --- key combos (mirrors normalize_combo in backend/browser.py and the desk) ----------
 
@@ -592,6 +644,6 @@
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
     CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
-    collectCandidates, clickSequence, deepPoint, realClick, isCovered, typeInto, describeEl,
+    collectCandidates, formState, implicitSubmit, clickSequence, deepPoint, realClick, isCovered, typeInto, describeEl,
   };
 })();
