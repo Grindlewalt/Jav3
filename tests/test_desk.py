@@ -1271,3 +1271,43 @@ async def test_key_combos_are_normalized_and_refused_early_on_the_server(env):
         assert len(fd.reqs) == n                         # none reached the computer
     finally:
         await fd.stop()
+
+
+OWN_URLS = ("http://jav3.lan:8000/#settings", "http://JAV3.LAN/", "http://jav3.lan./x",
+            "http://localhost:8000/", "http://LocalHost./", "http://app.localhost/",
+            "http://127.0.0.1:8000/#security", "http://127.1/", "http://2130706433/",
+            "http://0x7f.0.0.1/", "http://0177.0.0.1/", "http://0.0.0.0:8000/",
+            "http://[::1]:8000/", "http://[::ffff:127.0.0.1]/", "http://jav3%2Elan/",
+            "http://ｊａｖ３.lan/", "http://10.0.0.82:8000/", "http://tunnel.example.org/",
+            "http://foo@jav3.lan/", "http://example.com\\@jav3.lan/", "http://jav3.lan\\@example.com/",
+            "https://jav3.lan/api/desk", "http://box.local:8000/")
+
+
+async def test_desk_open_refuses_the_jav3_server_itself(env, monkeypatch):
+    """NAV-13: desk_open('http://<server>/#settings') opened the control plane in the
+    operator's logged-in browser, where desk_click can approve queued requests."""
+    from backend import lan
+    from backend.config import settings
+    monkeypatch.setattr(lan, "own_hosts", lambda: ["box.local", "10.0.0.82"])
+    monkeypatch.setattr(settings, "csrf_allowed_hosts", ["tunnel.example.org", "https://x.example:8443"])
+    fd = await _nav(env)
+    try:
+        await _tool("desk_screenshot")()
+        for url in OWN_URLS:
+            _free(env)
+            out = await _tool("desk_open")(url=url)
+            assert out.startswith("error:"), (url, out[:100])
+            assert "Jav3" in out or "@" in url or "\\" in url, (url, out[:100])
+        assert not any(r["verb"] == "open" for r in fd.reqs)
+        # the refusals are security events, like every other desk refusal
+        ev = [e for e in await _events("desk_refused") if "open refused" in e["summary"]]
+        assert ev
+        # other sites, and apps, still open
+        for url in ("https://example.com/", "http://10.0.0.99:8000/", "https://jav3.lan.example.com/"):
+            _free(env)
+            assert (await _tool("desk_open")(url=url)).startswith("open ok"), url
+        assert fd.reqs[-1]["params"]["url"] == "https://jav3.lan.example.com/"
+        _free(env)
+        assert (await _tool("desk_open")(app="firefox")).startswith("open ok")
+    finally:
+        await fd.stop()

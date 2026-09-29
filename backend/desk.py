@@ -77,12 +77,16 @@ import dataclasses
 import difflib
 import fnmatch
 import hashlib
+import ipaddress
 import json
 import re
 import secrets as _secrets
 import shlex
+import socket
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote, urlsplit
 
 from . import runtime
 from .agent import budget as budget_mod
@@ -183,6 +187,7 @@ class Desk:
     shell_busy: bool = False
     send_lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
     turns: dict = dataclasses.field(default_factory=dict)   # conversation id -> monotonic
+    host_header: str = ""              # the Host this computer reached the server by
     grants: dict = dataclasses.field(default_factory=dict)  # cached from get_grants
     locked: bool | None = False        # from the client's hello / latest state frame;
                                        # None = the client could not tell (not refused)
@@ -410,7 +415,7 @@ def _clean_hello(hello: dict) -> dict:
             "ceiling": {k: ceil.get(k) is True for k in ("screen", "input", "shell")}}
 
 
-async def attach(device_id: int, name: str, ws, hello: dict) -> Desk:
+async def attach(device_id: int, name: str, ws, hello: dict, host_header: str = "") -> Desk:
     """Register a freshly authenticated socket. A second connection from the
     same token replaces the first (a restarted client), which is told why."""
     old = _desks.get(device_id)
@@ -420,7 +425,8 @@ async def attach(device_id: int, name: str, ws, hello: dict) -> Desk:
             await old.ws.close(code=4000)
         except Exception:  # noqa: BLE001
             pass
-    d = Desk(device_id=device_id, name=name, ws=ws, hello=_clean_hello(hello))
+    d = Desk(device_id=device_id, name=name, ws=ws, hello=_clean_hello(hello),
+             host_header=(host_header or "")[:300])
     d.locked, d.asleep = _lock_flag(hello), hello.get("asleep") is True
     d.grants = await get_grants(device_id)
     _desks[device_id] = d
@@ -623,6 +629,96 @@ def normalize_combo(combo) -> str:
     return "+".join([*out, key])
 
 
+def _canon_host(host: str) -> str:
+    """A host as a browser will read it: percent-decoded, NFKC (full-width
+    letters), IDNA, lower case, no trailing dot or brackets; numeric IPv4
+    spellings (2130706433, 0x7f.1, 0177.0.0.1, 127.1) and IPv4-mapped IPv6
+    reduced to the dotted form."""
+    h = unicodedata.normalize("NFKC", unquote(host or "")).strip().lower().rstrip(".")
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    try:
+        h = h.encode("idna").decode("ascii")
+    except UnicodeError:
+        pass
+    try:
+        ip = ipaddress.ip_address(h)
+        return str(getattr(ip, "ipv4_mapped", None) or ip)
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9a-fx.]+", h):
+        try:
+            return socket.inet_ntoa(socket.inet_aton(h))
+        except OSError:
+            pass
+    return h
+
+
+def _host_of(raw: str) -> str:
+    """The host in 'host', 'host:port', '[::1]:8000' or 'https://host:8443/x'."""
+    raw = raw.strip()
+    try:
+        return urlsplit(raw if "//" in raw else "//" + raw).hostname or ""
+    except ValueError:
+        return ""
+
+
+def own_hosts(host_header: str = "") -> frozenset[str]:
+    """Every name this server answers to, canonical: localhost, the Host the
+    computer connected by (the tunnel or LAN name), the LAN names and IPs
+    (lan.own_hosts), and the operator's csrf_allowed_hosts (a reverse proxy's
+    public name). Loopback and unspecified addresses are checked separately
+    by is_own_host()."""
+    from . import lan
+    from .config import settings
+    raw = {"localhost", (host_header or "").strip()}
+    try:
+        raw.update(lan.own_hosts())
+        raw.add(lan.advertised_hostname())
+    except Exception:  # noqa: BLE001 — best effort; the Host header is the main one
+        pass
+    raw.update(str(e) for e in settings.csrf_allowed_hosts)
+    out = {_canon_host(_host_of(r)) for r in raw if r}
+    return frozenset(x for x in out if x)
+
+
+def is_own_host(host: str, own: frozenset[str]) -> bool:
+    h = _canon_host(host)
+    if h in own or h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
+
+
+def check_open_url(url: str, own: frozenset[str]) -> str:
+    """desk_open(url): http(s) only, and never the Jav3 server itself. The
+    operator is logged in to Jav3 in the browser this opens, where desk_click
+    can approve queued egress, grants and secrets: the agent must not steer a
+    tab there. Refused too: a backslash or user@ part, where a browser and
+    urlsplit read a different host."""
+    if not re.match(r"^https?://[^\s]{1,2000}$", url):
+        raise DeskError("only http(s) URLs can be opened")
+    if "\\" in url:
+        raise DeskError("URLs with a backslash are not opened")
+    try:
+        u = urlsplit(url)
+        host = u.hostname or ""
+        u.port  # noqa: B018 — raises on a bad port
+    except ValueError:
+        raise DeskError("that URL does not parse")
+    if not host:
+        raise DeskError("that URL has no host")
+    if u.username is not None or u.password is not None:
+        raise DeskError("URLs with a user:password@ part are not opened")
+    if is_own_host(host, own):
+        raise DeskError("that is the Jav3 server itself; computer use never opens it "
+                        "(it is where the operator approves this agent's requests)")
+    return url
+
+
 def _int(params: dict, k: str, lo: int, hi: int, default=None) -> int:
     v = params.get(k, default)
     if (isinstance(v, bool) or not isinstance(v, (int, float))
@@ -653,12 +749,13 @@ def _region(raw) -> dict:
 
 
 def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
-             full: dict | None = None) -> dict:
+             full: dict | None = None, own: frozenset[str] = frozenset()) -> dict:
     """The closed action list, server side: only known verbs, only known
     fields, every value typed and bounded. Coordinates are screenshot pixels
     and must fall inside the last screenshot. The client re-validates.
     `full` is the latest full (unzoomed) frame of the monitor a screenshot
-    asks for: a zoom region is in ITS pixels."""
+    asks for: a zoom region is in ITS pixels. `own` is own_hosts(): desk_open
+    never opens those."""
     if verb not in CAPABILITY:
         raise DeskError(f"unknown action {verb!r}")
     p: dict = {}
@@ -741,10 +838,7 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
     elif verb == "open":
         url, app = params.get("url"), params.get("app")
         if isinstance(url, str) and url.strip():
-            url = url.strip()
-            if not re.match(r"^https?://[^\s]{1,2000}$", url):
-                raise DeskError("only http(s) URLs can be opened")
-            p["url"] = url
+            p["url"] = check_open_url(url.strip(), own)
         elif isinstance(app, str) and app.strip():
             p["app"] = offered_app(app, apps)
         else:
@@ -1341,7 +1435,8 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     params = {k: v for k, v in params.items() if k != "frame"}
     try:
         p = validate(verb, params, d.frame, d.hello.get("apps") or [],
-                     full=_full_for(d, params.get("monitor")) if verb == "screenshot" else None)
+                     full=_full_for(d, params.get("monitor")) if verb == "screenshot" else None,
+                     own=own_hosts(d.host_header) if verb == "open" else frozenset())
     except DeskError as e:
         return await _refuse(d, verb, _audit_via(via), str(e))
     except Exception:  # noqa: BLE001 — a parameter validate did not foresee is a refusal, not a crash
