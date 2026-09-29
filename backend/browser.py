@@ -984,6 +984,9 @@ def shot_to_css(shot: dict | None, p: dict) -> dict:
         raise BrowserError(f"take a browser_screenshot_tab of tab {tab} first (a click by "
                            f"coordinates needs one from this turn, under {FRESH_SHOT_S} s "
                            "old; x, y are pixels of it)")
+    if shot.get("moved") == "changed":
+        raise BrowserError("the page may have changed since that screenshot — "
+                           "browser_screenshot_tab again, then click")
     if shot.get("moved"):
         raise BrowserError(f"tab {tab} {shot['moved']} since the latest screenshot; take a "
                            "new browser_screenshot_tab (x, y are pixels of it)")
@@ -1125,6 +1128,12 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
             for k, s in b.shots.items():
                 if k[1] == tab:
                     s["moved"] = moved
+        elif verb in _INPUT_VERBS:
+            # a click / keystroke can open a menu or modal: the screenshot it was
+            # computed from is consumed
+            for k, s in b.shots.items():
+                if k[1] == tab and not s.get("moved"):
+                    s["moved"] = "changed"
     if verb == "read_page" and isinstance(tab, int):
         b.reads[(op, tab)] = time.monotonic()
     elif verb in ("navigate", "close_tab", "back", "forward") and isinstance(tab, int):

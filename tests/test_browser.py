@@ -824,12 +824,20 @@ async def test_coordinate_click_and_focused_typing_through_the_tools(env, monkey
             assert r.startswith("error: take a browser_screenshot_tab of tab 7 first")
             assert fe.reqs == []                             # never sent
             await _tool("browser_screenshot_tab")(tab=7)
+            r = await _tool("browser_click")(tab=7, x=800, y=10)
+            assert r == "error: x=800, y=10 is outside the latest screenshot of tab 7 (800x600 px)"
             r = await _tool("browser_click")(tab=7, x=101, y=50)
             assert not r.startswith("error"), r
             assert fe.reqs[-1]["verb"] == "click"
             assert fe.reqs[-1]["params"] == {"tab": 7, "x": 50.5, "y": 25.0}
-            r = await _tool("browser_click")(tab=7, x=800, y=10)
-            assert r == "error: x=800, y=10 is outside the latest screenshot of tab 7 (800x600 px)"
+            # the click may have opened something: that screenshot is consumed
+            r = await _tool("browser_click")(tab=7, x=101, y=50)
+            assert r == ("error: the page may have changed since that screenshot — "
+                         "browser_screenshot_tab again, then click")
+            assert fe.reqs[-1]["verb"] == "click"
+            await _tool("browser_screenshot_tab")(tab=7)
+            assert not (await _tool("browser_click")(tab=7, x=101, y=50)).startswith("error")
+            await _tool("browser_screenshot_tab")(tab=7)
             assert "exactly one of element" in await _tool("browser_click")(tab=7, element="f0:1",
                                                                             x=1, y=1)
             # typing with no element goes to the focused field; it still needs a read
@@ -864,5 +872,26 @@ async def test_coordinate_click_needs_extension_0_4_0(env, monkeypatch):
         finally:
             budget_mod.active_op_id.reset(tok)
             broker._tainted.discard("op-xy2")
+    finally:
+        await fe.stop()
+
+
+async def test_id_click_needs_no_screenshot_and_consumes_the_last_one(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"], v="0.4.0").start()
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-consume")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            r = await _tool("browser_click")(tab=7, element="f0:1")
+            assert not r.startswith("error: take a browser_screenshot"), r
+            await _tool("browser_screenshot_tab")(tab=7)
+            await _tool("browser_hover")(tab=7, element="f0:1")
+            r = await _tool("browser_click")(tab=7, x=5, y=5)
+            assert r.startswith("error: the page may have changed since that screenshot")
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-consume")
     finally:
         await fe.stop()
