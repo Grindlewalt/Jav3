@@ -13,7 +13,9 @@ security boundary (the VM is).
 """
 import asyncio
 import functools
+import ipaddress
 import os
+import re
 import resource
 import signal
 import time
@@ -124,6 +126,72 @@ async def _capture_artifacts(root, before: dict, slug: str) -> tuple[list[str], 
     return captured, skipped
 
 
+_URL_HOST = re.compile(r"(?:https?|ssh|git)://(?:[^@/\s'\"]*@)?([^/\s:'\"?#\]]+|\[[0-9a-f:]+\])",
+                       re.I)
+_SCP_HOST = re.compile(r"\bgit@([A-Za-z0-9.-]+):")
+_BARE_IP = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
+def _hosts_in(text: str) -> list[str]:
+    """Hosts a failed command named (URLs, git@host:, bare IPv4), in order."""
+    found: list[str] = []
+    for rx in (_URL_HOST, _SCP_HOST, _BARE_IP):
+        for m in rx.finditer(text or ""):
+            h = m.group(1).strip("[]").lower().rstrip(".")
+            if h and h not in found:
+                found.append(h)
+    return found
+
+
+def _refused_outright(host: str) -> bool:
+    """Targets the egress proxy refuses for every box before any policy and
+    never queues: this machine's own address, loopback, private/LAN and
+    link-local (cloud metadata) space, and names that are not on the internet."""
+    proxy = os.environ.get("JARVIS_EGRESS_PROXY", "")
+    m = re.search(r"//([^:/]+)", proxy)
+    if m and host == m.group(1).lower():
+        return True                                   # the host itself
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return (host == "localhost" or "." not in host
+                or host.endswith((".local", ".localdomain", ".internal", ".lan", ".home.arpa")))
+    return not ip.is_global
+
+
+def _egress_note(source: str, output: str) -> str:
+    """What to tell the model after a failed network call under monitored
+    egress. The proxy answers every refusal with the same bare 403, and only an
+    UNDECIDED host (deny-by-default policy) is queued for the operator: a host
+    on a deny list, a profile with the network off, and the host/loopback/LAN/
+    metadata addresses are refused and NOT queued. This handler cannot see which
+    happened, so it says what the named hosts can only be, never that anything
+    was queued (it used to say 'QUEUED' for all of them)."""
+    hosts = _hosts_in(source + "\n" + output)
+    refused = [h for h in hosts if _refused_outright(h)]
+    public = [h for h in hosts if h not in refused]
+    parts = []
+    if refused:
+        parts.append(
+            f"[network refused: {', '.join(refused[:4])} is this machine's host, "
+            "loopback, or a private/LAN/metadata address. The egress proxy never "
+            "forwards there and does not queue it, so there is nothing for the "
+            "operator to approve; do not ask. A repository on the host (the "
+            "project's Gitea) is reached only through git_commit_request / "
+            "git_push_request, not from the sandbox.]")
+    if public or not refused:
+        named = (f"{', '.join(public[:4])}: " if public else "")
+        parts.append(
+            f"[network blocked: {named}the VM has monitored egress ON and the "
+            "proxy refused this call. If the project's policy is deny-by-default "
+            "and the host is undecided, the proxy queues it in the Network tab "
+            "for the operator; a host on a deny list, or a profile with the "
+            "network off, is refused and not queued. The Network tab shows which. "
+            "Name the exact hosts you need, ask the operator to check it, then "
+            "re-run this command.]")
+    return "\n".join(parts)
+
+
 async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> str:
     if not getattr(settings, "in_guest", False):
         return ("error: run_code only executes inside the sandbox guest. The "
@@ -232,12 +300,7 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
     proxy_on = bool(os.environ.get("JARVIS_EGRESS_PROXY"))
     if proc.returncode != 0 and any(m in combined for m in net_markers):
         if proxy_on:
-            lines.append(
-                "[network blocked: the VM has monitored egress ON, but the host(s) "
-                "this command reached are not on the project's allowlist yet — they "
-                "are now QUEUED for the operator to approve in the Network tab. Name "
-                "the exact hosts you need and ask the operator to approve them, then "
-                "re-run this command.]")
+            lines.append(_egress_note(code or command, out + "\n" + err))
         else:
             lines.append(
                 "[network blocked: the VM has no internet right now (monitored egress "
