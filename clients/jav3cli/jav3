@@ -2247,7 +2247,8 @@ def build_tui(base: str, token: str, **kw):
                 return
             self.app.add_theme({**clean, "name": THEME_PREVIEW})
             self.app.theme = THEME_PREVIEW
-            problems = theme_problems(resolved_theme_spec(self.app.theme_src[THEME_PREVIEW]))
+            problems = theme_problems(resolved_theme_spec(self.app.theme_src[THEME_PREVIEW]),
+                                      self.app.truecolor)
             self.hint("previewing — ctrl+s saves to " + str(themes_dir()),
                       warn=("⚠ " + problems[0] + (f" (+{len(problems) - 1} more)"
                                                    if len(problems) > 1 else ""))
@@ -7927,13 +7928,14 @@ JAV3_THEMES = {
 THEME_TUNE = {
     "textual-dark": dict(primary="#3a94e6", secondary="#386e96"),
     "textual-light": dict(surface="#d3d3d3", panel="#c6c6c6", accent="#a36a1c",
-                          warning="#a36a1c", success="#37864f"),
+                          warning="#a36a1c", success="#2f7a47"),
+    "nord": dict(error="#d0717a"),
     "dracula": dict(surface="#353742", panel="#44475a"),
     "monokai": dict(surface="#34352f", panel="#43443f"),
     "flexoki": dict(primary="#66a0c8", secondary="#3aa99f", accent="#8b7ec8",
                     warning="#d0a215", error="#d14d41", success="#879a39"),
     "rose-pine-dawn": dict(surface="#ebe5df", panel="#dad4ce", accent="#be7470",
-                           warning="#b17728"),
+                           warning="#b17728", success="#3f7f8a"),
 }
 
 
@@ -8089,9 +8091,10 @@ def _block_text_contrast(fed, shown) -> float:
     return _contrast((238,) * 3 if dark else (8,) * 3, shown)
 
 
-def theme_problems(spec: dict) -> list[str]:
+def theme_problems(spec: dict, tint: bool = True) -> list[str]:
     """Why a theme will read badly, worded for the editor's hint line; empty when
-    it is fine. `spec` has every colour spelled out (resolved_theme_spec)."""
+    it is fine. `spec` has every colour spelled out (resolved_theme_spec). `tint`:
+    diff lines sit on a 12% tint of their colour (not on 256 colours: DIFF_TINT)."""
     if spec.get("ansi"):
         return []
     c = {k: _hex_rgb(spec[k]) for k in THEME_ROLES}
@@ -8104,6 +8107,12 @@ def theme_problems(spec: dict) -> list[str]:
     r = _block_text_contrast(c["primary"], c["primary"])
     if r < 4:
         out.append(f"selected rows are hard to read: the label on primary is {r:.1f}:1")
+    for role in ("error", "success") if tint else ():
+        row = tuple(round(c["background"][i] + (c[role][i] - c["background"][i]) * 0.12)
+                    for i in range(3))
+        r = _contrast(c[role], row)
+        if r < 3:
+            out.append(f"{role} is hard to read on a changed line of a diff ({r:.1f}:1)")
     for a, b in (("background", "surface"), ("surface", "panel")):
         if abs(_lab(c[a])[0] - _lab(c[b])[0]) < 4:
             out.append(f"{a} and {b} are almost the same, so dialogs blend in")

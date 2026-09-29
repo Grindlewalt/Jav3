@@ -146,7 +146,7 @@ def test_jav3_default_survives_snapping():
 def test_every_theme_reads_on_both_kinds_of_terminal(name):
     src = jav3.resolved_theme_spec(ALL[name])
     assert jav3.theme_problems(src) == [], name
-    assert jav3.theme_problems(jav3.terminal_theme_spec(src, False)) == [], name
+    assert jav3.theme_problems(jav3.terminal_theme_spec(src, False), tint=False) == [], name
 
 
 def test_theme_problems_names_what_reads_badly():
