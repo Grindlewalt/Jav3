@@ -164,3 +164,21 @@ test('a coordinate click carries the element the screenshot showed there', () =>
   assert.deepEqual(validate('click', { tab: 2, x: 5, y: 6, expect: 'f0:4' }), { tab: 2, x: 5, y: 6 });
   assert.equal(validate('click', { tab: 2, x: 5, y: 6, expect: { id: 'f0:4', label: 'a'.repeat(200) } }).expect.label.length, 80);
 });
+
+test('deny list: host:port entries, trailing dots, v4-mapped and loopback ranges', async () => {
+  const { isDeniedUrl, endpointOf } = await import('../lib/verbs.js');
+  const deny = ['10.0.0.82:8000', 'jarvis.atomos.network', '[::1]:8000', '127.0.0.1:8000', 'macbook.local:8000'];
+  assert.ok(isDeniedUrl('http://10.0.0.82:8000/x', deny));
+  assert.ok(!isDeniedUrl('http://10.0.0.82:3000/', deny));          // Gitea
+  assert.ok(isDeniedUrl('https://JARVIS.atomos.network./a', deny)); // case + dot, any port
+  assert.ok(isDeniedUrl('http://jarvis.atomos.network:9999/', deny));
+  assert.ok(isDeniedUrl('http://[::1]:8000/', deny));
+  assert.ok(isDeniedUrl('http://localhost.:8000/', ['localhost:8000']));
+  assert.ok(isDeniedUrl('http://[::ffff:127.0.0.1]:8000/', deny));
+  assert.ok(isDeniedUrl('http://127.5.5.5:8000/', deny));
+  assert.ok(isDeniedUrl('http://MacBook.local.:8000/', deny));
+  assert.ok(!isDeniedUrl('https://example.com/', deny));
+  assert.ok(isDeniedUrl('http://jav3.lan:1234/', ['jav3.lan']));   // older host-only entry
+  assert.equal(endpointOf('http://10.0.0.82:8000'), '10.0.0.82:8000');
+  assert.equal(endpointOf('https://a.example'), 'a.example:443');
+});

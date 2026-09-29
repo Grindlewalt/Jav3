@@ -4,7 +4,7 @@
 // unfocused window. The operator's hand on it: per-site consent, a
 // notification with Cancel on every action, Pause, Disconnect.
 import {
-  VerbError, validate, hostOf, isDenied, siteDecision, describe,
+  VerbError, validate, hostOf, isDeniedUrl, endpointOf, siteDecision, describe,
   parseLoginLine, baseUrl, wsUrl, parseElementId, combineSigs, frameConsentNeeded, shouldAdopt, shotScale,
 } from './lib/verbs.js';
 import {
@@ -95,7 +95,7 @@ async function onFrame(m) {
   if (m.type === 'welcome') {
     S.backoff = 1000;
     const c = await cfg();
-    S.denyHosts = [...(Array.isArray(m.deny_hosts) ? m.deny_hosts : []), hostOf(c.address)].filter(Boolean);
+    S.denyHosts = [...(Array.isArray(m.deny_hosts) ? m.deny_hosts : []), endpointOf(c.address)].filter(Boolean);
     await chrome.storage.local.set({ name: typeof m.name === 'string' ? m.name : c.name });
     await setStatus('connected');
   } else if (m.type === 'req' && typeof m.id === 'string') {
@@ -150,7 +150,7 @@ async function ownTab(tabId) {
 async function allowed(url, c) {
   const host = hostOf(url);
   if (!host) throw new VerbError('that tab is not showing a web page');
-  if (isDenied(host, S.denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never uses it');
+  if (isDeniedUrl(url, S.denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never uses it');
   const d = siteDecision(host, c.sites);
   if (d === 'allow') return host;
   if (d === 'deny') throw new VerbError(`the operator blocked Jav3 on ${host}`);
@@ -271,7 +271,7 @@ async function tabFrames(tabId) {
   catch { frames = []; }
   return frames
     .filter(f => !f.errorOccurred)
-    .filter(f => f.frameId === 0 || (hostOf(f.url) && !isDenied(hostOf(f.url), S.denyHosts)))
+    .filter(f => f.frameId === 0 || (hostOf(f.url) && !isDeniedUrl(f.url, S.denyHosts)))
     .sort((a, b) => a.frameId - b.frameId);
 }
 
@@ -576,7 +576,7 @@ async function giveFocusBack(prevId, jav3WinId) {
 async function afterLoad(tabId, c) {
   const i = await info(tabId);
   const host = hostOf(i.url);
-  if (host && isDenied(host, S.denyHosts)) {
+  if (host && isDeniedUrl(i.url, S.denyHosts)) {
     await chrome.tabs.remove(tabId);
     throw new VerbError('the page redirected to the Jav3 server; tab closed');
   }
