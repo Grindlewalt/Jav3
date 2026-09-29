@@ -9,8 +9,8 @@ import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { sevClass, ts } from '../format.js'
 import {
-  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, DENY_TIP, FAULTS_LEDE, REFUSED_TAG, faultText, ledeFor,
-  SECURITY_LEDES,
+  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, ASKS_LEDE, DENY_TIP, FAULTS_LEDE, REFUSED_TAG, askAge,
+  askKindText, faultText, ledeFor, SECURITY_LEDES,
 } from '../securityCopy.js'
 import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
@@ -47,6 +47,7 @@ export function ReviewQueue({ slug }) {
   const [gitReqs, setGitReqs] = useState({})                 // slug -> [pending requests]
   const [pending, setPending] = useState([])                 // egress host approvals
   const [alerts, setAlerts] = useState([])                   // unacknowledged security events
+  const [asks, setAsks] = useState([])                       // questions waiting in chats
   const [busy, setBusy] = useState(false)
   const [board, setBoard] = useState(null)   // {id, seed} — the open evidence board
   // the boxes requests (WP3 services, WP5 packages). Either route may not
@@ -88,6 +89,12 @@ export function ReviewQueue({ slug }) {
     api(`/api/egress/pending${slug ? `?project=${encodeURIComponent(slug)}` : ''}`)
       .then((r) => setPending(r.pending || [])).catch(() => {})
   }
+  // questions an agent is blocked on in a chat: the nav badge counts them, so
+  // the page lists them (with a link to answer), or the badge runs one ahead
+  function loadAsks() {
+    if (slug) return
+    api('/api/notifications').then((r) => setAsks(r.asks || [])).catch(() => {})
+  }
   function loadAlerts() {
     api('/api/security/events?unacknowledged=true').then((r) => {
       let evs = r.events || []
@@ -128,7 +135,7 @@ export function ReviewQueue({ slug }) {
     // service requests ride topic `services` (below) with a slow fallback
     // poll; everything else keeps the 12 s refresh
     const refresh = () => {
-      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadPkgReqs()
+      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadPkgReqs(); loadAsks()
     }
     refresh()
     loadSvcReqs()
@@ -230,6 +237,7 @@ export function ReviewQueue({ slug }) {
   const projLabel = (s) => names[s] || s
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
   const total = alerts.length + gitTotal + pending.length + svcReqs.length + pkgReqs.length
+    + asks.length
 
   if (!slugs) return <div className="dim center-pad">…</div>
 
@@ -323,6 +331,28 @@ export function ReviewQueue({ slug }) {
           <PackageApprove p={approvingPkg} variants={variants}
                           onClose={() => setApprovingPkg(null)}
                           onDone={() => { setApprovingPkg(null); loadBoxReqs() }} />
+        </section>
+      )}
+
+      {/* ---- questions in chats: answered there, listed here so the count matches ---- */}
+      {asks.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Questions in chats</h3>
+            <span className="sec-count">{asks.length}</span>
+          </div>
+          <p className="dim small net-lede">{ASKS_LEDE}</p>
+          <ul className="staged-list rev-list">
+            {asks.map((k) => (
+              <li key={k.id} className="rev-egress">
+                <span className="tag pending">{askKindText(k.kind)}</span>
+                <span className="grow ellipsis" title={k.question}>{k.question}</span>
+                <span className="dim small">{askAge(k.age_s)}</span>
+                <Link className="small" to={`/c/${k.conversation_id}`}>
+                  Open chat #{k.conversation_id}</Link>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 

@@ -200,3 +200,21 @@ export function faultText(summary, tool) {
   if (tool && t.startsWith(`${tool}: `)) t = t.slice(tool.length + 2)
   return t
 }
+
+// ---- questions an agent is waiting on in a chat (WEB-17) ----------------------------
+// The nav badge counts them (they wait on you like everything else) but they are
+// answered in the chat, so the Queue lists them with a link instead of leaving
+// the badge one item ahead of the page.
+
+export const ASKS_LEDE = 'An agent is waiting for your answer in these chats. Answer there: '
+  + 'this list only points at them.'
+
+export const askKindText = (kind) => (kind === 'permission' ? 'asks permission' : 'question')
+
+export function askAge(seconds) {
+  const s = Math.max(0, Number(seconds) || 0)
+  if (s < 90) return 'just now'
+  if (s < 5400) return `${Math.round(s / 60)} min ago`
+  if (s < 172800) return `${Math.round(s / 3600)} h ago`
+  return `${Math.round(s / 86400)} days ago`
+}

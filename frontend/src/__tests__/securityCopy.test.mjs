@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, AUTO_REVIEW_LEDE,
   PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
-  decidedText, faultText, ledeFor, plural, secretChecklist, tallyLine,
+  askAge, askKindText, decidedText, faultText, ledeFor, plural, secretChecklist, tallyLine,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -95,5 +95,14 @@ assert.equal(faultText('Harness fault reported: write_file: nothing changed', 'w
 assert.equal(faultText('Harness fault reported: write_file: nothing changed'), 'write_file: nothing changed')
 assert.equal(faultText('Harness fault reported: it broke…', 'desk_type'), 'it broke…')
 assert.equal(faultText(undefined), '')
+
+// WEB-17: a question waiting in a chat is described, aged and pointed at
+assert.equal(askKindText('permission'), 'asks permission')
+assert.equal(askKindText('question'), 'question')
+assert.equal(askAge(10), 'just now')
+assert.equal(askAge(600), '10 min ago')
+assert.equal(askAge(7200), '2 h ago')
+assert.equal(askAge(3 * 86400), '3 days ago')
+assert.equal(askAge(undefined), 'just now')
 
 console.log('securityCopy ok')
