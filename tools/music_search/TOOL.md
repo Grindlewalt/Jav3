@@ -10,7 +10,7 @@ parameters:
   properties:
     query:
       type: string
-      description: Title, artist or album text. Substring match.
+      description: Title, artist or album text. Substring match. May be empty when `tag` is given.
     tag:
       type: string
       enum: [drive, fast]
@@ -18,7 +18,7 @@ parameters:
     limit:
       type: integer
       description: Most results to return (default 25, max 100).
-  required: [query]
+  required: []
 ---
 An empty query with a `tag` lists everything carrying that tag, which is how to
 answer "put on something fast".

@@ -28,19 +28,70 @@ def test_front_matter_parses(md):
     assert meta.get("name") and meta.get("description"), md
 
 
+# tools whose TOOL.md marks an argument required although the handler gives it a
+# default, ON PURPOSE: the handler (or the backend it calls) answers a blank
+# with a message specific to the tool, which reads better than argcheck's
+# generic "needs X". Anything else that differs is drift and fails below.
+SCHEMA_REQUIRES_MORE = {
+    "music_control": {"action"},        # '' -> the list of actions
+    "open_website": {"url"},            # '' -> "only http(s) URLs can be opened"
+    "package_request": {"manager", "package", "install_command", "reason"},  # the backend explains each
+    "play_movie": {"source"},           # gui.media_src names the allowed sources
+    "play_music": {"source"},
+    "projector_show": {"surface"},      # '' -> "which surface?"
+    "service_logs": {"name"},           # '' -> "no approved service named ''"
+    "service_request": {"command", "files", "name", "reason"},               # the backend explains each
+    "workspace_panel": {"action"},      # '' -> the actions
+}
+
+
 @pytest.mark.parametrize("md", [m for m in TOOL_MDS if (m.parent / "handler.py").exists()
                                 and m.name == "TOOL.md"], ids=lambda p: p.parent.name)
 def test_schema_matches_handler(md):
-    props = set(((_front(md).get("parameters") or {}).get("properties") or {}))
-    src = (md.parent / "handler.py").read_text()
-    m = re.search(r"async def run\((.*?)\)\s*(->[^:]*)?:", src, re.S)
-    if not m or "**" in m.group(1):
+    """Both ways: the schema offers nothing the handler refuses, the handler
+    takes nothing the schema never offers (the model could never use it), what
+    the handler cannot run without the schema requires, and what the schema
+    requires the handler also requires (or is listed above with its reason)."""
+    tool = md.parent.name
+    schema = _front(md).get("parameters") or {}
+    props = set(schema.get("properties") or {})
+    schema_required = set(schema.get("required") or [])
+    sig = list(inspect.signature(_load_handler(tool)).parameters.values())
+    if any(p.kind is p.VAR_KEYWORD for p in sig):
         return
-    parts = [a.strip() for a in m.group(1).split(",") if a.strip()]
-    names = {a.split(":")[0].split("=")[0].strip() for a in parts}
-    required = {a.split(":")[0].strip() for a in parts if "=" not in a}
+    names = {p.name for p in sig}
+    required = {p.name for p in sig if p.default is p.empty}
     assert props <= names, f"TOOL.md offers {sorted(props - names)} the handler refuses"
-    assert required <= props, f"handler requires {sorted(required - props)} the schema never offers"
+    assert names <= props, f"handler takes {sorted(names - props)} the schema never offers"
+    assert schema_required <= props, f"required {sorted(schema_required - props)} are not properties"
+    assert required <= schema_required, (
+        f"handler requires {sorted(required - schema_required)} the schema does not mark required")
+    assert schema_required - required == SCHEMA_REQUIRES_MORE.get(tool, set()), (
+        f"schema requires {sorted(schema_required - required)} the handler has defaults for; "
+        "give the handler no default, drop it from required, or list it in "
+        "SCHEMA_REQUIRES_MORE with the reason")
+
+
+_JSON_KIND = {"string": str, "integer": int, "number": float, "boolean": bool,
+              "array": list, "object": dict}
+
+
+@pytest.mark.parametrize("md", [m for m in TOOL_MDS if (m.parent / "handler.py").exists()
+                                and m.name == "TOOL.md"], ids=lambda p: p.parent.name)
+def test_schema_types_agree_with_handler_annotations(md):
+    """argcheck coerces and refuses by the handler's annotations, so an
+    annotation that disagrees with the schema would refuse an argument the
+    schema told the model to send."""
+    props = ((_front(md).get("parameters") or {}).get("properties")) or {}
+    for p in inspect.signature(_load_handler(md.parent.name)).parameters.values():
+        parsed = argcheck._kinds(p.annotation)
+        want = _JSON_KIND.get((props.get(p.name) or {}).get("type"))
+        if parsed is None or want is None:
+            continue
+        kinds, _ = parsed
+        ok = want in kinds or (want is float and int in kinds) or (want is int and float in kinds)
+        assert ok, (f"{md.parent.name}.{p.name}: schema says {props[p.name]['type']}, "
+                    f"the handler is annotated {p.annotation}")
 
 
 async def _h(tab: int, max_chars: int | None = None):
