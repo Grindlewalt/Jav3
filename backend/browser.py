@@ -173,11 +173,17 @@ def ext_outdated(have: str | None, need: str | None = None) -> bool:
 
 def needs_version(verb: str, p: dict) -> str | None:
     """The oldest extension that can run this validated request."""
+    have = MIN_EXT_VERSION.get(verb)
     if verb == "click" and "x" in p:
-        return "0.4.0"          # coordinate clicks + the screenshot's scale
-    if verb == "type" and "element" not in p:
-        return "0.4.0"          # typing into the focused element
-    return MIN_EXT_VERSION.get(verb)
+        have = "0.4.0"          # coordinate clicks + the screenshot's scale
+    elif verb == "type" and "element" not in p:
+        have = "0.4.0"          # typing into the focused element
+    if verb in _INPUT_VERBS:
+        # 0.5.0: no click through a covering element, the moved-page check on a
+        # coordinate click, the form-state `changed` signature, checkbox / Enter
+        # rules. Reading (read_page, scroll, screenshot, tabs) still works on older builds.
+        have = "0.5.0"
+    return have
 
 
 def moved_error(expect: dict) -> str:
@@ -1113,11 +1119,6 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
             p = shot_to_css(b.shots.get((op, p["tab"])), p)
         except BrowserError as e:
             return await _refuse(b, verb, p, str(e), project, kind="browser_blind")
-        if p.get("expect") and ext_outdated(b.ext, "0.5.0"):
-            # only 0.5.0 checks the page under the point; an older build would click blind
-            why = outdated_error(b.ext, "0.5.0")
-            await _audit(b, verb, p, False, why, project)
-            return f"error: {why}"
     elif verb in _FRESH_VERBS:
         at = b.reads.get((op, p["tab"]))
         if at is None or time.monotonic() - at > FRESH_READ_S:

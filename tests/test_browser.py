@@ -69,7 +69,7 @@ class WS:
 class FakeExt:
     """The extension: hello with the token, answers requests with `answer`."""
 
-    def __init__(self, token, headers=(), v=1):
+    def __init__(self, token, headers=(), v="0.5.0"):
         self.ws = WS(headers=headers)
         self.token = token
         self.v = v              # 1 = a pre-0.4.0 build (no version reported)
@@ -639,7 +639,8 @@ def test_ext_version_helpers():
     assert browser.ext_outdated("0.2.0", "0.3.0") and not browser.ext_outdated("0.3.0", "0.3.0")
     # unreported = 0.3.0 or older: 0.3.0 verbs pass, 0.4.0 forms do not
     assert not browser.ext_outdated(None, "0.3.0") and browser.ext_outdated(None, "0.4.0")
-    assert browser.needs_version("key", {}) == "0.3.0"
+    assert browser.needs_version("key", {}) == "0.5.0"
+    assert browser.needs_version("back", {}) == "0.3.0"
     assert browser.needs_version("read_page", {}) is None
 
 
@@ -653,7 +654,7 @@ async def test_outdated_extension_is_refused_with_a_reload_hint(env, monkeypatch
             await _tool("browser_read_page")(tab=7)
             r = await _tool("browser_key")(tab=7, combo="Enter")
             assert r == ("error: the jav3-browser extension in that browser is 0.2.0; this "
-                         "action needs 0.3.0 — reload it in chrome://extensions (Developer "
+                         "action needs 0.5.0 — reload it in chrome://extensions (Developer "
                          "mode → Reload) and read the page again")
             assert fe.reqs[-1]["verb"] == "read_page"          # never sent
             lst = (await env["op"].get("/api/browser")).json()["browsers"][0]
@@ -668,11 +669,11 @@ async def test_outdated_extension_is_refused_with_a_reload_hint(env, monkeypatch
 
 async def test_unreported_version_turns_unknown_action_into_reload_hint(env, monkeypatch):
     monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
-    fe = await FakeExt(env["btok"]).start()           # v: 1, like 0.2.0 / 0.3.0 builds
+    fe = await FakeExt(env["btok"], v=1).start()           # v: 1, like 0.2.0 / 0.3.0 builds
 
     async def answer(m):
-        if m["verb"] == "key":
-            return {"ok": False, "code": "invalid", "err": 'unknown action "key"'}
+        if m["verb"] == "back":
+            return {"ok": False, "code": "invalid", "err": 'unknown action "back"'}
         return await FakeExt.default_answer(m)
     fe.answer = answer
     try:
@@ -680,7 +681,7 @@ async def test_unreported_version_turns_unknown_action_into_reload_hint(env, mon
         tok = budget_mod.active_op_id.set("op-ver2")
         try:
             await _tool("browser_read_page")(tab=7)
-            r = await _tool("browser_key")(tab=7, combo="Enter")
+            r = await _tool("browser_back")(tab=7)
             assert r.startswith("error: the jav3-browser extension in that browser is 0.2.0 "
                                 "or older; this action needs 0.3.0 — reload it")
             lst = (await env["op"].get("/api/browser")).json()["browsers"][0]
@@ -774,9 +775,18 @@ def test_click_needs_exactly_one_of_element_or_xy():
     assert browser.validate("click", {"tab": 7, "x": 3, "y": 4}) == {"tab": 7, "x": 3, "y": 4}
     assert browser.validate("type", {"tab": 7, "text": "hi"}) == {"tab": 7, "text": "hi",
                                                                  "submit": False}
-    assert browser.needs_version("click", {"tab": 7, "x": 1, "y": 1}) == "0.4.0"
-    assert browser.needs_version("click", {"tab": 7, "element": "f0:1"}) is None
-    assert browser.needs_version("type", {"tab": 7, "text": "x"}) == "0.4.0"
+    assert browser.needs_version("click", {"tab": 7, "x": 1, "y": 1}) == "0.5.0"
+    # 0.5.0: covered-element refusal, form-state `changed`, the moved-page check
+    for verb, q in (("click", {"element": "f0:1"}), ("type", {"element": "f0:1", "text": "x"}),
+                    ("type", {"text": "x"}), ("select", {"element": "f0:1"}),
+                    ("hover", {"element": "f0:1"}), ("key", {"combo": "Enter"})):
+        assert browser.needs_version(verb, {"tab": 7, **q}) == "0.5.0", verb
+    # reading and moving around stay at their old minimums: an un-reloaded browser still reads
+    for verb in ("read_page", "list_tabs", "screenshot_tab", "scroll", "navigate", "open_tab"):
+        assert browser.needs_version(verb, {"tab": 7}) is None, verb
+    assert browser.needs_version("back", {"tab": 7}) == "0.3.0"
+    assert browser.CURRENT_EXT_VERSION == "0.5.0"
+    assert browser.ext_outdated("0.4.0") and not browser.ext_outdated("0.5.0")
 
 
 def test_shot_to_css_freshness_bounds_and_scale(monkeypatch):
@@ -808,7 +818,7 @@ def test_shot_to_css_freshness_bounds_and_scale(monkeypatch):
 
 async def test_coordinate_click_and_focused_typing_through_the_tools(env, monkeypatch):
     monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
-    fe = await FakeExt(env["btok"], v="0.4.0").start()
+    fe = await FakeExt(env["btok"], v="0.5.0").start()
 
     async def answer(m):
         res = await FakeExt.default_answer(m)
@@ -944,7 +954,7 @@ async def test_coordinate_click_carries_the_expected_element_and_reports_a_moved
 
 async def test_coordinate_click_needs_extension_0_4_0(env, monkeypatch):
     monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
-    fe = await FakeExt(env["btok"]).start()                  # unreported = 0.3.0 or older
+    fe = await FakeExt(env["btok"], v=1).start()                  # unreported = 0.3.0 or older
     try:
         await _grant(env, act=True)
         tok = budget_mod.active_op_id.set("op-xy2")
@@ -953,7 +963,7 @@ async def test_coordinate_click_needs_extension_0_4_0(env, monkeypatch):
             r = await _tool("browser_click")(tab=7, x=1, y=1)
             assert r.startswith("error: the jav3-browser extension in that browser is 0.3.0 or "
                                 "older (it does not report its version); this action needs "
-                                "0.4.0 — reload it")
+                                "0.5.0 — reload it")
             assert fe.reqs[-1]["verb"] == "screenshot_tab"
         finally:
             budget_mod.active_op_id.reset(tok)
@@ -964,7 +974,7 @@ async def test_coordinate_click_needs_extension_0_4_0(env, monkeypatch):
 
 async def test_id_click_needs_no_screenshot_and_consumes_the_last_one(env, monkeypatch):
     monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
-    fe = await FakeExt(env["btok"], v="0.4.0").start()
+    fe = await FakeExt(env["btok"], v="0.5.0").start()
     try:
         await _grant(env, act=True)
         tok = budget_mod.active_op_id.set("op-consume")
