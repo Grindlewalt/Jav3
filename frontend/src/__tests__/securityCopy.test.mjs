@@ -4,7 +4,8 @@ import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, AUTO_REVIEW_LEDE,
   PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
   askAge, askKindText, decidedText, dockerLead, dockerMemoryUnlimited, faultText, ledeFor, plural,
-  postureItems, ramLabel, secretChecklist, tallyLine, variantBuilds, variantSource,
+  IMPORT_TIP, TOOLS_LEDE, builtinState, postureItems, ramLabel, secretChecklist, tallyLine,
+  variantBuilds, variantSource,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -149,5 +150,14 @@ assert.match(variantBuilds({ name: 'main', versions: [] }), /^runs the base imag
 assert.equal(variantBuilds({ name: 'dev', versions: [] }, 'base-v4'), 'never built')
 assert.equal(variantBuilds({ name: 'main', versions: [], layer_packages: ['ripgrep'] }), 'never built')
 assert.equal(variantBuilds({ name: 'dev', versions: [{ version: 1 }] }), null)
+
+// WEB-19: a built-in tool is on, off, or waiting (on in its folder, not offered right now)
+assert.deepEqual(builtinState({ enabled: true, offered: true }), { word: 'on', tone: 'done' })
+assert.deepEqual(builtinState({ enabled: false, offered: false }), { word: 'off', tone: '' })
+assert.deepEqual(builtinState({ enabled: true, offered: false }), { word: 'waiting', tone: 'pending' })
+assert.equal(builtinState({ enabled: true }).word, 'on')      // an older host: `enabled` decides
+assert.equal(builtinState({ enabled: false }).word, 'off')
+assert.match(TOOLS_LEDE, /each arrives off/)
+assert.match(IMPORT_TIP, /switched off/)
 
 console.log('securityCopy ok')

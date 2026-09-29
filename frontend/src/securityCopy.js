@@ -301,3 +301,21 @@ export function variantBuilds(v, baseVersion) {
 }
 
 export const NEEDS_BUILD_WHY = 'its recipe changed since the active version was built'
+
+// ---- the Tools page (WEB-19) ------------------------------------------------------------
+
+export const TOOLS_LEDE = 'What the agent can call. Yours are skills you wrote. Imported ones '
+  + 'are skills brought in from elsewhere: each arrives off, and you grant it. Built-in ones '
+  + 'ship with Jav3.'
+
+export const IMPORT_TIP = 'Bring in a skill from a folder or a git address. It arrives '
+  + 'switched off, and you grant it after reading what it asks for.'
+
+// A built-in tool's state word. `enabled` is its folder's own switch; `offered`
+// is whether the model is handed it right now (the host adds `reason` when not).
+// An older host sends no `offered`: fall back to `enabled`.
+export function builtinState(t) {
+  const offered = t?.offered ?? !!t?.enabled
+  if (offered) return { word: 'on', tone: 'done' }
+  return t?.enabled === false ? { word: 'off', tone: '' } : { word: 'waiting', tone: 'pending' }
+}

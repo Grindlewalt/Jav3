@@ -4251,3 +4251,8 @@ a:has(> .nav-dot) { position: relative; }
     margin-bottom: 2px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.05em;
     text-transform: uppercase; color: var(--dim); }
 }
+.builtin-list { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.builtin-list li { display: block; }
+.builtin-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); }
+.builtin-desc { margin-top: var(--sp-2); }
+.builtin-why { margin-top: var(--sp-2); color: var(--amber); }

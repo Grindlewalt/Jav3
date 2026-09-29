@@ -107,6 +107,30 @@ async def test_ack_all_can_leave_reports_alone_or_clear_only_them(client, db):
     assert left == ["desk_refused"]
 
 
+# --- WEB-19: the Tools page can say why a built-in tool is not offered ----------
+
+async def test_tools_api_says_why_a_builtin_is_not_offered(client, monkeypatch):
+    from backend.config import settings
+    monkeypatch.setattr(settings, "vm_boxes_enabled", False)
+    tools = {t["name"]: t for t in (await client.get("/api/tools")).json()["tools"]}
+    builtin = {n: t for n, t in tools.items() if t["group"] == "builtin"}
+    assert builtin, "the registry has built-in tools"
+    for n, t in builtin.items():
+        assert t["offered"] == (not t["reason"]), n          # one truth, two spellings
+        assert isinstance(t["description"], str) and t["description"], n
+    # switched off in its own folder: the model is never offered it
+    assert not builtin["inbox_fetch"]["offered"]
+    assert "never offered" in builtin["inbox_fetch"]["reason"]
+    # waiting on a setting: names it
+    assert not builtin["package_request"]["offered"]
+    assert "vm_boxes_enabled" in builtin["package_request"]["reason"]
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    tools = {t["name"]: t for t in (await client.get("/api/tools")).json()["tools"]}
+    assert tools["package_request"]["offered"] and tools["package_request"]["reason"] == ""
+    # a tool that needs a connected computer says so while none is connected
+    assert "computer" in tools["desk_type"]["reason"] and not tools["desk_type"]["offered"]
+
+
 # --- WEB-20: the profile's secret checklist knows which secrets are infrastructure
 
 async def test_profile_secret_choices_mark_infrastructure(client, tmp_env):
