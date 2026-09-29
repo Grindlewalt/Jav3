@@ -1359,6 +1359,34 @@ class Command:
         self.busy_ok, self.takes_arg, self.leader = busy_ok, takes_arg, leader
 
 
+def help_view(keys: list[tuple[str, str]], cmds: list[tuple[str, str, str]]):
+    """/help as (a Rich renderable, its plain text). The keys come first, they are
+    what a new user needs; each command is two lines, its usage with the leader key
+    at the right edge and its description under it, so nothing is squeezed into a
+    narrow column and a `<path>` in a usage is only text."""
+    from rich.console import Group
+    from rich.table import Table
+    from rich.text import Text
+
+    kt = Table.grid(padding=(0, 2), expand=True)
+    kt.add_column(no_wrap=True, max_width=24, style="bold")
+    kt.add_column(ratio=1)
+    for k, v in keys:
+        kt.add_row(Text(k), Text(v))
+    ct = Table.grid(expand=True)
+    ct.add_column(ratio=1)
+    ct.add_column(justify="right", no_wrap=True, style="dim")
+    for usage, help_, lead in cmds:
+        ct.add_row(Text(usage, style="bold"), Text(lead))
+        ct.add_row(Text("  " + help_, style="dim"), "")
+    view = Group(Text("Keys", style="bold underline"), Text(""), kt, Text(""),
+                 Text("Commands", style="bold underline"), Text(""), ct)
+    plain = ["Keys", ""] + [f"{k}  {v}" for k, v in keys] + ["", "Commands", ""]
+    for usage, help_, lead in cmds:
+        plain += [f"{usage}  {lead}".rstrip(), f"  {help_}"]
+    return view, "\n".join(plain)
+
+
 def ask_view(ev: dict, question: str) -> tuple[str, str]:
     """(headline, detail markup) for an ask. A permission ask's headline already
     names the command or the path and its detail repeats it, so each is said once:
@@ -2886,15 +2914,24 @@ def build_tui(base: str, token: str, **kw):
             self.dismiss(None)
 
     class Help(ModalScreen):
+        """Markdown text in a dialog, or (with `view`) a Rich renderable: /help
+        is a list built by help_view, `text` then only says what it holds."""
+
         BINDINGS = [Binding("escape,q,enter", "close", show=False)]
 
-        def __init__(self, text: str) -> None:
+        def __init__(self, text: str, view=None) -> None:
             super().__init__()
-            self.text = text
+            self.text, self.view = text, view
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="dialog", classes="wide"):
-                yield Markdown(self.text)
+                yield Static(self.view) if self.view is not None else Markdown(self.text)
+
+        def on_mount(self) -> None:
+            if self.view is not None:
+                # a list wants the width: the shared #dialog.wide rule is 90 cells
+                dlg = self.query_one("#dialog")
+                dlg.styles.width, dlg.styles.max_width = "90%", 110
 
         def action_close(self) -> None:
             self.dismiss(None)
@@ -8568,12 +8605,10 @@ def build_tui(base: str, token: str, **kw):
                                                       actions))
 
         async def c_help(self, arg: str) -> None:
-            lines = ["# Jav3", "", "## Commands", "", "| command | | leader |", "|---|---|---|"]
-            for name, cmd in self.unique_commands():
-                lead = f"ctrl+x {cmd.leader}" if cmd.leader else ""
-                usage = f"/{name} {cmd.usage}".rstrip().replace("|", "\\|")
-                lines.append(f"| {usage} | {cmd.help} | {lead} |")
-            lines += ["", "## Keys", "", "| key | |", "|---|---|"]
+            cmds = [(f"/{name} {cmd.usage}".rstrip(), cmd.help,
+                     f"ctrl+x {cmd.leader}" if cmd.leader else "")
+                    for name, cmd in self.unique_commands()]
+            keys = []
             for k, v in [("enter", "send (while a turn runs: the agent gets it at its "
                                    "next step)"),
                          ("shift+tab", "permissions: yolo (the default: agents run in the VM "
@@ -8620,8 +8655,9 @@ def build_tui(base: str, token: str, **kw):
                          ("@path", "attach a local file"),
                          ("//text", "send text that starts with a slash"),
                          ("ctrl+d", "quit on an empty prompt")]:
-                lines.append(f"| `{k}` | {v} |")
-            await self.push_screen_wait(Help("\n".join(lines)))
+                keys.append((k, v))
+            view, plain = help_view(keys, cmds)
+            await self.push_screen_wait(Help(plain, view))
 
         async def c_new(self, arg: str = "") -> None:
             self.cid, self.title_text, self.last_reply = None, None, ""
