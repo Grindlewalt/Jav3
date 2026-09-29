@@ -2645,6 +2645,28 @@ def desktop_entries(dirs=LINUX_APP_DIRS) -> dict[str, str]:
     return out
 
 
+def apps_override() -> tuple[dict[str, list[str]], list[str]] | None:
+    """(kept, dropped names) from desk-apps.json; None when there is no usable
+    file. The operator's list is taken as is, except that the terminal /
+    script-runner exclusion applies to it too: a file that lists "Terminal"
+    would otherwise hand the model a shell the shell grant does not cover."""
+    try:
+        raw = json.loads(_path("desk-apps.json").read_text())
+        items = list(raw.items())
+    except (OSError, ValueError, AttributeError):
+        return None
+    kept, dropped = {}, []
+    for k, v in items:
+        if not (isinstance(k, str) and _APP_NAME_RE.fullmatch(k)
+                and isinstance(v, list) and v and all(isinstance(a, str) for a in v)):
+            continue
+        if _offerable(k):
+            kept[k] = v
+        else:
+            dropped.append(k)
+    return kept, dropped
+
+
 def local_apps(plat=sys.platform, *, mac_dirs=MAC_APP_DIRS,
                linux_dirs=LINUX_APP_DIRS) -> dict[str, list[str]]:
     """name -> argv for desk_open app=. From desk-apps.json if present (the
@@ -2654,13 +2676,9 @@ def local_apps(plat=sys.platform, *, mac_dirs=MAC_APP_DIRS,
     (through gtk-launch, when it exists). A terminal or script runner is
     never offered by default: opening one and typing into it would be shell
     by other means."""
-    try:
-        raw = json.loads(_path("desk-apps.json").read_text())
-        return {k: v for k, v in raw.items()
-                if isinstance(k, str) and _APP_NAME_RE.fullmatch(k)
-                and isinstance(v, list) and v and all(isinstance(a, str) for a in v)}
-    except (OSError, ValueError, AttributeError):
-        pass
+    over = apps_override()
+    if over is not None:
+        return over[0]
     if plat == "darwin":
         return {n: ["/usr/bin/open", "-a", n] for n in mac_bundles(mac_dirs)}
     apps = {}
@@ -3297,6 +3315,10 @@ def cmd_status(args) -> int:
               f"{'asleep' if st.get('asleep') else 'awake'}")
     except Exception as e:  # noqa: BLE001 — status reports, never dies
         print(f"screen:  unknown ({e})")
+    over = apps_override()
+    if over is not None and over[1]:
+        print(f"apps:    desk-apps.json entries not offered (a terminal or script runner is "
+              f"shell by other means): {', '.join(over[1])}")
     if sys.platform == "darwin":
         print(f"grant Accessibility + Screen Recording to: {sys.executable}")
     return 0
