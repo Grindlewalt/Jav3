@@ -713,6 +713,19 @@ def _plural(n: int, one: str, many: str | None = None) -> str:
     return f"{n} {one if n == 1 else many or one + 's'}"
 
 
+def fit_parts(parts: list[tuple[str, str, int]], width: int, sep: str = " · ",
+              markup_sep: str | None = None) -> str:
+    """Join (plain, markup, rank) parts in their order, leaving out the
+    highest-numbered ranks (last-added first among equals) until the plain
+    text fits `width`. The first part always stays."""
+    keep = list(range(len(parts)))
+    for i in sorted(range(1, len(parts)), key=lambda i: (-parts[i][2], -i)):
+        if len(sep.join(parts[j][0] for j in keep)) <= width:
+            break
+        keep.remove(i)
+    return (sep if markup_sep is None else markup_sep).join(parts[j][1] for j in keep)
+
+
 _CD = re.compile(r"""^cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)(?:\s+2>\s*/dev/null)?"""
                  r"""\s*(?:;|&&|\|\||$)\s*""")
 
@@ -1691,7 +1704,8 @@ def build_tui(base: str, token: str, **kw):
         ToolView #dur { width: auto; height: 1; padding: 0 0 0 2; color: $text-muted; }
         ToolView #body { display: none; }
         ToolView.block { margin: 1 0; }
-        ToolView.block #body { border-left: solid $panel-lighten-2; padding: 0 1; margin-left: 1; }
+        ToolView.block #body { border-left: solid $panel-lighten-2; padding: 0 1; margin-left: 1;
+                               text-wrap: nowrap; text-overflow: ellipsis; }
         ToolView.-picked #row { background: $panel; }
         ToolView.-picked #head { text-style: bold; }
         """
@@ -1705,12 +1719,16 @@ def build_tui(base: str, token: str, **kw):
             self.interrupted, self.why = False, "interrupted"
             self.more = 0                     # body lines left out when open
             self._shown: tuple = ()           # what the widgets last got
+            # held here, not queried: a result can land before the row's own
+            # children are mounted (they mount after the row itself)
+            self._head, self._dur = Static(id="head"), Static(id="dur")
+            self._body = Static(id="body")
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="row"):
-                yield Static(id="head")
-                yield Static(id="dur")
-            yield Static(id="body")
+                yield self._head
+                yield self._dur
+            yield self._body
 
         def on_mount(self) -> None:
             if not self.done:
@@ -1778,9 +1796,10 @@ def build_tui(base: str, token: str, **kw):
                 body, more = tool_body(self.tname, self.args, self.ok,
                                        self.result if self.done and not self.interrupted
                                        else None, True, cap=EXPANDED_LINES)
-                if body is None:
-                    body = "[$text-muted](nothing more to show yet)[/]" if not self.done \
-                        else "[$text-muted](no output)[/]"
+                if body is None and self.done:
+                    body = "[$text-muted](no output)[/]"
+                elif body is None and self.has_class("-picked"):
+                    body = "[$text-muted]running — what it returns shows here[/]"
                 if more:
                     body += f"\n[$text-muted]… {more} more lines · → shows all[/]"
             self.more = more
@@ -1788,15 +1807,14 @@ def build_tui(base: str, token: str, **kw):
                 return                          # the tick redraws; most ticks change nothing
             old = self._shown
             self._shown = (head, dur, body)
-            # a one-line title and duration never change the row's height
-            self.query_one("#head", Static).update(head, layout=False)
+            # a one-line title never changes the row's height
+            self._head.update(head, layout=False)
             if not old or old[1] != dur:
-                self.query_one("#dur", Static).update(dur, layout=not old or len(old[1]) != len(dur))
+                self._dur.update(dur, layout=not old or len(old[1]) != len(dur))
             if not old or old[2] != body:
-                b = self.query_one("#body", Static)
                 self.set_class(body is not None, "block")
-                b.display = body is not None
-                b.update(body or "")
+                self._body.display = body is not None
+                self._body.update(body or "")
 
         def full_markup(self) -> str:
             body, _ = tool_body(self.tname, self.args, self.ok,
@@ -1838,6 +1856,7 @@ def build_tui(base: str, token: str, **kw):
         def __init__(self, *children, **kw) -> None:
             super().__init__(*children, **kw)
             self.picked = None
+            self.picking = False       # focused (has_focus is not set yet in on_focus)
 
         def rows(self) -> list:
             return [w for w in self.children if isinstance(w, ToolView)]
@@ -1847,16 +1866,18 @@ def build_tui(base: str, token: str, **kw):
                 self.picked.remove_class("-picked")
             self.picked = tv
             if tv is not None:
-                tv.set_class(self.has_focus, "-picked")
+                tv.set_class(self.picking, "-picked")
                 if scroll:
                     self.scroll_to_widget(tv, animate=False)
 
         def on_focus(self) -> None:
+            self.picking = True
             rows = self.rows()
             self.pick(self.picked if self.picked in rows else (rows[-1] if rows else None))
             self.app._refresh_status()
 
         def on_blur(self) -> None:
+            self.picking = False
             if self.picked is not None:
                 self.picked.remove_class("-picked")
             self.app._refresh_status()
@@ -6169,16 +6190,30 @@ def build_tui(base: str, token: str, **kw):
             it ends — or, while tool rows are being picked, their keys."""
             t = self.turn if self.busy else None
             spin = f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/] " if t else ""
-            if self.log_view.has_focus:
-                when = f"{spin}[$text-muted]{t.stats()[0]} ·[/] " if t else ""
-                return (f"{when}[$primary]↑↓[/] pick · [$primary]enter[/] open/close · "
-                        "[$primary]→[/] all · [$primary]esc[/] back to the prompt")
+            width = self.query_one("#status-left", Static).size.width or 200
+            if self.log_view.picking:
+                parts = [("↑↓ pick", "[$primary]↑↓[/] pick", 0),
+                         ("enter open/close", "[$primary]enter[/] open/close", 1),
+                         ("→ all of it", "[$primary]→[/] all of it", 2),
+                         ("esc back", "[$primary]esc[/] back", 1)]
+                if t:
+                    parts.append((f"x {t.stats()[0]}", f"{spin}[$text-muted]{t.stats()[0]}[/]", 3))
+                return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
             verb = "interrupting" if self.stop_requested else "working"
-            esc = ("[$warning]esc again to interrupt[/]"
-                   if time.monotonic() - self.esc_armed < 2 else "esc interrupt")
+            stats = t.stats()
+            armed = time.monotonic() - self.esc_armed < 2
             nq = len(self.queue) + len(self.pending)
-            q = f"  [$accent]{nq} queued[/]" if nq else ""
-            return f"{spin}{verb} [$text-muted]{' · '.join(t.stats())} · {esc}[/]{q}"
+            # (plain, markup, rank): a narrow terminal drops the higher ranks
+            # first, so the line never wraps or gets cut mid-word
+            parts = [(f"x {verb} {stats[0]}", f"{spin}{verb} [$text-muted]{stats[0]}[/]", 0)]
+            for s in stats[1:]:
+                rank = 2 if s.startswith("$") else 1 if s.endswith(("tool", "tools")) else 3
+                parts.append((s, f"[$text-muted]{s}[/]", rank))
+            if nq:
+                parts.append((f"{nq} queued", f"[$accent]{nq} queued[/]", 1))
+            parts.append(("esc again to interrupt", "[$warning]esc again to interrupt[/]", 0)
+                         if armed else ("esc interrupt", "[$text-muted]esc interrupt[/]", 4))
+            return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
 
         def _refresh_status(self) -> None:
             left = self.query_one("#status-left", Static)
@@ -6194,7 +6229,7 @@ def build_tui(base: str, token: str, **kw):
                 left.update(f"[$warning b]ctrl+x[/]  {keys}  [$primary]b[/] notifications")
                 right.update("")
                 return
-            if self.log_view.has_focus or (self.busy and self.turn is not None):
+            if self.log_view.picking or (self.busy and self.turn is not None):
                 left.update(self._running_status(), layout=False)
             elif self.logged_in is False:
                 left.update("[$warning]not logged in[/] [$text-muted]— /login · "
