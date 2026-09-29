@@ -53,15 +53,21 @@ C->S res {id, ok:true, text,
             screen: {w, h}},                  # logical size of that monitor
     elements: [ {id:int, role:str, label:str, x:int, y:int, w:int, h:int,
                  src:"ax"|"atspi"|"uia"|"dom",
-                 value?: str, focused?: bool, enabled?: bool} ],
+                 value?: str, focused?: bool, enabled?: bool,
+                 window?: str} ],                  # "menu bar" or "<App>: <title>";
+                                                   # the server groups the list by it
     elements_src: "ax"|"atspi"|"uia"|"none",
     elements_note?: str,                      # why none: "no Accessibility
                                               # permission", "AT-SPI not
                                               # installed", ...
     cursor?: {x, y},                          # image px, if known
-    changed?: bool,                           # auto-shots only: did the
-                                              # screen differ from the frame
-                                              # before the action
+    changed?: bool,                           # auto-shots only: pixels_changed
+                                              # OR elements_changed
+    pixels_changed?: bool,                    # settled frame vs pre-action
+                                              # 160-px thumbnail, > 8 grey
+                                              # levels on > 40 pixels
+    elements_changed?: bool,                  # element list (count + labels)
+                                              # differs; catches overlays
     settled_ms?: int                          # how long until two consecutive
                                               # captures matched
 }
@@ -94,9 +100,12 @@ drag   {x,y, to_x,to_y, button?:"left"}                       -> screenshot res
 ### A.4 Settle
 
 After every input verb the client captures until two consecutive downscaled
-captures match (perceptual hash or byte-equal on a 64-px thumbnail), minimum
-0.3 s, maximum 3 s, and reports `changed` against the pre-action thumbnail and
-`settled_ms`. `SETTLE_S` stays as the floor.
+captures match (160-px thumbnail, a pixel counts as changed past 8 grey
+levels, 40 such pixels = changed; the first trial's Spotlight bar was missed
+at 64 px / 6 pixels), minimum 0.3 s, maximum 3 s, and reports `changed`
+(pixels OR element list) against the pre-action state and `settled_ms`.
+`SETTLE_S` stays as the floor. The server renders `changed: yes (elements)`
+when only the list moved.
 
 ### A.5 Locked screen / sleeping display
 
