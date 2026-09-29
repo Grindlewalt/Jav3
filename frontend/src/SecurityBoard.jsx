@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from './api.js'
 import { useAsk } from './ask.jsx'
 import { human, sevClass } from './format.js'
@@ -190,6 +191,7 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
   // program (in its unit), or everything its unit runs, joins the baseline so
   // it stops alerting. The server refuses what would hide too much.
   const proc = ev.kind === 'unexpected_process' && board?.detail?.exe ? board.detail : null
+  const fault = ev.kind === 'harness_fault' ? (board?.detail || ev.detail || {}) : null
   async function allow(scope) {
     const q = baselineAsk(proc, scope)
     if (!await ask.confirm(q.title, { body: q.body, confirmLabel: q.confirm })) return
@@ -274,10 +276,15 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
                     title="Stop alerting on this program in this unit, in every box">
               Allow this program</button>
           )}
+          {fault && fault.conversation_id && (
+            <Link className="ghost-link" to={`/c/${fault.conversation_id}`} onClick={onClose}
+                  title="open the chat where this happened">Open the chat</Link>
+          )}
           {onAck && !ev.acknowledged && (
             <button onClick={() => { onAck(ev.id); onClose() }}
-                    title="Mark it seen. The same program raises a new alert the next time a box boots.">
-              Acknowledge</button>
+                    title={fault ? 'You have dealt with it, or noted the bug. It leaves the list.'
+                      : 'Mark it seen. A repeat raises a new alert.'}>
+              {fault ? 'Mark resolved' : 'Acknowledge'}</button>
           )}
         </div>
       </div>

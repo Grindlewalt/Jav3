@@ -823,6 +823,35 @@ async def _process_board(db, ev, detail, add) -> dict:
                    "the agent was doing just before (Logs, Transcripts)."]}
 
 
+# --- harness_fault -----------------------------------------------------------
+
+async def _fault_board(db, ev, detail, add) -> dict:
+    """An agent's report that one of Jav3's own tools misbehaved. The summary in
+    the queue is cut at 160 characters; this board has all of it."""
+    cid = detail.get("conversation_id")
+
+    async def facts():
+        return _facts("The report", [
+            ["Tool", detail.get("tool")],
+            ["What it tried", detail.get("tried")],
+            ["What went wrong", detail.get("went_wrong")],
+            ["What it expected", detail.get("expected")],
+            ["Chat", f"chat #{cid}" if cid else None],
+            ["Project", await _project_name(db, ev.get("project_slug"))
+             or ev.get("project_slug")],
+            ["Reported", f"{_iso(_ts(ev.get('created_at')))} "
+                         f"({_ago(_ts(ev.get('created_at')))})"],
+        ])
+
+    await add(facts)
+    return {
+        "title": "An agent reported a problem with Jav3's own tools",
+        "why": "This is not a security alert. The agent hit a tool that errored on input "
+               "it believed valid, or did not do what it says. It is a bug report.",
+        "checks": ["Does the tool still do this? Ask an agent to repeat the call.",
+                   "Mark it resolved once you have dealt with it or noted the bug."]}
+
+
 # --- fallback ----------------------------------------------------------------
 
 async def _generic_board(db, ev, detail, add) -> dict:
@@ -853,7 +882,8 @@ async def _generic_board(db, ev, detail, add) -> dict:
 
 
 _BOARDS = {"write_flag": _write_board, "egress_anomaly": _egress_board,
-           "login_failed": _login_board, "unexpected_process": _process_board}
+           "login_failed": _login_board, "unexpected_process": _process_board,
+           "harness_fault": _fault_board}
 
 
 async def build_board(db: aiosqlite.Connection, ev: dict) -> dict:

@@ -500,10 +500,10 @@ async def remove_operator_baseline(body: BaselineRemoveBody):
 
 
 @security_router.post("/events/ack_all")
-async def ack_all():
+async def ack_all(only: str | None = None, exclude: str | None = None):
     db = await get_db()
     try:
-        return await security.acknowledge_all(db)
+        return await security.acknowledge_all(db, only=only, exclude=exclude)
     finally:
         await db.close()
 

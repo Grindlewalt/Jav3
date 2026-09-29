@@ -62,6 +62,51 @@ async def test_summary_approval_in_another_project_does_not_unblock(client, db):
     assert s["denied"] == 1 and s["allowed"] == 0
 
 
+# --- WEB-14: agent reports have their own list, whole text, and a way to clear them
+
+async def _fault(db, went_wrong="write_file reported success but git status is clean",
+                 conv=646):
+    return await security.record_harness_fault(
+        db, tried="write_file then git commit", went_wrong=went_wrong,
+        expected="the commit to see the file", tool="write_file", project="proj",
+        conversation_id=conv)
+
+
+async def test_fault_summary_is_cut_with_an_ellipsis_and_the_board_has_the_whole_text(client, db):
+    long = "the tool said done but " + "nothing changed on disk and " * 12 + "that is the fault"
+    await _fault(db, long)
+    ev = [e for e in await security.list_events(db) if e["kind"] == "harness_fault"][0]
+    assert ev["summary"].endswith("…") and len(ev["summary"]) <= 200
+    board = (await client.get(f"/api/security/events/{ev['id']}/context")).json()
+    facts = {r["label"]: r["value"] for s in board["sections"] if s["type"] == "facts"
+             for r in s["rows"]}
+    assert facts["What went wrong"] == long                    # nothing cut on the board
+    assert facts["What it tried"] == "write_file then git commit"
+    assert facts["Chat"] == "chat #646"
+    assert "Jav3's own tools" in board["title"]
+
+
+async def test_short_fault_summary_is_untouched(db):
+    await _fault(db, "short")
+    ev = [e for e in await security.list_events(db) if e["kind"] == "harness_fault"][0]
+    assert ev["summary"] == "Harness fault reported: write_file: short"
+
+
+async def test_ack_all_can_leave_reports_alone_or_clear_only_them(client, db):
+    await _fault(db)
+    await security.raise_event(db, kind="desk_refused", severity="warn", summary="x")
+    r = await client.post("/api/security/events/ack_all", params={"exclude": "harness_fault"})
+    assert r.json()["done"] == 1
+    left = [e["kind"] for e in await security.list_events(db, unacknowledged_only=True)]
+    assert left == ["harness_fault"]
+    await security.raise_event(db, kind="desk_refused", severity="warn", summary="y",
+                               cause="y")
+    r = await client.post("/api/security/events/ack_all", params={"only": "harness_fault"})
+    assert r.json()["done"] == 1
+    left = [e["kind"] for e in await security.list_events(db, unacknowledged_only=True)]
+    assert left == ["desk_refused"]
+
+
 # --- WEB-20: the profile's secret checklist knows which secrets are infrastructure
 
 async def test_profile_secret_choices_mark_infrastructure(client, tmp_env):

@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { Link, Outlet, useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
@@ -9,7 +9,8 @@ import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { sevClass, ts } from '../format.js'
 import {
-  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, DENY_TIP, REFUSED_TAG, ledeFor, SECURITY_LEDES,
+  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, DENY_TIP, FAULTS_LEDE, REFUSED_TAG, faultText, ledeFor,
+  SECURITY_LEDES,
 } from '../securityCopy.js'
 import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
@@ -206,18 +207,25 @@ export function ReviewQueue({ slug }) {
     } catch (e) { notifyError(e) }
     setBusy(false)
   }
-  async function ackAllAlerts() {
-    if (!await ask.confirm(`Acknowledge all ${alerts.length} alerts?`,
-                           { confirmLabel: 'Acknowledge all' })) return
+  // Agent reports (harness_fault) are a list of their own: the alerts' bulk
+  // acknowledge leaves them alone, and they have their own "Resolve all".
+  async function ackAllAlerts(only) {
+    const n = (only ? faults : secAlerts).length
+    if (!await ask.confirm(only ? `Mark all ${n} agent reports resolved?`
+                                : `Acknowledge all ${n} alerts?`,
+                           { confirmLabel: only ? 'Resolve all' : 'Acknowledge all' })) return
     setBusy(true)
     try {
-      await api('/api/security/events/ack_all', { method: 'POST' })
+      await api(`/api/security/events/ack_all?${only ? 'only' : 'exclude'}=harness_fault`,
+                { method: 'POST' })
       loadAlerts()
       window.dispatchEvent(new Event('jarvis-files-changed'))
     } catch (e) { notifyError(e) }
     setBusy(false)
   }
 
+  const faults = alerts.filter((a) => a.kind === 'harness_fault')
+  const secAlerts = alerts.filter((a) => a.kind !== 'harness_fault')
   const multi = !slug && (slugs?.length || 0) > 1
   const projLabel = (s) => names[s] || s
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
@@ -366,23 +374,45 @@ export function ReviewQueue({ slug }) {
       )}
 
       {/* ---- security alerts ---- */}
-      {alerts.length > 0 && (
+      {secAlerts.length > 0 && (
         <section className="sbx-sec">
           <div className="sbx-sec-head">
             <h3>Security alerts</h3>
-            <span className="sec-count">{alerts.length}</span>
+            <span className="sec-count">{secAlerts.length}</span>
             {/* ack_all is global — inside a single project's Workspace panel it
                 would silently clear other projects' alerts, so it stays off */}
             {!slug && (
               <div className="sec-actions">
                 <button className="ghost" disabled={busy}
-                        title="mark every alert as seen"
-                        onClick={ackAllAlerts}>Acknowledge all</button>
+                        title="mark every alert as seen (agent reports stay)"
+                        onClick={() => ackAllAlerts(false)}>Acknowledge all</button>
               </div>
             )}
           </div>
-          {alerts.map((a) => (
+          {secAlerts.map((a) => (
             <AlertRow key={a.id} a={a} onAck={ackAlert}
+                      onOpen={() => setBoard({ id: a.id, seed: a })} />
+          ))}
+        </section>
+      )}
+
+      {/* ---- what agents reported about Jav3's own tools: not security alerts ---- */}
+      {faults.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Agent reports</h3>
+            <span className="sec-count">{faults.length}</span>
+            {!slug && (
+              <div className="sec-actions">
+                <button className="ghost" disabled={busy}
+                        title="mark every agent report resolved"
+                        onClick={() => ackAllAlerts(true)}>Resolve all</button>
+              </div>
+            )}
+          </div>
+          <p className="dim small net-lede">{FAULTS_LEDE}</p>
+          {faults.map((a) => (
+            <FaultRow key={a.id} a={a} onAck={ackAlert}
                       onOpen={() => setBoard({ id: a.id, seed: a })} />
           ))}
         </section>
@@ -437,6 +467,37 @@ function AlertRow({ a, onAck, onOpen }) {
                 title="the flagged code, the diff, the directory, the traffic">
           Inspect</button>
         <button className="ghost" onClick={() => onAck(a.id)}>Acknowledge</button>
+      </div>
+    </div>
+  )
+}
+
+// One agent report: which tool, which chat, what went wrong. The chat link is
+// the point (a report with no way back to the turn that hit it is a riddle);
+// "Mark resolved" is the honest name for what the button does.
+function FaultRow({ a, onAck, onOpen }) {
+  const d = a.detail && typeof a.detail === 'object' ? a.detail : {}
+  return (
+    <div className="sbx-row sev-info">
+      <div className="grow rev-alert-main">
+        <div className="sbx-verdict-top rev-alert-top">
+          {d.tool && <span className="tag mono">{d.tool}</span>}
+          {a.project_slug && <span className="tag">{a.project_slug}</span>}
+          {d.conversation_id && (
+            <Link className="small" to={`/c/${d.conversation_id}`}
+                  title="open the chat where this happened">chat #{d.conversation_id}</Link>)}
+          <span className="dim small">{ts(a.created_at)}</span>
+        </div>
+        <button type="button" className="rev-alert-open" onClick={onOpen}
+                title="the whole report">
+          <span className="rev-alert-summary">{faultText(a.summary, d.tool)}</span>
+        </button>
+      </div>
+      <div className="sbx-right">
+        <button className="ghost" onClick={onOpen}>Inspect</button>
+        <button className="ghost" onClick={() => onAck(a.id)}
+                title="You have dealt with it, or noted the bug. It leaves this list.">
+          Mark resolved</button>
       </div>
     </div>
   )

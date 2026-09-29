@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, AUTO_REVIEW_LEDE,
   PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
-  decidedText, ledeFor, plural, secretChecklist, tallyLine,
+  decidedText, faultText, ledeFor, plural, secretChecklist, tallyLine,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -89,5 +89,11 @@ assert.equal(tallyLine({ examined: 3, allowed: 1, acked: 1, flagged: 1 }),
 assert.equal(tallyLine({ examined: 1, allowed: 0, acked: 2, flagged: 0, error: 'x' }),
   'looked at 1 item, allowed 0 sites, cleared 2 alerts, flagged 0 for you (stopped early)')
 for (const jargon of ['unreviewed', 'acked', ' seen']) assert.ok(!lede.includes(jargon), jargon)
+
+// WEB-14: an agent report's row drops what the section and the tag already say
+assert.equal(faultText('Harness fault reported: write_file: nothing changed', 'write_file'), 'nothing changed')
+assert.equal(faultText('Harness fault reported: write_file: nothing changed'), 'write_file: nothing changed')
+assert.equal(faultText('Harness fault reported: it broke…', 'desk_type'), 'it broke…')
+assert.equal(faultText(undefined), '')
 
 console.log('securityCopy ok')

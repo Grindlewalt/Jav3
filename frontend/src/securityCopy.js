@@ -186,3 +186,17 @@ export const AUTO_ALLOW_LEDE = 'When on, a site no list covers is judged the mom
   + 'Well-known sites are let through for 7 days, odd-looking ones are blocked, and the '
   + 'rest go to the model; a "not sure" waits for you. Different from Auto review on the '
   + 'Queue tab, which sweeps this list a few minutes later.'
+
+// ---- agent reports (harness_fault) in the Queue (WEB-14) ---------------------------
+
+export const FAULTS_LEDE = "Agents file these when one of Jav3's own tools misbehaved: an "
+  + 'error on input that looked valid, or a call that did not do what it says. They are '
+  + 'bug reports, not security alerts. Mark one resolved when you have dealt with it.'
+
+// the row's text: the summary without the prefix the section title already says,
+// and without the tool's name when the row shows it as a tag
+export function faultText(summary, tool) {
+  let t = String(summary || '').replace(/^Harness fault reported:\s*/, '')
+  if (tool && t.startsWith(`${tool}: `)) t = t.slice(tool.length + 2)
+  return t
+}
