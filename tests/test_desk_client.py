@@ -1331,3 +1331,28 @@ async def test_a_change_outside_the_zoom_is_seen_and_the_zoom_ends(cfg, monkeypa
     assert thumbs and all(t is None for t in thumbs)          # judged on the whole screen
     assert r["frame"]["region"] is None and s.frame.rect is None
     assert "zoom ended" in r["note"]
+
+
+def test_mac_source_switches_on_chromium_and_electron_accessibility_once_per_app():
+    """NAV-15: AXManualAccessibility (Electron) and AXEnhancedUserInterface
+    (Chromium) are set on an app element before it is walked, once per app
+    per session, and a failure changes nothing."""
+    import types
+    calls = []
+    src = object.__new__(jd.MacAXSource)
+    src._woken = set()
+    src.ct = types.SimpleNamespace(c_void_p=types.SimpleNamespace(
+        in_dll=lambda lib, name: name))
+    src.cf = object()
+    src.cfstr = lambda n: n
+    src.ax = types.SimpleNamespace(
+        AXUIElementSetAttributeValue=lambda a, n, v: calls.append((a, n, v)) or 0)
+    src.wake("app-1", 1)
+    src.wake("app-1", 1)
+    src.wake("app-2", 2)
+    assert calls == [("app-1", "AXManualAccessibility", "kCFBooleanTrue"),
+                     ("app-1", "AXEnhancedUserInterface", "kCFBooleanTrue"),
+                     ("app-2", "AXManualAccessibility", "kCFBooleanTrue"),
+                     ("app-2", "AXEnhancedUserInterface", "kCFBooleanTrue")]
+    src.ax = types.SimpleNamespace(AXUIElementSetAttributeValue=lambda *a: 1 / 0)
+    src.wake("app-3", 3)          # a broken call is ignored

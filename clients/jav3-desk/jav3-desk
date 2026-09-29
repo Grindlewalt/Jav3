@@ -897,6 +897,7 @@ class MacAXSource(ElementSource):
     def __init__(self):
         super().__init__("")
         self._hung: set[int] = set()
+        self._woken: set[int] = set()
         import ctypes
         import ctypes.util
         c = self.ct = ctypes
@@ -916,6 +917,8 @@ class MacAXSource(ElementSource):
                                                               c.POINTER(vp)]
         ax.AXUIElementCopyMultipleAttributeValues.restype = c.c_int32
         ax.AXUIElementSetMessagingTimeout.argtypes = [vp, c.c_float]
+        ax.AXUIElementSetAttributeValue.argtypes = [vp, vp, vp]
+        ax.AXUIElementSetAttributeValue.restype = c.c_int32
         ax.AXUIElementGetPid.argtypes = [vp, c.POINTER(c.c_int32)]
         ax.AXValueGetTypeID.restype = c.c_ulong
         ax.AXValueGetType.argtypes = [vp]
@@ -1040,6 +1043,25 @@ class MacAXSource(ElementSource):
         return {n: v if n in ("AXWindows", "AXMenuBar") else self.py(v)
                 for n, v in zip(names, self.py(out.value) or [])}
 
+    # the documented assistive-technology switches: Electron builds its web
+    # tree after AXManualAccessibility, Chromium after AXEnhancedUserInterface
+    WAKE_ATTRS = ("AXManualAccessibility", "AXEnhancedUserInterface")
+
+    def wake(self, app, pid: int) -> None:
+        """Switch on Chromium/Electron accessibility for this app, once per
+        app per session; nothing is restored and every failure is ignored
+        (the app's messaging timeout is already set, so a hung app costs at
+        most that)."""
+        if pid in self._woken:
+            return
+        self._woken.add(pid)
+        try:
+            true = self.ct.c_void_p.in_dll(self.cf, "kCFBooleanTrue")
+            for name in self.WAKE_ATTRS:
+                self.ax.AXUIElementSetAttributeValue(app, self.cfstr(name), true)
+        except Exception:  # noqa: BLE001 — a nicety; the walk works without it
+            pass
+
     def roots(self, deadline: float = float("inf")) -> tuple[list, list[str], list[str]]:
         """(root elements, their group names, their kinds): each window as
         "<App>: <title>" (or just the app), the front app's menu bar as
@@ -1070,6 +1092,7 @@ class MacAXSource(ElementSource):
                 continue
             self._keep.append(a)
             ax.AXUIElementSetMessagingTimeout(a, self.AX_TIMEOUT_S)
+            self.wake(a, pid)
             v = self.multi(a, ("AXTitle", "AXWindows", "AXMenuBar"))
             if not v:
                 continue                                   # hung or gone: next app
