@@ -322,6 +322,23 @@ async def test_no_input_without_a_fresh_screenshot(env, monkeypatch):
         await fd.stop()
 
 
+def test_open_app_is_checked_against_the_hello_list():
+    apps = ["Brave Browser", "Notes", "TextEdit"] + [f"App{i:03}" for i in range(197)]
+    assert desk.offered_app("textedit", apps) == "TextEdit"
+    assert desk.offered_app(" Notes ", apps) == "Notes"
+    with pytest.raises(desk.DeskError) as e:
+        desk.offered_app("TextEdt", apps)
+    msg = str(e.value)
+    assert msg.startswith("'TextEdt' is not one of the apps this computer offers: TextEdit, ")
+    assert msg.endswith(f"…and {len(apps) - desk.APPS_SHOWN} more; ask for the exact app name")
+    with pytest.raises(desk.DeskError, match="offers: none"):
+        desk.offered_app("x", [])
+    # the hello keeps up to 200 names, each shaped like an app name
+    h = desk._clean_hello({"apps": apps + ["one too many", "bad;name"]})
+    assert len(h["apps"]) == 200 and "bad;name" not in h["apps"]
+    assert desk._clean_hello({"apps": "TextEdit"})["apps"] == []
+
+
 async def test_closed_action_list(env):
     fd = await FakeDesk(env["desk_tok"]).start()
     try:
@@ -331,6 +348,8 @@ async def test_closed_action_list(env):
         assert "http(s)" in await _tool("desk_open")(url="file:///etc/passwd")
         assert "not one of the apps" in await _tool("desk_open")(app="xterm")
         assert (await _tool("desk_open")(app="firefox")).startswith("open ok")
+        assert (await _tool("desk_open")(app="Firefox")).startswith("open ok")
+        assert fd.reqs[-1]["params"]["app"] == "firefox"     # the client's own name
         assert "button" in await _tool("desk_click")(x=1, y=1, button="thumb")
         assert "outside" in await _tool("desk_scroll")(dy=50)
         assert "2000" in await _tool("desk_type")(text="x" * 2001)

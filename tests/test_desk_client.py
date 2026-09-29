@@ -648,6 +648,59 @@ async def test_wait_and_drag(cfg, monkeypatch):
     assert ws.sent[-1]["ok"] and ("drag", 200, 200, 600, 400, "left") in b.calls
 
 
+def test_mac_apps_come_from_the_installed_bundles(cfg, tmp_path):
+    apps_dir, sys_dir, util_dir = (tmp_path / n for n in ("A", "S", "U"))
+    for d, names in ((apps_dir, ["TextEdit.app", "Brave Browser.app", "iTerm.app",
+                                 "Adobe (Beta).app", "notes.txt", ".Hidden.app",
+                                 "Nested"]),
+                     (sys_dir, ["Notes.app", "textedit.app", "Script Editor.app"]),
+                     (util_dir, ["Terminal.app", "Disk Utility.app"])):
+        d.mkdir()
+        for n in names:
+            (d / n).mkdir()
+    (apps_dir / "Nested" / "Deep.app").mkdir()           # one level only
+    dirs = (str(apps_dir), str(sys_dir), str(util_dir), str(tmp_path / "missing"))
+    apps = jd.local_apps("darwin", mac_dirs=dirs)
+    # sorted, one per name (case-insensitive), no terminal / script runner,
+    # no name the server would reject, nothing nested
+    assert list(apps) == ["Brave Browser", "Disk Utility", "Notes", "TextEdit"]
+    assert apps["TextEdit"] == ["/usr/bin/open", "-a", "TextEdit"]
+    for i in range(250):
+        (apps_dir / f"App{i:03}.app").mkdir()
+    assert len(jd.mac_bundles(dirs)) == jd.APPS_CAP
+    # launched only by a name in the list: exact or case-insensitive
+    assert jd.app_named(apps, "textedit") == "TextEdit"
+    assert jd.app_named(apps, "TextEdit.app") is None and jd.app_named(apps, "") is None
+    frame = None
+    assert jd.validate("open", {"app": "notes"}, frame, apps)["app"] == "Notes"
+    with pytest.raises(jd.DeskError):
+        jd.validate("open", {"app": "Terminal"}, frame, apps)
+    # the operator's desk-apps.json still wins, as is
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "desk-apps.json").write_text(json.dumps({"Mine": ["/usr/bin/true"],
+                                                    "bad;name": ["x"]}))
+    assert jd.local_apps("darwin", mac_dirs=dirs) == {"Mine": ["/usr/bin/true"]}
+
+
+def test_linux_apps_add_desktop_entries(cfg, tmp_path, monkeypatch):
+    d = tmp_path / "apps"
+    d.mkdir()
+    (d / "org.gnome.TextEditor.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Text Editor\nExec=gnome-text-editor\n"
+        "[Desktop Action new]\nName=New Window\n")
+    (d / "xterm.desktop").write_text("[Desktop Entry]\nName=XTerm\nTerminal=false\n"
+                                     "Categories=System;TerminalEmulator;\n")
+    (d / "hidden.desktop").write_text("[Desktop Entry]\nName=Hidden\nNoDisplay=true\n")
+    (d / "tui.desktop").write_text("[Desktop Entry]\nName=htop\nTerminal=true\n")
+    monkeypatch.setattr(jd, "find_bin", lambda n: "/usr/bin/" + n
+                        if n in ("firefox", "gtk-launch") else None)
+    apps = jd.local_apps("linux", linux_dirs=(str(d),))
+    assert apps == {"firefox": ["/usr/bin/firefox"],
+                    "Text Editor": ["/usr/bin/gtk-launch", "org.gnome.TextEditor"]}
+    monkeypatch.setattr(jd, "find_bin", lambda n: None)     # no gtk-launch: PATH only
+    assert jd.local_apps("linux", linux_dirs=(str(d),)) == {}
+
+
 def test_drag_path_moves_in_steps_and_ends_on_target():
     p = jd.drag_path(0, 0, 120, 60)
     assert p[-1] == (120, 60) and len(p) == 12 and p[0] == (10, 5)

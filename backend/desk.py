@@ -74,6 +74,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import dataclasses
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -104,6 +105,8 @@ IDLE_DROP_S = 60            # a socket silent this long is dropped
 IMAGE_B64_CAP = 6_000_000   # a res frame's image, base64 chars
 EVENT_DEDUP_S = 60          # refusals / rate trips: one event per burst
 SESSION_EVENT_GAP_S = 600   # reconnect blips don't each raise start/stop
+APPS_KEEP = 200             # desk_open app names from hello (the client caps the same)
+APPS_SHOWN = 30             # named in a refusal; the rest are counted
 ELEMENTS_KEEP = 1000        # element registry per frame (the client caps at 400)
 ELEMENTS_SHOWN = 150        # listed to the model, in-view first
 WAIT_MAX_MS = 10_000        # desk_wait
@@ -370,8 +373,8 @@ def _clean_hello(hello: dict) -> dict:
                          if isinstance(m.get(k), (int, float, str))
                          and not isinstance(m.get(k), bool)})
     ceil = hello.get("ceiling") if isinstance(hello.get("ceiling"), dict) else {}
-    apps = [a for a in (hello.get("apps") or [])[:64]
-            if isinstance(a, str) and _APP_RE.match(a)]
+    raw_apps = hello.get("apps") if isinstance(hello.get("apps"), list) else []
+    apps = [a for a in raw_apps[:APPS_KEEP] if isinstance(a, str) and _APP_RE.match(a)]
     return {"v": hello.get("v") if isinstance(hello.get("v"), int) else 0,
             "host": s(hello.get("host"), 128), "platform": s(hello.get("platform"), 32),
             "session": s(hello.get("session"), 32), "backend": s(hello.get("backend"), 32),
@@ -656,10 +659,7 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
                 raise DeskError("only http(s) URLs can be opened")
             p["url"] = url
         elif isinstance(app, str) and app.strip():
-            if app.strip() not in apps:
-                raise DeskError(f"{app!r} is not one of the apps this computer "
-                                f"offers: {', '.join(apps) or 'none'}")
-            p["app"] = app.strip()
+            p["app"] = offered_app(app, apps)
         else:
             raise DeskError("open needs a url or an app")
     elif verb == "shell":
@@ -676,6 +676,29 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
     if verb in INPUT_VERBS:
         p["screenshot_after"] = params.get("screenshot_after", True) is not False
     return p
+
+
+def offered_app(app: str, apps: list[str]) -> str:
+    """The hello's name for `app` (exact, else case-insensitive), or a
+    refusal that lists what is offered: the closest names first, then the
+    rest alphabetically, cut at APPS_SHOWN."""
+    want = app.strip()
+    if want in apps:
+        return want
+    for a in apps:
+        if a.lower() == want.lower():
+            return a
+    if not apps:
+        raise DeskError(f"{want!r} is not one of the apps this computer offers: none")
+    close = difflib.get_close_matches(want.lower(), [a.lower() for a in apps], n=5,
+                                      cutoff=0.6)
+    close_names = [a for c in close for a in apps if a.lower() == c][:5]
+    order = close_names + sorted((a for a in apps if a not in close_names), key=str.lower)
+    shown = order[:APPS_SHOWN]
+    s = ", ".join(shown)
+    if len(order) > len(shown):
+        s += f" …and {len(order) - len(shown)} more; ask for the exact app name"
+    raise DeskError(f"{want!r} is not one of the apps this computer offers: {s}")
 
 
 def _audit_params(verb: str, p: dict) -> dict:

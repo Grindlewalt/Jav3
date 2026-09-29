@@ -1094,8 +1094,8 @@ def validate(verb: str, p: dict, frame: Frame | None, apps: dict,
             if not _URL_RE.match(url):
                 raise DeskError("only http(s) URLs")
             out["url"] = url
-        elif isinstance(app, str) and app in apps:
-            out["app"] = app
+        elif app_named(apps, app):
+            out["app"] = app_named(apps, app)
         else:
             raise DeskError("open needs an http(s) url or one of this computer's apps")
         return out
@@ -1928,25 +1928,127 @@ def detect_backend(env=os.environ, plat=sys.platform) -> str:
                     "WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE SWAYSOCK")
 
 
-def local_apps(plat=sys.platform) -> dict[str, list[str]]:
-    """name -> argv for desk_open app=. From desk-apps.json if present, else
-    the browsers/editors found here. A terminal is deliberately not offered
-    by default: opening one and typing into it would be shell by other means."""
+MAC_APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utilities",
+                "~/Applications")
+LINUX_APP_DIRS = ("/usr/share/applications",)
+APPS_CAP = 200            # names offered in hello (the server keeps as many)
+_APP_NAME_RE = re.compile(r"[A-Za-z0-9 ._+-]{1,64}")      # the server's rule too
+# never offered, whatever is installed: a terminal or a script runner, opened
+# and typed into, is shell by other means (shell has its own grant)
+NOT_OFFERED = frozenset({
+    "terminal", "iterm", "iterm2", "warp", "alacritty", "kitty", "wezterm", "ghostty",
+    "hyper", "tabby", "script editor", "automator", "shortcuts", "xterm", "uxterm",
+    "konsole", "gnome-terminal", "xfce4-terminal", "terminator", "tilix", "foot",
+    "console", "gnome-console", "kgx", "ptyxis", "lxterminal", "mate-terminal",
+    "qterminal", "rxvt", "urxvt", "st", "cool-retro-term", "yakuake", "guake"})
+
+
+def _offerable(name: str) -> bool:
+    return bool(_APP_NAME_RE.fullmatch(name)) and name.lower() not in NOT_OFFERED \
+        and "terminal" not in name.lower()
+
+
+def mac_bundles(dirs=MAC_APP_DIRS) -> list[str]:
+    """The .app bundles directly inside `dirs` (one level, no recursion),
+    names without the extension, sorted case-insensitively, one per name,
+    at most APPS_CAP."""
+    seen: dict[str, str] = {}
+    for d in dirs:
+        try:
+            names = os.listdir(os.path.expanduser(d))
+        except OSError:
+            continue
+        for n in names:
+            if n.endswith(".app") and not n.startswith("."):
+                n = n[:-4]
+                if _offerable(n):
+                    seen.setdefault(n.lower(), n)
+    return sorted(seen.values(), key=str.lower)[:APPS_CAP]
+
+
+def desktop_entries(dirs=LINUX_APP_DIRS) -> dict[str, str]:
+    """Name -> desktop-file id of the launchable, visible, non-terminal
+    entries in `dirs` (flat, no recursion)."""
+    out: dict[str, str] = {}
+    have: set[str] = set()
+    for d in dirs:
+        try:
+            files = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for fn in files:
+            if not fn.endswith(".desktop"):
+                continue
+            try:
+                text = Path(d, fn).read_text(errors="replace")[:65536]
+            except OSError:
+                continue
+            kv: dict[str, str] = {}
+            in_entry = False
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("["):
+                    in_entry = line == "[Desktop Entry]"
+                elif in_entry and "=" in line:
+                    k, v = line.split("=", 1)
+                    kv.setdefault(k.strip(), v.strip())
+            if kv.get("Type", "Application") != "Application" \
+                    or kv.get("NoDisplay", "").lower() == "true" \
+                    or kv.get("Hidden", "").lower() == "true" \
+                    or kv.get("Terminal", "").lower() == "true" \
+                    or "TerminalEmulator" in kv.get("Categories", ""):
+                continue
+            name = kv.get("Name", "")
+            if _offerable(name) and name.lower() not in have:
+                out[name] = fn[:-len(".desktop")]
+                have.add(name.lower())
+    return out
+
+
+def local_apps(plat=sys.platform, *, mac_dirs=MAC_APP_DIRS,
+               linux_dirs=LINUX_APP_DIRS) -> dict[str, list[str]]:
+    """name -> argv for desk_open app=. From desk-apps.json if present (the
+    operator's list, as is), else what is installed here: on macOS every
+    .app bundle in the usual folders, launched with `open -a <Name>`; on
+    Linux the browsers/editors found on PATH plus the .desktop entries
+    (through gtk-launch, when it exists). A terminal or script runner is
+    never offered by default: opening one and typing into it would be shell
+    by other means."""
     try:
         raw = json.loads(_path("desk-apps.json").read_text())
         return {k: v for k, v in raw.items()
-                if isinstance(k, str) and re.fullmatch(r"[A-Za-z0-9 ._+-]{1,64}", k)
+                if isinstance(k, str) and _APP_NAME_RE.fullmatch(k)
                 and isinstance(v, list) and v and all(isinstance(a, str) for a in v)}
     except (OSError, ValueError, AttributeError):
         pass
     if plat == "darwin":
-        return {n: ["/usr/bin/open", "-a", n] for n in ("Safari", "Finder", "Notes")}
+        return {n: ["/usr/bin/open", "-a", n] for n in mac_bundles(mac_dirs)}
     apps = {}
     for n in ("firefox", "chromium", "google-chrome", "code", "nautilus", "thunar"):
         p = find_bin(n)
         if p:
             apps[n] = [p]
+    launcher = find_bin("gtk-launch")
+    if launcher:
+        have = {k.lower() for k in apps}
+        for name, did in desktop_entries(linux_dirs).items():
+            if len(apps) >= APPS_CAP:
+                break
+            if name.lower() not in have:
+                apps[name] = [launcher, did]
+                have.add(name.lower())
     return apps
+
+
+def app_named(apps: dict, name) -> str | None:
+    """The offered app `name` refers to: exact, else case-insensitive."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    name = name.strip()
+    if name in apps:
+        return name
+    low = name.lower()
+    return next((k for k in apps if k.lower() == low), None)
 
 
 # --- the connection ------------------------------------------------------------------------------
