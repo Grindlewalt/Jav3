@@ -26,6 +26,7 @@ changes a severity, acknowledges or approves anything: quieter, same record.
 import json
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 import aiosqlite
 
@@ -113,12 +114,21 @@ async def set_notify_level(db: aiosqlite.Connection, level: str) -> str:
     return level
 
 
+# The two clocks, as functions so a replay of a real event log can drive them:
+# the SQL one (last_seen and the coalescing window, the created_at format) and
+# the rate limiter's.
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+_clock = time.monotonic
+
 # per-key ping times: a kind's pings (non-critical) or one row's repeat pings
 _pings: dict[str, deque] = {}
 
 
-def _rate_ok(key: str, limit: int, now: float | None = None) -> bool:
-    now = time.monotonic() if now is None else now
+def _rate_ok(key: str, limit: int) -> bool:
+    now = _clock()
     q = _pings.setdefault(key, deque())
     while q and now - q[0] > settings.security_ping_window_seconds:
         q.popleft()
@@ -138,9 +148,9 @@ async def _coalesce_target(db: aiosqlite.Connection, kind: str, severity: str,
     async with db.execute(
             "SELECT id, count, summary FROM security_events WHERE kind = ? AND severity = ? "
             "AND project_slug IS ? AND cause = ? AND acknowledged = 0 "
-            "AND COALESCE(last_seen, created_at) >= datetime('now', ?) "
+            "AND COALESCE(last_seen, created_at) >= datetime(?, ?) "
             "ORDER BY id DESC LIMIT 1",
-            (kind, severity, project, cause,
+            (kind, severity, project, cause, _utcnow(),
              f"-{int(settings.security_coalesce_seconds)} seconds")) as cur:
         r = await cur.fetchone()
     return dict(r) if r else None
@@ -158,7 +168,7 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
     twin = await _coalesce_target(db, kind, severity, project, cause)
     if twin is not None:
         await db.execute("UPDATE security_events SET count = count + 1, "
-                         "last_seen = datetime('now') WHERE id = ?", (twin["id"],))
+                         "last_seen = ? WHERE id = ?", (_utcnow(), twin["id"]))
         await db.commit()
         # already in the queue: only a critical repeat interrupts again, and
         # at most once per ping window
@@ -171,9 +181,9 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
         return twin["id"]
     cur = await db.execute(
         "INSERT INTO security_events(kind, severity, project_slug, summary, detail, "
-        "cause, last_seen) VALUES (?,?,?,?,?,?, datetime('now'))",
+        "cause, last_seen) VALUES (?,?,?,?,?,?,?)",
         (kind, severity, project, summary,
-         json.dumps(detail) if detail is not None else None, cause))
+         json.dumps(detail) if detail is not None else None, cause, _utcnow()))
     await db.commit()
     level = await notify_level(db)
     ping = wants(t, level) and (t == "critical"
