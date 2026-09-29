@@ -46,7 +46,7 @@ def _suggest(bad: str, names: list[str]) -> str:
 def prepare(name: str, handler, args: dict, *, read_only: bool) -> tuple[dict, str, str | None]:
     """-> (args to call with, note to append to the result, error or None)."""
     names, required, var_kw = _params(handler)
-    args = dict(args or {})
+    args = dict(args) if isinstance(args, dict) else {}
     unknown = [] if var_kw else [k for k in args if k not in names]
     missing = [r for r in required if r not in args]
     takes = ", ".join(f"{n}{'' if n in required else '?'}" for n in names) or "no arguments"

@@ -302,7 +302,9 @@ def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
             f"\n\n[system note: {i + 1} of {n_iter} tool rounds "
             "used — start concluding. Finish the current step, "
             "then answer with what you have and say plainly "
-            "what you could not determine.]")
+            "what you could not determine. If you owe a plan_report, "
+            "file it before the rounds run out (status failed with the "
+            "next step if the item is unfinished).]")
     elif (not noted and has_todo and settings.plan_recheck_every
           and (i + 1) % settings.plan_recheck_every == 0):
         # periodic progress check against the model's own plan; suppressed on
@@ -378,6 +380,15 @@ async def run_turn(
         # drop tools so the model must produce an answer from what it has
         # instead of another tool call it can't act on
         call_tools = None if (i == n_iter - 1 or force_conclude) else (view.wire() or None)
+        # ...except a run that owes a plan_report keeps THAT one tool: withholding
+        # it failed 30 of 39 plan attempts with "plan_report was not called"
+        # after the work was done (benchmark-game, 2026-09-27)
+        report_only = False
+        if call_tools is None:
+            report = [t for t in (view.wire() or [])
+                      if (t.get("function") or {}).get("name") == "plan_report"]
+            if report:
+                call_tools, report_only = report, True
         final: dict | None = None
         try:
             async for event in model.complete(
@@ -419,7 +430,8 @@ async def run_turn(
             yield {"type": "final", "content": content}
             return
 
-        if call_tools is None:
+        if call_tools is None or (report_only and any(
+                tc["function"]["name"] != "plan_report" for tc in final["tool_calls"])):
             # tools withheld but calls came back (DSML recovery) — nudge to a
             # plain-prose answer instead of executing them
             async for ev in _force_conclusion(messages, conversation_id,
@@ -447,6 +459,11 @@ async def run_turn(
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
+                args = {}
+            if not isinstance(args, dict):
+                # valid JSON but not an object ([..], null, "x"): an empty call,
+                # so argcheck names the missing arguments and the model retries,
+                # instead of a TypeError ending the whole turn
                 args = {}
             if not view.is_meta(name):
                 # a merged tool's action -> its real tool; an unloaded section
@@ -545,6 +562,12 @@ async def run_turn(
             if msg is not None:
                 messages.append(msg)
                 image_msgs.append({"idx": len(messages) - 1, "round": i})
+        if report_only:
+            # the last round's only tool was plan_report: it has run, so the
+            # turn ends here with whatever the model said alongside it
+            yield {"type": "final", "content": (final["content"] or "").strip()
+                   or "(filed the plan report at the round limit)"}
+            return
         _evict_stale_results(messages, tool_msgs, i)
         _evict_stale_images(messages, image_msgs)
 
