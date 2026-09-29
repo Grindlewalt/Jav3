@@ -895,3 +895,27 @@ async def test_id_click_needs_no_screenshot_and_consumes_the_last_one(env, monke
             broker._tainted.discard("op-consume")
     finally:
         await fe.stop()
+
+
+async def test_covered_element_error_reaches_the_model_verbatim(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"]).start()
+    msg = ('element f0:12 is covered by another element ("Accept cookies") — dismiss it '
+           "first or click the covering element f0:40")
+
+    async def answer(m):
+        if m["verb"] == "click" and m["params"].get("element") == "f0:12":
+            return {"ok": False, "code": "covered", "err": msg}
+        return await FakeExt.default_answer(m)
+    fe.answer = answer
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-cov")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            assert await _tool("browser_click")(tab=7, element="f0:12") == "error: " + msg
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-cov")
+    finally:
+        await fe.stop()

@@ -523,6 +523,10 @@ async function run(verb, p, c) {
   else if (verb === 'select') r = await inject(p.tab, selectEl, [el.n, p.value ?? null, p.label ?? null], el.frameId);
   else if (verb === 'hover') r = await inject(p.tab, hoverEl, [el.n], el.frameId);
   else r = await inject(p.tab, scrollToEl, [el.n], el.frameId);
+  if (r && r.code === 'covered') {
+    const cid = `f${parseElementId(p.element).frame}:${r.cover}`;
+    throw new VerbError(`element ${p.element} is covered by another element (${JSON.stringify(String(r.coverName || 'element'))}) — dismiss it first or click the covering element ${cid}`, 'covered');
+  }
   if (!r || !r.ok) throw pageErr(r, verb);
   if (verb === 'click' || verb === 'type' || verb === 'select') await saveFocusFrame(p.tab, el.frameId);
   if (verb !== 'scroll_to_element' && verb !== 'hover') { await new Promise(res => setTimeout(res, 300)); await waitLoad(p.tab); }

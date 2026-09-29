@@ -258,3 +258,16 @@ test('click sequence: the order and fields a real left click has', () => {
   assert.equal(by('click').init.detail, 1);
   assert.equal(by('focus').ctor, null);
 });
+
+// --- F5: click through an overlay ---------------------------------------------------
+test('isCovered: only an unrelated element on top counts as an overlay', () => {
+  const inner = { contains: () => false };
+  const btn = { contains: n => n === inner };
+  const wrapper = { contains: n => n === btn || n === wrapper };
+  const overlay = { contains: () => false };
+  assert.equal(D.isCovered(btn, btn), false);       // itself
+  assert.equal(D.isCovered(btn, inner), false);     // a part of it
+  assert.equal(D.isCovered(btn, wrapper), false);   // a wrapper of it
+  assert.equal(D.isCovered(btn, null), false);
+  assert.equal(D.isCovered(btn, overlay), true);
+});

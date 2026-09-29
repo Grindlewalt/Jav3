@@ -245,6 +245,27 @@
     return x.tagName.toLowerCase() + (n ? ' ' + JSON.stringify(n) : '');
   }
 
+  // Is `hit` (what is on top at the element's centre) a different, unrelated
+  // element - an overlay - rather than the element, a part of it, or a wrapper?
+  function isCovered(el, hit) {
+    if (!el || !hit || hit === el) return false;
+    if (el.contains && el.contains(hit)) return false;
+    if (hit.contains && hit.contains(el)) return false;
+    return true;
+  }
+
+  // Give the covering element an id in the same space as read_page's, so the
+  // model can click it. -> the number.
+  function tagCover(doc, hit) {
+    const t = (hit.closest && hit.closest(FOCUSABLE)) || hit;
+    const cur = t.getAttribute(ATTR);
+    if (cur) return { n: Number(cur), el: t };
+    let max = 0;
+    deepEach(doc, e => { const v = Number(e.getAttribute && e.getAttribute(ATTR)); if (v > max) max = v; });
+    t.setAttribute(ATTR, String(max + 1));
+    return { n: max + 1, el: t };
+  }
+
   // Dispatch clickSequence on `hit` (what is at the point); `el` is the element
   // the model asked for (null for a coordinate click). -> Promise<{ok, text}>
   async function realClick(win, doc, hit, x, y, el) {
@@ -289,6 +310,13 @@
     // nothing the dispatched sequence did not already do.
     const act = el && el.matches && el.matches(ACTIVATABLE) ? el : null;
     if (act && !changed && !got) {
+      // an overlay (a consent modal) took the click: a person could not click
+      // through it, so neither may the agent
+      if (isCovered(act, hit)) {
+        const c = tagCover(doc, hit);
+        return { ok: false, code: 'covered', cover: c.n, coverName: clean(accessibleName(c.el), 40) || c.el.tagName.toLowerCase(),
+                 err: 'element is covered by another element' };
+      }
       act.click();
       text += '; nothing reacted, so it was activated directly';
     }
@@ -564,6 +592,6 @@
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
     CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
-    collectCandidates, clickSequence, deepPoint, realClick, typeInto, describeEl,
+    collectCandidates, clickSequence, deepPoint, realClick, isCovered, typeInto, describeEl,
   };
 })();
