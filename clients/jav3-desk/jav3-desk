@@ -1302,14 +1302,22 @@ def atspi_source() -> ElementSource:
 
 BUTTONS = ("left", "right", "middle")
 MODIFIERS = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift", "alt": "alt",
-             "super": "super", "logo": "super", "win": "super", "meta": "super",
-             "cmd": "super", "altgr": "altgr"}
+             "option": "alt", "opt": "alt", "super": "super", "logo": "super",
+             "win": "super", "meta": "super", "cmd": "super", "command": "super",
+             "altgr": "altgr"}
 # keysym names allowed as the final key: letters, digits, F-keys and a named set
 _NAMED_KEYS = {"Return", "Enter", "Tab", "Escape", "BackSpace", "Delete", "Insert",
                "Home", "End", "Page_Up", "Page_Down", "Prior", "Next", "Left",
                "Right", "Up", "Down", "space", "minus", "equal", "comma", "period",
                "slash", "backslash", "semicolon", "apostrophe", "grave",
                "bracketleft", "bracketright", "Print", "Menu"}
+_NAMED_LC = {k.lower(): k for k in _NAMED_KEYS}
+# spellings a model reaches for (browser and web names), folded onto the keysyms
+_KEY_ALIASES = {"esc": "Escape", "backspace": "BackSpace", "del": "Delete",
+                "ins": "Insert", "pageup": "Page_Up", "pagedown": "Page_Down",
+                "pgup": "Page_Up", "pgdn": "Page_Down", "arrowleft": "Left",
+                "arrowright": "Right", "arrowup": "Up", "arrowdown": "Down",
+                "spacebar": "space"}
 # combos that end the session or hand the machine elsewhere; the backend adds
 # whatever its compositor binds to exit (hyprctl binds)
 DENY_KEYS = {"ctrl+alt+Delete", "ctrl+alt+BackSpace", "super+shift+e", "super+m",
@@ -1321,11 +1329,16 @@ _URL_RE = re.compile(r"^https?://[^\s]{1,2000}$")
 
 
 def normalize_combo(combo: str) -> str:
-    """'Ctrl+Shift+t' -> 'ctrl+shift+t'; modifiers canonical and ordered,
-    the final key as given. Raises DeskError on anything else."""
+    """'Ctrl+Shift+t' -> 'ctrl+shift+t'; modifiers canonical and ordered
+    (option = alt, command = super), the final key a letter or digit, F1-F24 or
+    a named key in any case ('enter', 'esc', 'ArrowDown', 'pgdn' -> the keysym).
+    A single letter after a modifier is lowercased: xdotool reads 'ctrl+L' as
+    ctrl+shift+l. backend/desk.py normalize_combo is the server's copy: keep
+    the two in step (tests/test_desk_client.py compares them). Raises
+    DeskError on anything else."""
     if not isinstance(combo, str) or not re.fullmatch(
             r"[A-Za-z0-9_]{1,32}(\+[A-Za-z0-9_]{1,32}){0,4}", combo.strip()):
-        raise DeskError("bad key combo")
+        raise DeskError('bad key combo (e.g. "Return", "ctrl+l", "shift+Tab")')
     parts = combo.strip().split("+")
     mods, key = parts[:-1], parts[-1]
     out = []
@@ -1337,9 +1350,16 @@ def normalize_combo(combo: str) -> str:
             out.append(c)
     order = ["ctrl", "alt", "altgr", "shift", "super"]
     out.sort(key=order.index)
-    if not (len(key) == 1 and key.isalnum()) and key not in _NAMED_KEYS \
-            and not re.fullmatch(r"F([1-9]|1[0-9]|2[0-4])", key):
-        raise DeskError(f"unknown key {key!r}")
+    if len(key) == 1 and key.isascii() and key.isalnum():
+        if out and key.isalpha():
+            key = key.lower()
+    else:
+        f = re.fullmatch(r"[Ff]([1-9]|1[0-9]|2[0-4])", key)
+        named = f"F{f.group(1)}" if f else (_NAMED_LC.get(key.lower())
+                                           or _KEY_ALIASES.get(key.lower()))
+        if not named:
+            raise DeskError(f"unknown key {key!r}")
+        key = named
     return "+".join([*out, key])
 
 
@@ -2095,8 +2115,15 @@ class MacBackend(Backend):
                  "space": 49, "BackSpace": 51, "Escape": 53, "Delete": 117,
                  "Left": 123, "Right": 124, "Down": 125, "Up": 126, "Home": 115,
                  "End": 119, "Page_Up": 116, "Page_Down": 121, "period": 47,
-                 "comma": 43, "slash": 44, "minus": 27, "equal": 24}
-    _FLAGS = {"shift": 1 << 17, "ctrl": 1 << 18, "alt": 1 << 19, "super": 1 << 20}
+                 "comma": 43, "slash": 44, "minus": 27, "equal": 24,
+                 "Prior": 116, "Next": 121, "Insert": 114,          # Insert is Help
+                 "bracketleft": 33, "bracketright": 30, "semicolon": 41,
+                 "apostrophe": 39, "grave": 50, "backslash": 42,
+                 **{f"F{n}": c for n, c in zip(range(1, 21), (
+                     122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107,
+                     113, 106, 64, 79, 80, 90))}}
+    _FLAGS = {"shift": 1 << 17, "ctrl": 1 << 18, "alt": 1 << 19, "altgr": 1 << 19,
+              "super": 1 << 20}
 
     def __init__(self):
         super().__init__()

@@ -133,6 +133,26 @@ BUTTONS = ("left", "right", "middle")
 # key combos: modifiers and keysym names joined by '+'. The client re-checks
 # against its own keysym table and denylist (session-killers).
 _KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,32}(\+[A-Za-z0-9_]{1,32}){0,4}$")
+# The same grammar as the client's normalize_combo (clients/jav3-desk): a copy,
+# because the client is one file that ships alone. tests/test_desk_client.py
+# runs both over the same table. The server refuses a bad key here so the
+# model finds out in this round, not after a trip to the computer.
+_MODIFIERS = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift", "alt": "alt",
+              "option": "alt", "opt": "alt", "super": "super", "logo": "super",
+              "win": "super", "meta": "super", "cmd": "super", "command": "super",
+              "altgr": "altgr"}
+_MOD_ORDER = ["ctrl", "alt", "altgr", "shift", "super"]
+_NAMED_KEYS = ("Return", "Enter", "Tab", "Escape", "BackSpace", "Delete", "Insert",
+               "Home", "End", "Page_Up", "Page_Down", "Prior", "Next", "Left",
+               "Right", "Up", "Down", "space", "minus", "equal", "comma", "period",
+               "slash", "backslash", "semicolon", "apostrophe", "grave",
+               "bracketleft", "bracketright", "Print", "Menu")
+_NAMED_LC = {k.lower(): k for k in _NAMED_KEYS}
+_KEY_ALIASES = {"esc": "Escape", "backspace": "BackSpace", "del": "Delete",
+                "ins": "Insert", "pageup": "Page_Up", "pagedown": "Page_Down",
+                "pgup": "Page_Up", "pgdn": "Page_Down", "arrowleft": "Left",
+                "arrowright": "Right", "arrowup": "Up", "arrowdown": "Down",
+                "spacebar": "space"}
 _APP_RE = re.compile(r"^[A-Za-z0-9 ._+-]{1,64}$")
 # control, zero-width and bidi-override characters: a label written by a web
 # page must not be able to reshape the lines of the result the model reads.
@@ -575,6 +595,34 @@ def _rate(q: collections.deque, per_s: int) -> bool:
     return True
 
 
+def normalize_combo(combo) -> str:
+    """'Option+Left' -> 'alt+Left', 'esc' -> 'Escape', 'ctrl+L' -> 'ctrl+l':
+    modifiers canonical and ordered, the final key a letter or digit, F1-F24 or
+    a named key in any case. Raises DeskError."""
+    if not isinstance(combo, str) or not _KEY_RE.match(combo.strip()):
+        raise DeskError('bad key combo (e.g. "Return", "ctrl+l", "shift+Tab", "cmd+c")')
+    *mods, key = combo.strip().split("+")
+    out: list[str] = []
+    for m in mods:
+        c = _MODIFIERS.get(m.lower())
+        if c is None:
+            raise DeskError(f"unknown modifier {m!r} in the key combo")
+        if c not in out:
+            out.append(c)
+    out.sort(key=_MOD_ORDER.index)
+    if len(key) == 1 and key.isascii() and key.isalnum():
+        if out and key.isalpha():
+            key = key.lower()               # xdotool reads 'ctrl+L' as ctrl+shift+l
+    else:
+        f = re.fullmatch(r"[Ff]([1-9]|1[0-9]|2[0-4])", key)
+        named = f"F{f.group(1)}" if f else (_NAMED_LC.get(key.lower())
+                                           or _KEY_ALIASES.get(key.lower()))
+        if not named:
+            raise DeskError(f"unknown key {key!r} in the key combo")
+        key = named
+    return "+".join([*out, key])
+
+
 def _int(params: dict, k: str, lo: int, hi: int, default=None) -> int:
     v = params.get(k, default)
     if (isinstance(v, bool) or not isinstance(v, (int, float))
@@ -689,10 +737,7 @@ def validate(verb: str, params: dict, frame: dict | None, apps: list[str],
                             f"secret ({', '.join(leaks)}). Secrets are never typed.")
         p["text"] = text
     elif verb == "key":
-        combo = params.get("combo")
-        if not isinstance(combo, str) or not _KEY_RE.match(combo.strip()):
-            raise DeskError("combo must look like ctrl+l, Return or super+shift+Tab")
-        p["combo"] = combo.strip()
+        p["combo"] = normalize_combo(params.get("combo"))
     elif verb == "open":
         url, app = params.get("url"), params.get("app")
         if isinstance(url, str) and url.strip():

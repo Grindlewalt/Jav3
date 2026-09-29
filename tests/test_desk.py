@@ -1249,3 +1249,25 @@ async def test_old_client_capture_failure_reads_as_locked_or_asleep(env):
         assert (await _tool("desk_screenshot")()) == "error: grim failed: no such output HDMI-9"
     finally:
         await fd.stop()
+
+
+async def test_key_combos_are_normalized_and_refused_early_on_the_server(env):
+    """NAV-14: 'enter', 'esc', 'option+Left', 'ArrowDown' used to pass the server
+    and fail at the client, one round trip each."""
+    fd = await _nav(env, changed=True)
+    try:
+        await _tool("desk_screenshot")()
+        for given, sent in (("enter", "Enter"), ("esc", "Escape"), ("option+Left", "alt+Left"),
+                            ("Command+c", "super+c"), ("ArrowDown", "Down"), ("f5", "F5"),
+                            ("ctrl+L", "ctrl+l")):
+            _free(env)
+            out = await _tool("desk_key")(combo=given)
+            assert out.startswith("key ok"), (given, out[:80])
+            assert fd.reqs[-1]["params"]["combo"] == sent
+        n = len(fd.reqs)
+        for bad in ("ctrl+banana", "hyper+x", "F25", "ctrl+"):
+            out = await _tool("desk_key")(combo=bad)
+            assert out.startswith("error:") and "combo" in out, out[:80]
+        assert len(fd.reqs) == n                         # none reached the computer
+    finally:
+        await fd.stop()

@@ -1272,3 +1272,85 @@ def test_session_state_carries_unknown_lock_through():
     c.b = _NS(screen_state=lambda: {"locked": "yes", "asleep": 1})
     assert c.state() == {"locked": False, "asleep": False}
     assert jd.screen_refusal({"locked": None, "asleep": False}) is None
+# --- overnight B2: key names (NAV-14) ---------------------------------------------------------
+
+# what a model types -> what the backends get
+COMBO_CASES = {
+    "Return": "Return", "enter": "Enter", "return": "Return", "tab": "Tab", "esc": "Escape",
+    "Escape": "Escape", "backspace": "BackSpace", "ArrowDown": "Down", "arrowleft": "Left",
+    "option+Left": "alt+Left", "Option+Right": "alt+Right", "Command+c": "super+c",
+    "cmd+bracketleft": "super+bracketleft", "CTRL+SHIFT+t": "ctrl+shift+t",
+    "shift+ctrl+T": "ctrl+shift+t", "ctrl+L": "ctrl+l", "alt+F4": "alt+F4", "f5": "F5",
+    "PageDown": "Page_Down", "pgup": "Page_Up", "del": "Delete", "Spacebar": "space",
+    "SPACE": "space", "ctrl+a": "ctrl+a", "A": "A", "5": "5",
+}
+BAD_COMBOS = ("", "ctrl+", "+a", "hyper+x", "ctrl+banana", "ctrl+l; reboot", "F25", "f0",
+              "ctrl+ctrl+ctrl+ctrl+ctrl+a", "a" * 40)
+
+
+def test_normalize_combo_takes_lowercase_and_common_aliases():
+    for given, want in COMBO_CASES.items():
+        assert jd.normalize_combo(given) == want, given
+    for bad in BAD_COMBOS:
+        with pytest.raises(jd.DeskError):
+            jd.normalize_combo(bad)
+    # validate() uses it, and the session-killer list still matches spellings
+    assert jd.validate("key", {"combo": "enter"}, FRAME, {})["combo"] == "Enter"
+    with pytest.raises(jd.DeskError, match="denylist"):
+        jd.validate("key", {"combo": "Ctrl+Alt+delete"}, FRAME, {})
+    with pytest.raises(jd.DeskError, match="denylist"):
+        jd.validate("key", {"combo": "control+option+f2"}, FRAME, {})
+
+
+def test_server_and_client_normalize_key_combos_the_same_way():
+    from backend import desk
+    for given in [*COMBO_CASES, *BAD_COMBOS, "Ctrl+Alt+Del", "meta+Tab", "shift+Menu",
+                  "super+Print", "ctrl+Prior", "logo+e"]:
+        try:
+            want = jd.normalize_combo(given)
+        except jd.DeskError:
+            with pytest.raises(desk.DeskError):
+                desk.normalize_combo(given)
+        else:
+            assert desk.normalize_combo(given) == want, given
+
+
+def _mac_key_backend():
+    """A MacBackend without the ctypes plumbing: key() only needs `cg`, `_post`."""
+    b = object.__new__(jd.MacBackend)
+    posted = []
+
+    class CG:
+        def CGEventCreateKeyboardEvent(self, src, code, down):
+            return {"code": code, "down": down, "flags": 0}
+
+        def CGEventSetFlags(self, ev, flags):
+            ev["flags"] = flags
+    b.cg = CG()
+    b._post = posted.append
+    return b, posted
+
+
+def test_macos_key_codes_cover_the_keys_the_combos_can_name():
+    kc = jd.MacBackend._KEYCODES
+    assert [kc[f"F{i}"] for i in range(1, 13)] == [122, 120, 99, 118, 96, 97, 98, 100, 101,
+                                                   109, 103, 111]
+    assert (kc["bracketleft"], kc["bracketright"], kc["semicolon"], kc["apostrophe"],
+            kc["grave"], kc["backslash"]) == (33, 30, 41, 39, 50, 42)
+    assert kc["Prior"] == kc["Page_Up"] == 116 and kc["Next"] == kc["Page_Down"] == 121
+    b, posted = _mac_key_backend()
+    b.key("super+bracketleft")                          # cmd+[ : back
+    assert [(e["code"], e["down"], e["flags"]) for e in posted] == [
+        (33, True, 1 << 20), (33, False, 1 << 20)]
+    posted.clear()
+    b.key("F5")
+    assert [e["code"] for e in posted] == [96, 96]
+    posted.clear()
+    b.key("alt+Left")
+    assert posted[0]["flags"] == 1 << 19
+    # a key the Mac has no code for says so in words, and posts nothing
+    posted.clear()
+    for k in ("Menu", "Print", "F21"):
+        with pytest.raises(jd.DeskError, match="no macOS key"):
+            b.key(k)
+    assert posted == []
