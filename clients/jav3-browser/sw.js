@@ -278,7 +278,7 @@ async function tabFrames(tabId) {
 // Read every frame of the tab and stitch the results. Element numbers are local
 // to each frame; here they gain a frame index ("f2:5"). The frame map is kept
 // so a later click/type/scroll_to_element can resolve an id to its frameId.
-async function readAllFrames(tabId, maxChars, selector) {
+async function readAllFrames(tabId, maxChars, selector, mode) {
   const frames = await tabFrames(tabId);
   const map = [];
   const elements = [];
@@ -291,7 +291,7 @@ async function readAllFrames(tabId, maxChars, selector) {
   // Share the text budget: the main frame gets it; subframes add elements only.
   for (const f of frames) {
     let r;
-    try { r = await inject(tabId, readPage, [f.frameId === 0 ? maxChars : 0, selector || ''], f.frameId); }
+    try { r = await inject(tabId, readPage, [f.frameId === 0 ? maxChars : 0, selector || '', mode || 'auto'], f.frameId); }
     catch { r = null; }
     if (!r) continue;
     const host = hostOf(r.url) || hostOf(f.url) || '';
@@ -313,7 +313,7 @@ async function readAllFrames(tabId, maxChars, selector) {
   const i = await info(tabId);
   return { data: { tab: tabId, url: i.url, title: title || i.title, text: topText,
                    elements, frames: frameOut, sig, viewport },
-           selectorFound, count: elements.length };
+           selectorFound, count: elements.filter(e => e.kind !== 'candidate').length };
 }
 
 // Where a direct child frame of the top page sits in the top viewport: the
@@ -423,14 +423,14 @@ async function run(verb, p, c) {
     const started = Date.now();
     let quiet = null;
     if (p.wait_ms) { try { quiet = await inject(p.tab, domQuiet, [p.wait_ms, QUIET_MS], 0); } catch { quiet = null; } }
-    let out = await readAllFrames(p.tab, p.max_chars, p.selector);
+    let out = await readAllFrames(p.tab, p.max_chars, p.selector, p.mode);
     while (p.wait_ms && Date.now() - started < p.wait_ms) {
       const enough = (p.min_elements ? out.count >= p.min_elements : false) ||
         (p.selector ? out.selectorFound : false) ||
         (!p.min_elements && !p.selector);
       if (enough) break;
       await new Promise(r => setTimeout(r, 350));
-      out = await readAllFrames(p.tab, p.max_chars, p.selector);
+      out = await readAllFrames(p.tab, p.max_chars, p.selector, p.mode);
     }
     return { data: { ...out.data, ...(quiet ? { quiet: !!quiet.quiet } : {}) } };
   }

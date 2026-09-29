@@ -688,3 +688,70 @@ async def test_unreported_version_turns_unknown_action_into_reload_hint(env, mon
             broker._tainted.discard("op-ver2")
     finally:
         await fe.stop()
+
+
+# --- candidates fallback (no button markup) ---------------------------------------------
+
+def _cand(n, text, inview=True, x=10, y=10):
+    return {"id": f"f0:{n}", "kind": "candidate", "tag": "div", "type": "", "role": "",
+            "name": text, "text": "", "box": {"x": x, "y": y, "w": 180, "h": 36},
+            "inView": inview}
+
+
+def _link(n, inview=True):
+    return {"id": f"f0:{n}", "tag": "a", "type": "", "role": "link", "name": f"L{n}",
+            "text": f"L{n}", "box": {"x": 0, "y": 0, "w": 10, "h": 10}, "inView": inview}
+
+
+def _page(elements):
+    return {"tab": 7, "url": "https://www.deltamath.com/app", "title": "DeltaMath",
+            "text": "Assignments", "elements": elements}
+
+
+def test_candidates_block_when_there_is_no_button_markup():
+    out = browser.render("read_page", _page([_cand(1, "Start assignment", x=120, y=40),
+                                            _cand(2, "Later", inview=False)]), {"tab": 7})
+    first, rest = out.split("\n", 1)
+    assert first == "no button/link markup on this page — using candidates"
+    assert "elements (pass the id" in rest and "\n(none)\n" in rest
+    assert ("candidates (no button markup — probably clickable, judge by the text):\n"
+            '[f0:1] "Start assignment" @ 120,40 180x36\n'
+            '[f0:2] "Later" @ 10,10 180x36 off-screen') in out
+    # an icon-only candidate names its tag
+    out = browser.render("read_page", _page([{**_cand(3, ""), "icon": True}]), {"tab": 7})
+    assert "[f0:3] div (icon, no label) @ 10,10 180x36" in out
+
+
+def test_candidates_mode_auto_all_interactive():
+    few = [_link(i) for i in range(1, 8)] + [_cand(20, "Start")]      # 7 in view
+    many = [_link(i) for i in range(1, 9)] + [_cand(20, "Start")]     # 8 in view
+    blk = "candidates (no button markup"
+    assert blk in browser.render("read_page", _page(few), {"tab": 7})
+    out = browser.render("read_page", _page(many), {"tab": 7})
+    assert blk not in out and "[f0:20]" not in out
+    assert blk in browser.render("read_page", _page(many), {"tab": 7, "mode": "all"})
+    out = browser.render("read_page", _page(few), {"tab": 7, "mode": "interactive"})
+    assert blk not in out and not out.startswith("no button/link markup")
+    # interactive present -> no "using candidates" lead line
+    assert not browser.render("read_page", _page(few), {"tab": 7}).startswith("no button")
+    # off-screen interactive elements do not count toward the 8
+    offs = [_link(i, inview=False) for i in range(1, 20)] + [_cand(30, "Go")]
+    assert blk in browser.render("read_page", _page(offs), {"tab": 7})
+    # the cap
+    lots = [_cand(i, f"c{i}") for i in range(1, 161)]
+    out = browser.render("read_page", _page(lots), {"tab": 7})
+    assert "[f0:150]" in out and "[f0:151]" not in out and "+10 more not listed" in out
+    assert browser.validate("read_page", {"tab": 7, "mode": "all"})["mode"] == "all"
+    assert "mode" not in browser.validate("read_page", {"tab": 7})
+    with pytest.raises(browser.BrowserError, match="mode must be one of auto, all, interactive"):
+        browser.validate("read_page", {"tab": 7, "mode": "every"})
+
+
+async def test_read_page_mode_reaches_the_extension(env, monkeypatch):
+    fe = await FakeExt(env["btok"]).start()
+    try:
+        await _grant(env)
+        await _tool("browser_read_page")(tab=7, mode="interactive")
+        assert fe.reqs[-1]["params"]["mode"] == "interactive"
+    finally:
+        await fe.stop()

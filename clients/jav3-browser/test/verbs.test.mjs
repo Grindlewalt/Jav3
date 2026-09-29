@@ -126,3 +126,9 @@ test('login line and URLs', () => {
   assert.equal(hostOf('https://[::1]:8/'), '::1');
   assert.equal(describe('click', 'example.com'), 'Jav3 is clicking on example.com');
 });
+
+test('read_page mode: auto / all / interactive, anything else refused', () => {
+  assert.deepEqual(validate('read_page', { tab: 1, mode: 'all' }), { tab: 1, max_chars: 8000, wait_ms: 0, mode: 'all' });
+  assert.equal(validate('read_page', { tab: 1 }).mode, undefined);
+  assert.throws(() => validate('read_page', { tab: 1, mode: 'every' }), /mode must be one of auto, all, interactive/);
+});

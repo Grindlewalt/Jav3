@@ -22,6 +22,8 @@ export const WAIT_CAP_MS = 10000;         // bounded retry budget on read_page
 export const MAX_FRAME_INDEX = 999;
 export const MAX_ELEMENT_N = 100000;
 export const OPTION_CAP = 500;
+// read_page: auto = candidates when < 8 interactive elements are in view
+export const READ_MODES = Object.freeze(['auto', 'all', 'interactive']);
 
 export class VerbError extends Error {
   constructor(msg, code) { super(msg); if (code) this.code = code; }
@@ -149,6 +151,10 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
       }
       if (params.selector.length > 200) throw new VerbError('selector is too long');
       p.selector = params.selector.trim();
+    }
+    if (params.mode !== undefined) {
+      if (!READ_MODES.includes(params.mode)) throw new VerbError(`mode must be one of ${READ_MODES.join(', ')}`);
+      p.mode = params.mode;
     }
   } else if (ELEMENT_VERBS.includes(verb)) p.element = parseElementId(params.element).id;
   if (verb === 'type') {

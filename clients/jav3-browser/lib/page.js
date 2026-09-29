@@ -9,11 +9,15 @@
 // A missing element returns { ok: false, code: 'stale' }; the server turns that
 // into "element fN:M is no longer on the page — browser_read_page again".
 
-export function readPage(maxChars, selector) {
+// mode: 'auto' (candidates when fewer than 8 interactive elements are in
+// view in this frame; the server applies the same rule across all frames),
+// 'all' (always), 'interactive' (never).
+export function readPage(maxChars, selector, mode) {
   const D = globalThis.__jav3Dom;
   D.deepEach(document, e => { if (e.hasAttribute(D.ATTR)) e.removeAttribute(D.ATTR); });
   const all = D.collect(document, window);
   const kept = D.orderInViewFirst(all, 300);
+  const box = r => ({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) });
   const els = kept.map((c, i) => {
     const el = c.el, r = c.r, n = i + 1;
     el.setAttribute(D.ATTR, String(n));
@@ -33,8 +37,7 @@ export function readPage(maxChars, selector) {
     }
     const e = {
       n, tag, type, role, name, text,
-      box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
-      inView: c.inView,
+      box: box(r), inView: c.inView,
     };
     if (value) e.value = value;
     if (!name && !text) e.icon = true;              // icon-only: kept, flagged
@@ -47,6 +50,23 @@ export function readPage(maxChars, selector) {
     }
     return e;
   });
+  // Candidates: elements with no button markup that look clickable (a
+  // cursor:pointer <div>, an ng-click <span>, short leaf text). Same id space
+  // and data-jav3-id tagging, numbered after the interactive ones, so
+  // click/type/hover work on them unchanged.
+  const inViewCount = kept.filter(c => c.inView).length;
+  if (mode === 'all' || (mode !== 'interactive' && inViewCount < 8)) {
+    const cands = D.collectCandidates(document, window, all.map(c => c.el));
+    cands.forEach((c, i) => {
+      const n = kept.length + i + 1;
+      c.el.setAttribute(D.ATTR, String(n));
+      const name = D.clean(D.accessibleName(c.el), 80);
+      const e = { n, kind: 'candidate', tag: c.el.tagName.toLowerCase(), type: '', role: '',
+                  name, text: '', box: box(c.r), inView: c.inView, why: c.why };
+      if (!name) e.icon = true;
+      els.push(e);
+    });
+  }
   const raw = document.body ? document.body.innerText : '';
   const body = raw.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
   let probed = null;

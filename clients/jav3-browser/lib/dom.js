@@ -8,7 +8,7 @@
 // injection) and as an ES module (import). It installs globalThis.__jav3Dom
 // once per realm; the IIFE keeps re-injection free of redeclaration errors.
 (function () {
-  const V = 2;
+  const V = 3;
   if (globalThis.__jav3Dom && globalThis.__jav3Dom.v === V) return;
 
   const ATTR = 'data-jav3-id';
@@ -75,6 +75,126 @@
       out.push({ el, r, inView: r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw });
     });
     return out;
+  }
+
+  // --- candidates: likely-clickable elements with no button markup ---------------------
+  // Framework apps (DeltaMath's Angular) wire click listeners onto plain
+  // <div>/<span>/<mat-*> elements: no button, link or role, so `collect` finds
+  // nothing. These helpers pick out what a person would still read as a button.
+
+  const CAND_CAP = 150;
+  const CAND_RAW_CAP = 2000;           // before dedupe (pairwise, so bounded)
+  const CAND_TEXT_MAX = 60;
+  const CAND_SKIP = new Set(['html', 'head', 'body', 'script', 'style', 'noscript', 'template',
+    'meta', 'link', 'title', 'br', 'hr', 'iframe', 'frame', 'option', 'optgroup', 'path', 'g',
+    'defs', 'use', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'tspan', 'stop',
+    'clippath', 'lineargradient', 'radialgradient', 'mask', 'symbol']);
+
+  // A click-handler attribute: onclick, ng-click, (click), jsaction, v-on:click,
+  // @click, data-*click* (data-action-click, data-onclick, ...).
+  function isClickAttr(name) {
+    const n = String(name || '').toLowerCase();
+    return n === 'onclick' || n === 'ng-click' || n === '(click)' ||
+      n === 'jsaction' || n === 'v-on:click' || n === '@click' ||
+      (n.startsWith('data-') && n.includes('click'));
+  }
+
+  // Computed style says the element is drawn at all (display/visibility/opacity).
+  function styleVisible(st) {
+    if (!st) return false;
+    if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return false;
+    return parseFloat(st.opacity) !== 0;
+  }
+
+  // Why an element looks clickable, from facts the caller gathered:
+  // {tag, cursor, parentCursor, attrs:[names], tabindex:"0"|null, text, leafish}
+  // -> 'pointer' | 'attr' | 'tabindex' | 'text' | ''.
+  // cursor:pointer is inherited, so only the element where it STARTS counts
+  // (its parent is not pointer): every <span> inside a pointer <div> is not
+  // another button.
+  function candidateReason(f) {
+    if (!f || CAND_SKIP.has(String(f.tag || '').toLowerCase())) return '';
+    if (f.cursor === 'pointer' && f.parentCursor !== 'pointer') return 'pointer';
+    if ((f.attrs || []).some(isClickAttr)) return 'attr';
+    if (f.tabindex != null && /^\s*\d+\s*$/.test(String(f.tabindex))) return 'tabindex';
+    const t = clean(f.text, 200);
+    if (f.leafish && t.length >= 1 && t.length <= CAND_TEXT_MAX) return 'text';
+    return '';
+  }
+
+  const boxHolds = (a, b, slack = 1) =>
+    a.x - slack <= b.x && a.y - slack <= b.y &&
+    a.x + a.w + slack >= b.x + b.w && a.y + a.h + slack >= b.y + b.h;
+
+  // Dedupe by box containment. items: [{box:{x,y,w,h}, text, why}] in
+  // document order. When one box holds another: an outer box picked only for
+  // its short text gives way to an inner one with a real signal (pointer,
+  // click attribute, tabindex) — a toolbar "☰ DeltaMath" must not swallow its
+  // ng-click menu icon; otherwise a short-text outer box (button-sized: text
+  // <= 60 chars) wins and the inner one is its label, and a long-text outer
+  // box is a container (a card, a list) that gives way to the controls
+  // inside it. Equal boxes: the first wins. -> kept indices, in order.
+  function dedupeContained(items) {
+    const drop = new Set();
+    const strong = it => !!it.why && it.why !== 'text';
+    for (let i = 0; i < items.length; i++) {
+      for (let j = 0; j < items.length; j++) {
+        if (i === j || drop.has(i) || drop.has(j)) continue;
+        const a = items[i].box, b = items[j].box;
+        if (!boxHolds(a, b)) continue;
+        if (boxHolds(b, a)) { drop.add(Math.max(i, j)); continue; }
+        if (!strong(items[i]) && strong(items[j])) drop.add(i);
+        else drop.add(clean(items[i].text, 200).length <= CAND_TEXT_MAX ? j : i);
+      }
+    }
+    return items.map((_, i) => i).filter(i => !drop.has(i));
+  }
+
+  // Is `el` inside (or equal to) one of the already-listed interactive
+  // elements? Walks up through open shadow roots to their hosts.
+  function insideAny(el, set) {
+    for (let n = el; n; n = n.parentNode || n.host) {
+      if (set.has(n)) return true;
+    }
+    return false;
+  }
+
+  // Near-leaf: no child elements, or up to 3 that have none themselves.
+  function leafish(el) {
+    const kids = el.children || [];
+    if (kids.length > 3) return false;
+    for (const k of kids) if (k.children && k.children.length) return false;
+    return true;
+  }
+
+  // The DOM half: visible elements not inside a listed interactive one, with
+  // a candidate reason; deduped; in view first; capped. -> [{el, r, inView, why}]
+  function collectCandidates(doc, win, listed) {
+    const vw = win.innerWidth, vh = win.innerHeight;
+    const set = new Set(listed || []);
+    const raw = [];
+    deepEach(doc, el => {
+      if (raw.length >= CAND_RAW_CAP) return false;
+      const tag = String(el.tagName || '').toLowerCase();
+      if (CAND_SKIP.has(tag) || insideAny(el, set)) return;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      const st = win.getComputedStyle(el);
+      if (!styleVisible(st)) return;
+      const parent = el.parentElement || (el.parentNode && el.parentNode.host) || null;
+      const lf = leafish(el);
+      const why = candidateReason({
+        tag, cursor: st.cursor, parentCursor: parent ? win.getComputedStyle(parent).cursor : '',
+        attrs: el.getAttributeNames ? el.getAttributeNames() : [],
+        tabindex: el.getAttribute ? el.getAttribute('tabindex') : null,
+        text: lf ? (el.innerText || '') : '', leafish: lf,
+      });
+      if (!why) return;
+      raw.push({ el, r, why, text: el.innerText || '',
+                 inView: r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw,
+                 box: { x: r.left, y: r.top, w: r.width, h: r.height } });
+    });
+    return orderInViewFirst(dedupeContained(raw).map(i => raw[i]), CAND_CAP);
   }
 
   // --- accessible names -------------------------------------------------------------
@@ -303,5 +423,7 @@
     v: V, ATTR, SEL, TABBABLE, clean, deepEach, collect, deepFind, findJav3, deepActive,
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
+    CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
+    collectCandidates,
   };
 })();

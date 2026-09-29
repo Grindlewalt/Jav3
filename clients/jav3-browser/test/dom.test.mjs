@@ -170,3 +170,68 @@ test('re-injection keeps one instance', async () => {
   await import('../lib/dom.js?again');
   assert.equal(globalThis.__jav3Dom, before);
 });
+
+// --- candidates (no button markup) -------------------------------------------------------
+
+test('candidate reasons: pointer where it starts, click attrs, tabindex, short leaf text', () => {
+  const R = D.candidateReason;
+  assert.equal(R({ tag: 'div', cursor: 'pointer', parentCursor: 'auto' }), 'pointer');
+  // inherited pointer (a <span> inside a pointer <div>) is not another button
+  assert.equal(R({ tag: 'span', cursor: 'pointer', parentCursor: 'pointer' }), '');
+  assert.equal(R({ tag: 'span', cursor: 'pointer', parentCursor: 'pointer', leafish: true, text: 'Go' }), 'text');
+  for (const a of ['onclick', 'ng-click', '(click)', 'jsaction', 'data-action-click', 'data-onclick', '@click']) {
+    assert.equal(R({ tag: 'mat-card', attrs: ['class', a] }), 'attr', a);
+  }
+  assert.equal(R({ tag: 'div', attrs: ['data-id', 'class'] }), '');
+  assert.equal(R({ tag: 'div', tabindex: '0' }), 'tabindex');
+  assert.equal(R({ tag: 'div', tabindex: '-1' }), '');
+  assert.equal(R({ tag: 'div', leafish: true, text: '  Start   assignment ' }), 'text');
+  assert.equal(R({ tag: 'div', leafish: true, text: 'x'.repeat(61) }), '');
+  assert.equal(R({ tag: 'div', leafish: false, text: 'Start' }), '');
+  assert.equal(R({ tag: 'script', cursor: 'pointer', parentCursor: 'auto' }), '');
+  assert.equal(R({ tag: 'path', attrs: ['onclick'] }), '');
+});
+
+test('candidate visibility: display, visibility, opacity', () => {
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'visible', opacity: '1' }), true);
+  assert.equal(D.styleVisible({ display: 'none', visibility: 'visible', opacity: '1' }), false);
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'hidden', opacity: '1' }), false);
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'visible', opacity: '0' }), false);
+  assert.equal(D.styleVisible({ display: 'block', visibility: 'visible', opacity: '0.4' }), true);
+});
+
+test('candidate dedupe by box containment: a button keeps its label, a card gives way', () => {
+  const b = (x, y, w, h) => ({ x, y, w, h });
+  // div.btn "Start assignment" holding its <span> label -> the div only
+  const btn = [{ box: b(10, 10, 200, 40), text: 'Start assignment' },
+               { box: b(20, 20, 120, 20), text: 'Start assignment' }];
+  assert.deepEqual(D.dedupeContained(btn), [0]);
+  // a long-text card holding two short controls -> the controls
+  const card = [{ box: b(0, 0, 500, 300), text: 'Assignment 4 due Friday. '.repeat(5) },
+                { box: b(10, 250, 80, 30), text: 'Open' },
+                { box: b(100, 250, 80, 30), text: 'Skip' }];
+  assert.deepEqual(D.dedupeContained(card), [1, 2]);
+  // a text-only toolbar does not swallow its ng-click icon (a real signal)
+  const bar = [{ box: b(0, 0, 1280, 40), text: '☰ DeltaMath', why: 'text' },
+               { box: b(8, 8, 24, 24), text: '☰', why: 'attr' },
+               { box: b(40, 8, 90, 20), text: 'DeltaMath', why: 'text' }];
+  assert.deepEqual(D.dedupeContained(bar), [1, 2]);
+  // a pointer button still keeps its text-only label out
+  assert.deepEqual(D.dedupeContained([{ box: b(0, 0, 100, 30), text: 'Go', why: 'pointer' },
+                                      { box: b(5, 5, 20, 20), text: 'Go', why: 'text' }]), [0]);
+  // same box twice -> the first; disjoint boxes -> both
+  assert.deepEqual(D.dedupeContained([{ box: b(0, 0, 9, 9), text: 'a' }, { box: b(0, 0, 9, 9), text: 'a' }]), [0]);
+  assert.deepEqual(D.dedupeContained([{ box: b(0, 0, 9, 9), text: 'a' }, { box: b(20, 0, 9, 9), text: 'b' }]), [0, 1]);
+});
+
+test('candidates skip what is already listed, including through shadow hosts', () => {
+  const btn = { tagName: 'BUTTON' };
+  const sr = { nodeType: 11, parentNode: null, host: btn };
+  const inner = { tagName: 'SPAN', parentNode: sr };
+  assert.equal(D.insideAny(inner, new Set([btn])), true);
+  assert.equal(D.insideAny({ tagName: 'DIV', parentNode: null }, new Set([btn])), false);
+  assert.equal(D.leafish({ children: [] }), true);
+  assert.equal(D.leafish({ children: [{ children: [] }, { children: [] }] }), true);
+  assert.equal(D.leafish({ children: [{ children: [{}] }] }), false);
+  assert.equal(D.CAND_CAP, 150);
+});
