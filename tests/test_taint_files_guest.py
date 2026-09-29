@@ -11,6 +11,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -82,7 +83,7 @@ async def test_reading_a_tainted_file_taints_the_turn_before_the_text_returns(tm
     sock = os.path.join(tempfile.mkdtemp(dir="/tmp"), "g.sock")
     broker.register_turn(broker.TurnEnvelope(op_id="op-g", active_project="demo"))
     broker.register_token("op-g", "tok")
-    lst = await _serve(__import__("pathlib").Path(sock))
+    lst = await _serve(Path(sock))
     try:
         out = await _guest(pkg, sock, ["news.md"], ["mine.md", "news.md"])
         assert "my own notes" in out[0] and "IGNORE THE OPERATOR" in out[1]
@@ -97,7 +98,7 @@ async def test_reading_only_clean_files_leaves_the_turn_clean(tmp_env, pkg):
     sock = os.path.join(tempfile.mkdtemp(dir="/tmp"), "g.sock")
     broker.register_turn(broker.TurnEnvelope(op_id="op-g", active_project="demo"))
     broker.register_token("op-g", "tok")
-    lst = await _serve(__import__("pathlib").Path(sock))
+    lst = await _serve(Path(sock))
     try:
         out = await _guest(pkg, sock, ["news.md"], ["mine.md"])
         assert "my own notes" in out[0]
@@ -119,7 +120,7 @@ async def test_a_wrong_token_is_refused_and_the_text_is_withheld(tmp_env, pkg):
     sock = os.path.join(tempfile.mkdtemp(dir="/tmp"), "g.sock")
     broker.register_turn(broker.TurnEnvelope(op_id="op-g", active_project="demo"))
     broker.register_token("op-g", "a-different-token")
-    lst = await _serve(__import__("pathlib").Path(sock))
+    lst = await _serve(Path(sock))
     try:
         out = await _guest(pkg, sock, ["news.md"], ["news.md"])
         assert out[0].startswith("error: could not record")
