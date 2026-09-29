@@ -653,7 +653,9 @@ EXAMPLES = ("Fix the failing test in tests/", "What changed in the last commit?"
             "Summarise this week's journal", "Research a quiet NAS for the rack",
             "Write a script that backs up ~/notes")
 COLLAPSED_LINES = 10
-NOTICE_CAP = 50                    # notifications kept in the sidebar
+EXPANDED_LINES = 40                # an open tool row, inline; → shows the rest
+DELEGATION_TOOLS = frozenset({"spawn_agent", "spawn_temp_agent", "deploy_agents", "research"})
+NOTICE_CAP = 50                   # notifications kept in the sidebar
 NOT_LOGGED_IN = ("not logged in — /login: paste the line from Settings → Add computer "
                  "(chat only), or use your password (full access)")
 SESSION_LOST = "not logged in (session expired, or token revoked) — /login"
@@ -686,6 +688,122 @@ def _summary(result: str, n: int = 110) -> str:
         return "(no output)"
     head = _short(lines[0], n)
     return head + (f"  (+{len(lines) - 1} lines)" if len(lines) > 1 else "")
+
+
+def _elapsed(secs: float, precise: bool = False) -> str:
+    """2m 13s. precise: tenths under ten seconds (a finished tool call)."""
+    secs = max(0.0, secs)
+    if precise and secs < 10:
+        return f"{secs:.1f}s"
+    s = int(secs)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60:02d}s"
+    return f"{s // 3600}h {s % 3600 // 60:02d}m"
+
+
+def _fmt_cost(usd) -> str:
+    if not isinstance(usd, (int, float)) or usd <= 0:
+        return "$0.00"
+    return f"${usd:.2f}" if usd >= 0.01 else f"${max(usd, 0.001):.3f}"
+
+
+def _plural(n: int, one: str, many: str | None = None) -> str:
+    return f"{n} {one if n == 1 else many or one + 's'}"
+
+
+def fit_parts(parts: list[tuple[str, str, int]], width: int, sep: str = " · ",
+              markup_sep: str | None = None) -> str:
+    """Join (plain, markup, rank) parts in their order, leaving out the
+    highest-numbered ranks (last-added first among equals) until the plain
+    text fits `width`. The first part always stays."""
+    keep = list(range(len(parts)))
+    for i in sorted(range(1, len(parts)), key=lambda i: (-parts[i][2], -i)):
+        if len(sep.join(parts[j][0] for j in keep)) <= width:
+            break
+        keep.remove(i)
+    return (sep if markup_sep is None else markup_sep).join(parts[j][1] for j in keep)
+
+
+_CD = re.compile(r"""^cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)(?:\s+2>\s*/dev/null)?"""
+                 r"""\s*(?:;|&&|\|\||$)\s*""")
+
+
+def _cmd_line(cmd) -> str:
+    """A shell command the way its row reads: the first line that does
+    something, without the agent's habitual `cd "$(pwd)";` or `cd <project>`
+    in front, and " …" when more lines follow."""
+    lines = [ln.strip() for ln in str(cmd or "").splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        rest = ln
+        while True:
+            m = _CD.match(rest)
+            if not m or not m.group(0):
+                break
+            rest = rest[m.end():]
+        if rest:
+            return rest + (" …" if i < len(lines) - 1 else "")
+    return lines[0] if lines else ""
+
+
+def result_hint(name: str, args, ok, result) -> str:
+    """The few words after a finished call's title: what came back ("lines
+    1-230 of 656", "20 matches in 3 files", "exit 0 · 40 lines", "+3 −1"),
+    not the first line of it. A failure: its first line, without "error:"."""
+    import difflib
+    a = args if isinstance(args, dict) else {}
+    r = result or ""
+    lines = [ln for ln in r.splitlines() if ln.strip()]
+    if ok is False:
+        return _short(re.sub(r"^error:\s*", "", lines[0]) if lines else "failed", 100)
+    if name in ("read_file", "local_read_file"):
+        m = re.match(r"\((lines \d+-\d+ of \d+)", r)
+        return m.group(1) if m else _plural(len(r.splitlines()), "line")
+    if name in ("search_codebase", "local_search"):
+        if r.startswith("no matches"):
+            return "no matches"
+        hits = [int(m.group(1)) for m in
+                re.finditer(r"^\S.*? \((\d+) match(?:es)?\)\s*$", r, re.M)]
+        if hits:
+            return f"{_plural(sum(hits), 'match', 'matches')} in {_plural(len(hits), 'file')}"
+    if name in ("list_files", "crawl_codebase", "local_list_files"):
+        n = len(lines) - (1 if lines and lines[0].startswith("project:") else 0)
+        return _plural(n, "entry", "entries")
+    if name == "web_search":
+        n = len(re.findall(r"^\d+\. ", r, re.M))
+        if n:
+            return _plural(n, "result")
+    if name == "read_and_summarize":
+        n = r.count("Source: ")
+        if n:
+            return f"summary of {_plural(n, 'source')}"
+    if name in ("edit_file", "local_edit_file") and ("find" in a or "replace" in a):
+        old = str(a.get("find", "")).splitlines()
+        new = str(a.get("replace", "")).splitlines()
+        add = rem = 0
+        for ln in difflib.unified_diff(old, new, lineterm="", n=0):
+            if ln.startswith("+") and not ln.startswith("+++"):
+                add += 1
+            elif ln.startswith("-") and not ln.startswith("---"):
+                rem += 1
+        return f"+{add} −{rem}"
+    if name in ("write_file", "local_write_file"):
+        return ""                      # the title already says how many lines
+    if name in ("run_code", "local_shell"):
+        m = re.match(r"exit (-?\d+)(?: · [\d.]+s)?([^\n]*)", r)
+        out = [ln for ln in r.splitlines()[1 if m else 0:]
+               if ln.strip() and not re.match(r"^--- (stdout|stderr) ---$", ln)]
+        bits = [f"exit {m.group(1)}"] if m else []
+        if m and m.group(2).strip(" ·"):
+            bits.append(m.group(2).strip(" ·"))
+        bits.append(_plural(len(out), "line") if out else "no output")
+        return " · ".join(bits)
+    if name == "todo_update":
+        todos = parse_todos(r)
+        if todos:
+            return f"{sum(d for d, _ in todos)}/{len(todos)} done"
+    return _summary(r, 70) if lines else ""
 
 
 def expand_attachments(text: str, cwd: Path | None = None) -> tuple[str, list[str], list[str]]:
@@ -746,7 +864,7 @@ def tool_title(name: str, args) -> tuple[str, str]:
         v = a.get(key)
         return _short(v, n) if v not in (None, "") else ""
     if name == "local_shell":
-        return "$", f"{s('command', 100)}  (local)"
+        return "$", f"{_short(_cmd_line(a.get('command')), 100)}  (local)"
     if name == "read_file":
         rng = f" [{a['offset']}:{a.get('limit', '')}]" if a.get("offset") else ""
         return "→", f"Read {s('path')}{rng}"
@@ -757,7 +875,9 @@ def tool_title(name: str, args) -> tuple[str, str]:
         return "←", f"Edit {s('path')}"
     if name == "run_code":
         if a.get("command"):
-            return "$", s("command", 100)
+            return "$", _short(_cmd_line(a["command"]), 100)
+        if not a.get("code"):
+            return "$", "run_code"         # a result seen without its call (attached late)
         first = next((ln for ln in str(a.get("code", "")).splitlines() if ln.strip()), "")
         return "$", f"python  {_short(first, 80)}"
     if name == "web_search":
@@ -765,7 +885,15 @@ def tool_title(name: str, args) -> tuple[str, str]:
     if name in ("web_read", "open_website"):
         return "%", f"Fetch {s('url')}"
     if name == "read_and_summarize":
-        return "%", f"Read {s('url') or _short(a.get('urls', ''), 70)}"
+        urls = a.get("urls") if isinstance(a.get("urls"), list) else []
+        first = s("url") or (_short(urls[0], 70) if urls else "")
+        return "%", f"Read {first}" + (f" (+{len(urls) - 1} more)" if len(urls) > 1 else "")
+    if name == "ask_user":
+        qs = a.get("questions") if isinstance(a.get("questions"), list) else []
+        q = qs[0].get("question", "") if qs and isinstance(qs[0], dict) else ""
+        return "?", f"Ask you {_short(q, 80)}".rstrip()
+    if name == "send_message":
+        return "✉", f"Message {s('to', 30)}  {s('message', 70)}".rstrip()
     if name == "research":
         return "◈", f"Research {s('topic')}"
     if name == "search_codebase":
@@ -994,12 +1122,13 @@ DIFF_TINT = True
 
 
 def tool_body(name: str, args, ok: bool | None, result: str | None,
-              expanded: bool) -> tuple[str | None, int]:
+              expanded: bool, cap: int | None = None) -> tuple[str | None, int]:
     """The block under a tool's title, as Textual markup, and how many lines were
-    left out. None = the call stays a single line."""
+    left out. None = the call stays a single line. `cap` overrides the line
+    limit (an open row in the transcript shows EXPANDED_LINES)."""
     import difflib
     a = args if isinstance(args, dict) else {}
-    cap = 400 if expanded else COLLAPSED_LINES
+    cap = cap or (400 if expanded else COLLAPSED_LINES)
 
     def clip(lines: list[str]) -> tuple[list[str], int]:
         return (lines, 0) if len(lines) <= cap else (lines[:cap], len(lines) - cap)
@@ -1034,12 +1163,29 @@ def tool_body(name: str, args, ok: bool | None, result: str | None,
             return "\n".join(f"[$success]✓[/] [$text-muted strike]{_esc(t)}[/]" if done
                              else f"[$warning]☐[/] {_esc(t)}" for done, t in todos), 0
         return None, 0
-    if name in ("run_code", "local_shell") and result is not None:
+    if name in ("run_code", "local_shell"):
+        # open: the whole command first when its row could not show it
+        cmd = str(a.get("command") or a.get("code") or "").strip()
+        head = ([f"[$text-muted]$ {_esc(ln)}[/]" for ln in cmd.splitlines()[:COLLAPSED_LINES]]
+                if expanded and ("\n" in cmd or len(cmd) > 100) else [])
+        if result is None:
+            return "\n".join(head) or None, 0
         lines, more = clip((result or "(no output)").rstrip().splitlines() or ["(no output)"])
-        return "\n".join(_esc(ln) for ln in lines), more
-    if expanded and result:
-        lines, more = clip(result.rstrip().splitlines())
-        return "\n".join(f"[$text-muted]{_esc(ln)}[/]" for ln in lines), more
+        return "\n".join(head + [_esc(ln) for ln in lines]), more
+    if expanded:
+        # an open row: what the title cut short (a sub-agent's task, a message),
+        # then what came back
+        out = []
+        for k, v in a.items():
+            if isinstance(v, str) and (len(v) > 60 or "\n" in v.strip()):
+                vl = v.strip().splitlines()
+                out.append(f"[$text-muted]{_esc(k)}:[/] {_esc(vl[0])}")
+                out += [f"  {_esc(ln)}" for ln in vl[1:6]]
+                if len(vl) > 6:
+                    out.append(f"  [$text-muted]… {len(vl) - 6} more lines[/]")
+        lines, more = clip((result or "").rstrip().splitlines())
+        out += [f"[$text-muted]{_esc(ln)}[/]" for ln in lines]
+        return "\n".join(out) or None, more
     return None, 0
 
 
@@ -1083,6 +1229,38 @@ class TurnState:
         self.tools: list[dict] = []       # finished calls
         self.done = False                 # a final arrived (not an error)
         self.local = False                # this turn opened a new /local chat
+        # the running status line and the ▣ footer
+        self.ntools = 0                   # calls started
+        self.agents = 0                   # sub-agents / teams / research started
+        self.plans = 0                    # jobs announced (orchestrate)
+        self.cost0: float | None = None   # the chat's cost when this view started watching
+        self.cost: float | None = None    # spent since, from /info
+        self.polled = self.started - 5    # first /info poll after ~5 s
+        self.ended: float | None = None
+        self.interrupted = False
+        self.failed = False
+        self.idle = False                 # attached, and nothing was running
+        self.footer = None
+
+    def count(self, name: str) -> None:
+        self.ntools += 1
+        if name in DELEGATION_TOOLS:
+            self.agents += 1
+
+    def stats(self, now: float | None = None) -> list[str]:
+        """["2m 13s", "14 tools", "2 agents", "$0.02"]: what the status line
+        says while the turn runs and the ▣ footer keeps after it."""
+        end = self.ended if self.ended is not None else (now or time.monotonic())
+        bits = [_elapsed(end - self.started)]
+        if self.ntools:
+            bits.append(_plural(self.ntools, "tool"))
+        if self.agents:
+            bits.append(_plural(self.agents, "agent"))
+        if self.plans:
+            bits.append(_plural(self.plans, "plan"))
+        if self.cost is not None:
+            bits.append(_fmt_cost(self.cost))
+        return bits
 
 
 def _subsequence_gaps(q: str, t: str) -> int | None:
@@ -1671,66 +1849,248 @@ def build_tui(base: str, token: str, **kw):
             yield Static("", id="home-hints")
 
     class ToolView(Vertical):
-        """One tool call: a title line, and for edits, writes, commands, todos
-        and failures a block under it. Click to expand or collapse."""
+        """One tool call on one line: state, title, what came back, how long.
+        Open (enter on the picked row, a click, ctrl+o for all) it shows the
+        diff, the output or the error, clipped to EXPANDED_LINES; → then shows
+        everything in a dialog."""
+
+        DEFAULT_CSS = """
+        ToolView { height: auto; padding-left: 2; }
+        ToolView #row { height: 1; }
+        ToolView #head { width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+        ToolView #dur { width: auto; height: 1; padding: 0 0 0 2; color: $text-muted; }
+        ToolView #body { display: none; }
+        ToolView.block { margin: 1 0; }
+        ToolView.block #body { border-left: solid $panel-lighten-2; padding: 0 1; margin-left: 1;
+                               text-wrap: nowrap; text-overflow: ellipsis; }
+        ToolView.-picked #row { background: $panel; }
+        ToolView.-picked #head { text-style: bold; }
+        """
 
         def __init__(self, name: str, args, *, ok: bool | None = None,
                      result: str | None = None, done: bool = False):
             super().__init__()
             self.tname, self.args, self.ok, self.result = name, args or {}, ok, result
             self.done, self.expanded, self.t0 = done, False, time.monotonic()
-            self.interrupted = False
+            self.t1: float | None = None      # finished (None for a row from history)
+            self.interrupted, self.why = False, "interrupted"
+            self.more = 0                     # body lines left out when open
+            self._shown: tuple = ()           # what the widgets last got
+            # held here, not queried: a result can land before the row's own
+            # children are mounted (they mount after the row itself)
+            self._head, self._dur = Static(id="head"), Static(id="dur")
+            self._body = Static(id="body")
 
         def compose(self) -> ComposeResult:
-            yield Static(id="head")
-            yield Static(id="body")
+            with Horizontal(id="row"):
+                yield self._head
+                yield self._dur
+            yield self._body
 
         def on_mount(self) -> None:
+            if not self.done:
+                self.app.__dict__.setdefault("live_tools", set()).add(self)
             self.redraw()
+
+        def on_unmount(self) -> None:
+            self.app.__dict__.get("live_tools", set()).discard(self)
+
+        def _ended(self) -> None:
+            self.t1 = time.monotonic()
+            self.app.__dict__.get("live_tools", set()).discard(self)
 
         def finish(self, ok: bool, result: str) -> None:
             self.ok, self.result, self.done = ok, result, True
+            self._ended()
             self.redraw()
 
-        def interrupt(self) -> None:
-            self.done, self.interrupted = True, True
+        def interrupt(self, why: str = "interrupted") -> None:
+            """No result will come: the turn was stopped, failed or lost."""
+            self.done, self.interrupted, self.why = True, True, why
+            self._ended()
             self.redraw()
 
         def on_click(self) -> None:
             self.expanded = not self.expanded
             self.redraw()
+            log = self.parent
+            if isinstance(log, ChatLog):
+                log.pick(self, scroll=False)
 
         def spin(self, frame: str) -> None:
             if not self.done:
                 self.redraw(frame)
 
-        def redraw(self, frame: str = "") -> None:
+        def head_markup(self, frame: str = "") -> tuple[str, str]:
+            """(title line, duration) as markup."""
             icon, title = tool_title(self.tname, self.args)
             if not self.done:
-                secs = f"  [$text-muted]{time.monotonic() - self.t0:.0f}s[/]"
-                head = f"[$warning]{frame or '~'}[/] {_esc(title)}{secs}"
+                head = f"[$warning]{frame or '~'}[/] {_esc(title)}"
             elif self.interrupted:
-                head = f"[$warning]{icon}[/] [strike]{_esc(title)}[/]  [$warning]interrupted[/]"
+                head = (f"[$warning]{icon}[/] [strike]{_esc(title)}[/]  "
+                        f"[$warning]{_esc(self.why)}[/]")
             elif self.ok is False:
-                head = f"[$error]✗ {_esc(title)}[/]"
+                head = (f"[$error]✗ {_esc(title)}[/]  "
+                        f"[$error]{_esc(result_hint(self.tname, self.args, False, self.result))}[/]")
             else:
-                head = f"[$text-muted]{icon}[/] {_esc(title)}"
-            body, more = (tool_body(self.tname, self.args, self.ok, self.result,
-                                    self.expanded) if self.done and not self.interrupted
-                          else (None, 0))
-            if body is None and self.done and self.ok and self.result and not self.expanded \
-                    and self.tname not in ("todo_update",):
-                head += f"  [$text-muted]{_esc(_summary(self.result, 60))}[/]"
-            self.query_one("#head", Static).update(head)
-            b = self.query_one("#body", Static)
-            self.set_class(body is not None, "block")
-            b.display = body is not None
-            if body is not None:
+                hint = result_hint(self.tname, self.args, self.ok, self.result)
+                col = ("$warning" if hint.startswith("exit ") and not hint.startswith("exit 0")
+                       else "$text-muted")
+                head = f"[$text-muted]{icon}[/] {_esc(title)}" + (
+                    f"  [{col}]{_esc(hint)}[/]" if hint else "")
+            if not self.done:
+                dur = _elapsed(time.monotonic() - self.t0)
+            elif self.t1 is not None:
+                dur = _elapsed(self.t1 - self.t0, precise=True)
+            else:
+                dur = ""
+            return head, dur
+
+        def redraw(self, frame: str = "") -> None:
+            head, dur = self.head_markup(frame)
+            body, more = (None, 0)
+            if self.expanded:
+                body, more = tool_body(self.tname, self.args, self.ok,
+                                       self.result if self.done and not self.interrupted
+                                       else None, True, cap=EXPANDED_LINES)
+                if body is None and self.done:
+                    body = "[$text-muted](no output)[/]"
+                elif body is None and self.has_class("-picked"):
+                    body = "[$text-muted]running — what it returns shows here[/]"
                 if more:
-                    body += f"\n[$text-muted]… {more} more lines · click to expand[/]"
-                elif self.expanded:
-                    body += "\n[$text-muted]click to collapse[/]"
-                b.update(body)
+                    body += f"\n[$text-muted]… {more} more lines · → shows all[/]"
+            self.more = more
+            if (head, dur, body) == self._shown:
+                return                          # the tick redraws; most ticks change nothing
+            old = self._shown
+            self._shown = (head, dur, body)
+            # a one-line title never changes the row's height
+            self._head.update(head, layout=False)
+            if not old or old[1] != dur:
+                self._dur.update(dur, layout=not old or len(old[1]) != len(dur))
+            if not old or old[2] != body:
+                self.set_class(body is not None, "block")
+                self._body.display = body is not None
+                self._body.update(body or "")
+
+        def full_markup(self) -> str:
+            body, _ = tool_body(self.tname, self.args, self.ok,
+                                self.result if self.done and not self.interrupted else None,
+                                True, cap=5000)
+            return body or "[$text-muted](no output)[/]"
+
+    class NewHint(Static):
+        """Under the transcript while the operator has scrolled up and more
+        arrived below. A click jumps to the bottom."""
+
+        DEFAULT_CSS = """
+        NewHint { height: 1; padding: 0 4; color: $primary; text-style: bold; display: none; }
+        """
+
+        def on_click(self) -> None:
+            self.app.log_view.scroll_end(animate=False)
+            self.app.unseen = 0
+            self.app._refresh_new_hint()
+
+    class ChatLog(VerticalScroll):
+        """The transcript. It follows the bottom until you scroll up. Tab from
+        the prompt picks a tool row: ↑ ↓ move, enter or space opens and closes
+        it, → shows all of an open row, home / end jump, esc or tab goes back
+        (typing goes back too, with the key)."""
+
+        FOCUS_ON_CLICK = False     # a click opens a row; the prompt keeps the keyboard
+        BINDINGS = [
+            Binding("up", "move(-1)", show=False),
+            Binding("down", "move(1)", show=False),
+            Binding("enter,space", "toggle", show=False),
+            Binding("right", "more", show=False),
+            Binding("left", "less", show=False),
+            Binding("home", "edge(0)", show=False),
+            Binding("end", "edge(1)", show=False),
+            Binding("escape,tab", "leave", show=False),
+        ]
+
+        def __init__(self, *children, **kw) -> None:
+            super().__init__(*children, **kw)
+            self.picked = None
+            self.picking = False       # focused (has_focus is not set yet in on_focus)
+
+        def rows(self) -> list:
+            return [w for w in self.children if isinstance(w, ToolView)]
+
+        def pick(self, tv, scroll: bool = True) -> None:
+            if self.picked is not None and self.picked is not tv:
+                self.picked.remove_class("-picked")
+            self.picked = tv
+            if tv is not None:
+                tv.set_class(self.picking, "-picked")
+                if scroll:
+                    self.scroll_to_widget(tv, animate=False)
+
+        def on_focus(self) -> None:
+            self.picking = True
+            rows = self.rows()
+            self.pick(self.picked if self.picked in rows else (rows[-1] if rows else None))
+            self.app._refresh_status()
+
+        def on_blur(self) -> None:
+            self.picking = False
+            if self.picked is not None:
+                self.picked.remove_class("-picked")
+            self.app._refresh_status()
+
+        def action_move(self, d: int) -> None:
+            rows = self.rows()
+            if not rows:
+                self.scroll_relative(y=d, animate=False)
+                return
+            i = rows.index(self.picked) if self.picked in rows else len(rows)
+            self.pick(rows[max(0, min(len(rows) - 1, i + d))])
+
+        def action_edge(self, end: int) -> None:
+            rows = self.rows()
+            if rows:
+                self.pick(rows[-1] if end else rows[0])
+            if end:
+                self.scroll_end(animate=False)
+            else:
+                self.scroll_home(animate=False)
+
+        def action_toggle(self) -> None:
+            tv = self.picked
+            if tv is not None:
+                tv.expanded = not tv.expanded
+                tv.redraw()
+                self.call_after_refresh(self.scroll_to_widget, tv, animate=False)
+
+        def action_more(self) -> None:
+            tv = self.picked
+            if tv is None:
+                return
+            if not tv.expanded:
+                self.action_toggle()
+            else:
+                self.app.push_screen(View(tool_title(tv.tname, tv.args)[1], tv.full_markup()))
+
+        def action_less(self) -> None:
+            if self.picked is not None and self.picked.expanded:
+                self.action_toggle()
+
+        def action_leave(self) -> None:
+            self.app.editor.focus()
+
+        async def on_key(self, event) -> None:
+            app = self.app
+            if app.leader:
+                event.stop()
+                event.prevent_default()
+                app.run_leader(event.key)
+            elif event.is_printable and event.character and event.key != "space":
+                # typing goes to the prompt, key included
+                event.stop()
+                event.prevent_default()
+                app.editor.focus()
+                app.editor.insert(event.character)
 
     class Editor(TextArea):
         """The prompt. Enter sends; ctrl+j / shift+enter / alt+enter (or a
@@ -5925,10 +6285,6 @@ def build_tui(base: str, token: str, **kw):
         Note { padding-left: 2; margin-top: 1; color: $text-muted; }
         Note.warn { color: $warning; }
         Note.error { color: $error; }
-        ToolView { height: auto; padding-left: 2; }
-        ToolView #body { display: none; }
-        ToolView.block { margin: 1 0; }
-        ToolView.block #body { border-left: solid $panel-lighten-2; padding: 0 1; margin-left: 1; }
         #bottom { height: auto; padding: 0 2; }
         OptionList > .option-list--option-highlighted,
         OptionList:focus > .option-list--option-highlighted {
@@ -6053,7 +6409,8 @@ def build_tui(base: str, token: str, **kw):
             with Horizontal(id="main"):
                 with Vertical(id="left"):
                     yield Static(id="header")
-                    yield VerticalScroll(Home(), id="log", can_focus=False)
+                    yield ChatLog(Home(), id="log")
+                    yield NewHint(id="new-hint")
                     with Vertical(id="bottom"):
                         yield OptionList(id="popup")
                         with Vertical(id="prompt"):
@@ -6436,11 +6793,35 @@ def build_tui(base: str, token: str, **kw):
 
         # -- transcript -------------------------------------------------------------------------
 
+        unseen = 0                     # transcript items mounted while scrolled up
+
         async def mount_log(self, widget) -> None:
             home = self.query(Home)
             if home:
                 await home.remove()
-            await self.log_view.mount(widget)
+            lv = self.log_view
+            if not self._following():
+                self.unseen += 1               # "↓ n new" until they scroll back down
+            await lv.mount(widget)
+
+        def _following(self) -> bool:
+            """The transcript keeps to the bottom (Textual's anchor), i.e. the
+            operator has not scrolled up to read something."""
+            lv = self.log_view
+            return lv.max_scroll_y <= 0 or (lv.is_anchored
+                                            and not getattr(lv, "_anchor_released", False))
+
+        def _refresh_new_hint(self) -> None:
+            hint = self.query_one(NewHint)
+            if self.unseen and self._following():
+                self.unseen = 0
+            show = bool(self.unseen)
+            if hint.display != show:
+                hint.display = show
+            if show:
+                text = f"↓ {self.unseen} new below · pgdn, or click here"
+                if str(hint.render()) != text:
+                    hint.update(text)
 
         async def note(self, text: str, kind: str = "info") -> None:
             await self.mount_log(Note(_esc(text), classes=kind))
@@ -6449,6 +6830,11 @@ def build_tui(base: str, token: str, **kw):
 
         async def clear_log(self) -> None:
             await self.log_view.remove_children()
+            # a new transcript starts at the bottom, following it, whatever the
+            # last one was scrolled to
+            self.log_view.anchor()
+            self.log_view.picked = None
+            self.unseen = 0
 
         async def show_home(self) -> None:
             await self.clear_log()
@@ -6535,6 +6921,37 @@ def build_tui(base: str, token: str, **kw):
                           + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
                           + "  [$text-muted]ctrl+b notifications[/]")
 
+        def _running_status(self) -> str:
+            """The status row while a turn runs — one steady line, `working 2m
+            13s · 14 tools · 2 agents · $0.02`, that the ▣ footer repeats when
+            it ends — or, while tool rows are being picked, their keys."""
+            t = self.turn if self.busy else None
+            spin = f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/] " if t else ""
+            width = self.query_one("#status-left", Static).size.width or 200
+            if self.log_view.picking:
+                parts = [("↑↓ pick", "[$primary]↑↓[/] pick", 0),
+                         ("enter open/close", "[$primary]enter[/] open/close", 1),
+                         ("→ all of it", "[$primary]→[/] all of it", 2),
+                         ("esc back", "[$primary]esc[/] back", 1)]
+                if t:
+                    parts.append((f"x {t.stats()[0]}", f"{spin}[$text-muted]{t.stats()[0]}[/]", 3))
+                return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
+            verb = "interrupting" if self.stop_requested else "working"
+            stats = t.stats()
+            armed = time.monotonic() - self.esc_armed < 2
+            nq = len(self.queue) + len(self.pending)
+            # (plain, markup, rank): a narrow terminal drops the higher ranks
+            # first, so the line never wraps or gets cut mid-word
+            parts = [(f"x {verb} {stats[0]}", f"{spin}{verb} [$text-muted]{stats[0]}[/]", 0)]
+            for s in stats[1:]:
+                rank = 2 if s.startswith("$") else 1 if s.endswith(("tool", "tools")) else 3
+                parts.append((s, f"[$text-muted]{s}[/]", rank))
+            if nq:
+                parts.append((f"{nq} queued", f"[$accent]{nq} queued[/]", 1))
+            parts.append(("esc again to interrupt", "[$warning]esc again to interrupt[/]", 0)
+                         if armed else ("esc interrupt", "[$text-muted]esc interrupt[/]", 4))
+            return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
+
         def _refresh_status(self) -> None:
             left = self.query_one("#status-left", Static)
             right = self.query_one("#status-right", Static)
@@ -6549,18 +6966,8 @@ def build_tui(base: str, token: str, **kw):
                 left.update(f"[$warning b]ctrl+x[/]  {keys}  [$primary]b[/] notifications")
                 right.update("")
                 return
-            if self.busy and self.turn is not None:
-                t = self.turn
-                spin = SPINNER[self.frame % len(SPINNER)]
-                verb = ("Interrupting" if self.stop_requested else
-                        "Running tools" if t.running else
-                        "Writing" if t.seg else "Thinking")
-                secs = int(time.monotonic() - t.started)
-                esc = ("[$warning]esc again to interrupt[/]"
-                       if time.monotonic() - self.esc_armed < 2 else "esc interrupt")
-                nq = len(self.queue) + len(self.pending)
-                q = f"  [$accent]{nq} queued[/]" if nq else ""
-                left.update(f"[$accent]{spin}[/] {verb}…  [$text-muted]{secs}s · {esc}[/]{q}")
+            if self.log_view.picking or (self.busy and self.turn is not None):
+                left.update(self._running_status(), layout=False)
             elif self.logged_in is False:
                 left.update("[$warning]not logged in[/] [$text-muted]— /login · "
                             "/ commands[/]")
@@ -6637,12 +7044,33 @@ def build_tui(base: str, token: str, **kw):
             from textual.css.query import NoMatches
             self.frame += 1
             try:
-                if self.busy and self.turn is not None:
-                    for tv in self.turn.running.values():
-                        tv.spin(SPINNER[self.frame % len(SPINNER)])
+                # every unfinished row, the turn's and a local `!command`'s alike
+                for tv in list(self.__dict__.get("live_tools", ())):
+                    tv.spin(SPINNER[self.frame % len(SPINNER)])
+                t = self.turn
+                if self.busy and t is not None and t.cid is not None \
+                        and time.monotonic() - t.polled > 10:
+                    t.polled = time.monotonic()
+                    self.run_worker(self._poll_cost(t), group="cost", exclusive=True)
                 self._refresh_status()
+                self._refresh_new_hint()
             except NoMatches:
                 pass          # shutting down, or a screen without the status row
+
+        async def _poll_cost(self, t: TurnState) -> None:
+            """What the running turn has spent so far, for the status line: the
+            chat's cost now, less what it was when this view began watching."""
+            try:
+                info = await self.api("GET", f"/api/conversations/{t.cid}/info")
+            except CliError:
+                return
+            cost = info.get("cost_usd")
+            if isinstance(cost, (int, float)):
+                if t.cost0 is None:
+                    t.cost0 = cost
+                t.cost = max(0.0, cost - t.cost0)
+            if t.cid == self.cid:
+                self.info = info
 
         def on_resize(self, event) -> None:
             self.refresh_chrome()
@@ -6652,6 +7080,7 @@ def build_tui(base: str, token: str, **kw):
             DIFF_TINT = getattr(self, "truecolor", True) and not self.current_theme.ansi
             if self.is_mounted:
                 for tv in self.query(ToolView):
+                    tv._shown = ()              # same markup, new colours: redraw anyway
                     tv.redraw()
 
         # -- turns ------------------------------------------------------------------------------
@@ -6694,7 +7123,13 @@ def build_tui(base: str, token: str, **kw):
         async def _turn(self, text: str) -> None:
             self.busy, self.stop_requested = True, False
             self.turn = TurnState()
+            # the turn's cost is the chat's from here on (a new chat starts at 0)
+            self.turn.cost0 = ((self.info or {}).get("cost_usd") or 0.0) \
+                if self.cid is not None else 0.0
             self.refresh_chrome()
+            # sending means following the reply, wherever the transcript was scrolled
+            self.log_view.scroll_end(animate=False)
+            self.unseen = 0
             try:
                 await self.mount_log(UserMsg(_esc(text)))
                 message, attached, skipped = expand_attachments(text)
@@ -6794,9 +7229,9 @@ def build_tui(base: str, token: str, **kw):
             return (next((w for w in self.pending if w.sent == sent), None)
                     or next((w for w in self.pending if w.sent.strip() == sent.strip()), None))
 
-        async def _undelivered(self, texts: list[str]) -> None:
+        async def _undelivered(self, texts: list[str], to_prompt: bool = False) -> None:
             """The turn ended before these reached the agent: they become the next
-            turn — or, after an interrupt, go back to the prompt."""
+            turn — or, after an interrupt or a failure, go back to the prompt."""
             back = []
             for u in texts:
                 w = self._match_pending(u)
@@ -6808,7 +7243,7 @@ def build_tui(base: str, token: str, **kw):
                     back.append(u)
             if not back:
                 return
-            if self.stop_requested:
+            if self.stop_requested or to_prompt:
                 ed = self.editor
                 ed.text = "\n".join(back + ([ed.text] if ed.text else []))
                 ed.move_cursor(ed.document.end)
@@ -6851,14 +7286,25 @@ def build_tui(base: str, token: str, **kw):
                 await turn.stream.write(chunk)
             elif t == "tool":
                 await self._close_seg()
-                tv = ToolView(ev.get("name", "?"), ev.get("args") or {})
+                name = ev.get("name") or "?"
+                tv = ToolView(name, ev.get("args") or {})
                 tv.expanded = self.tools_expanded
-                turn.running[ev.get("id")] = tv
+                # a call without an id (an older guest) must not take the place
+                # of another one's: its result is matched by name, oldest first
+                key = ev.get("id") or f"{name}\0{turn.ntools}"
+                turn.running[key] = tv
+                turn.count(name)
                 await self.mount_log(tv)
             elif t == "tool_result":
-                tv = turn.running.pop(ev.get("id"), None)
+                name = ev.get("name") or "?"
+                key = ev.get("id")
+                if key is None or key not in turn.running:
+                    key = next((k for k, v in turn.running.items()
+                                if isinstance(k, str) and "\0" in k and v.tname == name), key)
+                tv = turn.running.pop(key, None)
                 if tv is None:
-                    tv = ToolView(ev.get("name", "?"), {})
+                    # its call began before this view attached: the row has no args
+                    tv = ToolView(name, {})
                     await self.mount_log(tv)
                 ok = ev.get("ok") is not False
                 res = ev.get("result", "")
@@ -6868,7 +7314,8 @@ def build_tui(base: str, token: str, **kw):
                     self.todos = parse_todos(res)
                     self._refresh_sidebar()
             elif t == "job":
-                await self.note(f"◆ job: {ev.get('title', '')}")
+                turn.plans += 1
+                await self.note(f"◆ plan running: {ev.get('title', '')}")
             elif t == "inbox":
                 # an operator message arrives as operator_message too; the
                 # inbox copy is the model-facing framing of the same words
@@ -6898,9 +7345,18 @@ def build_tui(base: str, token: str, **kw):
                 return True
             elif t == "error":
                 await self._close_seg()
+                turn.failed = True
+                self._stop_rows(turn, "no result: the turn failed")
                 await self.note(ev.get("message") or "error", "error")
+                await self._turn_footer(turn)
+                if ev.get("undelivered"):
+                    # back to the prompt: the operator decides whether they still
+                    # apply after the failure
+                    await self._undelivered([str(u) for u in ev["undelivered"]],
+                                            to_prompt=True)
                 return True
             elif t == "idle":
+                turn.idle = True
                 return True
             return False
 
@@ -7028,19 +7484,42 @@ def build_tui(base: str, token: str, **kw):
                     await turn.md.remove()
             turn.md, turn.seg = None, ""
 
-        async def _finish(self, final: str) -> None:
-            turn = self.turn
+        def _stop_rows(self, turn: TurnState, why: str) -> None:
+            """Calls that will get no result now (a stop, a failure, a lost
+            stream): their rows say so and their timers stop."""
             for tv in turn.running.values():
-                tv.interrupt()
+                tv.interrupt(why)
             turn.running.clear()
-            secs = int(time.monotonic() - turn.started)
+
+        def _footer_markup(self, turn: TurnState) -> str:
             who = self.agent or "Jav3"
             model = (turn.model or self._model_label()).split("/")[-1]
+            bits = [_esc(who), _esc(model)] + turn.stats()
+            if turn.failed:
+                return f"[$error]▣[/] {' · '.join(bits)} · [$error]failed[/]"
+            if turn.interrupted:
+                return f"[$warning]▣[/] {' · '.join(bits)} · [$warning]interrupted[/]"
+            if not turn.done:
+                return f"[$warning]▣[/] {' · '.join(bits)} · [$warning]stream lost[/]"
+            return f"[$primary]▣[/] {' · '.join(bits)}"
+
+        async def _turn_footer(self, turn: TurnState) -> None:
+            """The ▣ line that closes a turn: what the status line said while it
+            ran (time, tools, agents, cost), frozen."""
+            if turn.footer is None:
+                turn.ended = time.monotonic()
+                turn.footer = Footer(self._footer_markup(turn))
+                await self.mount_log(turn.footer)
+
+        async def _finish(self, final: str) -> None:
+            turn = self.turn
             if final.startswith(INTERRUPTED):
+                turn.interrupted = True
+                self._stop_rows(turn, "interrupted")
                 await self._close_seg()
-                await self.mount_log(Footer(f"[$warning]▣[/] {_esc(who)} · {_esc(model)} · "
-                                            f"{secs}s · [$warning]interrupted[/]"))
+                await self._turn_footer(turn)
                 return
+            self._stop_rows(turn, "no result")
             if turn.stream is not None:
                 await turn.stream.stop()
                 turn.stream = None
@@ -7054,25 +7533,38 @@ def build_tui(base: str, token: str, **kw):
             elif final.strip() and final.strip() not in "".join(turn.printed):
                 await self.mount_log(Reply(final))
             self.last_reply = final or "".join(turn.printed)
-            await self.mount_log(Footer(f"[$primary]▣[/] {_esc(who)} · {_esc(model)} · {secs}s"))
+            await self._turn_footer(turn)
 
         async def _end_turn(self) -> None:
             t = self.turn
-            if t is not None and t.done and t.cid is not None and not self.ephemeral \
-                    and (t.cid != self.cid or not self.sidebar_shown()):
+            if t is not None and t.done and not t.interrupted and t.cid is not None \
+                    and not self.ephemeral and (t.cid != self.cid or not self.sidebar_shown()):
                 name = (self.title_text if t.cid == self.cid and self.title_text
                         else f"#{t.cid}")
                 self.push_notice(f"reply ready in {_short(name, 60)} · "
                                  f"{int(time.monotonic() - t.started)}s", "done")
-            if self.turn is not None:
-                self.last_turn = self.turn
+            if t is not None:
+                self.last_turn = t
+                # the stream ended without a final or an error (connection lost,
+                # this view left the turn): nothing may keep spinning
+                self._stop_rows(t, "no result: the stream ended")
+                if t.cid is not None and not t.idle:
+                    with contextlib.suppress(Exception):
+                        await self._turn_footer(t)
             self.turn, self.busy = None, False
             for w in self.pending:        # the server never said either way
                 w.fail("not confirmed — the turn ended without delivering it")
             self.pending.clear()
+            cid = t.cid if t is not None else None
             if self.ephemeral:
                 self.cid = None          # a temporary chat is wiped when its turn ends
             self.refresh_chrome()
+            if t is not None and t.footer is not None and cid is not None:
+                # the footer's cost: the chat's total now, less where it began
+                with contextlib.suppress(Exception):
+                    await self._poll_cost(t)
+                    if t.cost is not None:
+                        t.footer.update(self._footer_markup(t))
             await self.refresh_info()
 
         async def _stop_remote(self) -> None:
@@ -7667,7 +8159,8 @@ def build_tui(base: str, token: str, **kw):
                          ("custom themes", f"{themes_dir()} — /theme import copies a "
                                            ".json there, checked on every start"),
                          ("/screenshot help", "the default format and folder"),
-                         ("ctrl+o", "expand / collapse tool output (or click a tool)"),
+                         ("ctrl+o · tab", "open / close every tool row · tab picks one: "
+                                          "↑↓ enter, → all of it, esc back (or click it)"),
                          ("ctrl+g", "edit the prompt in $EDITOR"),
                          ("pgup / pgdn", "scroll the transcript"),
                          ("↑ ↓", "prompt history"),
