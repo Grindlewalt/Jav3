@@ -55,6 +55,30 @@ Settings (`backend/config.py`): `gitea_enabled`, `gitea_port`, `gitea_url`
 Approved commit requests (`git_commit_request`) also push main to Gitea as the
 operator.
 
+A turn that runs in a guest VM keeps its `write_file`/`edit_file` output in the
+VM until the turn's final message. `git_status`, `git_diff`, `git_commit_request`
+and `git_push_request` therefore pull that buffer to the host first
+(`gitgate.flush_guest_writes`), so they see this turn's files. Without it a
+push request built earlier in the same turn held none of the agent's new files.
+
+## When it goes wrong
+
+The reply to the agent says what happened and what to do; nothing is filed on
+an error.
+
+- Not set up, or Gitea down: the tool says so and points to `git_commit_request`.
+- Nothing changed, or the same changes are already waiting as request #N: refused,
+  with the request's number. Different changes make a second request, and the
+  reply names the earlier ones (the later snapshot includes them).
+- Approve when Gitea is down: 502, the request stays pending. When Gitea will not
+  merge: 409, the request stays pending with the reason in its `error`. Gitea
+  answers `405 Please try again later` both while it checks and for good when the
+  PR conflicts with main, so Jav3 retries twice, then reads the PR's `mergeable`
+  flag to say which. The usual conflict is two requests filed from the same main;
+  reject the second and have the agent file a new one.
+- A PR deleted in Gitea closes its request. A commit request approved after its
+  PR merged closes as "already in main".
+
 ## Boundaries
 
 - Main is protected. Only the operator can push or merge, and the bot is on

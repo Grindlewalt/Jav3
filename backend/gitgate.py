@@ -319,8 +319,9 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
     await flush_guest_writes(slug)      # this turn's write_file/edit_file, still in the VM
     _, porcelain, _ = await run_git(slug, "status", "--porcelain")
     if not porcelain.strip():
-        raise ValueError("nothing to commit — every file in the project already "
-                         "matches the last commit. Write or edit a file first.")
+        raise ValueError("nothing to commit — the working tree is clean: every file in "
+                         "the project already matches the last commit. Write or edit "
+                         "a file first.")
     db = await get_db()
     try:
         cur = await db.execute(
@@ -419,6 +420,18 @@ async def approve_request(rid: int, slug: str | None = None) -> dict:
             await run_git(slug, "add", "--", *paths, check=True)
         else:
             await run_git(slug, "add", "-A", check=True)
+        rc, _, _ = await run_git(slug, "diff", "--cached", "--quiet")
+        rc_head, head, _ = await run_git(slug, "rev-parse", "--verify", "-q", "HEAD")
+        if rc == 0 and rc_head == 0:
+            # nothing left to commit: a pull request merged since (or an earlier
+            # approval) already put these files into main. Close the request
+            # instead of leaving it pending with a git error nobody can fix.
+            await db.execute(
+                "UPDATE git_requests SET status = 'approved', commit_sha = ?, error = ?, "
+                "decided_at = datetime('now') WHERE id = ?",
+                (head.strip(), "nothing new to commit: these changes are already in main", rid))
+            await db.commit()
+            return await _fetch_request(db, rid)
         try:
             await run_git(slug, "-c", "user.name=Jav3",
                           "-c", f"user.email={settings.git_author_email}",

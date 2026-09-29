@@ -181,6 +181,45 @@ async def test_a_merged_request_is_settled_before_the_next_is_filed(client, fake
     assert {r["status"] for r in rows} == {"approved", "pending"}
 
 
+# --- "commit it and request a push" (the operator's own wording) ---------------
+
+async def test_commit_request_approved_after_its_pr_merged_closes_cleanly(client, fake):
+    """The agent files git_commit_request AND git_push_request for the same files.
+    Merging the PR first must not leave the commit request pending on a git error."""
+    (_pdir() / "code" / "x.py").write_text("print(1)\n")
+    out = await registry.dispatch("git_commit_request", {"message": "Add x"})
+    assert "filed" in out
+    out = await registry.dispatch("git_push_request", {"title": "Add x"})
+    assert "filed" in out
+    rows = (await _rows(client)).json()["requests"]
+    push = next(r for r in rows if r["kind"] == "push")
+    commit = next(r for r in rows if r["kind"] == "commit")
+    r = await client.post(f"/api/projects/demo/git/requests/{push['id']}/approve")
+    assert r.status_code == 200, r.text
+    r = await client.post(f"/api/projects/demo/git/requests/{commit['id']}/approve")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "approved" and body["commit_sha"] == _head()
+    assert "already in main" in body["error"]
+    assert _git("--git-dir", str(fake.bare), "rev-parse", "main") == _head()
+
+
+async def test_commit_approved_first_then_its_pr_merges_without_conflict(client, fake):
+    (_pdir() / "code" / "x.py").write_text("print(1)\n")
+    await registry.dispatch("git_commit_request", {"message": "Add x"})
+    await registry.dispatch("git_push_request", {"title": "Add x"})
+    rows = (await _rows(client)).json()["requests"]
+    push = next(r for r in rows if r["kind"] == "push")
+    commit = next(r for r in rows if r["kind"] == "commit")
+    r = await client.post(f"/api/projects/demo/git/requests/{commit['id']}/approve")
+    assert r.status_code == 200 and r.json()["error"] is None, r.text
+    # the PR was cut from the old main; the FakeGitea merge is a ref move, so
+    # what matters here is that the request settles and main mirrors the host
+    fake.merge(1)
+    got = (await _rows(client)).json()["requests"]
+    assert next(x for x in got if x["id"] == push["id"])["status"] == "approved"
+
+
 # --- runtime files never ride along ---------------------------------------------
 
 async def test_snapshot_leaves_runtime_files_out(client, fake):
