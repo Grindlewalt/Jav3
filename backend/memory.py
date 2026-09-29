@@ -468,18 +468,35 @@ def _note_sort_key(path):
     return (0 if "pref" in name else 1, name)
 
 
+# What a note with frontmatter we can't read counts as: an untrusted agent note
+# awaiting approval. Failing open ({} = operator-authored, trusted) let a
+# description holding both quote kinds, a BOM or a leading blank line turn a
+# tainted agent note into a binding rule.
+_UNREADABLE_META = {"source": "agent", "approved": False, "taint": "untrusted",
+                    "_bad_frontmatter": True}
+
+
 def parse_note(text: str) -> tuple[dict, str]:
     """(frontmatter meta, body) for a memory note. Notes without frontmatter
-    parse as ({}, whole text)."""
-    m = _FRONTMATTER.match(text)
-    if not m:
+    parse as ({}, whole text); a note that starts like frontmatter but doesn't
+    parse as a YAML mapping fails CLOSED (untrusted, pending approval)."""
+    text = text.lstrip("﻿")
+    lead = text.lstrip()
+    if not lead.startswith("---"):
         return {}, text.strip()
+    m = _FRONTMATTER.match(lead)
+    if not m:
+        return dict(_UNREADABLE_META), text.strip()
     import yaml
     try:
-        meta = yaml.safe_load(m.group(1)) or {}
+        meta = yaml.safe_load(m.group(1))
     except yaml.YAMLError:
-        return {}, text.strip()
-    return (meta if isinstance(meta, dict) else {}), m.group(2).strip()
+        return dict(_UNREADABLE_META), m.group(2).strip()
+    if meta is None:
+        meta = {}
+    if not isinstance(meta, dict):
+        return dict(_UNREADABLE_META), m.group(2).strip()
+    return meta, m.group(2).strip()
 
 
 def note_taint(meta: dict) -> str:
@@ -516,6 +533,7 @@ def promote_note(name: str) -> bool:
     meta, body = parse_note(p.read_text())
     meta["approved"] = True
     meta.pop("taint", None)
+    meta.pop("_bad_frontmatter", None)   # the rewrite below repairs it
     meta.setdefault("source", "agent")
     fm = yaml.safe_dump(meta, default_flow_style=False, sort_keys=False).strip()
     p.write_text(f"---\n{fm}\n---\n{body.rstrip()}\n")

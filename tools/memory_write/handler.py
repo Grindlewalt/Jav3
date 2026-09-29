@@ -1,5 +1,7 @@
 import re
 
+import yaml
+
 from backend import secrets as secrets_mod
 from backend.memory import notes_dir, parse_note
 from backend.memory import weakening_advice
@@ -20,8 +22,11 @@ def _with_frontmatter(description: str | None, body: str, taint: str | None = No
     # web content from being promoted to a standing rule by writing it to memory.
     lines = ["source: agent", "approved: false"]
     if description:
-        # single-line YAML value; a stray colon/quote must not break parsing
-        lines.append(f"description: {' '.join(description.split())!r}")
+        # single-line YAML value dumped BY yaml: a Python repr is not YAML (both
+        # quote kinds made it unparseable, and an unparseable note used to read
+        # as operator-authored and trusted)
+        lines.append(yaml.safe_dump({"description": " ".join(description.split())},
+                                    allow_unicode=True, width=1 << 20).strip())
     # taint (persisted): set when the write happened in a turn that had already
     # consumed untrusted external content, or carried forward from a prior write.
     # It is STICKY — only the operator's promote action clears it. This survives
