@@ -66,3 +66,120 @@ async def test_a_budget_stop_is_marked_on_the_final_event(tmp_env, monkeypatch):
     final = events[-1]
     assert final["type"] == "final" and final["content"].startswith("(stopped: token budget")
     assert final["stop"] == "budget"
+
+
+# --- RUNS-03: eviction by pressure, stale reads first, an outline, re-reads counted ---
+
+BIG = 8_000
+
+
+def _source(name, n=BIG):
+    """A JS-looking file of about n chars with a few symbols."""
+    head = f"export class {name} {{\n  update(dt) {{\n  }}\n}}\nfunction build{name}() {{}}\n"
+    return head + "// filler\n" * ((n - len(head)) // 10)
+
+
+def _dispatch_files(files):
+    async def dispatch(name, args):
+        if name == "read_file":
+            return files.get(args.get("path"), "error: no such file")
+        return "edited"
+    return dispatch
+
+
+def _stats(events):
+    return next(e for e in events if e["type"] == "turn_stats")
+
+
+async def test_big_reads_stay_while_the_context_is_small(tmp_env, monkeypatch):
+    """216 of 446 read_file calls in 14 days were re-reads of a result dropped
+    two rounds after it was read, at any context size."""
+    files = {f"src/f{i}.js": _source(f"F{i}") for i in range(6)}
+    rounds = [[("read_file", {"path": p})] for p in files]
+    model = ScriptedModel(rounds)
+    events = await run(monkeypatch, model, _dispatch_files(files))
+    assert events[-1] == {"type": "final", "content": "done"}
+    assert not any("dropped to keep" in c for _r, c in model.seen[-1])
+    assert _stats(events)["evictions"] == 0
+
+
+async def test_pressure_drops_oldest_reads_with_an_outline_and_counts_the_reread(
+        tmp_env, monkeypatch):
+    monkeypatch.setattr(settings, "tool_result_pressure_chars", 30_000)
+    files = {f"src/f{i}.js": _source(f"F{i}") for i in range(6)}
+    rounds = [[("read_file", {"path": p})] for p in files]
+    rounds.append([("read_file", {"path": "src/f0.js"})])       # comes back for f0
+    model = ScriptedModel(rounds)
+    events = await run(monkeypatch, model, _dispatch_files(files))
+    stub = next(c for _r, c in model.seen[-1] if "src/f0.js" in c and "dropped" in c)
+    assert "whole file" in stub and "Outline:" in stub
+    assert "L1 F0" in stub and "L2 update" in stub and "buildF0" in stub
+    assert "offset and limit" in stub
+    st = _stats(events)
+    assert st["evictions"] >= 1 and st["rereads"] == 1
+    # the newest reads are still whole
+    assert any(c == files["src/f5.js"] for _r, c in model.seen[-1])
+
+
+def test_stale_reads_go_first_and_reads_of_a_file_being_edited_last(monkeypatch):
+    monkeypatch.setattr(settings, "tool_result_pressure_chars", 39_000)
+    msgs, tool_msgs = [{"role": "system", "content": "s"}], []
+
+    def add(name, rnd, path, chars):
+        msgs.append({"role": "tool", "content": "x" * chars})
+        entry = {"idx": len(msgs) - 1, "round": rnd, "name": name, "path": path}
+        if name == "read_file":
+            entry["span"] = (1, float("inf"))
+        tool_msgs.append(entry)
+    add("read_file", 0, "b.js", 10_000)      # old, never edited
+    add("read_file", 1, "a.js", 10_000)      # read BEFORE a.js was edited: stale
+    add("edit_file", 2, "a.js", 50)
+    add("read_file", 3, "f.js", 10_000)      # f.js was edited in round 3, then re-read
+    add("read_file", 3, "c.js", 10_000)
+    edited = {"a.js": 2, "f.js": 3}
+    dropped = loop_mod._evict_stale_results(msgs, tool_msgs, current_round=9, edited=edited)
+    names = [t["path"] for t in dropped]
+    assert names[0] == "a.js"                    # stale first, though b.js is older
+    assert "f.js" not in names                   # the file under edit keeps its read
+    assert msgs[tool_msgs[0]["idx"]]["content"].startswith("[read_file b.js")
+
+
+async def test_turn_stats_count_recoveries_retries_and_the_cap(tmp_env, monkeypatch):
+    class Model:
+        def __init__(self):
+            self.n = 0
+
+        async def complete(self, messages, tools=None, **kw):
+            self.n += 1
+            if self.n == 1:      # DSML recovery rebuilt this call
+                yield {"type": "message", "content": "", "usage": None, "tool_calls": [
+                    {"id": "dsml_0", "type": "function",
+                     "function": {"name": "read_file", "arguments": "{}"}}]}
+            elif self.n == 2:    # markup the gateway could not parse
+                yield {"type": "message", "usage": None, "tool_calls": [],
+                       "content": "<｜DSML｜ invoke name=\"read_file\">"}
+            else:                # a call on the last round, tools withheld
+                yield {"type": "message", "content": "", "usage": None, "tool_calls": [
+                    {"id": f"c{self.n}", "type": "function",
+                     "function": {"name": "read_file", "arguments": "{}"}}]}
+
+    async def dispatch(name, args):
+        return "ok"
+    events = await run(monkeypatch, Model(), dispatch, max_iterations=3)
+    st = _stats(events)
+    assert events[-2]["type"] == "turn_stats" and events[-1]["type"] == "final"
+    assert st["dsml_recovered"] == 1 and st["markup_retries"] == 1
+    assert st["forced_conclusion"] == 1 and st["cap_hit"] == 1 and st["stop"] == "cap"
+    assert st["rounds"] == 3
+
+
+async def test_a_budget_stop_shows_in_the_stats(tmp_env, monkeypatch):
+    class Spent:
+        async def complete(self, messages, tools=None, **kw):
+            raise BudgetExceeded("token budget spent")
+            yield  # pragma: no cover
+
+    async def dispatch(name, args):
+        return "ok"
+    events = await run(monkeypatch, Spent(), dispatch)
+    assert _stats(events)["stop"] == "budget"

@@ -22,6 +22,7 @@ class _Settings:
     tool_result_max_chars = 12000
     tool_result_keep_recent = 2
     tool_result_evict_chars = 4000
+    tool_result_pressure_chars = 250000
     # the loop evicts older tool screenshots after every tool round; the host
     # default lives in backend/config.py — keep the two in step
     screenshot_keep_recent = 3

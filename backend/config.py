@@ -319,6 +319,16 @@ class Settings(BaseSettings):
     read_file_max_chars: int = 48_000
     tool_result_evict_chars: int = 4_000
     tool_result_keep_recent: int = 2
+    # ...but only once the turn's context passes this many chars (~60k tokens):
+    # then the oldest results go, down to 60% of it (a stale read first, a read
+    # of a file being edited last), and a dropped read keeps an outline. Below
+    # it nothing is dropped, because evicting after 2 rounds made coding agents
+    # re-read about half their files (RUNS-03: 216 of 446 read_file calls in 14
+    # days) and broke the provider's prefix cache each time. Replay of 1,608
+    # real tool calls (scripts/replay_evictions.py): age-only 163 re-reads of 431
+    # reads; 250k 5 re-reads and 10% lower cache-aware cost. 0 = the old
+    # age-only rule. The guest copy must match (guest/backend/config.py).
+    tool_result_pressure_chars: int = 250_000
     # How many recent screenshots stay in-context as real image blocks; older
     # ones become a text stub. Each screenshot is ~1k+ tokens and re-sent every
     # iteration. Three frames let the model compare before/after an action

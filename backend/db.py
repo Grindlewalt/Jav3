@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_turnstats(db)
         await _migrate_calls(db)
         await _migrate_logging(db)
         await _migrate_secnotify(db)
@@ -796,6 +797,30 @@ async def _add_columns(db: aiosqlite.Connection, table: str,
     for col, decl in cols:
         if col not in have:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+async def _migrate_turnstats(db: aiosqlite.Connection) -> None:
+    """One row per loop turn (backend/turnstats.py): the loop's own recoveries
+    and cut-offs, which no other table records. Idempotent and additive."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS turn_stats ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " conversation_id INTEGER,"
+        " op_id TEXT,"
+        " box_id TEXT,"
+        " rounds INTEGER NOT NULL DEFAULT 0,"
+        " dsml_recovered INTEGER NOT NULL DEFAULT 0,"
+        " markup_retries INTEGER NOT NULL DEFAULT 0,"
+        " forced_conclusion INTEGER NOT NULL DEFAULT 0,"
+        " cap_hit INTEGER NOT NULL DEFAULT 0,"
+        " evictions INTEGER NOT NULL DEFAULT 0,"
+        " rereads INTEGER NOT NULL DEFAULT 0,"
+        " stop TEXT NOT NULL DEFAULT 'final',"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_turn_stats_created "
+                     "ON turn_stats(created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_turn_stats_conv "
+                     "ON turn_stats(conversation_id)")
 
 
 async def _migrate_calls(db: aiosqlite.Connection) -> None:
