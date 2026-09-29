@@ -2183,7 +2183,7 @@ def build_tui(base: str, token: str, **kw):
             except ThemeError as e:
                 self.hint(str(e), True)
                 return
-            self.app.register_theme(Theme(**{**clean, "name": THEME_PREVIEW}))
+            self.app.add_theme({**clean, "name": THEME_PREVIEW})
             self.app.theme = THEME_PREVIEW
             self.hint("previewing — ctrl+s saves to " + str(themes_dir()))
 
@@ -2196,7 +2196,7 @@ def build_tui(base: str, token: str, **kw):
         def _restore(self) -> None:
             if self.app.theme == THEME_PREVIEW:
                 self.app.theme = self.before
-            self.app.unregister_theme(THEME_PREVIEW)
+            self.app.drop_theme(THEME_PREVIEW)
 
         def action_cancel(self) -> None:
             self._restore()
@@ -2209,7 +2209,7 @@ def build_tui(base: str, token: str, **kw):
             except ThemeError as e:
                 self.hint(str(e), True)
                 return
-            self.app.register_theme(Theme(**clean))
+            self.app.add_theme(clean)
             self._restore()
             self.dismiss(clean["name"])
 
@@ -5409,8 +5409,13 @@ def build_tui(base: str, token: str, **kw):
             # to the same black: dialogs, the prompt box and the input fields
             # vanished into the background. There they are greys from the
             # 256-colour ramp itself (233/235/237), which survive the rounding.
-            truecolor = self.console.color_system == "truecolor"
-            self.register_theme(Theme(
+            truecolor = self.truecolor = self.console.color_system == "truecolor"
+            self.theme_src = {}
+            kept = {n: t for n, t in self.available_themes.items() if n in THEME_KEEP}
+            for name in list(self.available_themes):
+                if name not in kept:
+                    self.unregister_theme(name)
+            self.add_theme(dict(
                 name="jav3", primary="#5fd7af", secondary="#af87ff", accent="#ffaf5f",
                 foreground="#e4e4e4",
                 background="#0e1014" if truecolor else "#121212",
@@ -5418,15 +5423,14 @@ def build_tui(base: str, token: str, **kw):
                 panel="#1e232b" if truecolor else "#3a3a3a",
                 warning="#ffaf00", error="#ff6b6b", success="#5fd787", dark=True))
             for spec in jav3_theme_specs(truecolor):
-                self.register_theme(Theme(**spec))
-            for name in list(self.available_themes):
-                if name not in THEME_KEEP and name != "jav3" and name not in JAV3_THEMES:
-                    self.unregister_theme(name)
+                self.add_theme(spec)
+            for theme in kept.values():
+                self.add_theme(theme)
             self.builtin_themes = {n.lower() for n in self.available_themes} | {
                 THEME_PREVIEW}
             customs, errors = load_custom_themes(self.builtin_themes)
             for clean in customs:
-                self.register_theme(Theme(**clean))
+                self.add_theme(clean)
             for e in errors:
                 self.push_notice(e, "warn")
             settings = self._load_settings()
@@ -7080,12 +7084,29 @@ def build_tui(base: str, token: str, **kw):
                          "follow": "project: follows whatever is loaded"}[mode])
             self.refresh_chrome()
 
+        def add_theme(self, theme) -> None:
+            """Register a Theme, or the dict of a validated theme file. On a
+            256-colour terminal what gets registered is the snapped variant
+            (terminal_theme_spec); the theme as given is kept for /theme export."""
+            if isinstance(theme, dict):
+                theme = Theme(**theme)
+            self.theme_src[theme.name] = theme
+            if not self.truecolor and not theme.ansi:
+                theme = Theme(**terminal_theme_spec(resolved_theme_spec(theme), False))
+            self.register_theme(theme)
+            if theme.name == self.theme and self.is_mounted:
+                self.refresh_css(animate=False)     # the active theme changed under it
+
+        def drop_theme(self, name: str) -> None:
+            self.unregister_theme(name)
+            self.theme_src.pop(name, None)
+
         def theme_names(self) -> list[str]:
             return sorted(t for t in self.available_themes if t != THEME_PREVIEW)
 
         def current_theme_dict(self) -> dict:
             from textual.color import Color
-            t = self.current_theme
+            t = self.theme_src.get(self.theme) or self.current_theme
             d = {"name": t.name, "dark": bool(t.dark)}
             for k in THEME_COLOURS:
                 v = getattr(t, k, None)
@@ -7126,7 +7147,7 @@ def build_tui(base: str, token: str, **kw):
                 if not rest:
                     raise CliError("usage: /theme import <path to a .json theme>")
                 clean, path = import_theme(rest, self.builtin_themes)
-                self.register_theme(Theme(**clean))
+                self.add_theme(clean)
                 self.theme = clean["name"]
                 self._save_settings(theme=clean["name"])
                 self.notify(f"theme {clean['name']} imported to {path} — the source file "
@@ -7830,6 +7851,192 @@ def jav3_theme_specs(truecolor: bool) -> list[dict]:
         for k, v in spec.items():
             d[k] = (v[0] if truecolor else v[1]) if isinstance(v, tuple) else v
         out.append(d)
+    return out
+
+
+# --- 256 colours -------------------------------------------------------------------------
+#
+# Terminal.app has 256 colours. Rich turns a truecolor value into one of them by
+# rounding each channel, and anything under 15% saturation into the grey ramp:
+# nord's slate #2e3440 comes out teal, dracula's dark panel navy, two near-whites
+# the same white. So on such a terminal every theme is snapped once, here, to
+# palette entries Rich really selects, and the roles that have to read against
+# each other are checked: the three surfaces stay clearly apart (greys from the
+# ramp), text and the three verdict colours keep their contrast on those, the
+# selection block keeps its label readable, and error / warning / success stay
+# distinguishable. Truecolor terminals get the theme as written.
+
+THEME_ROLES = ("primary", "secondary", "accent", "foreground", "background", "surface",
+               "panel", "warning", "error", "success")
+MIN_SURFACE_STEP = 6.0       # L* between background, surface and panel
+_XTERM: list | None = None   # (shown rgb, feed rgb, Lab) per usable palette entry
+_CUBE = {0: (0, 47), 95: (48, 114), 135: (115, 154), 175: (155, 194), 215: (195, 234),
+         255: (235, 255)}      # a cube level -> the channel values Rich rounds to it
+
+
+def _hex_rgb(h: str) -> tuple[int, int, int]:
+    return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+
+
+def _rgb_hex(c) -> str:
+    return "#%02x%02x%02x" % tuple(c)
+
+
+def _lin(v: float) -> float:
+    v /= 255
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def _luminance(c) -> float:
+    r, g, b = (_lin(v) for v in c)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a, b) -> float:
+    la, lb = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def _lab(c) -> tuple[float, float, float]:
+    r, g, b = (_lin(v) for v in c)
+    x, y, z = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047, \
+              0.2126 * r + 0.7152 * g + 0.0722 * b, \
+              (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+
+    def f(t):
+        return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+    fx, fy, fz = f(x), f(y), f(z)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def _delta_e(a, b) -> float:
+    return sum((p - q) ** 2 for p, q in zip(_lab(a), _lab(b))) ** 0.5
+
+
+def _xterm_colours() -> list:
+    """The palette entries a truecolor value can be made to select: the grey ramp,
+    black, white and the cube's coloured entries (the 16 ANSI ones are the
+    terminal's to draw; the cube's greys duplicate the ramp). Each comes with a
+    `feed` colour that Rich's rounding maps to exactly that entry."""
+    global _XTERM
+    if _XTERM is None:
+        from itertools import product
+        from rich.color import EIGHT_BIT_PALETTE, Color, ColorSystem
+
+        def index(c):
+            return Color.from_rgb(*c).downgrade(ColorSystem.EIGHT_BIT).number
+        out = []
+        for i in range(16, 256):
+            shown = tuple(EIGHT_BIT_PALETTE[i])
+            if 16 < i < 232 and shown[0] == shown[1] == shown[2]:
+                continue
+            if 16 < i < 232:
+                feeds = [c for c in product(*[(shown[k], *_CUBE[shown[k]]) for k in range(3)])
+                         if index(c) == i]
+            else:                # the ramp, black and white: some grey Rich sends there
+                feeds = [(v,) * 3 for v in range(256) if index((v,) * 3) == i]
+            if feeds:
+                feed = min(feeds, key=lambda c: sum(abs(p - q) for p, q in zip(c, shown)))
+                out.append((shown, feed, _lab(shown)))
+        _XTERM = out
+    return _XTERM
+
+
+def _grey(shown) -> bool:
+    return shown[0] == shown[1] == shown[2]
+
+
+def snap_colour(h: str) -> str:
+    """`h` as the #rrggbb to hand Textual on a 256-colour terminal: the nearest
+    palette entry, chosen so that Rich's own rounding lands on it."""
+    lab = _lab(_hex_rgb(h))
+    best = min(_xterm_colours(), key=lambda c: sum((p - q) ** 2 for p, q in zip(lab, c[2])))
+    return _rgb_hex(best[1])
+
+
+def resolved_theme_spec(theme) -> dict:
+    """A Textual Theme as plain values with every colour spelled out (a built-in
+    leaves surface, panel and the rest to be derived)."""
+    from textual.color import Color
+    d = {"name": theme.name, "dark": bool(theme.dark), "variables": dict(theme.variables),
+         "luminosity_spread": theme.luminosity_spread, "text_alpha": theme.text_alpha,
+         "ansi": theme.ansi}
+    if theme.ansi:
+        d.update({k: getattr(theme, k) for k in (*THEME_ROLES, "boost")})
+        return d
+    made = theme.to_color_system().generate()
+    for k in THEME_ROLES:
+        d[k] = Color.parse(made[k]).hex[:7].lower()
+    if theme.boost:
+        d["boost"] = theme.boost
+    return d
+
+
+def terminal_theme_spec(spec: dict, truecolor: bool) -> dict:
+    """`spec` (resolved_theme_spec, or a validated theme file) ready for this
+    terminal; as is on truecolor, snapped and checked on 256 colours."""
+    if truecolor or spec.get("ansi"):
+        return spec
+    full = dict(spec)
+    if "background" not in full:                 # a theme file that leaves roles out
+        from textual.theme import Theme
+        full = {**spec, **resolved_theme_spec(Theme(**spec))}
+    dark = bool(full.get("dark", True))
+    cands = _xterm_colours()
+    greys = sorted((c for c in cands if _grey(c[0])), key=lambda c: c[2][0])
+    out = dict(full)
+    # 1. the surfaces: neutral greys, each a clear step from the one before,
+    # going the way the theme goes (dark: lighter; light: darker)
+    step, surf = (1 if dark else -1), {}
+    for k, before in (("background", None), ("surface", "background"), ("panel", "surface")):
+        want = _lab(_hex_rgb(full[k]))[0]
+        if before is None:
+            pick = min(greys, key=lambda c: abs(c[2][0] - want))
+        else:
+            pl = surf[before][2][0]
+            if abs(want - _lab(_hex_rgb(full[before]))[0]) > 1:
+                step = 1 if want > _lab(_hex_rgb(full[before]))[0] else -1
+            room = [c for c in greys if (c[2][0] - pl) * step >= MIN_SURFACE_STEP]
+            if not room:
+                step = -step
+                room = [c for c in greys if (c[2][0] - pl) * step >= MIN_SURFACE_STEP]
+            pick = min(room, key=lambda c: abs(c[2][0] - want))
+        surf[k] = pick
+        out[k] = _rgb_hex(pick[1])
+    bg, sf = surf["background"][0], surf["surface"][0]
+    # 2. the colours that are read on those surfaces; the verdict trio must also
+    # stay apart (as far apart as the theme made them, up to a clear margin)
+    chosen: dict[str, tuple] = {}
+
+    def apart(role, c) -> bool:
+        for other in ("error", "warning", "success"):
+            if other == role or other not in chosen or role not in ("error", "warning", "success"):
+                continue
+            was = _delta_e(_hex_rgb(full[role]), _hex_rgb(full[other]))
+            if _delta_e(c[0], chosen[other]) < min(22.0, 0.8 * was):
+                return False
+        return True
+
+    def reads(role, c) -> bool:
+        need = 7.0 if role == "foreground" else 3.0
+        if _contrast(c[0], bg) < need or _contrast(c[0], sf) < min(need, 4.5):
+            return False
+        if role == "primary":     # the selection block: Textual writes white or black on it
+            text = (238,) * 3 if (0.299 * c[1][0] + 0.587 * c[1][1] + 0.114 * c[1][2]) / 255 < 0.5 \
+                else (8,) * 3
+            return _contrast(text, c[0]) >= 4.5
+        return True
+
+    for role in ("primary", "error", "success", "warning", "accent", "secondary", "foreground"):
+        lab = _lab(_hex_rgb(full[role]))
+        ranked = sorted(cands, key=lambda c: sum((p - q) ** 2 for p, q in zip(lab, c[2])))
+        pick = next((c for c in ranked if reads(role, c) and apart(role, c)), None) \
+            or next((c for c in ranked if reads(role, c)), ranked[0])
+        out[role] = _rgb_hex(pick[1])
+        chosen[role] = pick[0]
+    # colours a built-in spelled out in its variables follow the roles they name
+    was = {full[k].lower(): out[k] for k in THEME_ROLES if k in full}
+    out["variables"] = {k: was.get(str(v).lower(), v) for k, v in full.get("variables", {}).items()}
     return out
 
 
