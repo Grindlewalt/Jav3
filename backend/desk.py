@@ -575,8 +575,9 @@ def _rate(q: collections.deque, per_s: int) -> bool:
 
 def _int(params: dict, k: str, lo: int, hi: int, default=None) -> int:
     v = params.get(k, default)
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        raise DeskError(f"{k} must be a number")
+    if (isinstance(v, bool) or not isinstance(v, (int, float))
+            or (isinstance(v, float) and v != v) or v in (float("inf"), float("-inf"))):
+        raise DeskError(f"{k} must be a whole number")
     v = int(v)
     if not lo <= v <= hi:
         raise DeskError(f"{k}={v} is outside {lo}..{hi}")
@@ -1259,6 +1260,8 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
                      full=_full_for(d, params.get("monitor")) if verb == "screenshot" else None)
     except DeskError as e:
         return await _refuse(d, verb, _audit_via(via), str(e))
+    except Exception:  # noqa: BLE001 — a parameter validate did not foresee is a refusal, not a crash
+        return await _refuse(d, verb, _audit_via(via), "those parameters could not be used")
     ap = {**p, **_audit_via(via)}          # the audit row: the point AND how it was chosen
     if cap == "input" and not _rate(d.input_times, INPUT_PER_S):
         return await _refuse(d, verb, ap, f"rate limit: over {INPUT_PER_S} input "

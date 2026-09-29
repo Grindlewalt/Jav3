@@ -360,6 +360,22 @@ async def test_closed_action_list(env):
         await fd.stop()
 
 
+async def test_nan_and_inf_are_refused_not_raised(env):
+    fd = await FakeDesk(env["desk_tok"]).start()
+    try:
+        await _grant(env, screen=True, input=True)
+        await _tool("desk_screenshot")()
+        n = len(fd.reqs)
+        for bad in (float("nan"), float("inf"), float("-inf"), "7", None):
+            out = await desk.act("click", {"x": bad if bad is not None else "a", "y": 5})
+            assert out.startswith("error:") and "x must be a whole number" in out, out
+        out = await desk.act("scroll", {"dy": float("nan")})
+        assert out == "error: dy must be a whole number"
+        assert len(fd.reqs) == n
+    finally:
+        await fd.stop()
+
+
 async def test_type_refuses_secret_values(env, monkeypatch):
     from backend import secrets as secrets_mod
     monkeypatch.setattr(secrets_mod, "load", lambda: {"GH_TOKEN": "ghp_supersecret123"})
