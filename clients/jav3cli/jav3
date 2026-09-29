@@ -4920,13 +4920,14 @@ def build_tui(base: str, token: str, **kw):
     def _box_turns(r) -> list[dict]:
         return [t for t in _jlist(r.get("now")) if isinstance(t, dict)]
 
-    def _turn_text(t: dict, width: int = 40) -> str:
-        """`#42 fix the build shell npm test`: the turn, its title, its tool."""
+    def _turn_text(t: dict, width: int = 40, home: str | None = None) -> str:
+        """`#42 fix the build shell npm test`: the turn, its title, its tool
+        (and its project, when it is not the box's own `home`)."""
         cid = t.get("conversation_id")
         out = f"[b]{'#' + str(cid) if cid else 'a turn'}[/]"
         if t.get("title"):
             out += f" {_esc(_short(t['title'], width))}"
-        if t.get("project"):
+        if t.get("project") and t.get("project") != home:
             out += f" [$text-muted]⌂ {_esc(t['project'])}[/]"
         tool = t.get("tool") if isinstance(t.get("tool"), dict) else {}
         if tool.get("name"):
@@ -4941,7 +4942,7 @@ def build_tui(base: str, token: str, **kw):
         if not now:
             return ""
         more = f" [$text-muted]+{len(now) - 1} more[/]" if len(now) > 1 else ""
-        return f" [$text-muted]·[/] {_turn_text(now[0], 32)}{more}"
+        return f" [$text-muted]·[/] {_turn_text(now[0], 32, r.get('project'))}{more}"
 
     _BOX_EV_COL = {"started": "$success", "restarted": "$success", "stopped": "$text-muted",
                    "idle_stopped": "$text-muted", "wiped": "$warning", "nuked": "$warning",
@@ -4985,11 +4986,13 @@ def build_tui(base: str, token: str, **kw):
         was = (f" [$text-muted]· {_esc(str(last.get('event') or '').replace('_', '-'))} "
                f"{_local_ts(last.get('created_at'))}[/]"
                if st != "running" and last and not err else "")
+        kind = "" if r.get("kind") == r.get("id") else _esc(str(r.get("kind") or ""))
+        meta = f"[$text-muted]{kind}{where}[/] " if kind or where else ""
         return (f"[{col}]●[/] [b]{_esc(r.get('id') or '?')}[/] {_runtime_tag(r.get('runtime'))} "
-                f"[$text-muted]{_esc(r.get('kind') or '')}{where}[/] [{col}]{_esc(word)}[/]"
+                f"{meta}[{col}]{_esc(word)}[/]"
                 f"{_box_timer(r)}{_box_now(r)}{busy}{err}{was} [$text-muted]· "
                 f"{r.get('mem_mb') or '?'}MB · {_esc(img.get('variant') or 'main')}"
-                f"{' v' + str(img['version']) if img.get('version') else ''}{up}[/]")
+                f"{' v' + str(img['version']).lstrip('v') if img.get('version') else ''}{up}[/]")
 
     def _row_leftover(e) -> str:
         r = e["raw"]
@@ -5041,7 +5044,10 @@ def build_tui(base: str, token: str, **kw):
                 "images": "[$primary]b[/] build a new version  [$primary]l[/] build log",
                 "catalogue": "[$primary]y[/] approve  [$primary]n[/] reject"}
         BINDINGS = [Binding("x", "nuke", show=False), Binding("c", "clean", show=False)]
+        # one line per row, however long (the frame's `SecRow { height: 1 }`
+        # does not reach this subclass's rows); the head gets two more lines
         DEFAULT_CSS = """
+        VmsScreen SecRow { height: 1; }
         VmsScreen #sec-sub { max-height: 6; }
         """
 
@@ -5191,7 +5197,7 @@ def build_tui(base: str, token: str, **kw):
             lo = _jlist(self.leftovers.get("items"))
             n = sum(1 for i in lo if isinstance(i, dict) and i.get("cleanable"))
             if lo:
-                line += ((" " if line else "") + f"[$warning]{len(lo)} leftover"
+                line += (("   " if line else "") + f"[$warning]{len(lo)} leftover"
                          f"{'s' * (len(lo) != 1)} no box owns[/]"
                          + (" [$text-muted]— c cleans[/]" if n else ""))
             return line + "\n" if line else ""
@@ -5245,6 +5251,11 @@ def build_tui(base: str, token: str, **kw):
             else:
                 doing = []
             last = r.get("last_event") if isinstance(r.get("last_event"), dict) else None
+            hist = []
+            if self.hist_box == r.get("id"):
+                hist = (["[b]history[/] [$text-muted](newest first)[/]"]
+                        + ([_box_event_line(x) for x in self.hist]
+                           or ["[$text-muted]no history yet[/]"]) + [""])
             lines = [
                 keys, "",
                 f"[b]{_esc(r.get('id') or '?')}[/] {_esc(r.get('kind') or '')}"
@@ -5253,14 +5264,19 @@ def build_tui(base: str, token: str, **kw):
                 + (f" [$text-muted]since {_local_ts(r['started_at'])}[/]"
                    if r.get("started_at") else ""),
                 *doing,
+                (f"[$error b]last error:[/] {_esc(str(r['last_error']))}"
+                 if r.get("last_error") else None),
+                ("last: " + _box_event_line(last) if last and not hist else None),
+                *([""] + hist if hist else []),
                 f"runtime: {_runtime_tag(r.get('runtime'))}"
                 + ("  [$text-muted]a container shares the host kernel[/]"
                    if r.get("runtime") == "docker" else "")
                 + ("".join("\n" + x for x in _docker_notes(self.runtimes))
                    if r.get("runtime") == "docker" else ""),
                 f"image {_esc(img.get('variant') or 'main')} "
-                f"{_esc(str(img.get('version') or '(active version)'))}  RAM "
-                f"{r.get('mem_mb') or '?'} MB"
+                + (f"v{_esc(str(img['version']).lstrip('v'))}" if img.get("version")
+                   else "(active version)")
+                + f"  RAM {r.get('mem_mb') or '?'} MB"
                 + (f" (costs {r['ram_cost_mb']} MB of the budget)"
                    if r.get("ram_cost_mb") and r.get("ram_cost_mb") != r.get("mem_mb") else "")
                 + f"  rss {_bytes(r.get('rss_bytes'))}B  cpu "
@@ -5270,16 +5286,8 @@ def build_tui(base: str, token: str, **kw):
                 f"net: {_esc(net.get('tap') or '?')} host {_esc(net.get('host_ip') or '?')} "
                 f"guest {_esc(net.get('guest_ip') or '?')}",
                 (f"service #{r.get('service_id')} · placement {_esc(r.get('placement') or '?')}"
-                 if r.get("service_id") or r.get("placement") else ""),
-                (f"[$error b]last error:[/] {_esc(str(r['last_error']))}"
-                 if r.get("last_error") else ""),
-                ("last: " + _box_event_line(last) if last and self.hist_box != r.get("id")
-                 else "")]
-            if self.hist_box == r.get("id"):
-                lines += ["", "[b]history[/] [$text-muted](newest first)[/]"]
-                lines += [_box_event_line(x) for x in self.hist] or [
-                    "[$text-muted]no history yet[/]"]
-            return "\n".join(x for x in lines if x is not None)
+                 if r.get("service_id") or r.get("placement") else None)]
+            return "\n".join(x for x in lines if x is not None).rstrip()
 
         def _detail_leftover(self, e) -> str:
             r = e["raw"]
