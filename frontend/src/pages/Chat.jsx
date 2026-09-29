@@ -397,6 +397,9 @@ export default function Chat({
     tailAbort.current?.abort()
     folder.current.cancel()
     const mine = ++gen.current
+    // the id answers and stops go to: it stayed on the chat that last STARTED a
+    // turn, so a question from the chat opened since was answered into the old one
+    liveId.current = id
     setTemporary(false)   // saved chats always persist
     if (!resume) closeSideOnPhone()
     setConversationId(id)
@@ -458,6 +461,7 @@ export default function Chat({
     tailAbort.current?.abort()
     folder.current.cancel()
     gen.current += 1
+    liveId.current = null
     setBusy(false)
     closeSideOnPhone()
     setConversationId(null)
@@ -804,7 +808,7 @@ export default function Chat({
               onSubmit={(e) => { e.preventDefault(); slash.submit() || send() }}>
           <div className="composer-glow" ref={glowRef} />
           {slash.popup}
-          {!follow.pinned && !showRuns && messages.length > 0 && (
+          {!follow.pinned && (follow.away > 0 || busy) && !showRuns && messages.length > 0 && (
             <button type="button" className="follow-pill" onClick={follow.jump}>
               {follow.away > 0 ? `${follow.away} new` : 'latest'} <span aria-hidden="true">↓</span>
             </button>

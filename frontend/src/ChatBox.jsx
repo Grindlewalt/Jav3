@@ -298,7 +298,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
           </div>
         ))}
       </div>
-      {!follow.pinned && messages.length > 0 && (
+      {!follow.pinned && (follow.away > 0 || busy) && messages.length > 0 && (
         <button type="button" className="follow-pill" onClick={follow.jump}>
           {follow.away > 0 ? `${follow.away} new` : 'latest'} <span aria-hidden="true">↓</span>
         </button>
