@@ -39,8 +39,12 @@ from . import argcheck, imported
 # How much of a tool's TOOL.md body ships in its spec. Bounds a runaway body
 # while fitting the curated guidance the complex tools (spawn_agent, research,
 # create_agent, ...) genuinely need — 300 silently truncated their most important
-# lines. Authors still keep bodies tight and lead with what matters most.
-SPEC_NOTES_MAX = 600
+# lines, and 600 still cut the failure-recovery tails of ten tools (2026-09-29:
+# git_push_request lost its fallback, send_message that it cannot wait for a
+# reply, music_play "do not claim it is playing"). tests/test_tool_contracts.py
+# fails a TOOL.md body over this, so a cut is never silent; a body that is cut
+# anyway ends in "…" so the model can tell. Authors still lead with what matters most.
+SPEC_NOTES_MAX = 1200
 
 # The model's id for the call being dispatched. The loop sets it around
 # dispatch(); the guest shim of this module forwards it on tool_broker_call so a
@@ -292,7 +296,10 @@ def openai_tool_specs(entries: list[dict] | None = None,
         if e.get("kind") == "skill":
             desc += " (Invoking this skill loads its full instructions.)"
         elif e.get("body") and notes_cap:
-            desc += f"\nNotes: {e['body'][:notes_cap]}"
+            body = e["body"]
+            if len(body) > notes_cap:
+                body = body[:notes_cap].rstrip() + "…"     # the model sees it was cut
+            desc += f"\nNotes: {body}"
         specs.append(_sectioned({
             "type": "function",
             "function": {

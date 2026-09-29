@@ -4,6 +4,13 @@ from ...db import get_db
 from ...memory import get_active_project
 
 
+class NoProjectError(LookupError):
+    """No usable project for a file tool. `for_model`: the message is written for
+    the model, so argcheck.crash_message hands it back as is instead of calling
+    it a harness fault."""
+    for_model = True
+
+
 async def active_slug() -> str | None:
     """The running operation's pinned project when inside one (set per turn by
     chat/agent/schedule from the conversation's binding — this is what keeps
@@ -54,11 +61,11 @@ async def require_project() -> str:
         if artifact:
             await _ensure_artifact_project(artifact)
             return artifact
-        raise LookupError(
+        raise NoProjectError(
             "no project is loaded — call load_project first "
             "(project slugs are listed in your 'All projects' context)")
     if not (settings.projects_dir / slug / "project.md").exists():
-        raise LookupError(
+        raise NoProjectError(
             f"active project '{slug}' has no files on disk — "
             "call load_project with a different slug, or ask the operator to restore it")
     return slug

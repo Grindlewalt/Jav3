@@ -11,7 +11,7 @@ parameters:
     mode:
       type: string
       enum: [url, app]
-      description: url = load a page in headless chromium; app = run `command` on a virtual display and capture it.
+      description: url (the default) = load a page in headless chromium; app = run `command` on a virtual display and capture it.
     url:
       type: string
       description: url mode. http(s) only. localhost / 127.0.0.1 reach a server running in this box.
@@ -31,7 +31,7 @@ parameters:
     full_page:
       type: boolean
       description: url mode. Capture a tall viewport (up to 4000 px) instead of one screen.
-  required: [mode]
+  required: []
 ---
 The image comes back attached, at most 1280 px wide. A page from anywhere but
 this box's loopback is remote content: the turn is marked tainted exactly as

@@ -253,7 +253,7 @@ def test_guest_package_includes_screenshot_only_with_boxes(monkeypatch):
     monkeypatch.setattr(settings, "vm_boxes_enabled", False)
     assert "tools/screenshot/handler.py" not in names()
     src = (settings.base_dir / "guest" / "backend" / "agent" / "tools" / "registry.py").read_text()
-    assert '"screenshot"' in src          # the guest dispatches it locally
+    assert "from .inguest import" in src  # the guest dispatches it locally, by the shared list
 
 
 def test_tool_specs_gated_on_boxes(monkeypatch):

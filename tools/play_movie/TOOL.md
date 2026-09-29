@@ -13,9 +13,12 @@ parameters:
     title:
       type: string
       description: What to show on the player (defaults to the file name).
+    tab:
+      type: string
+      description: Which open Jav3 tab to use, by name ("the mac", "phone"). Omit it — the default is the tab the operator is talking to you from, which is almost always what they mean.
   required: [source]
 ---
-Same rules as play_music: the player floats in every open GUI tab; remote URLs
+Same rules as play_music: the player floats in one GUI tab (the one the operator is talking from, or `tab`); remote URLs
 must be on the media allowlist (config media_hosts) or the browser blocks them.
 Browsers may hold autoplay-with-sound until the operator presses play — the
 controls are right there.

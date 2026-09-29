@@ -13,9 +13,12 @@ parameters:
     title:
       type: string
       description: What to show on the player (defaults to the file name).
+    tab:
+      type: string
+      description: Which open Jav3 tab to use, by name ("the mac", "phone"). Omit it — the default is the tab the operator is talking to you from, which is almost always what they mean.
   required: [source]
 ---
-The player floats bottom-right in every open GUI tab, with normal controls.
+The player floats bottom-right in ONE GUI tab (the one the operator is talking from, or `tab`), with normal controls.
 Remote URLs must be on the operator's media allowlist (config media_hosts) or
 the browser's CSP blocks them — the tool refuses with the allowlist so you can
 tell the operator what to extend. Starting a new track replaces the current one.
