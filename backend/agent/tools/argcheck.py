@@ -259,6 +259,10 @@ def _user_fault(e: BaseException) -> str | None:
 def crash_message(name: str, e: BaseException) -> str:
     """One line the model can act on, plus where it happened (for a harness
     fault report) — not a traceback."""
+    if getattr(e, "for_model", False):
+        # an error written for the model (toolctx.NoProjectError): its message
+        # is the whole answer, and it is not a harness fault
+        return f"error: {name}: {str(e).rstrip('.')}."
     fault = _user_fault(e)
     if fault:
         return f"error: {name}: {fault}."

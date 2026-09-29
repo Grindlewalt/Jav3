@@ -495,6 +495,53 @@ def test_the_extracted_guest_registry_routes_by_the_shared_list(tmp_path, monkey
     assert out.returncode == 0, out.stderr[-600:]
 
 
+FILE_TOOLS = {"write_file": {"path": "a.txt", "content": "x"}, "read_file": {"path": "a.txt"},
+              "edit_file": {"path": "a.txt", "find": "a", "replace": "b"}, "list_files": {},
+              "dashboard": {"path": "d.html", "html": "<p>"}, "search_codebase": {"query": "a"},
+              "crawl_codebase": {}}
+
+
+@pytest.mark.parametrize("tool", sorted(FILE_TOOLS))
+async def test_a_file_tool_with_no_project_says_so_plainly(tmp_env, tool):
+    """Fault #8: 'LookupError: no project is loaded in the guest for this turn (at
+    tools/toolctx.py:17) ... this is a harness fault: report it'."""
+    from backend import runtime
+    from backend.agent.tools import registry
+    runtime.active_project.set(None)
+    out = await registry.dispatch(tool, FILE_TOOLS[tool])
+    assert out.startswith(f"error: {tool}: no project is loaded"), out
+    assert "call load_project" in out and "harness fault" not in out and "LookupError" not in out
+
+
+def test_the_guest_says_what_to_do_when_no_project_is_loaded(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from backend.config import settings
+    from backend.vm import guest_pkg
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    pkg = tmp_path / "pkg.tgz"
+    pkg.write_bytes(guest_pkg.build_package_tar())
+    code = ("import asyncio, socket, sys, tarfile\n"
+            "socket.VMADDR_CID_HOST = 2\n"
+            "tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')\n"
+            "sys.path.insert(0, sys.argv[2])\n"
+            "from backend.agent.tools import argcheck, toolctx\n"
+            "async def go():\n"
+            "    try:\n"
+            "        await toolctx.require_project()\n"
+            "    except LookupError as e:\n"
+            "        return argcheck.crash_message('write_file', e)\n"
+            "print(asyncio.run(go()))\n")
+    out = subprocess.run([sys.executable, "-S", "-c", code, str(pkg), str(tmp_path / "x")],
+                         cwd=tmp_path, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr[-600:]
+    msg = out.stdout.strip()
+    assert msg.startswith("error: write_file: no project is loaded"), msg
+    assert "run_code" in msg and "load_project" in msg
+    assert "harness fault" not in msg and "LookupError" not in msg
+
+
 def test_every_in_guest_tool_has_a_host_folder_and_the_gate_list_agrees():
     from backend import permissions
     from backend.agent.tools import inguest
