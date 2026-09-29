@@ -163,10 +163,11 @@ function Counts({ project, tick }) {
   useEffect(() => { reload() }, [tick]) // eslint-disable-line
   const n = (k) => (c ? c[k] : '–')
   return (
-    <div className="net-counts" title="distinct hosts in the last 24 hours; waiting is now">
-      <span><b>{n('allowed')}</b> allowed</span>
-      <span><b>{n('denied')}</b> blocked</span>
-      <span className={c?.waiting ? 'net-count-waiting' : ''}><b>{n('waiting')}</b> waiting</span>
+    <div className="net-counts"
+         title="Sites, not requests. Allowed and blocked cover the last 24 hours; waiting is right now.">
+      <span><b>{n('allowed')}</b> allowed <span className="dim small">24 h</span></span>
+      <span><b>{n('denied')}</b> blocked <span className="dim small">24 h</span></span>
+      <span className={c?.waiting ? 'net-count-waiting' : ''}><b>{n('waiting')}</b> waiting <span className="dim small">now</span></span>
     </div>
   )
 }

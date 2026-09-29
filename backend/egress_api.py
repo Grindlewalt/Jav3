@@ -109,18 +109,27 @@ async def bulk_pending(body: BulkBody):
 @router.get("/summary")
 async def summary(project: str | None = None):
     """The Network page's three counts: distinct hosts allowed / denied in the
-    last 24h, and hosts waiting on the operator now."""
+    last 24h, and hosts waiting on the operator now.
+
+    A host you (or the reviewer) approved later is allowed, and the deny that
+    queued it stops counting as blocked: the counts have to add up to what the
+    decision log beside them shows. A `cut` is never superseded."""
     db = await get_db()
     try:
-        where, args = "created_at > datetime('now', '-1 day')", ()
+        where, args = "e.created_at > datetime('now', '-1 day')", ()
         if project:
-            where += " AND project_slug = ?"
+            where += " AND e.project_slug = ?"
             args = (project,)
         async with db.execute(
-                "SELECT COUNT(DISTINCT CASE WHEN verdict IN ('allow','auto_allow') "
-                "THEN host END) AS allowed, "
-                "COUNT(DISTINCT CASE WHEN verdict IN ('deny','auto_deny','cut') "
-                f"THEN host END) AS denied FROM egress_events WHERE {where}", args) as cur:
+                "SELECT COUNT(DISTINCT CASE WHEN e.verdict IN "
+                "('allow','auto_allow','approved','reviewer_approved') THEN e.host END) "
+                "AS allowed, "
+                "COUNT(DISTINCT CASE WHEN e.verdict IN ('deny','auto_deny','cut') "
+                "AND (e.verdict = 'cut' OR NOT EXISTS ("
+                "SELECT 1 FROM egress_events a WHERE a.host = e.host AND a.id > e.id "
+                "AND a.project_slug IS e.project_slug "
+                "AND a.verdict IN ('approved','reviewer_approved'))) "
+                f"THEN e.host END) AS denied FROM egress_events e WHERE {where}", args) as cur:
             r = dict(await cur.fetchone())
         r["waiting"] = len(await egress.list_pending(db, project))
         return r
