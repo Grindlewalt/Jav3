@@ -625,6 +625,8 @@ async def test_stale_changed_key_and_screenshot_through_the_tools(env, monkeypat
         finally:
             budget_mod.active_op_id.reset(tok)
             broker._tainted.discard("op-nav")
+            broker._nav_tainted.pop("op-nav", None)
+            broker._taint_src.pop("op-nav", None)
     finally:
         await fe.stop()
 

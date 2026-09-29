@@ -191,18 +191,18 @@ async def test_broker_sets_nav_taint_only_after_desk_or_browser(tmp_env):
     import backend.vm.broker as b
     orig = b.registry.dispatch
     b.registry.dispatch = fake_dispatch
-    broker.register_turn(broker.TurnEnvelope(op_id="op-nav"))
+    broker.register_turn(broker.TurnEnvelope(op_id="op-nav-mem"))
     try:
-        await broker.broker_dispatch("op-nav", "memory_write", {})
-        broker.mark_tainted("op-nav")                  # web-ish taint
-        await broker.broker_dispatch("op-nav", "memory_write", {})
-        broker.mark_tainted("op-nav", "desk")
-        await broker.broker_dispatch("op-nav", "memory_write", {})
+        await broker.broker_dispatch("op-nav-mem", "memory_write", {})
+        broker.mark_tainted("op-nav-mem")                  # web-ish taint
+        await broker.broker_dispatch("op-nav-mem", "memory_write", {})
+        broker.mark_tainted("op-nav-mem", "desk")
+        await broker.broker_dispatch("op-nav-mem", "memory_write", {})
     finally:
         b.registry.dispatch = orig
-        broker.release_turn("op-nav")
+        broker.release_turn("op-nav-mem")
     assert seen == [None, None, "desk"]
-    assert "op-nav" not in broker._nav_tainted
+    assert "op-nav-mem" not in broker._nav_tainted
 
 
 def test_quarantine_note_wording_per_source():
