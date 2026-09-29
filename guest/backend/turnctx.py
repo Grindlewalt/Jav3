@@ -31,7 +31,17 @@ rules: contextvars.ContextVar = contextvars.ContextVar("guest_rules", default=""
 active_slug: contextvars.ContextVar = contextvars.ContextVar(
     "guest_active_slug", default=None)
 
-_VARS = (op_id, op_token, gateway_port, specs, read_only, rules, active_slug)
+# The project's files a tainted turn wrote (host: backend/taintpaths.py). A read
+# of one is reported to the host (`taint_note`), so the turn counts as having read
+# untrusted text. `taint_reported` is a one-element list so every task of the
+# turn shares it: one report per turn is enough.
+tainted_paths: contextvars.ContextVar = contextvars.ContextVar(
+    "guest_tainted_paths", default=frozenset())
+taint_reported: contextvars.ContextVar = contextvars.ContextVar(
+    "guest_taint_reported", default=None)
+
+_VARS = (op_id, op_token, gateway_port, specs, read_only, rules, active_slug,
+         tainted_paths, taint_reported)
 
 
 def enter(spec: dict, slug: str | None) -> list:
@@ -44,6 +54,9 @@ def enter(spec: dict, slug: str | None) -> list:
         read_only.set(frozenset(spec.get("read_only") or ())),
         rules.set(spec.get("rules", "")),
         active_slug.set(slug),
+        tainted_paths.set(frozenset(p for p in (spec.get("tainted_paths") or ())
+                                    if isinstance(p, str))),
+        taint_reported.set([False]),
     ]
 
 

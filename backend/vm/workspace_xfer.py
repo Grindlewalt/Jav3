@@ -13,7 +13,7 @@ import io
 import tarfile
 from pathlib import Path
 
-from .. import writes
+from .. import taintpaths, writes
 from ..config import settings
 from ..fsutil import list_tree
 
@@ -82,4 +82,9 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes) -> dict:
             if triggers:
                 flagged[rel] = triggers
             applied.append(rel)
+    # remember which of these files a tainted turn wrote (backend/taintpaths.py):
+    # a later turn that reads one is told, by the guest, that it read untrusted
+    # text; a clean turn's write of a path clears it
+    from . import broker
+    taintpaths.record(slug, applied, broker.project_tainted(slug, consume=True))
     return {"applied": applied, "secret_files": leaks, "flags": flagged}

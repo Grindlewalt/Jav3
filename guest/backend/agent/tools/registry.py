@@ -107,7 +107,62 @@ async def _local_dispatch(name: str, args: dict) -> str:
         result = await handler(**args)
     except Exception as e:  # noqa: BLE001 — the loop must observe failures, not die
         return argcheck.crash_message(name, e)
+    withheld = await _report_taint(name, args, result)
+    if withheld:
+        return withheld
     return result + note if note and isinstance(result, str) else result
+
+
+async def _report_taint(name: str, args: dict, result) -> str | None:
+    """Tell the host when this call touched a file a tainted turn wrote, BEFORE
+    the result reaches the model (MEM-09: run_code and read_file have no broker
+    hop, so the host cannot see what they return). None to carry on; an error
+    string when the host could not be told, so the text is withheld rather than
+    read as clean."""
+    tainted = turnctx.tainted_paths.get()
+    if not tainted:
+        return None
+    reported = turnctx.taint_reported.get()
+    if reported is not None and reported[0]:
+        return None
+    from . import taintcheck            # shipped from the host (guest_pkg _COPY_MODULES)
+    hit = taintcheck.touches(name, args, result, tainted)
+    if hit is None:
+        return None
+    if not await _taint_note(f"file:{hit}"):
+        return ("error: could not record that this file holds untrusted text, so its "
+                "content is withheld. Try again.")
+    if reported is not None:
+        reported[0] = True
+    return None
+
+
+async def _taint_note(source: str) -> bool:
+    """The gateway's `taint_note` op for this turn: True once the host says so."""
+    loop = asyncio.get_running_loop()
+    s = None
+    try:
+        if boxinfo.unix_gateway():
+            s = await loop.run_in_executor(None, boxinfo.gateway_connect)
+        else:
+            s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+            await loop.run_in_executor(None, s.connect, (HOST_CID, turnctx.gateway_port.get()))
+        s.setblocking(False)
+        req = {"op": "taint_note", "op_id": turnctx.op_id.get(),
+               "op_token": turnctx.op_token.get(), "source": source[:64]}
+        await loop.sock_sendall(s, (json.dumps(req) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = await loop.sock_recv(s, 65536)
+            if not chunk:
+                return False
+            buf += chunk
+        return json.loads(buf.split(b"\n", 1)[0]).get("type") == "taint_noted"
+    except (OSError, ValueError):
+        return False
+    finally:
+        if s is not None:
+            s.close()
 
 
 async def _broker_dispatch(name: str, args: dict) -> str:

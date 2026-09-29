@@ -18,6 +18,7 @@ import socket  # noqa: F401 -- tests patch gt.socket.socket
 
 from ..agent import budget as budget_mod
 from ..agent.budget import Budget
+from .. import taintpaths
 from ..config import settings
 from . import boxes, broker, workspace_xfer
 from . import persist as persist_mod
@@ -154,6 +155,9 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         # inbox over the broker between iterations; off, it never asks and pays
         # nothing. Off for anything with no identity worth writing to.
         "inbox": inbox,
+        # the project's files a tainted turn wrote (backend/taintpaths.py): the
+        # guest reports a read of one, so the turn is tainted like a web_read
+        "tainted_paths": taintpaths.paths(active_slug) if active_slug else [],
     }
     if owns_ws:
         # ship the workspace so the in-guest file tools work on a copy; the

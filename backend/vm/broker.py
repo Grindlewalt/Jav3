@@ -48,7 +48,16 @@ _envelopes: dict[str, TurnEnvelope] = {}
 
 
 def register_turn(env: TurnEnvelope) -> None:
+    proj = env.active_project
+    if proj and not any(e.active_project == proj for e in _envelopes.values()):
+        # nothing live on this project: a taint from an earlier turn is not this
+        # turn's business (see _dirty_projects)
+        _dirty_projects.discard(proj)
     _envelopes[env.op_id] = env
+    if env.parent_op and env.parent_op in _tainted:
+        # a child starts as tainted as the parent that briefed it: its task text
+        # may be the parent's paraphrase of a web page
+        _taint_op(env.op_id, _nav_tainted.get(env.parent_op))
     # attribute the guest's egress (which carries no op_id) to this turn's project
     from .. import egress
     egress.set_context(env.active_project, env.op_id, env.conversation_id)
@@ -212,6 +221,11 @@ _tainted: set[str] = set()
 # ...and, of those, the ones tainted by a screen or a page (desk_* / browser_*):
 # op_id -> "desk" | "browser". Feeds runtime.nav_taint for memory_write.
 _nav_tainted: dict[str, str] = {}
+# Projects on which a turn became tainted since the project was last idle. A
+# turn's own entry dies with it (release_turn), but the guest's write buffer can
+# be pulled AFTER that (the commit gate flushes it): the files in it were still
+# written by a tainted turn. workspace_xfer.apply_guest_writes reads this.
+_dirty_projects: set[str] = set()
 # op_id -> how many tainted children have ended under it (release_turn). The
 # delegating call's result is annotated when this moved during the call.
 _from_children: dict[str, int] = {}
@@ -245,6 +259,58 @@ def op_tainted(op_id: str) -> bool:
     return op_id in _tainted
 
 
+def _taint_op(op_id: str, source: str | None = None) -> None:
+    """The one place a turn joins the ledger."""
+    _tainted.add(op_id)
+    if source in ("desk", "browser"):
+        _nav_tainted.setdefault(op_id, source)
+    env = _envelopes.get(op_id)
+    if env is not None and env.active_project:
+        _dirty_projects.add(env.active_project)
+
+
+def project_tainted(slug: str | None, *, consume: bool = False) -> bool:
+    """Was a turn on this project tainted while it was live, or since the
+    project was last idle? `consume` resets the since-idle half (one pull of the
+    guest's write buffer takes it)."""
+    if not slug:
+        return False
+    live = any(e.active_project == slug and e.op_id in _tainted
+               for e in _envelopes.values())
+    pending = slug in _dirty_projects
+    if consume:
+        _dirty_projects.discard(slug)
+    return live or pending
+
+
+async def taint_from_egress(att: dict, host: str | None = None) -> None:
+    """The egress proxy just allowed a connection for `att` (its attribution):
+    bytes from the network are about to enter the guest, so whatever the turns
+    on that project print next (a curl, a git clone, a fetched page) is
+    untrusted, and run_code has no broker hop to say so. Taints every live turn
+    of the project, since with turns overlapping on one guest the proxy cannot
+    tell which of them asked. A package registry does not count: `pip install`
+    and `npm install` would otherwise taint every build."""
+    from .. import egress
+    if host and egress._host_matches(egress._norm(host), list(egress.IMAGE_BUILD_HOSTS)):
+        return
+    proj = att.get("project")
+    ops = {att.get("op_id")} if att.get("op_id") else set()
+    if proj and not egress.is_unattributed(proj):
+        ops |= {e["op_id"] for e in egress.contexts_matching(
+            lambda e: bool(e["op_id"]) and e["project"] == proj)}
+    for op in ops:
+        env = _envelopes.get(op)
+        if env is None or op in _tainted:
+            continue
+        _taint_op(op)
+        try:
+            from . import persist
+            await persist.on_taint(env.active_project)
+        except Exception:  # noqa: BLE001 — the proxy must never fail over this
+            pass
+
+
 def mark_tainted(op_id: str, source: str | None = None) -> None:
     """Stamp an operation untrusted from outside the name-based classifier.
 
@@ -258,9 +324,7 @@ def mark_tainted(op_id: str, source: str | None = None) -> None:
     `source` ("desk" / "browser") also records that a screen or a page did it
     (see _nav_tainted)."""
     if op_id:
-        _tainted.add(op_id)
-        if source in ("desk", "browser"):
-            _nav_tainted.setdefault(op_id, source)
+        _taint_op(op_id, source)
 
 
 async def broker_dispatch(op_id: str, name: str, args: dict,
@@ -331,9 +395,7 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
         # tier-4 (post-dispatch): stamp taint into the ledger, and mark a
         # laundering promotion on the result the model sees.
         if classify_taint(name) == "untrusted":
-            _tainted.add(op_id)
-            if _nav_source(name):
-                _nav_tainted.setdefault(op_id, _nav_source(name))
+            _taint_op(op_id, _nav_source(name))
         if op_id in _tainted and not was_tainted:
             # this call is what tainted the turn (a web read, or a peer message
             # via mark_tainted). Its project's /persist goes read-only at the
