@@ -95,7 +95,7 @@ export const NAV_ITEMS = [
   { to: '/vms', label: 'VMs', icon: 'vms', primary: true, dot: 'vms' },
   { to: '/tools', label: 'Tools', icon: 'tools', primary: true },
   { to: '/settings', label: 'Settings', icon: 'settings', primary: true },
-  { to: '/memory', label: 'Memory', icon: 'memory' },
+  { to: '/memory', label: 'Memory', icon: 'memory', count: 'memory' },
   { to: '/schedules', label: 'Schedules', icon: 'schedules' },
   { to: '/shell', label: 'Shell', icon: 'shell' },
 ]

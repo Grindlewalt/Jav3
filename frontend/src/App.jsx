@@ -262,7 +262,7 @@ export default function App() {
   if (user === null && !setupNeeded && location.pathname !== '/login')
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
 
-  const counts = { review: notices.count }
+  const counts = { review: notices.count, memory: notices.memoryPending }
   const dots = { vms: vmDot }
 
   // The phone drawer's way into chat history. On a phone the Chat sidebar is
@@ -298,6 +298,9 @@ export default function App() {
               <button className="nav-more" aria-expanded={moreOpen} aria-haspopup="menu"
                       aria-label="More" title="More" onClick={() => setMoreOpen((o) => !o)}>
                 <MoreIcon />
+                {/* Memory lives behind this button: a note waiting for approval
+                    shows here too, or it would never be seen */}
+                {counts.memory > 0 && <span className="nav-dot warn" aria-hidden="true" />}
               </button>
             )}>
         <NavList items={OVERFLOW_ITEMS} itemClassName="menu-item" itemRole="menuitem"
