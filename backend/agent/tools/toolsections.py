@@ -50,8 +50,8 @@ SECTIONS: dict[str, dict] = {
         "about": "switch project, workspace panels, dashboards, codebase index, "
                  "sandbox packages, sandbox screenshots",
         "triggers": r"\b(load|switch|open) (the |a |another )?project\b|\b(workspace|panels?|"
-                    r"dashboards?|crawl|index the (code|codebase)|apt|pip install|"
-                    r"npm install|packages?|screenshot)\b"},
+                    r"dashboards?|crawl|index the (code|codebase)|screenshot)\b|"
+                    r"\b(install|add) (a |an |the )?(apt |pip |npm )?packages?\b"},
     "web": {
         "about": "read one web page as plain text",
         "triggers": r"https?://|\b(web ?page|article|url)\b"},
@@ -68,7 +68,7 @@ SECTIONS: dict[str, dict] = {
         "merged": "See and operate the operator's connected computer: screenshot with an "
                   "element list, then click, type, press keys, scroll, drag, open apps "
                   "or URLs, wait for the screen, run a shell command.",
-        "triggers": r"\b(click|double[- ]click|screen|desktop|my (computer|mac|laptop|pc)|"
+        "triggers": r"\b(click|double[- ]click|screen|screenshot|desktop|my (computer|mac|laptop|pc)|"
                     r"mouse|cursor|windows?|launch|apps?)\b",
         "guide": "desk", "lead": ["screenshot"]},
     "git": {
