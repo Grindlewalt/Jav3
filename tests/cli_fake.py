@@ -67,6 +67,8 @@ class FakeServer:
         self.post_status: int | None = None
         self.post_error: Exception | None = None
         self.answer_status = 200
+        self.local_info: dict | None = None      # what /info says about a /local chat
+        self.local_results: list[dict] = []
         self.running: list[int] = []
         self.calls: list[tuple[str, str]] = []
 
@@ -103,7 +105,8 @@ class FakeServer:
         if path == "/api/chat/running":
             return httpx.Response(200, json={"running": self.running})
         if path.endswith("/info"):
-            return httpx.Response(200, json={"title": "t", "files": []})
+            return httpx.Response(200, json={"title": "t", "files": [],
+                                             "local": self.local_info})
         if path.startswith("/api/conversations/") and method == "PATCH":
             self.patches.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
@@ -117,6 +120,9 @@ class FakeServer:
             self.feeds.append(feed)
             return httpx.Response(200, stream=feed,
                                   headers={"content-type": "text/event-stream"})
+        if path.endswith("/local_result") and method == "POST":
+            self.local_results.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
         if path.endswith("/answer") and method == "POST":
             self.answers.append(json.loads(request.content))
             return httpx.Response(self.answer_status, json={"ok": self.answer_status == 200,
