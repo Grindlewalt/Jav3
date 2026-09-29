@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_boxlog(db)
         await db.commit()
     finally:
         await db.close()
@@ -861,6 +862,27 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
         " set_by TEXT,"
         " updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         " CHECK (mode <> 'join' OR box_id IS NOT NULL))")
+
+
+async def _migrate_boxlog(db: aiosqlite.Connection) -> None:
+    """Each box's history (backend/vm/boxlog.py): started, stopped, restarted,
+    idle_stopped, wiped, nuked, destroyed, crashed, error, with the reason and
+    who asked. Rows outlive the box (a destroyed box's history still reads).
+    Idempotent and additive."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS box_events ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " box_id TEXT NOT NULL,"
+        " kind TEXT,"
+        " project TEXT,"
+        " runtime TEXT,"
+        " event TEXT NOT NULL,"
+        " reason TEXT,"
+        " actor TEXT,"
+        " detail TEXT,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_box_events_box "
+                     "ON box_events(box_id, id)")
 
 
 async def get_state(db: aiosqlite.Connection, key: str) -> str | None:
