@@ -1444,6 +1444,157 @@ class LocalExecutor:
                 proc.kill()
 
 
+# -- Security > Calls: how the model key is used (pure markup, no Textual) -------------
+#
+# Rows come from GET /api/logs/calls: {"kind": "call", ...} for a model call the
+# host made and {"kind": "refused", ...} for a request the gateway turned away.
+# The SecurityScreen wraps these; they live here so tests can call them.
+
+_REFUSED_WHY = {
+    "unknown_op_id": "The op_id is not a turn the host registered for this caller (it is "
+                     "unknown, or its token did not match). The gateway answered "
+                     "unknown_op_id and nothing reached the provider.",
+    "wrong_box": "The op_id belongs to a turn running in a different box. The gateway "
+                 "answered unknown_op_id and nothing reached the provider.",
+    "budget_exceeded": "The turn's token budget was already spent. The gateway refused "
+                       "before contacting the provider.",
+    "op_not_allowed": "This kind of box may not use that gateway op.",
+    "unknown_op": "The guest asked for a gateway op that does not exist.",
+    "no_package": "There is no guest package for this kind of box.",
+}
+
+
+def calls_tok(n) -> str:
+    """Token counts in the row's short form: 812, 12.4k, 1.2M."""
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return "?"
+    if n < 1000:
+        return f"{n:.0f}"
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n / 1_000_000:.1f}M"
+
+
+def calls_usd(c, places: int = 4) -> str:
+    try:
+        c = float(c or 0)
+    except (TypeError, ValueError):
+        return "$?"
+    if places == 2 and 0 < c < 0.01:      # a total too small for cents keeps its digits
+        places = 4
+    return f"${c:.2f}" if c >= 1 else f"${c:.{places}f}"
+
+
+def calls_model(m) -> str:
+    """The ledgered `provider/model`, with DeepSeek's own prefix dropped."""
+    m = str(m or "?")
+    return m[len("deepseek/"):] if m.startswith("deepseek/") else m
+
+
+def calls_row(e: dict) -> str:
+    """One Calls list row (spec: BACKLOG.md 'TUI: make the security story visible')."""
+    r, ts = e["raw"], (e.get("ts") or "")[5:16]
+    if e["type"] == "refusal":
+        return (f"[$error]●[/] [$text-muted]{ts}[/] [$error b]REFU[/] "
+                f"{_esc(r.get('op_name') or '?')} {_esc(r.get('reason') or '?')} "
+                f"[$text-muted]from box {_esc(r.get('box_id') or '-')}[/]")
+    meta = []
+    if r.get("op_id"):
+        meta.append(f"op {_esc(_short(r['op_id'], 16))}")
+    if r.get("project_slug"):
+        meta.append(f"⌂ {_esc(r['project_slug'])}")
+    if r.get("conversation_id") is not None:
+        meta.append(f"#{r['conversation_id']}")
+    return (f"[$primary]●[/] [$text-muted]{ts}[/] [$primary b]CALL[/] "
+            f"{_esc(calls_model(r.get('model')))}"
+            + (f" [$text-muted]{' '.join(meta)}[/]" if meta else "")
+            + f" ↑{calls_tok(r.get('input_tokens'))} ↓{calls_tok(r.get('output_tokens'))} "
+              f"[$text-muted]cache {calls_tok(r.get('cache_hit'))}[/] "
+              f"{calls_usd(r.get('cost_usd'))}")
+
+
+def calls_detail(e: dict) -> str:
+    """The pane under the list for the selected row."""
+    r = e["raw"]
+    if e["type"] == "refusal":
+        why = _REFUSED_WHY.get(r.get("reason") or "", "")
+        return "\n".join([
+            f"[$error b]REFUSED[/] [b]{_esc(r.get('op_name') or '?')}[/] · "
+            f"{_esc(r.get('reason') or '?')}",
+            f"[$text-muted]from box {_esc(r.get('box_id') or 'unknown')}"
+            + (f" · ⌂ {_esc(r['project_slug'])}" if r.get("project_slug") else "")
+            + f" · {_esc(r.get('ts') or '')}[/]",
+            *([_esc(why)] if why else [])])
+    who = [f"op {_esc(r.get('op_id') or '-')}"]
+    who.append(f"conversation #{r['conversation_id']}" if r.get("conversation_id") is not None
+               else "no conversation")
+    who += [f"box {_esc(r.get('box_id') or '-')}", _esc(calls_model(r.get("model")))]
+    numbers = (f"{int(r.get('input_tokens') or 0):,} in ({int(r.get('cache_hit') or 0):,} "
+               f"cached) · {int(r.get('output_tokens') or 0):,} out · "
+               f"{calls_usd(r.get('cost_usd'))} · "
+               + ("context stored" if r.get("has_context") else "context not stored"))
+    keys = ("[$primary]enter[/] view context" if r.get("has_context")
+            else "[$text-muted]enter: no context stored for this call[/]")
+    return "\n".join([
+        " · ".join(who), numbers,
+        f"[$text-muted]{_esc(r.get('ts') or '')}"
+        + (f" · ⌂ {_esc(r['project_slug'])}" if r.get("project_slug") else "") + "[/]",
+        f"{keys}   [$primary]c[/] this conversation only"])
+
+
+def calls_sub(meta: dict, only: int | None = None) -> str:
+    """The Calls header: where the key goes, then the window's totals."""
+    if not meta:                      # not loaded yet: say only what is always true
+        return "[$text-muted]key held by the host gateway · the guest never sees it[/]"
+    hosts = [str(h) for h in (meta or {}).get("key_hosts") or []]
+    sent =(f"sent only to {_esc(', '.join(hosts))}" if hosts
+            else "no model key is set, so nothing is sent")
+    t = (meta or {}).get("totals") or {}
+    hrs = int((meta or {}).get("hours") or 24)
+    span = f"last {hrs}h"
+    if only is not None:
+        totals = f"conversation #{only}, {span}: {int(t.get('calls') or 0)} calls"
+    else:
+        n = int(t.get("refused") or 0)
+        totals = f"{span}: {int(t.get('calls') or 0)} calls"
+    totals += f" · {calls_usd(t.get('cost_usd'), 2)}"
+    if only is None:
+        totals += (f" · [$error]{n} refused[/]" if n else " · 0 refused")
+    trunc = (" [$text-muted](newest rows shown)[/]" if (meta or {}).get("truncated") else "")
+    return (f"[$text-muted]key held by the host gateway · {sent} · the guest never "
+            f"sees it[/]\n{totals}{trunc}")
+
+
+def calls_context_markup(payload: dict, cap: int = 6000, total: int = 120_000) -> str:
+    """A captured call's message array for the View dialog: role, then the text,
+    each message and the whole cut to a size a terminal can hold."""
+    msgs = payload.get("messages") or []
+    head = (f"{int(payload.get('input_tokens') or 0):,} in "
+            f"({int(payload.get('cache_hit') or 0):,} cached) · {len(msgs)} messages · "
+            f"{int(payload.get('n_tools') or 0)} tools offered")
+    out, used = [f"[$text-muted]{_esc(head)}[/]"], 0
+    for i, m in enumerate(msgs):
+        c = m.get("content")
+        if isinstance(c, list):
+            c = "\n".join(str(p.get("text") if isinstance(p, dict) and p.get("type") == "text"
+                              else f"[{p.get('type') if isinstance(p, dict) else 'part'}]")
+                          for p in c)
+        text = str(c or "")
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            text += f"\n→ {fn.get('name')}({fn.get('arguments')})"
+        if len(text) > cap:
+            text = text[:cap] + f"\n… {len(text) - cap:,} more characters"
+        if used + len(text) > total:
+            out.append(f"[$text-muted]… {len(msgs) - i} more messages not shown[/]")
+            break
+        used += len(text)
+        out.append(f"\n[$primary b]{_esc(str(m.get('role') or '?'))}[/]\n{_esc(text)}")
+    return "\n".join(out)
+
+
 def build_tui(base: str, token: str, **kw):
     """Define the Textual app (imported only when the TUI actually runs, so the
     plain commands work without Textual) and return an instance."""
@@ -3275,6 +3426,7 @@ def build_tui(base: str, token: str, **kw):
     _ROWS = {"service": _row_service, "package": _row_package, "policy": _row_policy,
              "group": _row_group, "pbox": _row_pbox, "proc": _row_proc, "svc": _row_svc,
              "orphan": _row_orphan,
+             "call": calls_row, "refusal": calls_row,
              "profile": _row_profile}
 
     class SecurityScreen(Screen):
@@ -3282,15 +3434,17 @@ def build_tui(base: str, token: str, **kw):
         next, ← previous, 1-6 jump, ↑↓ select (detail below), esc back. Plain
         keys only (Terminal.app: no shift+arrows)."""
 
-        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules")
+        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules",
+                "calls")
         LABELS = {"queue": "Queue", "network": "Network", "logs": "Logs",
                   "secrets": "Secrets", "persistent": "Persistent", "profiles": "Profiles",
-                  "rules": "Rules"}
+                  "rules": "Rules", "calls": "Calls"}
         EMPTY = {"queue": "nothing waits on you", "network": "no egress traffic yet",
                  "logs": "no security events", "secrets": "no secrets saved — a adds one",
                  "persistent": "no persistent processes or services reported",
                  "profiles": "no profiles — a creates one",
-                 "rules": "no always-allow rules (permission asks add them)"}
+                 "rules": "no always-allow rules (permission asks add them)",
+                 "calls": "no model calls yet"}
         COUNTED = ("queue", "secrets")    # tabs whose count shows in the header
         FOOT = {"queue": "[$primary]y[/] approve  [$primary]n[/] deny  "
                          "[$primary]a[/] acknowledge",
@@ -3304,7 +3458,8 @@ def build_tui(base: str, token: str, **kw):
                               "[$primary]l[/] service logs  [$primary]d[/] revoke service",
                 "profiles": "[$primary]a[/] new  [$primary]e[/] edit  [$primary]p[/] assign "
                             "to project  [$primary]d[/] delete",
-                "rules": "[$primary]d[/] revoke the always-allow rule"}
+                "rules": "[$primary]d[/] revoke the always-allow rule",
+                "calls": "[$primary]c[/] conversation  [$primary]enter[/] context"}
         POLL_SECONDS = 4.0
         LIMIT = 200
         GENERAL = "__general__"          # egress.py's shared baseline policy row
@@ -3313,7 +3468,7 @@ def build_tui(base: str, token: str, **kw):
         DEFAULT_CSS = """
         SecurityScreen { background: $background; }
         #sec-tabs { height: 1; padding: 0 2; margin: 1 0 0 0; }
-        SecTab { width: auto; padding: 0 1; margin-right: 1; color: $text-muted; }
+        SecTab { width: auto; padding: 0 1; color: $text-muted; }  /* 8 tabs must fit 80 columns */
         SecTab.-on { background: $primary; color: auto 95%; text-style: bold; }
         #sec-sub { height: auto; max-height: 4; padding: 0 2; margin: 1 0 0 0; }
         #sec-list { height: 1fr; padding: 0 1; margin-top: 1; scrollbar-size-vertical: 1; }
@@ -3336,6 +3491,8 @@ def build_tui(base: str, token: str, **kw):
             Binding("5", "jump(4)", show=False),
             Binding("6", "jump(5)", show=False),
             Binding("7", "jump(6)", show=False),
+            Binding("8", "jump(7)", show=False),
+            Binding("c", "conversation", show=False),
             Binding("up,k", "move(-1)", show=False),
             Binding("down,j", "move(1)", show=False),
             Binding("pageup", "page(-1)", show=False),
@@ -3357,10 +3514,14 @@ def build_tui(base: str, token: str, **kw):
             Binding("enter", "enter", show=False),
         ]
 
-        def __init__(self, tab: str = "queue", project: str | None = None) -> None:
+        def __init__(self, tab: str = "queue", project: str | None = None,
+                     conversation: int | None = None) -> None:
             super().__init__()
             self.tab = tab if tab in self.TABS else "queue"
             self.project = project            # Network's filter; None = all projects
+            self.conversation = conversation  # the chat /security was opened from (Calls' c)
+            self.calls_only = False           # Calls: only that conversation's calls
+            self.calls_meta: dict = {}        # GET /api/logs/calls minus its rows
             self.entries: dict[str, list[dict]] = {t: [] for t in self.TABS}
             self.loaded: dict[str, bool] = {t: False for t in self.TABS}
             self.errors: dict[str, list[str]] = {t: [] for t in self.TABS}
@@ -3595,6 +3756,62 @@ def build_tui(base: str, token: str, **kw):
             r = e["raw"]
             await self._send("DELETE", f"/api/permissions/rules/{r.get('id')}",
                              f"revoked {r.get('tool')}: {r.get('prefix')}")
+
+        # -- Calls: how the model key is used ---------------------------------------------
+
+        async def _load_calls(self):
+            # the model_calls ledger and the gateway's refusals, one timeline; the
+            # host names where the key is sent, never the key
+            params = {"hours": 24}
+            if self.calls_only and self.conversation is not None:
+                params["conversation_id"] = self.conversation
+            d = await self._get("calls", "model calls", "/api/logs/calls", "", params=params)
+            if d is None:
+                return None
+            self.calls_meta = {k: v for k, v in d.items() if k != "rows"}
+            return self.calls_entries(d.get("rows") or [])
+
+        @staticmethod
+        def calls_entries(rows) -> list[dict]:
+            """The server's rows (already newest first) as list entries."""
+            return [{"type": "refusal" if r.get("kind") == "refused" else "call",
+                     "key": f"{'f' if r.get('kind') == 'refused' else 'c'}{r.get('id')}",
+                     "ts": r.get("ts") or "", "raw": r} for r in rows or []]
+
+        def _detail_call(self, e) -> str:
+            return calls_detail(e)
+
+        def _detail_refusal(self, e) -> str:
+            return calls_detail(e)
+
+        async def action_conversation(self) -> None:
+            """c: this conversation's calls only, and back to all of them."""
+            if self.tab != "calls" or self.locked:
+                return
+            if self.conversation is None:
+                self._fail("no conversation to filter by: open /security from a chat")
+                return
+            self.calls_only = not self.calls_only
+            self.status = ""
+            self.entries["calls"], self.loaded["calls"] = [], False
+            await self.rebuild()
+            self.run_worker(self.load("calls"), group="sec-load", exclusive=True)
+
+        async def _view_call_context(self, e) -> None:
+            r = e["raw"]
+            if not r.get("has_context"):
+                self.status = ("[$warning]context wasn't captured for this call (capture was "
+                               "off, or it aged out)[/]")
+                self.render_chrome()
+                return
+            try:
+                d = await self.app.api("GET", f"/api/logs/calls/{r.get('id')}/context") or {}
+            except CliError as ex:
+                self._fail(str(ex))
+                return
+            self.status = ""
+            await self.app.push_screen_wait(View(f"Call #{r.get('id')} context",
+                                                 calls_context_markup(d)))
 
         async def _load_secrets(self):
             # GET /api/secrets is names, last-4 and bound hosts; it never
@@ -4068,6 +4285,9 @@ def build_tui(base: str, token: str, **kw):
             elif self.tab == "rules":
                 bits.append("[$text-muted]\"always allow\" answers to permission asks: one "
                             "tool and one command or path prefix per project[/]")
+            elif self.tab == "calls":
+                bits.append(calls_sub(self.calls_meta,
+                                      self.conversation if self.calls_only else None))
             elif self.tab != "secrets":
                 bits.append(self.vms_sub())
             else:
@@ -4278,6 +4498,8 @@ def build_tui(base: str, token: str, **kw):
             elif e["type"] == "profile":
                 await self.app.push_screen_wait(View(
                     f"Profile {e['raw'].get('name') or ''}", "\n".join(_profile_lines(e["raw"]))))
+            elif e["type"] == "call":
+                self._act(self._view_call_context(e))       # a dialog needs a worker
 
         def persistent_entries_again(self) -> list[dict]:
             """Re-flatten the last report with the new open set (no request)."""
@@ -7633,7 +7855,7 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_security(self, arg: str) -> None:
             await self._tabbed(SecurityScreen, (arg or "").strip().lower() or "queue",
-                               lambda tab: SecurityScreen(tab, self.project))
+                               lambda tab: SecurityScreen(tab, self.project, self.cid))
 
         async def c_vms(self, arg: str) -> None:
             await self._tabbed(VmsScreen, (arg or "").strip().lower() or "boxes", VmsScreen)
