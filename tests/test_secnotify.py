@@ -248,13 +248,19 @@ async def test_a_repeat_outside_the_window_is_a_new_row(db, monkeypatch):
     assert len(await _rows(db)) == n + 1                           # 0 turns coalescing off
 
 
-async def test_a_critical_repeat_pings_again_once_per_window(db, feed):
+async def test_a_critical_repeat_pings_again_once_per_window(db, feed, monkeypatch):
+    now = {"t": 1000.0}
+    monkeypatch.setattr(security, "_clock", lambda: now["t"])
     kw = dict(kind="write_flag", severity="critical", project="p",
               summary="write refused (secret leak) in .env")
-    for _ in range(3):
+    for step in (0, 5, 5, settings.security_ping_window_seconds, 5):
+        now["t"] += step
         await security.raise_event(db, **kw)
-    assert [(e["repeat"], e["ping"]) for e in feed()] == [(False, True), (True, True),
-                                                           (True, False)]
+    # the first pings; repeats inside the window are counted quietly; the
+    # first repeat after it pings again (the card shows the count)
+    assert [(e["repeat"], e["ping"], e["count"]) for e in feed()] == [
+        (False, True, 1), (True, False, 2), (True, False, 3), (True, True, 4),
+        (True, False, 5)]
 
 
 # --- the per-kind rate limit ---------------------------------------------------------

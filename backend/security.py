@@ -136,7 +136,9 @@ def _rate_ok(key: str, limit: int) -> bool:
         return False
     q.append(now)
     if len(_pings) > 2000:                      # repeat keys are per row: keep it bounded
-        for k in [k for k, v in _pings.items() if not v][:1000]:
+        stale = [k for k, v in _pings.items()
+                 if now - v[-1] > settings.security_ping_window_seconds]
+        for k in stale:
             del _pings[k]
     return True
 
@@ -188,6 +190,8 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
     level = await notify_level(db)
     ping = wants(t, level) and (t == "critical"
                                 or _rate_ok(kind, settings.security_ping_per_kind))
+    if t == "critical":
+        _rate_ok(f"#{cur.lastrowid}", 1)        # its repeats stay quiet for a window
     # mirror the REST row shape (detail as an object) so live-SSE rows in the
     # Review Center render the same as poll-loaded ones
     bus.publish(SECURITY_CHAN, {"type": "security_event", "id": cur.lastrowid,
