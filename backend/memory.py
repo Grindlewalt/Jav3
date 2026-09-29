@@ -103,6 +103,46 @@ def notes_dir():
     return settings.memory_dir / "notes"
 
 
+NOTE_NAME_MAX = 80
+
+
+def note_slug(name) -> str:
+    """The file name the agent's tools give a NEW note: lowercase letters, digits
+    and hyphens, cut at NOTE_NAME_MAX. ValueError when nothing is left."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-")[:NOTE_NAME_MAX].strip("-")
+    if not slug:
+        raise ValueError("bad note name")
+    return slug
+
+
+def resolve_note(name, notes=None) -> str | None:
+    """The stem of the EXISTING note that `name` means, or None. The operator
+    names files by hand ('My Ideas', 'ideas_v2', 'v1.2-plan'), the tools used to
+    look only for the slug ('my-ideas'), so the note in the prompt's own index
+    could not be read, deleted or written by the name shown there. Exact stem
+    first, then case-insensitive, then the same slug."""
+    notes = notes or notes_dir()
+    stems = sorted(p.stem for p in notes.glob("*.md")) if notes.is_dir() else []
+    name = str(name)
+    if name in stems:
+        return name
+    low = name.lower()
+    for s in stems:
+        if s.lower() == low:
+            return s
+    try:
+        want = note_slug(name)
+    except ValueError:
+        return None
+    for s in stems:
+        try:
+            if note_slug(s) == want:
+                return s
+        except ValueError:
+            continue
+    return None
+
+
 # --- trash and proposals -----------------------------------------------------
 # Both live in dot-directories INSIDE the notes dir: the prompt assembly, the
 # tools and the operator's file listing all glob `*.md` one level down or skip

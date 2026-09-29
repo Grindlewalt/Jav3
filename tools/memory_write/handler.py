@@ -1,19 +1,11 @@
-import re
-
 import yaml
 
 from backend import memory
 from backend import secrets as secrets_mod
-from backend.memory import notes_dir, parse_note, strip_leading_frontmatter
+from backend.memory import (note_slug, notes_dir, parse_note, resolve_note,
+                            strip_leading_frontmatter)
 from backend.memory import weakening_advice
 from backend.runtime import nav_taint, write_taint
-
-
-def _safe_name(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
-    if not slug:
-        raise ValueError("bad note name")
-    return slug
 
 
 def _with_frontmatter(description: str | None, body: str, taint: str | None = None,
@@ -86,7 +78,7 @@ def _label(stem: str, name: str) -> str:
     calling the note by a name it never wrote."""
     if stem == name:
         return f"'{stem}'"
-    return (f"'{stem}' (your name {name!r} was normalised; use '{stem}' with "
+    return (f"'{stem}' (your name {name[:60]!r} was normalised; use '{stem}' with "
             "memory_read and memory_write)")
 
 
@@ -164,14 +156,16 @@ async def run(name: str, content: str, mode: str | None = "append",
         return (f"error: unknown mode {mode!r}. Use one of: append (add to the "
                 "note), replace (rewrite it), delete (remove it).")
     name = str(name)
+    notes = notes_dir()
     try:
-        stem = _safe_name(name)
+        # a note that exists is addressed by the name it has (the operator's
+        # 'My Ideas.md'), a new one gets the plain slug
+        stem = resolve_note(name, notes) or note_slug(name)
     except ValueError:
         return "error: bad note name. Use letters, digits and hyphens."
     label = _label(stem, name)
     content = "" if content is None else str(content)
     description = None if description is None else str(description)
-    notes = notes_dir()
     notes.mkdir(parents=True, exist_ok=True)
     path = notes / f"{stem}.md"
     # same hard line as writes.apply_write: a real secret VALUE never lands in
