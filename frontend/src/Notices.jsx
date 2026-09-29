@@ -120,6 +120,13 @@ export function useNotices(enabled) {
   useEffect(() => {
     if (!enabled) return
     return subscribeSse('/api/agents/notices/stream', (ev) => {
+      // the storage watch (backend/storage_watch.py): at most one a day, and
+      // the card goes to the Logs tab where retention and delete live
+      if (ev.type === 'storage_warning') {
+        push({ sev: 'warn', title: ev.title || 'Storage is filling up',
+               body: ev.summary || '', to: ev.to || '/security/logs', life: 30 })
+        return
+      }
       if (ev.type !== 'agent_run_done') return
       if (isWatched(ev.conversation_id)) return   // they're looking right at it
       push({
