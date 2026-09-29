@@ -6639,6 +6639,7 @@ def build_tui(base: str, token: str, **kw):
             self.hist_pos: int | None = None
             self.hist_draft = ""
             self.popup_items: list[tuple[str, str]] = []   # (kind, value)
+            self.arg_deliberate = False     # the argument menu was opened by Tab or ↑ ↓
             self.initial = (resume, cont, prompt)
             self.client = None
             self.commands = self._commands()
@@ -8005,6 +8006,7 @@ def build_tui(base: str, token: str, **kw):
             items: list[tuple[str, str, str]] = []     # (kind, value, label markup)
             if text.startswith("/") and "\n" not in text:
                 if " " not in text:
+                    self.arg_deliberate = False
                     q = text[1:].lower()
                     for name, cmd in self.unique_commands():
                         if name.startswith(q):
@@ -8018,6 +8020,9 @@ def build_tui(base: str, token: str, **kw):
                         if value.startswith(arg) or (arg and arg.lower() in meta.lower()):
                             items.append(("arg", value, f"{_esc(value)}  "
                                           f"[$text-muted]{_esc(meta)}[/]"))
+                    # what was typed, when it is an option, before the ones that only
+                    # begin with it: /sessions 5 must not become /sessions 50
+                    items.sort(key=lambda it: it[1] != arg)
             else:
                 word = self._word_before_cursor()
                 if word.startswith("@"):
@@ -8068,8 +8073,10 @@ def build_tui(base: str, token: str, **kw):
                     self.hide_popup()
                     self.history_step(-1)
                 else:
+                    self.arg_deliberate = True
                     pop.action_cursor_up()
             elif key == "down":
+                self.arg_deliberate = True
                 pop.action_cursor_down()
             elif key in ("tab", "enter"):
                 i = pop.highlighted or 0
@@ -8083,12 +8090,14 @@ def build_tui(base: str, token: str, **kw):
             ed = self.editor
             if kind == "cmd":
                 cmd = self.commands[value]
-                if cmd.takes_arg:
+                if cmd.takes_arg and not submit:
+                    # Tab opens the argument menu; Enter runs the command as typed
+                    # (its bare form opens its own picker), never option 0 of a menu
+                    # nobody asked for
                     ed.text = f"/{value} "
                     ed.move_cursor(ed.document.end)
+                    self.arg_deliberate = True
                     self.update_popup()
-                    if not self.popup_open() and submit and not self.arg_options(value):
-                        self.hide_popup()
                     return
                 ed.text = f"/{value}"
                 ed.move_cursor(ed.document.end)
@@ -8097,7 +8106,15 @@ def build_tui(base: str, token: str, **kw):
                     ed.post_message(Editor.Submitted(ed.text))
                 return
             if kind == "arg":
-                head = ed.text.partition(" ")[0]
+                head, _, typed = ed.text.partition(" ")
+                if submit and not typed.strip() and not self.arg_deliberate:
+                    # Enter on a menu that opened because of a typed space: the
+                    # command as typed, not its first option
+                    ed.text = head
+                    ed.move_cursor(ed.document.end)
+                    self.hide_popup()
+                    ed.post_message(Editor.Submitted(ed.text))
+                    return
                 ed.text = f"{head} {value}"
                 ed.move_cursor(ed.document.end)
                 self.hide_popup()

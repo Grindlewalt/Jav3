@@ -82,6 +82,8 @@ class FakeServer:
     def handle(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
         self.calls.append((method, path))
+        if path == "/api/devices/whoami":
+            return httpx.Response(200, json={"username": "device:test"})
         if path == "/api/auth/me":
             return httpx.Response(200, json={"username": "op",
                                              "access": "full" if self.full else "chat"})
