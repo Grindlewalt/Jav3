@@ -130,12 +130,17 @@ export async function clickEl(id) {
 
 // A click at (x, y), CSS px of the top frame's viewport (the server converts
 // from screenshot pixels).
-export async function clickAt(x, y) {
+// `expect` ({n, label}, a top-frame element) is what the screenshot showed at
+// the point: if something else is under it now, refuse instead of clicking.
+export async function clickAt(x, y, expect) {
   const D = globalThis.__jav3Dom;
   if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) {
     return { ok: false, err: `${x},${y} is outside the page (${window.innerWidth}x${window.innerHeight} CSS px); take a new browser_screenshot_tab` };
   }
   const hit = D.deepPoint(document, x, y);
+  if (expect && D.pointMoved(D.findJav3(document, expect.n), hit)) {
+    return { ok: false, code: 'moved', err: 'the page moved since the screenshot — ' + JSON.stringify(expect.label || 'the element') + ' is no longer at that point; browser_screenshot_tab again' };
+  }
   if (!hit) return { ok: false, err: 'nothing on the page at that point' };
   if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
     return { ok: false, code: 'frame', err: 'that point is inside an iframe; browser_read_page and click its element by id (f1:…)' };

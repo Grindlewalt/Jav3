@@ -155,3 +155,12 @@ test('screenshot scale and the CSS-px conversion', async () => {
   assert.deepEqual(shotScale(800, 600, { dpr: 2 }), { x: 2, y: 2 });
   assert.deepEqual(shotScale(800, 600, null), { x: 1, y: 1 });
 });
+
+test('a coordinate click carries the element the screenshot showed there', () => {
+  assert.deepEqual(validate('click', { tab: 2, x: 5, y: 6, expect: { id: 'f0:4', label: 'Accept' } }),
+    { tab: 2, x: 5, y: 6, expect: { n: 4, label: 'Accept' } });
+  // a subframe's point is an <iframe>: nothing to compare; junk is dropped
+  assert.deepEqual(validate('click', { tab: 2, x: 5, y: 6, expect: { id: 'f2:4', label: 'x' } }), { tab: 2, x: 5, y: 6 });
+  assert.deepEqual(validate('click', { tab: 2, x: 5, y: 6, expect: 'f0:4' }), { tab: 2, x: 5, y: 6 });
+  assert.equal(validate('click', { tab: 2, x: 5, y: 6, expect: { id: 'f0:4', label: 'a'.repeat(200) } }).expect.label.length, 80);
+});

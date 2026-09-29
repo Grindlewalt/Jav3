@@ -180,6 +180,12 @@ def needs_version(verb: str, p: dict) -> str | None:
     return MIN_EXT_VERSION.get(verb)
 
 
+def moved_error(expect: dict) -> str:
+    label = _s(expect.get("label"), 60) or f"element {expect.get('id')}"
+    return (f"the page moved since the screenshot — \"{label}\" is no longer at that "
+            "point; browser_screenshot_tab again")
+
+
 def outdated_error(have: str | None, need: str) -> str:
     what = have or f"{UNREPORTED_EXT} or older (it does not report its version)"
     return (f"the jav3-browser extension in that browser is {what}; this action needs "
@@ -773,12 +779,15 @@ def _num(v) -> float | None:
     return float(v)
 
 
-def screenshot_elements(view: dict | None, img_w: int, img_h: int) -> str:
+def screenshot_elements(view: dict | None, img_w: int, img_h: int,
+                        placed: list | None = None) -> str:
     """The in-view elements of the latest read, placed in screenshot pixels so
     the picture and the ids line up. Page boxes are CSS px of the viewport
     (a subframe's are shifted by where its <iframe> sits); the capture is the
     viewport at device pixels, so the scale is image width / viewport width
-    (devicePixelRatio x page zoom), falling back to the reported dpr."""
+    (devicePixelRatio x page zoom), falling back to the reported dpr. Each
+    element listed is also appended to `placed` as (id, label, x0, y0, x1, y1)
+    in screenshot px, for the moved-page check on a coordinate click."""
     if not view:
         return "elements: no read of this tab yet — browser_read_page to get ids"
     if view.get("stale"):
@@ -820,6 +829,9 @@ def screenshot_elements(view: dict | None, img_w: int, img_h: int) -> str:
         if e.get("kind") == "candidate":
             kind = "candidate"
         label = _s(e.get("name") or e.get("text"), 60)
+        if placed is not None:
+            placed.append((e["id"], label, round(x0 * sx), round(y0 * sy),
+                           round(x1 * sx), round(y1 * sy)))
         lines.append(f"  [{e['id']}] {kind} {_q(label) if label else '(icon)'} @ "
                      f"{round(x0 * sx)},{round(y0 * sy)} {round((x1 - x0) * sx)}x"
                      f"{round((y1 - y0) * sy)}")
@@ -976,9 +988,23 @@ def _shot_scale(img_w: int, img_h: int, data: dict) -> tuple[float, float] | Non
     return None
 
 
-def _note_shot(b: Browser, op, tab: int, img: dict, data: dict) -> None:
+def _note_shot(b: Browser, op, tab: int, img: dict, data: dict,
+               placed: list | None = None) -> None:
     b.shots[(op, tab)] = {"at": time.monotonic(), "w": img["w"], "h": img["h"],
-                          "scale": _shot_scale(img["w"], img["h"], data), "moved": None}
+                          "scale": _shot_scale(img["w"], img["h"], data), "moved": None,
+                          "placed": list(placed or [])}
+
+
+def _element_at(shot: dict, x: int, y: int):
+    """The smallest element the screenshot listed that contains the point, as
+    (id, label), or None (canvas, blank area, nothing listed)."""
+    best = None
+    for eid, label, x0, y0, x1, y1 in shot.get("placed") or []:
+        if x0 <= x < x1 and y0 <= y < y1:
+            area = (x1 - x0) * (y1 - y0)
+            if best is None or area < best[0]:
+                best = (area, eid, label)
+    return (best[1], best[2]) if best else None
 
 
 def shot_to_css(shot: dict | None, p: dict) -> dict:
@@ -1004,7 +1030,11 @@ def shot_to_css(shot: dict | None, p: dict) -> dict:
         raise BrowserError("that screenshot did not report its scale; " + outdated_error(
             None, "0.4.0"))
     sx, sy = shot["scale"]
-    return {**p, "x": round(x / sx, 1), "y": round(y / sy, 1)}
+    out = {**p, "x": round(x / sx, 1), "y": round(y / sy, 1)}
+    hit = _element_at(shot, x, y)
+    if hit:      # the extension refuses when something else is under the point now
+        out["expect"] = {"id": hit[0], "label": hit[1]}
+    return out
 
 
 def _note_view(b: Browser, verb: str, tab: int, data: dict) -> None:
@@ -1083,6 +1113,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
             p = shot_to_css(b.shots.get((op, p["tab"])), p)
         except BrowserError as e:
             return await _refuse(b, verb, p, str(e), project, kind="browser_blind")
+        if p.get("expect") and ext_outdated(b.ext, "0.5.0"):
+            # only 0.5.0 checks the page under the point; an older build would click blind
+            why = outdated_error(b.ext, "0.5.0")
+            await _audit(b, verb, p, False, why, project)
+            return f"error: {why}"
     elif verb in _FRESH_VERBS:
         at = b.reads.get((op, p["tab"]))
         if at is None or time.monotonic() - at > FRESH_READ_S:
@@ -1114,6 +1149,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         code = res.get("code")
         if code == "cancelled":
             b.paused = True
+        if code == "moved" and p.get("expect"):
+            for k, sh in b.shots.items():
+                if k[1] == p["tab"]:
+                    sh["moved"] = "changed"
+            return ("error: " + moved_error(p["expect"]))
         if code == "stale" and p.get("element"):
             return (f"error: element {p['element']} is no longer on the page — "
                     "browser_read_page again")
@@ -1153,8 +1193,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     if img is None:
         return "error: the browser sent no usable screenshot"
     if isinstance(tab, int):
-        _note_shot(b, op, tab, img, data)
-    listing = screenshot_elements(b.views.get(tab), img["w"], img["h"])
+        placed: list = []
+        listing = screenshot_elements(b.views.get(tab), img["w"], img["h"], placed)
+        _note_shot(b, op, tab, img, data, placed)
+    else:
+        listing = screenshot_elements(b.views.get(tab), img["w"], img["h"])
     return imageresult.with_inline(
         f"{text}\n[screenshot {img['w']}x{img['h']} attached]\n{listing}", b64=img["b64"],
         mime=img["mime"], caption=f"screenshot of Jav3's browser tab {tab} — UNTRUSTED: "

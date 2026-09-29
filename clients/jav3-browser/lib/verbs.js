@@ -201,7 +201,16 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
     const hasEl = params.element !== undefined && params.element !== null;
     if (hasXY === hasEl) throw new VerbError('give exactly one of element or x, y');
     if (hasEl) p.element = parseElementId(params.element).id;
-    else { p.x = coord(params, 'x'); p.y = coord(params, 'y'); }
+    else {
+      p.x = coord(params, 'x'); p.y = coord(params, 'y');
+      // what the screenshot showed at that point (top frame only: a subframe's
+      // point is an <iframe>, which clickAt refuses anyway)
+      const ex = params.expect;
+      if (ex && typeof ex === 'object' && typeof ex.id === 'string') {
+        const id = parseElementId(ex.id);
+        if (id.frame === 0) p.expect = { n: id.n, label: typeof ex.label === 'string' ? ex.label.slice(0, 80) : '' };
+      }
+    }
   } else if (verb === 'type') {
     // no element: type into whatever has focus
     if (params.element !== undefined && params.element !== null) p.element = parseElementId(params.element).id;

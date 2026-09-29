@@ -271,3 +271,18 @@ test('isCovered: only an unrelated element on top counts as an overlay', () => {
   assert.equal(D.isCovered(btn, null), false);
   assert.equal(D.isCovered(btn, overlay), true);
 });
+
+test('pointMoved: the element still under the point, or a page that shifted', () => {
+  const inner = { tagName: 'SPAN', contains: () => false };
+  const btn = { tagName: 'BUTTON', contains: n => n === inner };
+  const wrapper = { tagName: 'DIV', contains: n => n === btn || n === wrapper };
+  const banner = { tagName: 'DIV', contains: () => false };
+  const body = { tagName: 'BODY', contains: () => true };
+  assert.equal(D.pointMoved(btn, btn), false);
+  assert.equal(D.pointMoved(btn, inner), false);      // a part of it
+  assert.equal(D.pointMoved(btn, wrapper), false);    // a wrapper of it
+  assert.equal(D.pointMoved(btn, banner), true);      // a banner pushed in
+  assert.equal(D.pointMoved(btn, body), true);        // it left; only the page is there
+  assert.equal(D.pointMoved(null, btn), true);        // it is gone
+  assert.equal(D.pointMoved(btn, null), true);
+});

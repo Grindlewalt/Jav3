@@ -856,6 +856,92 @@ async def test_coordinate_click_and_focused_typing_through_the_tools(env, monkey
         await fe.stop()
 
 
+def test_shot_to_css_names_the_element_under_the_point():
+    b = browser.Browser(device_id=1, name="c", ws=None)
+    browser._note_view(b, "read_page", 7, {
+        "viewport": {"w": 400, "h": 300, "dpr": 2},
+        "frames": [{"index": 0, "offset": {"x": 0, "y": 0}}],
+        "elements": [
+            {"id": "f0:3", "tag": "div", "role": "dialog", "name": "Cookies", "frame": 0,
+             "box": {"x": 0, "y": 0, "w": 200, "h": 100}, "inView": True},
+            {"id": "f0:4", "tag": "button", "name": "Accept", "frame": 0,
+             "box": {"x": 10, "y": 10, "w": 50, "h": 20}, "inView": True}]})
+    placed = []
+    browser.screenshot_elements(b.views[7], 800, 600, placed)
+    assert [x[0] for x in placed] == ["f0:3", "f0:4"]
+    shot = {"at": browser.time.monotonic(), "w": 800, "h": 600, "scale": (2.0, 2.0),
+            "moved": None, "placed": placed}
+    out = browser.shot_to_css(shot, {"tab": 7, "x": 30, "y": 30})
+    assert out["expect"] == {"id": "f0:4", "label": "Accept"}      # the smallest box wins
+    out = browser.shot_to_css(shot, {"tab": 7, "x": 300, "y": 30})
+    assert out["expect"] == {"id": "f0:3", "label": "Cookies"}
+    assert "expect" not in browser.shot_to_css(shot, {"tab": 7, "x": 700, "y": 500})
+    assert "expect" not in browser.shot_to_css({**shot, "placed": []}, {"tab": 7, "x": 30, "y": 30})
+    assert browser.moved_error({"id": "f0:4", "label": "Accept"}) == (
+        'the page moved since the screenshot — "Accept" is no longer at that point; '
+        "browser_screenshot_tab again")
+
+
+async def test_coordinate_click_carries_the_expected_element_and_reports_a_moved_page(
+        env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"], v="0.5.0").start()
+    moved = {"on": False}
+
+    async def answer(m):
+        if m["verb"] == "click" and moved["on"] and m["params"].get("expect"):
+            return {"ok": False, "code": "moved", "err": "whatever the extension says"}
+        res = await FakeExt.default_answer(m)
+        if m["verb"] == "read_page":
+            res["data"]["viewport"] = {"w": 400, "h": 300, "dpr": 2}
+            res["data"]["frames"][0]["offset"] = {"x": 0, "y": 0}
+        if m["verb"] == "screenshot_tab":
+            res["data"]["scale"] = {"x": 2, "y": 2}
+        return res
+    fe.answer = answer
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-moved")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            await _tool("browser_screenshot_tab")(tab=7)
+            r = await _tool("browser_click")(tab=7, x=50, y=50)      # f0:2 "q" at 0,40 200x40
+            assert not r.startswith("error"), r
+            assert fe.reqs[-1]["params"] == {"tab": 7, "x": 25.0, "y": 25.0,
+                                             "expect": {"id": "f0:2", "label": "q"}}
+            await _tool("browser_screenshot_tab")(tab=7)
+            r = await _tool("browser_click")(tab=7, x=700, y=500)    # nothing listed there
+            assert "expect" not in fe.reqs[-1]["params"]
+            await _tool("browser_screenshot_tab")(tab=7)
+            moved["on"] = True
+            r = await _tool("browser_click")(tab=7, x=50, y=50)
+            assert r == ('error: the page moved since the screenshot — "q" is no longer at '
+                         "that point; browser_screenshot_tab again")
+            # that screenshot is spent
+            r = await _tool("browser_click")(tab=7, x=50, y=50)
+            assert r.startswith("error: the page may have changed since that screenshot")
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-moved")
+    finally:
+        await fe.stop()
+    fe = await FakeExt(env["btok"], v="0.4.0").start()
+    fe.answer = answer
+    try:
+        tok = budget_mod.active_op_id.set("op-moved2")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            await _tool("browser_screenshot_tab")(tab=7)
+            r = await _tool("browser_click")(tab=7, x=50, y=50)
+            assert r.startswith("error: the jav3-browser extension in that browser is 0.4.0; "
+                                "this action needs 0.5.0")
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-moved2")
+    finally:
+        await fe.stop()
+
+
 async def test_coordinate_click_needs_extension_0_4_0(env, monkeypatch):
     monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
     fe = await FakeExt(env["btok"]).start()                  # unreported = 0.3.0 or older

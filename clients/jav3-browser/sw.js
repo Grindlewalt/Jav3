@@ -495,7 +495,7 @@ async function run(verb, p, c) {
     const prev = await focusedWindow();
     let r;
     if (verb === 'click') {
-      r = await inject(p.tab, clickAt, [p.x, p.y], 0);
+      r = await inject(p.tab, clickAt, [p.x, p.y, p.expect || null], 0);
       if (r && r.ok) await saveFocusFrame(p.tab, 0);
     } else {
       r = await inject(p.tab, typeActive, [p.text, p.submit], 0);

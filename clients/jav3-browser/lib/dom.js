@@ -8,7 +8,7 @@
 // injection) and as an ES module (import). It installs globalThis.__jav3Dom
 // once per realm; the IIFE keeps re-injection free of redeclaration errors.
 (function () {
-  const V = 4;
+  const V = 5;
   if (globalThis.__jav3Dom && globalThis.__jav3Dom.v === V) return;
 
   const ATTR = 'data-jav3-id';
@@ -252,6 +252,17 @@
     if (el.contains && el.contains(hit)) return false;
     if (hit.contains && hit.contains(el)) return false;
     return true;
+  }
+
+  // A coordinate click that named the element the screenshot showed there
+  // (`el`, null when it is gone): has the page moved, i.e. is something else
+  // under the point now? The page's root (body / html) under the point means the
+  // element left, even though it is technically an ancestor.
+  function pointMoved(el, hit) {
+    if (!el || !hit) return true;
+    const t = hit.tagName;
+    if (hit !== el && (t === 'BODY' || t === 'HTML')) return true;
+    return isCovered(el, hit);
   }
 
   // Give the covering element an id in the same space as read_page's, so the
@@ -644,6 +655,6 @@
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
     CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
-    collectCandidates, formState, implicitSubmit, clickSequence, deepPoint, realClick, isCovered, typeInto, describeEl,
+    collectCandidates, formState, implicitSubmit, clickSequence, deepPoint, realClick, isCovered, pointMoved, typeInto, describeEl,
   };
 })();
