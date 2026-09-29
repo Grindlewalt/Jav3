@@ -91,3 +91,194 @@ def test_identity_arguments_are_refused_even_read_only():
         return ""
     _, _, err = argcheck.prepare("inbox_fetch", fetch, {"conversation_id": 7}, read_only=True)
     assert err and "has no parameter 'conversation_id'" in err
+
+
+# --- RUNS-16: the misspelled key is named, and an unambiguous one is remapped ---
+
+async def _edit(path: str, find: str, replace: str, all: bool = False):
+    return "ok"
+
+
+def test_missing_argument_error_names_the_misspelled_key():
+    # conversation 553: four edit_file calls passed 'replacement' for 'replace'
+    # two keys claim the same argument, so neither is guessed: both are named
+    _, _, err = argcheck.prepare("edit_file", _edit,
+                                 {"path": "a", "find": "b", "replacemen": "c",
+                                  "replacement": "d"}, read_only=False)
+    assert "needs replace" in err
+    assert "'replacement'" in err and "'replacemen'" in err and "did you mean 'replace'" in err
+
+
+def test_unique_close_key_for_the_missing_required_one_is_remapped():
+    args, note, err = argcheck.prepare("edit_file", _edit,
+                                       {"path": "a", "find": "b", "replacement": "c"},
+                                       read_only=False)
+    assert err is None and args == {"path": "a", "find": "b", "replace": "c"}
+    assert "took 'replacement' as 'replace'" in note
+
+
+def test_a_distant_key_is_named_but_not_remapped():
+    _, _, err = argcheck.prepare("edit_file", _edit, {"path": "a", "find": "b", "txt": "c"},
+                                 read_only=False)
+    assert err and "'txt'" in err and "needs replace" in err
+
+
+def test_remap_never_overwrites_a_key_the_model_did_send():
+    args, _, err = argcheck.prepare("edit_file", _edit,
+                                    {"path": "a", "find": "b", "replace": "c", "replacement": "d"},
+                                    read_only=False)
+    assert err and "'replacement'" in err     # ambiguous: refuse instead of picking one
+
+
+# --- argument TYPES (TOOLS-03/04/10): checked from the handler's annotations ---
+
+async def _typed(text: str, n: int = 3, flag: bool = False, rate: float | None = None,
+                 items: list | None = None, opts: dict | None = None,
+                 either: str | list | None = None, free=None):
+    return "ok"
+
+
+def _prep(**args):
+    return argcheck.prepare("t", _typed, {"text": "x", **args}, read_only=False)
+
+
+@pytest.mark.parametrize("given,want", [("0", 0), (" 12 ", 12), (7, 7), (4.0, 4), ("-2", -2)])
+def test_whole_numbers_come_from_digit_strings_and_whole_floats(given, want):
+    args, _, err = _prep(n=given)
+    assert err is None and args["n"] == want and type(args["n"]) is int
+
+
+@pytest.mark.parametrize("given,want", [("true", True), ("False", False), ("yes", True),
+                                        ("no", False), ("1", True), (0, False), (True, True)])
+def test_booleans_come_from_plain_words(given, want):
+    args, _, err = _prep(flag=given)
+    assert err is None and args["flag"] is want
+
+
+def test_other_shapes_are_coerced_only_when_the_meaning_is_plain():
+    args, _, err = _prep(rate="0.5", items='["a", "b"]', opts='{"k": 1}', text=12)
+    assert err is None
+    assert args["rate"] == 0.5 and args["items"] == ["a", "b"] and args["opts"] == {"k": 1}
+    assert args["text"] == "12"
+    assert _prep(either=["a"])[2] is None and _prep(either="a")[2] is None
+
+
+@pytest.mark.parametrize("bad,phrase", [
+    ({"n": "four"}, "n must be a whole number (got 'four')"),
+    ({"n": 1.5}, "n must be a whole number (got 1.5)"),
+    ({"n": True}, "n must be a whole number (got true)"),
+    ({"n": ["1"]}, "n must be a whole number (got a list)"),
+    ({"flag": "maybe"}, "flag must be true or false (got 'maybe')"),
+    ({"flag": 2}, "flag must be true or false (got 2)"),
+    ({"text": {"k": 1}}, "text must be text (got an object)"),
+    ({"text": True}, "text must be text (got true)"),
+    ({"text": None}, "text is required (got null)"),
+    ({"items": "a.py"}, "items must be a list (got 'a.py')"),
+    ({"opts": [1]}, "opts must be an object (got a list)"),
+    ({"rate": "fast"}, "rate must be a number (got 'fast')"),
+    ({"either": {"k": 1}}, "either must be text or a list (got an object)"),
+])
+def test_uncoercible_types_are_one_plain_error_that_is_not_a_harness_fault(bad, phrase):
+    _, _, err = _prep(**bad)
+    assert err and phrase in err and "Nothing ran" in err
+    assert "harness fault" not in err and "report_harness_fault" not in err
+
+
+def test_null_for_an_optional_argument_means_not_given():
+    args, _, err = _prep(n=None, flag=None, rate=None, items=None)
+    assert err is None
+    assert "n" not in args and "flag" not in args      # the defaults apply
+    assert args["rate"] is None and args["items"] is None   # None was allowed anyway
+
+
+def test_every_bad_argument_is_reported_at_once():
+    _, _, err = _prep(n="x", flag="y")
+    assert "n must be" in err and "flag must be" in err
+
+
+def test_unannotated_parameters_are_left_to_the_handler():
+    args, _, err = _prep(free={"anything": [1]})
+    assert err is None and args["free"] == {"anything": [1]}
+
+
+def _load_handler(tool: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"contract_{tool}",
+                                                  ROOT / "tools" / tool / "handler.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.run
+
+
+HANDLERS = sorted(p.parent.name for p in (ROOT / "tools").glob("*/handler.py"))
+
+
+@pytest.mark.parametrize("tool", HANDLERS)
+def test_a_wrong_typed_argument_never_reaches_any_handler(tool):
+    """Every annotated parameter of every tool refuses an object for a scalar
+    (and a scalar for an object) before the handler runs, so none can crash on it."""
+    run = _load_handler(tool)
+    for p in inspect.signature(run).parameters.values():
+        parsed = argcheck._kinds(p.annotation)
+        if parsed is None:
+            continue
+        kinds, _ = parsed
+        bad = [{"k": 1}] if dict not in kinds else [3.5j]      # 3.5j: nothing coerces a complex
+        for value in bad:
+            _, _, err = argcheck.prepare(tool, run, {p.name: value}, read_only=False)
+            missing_first = err and err.startswith(f"error: {tool} needs")
+            assert err and (missing_first or f"{p.name} must be" in err), (tool, p.name, err)
+
+
+@pytest.fixture
+def proj(tmp_env):
+    d = tmp_env / "projects" / "p"
+    d.mkdir(parents=True)
+    (d / "project.md").write_text("# p\n")
+    (d / "README.md").write_text("hello\nworld\na(b\n")
+    return d
+
+
+async def _tool(name: str, **args) -> str:
+    from backend import runtime
+    from backend.agent.tools import registry
+    runtime.active_project.set("p")
+    return await registry.dispatch(name, args)
+
+
+async def test_write_file_with_structured_content_is_a_fixable_error(proj):
+    for bad in ({"k": 1}, ["a"], None, True):
+        out = await _tool("write_file", path="x.json", content=bad)
+        assert out.startswith("error: write_file: content ") and "harness fault" not in out, out
+    assert not (proj / "x.json").exists()
+    assert (await _tool("write_file", path="n.txt", content=42)).startswith("wrote n.txt")
+    assert (proj / "n.txt").read_text() == "42"
+
+
+async def test_dashboard_with_bad_types_is_a_fixable_error(proj):
+    for kw in ({"path": "d.html", "html": None}, {"path": 5, "html": "<p>"},
+               {"path": None, "html": "<p>"}):
+        out = await _tool("dashboard", **kw)
+        assert out.startswith("error:") and "harness fault" not in out, out
+
+
+async def test_todo_update_takes_the_index_as_a_digit_string(proj):
+    await _tool("todo_update", action="add", text="first")
+    out = await _tool("todo_update", action="check", index="0")
+    assert "0. [x] first" in out, out
+    out = await _tool("todo_update", action="check", index="two")
+    assert out.startswith("error: todo_update: index must be a whole number (got 'two')"), out
+
+
+async def test_research_angles_as_words_is_a_fixable_error(proj):
+    out = await _tool("research", topic="tides", angles="four")
+    assert out.startswith("error: research: angles must be a whole number (got 'four')"), out
+
+
+async def test_search_codebase_none_query_and_bool_flag(proj):
+    out = await _tool("search_codebase", query=None)
+    assert out.startswith("error: search_codebase: query is required"), out
+    # regex='false' used to mean regex ON (a non-empty string is truthy): 'a(' is not a pattern
+    out = await _tool("search_codebase", query="a(", regex="false")
+    assert "a(b" in out and not out.startswith("error"), out
+    assert (await _tool("search_codebase", query="a(", regex="yes")).startswith("error: bad regex")
