@@ -626,6 +626,66 @@ async def test_settle_reports_changed_and_settled_ms(cfg, monkeypatch):
     assert ws.sent[-1]["changed"] is True and ws.sent[-1]["settled_ms"] >= 50
 
 
+def test_a_dim_overlay_is_a_change_and_a_caret_is_not():
+    """The trial's miss: Spotlight's translucent bar over a dark window moved
+    many thumbnail pixels by 8-24 grey levels and almost none by more."""
+    w, h = 160, 100
+    base = [30] * (w * h)
+    overlay = list(base)
+    for y in range(18, 24):
+        for x in range(50, 120):
+            overlay[y * w + x] = 30 + 14             # dim bar: +14 levels
+    assert not jd.thumbs_match(_pgm(base, w, h), _pgm(overlay, w, h))
+    caret = list(base)
+    for y in range(40, 43):
+        caret[y * w + 80] = 200                       # a caret, 3 px tall
+    assert jd.thumbs_match(_pgm(base, w, h), _pgm(caret, w, h))
+    noise = [30 + (i % 3) * 3 for i in range(w * h)]  # JPEG-ish wobble under tolerance
+    assert jd.thumbs_match(_pgm(base, w, h), _pgm(noise, w, h))
+
+
+def test_elements_sig_ignores_order_and_position():
+    a = [{"role": "button", "label": "Save", "x": 1}, {"role": "tab", "label": "One", "x": 5}]
+    b = [{"role": "tab", "label": "One", "x": 9}, {"role": "button", "label": "Save", "x": 2}]
+    assert jd.elements_sig(a) == jd.elements_sig(b)
+    assert jd.elements_sig(a) != jd.elements_sig(a + [{"role": "textfield", "label": "S"}])
+    assert jd.elements_sig(a) != jd.elements_sig([{**a[0], "label": "Saved"}, a[1]])
+
+
+async def test_changed_uses_the_settled_frame_and_the_element_list(cfg, monkeypatch):
+    monkeypatch.setattr(jd, "SETTLE_S", 0)
+    monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)
+    tree = [{"role": "", "box": (0, 0, 2560, 1600), "children": [
+        {"role": "button", "label": "Save", "box": (400, 300, 200, 60)}]}]
+    b = NavBackend(tree=tree)
+    s = jd.Session(b, "a", "t")
+    s.grants = {"screen": True, "input": True, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "0", "verb": "screenshot", "params": {}})
+    # the key opens an overlay whose pixels compare equal, but a field appears
+    b.key = lambda combo: tree[0]["children"].append(
+        {"role": "textfield", "label": "Spotlight Search", "box": (800, 300, 900, 60)})
+    await s.handle(ws, {"id": "1", "verb": "key", "params": {"combo": "super+space"}})
+    r = ws.sent[-1]
+    assert r["ok"] and r["pixels_changed"] is False and r["elements_changed"] is True
+    assert r["changed"] is True
+    assert any(e["label"] == "Spotlight Search" for e in r["elements"])
+    # nothing moves at all: both signals say no
+    b.key = lambda combo: None
+    await s.handle(ws, {"id": "2", "verb": "key", "params": {"combo": "Escape"}})
+    r = ws.sent[-1]
+    assert r["changed"] is False and r["elements_changed"] is False
+    # the pre-action thumbnail is the one right before the action; the
+    # comparison is against the settled frame, not the first capture
+    b.thumbs = [b"PRE", b"MID", b"END", b"END"]
+    b.key = lambda combo: None
+    await s.handle(ws, {"id": "3", "verb": "key",
+                        "params": {"combo": "Escape", "screenshot_after": False}})
+    r = ws.sent[-1]
+    assert r["pixels_changed"] is True and r["changed"] is True and "image" not in r
+    assert "elements_changed" in r                   # the walk ran without a shot too
+
+
 async def test_wait_and_drag(cfg, monkeypatch):
     monkeypatch.setattr(jd, "SETTLE_S", 0)
     monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)

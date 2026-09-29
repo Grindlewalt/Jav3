@@ -56,6 +56,7 @@ import argparse
 import asyncio
 import base64
 import getpass
+import hashlib
 import json
 import os
 import platform
@@ -84,7 +85,9 @@ LONG_EDGE = 1280          # screenshots are downscaled to this long edge
 SETTLE_S = 0.3            # settle floor after an input action (A.4 minimum)
 SETTLE_MAX_S = 3.0        # settle ceiling: a clock or a video never "settles"
 SETTLE_POLL_S = 0.08      # between thumbnails while settling
-THUMB_EDGE = 64           # settle compares thumbnails this big (long edge)
+THUMB_EDGE = 160          # settle compares thumbnails this big (long edge): at 64
+                          # a translucent overlay (Spotlight) was a handful of pixels
+PIXEL_TOL = 8             # grey levels a thumbnail pixel may move and still "match"
 ZOOM_MAX = 3.0            # a zoom upscales at most this much over native pixels
 ELEMENTS_BUDGET_S = 1.5   # the accessibility walk never blocks a screenshot longer
 ELEMENTS_CAP = 400
@@ -442,8 +445,9 @@ def decode_thumb(data: bytes) -> tuple[int, int, bytes] | None:
 
 def thumbs_match(a: bytes | None, b: bytes | None) -> bool:
     """Same screen, for settle's purposes. Decodable thumbnails (raw pixels)
-    match when at most 1 in 400 pixels differ by more than 24 grey levels, so
-    a blinking caret does not keep the screen "changing"; anything else is
+    match when at most 1 in 400 pixels differ by more than PIXEL_TOL grey
+    levels, so a blinking caret does not keep the screen "changing" but a
+    dim overlay on a dark window does count; anything else is
     byte-equal (a JPEG of the same pixels is the same bytes, but a caret blink
     reads as a change — the SETTLE_MAX_S ceiling bounds that)."""
     if a is None or b is None:
@@ -454,7 +458,7 @@ def thumbs_match(a: bytes | None, b: bytes | None) -> bool:
     if not da or not db or da[:2] != db[:2]:
         return False
     n = len(da[2])
-    diff = sum(1 for p, q in zip(da[2], db[2]) if abs(p - q) > 24)
+    diff = sum(1 for p, q in zip(da[2], db[2]) if abs(p - q) > PIXEL_TOL)
     return diff <= max(1, n // 400)
 
 
@@ -564,6 +568,16 @@ def walk_tree(roots, read, clip: tuple, deadline: float, *,
             for c in reversed(list(info.get("children") or ())):
                 stack.append((c, depth + 1, owner, owner_depth))
     return out, False
+
+
+def elements_sig(els: list[dict]) -> str:
+    """What the element list says, independent of order and position: the
+    count and the multiset of (role, label). Two frames with the same sig
+    show the same controls."""
+    h = hashlib.sha256(str(len(els)).encode())
+    for k in sorted(f"{e.get('role')}\x1f{e.get('label')}" for e in els):
+        h.update(b"\x1e" + k.encode(errors="replace"))
+    return h.hexdigest()[:16]
 
 
 def build_elements(raw: list[dict], frame: Frame, src: str) -> list[dict]:
@@ -2397,7 +2411,8 @@ class Session:
                 del out["changed"]
             out.update(self._auto_shot(f))
             return out
-        before = self._thumb(f)
+        sig_before = self._sig(f)
+        before = self._thumb(f)           # the last thing before the action itself
         if verb in ("move", "click") or (verb == "scroll" and "x" in p):
             self.b.move(*f.to_screen(p["x"], p["y"]))
         if verb == "click":
@@ -2418,9 +2433,22 @@ class Session:
                 subprocess.Popen(self.apps[p["app"]], shell=False, start_new_session=True,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         changed, ms = self.settle(before, floor=SETTLE_S * (3 if verb == "open" else 1))
-        out = {"ok": True, "text": f"{verb} done", "changed": changed, "settled_ms": ms}
-        if changed is None:
-            del out["changed"]
+        # the post-action comparisons use the SETTLED screen: the auto-shot
+        # (taken now) or, without one, a fresh walk
+        shot = self._auto_shot(f) if p.get("screenshot_after") else None
+        els_changed = None
+        if sig_before is not None:
+            sig_after = self._sig_of(shot) if shot is not None else self._sig(f)
+            if sig_after is not None:
+                els_changed = sig_after != sig_before
+        out = {"ok": True, "text": f"{verb} done", "settled_ms": ms}
+        if changed is not None:
+            out["pixels_changed"] = changed
+        if els_changed is not None:
+            out["elements_changed"] = els_changed
+        if changed is not None or els_changed is not None:
+            out["changed"] = bool(changed) or bool(els_changed)
+        changed = out.get("changed")
         if verb == "type":
             why = typed_check(p["text"], self._focus(), changed)
             if why:
@@ -2428,9 +2456,26 @@ class Session:
                     why += (" (secure keyboard entry is on in another app, which "
                             "blocks typed keys)")
                 out.update(ok=False, err=why)
-        if p.get("screenshot_after") or not out["ok"]:
-            out.update(self._auto_shot(f))
+                shot = shot or self._auto_shot(f)     # the model sees where it went
+        if shot is not None:
+            out.update(shot)
         return out
+
+    def _sig(self, frame: Frame | None) -> str | None:
+        """elements_sig of what the tree shows in `frame` now; None when there
+        is no tree or the walk was partial (a cut list proves nothing)."""
+        if frame is None:
+            return None
+        try:
+            return self._sig_of(self._elements(frame))
+        except Exception:  # noqa: BLE001 — a second signal only
+            return None
+
+    @staticmethod
+    def _sig_of(res: dict) -> str | None:
+        if res.get("elements_src", "none") == "none" or res.get("elements_note"):
+            return None
+        return elements_sig(res.get("elements") or [])
 
     def _focus(self) -> dict | None:
         """The focused element, from the element source; None = cannot tell."""

@@ -935,6 +935,18 @@ async def test_wait_and_drag(env):
         await fd.stop()
 
 
+async def test_changed_by_elements_only_is_named(env):
+    fd = await _nav(env, changed=True, pixels_changed=False, elements_changed=True)
+    try:
+        await _tool("desk_screenshot")()
+        assert "changed: yes (elements), settled in 420 ms" in await _tool("desk_key")(
+            combo="super+space")
+        fd.answer = rich(changed=True, pixels_changed=True, elements_changed=True)
+        assert "changed: yes, settled in 420 ms" in await _tool("desk_key")(combo="Escape")
+    finally:
+        await fd.stop()
+
+
 async def test_type_that_did_not_land_is_an_error_with_the_screen(env):
     why = ('typed text did not appear in the focused field ("textfield Spotlight '
            'Search") — click the field first, then type')

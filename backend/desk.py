@@ -23,7 +23,7 @@ Wire protocol (JSON text frames, `type` on every one):
                    elements?:[{id, role, label, x, y, w, h, src, value?,
                                focused?, enabled?}],
                    elements_src?, elements_note?, cursor?:{x,y},
-                   changed?, settled_ms?}
+                   changed?, pixels_changed?, elements_changed?, settled_ms?}
     S->C kill     {reason}              Stop / revoke: drop input now
     C->S ping  -> S->C pong             every 20 s; silent 60 s = dropped
 
@@ -899,8 +899,16 @@ def _element_line(e: dict, w: int, h: int) -> str:
     return s
 
 
+def changed_line(changed: bool, elements_only: bool = False) -> str:
+    """`changed: yes` / `no`; `yes (elements)` when the pixels compared equal
+    but the element list moved (a dim overlay, a list that re-rendered)."""
+    return f"changed: {'yes' if changed else 'no'}" + (
+        " (elements)" if changed and elements_only else "")
+
+
 def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None = None,
-                 settled_ms: int | None = None, asked_elements: bool = True) -> str:
+                 settled_ms: int | None = None, asked_elements: bool = True,
+                 elements_only: bool = False) -> str:
     """The frame as text for the model (contract B): where it is, the cursor,
     the numbered elements (in-view first, capped), and — after an input verb —
     whether the screen changed."""
@@ -940,7 +948,7 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
         why = f.get("note") or "this computer reported none"
         lines.append(f"(no elements: {why} — click by coordinates)")
     if changed is not None:
-        s = f"changed: {'yes' if changed else 'no'}"
+        s = changed_line(changed, elements_only)
         if settled_ms is not None:
             s += f", settled in {settled_ms} ms"
         lines.append(s)
@@ -1147,6 +1155,8 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     # have a before. On a plain screenshot it would be noise.
     changed = (res.get("changed") if isinstance(res.get("changed"), bool)
                and verb != "screenshot" else None)
+    elements_only = (changed is True and res.get("elements_changed") is True
+                     and res.get("pixels_changed") is False)
     settled = res.get("settled_ms")
     settled = int(settled) if _isnum(settled) and 0 <= settled <= 600_000 else None
     prev_hash = (d.frame or {}).get("hash")
@@ -1162,11 +1172,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     head.append(text[:2000] or f"{verb} done")
     if f is None:
         if changed is not None:
-            head.append(f"changed: {'yes' if changed else 'no'}")
+            head.append(changed_line(changed, elements_only))
         return "\n".join(head)
     body = render_frame(d, f, same=verb == "screenshot" and prev_hash == f["hash"],
                         changed=changed, settled_ms=settled,
-                        asked_elements=p.get("elements", True))
+                        asked_elements=p.get("elements", True), elements_only=elements_only)
     return imageresult.with_inline(
         "\n".join([*head, body, f"[{d.name}: screenshot {img['w']}x{img['h']} attached]"]),
         b64=img["b64"], mime=img["mime"], caption=_caption(d, img))
