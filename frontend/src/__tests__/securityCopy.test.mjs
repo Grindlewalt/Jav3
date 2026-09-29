@@ -4,7 +4,7 @@ import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, AUTO_REVIEW_LEDE,
   PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
   askAge, askKindText, decidedText, dockerLead, dockerMemoryUnlimited, faultText, ledeFor, plural,
-  postureItems, ramLabel, secretChecklist, tallyLine,
+  postureItems, ramLabel, secretChecklist, tallyLine, variantBuilds, variantSource,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -138,5 +138,16 @@ assert.equal(items.find((i) => i.label === 'Auto-allow').tone, 'warn')
 assert.equal(items.some((i) => i.label === 'Auto review'), false)
 assert.deepEqual(postureItems({ profiles: null, auto: null, reviewer: null }), [])
 assert.equal(postureItems({ profiles: [{ ...prof, network_off: true }] })[0].value, 'network off')
+
+// WEB-16: a variant with no parent is built on the base image, never "from" nothing at all;
+// `main` says it runs the base image; others that were never built say so
+assert.equal(variantSource({ from: null }), 'built directly on the base image')
+assert.equal(variantSource({ from: 'main' }), 'built on main')
+assert.equal(variantBuilds({ name: 'main', versions: [] }, 'base-v4'),
+  'runs the base image base-v4 with nothing added, so it has no builds of its own')
+assert.match(variantBuilds({ name: 'main', versions: [] }), /^runs the base image with nothing added/)
+assert.equal(variantBuilds({ name: 'dev', versions: [] }, 'base-v4'), 'never built')
+assert.equal(variantBuilds({ name: 'main', versions: [], layer_packages: ['ripgrep'] }), 'never built')
+assert.equal(variantBuilds({ name: 'dev', versions: [{ version: 1 }] }), null)
 
 console.log('securityCopy ok')

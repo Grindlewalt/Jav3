@@ -5,7 +5,9 @@ import Tabs from '../components/Tabs.jsx'
 import { Button, EmptyState, Input, Modal, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
-import { VMS_LEDES, dockerMemoryUnlimited, ledeFor, ramLabel } from '../securityCopy.js'
+import {
+  NEEDS_BUILD_WHY, VMS_LEDES, dockerMemoryUnlimited, ledeFor, ramLabel, variantBuilds, variantSource,
+} from '../securityCopy.js'
 import { ago, ts } from '../format.js'
 import {
   boxEvents, cleanLeftovers, destroyBox, followBoxes, listBoxes, listLeftovers, nukeShared,
@@ -592,6 +594,8 @@ export function Images() {
   const [bs, setBs] = useState(null)       // the build panel: logic.buildState
   const [dlg, setDlg] = useState(null)
   const [log, setLog] = useState(null)     // {variant, version}: the build log dialog
+  const [base, setBase] = useState(null)     // the base image's status (BaseImage and `main`)
+  useEffect(() => { vmStatus().then(setBase).catch(() => setBase(null)) }, [])
 
   // seed from the REST read; the `vm-images` topic on the shared stream
   // carries the rest (start, boot, log lines, done, resolved)
@@ -614,7 +618,7 @@ export function Images() {
 
   return (
     <div className="bx-page">
-      <BaseImage onLog={() => setLog({ variant: 'base', version: null })} />
+      <BaseImage s={base} onLog={() => setLog({ variant: 'base', version: null })} />
       {unavailable && <Unavailable what="The image manager" />}
       <LoadError error={error} />
       {bs && (bs.running || bs.last || bs.log.length > 0) && (
@@ -623,7 +627,7 @@ export function Images() {
         <div className="sbx-sec-head"><h3>Variants</h3>
           <span className="sec-count">{data?.variants.length ?? '…'}</span></div>
         {(data?.variants || []).map((v) => (
-          <Variant key={v.name} v={v} building={building}
+          <Variant key={v.name} v={v} building={building} baseVersion={base?.image_version}
                    onBuild={() => setDlg(v)}
                    onLog={(version) => setLog({ variant: v.name, version })} />
         ))}
@@ -680,7 +684,7 @@ function BuildPanel({ bs, onLog }) {
   )
 }
 
-function Variant({ v, building, onBuild, onLog }) {
+function Variant({ v, building, baseVersion, onBuild, onLog }) {
   const versions = v.versions || []
   const lb = v.last_build
   const [docker, setDocker] = useState(null)
@@ -693,13 +697,13 @@ function Variant({ v, building, onBuild, onLog }) {
       <div className="bx-variant-head">
         <b className="mono">{v.name}</b>
         {v.builtin && <Tag>built-in</Tag>}
-        {v.needs_build && <Tag tone="pending" title="its recipe changed since the active version was built">
-          needs a build</Tag>}
-        <span className="dim small">from {v.from}</span>
+        {v.needs_build && <Tag tone="pending" title={NEEDS_BUILD_WHY}>needs a build</Tag>}
+        <span className="dim small">{variantSource(v)}</span>
         {v.min_mem_mb ? <span className="dim small">· needs ≥ {mb(v.min_mem_mb)}</span> : null}
         <span className="grow" />
         <Button variant="ghost" disabled={building} onClick={onBuild}>Build new version</Button>
       </div>
+      {v.needs_build && <div className="dim small">Needs a build: {NEEDS_BUILD_WHY}.</div>}
       <div className="small bx-used">used by: <ProjectList slugs={v.used_by} empty="no project" /></div>
       <div className="small bx-lastbuild">
         {lb
@@ -724,7 +728,7 @@ function Variant({ v, building, onBuild, onLog }) {
         {docker?.dockerfile != null && <pre className="mono small">{docker.dockerfile}</pre>}
       </details>
       {versions.length === 0
-        ? <div className="dim small">never built</div>
+        ? <div className="dim small">{variantBuilds(v, baseVersion)}</div>
         : (
           <ul className="staged-list rev-list bx-versions">
             {versions.map((x) => (
@@ -750,12 +754,10 @@ function Variant({ v, building, onBuild, onLog }) {
 }
 
 // The shared guest's golden image and its rebuild, kept from the old VM chip.
-function BaseImage({ onLog }) {
-  const [s, setS] = useState(null)
+function BaseImage({ s, onLog }) {
   const [busy, setBusy] = useState(false)
   const [hasLog, setHasLog] = useState(false)   // a rebuild ran since the app started
   const ask = useAsk()
-  useEffect(() => { vmStatus().then(setS).catch(() => setS(null)) }, [])
   useEffect(() => { imageLog('base').then(() => setHasLog(true)).catch(() => setHasLog(false)) }, [busy])
   if (!s) return null
   async function rebuild() {

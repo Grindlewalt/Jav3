@@ -284,3 +284,20 @@ export function postureItems({ profiles, auto, reviewer }) {
   }
   return items
 }
+
+// ---- the Images tab (WEB-16) ------------------------------------------------------------
+// A variant recipe's `from none` reaches the page as from: null. It is not
+// "from nothing": it sits directly on the base image, and `main` is that image
+// with nothing added, which is why it has no builds of its own.
+
+export const variantSource = (v) => (v?.from ? `built on ${v.from}` : 'built directly on the base image')
+
+export function variantBuilds(v, baseVersion) {
+  if ((v?.versions || []).length) return null
+  if (v?.name === 'main' && !(v.layer_packages || []).length) {
+    return `runs the base image${baseVersion ? ` ${baseVersion}` : ''} with nothing added, so it has no builds of its own`
+  }
+  return 'never built'
+}
+
+export const NEEDS_BUILD_WHY = 'its recipe changed since the active version was built'
