@@ -91,8 +91,10 @@ THUMB_EDGE = 160          # settle compares thumbnails this big (long edge): at 
 PIXEL_TOL = 8             # grey levels a thumbnail pixel may move and still "match"
 ZOOM_MAX = 3.0            # a zoom upscales at most this much over native pixels
 ELEMENTS_BUDGET_S = 1.5   # the accessibility walk never blocks a screenshot longer
-PRE_REUSE_S = 2.0         # an input verb reuses the last response's walk + thumbnail
-                          # as its "before" when they are younger than this
+PRE_REUSE_S = 3.0         # an input verb reuses the last response's walk + thumbnail
+                          # as its "before" when they are younger than this. 3 s, not
+                          # 2: in the live trial the gaps between actions were 2.1-2.5 s,
+                          # so a 2 s window never applied
 ELEMENTS_CAP = 400
 ELEMENTS_DEPTH = 12
 ROW_PX = 40               # reading order: rows of this many image px, then x
