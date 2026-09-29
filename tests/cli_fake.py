@@ -69,6 +69,7 @@ class FakeServer:
         self.answer_status = 200
         self.local_info: dict | None = None      # what /info says about a /local chat
         self.local_results: list[dict] = []
+        self.perm_puts: list[dict] = []
         self.running: list[int] = []
         self.calls: list[tuple[str, str]] = []
 
@@ -136,6 +137,9 @@ class FakeServer:
             self.messages.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
         if path.endswith("/permission_mode"):
+            if method == "PUT":
+                self.perm_puts.append(json.loads(request.content))
+                return httpx.Response(200, json={"mode": self.perm_puts[-1]["mode"]})
             return httpx.Response(200, json={"mode": "yolo"})
         return httpx.Response(404, json={"detail": f"nope: {path}"})
 

@@ -7155,6 +7155,7 @@ def build_tui(base: str, token: str, **kw):
                     "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
                     "[$text]ctrl+x l[/]    [$text-muted]sessions[/]\n"
                     "[$text]ctrl+x m[/]    [$text-muted]models[/]\n"
+                    "[$text]ctrl+x u[/]    [$text-muted]permissions: make agents ask first[/]\n"
                     "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
             show = self.sidebar_shown()        # hidden unless the operator opened it
             self.query_one("#sidebar").display = show
@@ -7384,6 +7385,7 @@ def build_tui(base: str, token: str, **kw):
                     message += "\n\n" + "\n\n".join(self.attachments)
                     self.attachments = []
                 self.last_user = text
+                await self._explain_permissions()
                 body = self._body(message)
                 self.turn.local = bool(body.get("local"))
                 await self._post(body)
@@ -7638,10 +7640,19 @@ def build_tui(base: str, token: str, **kw):
         # permission modes (backend/permissions.py): shift+tab cycles, stored per
         # conversation; a chat not created yet sends it with its first message
         PERM_MODES = ("yolo", "auto", "ask")
-        PERM_HINT = {"yolo": "everything runs in the VM without asking",
+        PERM_HINT = {"yolo": "everything runs in the VM without asking (the default)",
                      "auto": "a cheap judge reviews each write/run; risky ones ask you",
                      "ask": "every write/run asks you first"}
         perm_mode = "yolo"
+
+        async def _explain_permissions(self) -> None:
+            """Once, the first time a turn starts with the default: what the chip in
+            the prompt's corner means and how to change it."""
+            if self.perm_mode != "yolo" or self._load_settings().get("perm_explained"):
+                return
+            self._save_settings(perm_explained=True)
+            await self.note("permissions: yolo — agents run in the VM without asking. "
+                            "shift+tab or /permissions makes them ask first.")
 
         def _perm_label(self) -> str:
             col = {"yolo": "$text-muted", "auto": "$accent", "ask": "$warning"}[self.perm_mode]
@@ -7649,9 +7660,29 @@ def build_tui(base: str, token: str, **kw):
 
         def cycle_permission(self) -> None:
             modes = self.PERM_MODES
-            self.perm_mode = modes[(modes.index(self.perm_mode) + 1) % len(modes)]
+            self.set_permission(modes[(modes.index(self.perm_mode) + 1) % len(modes)])
+
+        def set_permission(self, mode: str) -> None:
+            self.perm_mode = mode
+            self._save_settings(perm_explained=True)
             self.refresh_chrome()
             self.run_worker(self._save_perm_mode(self.cid, self.perm_mode), group="perm")
+
+        async def c_permissions(self, arg: str) -> None:
+            """/permissions [yolo|auto|ask]: whether agents ask before they write or
+            run something. shift+tab cycles the same three from the prompt."""
+            if not arg:
+                rows = [(m, f"{m}  (the default)" if m == "yolo" else m, self.PERM_HINT[m]
+                         .replace(" (the default)", "")) for m in self.PERM_MODES]
+                arg = await self.pick("Permissions", rows, self.perm_mode,
+                                      hint="shift+tab cycles these · set per chat") or ""
+                if not arg:
+                    return
+            mode = arg.strip().lower()
+            if mode not in self.PERM_MODES:
+                raise CliError(f"permissions: {arg!r} is not one of "
+                               f"{', '.join(self.PERM_MODES)}")
+            self.set_permission(mode)
 
         async def _save_perm_mode(self, cid, mode: str) -> None:
             if cid is not None and not self.ephemeral:
@@ -8311,6 +8342,10 @@ def build_tui(base: str, token: str, **kw):
                                   "import custom themes", "[name|create|export [path]|"
                                   "import <path>]",
                                   takes_arg=True, busy_ok=True, leader="t"),
+                "permissions": Command(self.c_permissions, "ask before agents write or run "
+                                       "(yolo · auto · ask); shift+tab cycles",
+                                       "[yolo|auto|ask]", takes_arg=True, busy_ok=True,
+                                       leader="u"),
                 "temp": Command(self.c_temp, "toggle temporary chats (nothing saved)"),
                 "local": Command(self.c_local, "toggle local chats (files and shell here, "
                                  "in this directory)"),
@@ -8371,7 +8406,8 @@ def build_tui(base: str, token: str, **kw):
                                 ("providers", "provider"),
                                 ("orchestrate", "orchestration"),
                                 ("review", "security"),
-                                ("stop-project", "stop-a")):
+                                ("stop-project", "stop-a"), ("perms", "permissions"),
+                                ("mode", "permissions")):
                 c[alias] = c[name]
             return c
 
@@ -8414,6 +8450,8 @@ def build_tui(base: str, token: str, **kw):
                         ("default", "default <format> [location]"),
                         ("svg", "colours, opens in a browser"), ("txt", "plain text"),
                         ("png", "needs cairosvg")]
+            if fn == self.c_permissions:
+                return [(m, self.PERM_HINT[m]) for m in self.PERM_MODES]
             if fn == self.c_login:
                 return [("password", "full access"), ("line", "chat only")]
             if fn == self.c_security:
@@ -8441,6 +8479,8 @@ def build_tui(base: str, token: str, **kw):
             lines += ["", "## Keys", "", "| key | |", "|---|---|"]
             for k, v in [("enter", "send (while a turn runs: the agent gets it at its "
                                    "next step)"),
+                         ("shift+tab", "permissions: yolo (the default: agents run in the VM "
+                                       "without asking) → auto → ask; /permissions picks"),
                          ("← (empty prompt)", "agents screen: everything working, "
                                               "across projects"),
                          ("/security (ctrl+x v)", "queue · network · logs · secrets · "
