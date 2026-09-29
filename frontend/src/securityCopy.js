@@ -27,8 +27,8 @@ export const SECURITY_LEDES = {
 
 export const VMS_LEDES = {
   '/vms': 'Every box Jav3 runs: the shared box that chat turns use, project boxes, '
-    + 'service boxes and image builders. Some run as virtual machines, some as Docker '
-    + 'containers, which are less isolated.',
+    + 'service boxes and image builders. A box is a virtual machine or, where the server '
+    + 'allows it, a Docker container, which is less isolated.',
   '/vms/images': 'The disk images boxes start from. A variant adds packages on top of '
     + 'the base image; a box picks up a new version the next time it boots.',
   '/vms/catalogue': 'The history of package requests: what agents asked to install, '
@@ -217,4 +217,34 @@ export function askAge(seconds) {
   if (s < 5400) return `${Math.round(s / 60)} min ago`
   if (s < 172800) return `${Math.round(s / 3600)} h ago`
   return `${Math.round(s / 86400)} days ago`
+}
+
+// ---- the VMs page: Docker boxes and the warning wall (WEB-11) ------------------------
+
+// docker_runtime.NO_MEMORY_LIMIT: `docker run --memory` is ignored when the
+// kernel has the memory cgroup off (Raspberry Pi OS ships that way)
+const NO_MEMORY = /^no memory limits/i
+
+export const dockerMemoryUnlimited = (runtimes) => !!runtimes?.docker?.available
+  && (runtimes.docker.warnings || []).some((w) => NO_MEMORY.test(w))
+
+// "512 MB", or, where the limit is not enforced, what is true
+export const ramLabel = (memText, unlimited) =>
+  (unlimited ? `no limit (${memText} not enforced)` : memText)
+
+// The plain sentence that leads the runtime banner; the technical list goes
+// under "Details". Empty when there is nothing to warn about.
+export function dockerLead(docker) {
+  if (!docker?.available || !(docker.weak || (docker.warnings || []).length)) return ''
+  const parts = ['Docker boxes are less isolated than VMs: a container shares this '
+    + "machine's kernel."]
+  if ((docker.warnings || []).some((w) => NO_MEMORY.test(w))) {
+    parts.push("On this machine they can also use all of its RAM, because the kernel has "
+      + 'memory limits switched off.')
+  }
+  if (docker.weak) {
+    parts.push('Docker also runs without user separation, so something that broke out of '
+      + 'a container would have a real user\'s rights on the host.')
+  }
+  return parts.join(' ')
 }

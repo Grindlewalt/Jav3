@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, AUTO_REVIEW_LEDE,
   PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
-  askAge, askKindText, decidedText, faultText, ledeFor, plural, secretChecklist, tallyLine,
+  askAge, askKindText, decidedText, dockerLead, dockerMemoryUnlimited, faultText, ledeFor, plural,
+  ramLabel, secretChecklist, tallyLine,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -104,5 +105,24 @@ assert.equal(askAge(600), '10 min ago')
 assert.equal(askAge(7200), '2 h ago')
 assert.equal(askAge(3 * 86400), '3 days ago')
 assert.equal(askAge(undefined), 'just now')
+
+// WEB-11: a Docker box's RAM does not claim a limit the kernel ignores, and the banner
+// leads with a plain sentence
+const MEM = 'no memory limits: this kernel has the memory cgroup off, so a box can use all of the host\'s RAM. On a Raspberry Pi add \'cgroup_enable=memory\' to cmdline.txt and reboot'
+const rt = { docker: { available: true, weak: false, warnings: [MEM, 'no gVisor: the container shares the host kernel'] } }
+assert.equal(dockerMemoryUnlimited(rt), true)
+assert.equal(dockerMemoryUnlimited({ docker: { available: true, warnings: ['no gVisor'] } }), false)
+assert.equal(dockerMemoryUnlimited({ docker: { available: false, warnings: [MEM] } }), false)
+assert.equal(dockerMemoryUnlimited(undefined), false)
+assert.equal(ramLabel('512 MB', true), 'no limit (512 MB not enforced)')
+assert.equal(ramLabel('512 MB', false), '512 MB')
+const lead = dockerLead(rt.docker)
+assert.match(lead, /^Docker boxes are less isolated than VMs/)
+assert.match(lead, /use all of its RAM/)
+for (const jargon of ['gVisor', 'userns', 'uid', 'cgroup', 'cmdline']) assert.ok(!lead.includes(jargon), jargon)
+assert.doesNotMatch(dockerLead({ available: true, weak: false, warnings: ['no gVisor'] }), /RAM/)
+assert.match(dockerLead({ available: true, weak: true, warnings: [] }), /without user separation/)
+assert.equal(dockerLead({ available: true, weak: false, warnings: [] }), '')
+assert.equal(dockerLead({ available: false, weak: true, warnings: [MEM] }), '')
 
 console.log('securityCopy ok')

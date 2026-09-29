@@ -5,7 +5,7 @@ import Tabs from '../components/Tabs.jsx'
 import { Button, EmptyState, Input, Modal, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
-import { VMS_LEDES, ledeFor } from '../securityCopy.js'
+import { VMS_LEDES, dockerMemoryUnlimited, ledeFor, ramLabel } from '../securityCopy.js'
 import { ago, ts } from '../format.js'
 import {
   boxEvents, cleanLeftovers, destroyBox, followBoxes, listBoxes, listLeftovers, nukeShared,
@@ -76,6 +76,8 @@ export function Boxes() {
   const [histTick, setHistTick] = useState(0)
 
   const boxes = useMemo(() => sortBoxes(data?.boxes), [data])
+  // a Docker box's RAM figure is a request the kernel may not honour (WEB-11)
+  const noLimit = dockerMemoryUnlimited(data?.runtimes)
   const reloadLeft = left.reload
   // box_up / box_down / box_event on the shared stream: refetch (the poll is
   // the fallback); a history event also refreshes the open history
@@ -119,7 +121,7 @@ export function Boxes() {
           (<code>vm_boxes_enabled</code>): every project runs in the one shared box.</div>
       )}
 
-      <Budget data={data} />
+      <Budget data={data} noLimit={noLimit} />
       {data && !data.legacy && <RuntimeStatus runtimes={data.runtimes} />}
       {data?.idle && <div className="dim small bx-idle-policy">{idlePolicy(data.idle, data.enabled)}</div>}
 
@@ -143,6 +145,7 @@ export function Boxes() {
           )}
           {boxes.map((b) => (
             <BoxRow key={b.id} b={b} legacy={data?.legacy} open={open === b.id}
+                    unlimited={noLimit && b.runtime === 'docker'}
                     histTick={histTick}
                     onToggle={() => setOpen((o) => (o === b.id ? null : b.id))}
                     onVerb={(verb) => setDlg({ verb, box: b })} />
@@ -178,7 +181,7 @@ const STOPS_OTHER = { service: 'stays up (its services)', builder: 'when the bui
 // One box: where it runs, what it is doing, when the reaper acts on it, what
 // it costs, and its actions. Agent-supplied strings (titles, tool arguments,
 // errors) are text nodes.
-function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
+function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
   const up = b.state === 'running'
   const word = activityWord(b)
   const turns = doingNow(b)
@@ -231,7 +234,9 @@ function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
         <span role="cell"><RuntimeTag runtime={b.runtime} /></span>
         <span role="cell" className="small">
           <span className="mono">{b.image?.variant || 'main'}{b.image?.version ? ` v${String(b.image.version).replace(/^v/, '')}` : ''}</span>
-          <span className="dim"> · {mb(b.mem_mb)}</span>
+          <span className="dim" title={unlimited
+            ? 'the kernel on this machine ignores Docker memory limits, so this box can use all of the RAM'
+            : undefined}> · {ramLabel(mb(b.mem_mb), unlimited)}</span>
           {b.rss_bytes != null && <span className="dim"> ({bytes(b.rss_bytes)} used)</span>}
           {b.cpu_pct != null && <span className="dim"> · {b.cpu_pct}%</span>}
           {b.restart_needed && <Tag tone="pending" title="a newer image is waiting for its next boot">restart to update</Tag>}
@@ -350,7 +355,7 @@ function Leftovers({ data, error, onDone, onRefresh }) {
   )
 }
 
-function Budget({ data }) {
+function Budget({ data, noLimit }) {
   const b = data?.budget
   if (!data) return null
   const cap = b?.ram_mb_cap || 0
@@ -376,11 +381,16 @@ function Budget({ data }) {
       </div>
       <div className="bx-bar" role="img"
            aria-label={`${used} of ${scale} MB reserved`}>
-        {segs.map((s) => (
-          <span key={s.id} className={`bx-seg k-${s.kind}${s.running ? ' on' : ''}`}
-                style={{ width: `${Math.min(100, (s.mb / scale) * 100)}%` }}
-                title={`${s.id}: ${s.mb} MB${s.running ? '' : ' (reserved, stopped)'}`} />
-        ))}
+        {segs.map((s) => {
+          // a Docker box with no enforced limit is hatched: its MB is what was
+          // asked for, not what it is held to
+          const loose = noLimit && (data.boxes || []).find((x) => x.id === s.id)?.runtime === 'docker'
+          return (
+            <span key={s.id} className={`bx-seg k-${s.kind}${s.running ? ' on' : ''}${loose ? ' loose' : ''}`}
+                  style={{ width: `${Math.min(100, (s.mb / scale) * 100)}%` }}
+                  title={`${s.id}: ${loose ? `no limit (${s.mb} MB not enforced)` : `${s.mb} MB`}${s.running ? '' : ' (reserved, stopped)'}`} />
+          )
+        })}
       </div>
       <div className="bx-legend dim small">
         <span><i className="k-shared" /> shared</span>
@@ -388,6 +398,8 @@ function Budget({ data }) {
         <span><i className="k-service" /> service</span>
         <span><i className="k-builder" /> builder</span>
         <span>faded = reserved but stopped (every reservation counts)</span>
+        {noLimit && (data?.boxes || []).some((x) => x.runtime === 'docker')
+          && <span>hatched = Docker box with no enforced limit</span>}
       </div>
     </section>
   )
