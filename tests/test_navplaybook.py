@@ -48,6 +48,8 @@ def test_key_guidance_present():
               "browser_hover", "browser_screenshot_tab", "stale", "changed:",
               "secrets store", "untrusted"):
         assert s in browser, s
+    assert 'desk_wait(mode="stable")' in desk and 'mode="change" only' in desk
+    assert "latest result only" in desk and "If a screenshot fails" in desk
 
 
 def test_append_to():
