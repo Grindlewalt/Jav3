@@ -518,6 +518,26 @@ def _op_key() -> str | None:
     return f"conv:{cid}" if cid is not None else None
 
 
+CAPTURE_LOCKED_ERR = ("the screen could not be captured — it is probably locked or "
+                      "asleep; ask the operator to unlock it")
+# What a client that never sends locked / asleep reports when a capture is
+# refused by a lock screen or a sleeping display: "<tool> failed: <stderr>".
+# macOS screencapture says exactly the first; the Linux tools (grim, maim,
+# scrot, ImageMagick import) fail with these wordings when nothing can be read.
+_CAPTURE_TOOLS = ("screencapture", "grim", "maim", "scrot", "import", "gnome-screenshot")
+_CAPTURE_FAILS = ("could not create image from display", "screencopy", "failed to",
+                  "unable to", "can't grab", "cannot grab")
+
+
+def _capture_failure(err: str) -> str | None:
+    """The friendly sentence for a raw capture-tool failure, else None."""
+    low = err.strip().lower()
+    for tool in _CAPTURE_TOOLS:
+        if low.startswith(tool + " failed:") and any(f in low for f in _CAPTURE_FAILS):
+            return CAPTURE_LOCKED_ERR
+    return None
+
+
 def _lock_flag(msg: dict) -> bool | None:
     """True = locked, None = the client said "unknown" (an explicit null: a
     Linux box whose locker reports nothing), False = unlocked or never sent.
@@ -1214,7 +1234,8 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     err = res.get("err") if isinstance(res.get("err"), str) else ""
     await _audit(d, verb, ap, ok, None if ok else (err or "failed"))
     if not ok:
-        text = f"error: {(err or 'the computer refused')[:500]}"
+        text = (f"error: {_capture_failure(err)}" if _capture_failure(err)
+                else f"error: {(err or 'the computer refused')[:500]}")
         # a refusal ends here; a failed action that still carries the screen
         # (desk_type whose text did not appear) shows it under the error
         if verb not in INPUT_VERBS or _image(res) is None:

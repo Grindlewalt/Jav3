@@ -1106,3 +1106,29 @@ async def test_unknown_lock_state_is_not_refused(env):
         assert "1280x800" in imageresult.split(await _tool("desk_screenshot")())[0]
     finally:
         await fd.stop()
+
+
+async def test_old_client_capture_failure_reads_as_locked_or_asleep(env):
+    """A client that never sends locked/asleep still fails a capture with the
+    raw tool error; the server turns that into one sentence."""
+    fd = await FakeDesk(env["desk_tok"]).start()
+    want = ("error: the screen could not be captured — it is probably locked or "
+            "asleep; ask the operator to unlock it")
+    try:
+        await _grant(env, screen=True, input=True)
+        for raw in ("screencapture failed: could not create image from display 1",
+                    "grim failed: failed to create screencopy frame",
+                    "maim failed: Failed to grab the image"):
+            async def fail(m, raw=raw):
+                return {"ok": False, "err": raw}
+            fd.answer = fail
+            await asyncio.sleep(0.6)                 # the screenshot rate limit
+            assert (await _tool("desk_screenshot")()) == want
+        # any other client error is passed through untouched
+        async def other(m):
+            return {"ok": False, "err": "grim failed: no such output HDMI-9"}
+        fd.answer = other
+        await asyncio.sleep(0.6)
+        assert (await _tool("desk_screenshot")()) == "error: grim failed: no such output HDMI-9"
+    finally:
+        await fd.stop()
