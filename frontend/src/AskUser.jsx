@@ -43,7 +43,16 @@ function AskCard({ ev, cid, compact, onDone }) {
   const options = q.options || []
   const multi = !!q.multi_select
 
-  useEffect(() => { box.current?.focus() }, [])
+  // The card takes the keys when it appears, unless the reader is mid-sentence
+  // in a field: an ask that landed while they typed their next message used to
+  // swallow the rest of it (and Enter answered it).
+  useEffect(() => {
+    const a = document.activeElement
+    const typing = a && a !== document.body && a !== box.current
+      && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.isContentEditable)
+      && String(a.value ?? a.textContent ?? '').length > 0
+    if (!typing) box.current?.focus({ preventScroll: true })
+  }, [])
 
   async function submit(answers) {
     try {

@@ -4077,3 +4077,124 @@ a:has(> .nav-dot) { position: relative; }
   .bx-glance .bx-tr > .bx-actions { grid-column: 1 / -1; }
   .bx-glance .bx-tr > .bx-actions { justify-content: flex-start; }
 }
+/* running view (ToolActivity.jsx, TurnStatus.jsx, useFollow.js, JobTree.jsx)
+   Clarity while a turn streams: one-line tool rows, a steady status line, a
+   dock that carries the open question, a pill back to the newest, and rows
+   that do not slide the page about. */
+
+/* the thread clears the dock's real height (useDockHeight), not a guess */
+.chat-layout .thread {
+  padding-bottom: calc(var(--dock-h, 104px) + 22px + var(--sab)); }
+
+/* Rows enter with a fade only: the shared msg-in slides 10px up, and a run
+   that adds a row a second made the whole page tremble. */
+.tool-row { margin: 3px 0; border-radius: 8px; animation: tool-in 0.16s ease both; }
+@keyframes tool-in { from { opacity: 0; } }
+.tool-row-head { gap: 7px; padding: 3px 9px; min-height: 26px; }
+.tool-row-head.static { cursor: default; }
+.tool-row-head.static:hover { background: none; }
+.tool-title { flex-shrink: 0; white-space: nowrap; font-weight: 500;
+  color: color-mix(in srgb, var(--text) 82%, var(--dim)); }
+.tool-row.live .tool-title { color: var(--text); }
+.tool-arg { min-width: 0; flex: 0 1 auto; color: var(--dim);
+  font: 11.5px ui-monospace, Menlo, monospace; }
+.tool-ms { flex-shrink: 0; font-size: 11px; color: var(--dim);
+  font-variant-numeric: tabular-nums; }
+.tool-ms.live { color: var(--accent); }
+.tool-note { flex-shrink: 0; font-size: 11px; color: var(--dim);
+  font-variant-numeric: tabular-nums; }
+.tool-note.bad { color: var(--red); font-weight: 600; }
+.tool-stop { color: var(--dim); font-size: 11px; }
+.tool-row.stopped { border-style: dashed; }
+.tool-row.warn { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+/* a failed call is the one row that should be found at a glance: a red edge,
+   a tint, and its first line of error under it without opening anything */
+.tool-row.err {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  border-left: 3px solid var(--red);
+  background: color-mix(in srgb, var(--red) 8%, var(--bg-soft)); }
+.tool-row.err .tool-title { color: var(--red); }
+.tool-err-line { padding: 0 11px 5px 33px; font-size: 11.5px; color: var(--red);
+  opacity: 0.9; }
+.tool-row-head:focus-visible, .tool-fold-head:focus-visible, .steps-pill:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -2px; }
+.tool-more { margin: 2px 0 6px; padding: 3px 10px; font-size: 11px; }
+.tool-row-detail .tool-pre { max-height: 220px; }
+.job-row .run-tree { padding: 4px 8px 6px; }
+
+/* the finished, uneventful rows behind the newest, folded while it streams */
+.tool-fold { margin: 3px 0; }
+.tool-fold-head { display: flex; align-items: center; gap: 7px; padding: 2px 6px;
+  font-size: 12px; color: var(--dim); cursor: pointer; border-radius: 6px; }
+.tool-fold-head:hover { color: var(--text); }
+.tool-fold-head .chev { font-size: 15px; line-height: 1; }
+
+.steps-dim { color: var(--dim); }
+.steps-dim::before { content: '· '; }
+.steps-bad { color: var(--red); }
+.steps-bad::before { content: '· '; color: var(--dim); }
+
+/* A bubble that is streaming, or holds a run's rows, keeps a floor width:
+   shrink-wrapped, it widened with every label and every line and the text
+   under it jumped sideways. */
+.msg.assistant .bubble:has(.tool-row, .tool-fold, .activity-group, .typing) {
+  min-width: min(30rem, calc(100% - 43px)); }   /* 43 = avatar + gap */
+.msg-avatar.thinking + .bubble { min-width: min(30rem, calc(100% - 43px)); }
+
+/* the dock: what rides with the composer while a turn runs */
+.composer .turn-status, .composer .ask-card {
+  pointer-events: auto; position: relative; box-sizing: border-box;
+  max-width: 880px; margin: 0 auto 8px; }
+.composer .ask-card { margin-bottom: 10px; background: var(--panel);
+  max-height: min(46vh, 360px); overflow-y: auto;
+  box-shadow: 0 8px 28px rgb(var(--shadow-rgb) / 0.3); }
+.turn-status { display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 0 8px; font-size: 12px; color: var(--dim);
+  font-variant-numeric: tabular-nums; }
+.turn-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green); animation: pulse 1.6s ease-in-out infinite; }
+.turn-status.waiting .turn-status-dot { background: var(--amber); }
+.turn-status.waiting .turn-status-main { color: var(--amber); }
+.turn-status-main { flex-shrink: 0; color: color-mix(in srgb, var(--text) 85%, var(--dim));
+  white-space: nowrap; }
+.turn-status-bad { color: var(--red); }
+.turn-status-now { min-width: 0; margin-left: auto;
+  font: 11.5px ui-monospace, Menlo, monospace; }
+.turn-status.compact { margin: 0; padding: 0 2px; font-size: 11.5px; }
+@media (prefers-reduced-motion: reduce) {
+  .turn-status-dot { animation: none; }
+  .tool-row { animation: none; }
+}
+
+/* the way back to the newest, above the dock, when the reader scrolled up */
+.follow-pill {
+  pointer-events: auto; position: absolute; left: 50%; top: 0;
+  transform: translate(-50%, -100%); z-index: 4;
+  padding: 4px 13px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: var(--accent); color: var(--accent-ink); border: 0;
+  box-shadow: 0 4px 16px rgb(var(--shadow-rgb) / 0.35); }
+.follow-pill:hover:not(:disabled) { transform: translate(-50%, -100%);
+  filter: brightness(1.08); }
+.cb-msgs { position: relative; flex: 1; min-height: 0; display: flex;
+  flex-direction: column; }
+.cb-msgs .follow-pill { top: auto; bottom: 8px; transform: translateX(-50%); }
+.cb-msgs .follow-pill:hover:not(:disabled) { transform: translateX(-50%); }
+
+/* the toolbar wraps instead of squeezing the project chip to a dot when the
+   chat sits beside windows */
+.chat-toolbar { flex-wrap: wrap; row-gap: 4px; }
+.chat-toolbar > .chat-title, .chat-toolbar > .grow { flex: 1 1 140px; min-width: 0; }
+.chat-meta { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+.chat-meta .proj-pick { flex-shrink: 0; max-width: 100%; }
+
+/* job trees: how the job stands, and a failure that reads as one */
+.run-summary { padding: 0 2px 4px; }
+.run-live { color: var(--green); }
+.run-failed { color: var(--red); }
+.run-err { color: var(--red); font-size: 11.5px; min-width: 0; max-width: 45%; }
+
+/* plan panel: how the run stands */
+.plan-progress { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.plan-failed { color: var(--red); }
+.plan-item.running { box-shadow: inset 2px 0 0 var(--accent); }

@@ -172,13 +172,22 @@ export default function AgentOutputs() {
 
 function OutputCard({ o, owner, chatId, onOpenChat, onStop }) {
   const [transcript, setTranscript] = useState(null)
-  const loadTranscript = (e) => {
-    if (!e.currentTarget.open || transcript) return
-    api(`/api/conversations/${o.id}/messages`)
-      .then((r) => setTranscript((r.messages || [])
-        .filter((m) => m.role === 'user' || m.role === 'assistant')))
-      .catch(() => setTranscript([]))
-  }
+  const [opened, setOpened] = useState(false)
+  const loadedAt = useRef(null)
+  const load = () => api(`/api/conversations/${o.id}/messages`)
+    .then((r) => {
+      loadedAt.current = o.last_at
+      setTranscript((r.messages || [])
+        .filter((m) => m.role === 'user' || m.role === 'assistant'))
+    })
+    .catch(() => setTranscript((t) => t ?? []))
+  const loadTranscript = (e) => setOpened(e.currentTarget.open)
+  // An output that is still working grows its transcript; the one loaded when
+  // the fold was opened went stale under the reader. Reload it when the row
+  // says it changed (last_at moves), while it stays open.
+  useEffect(() => {
+    if (opened && loadedAt.current !== o.last_at) load()
+  }, [o.last_at, opened]) // eslint-disable-line
   return (
     <Card as="article" className={o.running ? 'output-card running' : 'output-card'}>
       <div className="output-head">

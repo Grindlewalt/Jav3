@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { resourceAllowed } from './mediaHosts.js'
@@ -21,11 +22,16 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (node.tagName?.toLowerCase() !== 'a') ['href', 'xlink:href'].forEach(strip)
 })
 
-export default function Md({ text }) {
-  const html = DOMPurify.sanitize(marked.parse(text || '', { breaks: true }), {
+// Parsed and sanitized once per text, and skipped outright when the text is
+// unchanged: a streaming reply re-renders its whole transcript on every
+// chunk, and every finished message used to be parsed again each time.
+function Md({ text }) {
+  const html = useMemo(() => DOMPurify.sanitize(marked.parse(text || '', { breaks: true }), {
     FORBID_TAGS: ['iframe', 'object', 'embed'],
     ADD_TAGS: ['video', 'audio', 'source', 'track'],
     ADD_ATTR: ['controls', 'loop', 'muted', 'playsinline', 'poster'],
-  })
+  }), [text])
   return <div className="md-body" dangerouslySetInnerHTML={{ __html: html }} />
 }
+
+export default memo(Md)

@@ -29,16 +29,29 @@ export default function PlanPanel({ slug, state, setState }) {
 
   useEffect(() => {
     if (!plan?.root_id || !running) return
-    // the head's job on the shared event stream, not a socket of its own
-    const unfollow = followRun(plan.root_id, (ev) => {
+    // the head's job on the shared event stream, not a socket of its own.
+    // `unfollow` is assigned after followRun returns; a callback that fires
+    // before that (a snapshot replayed at once) must not touch it yet.
+    let unfollow = null
+    unfollow = followRun(plan.root_id, (ev) => {
       if (ev.type === 'plan_item') {
         const { type, job_id, ...it } = ev
         setPlan((p) => p ? { ...p, items: p.items.map((x) => x.id === it.id ? { ...x, ...it } : x) } : p)
       }
-      if (ev.type === 'job_final') { unfollow(); load() }
+      if (ev.type === 'job_final') { unfollow?.(); load() }
     }, () => load())
-    return () => unfollow()
+    return () => unfollow?.()
   }, [plan?.root_id, running]) // eslint-disable-line
+
+  // While a run is live, look again every few seconds. The live events are the
+  // fast path, but they can only start once the head's id is known, and the
+  // response to Run comes back before it is: a panel that had missed both stayed
+  // on "draft / todo / Stop" after the run had long finished.
+  useEffect(() => {
+    if (!running) return undefined
+    const t = setInterval(load, plan?.root_id ? 10000 : 2500)
+    return () => clearInterval(t)
+  }, [running, plan?.root_id, slug]) // eslint-disable-line
 
   async function call(path, options) {
     setBusy(true)
@@ -60,6 +73,14 @@ export default function PlanPanel({ slug, state, setState }) {
   const run = () => post('/run', {})
   const stop = () => post('/stop')
   const todo = plan?.items.filter((it) => it.status === 'todo').length || 0
+  // how the run stands, at a glance: the list can be longer than the window
+  const tally = { running: 0, failed: 0, blocked: 0, finished: 0 }
+  for (const it of plan?.items || []) {
+    if (it.status === 'running') tally.running += 1
+    else if (it.status === 'failed') tally.failed += 1
+    else if (it.status === 'blocked') tally.blocked += 1
+    else if (it.status === 'done' || it.status === 'skipped') tally.finished += 1
+  }
 
   return (
     <div className="pane-col">
@@ -75,6 +96,13 @@ export default function PlanPanel({ slug, state, setState }) {
           <div className="row plan-head">
             <strong className="grow ellipsis" title={plan.title}>{plan.title || 'Plan'}</strong>
             <Tag tone={PLAN_TONE[plan.status]}>{plan.status}</Tag>
+            {plan.items.length > 0 && (
+              <span className="dim small plan-progress" title="items finished of all">
+                {tally.finished}/{plan.items.length} done
+                {tally.running > 0 && ` · ${tally.running} running`}
+                {tally.failed > 0 && <span className="plan-failed"> · {tally.failed} failed</span>}
+              </span>
+            )}
             {running
               ? <Button variant="ghost" onClick={stop} disabled={busy}>Stop</Button>
               : <Button onClick={() => run()} disabled={busy || !todo}>

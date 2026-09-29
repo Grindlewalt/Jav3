@@ -5,7 +5,10 @@ import { api, chatStream, tailStream } from '../api.js'
 import { NavSlotContext } from '../nav.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { isPhone, useIsPhone } from '../breakpoints.js'
-import { applyTurnEvent, finishTurn, MessageBody } from '../ToolActivity.jsx'
+import { MessageBody } from '../ToolActivity.jsx'
+import { activityMark, makeTurnFolder, newTurn } from '../turnEvents.js'
+import { useDockHeight, useFollow } from '../useFollow.js'
+import TurnStatus from '../TurnStatus.jsx'
 import { useAsk } from '../ask.jsx'
 import ModelPicker from '../ModelPicker.jsx'
 import { AskPanel, PermissionModeSelect, useOperatorAsks, usePermissionMode } from '../AskUser.jsx'
@@ -235,6 +238,14 @@ export default function Chat({
   const orbFrom = useRef(null)     // its rect at that moment; consumed by the fly-in
   const tailAbort = useRef(null)   // cancels a resume-tail when switching chats
   const liveId = useRef(null)      // id of the turn in flight
+  // Which chat this view is showing, as a counter: opening or leaving a chat
+  // bumps it, and a stream that started under an earlier value has been
+  // superseded. Without it a turn still streaming from chat A wrote its tokens,
+  // its final reply and its busy flag into whichever chat had been opened since.
+  const gen = useRef(0)
+  const dockRef = useRef(null)     // the composer's dock: status, asks, the bar
+  const folder = useRef(null)
+  if (!folder.current) folder.current = makeTurnFolder((fn) => setMessages(fn))
   // Read during render, before any effect: the persistence effect below fires
   // on mount with a null id and would clear the key before a restore effect
   // could read it.
@@ -305,12 +316,13 @@ export default function Chat({
     ], { duration: 620, easing: 'cubic-bezier(0.22, 0.9, 0.28, 1)' })
   }, [messages])
 
-  useEffect(() => {
-    // scroll only the message list, never the page (scrollIntoView walks
-    // every scrollable ancestor)
-    const box = scrollRef.current
-    if (box) box.scrollTop = box.scrollHeight
-  }, [messages])
+  // Follow the stream to the bottom unless the reader has scrolled up (then a
+  // "N new" pill brings them back). Only the message list scrolls, never the
+  // page (scrollIntoView walks every scrollable ancestor).
+  const follow = useFollow(scrollRef, { mark: activityMark(messages), resetKey: conversationId })
+  const followRun = follow.follow
+  useLayoutEffect(() => { followRun() }, [messages, followRun])
+  useDockHeight(dockRef)
 
   // the composer grows with the draft, up to the CSS max-height. Past one line
   // the pill relaxes into a rounded box — .multi is that threshold.
@@ -341,35 +353,39 @@ export default function Chat({
     glowRef.current?.style.setProperty('--gi', '0')
   }
 
-  // one handler for both paths: the live POST stream and a resumed tail.
-  // token/tool/tool_result fold into the streaming message's parts; final
-  // swaps in the reply with the activity collapsed above it.
-  function handleTurnEvent(ev) {
+  // One handler for both paths: the live POST stream and a resumed tail.
+  // token/tool/tool_result/job fold into the streaming message's parts (text
+  // tokens batched: turnEvents.makeTurnFolder); final swaps in the reply with
+  // the activity collapsed above it; an error keeps the run and appends itself.
+  // `mine` is the counter value the stream started under: once the view has
+  // moved to another chat (gen bumped) the stream is stale and says nothing.
+  function handleTurnEvent(ev, mine = gen.current) {
+    if (mine !== gen.current) return
     slash.onEvent(ev)
     asks.onEvent(ev)
     if (ev.type === 'start') {
       liveId.current = ev.conversation_id
       // temporary: never adopt the id, or the chat becomes a saved one
-      if (!temporary) setConversationId(ev.conversation_id)
+      if (!temporary) {
+        setConversationId(ev.conversation_id)
+        adoptConversation(ev.conversation_id)
+      }
     }
-    if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
-        return copy
-      })
-    if (ev.type === 'final')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
-        return copy
-      })
-    if (ev.type === 'error')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = { role: 'error', content: ev.message }
-        return copy
-      })
+    folder.current.handle(ev)
+  }
+
+  // A chat this turn just created is not in the list until the list is
+  // fetched, and until then everything that reads the chat's project from its
+  // row saw a chat that follows the loaded project: the windows beside the chat
+  // swapped to the WRONG project's board for the whole turn, and back when it
+  // ended. Give the row what the send asked for now, then fetch the real one.
+  function adoptConversation(id) {
+    setConversations((cs) => (cs.some((c) => c.id === id) ? cs : [{
+      id, summary: '', running: true,
+      project_slug: pendingMode === 'pin' ? (pendingProject || null) : null,
+      project_locked: pendingMode === 'follow' ? 0 : 1,
+    }, ...cs]))
+    refreshConvos()
   }
 
   // the phone list overlays the thread, so picking a chat should reveal it
@@ -377,13 +393,22 @@ export default function Chat({
     if (isPhone()) setSideOpen(false)
   }
 
-  async function openConversation(id, { resume = false } = {}) {
+  async function openConversation(id, { resume = false, attempt = 0 } = {}) {
     tailAbort.current?.abort()
+    folder.current.cancel()
+    const mine = ++gen.current
+    // the id answers and stops go to: it stayed on the chat that last STARTED a
+    // turn, so a question from the chat opened since was answered into the old one
+    liveId.current = id
     setTemporary(false)   // saved chats always persist
     if (!resume) closeSideOnPhone()
     setConversationId(id)
     setChatJobs([])
+    setBusy(false)        // an abandoned send or tail no longer speaks for this view
     const r = await api(`/api/conversations/${id}/messages`)
+    // a slow transcript for a chat the reader already left must not land over
+    // the one they went to
+    if (mine !== gen.current) return
     setMessages(r.messages)
     setChatJobs(r.jobs || [])
     if (!r.running) return
@@ -391,25 +416,52 @@ export default function Chat({
     // seeding the placeholder with the tool calls it already made
     setBusy(true)
     const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: seed }])
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true,
+                                parts: seed, t0: Date.now() }])
     const ctl = new AbortController()
     tailAbort.current = ctl
+    let settled = false
     try {
       await tailStream(`/api/chat/${id}/stream`, (ev) => {
         if (ev.type === 'idle') {
           // turn ended between the messages fetch and the tail — reload
-          api(`/api/conversations/${id}/messages`).then((r2) => setMessages(r2.messages))
+          settled = true
+          api(`/api/conversations/${id}/messages`).then((r2) => {
+            if (mine === gen.current) setMessages(r2.messages)
+          })
           return
         }
-        handleTurnEvent(ev)
+        if (ev.type === 'final' || ev.type === 'error') settled = true
+        handleTurnEvent(ev, mine)
       }, ctl.signal)
-      refreshConvos()
-    } catch { /* tail aborted or dropped; messages reload on next open */ }
+    } catch { /* tail aborted or dropped */ }
+    if (mine !== gen.current) return
+    folder.current.flush()
+    if (!settled && attempt < 3) {
+      // the stream ended without an ending, so the turn may well still be
+      // going (a dropped connection): look again rather than leave a spinner
+      // that never resolves
+      await new Promise((ok) => { setTimeout(ok, 800 * (attempt + 1)) })
+      if (mine === gen.current) openConversation(id, { resume: true, attempt: attempt + 1 })
+      return
+    }
+    if (!settled) {
+      // out of patience: show what is saved instead of a placeholder that
+      // would spin forever
+      try {
+        const r2 = await api(`/api/conversations/${id}/messages`)
+        if (mine === gen.current) setMessages(r2.messages)
+      } catch { /* offline: the placeholder stays until the next open */ }
+    }
     setBusy(false)
+    refreshConvos()
   }
 
   function newConversation() {
     tailAbort.current?.abort()
+    folder.current.cancel()
+    gen.current += 1
+    liveId.current = null
     setBusy(false)
     closeSideOnPhone()
     setConversationId(null)
@@ -498,11 +550,14 @@ export default function Chat({
     // before this turn unmounts it, so the avatar can fly in from there
     if (messages.length === 0 && orbRef.current)
       orbFrom.current = orbRef.current.getBoundingClientRect()
+    const mine = gen.current
+    let started = false   // the turn began (a `start` arrived)
+    let settled = false   // it ended (a `final` or `error` arrived)
     setBusy(true)
     // clear the bar NOW — the message visibly left; it comes back on failure
     if (!resend) setInput('')
-    setMessages((m) => [...m, { role: 'user', content: text },
-                        { role: 'assistant', content: '', streaming: true, parts: [] }])
+    setMessages((m) => [...m, ...newTurn(text)])
+    follow.jump()   // sending is a request to see the answer
     try {
       await chatStream(
         { message: text, conversation_id: conversationId,
@@ -511,29 +566,49 @@ export default function Chat({
           ...(conversationId ? {} : { project: pendingProject || null,
                                       project_mode: pendingMode, ...slash.newChatFields,
                                       permission_mode: permMode }) },
-        handleTurnEvent,
+        (ev) => {
+          if (ev.type === 'start') started = true
+          if (ev.type === 'final' || ev.type === 'error') settled = true
+          handleTurnEvent(ev, mine)
+        },
       )
-      api('/api/conversations').then((r) => setConversations(r.conversations))
-      // a turn may have launched research, a team or a plan run: refresh the
-      // Runs view's "this chat" list (a temporary chat has nothing to fetch)
-      const done = conversationId ?? liveId.current
-      if (done && !temporary) {
-        api(`/api/conversations/${done}/messages`)
-          .then((r) => setChatJobs(r.jobs || [])).catch(() => {})
-      }
     } catch (err) {
-      // drop the two optimistic messages
-      setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'turn_in_progress') {
+      if (mine !== gen.current) return   // the reader moved on; the turn runs regardless
+      folder.current.flush()
+      if (started && !err.status) {
+        // the connection dropped mid-turn: the turn is still running server-side
+        settled = false
+      } else {
+        // refused before anything streamed: drop the two optimistic messages
+        setMessages((m) => m.slice(0, -2))
         setInput(text)
         setMessages((m) => [...m, { role: 'error',
-          content: 'a turn is still running in this chat — wait for it to finish' }])
-      } else {
-        setInput(text)
-        setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
+          content: err.status === 409 && err.detail === 'turn_in_progress'
+            ? 'a turn is still running in this chat — wait for it to finish'
+            : (err.detail || String(err)) }])
+        setBusy(false)
+        return
       }
     }
+    if (mine !== gen.current) { refreshConvos(); return }
+    folder.current.flush()
+    if (!settled) {
+      // The stream ended without an ending (a dropped connection, a restart).
+      // Rather than leave a placeholder spinning, pick the turn back up by
+      // re-attaching; a temporary chat has nothing saved to re-attach to.
+      const id = conversationId ?? liveId.current
+      if (id && !temporary) { openConversation(id, { resume: true }); return }
+      folder.current.handle({ type: 'error', message: 'the connection dropped mid-turn' })
+    }
     setBusy(false)
+    api('/api/conversations').then((r) => setConversations(r.conversations))
+    // a turn may have launched research, a team or a plan run: refresh the
+    // Runs view's "this chat" list (a temporary chat has nothing to fetch)
+    const done = conversationId ?? liveId.current
+    if (done && !temporary) {
+      api(`/api/conversations/${done}/messages`)
+        .then((r) => setChatJobs(r.jobs || [])).catch(() => {})
+    }
   }
 
   // Swipe in from the left edge to open the chat list on a phone — the quick
@@ -724,10 +799,23 @@ export default function Chat({
             </div>
           )}
         </div>
-        <AskPanel asks={asks} cid={liveId.current ?? conversationId} />
-        <form className="composer" onSubmit={(e) => { e.preventDefault(); slash.submit() || send() }}>
+        {/* The dock: the composer floats over the bottom of the thread, and
+            what has to be seen while a turn runs rides with it: the steady
+            status line, an open question, the way back to the newest.
+            (Between the list and the composer, an open question sat UNDER the
+            composer's overlay, its buttons out of reach.) */}
+        <form className="composer" ref={dockRef}
+              onSubmit={(e) => { e.preventDefault(); slash.submit() || send() }}>
           <div className="composer-glow" ref={glowRef} />
           {slash.popup}
+          {!follow.pinned && (follow.away > 0 || busy) && !showRuns && messages.length > 0 && (
+            <button type="button" className="follow-pill" onClick={follow.jump}>
+              {follow.away > 0 ? `${follow.away} new` : 'latest'} <span aria-hidden="true">↓</span>
+            </button>
+          )}
+          <TurnStatus busy={busy} messages={messages} cid={liveId.current ?? conversationId}
+                      waiting={asks.asks.length > 0} />
+          <AskPanel asks={asks} cid={liveId.current ?? conversationId} />
           <div className={`composer-inner${multiline ? ' multi' : ''}`}>
             <textarea
               ref={inputRef}
