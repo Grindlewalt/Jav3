@@ -53,9 +53,27 @@ call_id = contextvars.ContextVar("jav3_registry_call_id", default=None)
 _DYNAMIC: dict[str, tuple[float, Callable[..., Awaitable[str]]]] = {}
 
 
+# A tool name is a folder name under tools/, nothing more. The name can come
+# from a guest (broker_dispatch forwards it verbatim), so an absolute path or a
+# `..` must never reach the join below: pathlib makes tools_dir / "/x" == "/x".
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
+
+
+def _handler_path(name: str) -> Path | None:
+    """tools/<name>/handler.py for a real tool folder (it has a TOOL.md), or
+    None for anything else: a bad name, or a path that resolves outside tools/."""
+    if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
+        return None
+    root = settings.tools_dir.resolve()
+    folder = (root / name).resolve()
+    if folder.parent != root or not (folder / "TOOL.md").is_file():
+        return None
+    return folder / "handler.py"
+
+
 def _load_dynamic(name: str) -> Callable[..., Awaitable[str]] | None:
-    path = settings.tools_dir / name / "handler.py"
-    if not path.is_file():
+    path = _handler_path(name)
+    if path is None or not path.is_file():
         return None
     mtime = path.stat().st_mtime
     cached = _DYNAMIC.get(name)
