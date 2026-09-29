@@ -666,6 +666,23 @@ class Settings(BaseSettings):
     egress_volume_min_bytes: int = 1_000_000  # ignore spikes below this (tiny-baseline noise)
     egress_beacon_min_hits: int = 6           # regular hits to one host before cadence is judged
     egress_beacon_cv_max: float = 0.15        # inter-arrival coefficient-of-variation below this = beacon
+    # Volume and cadence are judged over this span before the host's latest
+    # hit, not all history: summed forever, a daily 25 KB pip session crossed
+    # 1 MB after 40 days and cut files.pythonhosted.org (Pi, 2026-09-07), and
+    # a daily schedule is a perfect 86400 s "beacon". 6 beacon hits inside 6 h
+    # means a period of about an hour or less.
+    egress_anomaly_window_seconds: int = 6 * 3600
+
+    # --- Security notifications (backend/security.py) ---------------------
+    # A repeat of an unacknowledged event (same kind, project, cause and
+    # severity) inside this window bumps the row's count instead of adding a
+    # row and a ping (<= 0 turns coalescing off). Non-critical pings are then
+    # capped per kind: at most `per_kind` in any `window`. Critical events are
+    # never rate limited. The ping level itself (critical | approvals | all)
+    # is the operator's, in Settings -> Notifications (session_state).
+    security_coalesce_seconds: int = 24 * 3600
+    security_ping_per_kind: int = 3
+    security_ping_window_seconds: int = 600
 
     # --- Egress auto mode (backend/egress_auto.py) -------------------------
     # Off unless the operator flips it (globally or per project). A host it

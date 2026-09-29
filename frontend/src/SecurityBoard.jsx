@@ -182,6 +182,10 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
               <span className="mono">{ev.kind}</span>
               {ev.project_slug && <> · {ev.project_slug}</>}
               {ev.created_at && <> · {String(ev.created_at).replace('T', ' ').slice(0, 19)}</>}
+              {/* repeats were counted onto this row; the evidence is the first */}
+              {ev.count > 1 && (
+                <> · seen {ev.count}×{ev.last_seen
+                  && `, last ${String(ev.last_seen).replace('T', ' ').slice(0, 19)}`}</>)}
               {ev.acknowledged ? <> · acknowledged</> : null}
             </div>
           </div>

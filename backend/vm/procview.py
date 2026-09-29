@@ -96,6 +96,19 @@ BUILTIN_BASELINE: tuple[tuple[str, str], ...] = (
     ("*", "unattended-upgrades.service"),
     ("*", "apt-daily.service"),
     ("*", "apt-daily-upgrade.service"),
+    # stock Debian 13 timers (Persistent=true, so they catch up at every boot
+    # of a box that was off at their hour). On the Pi they were 111 of 121
+    # unexpected_process alerts in two days: apt-listchanges.service running
+    # python3, apt-get changelog, the apt https method and systemctl; plus
+    # fstrim and man-db. Timer-started services are never "enabled", so an
+    # image baseline does not list them either. Exact unit names again.
+    ("*", "apt-listchanges.service"),
+    ("*", "man-db.service"),
+    ("*", "fstrim.service"),
+    ("*", "logrotate.service"),
+    ("*", "dpkg-db-backup.service"),
+    ("*", "e2scrub_all.service"),
+    ("*", "e2scrub_reap.service"),
 )
 
 
@@ -354,7 +367,10 @@ def classify(snap: dict, box, baseline: Baseline,
     turn_box = box.kind in ("shared", "project")
     tags: dict[int, str] = {}
     for pid, p in procs.items():
-        if p["kthread"] or pid == self_pid:
+        # PID 1 is the box's own init: systemd in a VM (init.scope, already
+        # baselined), tini in a Docker box, where there is no unit to match
+        # (an alert per Docker box boot on the Pi). Nothing else can hold it.
+        if p["kthread"] or pid == self_pid or pid == 1:
             continue
         m = SVC_UNIT.match(p["unit"])
         if m:

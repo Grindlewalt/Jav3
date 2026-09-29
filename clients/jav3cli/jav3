@@ -3657,8 +3657,10 @@ def build_tui(base: str, token: str, **kw):
                                      "raw": {**q, "project_slug": slug},
                                      "ts": q.get("created_at") or ""})
             asks.sort(key=lambda x: x["ts"], reverse=True)
+            # a coalesced row (count > 1) sorts and reads by its latest repeat
             al = [{"type": "alert", "key": f"s{e.get('id')}", "raw": e,
-                   "ts": e.get("created_at") or ""}
+                   "ts": ((e.get("count") or 1) > 1 and e.get("last_seen")
+                          or e.get("created_at") or "")}
                   for e in alerts if not e.get("acknowledged")]
             al.sort(key=lambda x: x["ts"], reverse=True)
             al.sort(key=lambda x: SecurityScreen._rank(x["raw"]))
@@ -3933,9 +3935,12 @@ def build_tui(base: str, token: str, **kw):
                 mark = "[$text-muted]✓[/]" if acked else f"[{col}]●[/]"
                 proj = f" [$text-muted]⌂ {_esc(r['project_slug'])}[/]" if r.get(
                     "project_slug") else ""
+                # the same alert again while this row waited: counted on it
+                n = r.get("count") or 1
+                times = f" [b]×{n}[/]" if isinstance(n, int) and n > 1 else ""
                 text = _esc(_short(r.get("summary") or "", 90))
                 return (f"{mark} [$text-muted]{ts}[/] [{col} b]{sev[:4].upper():<4}[/] "
-                        f"[$secondary]{_esc(r.get('kind') or '?')}[/]{proj} "
+                        f"[$secondary]{_esc(r.get('kind') or '?')}[/]{times}{proj} "
                         + (f"[$text-muted]{text}[/]" if acked else text))
             if t == "net":
                 v = r.get("verdict") or "?"
@@ -3999,11 +4004,15 @@ def build_tui(base: str, token: str, **kw):
                 ack = (f"  [$text-muted]acknowledged {_esc(r.get('acknowledged_at') or '')}[/]"
                        if r.get("acknowledged") else "")
                 body = _detail_markup(r.get("detail"))
+                n = r.get("count") or 1
+                again = (f"\n[$text-muted]seen {n}× · last {_esc(r.get('last_seen') or '?')} "
+                         "· the evidence below is the first[/]"
+                         if isinstance(n, int) and n > 1 else "")
                 return (f"{head}[{col} b]{_esc(sev.upper())}[/] "
                         f"[$secondary]{_esc(r.get('kind') or '?')}[/] "
                         f"[$text-muted]#{r.get('id')} · {_esc(r.get('created_at') or '')}"
                         f" · {_esc(r.get('project_slug') or 'no project')}[/]{ack}\n"
-                        f"[b]{_esc(r.get('summary') or '')}[/]"
+                        f"[b]{_esc(r.get('summary') or '')}[/]{again}"
                         + (f"\n\n{body}" if body else ""))
             if t == "net":
                 return _esc(json.dumps(r, indent=2, sort_keys=True, default=str))
@@ -5561,6 +5570,7 @@ def build_tui(base: str, token: str, **kw):
             self.logged_in: bool | None = None    # None = not checked yet
             self.notices: list[tuple[float, str, str]] = []   # (time, kind, text), newest first
             self.unread = 0
+            self.crit_unread = 0                  # of those, critical security alerts
             self.options: dict = {}
             self.convs: list[dict] = []
             self.info: dict | None = None
@@ -5729,25 +5739,75 @@ def build_tui(base: str, token: str, **kw):
                                "(a device token from Settings → Add computer is chat only)")
 
         async def _notice_loop(self) -> None:
-            """The server's notice stream (agent runs the operator started
-            finishing elsewhere) -> notifications. Operator session only."""
+            """The server's one multiplexed stream, topics `notices` (agent runs
+            the operator started finishing elsewhere) and `security` (alerts,
+            of which only those the server marks `ping` notify) ->
+            notifications. Operator session only. A server without /api/events
+            answers 404 and the loop falls back to the notices stream alone."""
             backoff = 2.0
+            path = "/api/events?topics=notices,security"
             while is_session(self.token) and self.client is not None:
                 try:
-                    async with self.client.stream("GET", "/api/agents/notices/stream") as r:
+                    async with self.client.stream("GET", path) as r:
                         if r.status_code in (401, 403):
                             return
+                        if r.status_code == 404 and path.startswith("/api/events"):
+                            path = "/api/agents/notices/stream"
+                            continue
                         if r.status_code < 400:
                             backoff = 2.0
                             async for ev in aiter_sse(r.aiter_lines()):
+                                if "topic" in ev:          # /api/events wraps each one
+                                    ev = ev.get("event") or {}
                                 if ev.get("type") == "agent_run_done":
                                     self._agent_notice(ev)
                                 elif ev.get("type") == "storage_warning":
                                     self.push_notice("◆ " + _short(ev.get("summary") or "storage is filling up", 300), "warn")
+                                elif ev.get("type") == "security_event":
+                                    await self._security_notice(ev)
                 except (httpx.HTTPError, ValueError):
                     pass
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
+
+        async def _security_notice(self, ev: dict) -> None:
+            """A live security event. The server decides whether it pings
+            (backend/security.py, against Settings -> Notifications: critical
+            only / needs my approval / everything); an event without `ping`
+            (an older server) pings only when critical. A ping is a sidebar
+            notice and, with the sidebar hidden, a toast and the status-row
+            badge. A critical one also counts in its own red badge and, while
+            a turn of this chat or project runs, prints a red line in the chat.
+            Every string is the server's: plain text, never markup."""
+            crit = ev.get("severity") == "critical" or ev.get("tier") == "critical"
+            if not (ev["ping"] if "ping" in ev else crit):
+                return
+            proj = ev.get("project") or ev.get("project_slug")
+            n = ev.get("count") or 1
+            text = (f"{ev.get('kind') or 'alert'}{' ⌂ ' + str(proj) if proj else ''} "
+                    f"{_short(str(ev.get('summary') or ''), 140)}"
+                    + (f" (×{n})" if isinstance(n, int) and n > 1 else ""))
+            if crit and not self.sidebar_shown():
+                self.crit_unread += 1
+            self.push_notice(text, "error" if crit else "warn",
+                             timeout=20 if crit else 5)
+            if crit and self.busy and self.turn is not None and self._in_this_turn(ev, proj):
+                from textual.css.query import NoMatches
+                try:
+                    await self.mount_log(Note(_esc(f"security: {text} — /security to review"),
+                                              classes="error"))
+                except NoMatches:
+                    pass
+
+        def _in_this_turn(self, ev: dict, proj) -> bool:
+            """Does a live event belong to the turn on screen? Its conversation
+            is this chat, or its project is this chat's, or it has none (a
+            shared-box or host-wide alert)."""
+            d = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            cid = d.get("conversation_id")
+            if cid is not None and cid in (self.cid, getattr(self.turn, "cid", None)):
+                return True
+            return not proj or proj == self._project_label()
 
         def _agent_notice(self, ev: dict) -> None:
             who = ev.get("agent") or ev.get("slug") or "an agent"
@@ -5765,7 +5825,8 @@ def build_tui(base: str, token: str, **kw):
         def sidebar_shown(self) -> bool:
             return bool(self.sidebar_pref)
 
-        def push_notice(self, text: str, kind: str = "info", toast: bool = True) -> None:
+        def push_notice(self, text: str, kind: str = "info", toast: bool = True,
+                        timeout: float = 5) -> None:
             """Newest first, capped. With the sidebar hidden it also counts as
             unread (the badge in the status row) and shows as a toast."""
             from textual.css.query import NoMatches
@@ -5774,7 +5835,8 @@ def build_tui(base: str, token: str, **kw):
             if not self.sidebar_shown():
                 self.unread += 1
                 if toast:
-                    self.notify(text, timeout=5, severity={"error": "error", "warn": "warning"}
+                    self.notify(text, timeout=timeout,
+                                severity={"error": "error", "warn": "warning"}
                                 .get(kind, "information"))
             try:
                 self._refresh_sidebar()
@@ -6054,7 +6116,9 @@ def build_tui(base: str, token: str, **kw):
             else:
                 left.update("[$text-muted]enter send · ctrl+j newline · / commands · "
                             "@ file · ! shell[/]")
-            badge = (f"[$warning b]● {self.unread}[/] [$text-muted]ctrl+b[/]  "
+            # critical security alerts not yet seen get their own red count
+            crit = f"[$error b]✗ {self.crit_unread}[/] " if self.crit_unread else ""
+            badge = (f"{crit}[$warning b]● {self.unread}[/] [$text-muted]ctrl+b[/]  "
                      if self.unread else "")
             right.update(f"{badge}[$text-muted]ctrl+x leader · ctrl+p commands[/]")
 
@@ -6930,7 +6994,7 @@ def build_tui(base: str, token: str, **kw):
             shown = self.query_one("#sidebar").display
             self.sidebar_pref = not shown
             if self.sidebar_pref:
-                self.unread = 0
+                self.unread = self.crit_unread = 0
             self._save_settings(sidebar=self.sidebar_pref)
             self.refresh_chrome()
 

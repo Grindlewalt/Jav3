@@ -139,16 +139,20 @@ export function ReviewQueue({ slug }) {
     }
   }, [key]) // eslint-disable-line
 
-  // live security alerts prepend as they fire
+  // live security alerts prepend as they fire; a repeat (the server coalesced
+  // it onto a row still in the queue) only bumps that row's count
   useEffect(() => {
     return subscribeSse('/api/security/stream', (ev) => {
       if (ev.type !== 'security_event') return
       const proj = ev.project_slug || ev.project
       if (slug && proj !== slug) return
-      setAlerts((a) => a.some((x) => x.id === ev.id) ? a : [{
-        id: ev.id, kind: ev.kind, severity: ev.severity, project_slug: proj,
-        summary: ev.summary, detail: ev.detail, acknowledged: false,
-        created_at: ev.created_at }, ...a])
+      setAlerts((a) => a.some((x) => x.id === ev.id)
+        ? a.map((x) => (x.id === ev.id && ev.count
+          ? { ...x, count: ev.count, last_seen: new Date().toISOString() } : x))
+        : [{
+          id: ev.id, kind: ev.kind, severity: ev.severity, project_slug: proj,
+          summary: ev.summary, detail: ev.detail, acknowledged: false,
+          created_at: ev.created_at, count: ev.count || 1, tier: ev.tier }, ...a])
     })
   }, [slug])
 
@@ -416,9 +420,13 @@ function AlertRow({ a, onAck, onOpen }) {
           <span className={`tag sev-${sev}-tag`}>{a.severity}</span>
           <span className="mono small">{a.kind}</span>
           {a.project_slug && <span className="tag">{a.project_slug}</span>}
+          {/* the same alert again while this row waited: counted, not re-listed */}
+          {a.count > 1 && (
+            <span className="tag" title={`first ${ts(a.created_at)}, last ${ts(a.last_seen)} UTC`}>
+              ×{a.count}</span>)}
           {a.triage_verdict === 'flag' && (
             <span className="tag triage-flag" title={a.triage_reason}>⚑ {a.triage_reason}</span>)}
-          <span className="dim small">{ts(a.created_at)}</span>
+          <span className="dim small">{ts(a.count > 1 && a.last_seen ? a.last_seen : a.created_at)}</span>
         </div>
         {/* the whole summary is the affordance — clicking it opens the board */}
         <button type="button" className="rev-alert-open" onClick={onOpen}
