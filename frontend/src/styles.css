@@ -4229,3 +4229,25 @@ a:has(> .nav-dot) { position: relative; }
 .posture-item { color: var(--text); text-decoration: none; }
 .posture-item:hover b { text-decoration: underline; }
 .posture-item.warn b { color: var(--amber); }
+/* the scrolling Security tab strip: a fade and an arrow on the side with more (WEB-18) */
+.scroll-hint { position: relative; min-width: 0; max-width: 100%; align-self: center; display: flex; }
+.scroll-hint > .tabs { flex: 1 1 auto; }
+.scroll-hint::before, .scroll-hint::after { content: ''; position: absolute; top: 1px; bottom: 1px;
+  width: 30px; pointer-events: none; opacity: 0; transition: opacity 0.15s;
+  display: flex; align-items: center; color: var(--dim); font-size: var(--fs-lg); }
+.scroll-hint::before { content: '\2039'; left: 1px; justify-content: flex-start; padding-left: 8px;
+  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+  background: linear-gradient(to right, var(--bg-soft) 35%, transparent); }
+.scroll-hint::after { content: '\203A'; right: 1px; justify-content: flex-end; padding-right: 8px;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  background: linear-gradient(to left, var(--bg-soft) 35%, transparent); }
+.scroll-hint.more-left::before, .scroll-hint.more-right::after { opacity: 1; }
+@media (max-width: 640px) {
+  .page-shell > .page-head > .scroll-hint { flex: 1 1 100%; }
+}
+/* below 1100px the boxes table has no header row: each cell carries its own label (WEB-18) */
+@media (max-width: 1100px) {
+  .bx-glance .bx-tr > [data-label]::before { content: attr(data-label); display: block;
+    margin-bottom: 2px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--dim); }
+}

@@ -206,7 +206,7 @@ function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
             {b.last_error && <span className="error small bx-row-err">{b.last_error}</span>}
           </span>
         </span>
-        <span role="cell" className="bx-now small">
+        <span role="cell" className="bx-now small" data-label="Doing now">
           {turns.length > 0 ? turns.map((t) => (
             <span key={t.key} className="bx-turn">
               <span><b>{t.head}</b>{t.title ? ` ${t.title}` : ''}
@@ -225,7 +225,7 @@ function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
             </span>
           )}
         </span>
-        <span role="cell" className="small">
+        <span role="cell" className="small" data-label="Stops">
           {timer
             ? <span className={timer.tone === 'pending' ? 'warn' : ''} title={timer.title}>{timer.text}</span>
             : up && b.stop_after_s && b.inflight > 0
@@ -233,8 +233,8 @@ function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
                   {b.stop_action === 'scrub' ? 'scrub' : 'stop'} after {mins(b.stop_after_s)} idle</span>
               : <span className="dim">{up ? (STOPS_OTHER[b.kind] || '–') : '–'}</span>}
         </span>
-        <span role="cell"><RuntimeTag runtime={b.runtime} /></span>
-        <span role="cell" className="small">
+        <span role="cell" data-label="Runtime"><RuntimeTag runtime={b.runtime} /></span>
+        <span role="cell" className="small" data-label="Image · RAM · CPU">
           <span className="mono">{b.image?.variant || 'main'}{b.image?.version ? ` v${String(b.image.version).replace(/^v/, '')}` : ''}</span>
           <span className="dim" title={unlimited
             ? 'the kernel on this machine ignores Docker memory limits, so this box can use all of the RAM'
@@ -243,7 +243,8 @@ function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
           {b.cpu_pct != null && <span className="dim"> · {b.cpu_pct}%</span>}
           {b.restart_needed && <Tag tone="pending" title="a newer image is waiting for its next boot">restart to update</Tag>}
         </span>
-        <span role="cell" className="small" title={b.started_at ? `since ${localTime(b.started_at)}` : undefined}>
+        <span role="cell" className="small" data-label="Up"
+              title={b.started_at ? `since ${localTime(b.started_at)}` : undefined}>
           {up ? uptime(b.uptime_s) : '–'}</span>
         <span role="cell" className="bx-actions">
           {up

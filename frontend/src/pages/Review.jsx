@@ -4,6 +4,7 @@ import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 import Posture from '../Posture.jsx'
+import ScrollHint from '../ScrollHint.jsx'
 import { useEgressDecide } from '../EgressDecide.jsx'
 import { PendingCountContext } from '../Notices.jsx'
 import { notify, notifyError } from '../notify.js'
@@ -555,14 +556,14 @@ export default function Review() {
   return (
     <Page variant="fill" title="Security" className="review-shell"
           actions={(
-            <Tabs label="Security sections" items={[
+            <ScrollHint><Tabs label="Security sections" items={[
               { to: '/security', end: true, label: 'Queue', count },
               { to: '/security/persistent', label: 'Persistent' },
               { to: '/security/network', label: 'Network' },
               { to: '/security/profiles', label: 'Profiles' },
               { to: '/security/logs', label: 'Logs' },
               { to: '/security/secrets', label: 'Secrets' },
-            ]} />
+            ]} /></ScrollHint>
           )}>
       <div className="review-body">
         {/* one line on what this tab is, in the tab's own column */}
