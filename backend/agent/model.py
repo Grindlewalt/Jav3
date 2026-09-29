@@ -129,8 +129,8 @@ async def record_model_call(conversation_id: int | None, model_name: str,
         frame = None
         if not ephemeral and await ctxstore.capture_enabled(db):
             try:
-                frame = ctxstore.build_frame(
-                    conversation_id, _redact_images(messages), len(tools or []))
+                frame = await ctxstore.build_frame(
+                    conversation_id, _redact_images(messages), len(tools or [])).pack()
             except Exception:  # noqa: BLE001 — never cost the usage row
                 frame = None
         cur = await db.execute(

@@ -2,7 +2,6 @@
 Model.complete choke point (usage always; raw context unless the operator
 switched capture off), and the Logs cost endpoints price it with the configured
 per-million rates."""
-import json
 
 import httpx
 import pytest

@@ -20,6 +20,7 @@ one query and ages out as one unit: a row is only nulled when the whole chain
 is past retention (see prune). Nothing here can make a stored blob unreadable
 except deleting its own chain, and then load() says "gone", never garbage.
 """
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -62,15 +63,30 @@ async def keep_days(db) -> int:
 # --- writing ---------------------------------------------------------------
 
 class Frame:
-    __slots__ = ("blob", "key", "depth", "digests", "parent")
+    __slots__ = ("raw", "blob", "key", "depth", "digests", "parent")
 
-    def __init__(self, blob: bytes, key: int | None, depth: int,
+    def __init__(self, raw: bytes, key: int | None, depth: int,
                  digests: list[bytes], parent: int | None = None):
-        self.blob = blob          # what goes in model_calls.context
+        self.raw = raw            # the frame's JSON, not yet compressed
+        self.blob = None          # what goes in model_calls.context (see pack)
         self.key = key            # model_calls.ctx_key: None for a full frame
         self.depth = depth        # deltas since the last full frame
         self.digests = digests    # per message, for the next call's comparison
         self.parent = parent      # the base row of a delta
+
+    async def pack(self) -> "Frame":
+        """Compress. A full frame of a long conversation is hundreds of KB and
+        zlib's ~100 ms on a small box would stall the event loop, so anything
+        big goes to a thread (zlib drops the GIL); a delta is a few KB."""
+        if len(self.raw) > _THREAD_ABOVE:
+            comp = await asyncio.to_thread(zlib.compress, self.raw, 6)
+        else:
+            comp = zlib.compress(self.raw, 6)
+        self.blob = MAGIC + comp
+        return self
+
+
+_THREAD_ABOVE = 64 * 1024
 
 
 class _Head:
@@ -81,15 +97,21 @@ class _Head:
         self.at = time.monotonic()
 
 
-# conversation id -> the last few calls' frames, to delta against. In-process
+# (database, conversation id) -> the last few calls' frames, to delta against.
+# Keyed by database path too, so a row id is never taken from another database
+# (a test swapping its state dir; nothing else changes the path). In-process
 # on purpose (one process, require_single_process): after a restart the first
 # call of a conversation is simply a full frame. A head older than _HEAD_TTL is
 # dropped, so a delta never points at a row retention may already have nulled
 # (the shortest retention is a day).
-_heads: "OrderedDict[int, list[_Head]]" = OrderedDict()
+_heads: "OrderedDict[tuple[str, int], list[_Head]]" = OrderedDict()
 _MAX_CONVERSATIONS = 64
 _HEADS_PER_CONVERSATION = 3
 _HEAD_TTL = 6 * 3600
+
+
+def _hkey(conversation_id: int) -> tuple[str, int]:
+    return (str(settings.db_path), conversation_id)
 
 
 def _digest(s: str) -> bytes:
@@ -108,14 +130,15 @@ def _shared_prefix(a: list[bytes], b: list[bytes]) -> int:
 def build_frame(conversation_id: int | None, messages: list[dict],
                 n_tools: int) -> Frame:
     """Serialise one call's message array (delta against the conversation's
-    best matching recent call when that saves real bytes) and compress it."""
+    best matching recent call when that saves real bytes). `await .pack()` on
+    the result compresses it."""
     parts = [json.dumps(m, default=str) for m in messages]
     digests = [_digest(p) for p in parts]
     total = sum(map(len, parts))
     best = None
     if settings.context_capture_delta and conversation_id is not None:
         now = time.monotonic()
-        cand = [h for h in _heads.get(conversation_id, ())
+        cand = [h for h in _heads.get(_hkey(conversation_id), ())
                 if now - h.at < _HEAD_TTL
                 and h.depth < settings.context_delta_chain_max]
         scored = [(_shared_prefix(h.digests, digests), h) for h in cand]
@@ -126,12 +149,11 @@ def build_frame(conversation_id: int | None, messages: list[dict],
                 best = (shared, head)
     if best is None:
         text = '{"v":1,"n_tools":%d,"messages":[%s]}' % (n_tools, ",".join(parts))
-        return Frame(MAGIC + zlib.compress(text.encode(), 6), None, 0, digests)
+        return Frame(text.encode(), None, 0, digests)
     shared, head = best
     text = '{"v":1,"base":%d,"shared":%d,"n_tools":%d,"messages":[%s]}' % (
         head.row_id, shared, n_tools, ",".join(parts[shared:]))
-    return Frame(MAGIC + zlib.compress(text.encode(), 6), head.key,
-                 head.depth + 1, digests, head.row_id)
+    return Frame(text.encode(), head.key, head.depth + 1, digests, head.row_id)
 
 
 def remember(conversation_id: int | None, frame: Frame, row_id: int) -> None:
@@ -140,8 +162,8 @@ def remember(conversation_id: int | None, frame: Frame, row_id: int) -> None:
         return
     head = _Head(row_id, frame.key if frame.key is not None else row_id,
                  frame.depth, frame.digests)
-    heads = _heads.setdefault(conversation_id, [])
-    _heads.move_to_end(conversation_id)
+    heads = _heads.setdefault(_hkey(conversation_id), [])
+    _heads.move_to_end(_hkey(conversation_id))
     # the head this frame extends is superseded by it
     heads[:] = [h for h in heads if h.row_id != frame.parent]
     heads.append(head)
@@ -220,7 +242,8 @@ async def prune(db, days: int) -> int:
         "  SELECT ctx_key FROM model_calls WHERE ctx_key IS NOT NULL "
         "  AND context IS NOT NULL AND created_at >= datetime('now', ?))",
         (cut, cut))
-    forget_heads()
+    if cur.rowcount:
+        forget_heads()        # a cached base may be among the rows just nulled
     return cur.rowcount or 0
 
 
