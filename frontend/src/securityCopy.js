@@ -139,3 +139,18 @@ export function baselineAsk(d, scope) {
     confirm: 'Allow this program',
   }
 }
+
+// ---- the profile form's secret checklist (WEB-20) ---------------------------------
+
+// `choices` is [{name, infrastructure}] from the host; `held` the names the
+// profile already has. Infrastructure secrets (the Cloudflare Access token,
+// Jav3's own credentials) stay out of the list until asked for, unless the
+// profile already holds one, so it can be seen and unticked. Names the profile
+// holds that no longer exist are listed too.
+export function secretChecklist(choices, held, showInfra) {
+  const infra = new Set(choices.filter((s) => s.infrastructure).map((s) => s.name))
+  const names = [...new Set([...choices.map((s) => s.name), ...held])]
+  const list = names.filter((n) => showInfra || !infra.has(n) || held.includes(n)).sort()
+  const hidden = [...infra].filter((n) => !showInfra && !held.includes(n)).length
+  return { list, infra, hidden }
+}

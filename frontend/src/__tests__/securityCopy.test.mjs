@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE,
-  allowedLine, baselineAsk, decidedText, ledeFor, plural,
+  allowedLine, baselineAsk, decidedText, ledeFor, plural, secretChecklist,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -56,5 +56,21 @@ for (const t of ['service', 'run_code', 'unexpected', 'stale', 'built-in baselin
 assert.equal(plural(1, 'box', 'boxes'), '1 box')
 assert.equal(plural(0, 'box', 'boxes'), '0 boxes')
 assert.equal(plural(2, 'alert'), '2 alerts')
+
+// WEB-20: infrastructure secrets are hidden from a profile's checklist until asked for,
+// and stay visible when the profile already holds one
+const choices = [{ name: 'NEWS_API_KEY', infrastructure: false },
+  { name: 'CF_ACCESS_CLIENT_ID', infrastructure: true },
+  { name: 'CF_ACCESS_CLIENT_SECRET', infrastructure: true }]
+let cl = secretChecklist(choices, [], false)
+assert.deepEqual(cl.list, ['NEWS_API_KEY'])
+assert.equal(cl.hidden, 2)
+cl = secretChecklist(choices, [], true)
+assert.deepEqual(cl.list, ['CF_ACCESS_CLIENT_ID', 'CF_ACCESS_CLIENT_SECRET', 'NEWS_API_KEY'])
+assert.equal(cl.hidden, 0)
+cl = secretChecklist(choices, ['CF_ACCESS_CLIENT_ID', 'GONE_KEY'], false)
+assert.deepEqual(cl.list, ['CF_ACCESS_CLIENT_ID', 'GONE_KEY', 'NEWS_API_KEY'])
+assert.equal(cl.hidden, 1)
+assert.ok(cl.infra.has('CF_ACCESS_CLIENT_ID'))
 
 console.log('securityCopy ok')

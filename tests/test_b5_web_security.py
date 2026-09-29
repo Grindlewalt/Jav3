@@ -62,6 +62,22 @@ async def test_summary_approval_in_another_project_does_not_unblock(client, db):
     assert s["denied"] == 1 and s["allowed"] == 0
 
 
+# --- WEB-20: the profile's secret checklist knows which secrets are infrastructure
+
+async def test_profile_secret_choices_mark_infrastructure(client, tmp_env):
+    from backend import secrets as secrets_store
+    secrets_store.save({"NEWS_API_KEY": "n" * 12, "CF_ACCESS_CLIENT_ID": "i" * 12,
+                        "CF_ACCESS_CLIENT_SECRET": {"value": "s" * 12, "hosts": ["x.example"]},
+                        "GITHUB_TOKEN": "g" * 12, "JAV3_PAIRING": "p" * 12})
+    r = await client.get("/api/profiles/secret-choices")
+    assert r.status_code == 200
+    got = {s["name"]: s["infrastructure"] for s in r.json()["secrets"]}
+    assert got == {"CF_ACCESS_CLIENT_ID": True, "CF_ACCESS_CLIENT_SECRET": True,
+                   "JAV3_PAIRING": True, "GITHUB_TOKEN": False, "NEWS_API_KEY": False}
+    # names only: no value and no tail comes back
+    assert "n" * 4 not in r.text and "last4" not in r.text
+
+
 # --- WEB-02: an alert can be allowed, not only acknowledged --------------------
 
 async def _proc_alert(db, exe="/usr/local/bin/job", unit="weekly-job.service", pid=7,
