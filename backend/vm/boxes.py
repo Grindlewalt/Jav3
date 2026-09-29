@@ -667,8 +667,10 @@ async def _own_box(slug: str, eff: dict) -> Box:
         if (existing.runtime != (eff.get("runtime") or "kvm") and not _bound(existing)
                 and not (ctl is not None and ctl.running())):
             # a stopped, idle box on the old runtime: disposable, re-made below
-            await destroy(existing, reason=f"runtime changed to "
-                                           f"{eff.get('runtime') or 'kvm'}")
+            from . import boxlog
+            async with boxlog.action(existing, "destroyed", reason=(
+                    f"runtime changed to {eff.get('runtime') or 'kvm'}")):
+                await destroy(existing)
         else:
             follow_profile_image(existing, eff.get("image"))
             return existing
@@ -684,7 +686,10 @@ async def _own_box(slug: str, eff: dict) -> Box:
             victim = idle_project_box(exclude=f"p-{slug}")
             if victim is None:
                 raise
-            await destroy(victim, reason=f"idle, gave way to p-{slug} (box cap)")
+            from . import boxlog
+            async with boxlog.action(victim, "destroyed",
+                                     reason=f"idle, gave way to p-{slug} (box cap)"):
+                await destroy(victim)
     raise BoxCapError("no box could be freed")
 
 
