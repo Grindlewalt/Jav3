@@ -87,9 +87,6 @@ def dsml_prose(content: str) -> str:
     return (content[:m.start()] if m else content).strip()
 
 
-CAPTURE_STATE_KEY = "capture_context"
-
-
 def _redact_images(messages: list[dict]) -> list[dict]:
     """Swap base64 image data-URIs for a short placeholder before a message
     array is logged — a captured screenshot is multi-MB and would bloat the
@@ -117,35 +114,39 @@ async def record_model_call(conversation_id: int | None, model_name: str,
                             tools: list[dict] | None) -> None:
     """Ledger every API call: exact usage always (the Logs cost tab sums
     this — usage_log only covers chat turns, this covers everything), plus
-    the raw message array when the operator flipped capture on. Incognito
+    the raw message array unless the operator switched capture off (it is on by
+    default; backend/ctxstore.py holds the storage form). Incognito
     records usage unattributed (spend is real money) but never content.
     Must never fail the model call — best effort by design."""
-    from ..db import get_db, get_state
-    from .. import runtime
+    from ..db import get_db
+    from .. import ctxstore, runtime
     u = usage or {}
     ephemeral = runtime.ephemeral.get()
     if ephemeral:
         conversation_id = None
     db = await get_db()
     try:
-        context = None
-        if not ephemeral and await get_state(db, CAPTURE_STATE_KEY) == "1":
-            context = json.dumps({"messages": _redact_images(messages),
-                                  "n_tools": len(tools or [])})
-        await db.execute(
+        frame = None
+        if not ephemeral and await ctxstore.capture_enabled(db):
+            try:
+                frame = ctxstore.build_frame(
+                    conversation_id, _redact_images(messages), len(tools or []))
+            except Exception:  # noqa: BLE001 — never cost the usage row
+                frame = None
+        cur = await db.execute(
             "INSERT INTO model_calls (conversation_id, model, input_tokens, "
-            "output_tokens, cache_hit, cache_miss, context) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "output_tokens, cache_hit, cache_miss, context, ctx_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (conversation_id, model_name,
              u.get("prompt_tokens", 0), u.get("completion_tokens", 0),
              u.get("prompt_cache_hit_tokens", 0),
-             u.get("prompt_cache_miss_tokens", 0), context))
+             u.get("prompt_cache_miss_tokens", 0),
+             frame.blob if frame else None, frame.key if frame else None))
+        if frame is not None:
+            ctxstore.remember(conversation_id, frame, cur.lastrowid)
         # retention: usage rows are tiny and kept forever; context blobs are
-        # the heavy part and age out
-        await db.execute(
-            "UPDATE model_calls SET context = NULL WHERE context IS NOT NULL "
-            "AND created_at < datetime('now', ?)",
-            (f"-{settings.context_capture_keep_days} days",))
+        # the heavy part and age out (a delta chain as one unit)
+        await ctxstore.prune_if_due(db)
         await db.commit()
     finally:
         await db.close()

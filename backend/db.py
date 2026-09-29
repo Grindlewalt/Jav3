@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cache_hit INTEGER NOT NULL DEFAULT 0,
     cache_miss INTEGER NOT NULL DEFAULT 0,
-    context TEXT,                        -- JSON {messages, n_tools}; only when capture is on
+    context TEXT,                        -- captured message array (backend/ctxstore.py): compressed frame, or legacy JSON text
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- Monitored egress (Layer 3). Per-project egress policy. A project with no row
@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_logging(db)
         await db.commit()
     finally:
         await db.close()
@@ -792,6 +793,21 @@ async def _add_columns(db: aiosqlite.Connection, table: str,
     for col, decl in cols:
         if col not in have:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+async def _migrate_logging(db: aiosqlite.Connection) -> None:
+    """Captured-context storage (backend/ctxstore.py). ctx_key: the first row
+    of a delta chain, so a chain reads in one query and ages out as a unit.
+    The two partial indexes keep retention and the "how much is captured"
+    count off the rows that hold no context (nearly all of them, after a
+    prune). Idempotent, additive only."""
+    await _add_columns(db, "model_calls", (("ctx_key", "INTEGER"),))
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_calls_ctxkey "
+        "ON model_calls(ctx_key) WHERE ctx_key IS NOT NULL")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_calls_ctx "
+        "ON model_calls(created_at) WHERE context IS NOT NULL")
 
 
 async def _migrate_boxes(db: aiosqlite.Connection) -> None:

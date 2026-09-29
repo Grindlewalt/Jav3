@@ -208,9 +208,28 @@ class Settings(BaseSettings):
     price_cache_hit_per_m: float = 0.003
     price_cache_miss_per_m: float = 0.15
     price_output_per_m: float = 0.60
-    # Raw-context capture (the exact message array sent per model call) is
-    # opt-in and heavy; captured blobs older than this are nulled out.
+    # Raw-context capture (the exact message array sent per model call) is ON
+    # unless the operator switched it off (Logs > Cost); captured blobs older
+    # than this are nulled out. The Logs page can override the days (state key
+    # context_keep_days); this is the default.
     context_capture_keep_days: int = 7
+    # Stored compressed, and as a delta against the conversation's previous
+    # call (each ReAct round re-sends the grown context; on the Pi's real
+    # transcripts that is ~4x for zlib alone and ~100x with the delta). A chain
+    # restarts with a full frame at least every N calls, which bounds a read.
+    # False = every call stored as a full compressed blob.
+    context_capture_delta: bool = True
+    context_delta_chain_max: int = 24
+    # Storage watch (backend/storage_watch.py): one operator notice, at most
+    # once a day, while any of these is over. Captured context, database bytes
+    # in use (the file minus reusable pages), and free space on the disk
+    # holding the database.
+    storage_watch_enabled: bool = True
+    storage_watch_interval_s: int = 3600
+    storage_notify_repeat_s: int = 86400
+    storage_captured_warn_mb: int = 1024
+    storage_db_warn_mb: int = 3072
+    storage_free_warn_pct: float = 10.0
 
     # Remote hosts whose images/video the render surfaces (chat markdown + the
     # dashboard iframe) may auto-load. Everything else is blocked, so a model

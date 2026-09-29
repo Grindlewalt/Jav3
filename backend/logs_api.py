@@ -5,17 +5,16 @@ The chat sidebar hides tool calls; this exposes the full interleaved timeline
 the numbers that explain a token blow-up — tool-call counts, result bytes, and
 the real token usage recorded per turn. Read-only.
 """
-import json
 import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .agent.model import CAPTURE_STATE_KEY
 from .auth import require_user
-from . import providers
+from . import ctxstore, providers, storage_watch
 from .config import settings
-from .db import get_db, get_state, set_state
+from .ctxstore import CAPTURE_STATE_KEY
+from .db import get_db, set_state
 
 router = APIRouter(prefix="/api/logs", tags=["logs"],
                    dependencies=[Depends(require_user)])
@@ -84,7 +83,7 @@ async def costs():
                     "priced": _prices(r["model"]) is not None}
             agg["cost_usd"] = round(agg["cost_usd"], 4)
             out[label] = {**agg, "by_model": by_model}
-        capture = await get_state(db, CAPTURE_STATE_KEY) == "1"
+        capture = await ctxstore.capture_enabled(db)
     finally:
         await db.close()
     return {"windows": out, "capture_context": capture,
@@ -99,9 +98,9 @@ class CaptureToggle(BaseModel):
 
 @router.post("/capture-context")
 async def capture_context(body: CaptureToggle):
-    """Opt into storing the exact message array sent per model call. Heavy
-    (each ReAct iteration re-sends the grown context), so blobs age out after
-    settings.context_capture_keep_days."""
+    """Switch storing the exact message array sent per model call on or off.
+    It is ON unless switched off here (no row = on). Blobs are compressed and
+    delta-coded (backend/ctxstore.py) and age out after the retention days."""
     db = await get_db()
     try:
         await set_state(db, CAPTURE_STATE_KEY, "1" if body.enabled else "0")
@@ -109,6 +108,60 @@ async def capture_context(body: CaptureToggle):
     finally:
         await db.close()
     return {"ok": True, "enabled": body.enabled}
+
+
+@router.get("/storage")
+async def storage():
+    """What capture is holding, the database and the disk, against the limits
+    the storage watch warns at (backend/storage_watch.py)."""
+    return await storage_watch.status()
+
+
+class Retention(BaseModel):
+    days: int
+
+
+@router.post("/capture-retention")
+async def capture_retention(body: Retention):
+    """Choose how many days of captured context to keep (1/3/7/14/30). A
+    shorter choice is applied at once, not at the next hourly pass."""
+    if body.days not in ctxstore.KEEP_CHOICES:
+        raise HTTPException(status_code=400, detail="days must be one of "
+                            + ", ".join(map(str, ctxstore.KEEP_CHOICES)))
+    db = await get_db()
+    try:
+        await set_state(db, ctxstore.KEEP_STATE_KEY, str(body.days))
+        before = (await ctxstore.captured(db))["bytes"]
+        pruned = await ctxstore.prune(db, body.days)
+        await db.commit()
+        after = (await ctxstore.captured(db))["bytes"]
+    finally:
+        await db.close()
+    return {"ok": True, "days": body.days, "deleted": pruned,
+            "freed_bytes": max(before - after, 0)}
+
+
+class PruneContext(BaseModel):
+    older_than_days: int
+
+
+@router.post("/prune-context")
+async def prune_context(body: PruneContext):
+    """Delete captured context older than N days, now. Token counts and costs
+    stay; only the stored message arrays go. A call still inside its
+    conversation's live delta chain is kept until the whole chain is old."""
+    if not 1 <= body.older_than_days <= 3650:
+        raise HTTPException(status_code=400, detail="older_than_days out of range")
+    db = await get_db()
+    try:
+        before = (await ctxstore.captured(db))["bytes"]
+        pruned = await ctxstore.prune(db, body.older_than_days)
+        await db.commit()
+        after = (await ctxstore.captured(db))["bytes"]
+    finally:
+        await db.close()
+    return {"ok": True, "deleted": pruned, "freed_bytes": max(before - after, 0),
+            "captured_bytes": after}
 
 
 @router.get("/conversations/{cid}/calls")
@@ -119,7 +172,7 @@ async def model_calls(cid: int):
     try:
         cur = await db.execute(
             "SELECT id, model, input_tokens, output_tokens, cache_hit, "
-            "cache_miss, LENGTH(context) AS context_bytes, created_at "
+            "cache_miss, (context IS NOT NULL) AS has_context, created_at "
             "FROM model_calls WHERE conversation_id=? ORDER BY id", (cid,))
         rows = [dict(r) for r in await cur.fetchall()]
     finally:
@@ -128,7 +181,7 @@ async def model_calls(cid: int):
         r["cost_usd"] = round(
             _cost_usd(r["cache_hit"], r["cache_miss"], r["output_tokens"],
                       r["model"]), 6)
-        r["has_context"] = bool(r.pop("context_bytes"))
+        r["has_context"] = bool(r["has_context"])
     return {"calls": rows}
 
 
@@ -138,18 +191,23 @@ async def call_context(call_id: int):
     db = await get_db()
     try:
         cur = await db.execute(
-            "SELECT context, input_tokens, cache_hit, cache_miss "
+            "SELECT input_tokens, cache_hit, cache_miss "
             "FROM model_calls WHERE id=?", (call_id,))
         row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such call")
+        try:
+            payload = await ctxstore.load(db, call_id)
+        except ctxstore.ContextGone:
+            raise HTTPException(status_code=404, detail="the stored context of "
+                                "this call is partly gone (its retention "
+                                "window passed)") from None
     finally:
         await db.close()
-    if row is None:
-        raise HTTPException(status_code=404, detail="no such call")
-    if not row["context"]:
+    if payload is None:
         raise HTTPException(status_code=404,
                             detail="no context captured for this call "
                             "(capture was off, or the blob aged out)")
-    payload = json.loads(row["context"])
     return {**payload, "input_tokens": row["input_tokens"],
             "cache_hit": row["cache_hit"], "cache_miss": row["cache_miss"]}
 

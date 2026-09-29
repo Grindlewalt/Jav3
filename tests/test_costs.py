@@ -1,13 +1,13 @@
 """The model-call ledger + cost accounting: every API call is recorded at the
-Model.complete choke point (usage always; raw context only when the operator
-flips capture on), and the Logs cost endpoints price it with the configured
+Model.complete choke point (usage always; raw context unless the operator
+switched capture off), and the Logs cost endpoints price it with the configured
 per-million rates."""
 import json
 
 import httpx
 import pytest
 
-from backend import runtime
+from backend import ctxstore, runtime
 from backend.agent.model import record_model_call
 from backend.auth import hash_password
 from backend.config import settings
@@ -39,6 +39,14 @@ async def client(tmp_env):
         yield c
 
 
+async def _load(call_id):
+    db = await get_db()
+    try:
+        return await ctxstore.load(db, call_id)
+    finally:
+        await db.close()
+
+
 async def _rows():
     db = await get_db()
     try:
@@ -48,24 +56,26 @@ async def _rows():
         await db.close()
 
 
-async def test_usage_always_recorded_context_only_when_captured(tmp_env):
+async def test_usage_always_recorded_context_unless_capture_is_off(tmp_env):
     await init_db()
     await record_model_call(7, "deepseek-v4-flash", USAGE, MSGS, tools=[{}, {}])
     rows = await _rows()
     assert rows[0]["conversation_id"] == 7
     assert rows[0]["input_tokens"] == 1000 and rows[0]["cache_hit"] == 900
-    assert rows[0]["context"] is None          # capture defaults OFF
+    # capture defaults ON: nothing was switched on, the context is there
+    ctx = await _load(rows[0]["id"])
+    assert ctx["messages"] == MSGS and ctx["n_tools"] == 2
 
     db = await get_db()
     try:
-        await set_state(db, "capture_context", "1")
+        await set_state(db, "capture_context", "0")     # the operator turned it off
         await db.commit()
     finally:
         await db.close()
     await record_model_call(7, "deepseek-v4-flash", USAGE, MSGS, tools=[{}, {}])
     rows = await _rows()
-    ctx = json.loads(rows[1]["context"])
-    assert ctx["messages"] == MSGS and ctx["n_tools"] == 2
+    assert rows[1]["context"] is None
+    assert rows[1]["input_tokens"] == 1000          # usage is counted regardless
 
 
 async def test_incognito_records_spend_but_never_content(tmp_env):
@@ -116,19 +126,27 @@ async def test_cost_endpoints_price_the_ledger(client):
                 + 600 * settings.price_output_per_m) / 1_000_000
     assert w["cost_usd"] == round(expected, 4)
     assert r["windows"]["all"]["calls"] == 3
-    assert r["capture_context"] is False
+    assert r["capture_context"] is True             # on until switched off
     assert r["prices_per_m"]["output"] == settings.price_output_per_m
 
     # per-conversation drill-down
     calls = (await client.get("/api/logs/conversations/5/calls")).json()["calls"]
-    assert len(calls) == 3 and calls[0]["has_context"] is False
+    assert len(calls) == 3 and calls[0]["has_context"] is True
     assert calls[0]["cost_usd"] > 0
+    ctx0 = (await client.get(f"/api/logs/calls/{calls[0]['id']}/context")).json()
+    assert ctx0["messages"] == MSGS
 
-    # context 404s until captured
-    r404 = await client.get(f"/api/logs/calls/{calls[0]['id']}/context")
+    # switch capture off via the API: a new call has no context, and it 404s
+    off = await client.post("/api/logs/capture-context", json={"enabled": False})
+    assert off.json()["enabled"] is False
+    assert (await client.get("/api/logs/costs")).json()["capture_context"] is False
+    await record_model_call(5, "m", USAGE, MSGS, tools=None)
+    calls = (await client.get("/api/logs/conversations/5/calls")).json()["calls"]
+    assert calls[-1]["has_context"] is False
+    r404 = await client.get(f"/api/logs/calls/{calls[-1]['id']}/context")
     assert r404.status_code == 404
 
-    # flip capture on via the API, record another call, read its context back
+    # flip capture back on, record another call, read its context back
     ok = await client.post("/api/logs/capture-context", json={"enabled": True})
     assert ok.json()["enabled"] is True
     await record_model_call(5, "m", USAGE, MSGS, tools=[{}])
