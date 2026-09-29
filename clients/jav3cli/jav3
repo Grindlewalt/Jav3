@@ -7912,7 +7912,7 @@ JAV3_THEMES = {
     "jav3-amber": dict(primary="#ffaf00", secondary="#d78700", accent="#ffd787",
                        foreground="#ffaf00", background=("#0c0900", "#121212"),
                        surface=("#1a1406", "#262626"), panel=("#2a200a", "#3a3a3a"),
-                       warning="#ffff5f", error="#ff5f5f", success="#d7d75f", dark=True),
+                       warning="#ffff5f", error="#ff5f5f", success="#afd75f", dark=True),
     "jav3-solarized": dict(primary="#5fafd7", secondary="#8787d7", accent="#00afaf",
                            foreground="#a8a8a8", background=("#002b36", "#1c1c1c"),
                            surface=("#073642", "#262626"), panel=("#0b4250", "#3a3a3a"),
