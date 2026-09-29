@@ -184,7 +184,7 @@ probably locked or asleep`). An omitted `locked` is `false`, as before.
 ```
 screen 1280x800 of "DP-1" (monitor 1 of 2; others: "HDMI-A-1") — frame 17   | or: zoomed region 400,300 320x200 of "DP-1", shown at 1280x800 — frame 17
 cursor at 612,388
-elements (click by id; coordinates are pixels of this image):
+elements (click by id; @ is the centre, in pixels of this image):
   [1] button "Save" @ 640,410 80x28
   [2] textfield "Search" @ 200,60 300x24 value="foo" focused
   ...
