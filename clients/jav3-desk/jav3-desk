@@ -73,6 +73,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import logging
 import urllib.error
 import urllib.request
@@ -753,42 +754,73 @@ class FakeElementSource(ElementSource):
 TYPED_TAIL = 40           # read-back compares at most this many trailing characters
 
 
-def typed_check(text: str, focus: dict | None, changed: bool | None = None) -> str | None:
-    """Did `text` land in the focused field? None = yes, or cannot tell
-    (no reader, a secure field, a newline/tab that may have submitted or
-    moved focus, a value too long to read); else the error for the model.
-    A field whose value lacks the text is always an error; "nothing
-    focused" / "not a text field" only when the screen did not change
-    either (Chromium reports no focused element until its accessibility is
-    on, and a canvas editor has no text field, yet typing there works).
+SHOT_LOST_NOTE = ("the action was sent but the screen could not be captured afterwards — "
+                  "take desk_screenshot before repeating it")
+TYPED_DIFF_NOTE = ("typed; the field now reads differently from what was typed "
+                   "(autocomplete or formatting?) — check the screenshot before retyping")
+
+
+def _fold(s: str) -> str:
+    """Comparable form of field text: NFKC, case-folded, whitespace collapsed."""
+    return " ".join(unicodedata.normalize("NFKC", s).split()).casefold()
+
+
+def _field_text(focus: dict) -> str:
+    value, sel = focus.get("value"), focus.get("selected")
+    return _fold(f"{value if isinstance(value, str) else ''} "
+                 f"{sel if isinstance(sel, str) else ''}")
+
+
+def typed_result(text: str, focus: dict | None, changed: bool | None = None,
+                 before: dict | None = None) -> tuple[str | None, str | None]:
+    """Did `text` land in the focused field? (error, note). (None, None) = yes,
+    or cannot tell (no reader, a secure field, a newline/tab that may have
+    submitted or moved focus, a value too long to read). The text was typed
+    whatever this says, so the error is only for "it visibly went nowhere":
+    the field's value did not change and the screen did not change. A field
+    that changed but does not hold the text (autocomplete, reformatting,
+    masking, auto-capitalise) is a note, not an error: an error invites a
+    retype, and the text would land twice. `before` is the focused element
+    before typing; without it a value lacking the text stays an error.
     Never quotes the field's value — only its role and label."""
     if focus is None or any(c in text for c in "\n\r\t"):
-        return None
-    want = " ".join(text.split()).casefold()
+        return None, None
+    want = _fold(text)
     if not want:
-        return None
+        return None, None
     if not focus:
         if changed is True:
-            return None
+            return None, None
         return ("typed text did not appear: nothing on this computer has keyboard "
-                "focus — click the field first, then type")
+                "focus — click the field first, then type"), None
     role = focus.get("role") or "element"
     label = " ".join(str(focus.get("label") or "").split())[:60]
     what = f"{role} {label}".strip().replace('"', "'")
-    value, sel = focus.get("value"), focus.get("selected")
+    value = focus.get("value")
     if focus.get("secure") or focus.get("truncated"):
-        return None
+        return None, None
     if role not in ("textfield", "combobox") and not isinstance(value, str):
         if changed is True:
-            return None
+            return None, None
         return (f'typed text did not appear: the focused element is not a text field '
-                f'("{what}") — click the field first, then type')
-    hay = " ".join(f"{value if isinstance(value, str) else ''} "
-                   f"{sel if isinstance(sel, str) else ''}".split()).casefold()
+                f'("{what}") — click the field first, then type'), None
+    hay = _field_text(focus)
     if want[-TYPED_TAIL:] in hay:
-        return None
+        return None, None
+    if before is not None:
+        if hay != _field_text(before):
+            return None, TYPED_DIFF_NOTE
+        if changed is True:
+            return None, None
     return (f'typed text did not appear in the focused field ("{what}") — click the '
-            f"field first, then type")
+            f"field first, then type"), None
+
+
+def typed_check(text: str, focus: dict | None, changed: bool | None = None,
+                before: dict | None = None) -> str | None:
+    """The error half of typed_result (None when it landed, cannot be told, or
+    only differs from what was typed)."""
+    return typed_result(text, focus, changed, before)[0]
 
 
 def ax_info(v: dict) -> dict:
@@ -2892,6 +2924,7 @@ class Session:
             out.update(shot)
             return out
         sig_before, before = self._before(f)
+        typing_before = self._focus() if verb == "type" else None
         if verb in ("move", "click") or (verb == "scroll" and "x" in p):
             self.b.move(*f.to_screen(p["x"], p["y"]))
         if verb == "click":
@@ -2914,10 +2947,19 @@ class Session:
         changed, ms = self.settle(before, floor=SETTLE_S * (3 if verb == "open" else 1))
         # the post-action comparisons use the SETTLED screen: the auto-shot
         # (taken now) or, without one, a fresh walk
-        shot = self._auto_shot(f) if p.get("screenshot_after") else None
+        # The input is already posted: nothing below may turn this into an
+        # error that invites the model to repeat it.
+        note = None
+        try:
+            shot = self._auto_shot(f) if p.get("screenshot_after") else None
+        except Exception:  # noqa: BLE001
+            shot, note = None, SHOT_LOST_NOTE
         settled = self.settled_thumb
         els_changed = None
-        after = shot if shot is not None else self._elements(f) if f is not None else {}
+        try:
+            after = shot if shot is not None else self._elements(f) if f is not None else {}
+        except Exception:  # noqa: BLE001 — a second signal only
+            after = {}
         sig_after = self._sig_of(after)
         if sig_before is not None and sig_after is not None:
             els_changed = sig_after != sig_before
@@ -2930,15 +2972,22 @@ class Session:
             out["changed"] = bool(changed) or bool(els_changed)
         changed = out.get("changed")
         if verb == "type":
-            why = typed_check(p["text"], self._focus(), changed)
+            why, diff_note = typed_result(p["text"], self._focus(), changed, typing_before)
+            note = note or diff_note
             if why:
                 if self._secure():
                     why += (" (secure keyboard entry is on in another app, which "
                             "blocks typed keys)")
                 out.update(ok=False, err=why)
                 if shot is None:                      # the model sees where it went
-                    shot = self._auto_shot(f)
-                    settled = None                    # the thumb predates this shot
+                    try:
+                        shot = self._auto_shot(f)
+                        settled = None                # the thumb predates this shot
+                    except Exception:  # noqa: BLE001
+                        note = note or SHOT_LOST_NOTE
+        if note and out.get("ok") is not False:
+            out["note"] = note
+            out["text"] = f"{out['text']}\nnote: {note}"
         if shot is not None:
             out.update(shot)
             self._remember(self.frame, shot, settled)

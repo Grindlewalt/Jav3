@@ -945,7 +945,8 @@ def test_typed_check_reads_the_focused_field_back():
     # no focus reported but the screen changed (Chromium, canvas editors): no claim
     assert jd.typed_check("a", {}, changed=True) is None
     assert jd.typed_check("a", {"role": "", "label": "", "value": None}, True) is None
-    assert jd.typed_check("TextEdit", field, changed=True) is not None   # value is proof
+    # without a "before" reading a value lacking the text stays an error
+    assert jd.typed_check("TextEdit", field, changed=True) is not None
     assert 'not a text field ("button Save")' in jd.typed_check(
         "a", {"role": "button", "label": "Save", "value": None})
     # cannot tell: no reader, a secure field, a newline that may have submitted
@@ -954,6 +955,56 @@ def test_typed_check_reads_the_focused_field_back():
     assert jd.typed_check("hi\n", field) is None
     # the error names the field, never its value
     assert "hunter2" not in jd.typed_check("x", {**field, "value": "hunter2"})
+
+
+def test_typed_read_back_tolerates_reformatting_and_only_errors_when_nothing_moved():
+    field = {"role": "textfield", "label": "Name", "value": ""}
+    # comparison is NFKC + case-folded + whitespace-collapsed
+    assert jd.typed_result("ｆｉｌｅ  Name", {**field, "value": "FILE name"}) == (None, None)
+    assert jd.typed_result("caf\u00e9", {**field, "value": "cafe\u0301"}) == (None, None)
+    # the field changed but does not hold the text (autocomplete): a note, not an error
+    err, note = jd.typed_result("Marx", {**field, "value": "Marseille, France"}, None, field)
+    assert err is None and note == jd.TYPED_DIFF_NOTE
+    assert note.startswith("typed; the field now reads differently from what was typed")
+    err, note = jd.typed_result("1234567", {**field, "value": "123-45-67"}, False,
+                                {**field, "value": "12"})
+    assert err is None and note == jd.TYPED_DIFF_NOTE
+    # neither the field nor the screen changed: the error
+    err, note = jd.typed_result("abc", {**field, "value": "old"}, False,
+                                {**field, "value": "old"})
+    assert err and err.startswith("typed text did not appear") and note is None
+    # unchanged field but the screen moved: no claim either way
+    assert jd.typed_result("abc", {**field, "value": "old"}, True,
+                           {**field, "value": "old"}) == (None, None)
+
+
+async def test_type_with_autocomplete_is_ok_with_a_note_and_a_lost_shot_is_not_an_error(
+        cfg, monkeypatch):
+    monkeypatch.setattr(jd, "SETTLE_S", 0)
+    monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)
+    b = NavBackend(tree=TREE)
+    focus = {"role": "textfield", "label": "Search", "value": ""}
+    b.elements_source = lambda: jd.FakeElementSource(TREE, focus=lambda: dict(focus))
+    orig_type = b.type_text
+    b.type_text = lambda t: (orig_type(t), focus.update(value=focus["value"] + "*"))[0]
+    s = jd.Session(b, "a", "t")
+    s.grants = {"screen": True, "input": True, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "0", "verb": "screenshot", "params": {}})
+    await s.handle(ws, {"id": "1", "verb": "type",
+                        "params": {"text": "TextEd", "screenshot_after": False}})
+    r = ws.sent[-1]
+    assert r["ok"] is True and r["note"] == jd.TYPED_DIFF_NOTE and "note: typed;" in r["text"]
+    # the input went out, then the capture failed: ok, with the note, never an error
+    def boom(f):
+        raise RuntimeError("capture died")
+    monkeypatch.setattr(s, "_auto_shot", boom)
+    await s.handle(ws, {"id": "2", "verb": "type", "params": {"text": "TextEd", "screenshot_after": True}})
+    r = ws.sent[-1]
+    assert r["ok"] is True and "image" not in r
+    assert r["note"] == ("the action was sent but the screen could not be captured "
+                         "afterwards — take desk_screenshot before repeating it")
+    assert len([c for c in b.calls if c[0] == "type"]) == 2       # sent once each, not retried
 
 
 async def test_type_is_read_back_and_fails_with_the_screen(cfg, monkeypatch):
