@@ -52,6 +52,7 @@ def register_turn(env: TurnEnvelope) -> None:
 def release_turn(op_id: str) -> None:
     _envelopes.pop(op_id, None)
     _tainted.discard(op_id)          # forget the turn's taint history too
+    _nav_tainted.pop(op_id, None)
     # ...and hand egress attribution back to whatever turn is still running, or
     # to nobody. Leaving it set meant a finished project kept policing the
     # guest's later traffic.
@@ -144,7 +145,8 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               # return the post-action screenshot).
                               "desk_screenshot", "desk_click", "desk_move",
                               "desk_scroll", "desk_type", "desk_key",
-                              "desk_open", "desk_shell",
+                              "desk_open", "desk_shell", "desk_wait",
+                              "desk_drag",
                               # the operator's browser (jav3-browser): pages
                               # are web content, exactly like web_read
                               "browser_open_tab", "browser_navigate",
@@ -152,7 +154,8 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               "browser_type", "browser_scroll",
                               "browser_scroll_to_element",
                               "browser_screenshot_tab", "browser_close_tab",
-                              "browser_list_tabs",
+                              "browser_list_tabs", "browser_select",
+                              "browser_hover", "browser_key", "browser_back",
                               # /local: files and command output from the
                               # operator's own machine — a cloned repo's README
                               # is as attacker-authorable as a web page
@@ -176,6 +179,14 @@ _PROMOTION_TOOLS = frozenset({"memory_write"})
 # primary block; this ledger is the runtime half — it catches the promotion at
 # the moment it happens and records the provenance on the result.
 _tainted: set[str] = set()
+# ...and, of those, the ones tainted by a screen or a page (desk_* / browser_*):
+# op_id -> "desk" | "browser". Feeds runtime.nav_taint for memory_write.
+_nav_tainted: dict[str, str] = {}
+
+
+def _nav_source(name: str) -> str | None:
+    return ("desk" if name.startswith("desk_")
+            else "browser" if name.startswith("browser_") else None)
 
 _PROMOTION_QUARANTINE_NOTE = (
     "\n\n[taint: this write happened in a turn that already consumed untrusted "
@@ -193,7 +204,7 @@ def op_tainted(op_id: str) -> bool:
     return op_id in _tainted
 
 
-def mark_tainted(op_id: str) -> None:
+def mark_tainted(op_id: str, source: str | None = None) -> None:
     """Stamp an operation untrusted from outside the name-based classifier.
 
     `classify_taint` decides from the tool NAME alone, which is right for
@@ -201,9 +212,14 @@ def mark_tainted(op_id: str) -> None:
     inbox_fetch (an empty poll returns nothing, and polling happens every
     round). The inbox handler calls this only when a peer's words actually
     entered the turn — otherwise every turn in the system would come up
-    tainted for having checked an empty mailbox."""
+    tainted for having checked an empty mailbox.
+
+    `source` ("desk" / "browser") also records that a screen or a page did it
+    (see _nav_tainted)."""
     if op_id:
         _tainted.add(op_id)
+        if source in ("desk", "browser"):
+            _nav_tainted.setdefault(op_id, source)
 
 
 async def broker_dispatch(op_id: str, name: str, args: dict,
@@ -242,6 +258,8 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
     # persist the taint onto the written note (not just the in-turn result): the
     # handler reads this contextvar and stamps `taint: untrusted` into frontmatter.
     taint_tok = runtime.write_taint.set("untrusted") if launder else None
+    nav_tok = (runtime.nav_taint.set(_nav_tainted[op_id])
+               if launder and op_id in _nav_tainted else None)
     try:
         # tier-4 hook (pre-dispatch): policy / deterministic diff-gate on
         # (name, args, env) — halt-for-human or reject goes here.
@@ -261,6 +279,8 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
         # laundering promotion on the result the model sees.
         if classify_taint(name) == "untrusted":
             _tainted.add(op_id)
+            if _nav_source(name):
+                _nav_tainted.setdefault(op_id, _nav_source(name))
         if op_id in _tainted and not was_tainted:
             # this call is what tainted the turn (a web read, or a peer message
             # via mark_tainted). Its project's /persist goes read-only at the
@@ -280,5 +300,7 @@ async def broker_dispatch(op_id: str, name: str, args: dict,
         budget_mod.active_op_id.reset(optok)
         if taint_tok is not None:
             runtime.write_taint.reset(taint_tok)
+        if nav_tok is not None:
+            runtime.nav_taint.reset(nav_tok)
         for v, tok in zip(vars_, tokens):
             v.reset(tok)

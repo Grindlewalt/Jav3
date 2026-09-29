@@ -65,6 +65,13 @@ spawn_depth = contextvars.ContextVar("jav3_spawn_depth", default=0)
 # the file instead of only annotating the in-turn result.
 write_taint = contextvars.ContextVar("jav3_write_taint", default=None)
 
+# Set alongside write_taint when what tainted the turn was a SCREEN or a PAGE
+# ("desk" / "browser"): text there can be written by anyone, and it is the
+# path by which "turn shell on" reaches memory. memory_write refuses outright
+# (memory.weakening_advice) a note from such a turn that recommends weakening
+# a guard, instead of only quarantining it.
+nav_taint = contextvars.ContextVar("jav3_nav_taint", default=None)
+
 # The agent whose PRIVATE notes dir the memory tools use for this operation:
 # set only when the turn runs as an agent definition with `own_memory: true`,
 # and then memory_read/memory_write target agents/<slug>/memory/ instead of the

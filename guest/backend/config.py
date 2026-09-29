@@ -24,7 +24,7 @@ class _Settings:
     tool_result_evict_chars = 4000
     # the loop evicts older tool screenshots after every tool round; the host
     # default lives in backend/config.py — keep the two in step
-    screenshot_keep_recent = 1
+    screenshot_keep_recent = 3
     # where the pushed workspace unpacks and where the clean tool handlers live
     projects_dir = _BASE / "projects"
     tools_dir = _BASE / "tools"

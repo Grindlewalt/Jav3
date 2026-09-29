@@ -1,12 +1,15 @@
 ---
 name: desk_move
-description: Move the pointer on the connected computer (hover); returns the screen afterwards.
+description: Move the pointer on the connected computer (hover), onto an element id or a point; returns the screen afterwards.
 when_to_use: To reveal a tooltip or hover menu seen in the latest desk_screenshot.
 enabled: true
 requires_desk: true
 parameters:
   type: object
   properties:
+    element:
+      type: integer
+      description: Id from the element list of the latest screenshot. Moves to its centre.
     x:
       type: integer
     y:
@@ -14,6 +17,5 @@ parameters:
     computer:
       type: string
       description: Which connected computer (name). Omit when only one is connected.
-  required: [x, y]
 ---
-Coordinates are pixels of the latest desk_screenshot.
+Give element, or x and y (pixels of the latest desk_screenshot), not both.

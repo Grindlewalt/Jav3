@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_user
-from .config import ENV_FILE, has_state, settings
+from .config import ENV_FILE, has_any_state, settings
 from .statemigrate import integrity_ok, service_busy, snapshot_db
 
 # The file-tree state dirs, by their name on the remote.
@@ -361,7 +361,7 @@ def restore(from_remote: str | None = None, to_dir: Path | None = None,
     if not rclone:
         raise BackupError(f"rclone is not installed — {INSTALL_HINT}")
     to = Path(to_dir or settings.state_dir).expanduser().resolve()
-    if has_state(to) and not force:
+    if has_any_state(to) and not force:
         raise BackupError(f"{to} already holds Jav3 state — refusing to "
                           "overwrite it (pass --force to restore over it)")
     why = service_busy(to / "data" / "jarvis.db")

@@ -132,6 +132,43 @@ def test_populated_state_dir_wins_over_legacy(tmp_path):
     assert s.db_path == st / "data" / "jarvis.db"
 
 
+def _scaffold(st: Path) -> None:
+    """What the Pi's ~/.local/share/jarvis held: empty dirs, a seeded skill,
+    memory seeds, and the 0-byte jarvis.db a read-write connect left."""
+    for n in ("memory/notes", "projects", "agents", "data/vm", "skills/organize-project"):
+        (st / n).mkdir(parents=True, exist_ok=True)
+    (st / "skills" / "organize-project" / "SKILL.md").write_text("shipped")
+    (st / "memory" / "user.md").write_text("seed")
+    (st / "data" / "jarvis.db").write_bytes(b"")
+
+
+def test_scaffolding_and_an_empty_db_are_not_state(tmp_path):
+    st = tmp_path / "state"
+    _scaffold(st)
+    assert not config.has_state(st)
+    assert config.has_any_state(st)                 # still refuses a migrate INTO it
+    # the probe is read-only: it never creates a DB where there was none
+    bare = tmp_path / "bare"
+    assert not config.has_state(bare) and not (bare / "data" / "jarvis.db").exists()
+    # one real table is state
+    con = sqlite3.connect(st / "data" / "jarvis.db")
+    con.execute("CREATE TABLE tool_calls (id INTEGER PRIMARY KEY)")
+    con.commit()
+    con.close()
+    assert config.has_state(st)
+    # garbage bytes are not a DB
+    (st / "data" / "jarvis.db").write_bytes(b"not sqlite" * 100)
+    assert not config.has_state(st)
+
+
+def test_scaffolded_state_dir_does_not_steal_the_live_checkout(tmp_path):
+    repo = _legacy_repo(tmp_path / "repo")
+    st = tmp_path / "state"
+    _scaffold(st)
+    s = mk(base_dir=repo, state_dir=st)
+    assert s.legacy_layout and s.db_path == repo / "data" / "jarvis.db"
+
+
 def test_shipped_skills_seed_once(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / "skills" / "organize-project").mkdir(parents=True)

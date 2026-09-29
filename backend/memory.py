@@ -8,6 +8,35 @@ from .config import settings, ensure_dirs
 from .db import get_state
 
 
+# A note that argues for weakening a guard. Written in a turn that read a
+# screen or a page, that is the shape of an injection trying to outlive the
+# turn ("the operator should run allow-shell"), so memory_write refuses it
+# rather than quarantining it (runtime.nav_taint). Deliberately small and
+# literal: it names the switches this system has, not every phrasing.
+_WEAKENING = [re.compile(p, re.I) for p in (
+    r"\ballow-shell\b",
+    r"\bturn(?:ing|s|ed)?\s+(?:the\s+)?shell\s+on\b",
+    r"\bturn(?:ing|s|ed)?\s+on\s+(?:the\s+)?shell\b",
+    r"\bshell\b[^.\n]{0,40}\b(?:turned|switched|set)\s+on\b",
+    r"\b(?:grant|enable|allow)(?:s|ed|ing)?\s+(?:the\s+)?shell\b",
+    r"\bdisabl(?:e|es|ed|ing)\b[^.\n]{0,40}\b(?:guard|gate|approval)s?\b",
+    r"\b(?:grant|give)(?:s|ed|ing)?\s+(?:it\s+|jav3\s+|the\s+agent\s+)?"
+    r"(?:more\s+|full\s+|all\s+)?(?:permissions?|access(?:ibility)?|screen recording)\b",
+    r"\b(?:disable|turn\s+off|switch\s+off)\b[^.\n]{0,40}"
+    r"\b(?:security|sandbox|taint|firewall|lock\s*screen)\b",
+)]
+
+
+def weakening_advice(text: str) -> str | None:
+    """The phrase in `text` that recommends enabling shell, granting
+    permissions or disabling a guard; None when there is none."""
+    for rx in _WEAKENING:
+        m = rx.search(text or "")
+        if m:
+            return m.group(0)
+    return None
+
+
 def estimate_tokens(text: str) -> int:
     """Cheap chars/4 estimate — for budgeting the context, not billing."""
     return max(0, round(len(text) / 4))
