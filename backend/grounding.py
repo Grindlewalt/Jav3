@@ -633,25 +633,32 @@ def score_model(model_id: str, answers: list, boxes: list, sizes: list,
     n = len(boxes)
     best = None
     for conv in CONVENTIONS:
-        hits, errs = 0, []
+        hits, errs, ch, cm = 0, [], [], []
         for ans, box, (w, h) in zip(answers, boxes, sizes):
             pt = checked_pixels(ans, conv, w, h)
             if pt is None:
+                if ans is not None:
+                    cm.append(ans[2])         # rejected: a miss that reported a confidence
                 continue
             hit, err = score(pt, box)
             hits += hit
             errs.append(err)
+            (ch if hit else cm).append(ans[2])
         med = statistics.median(errs) if errs else None
         key = (hits, -(med if med is not None else 1e9))
         if best is None or key > best[0]:
-            best = (key, conv, hits, med)
-    _key, conv, hits, med = best
+            best = (key, conv, hits, med, ch, cm)
+    _key, conv, hits, med, ch, cm = best
     rate = hits / n if n else 0.0
     return {"model": model_id, "hit_rate": round(rate, 3),
             "median_px": round(med, 1) if med is not None else None,
             "p95_ms": _p95(latencies), "cost_per_1k": _cost_per_1k(model_id),
             "convention": conv, "n": n, "errors": errors,
-            "unusable": rate < UNUSABLE_BELOW, "last_error": last_error}
+            "unusable": rate < UNUSABLE_BELOW, "last_error": last_error,
+            # what the model reported as confidence on hits vs misses, so
+            # MIN_CONFIDENCE can be picked from data
+            "conf_hit": round(statistics.fmean(ch), 3) if ch else None,
+            "conf_miss": round(statistics.fmean(cm), 3) if cm else None}
 
 
 def rank(rows: list[dict]) -> list[dict]:

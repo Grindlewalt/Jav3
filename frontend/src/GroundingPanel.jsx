@@ -130,6 +130,11 @@ export default function GroundingPanel() {
                           {r.probed_at ? ago(r.probed_at) : ''}</td>
                         <td>
                           {r.stale && <Tag tone="error">stale</Tag>}
+                          {(r.conf_hit != null || r.conf_miss != null) && (
+                            <span className="dim small"
+                                  title="mean confidence the model reported on hits and on misses">
+                              {' '}conf hit {num(r.conf_hit, 2)} / miss {num(r.conf_miss, 2)}</span>
+                          )}
                           {r.unusable && <Tag tone="error">unusable</Tag>}
                           {r.errors > 0 && (
                             <span className="dim small" title={r.last_error || ''}>

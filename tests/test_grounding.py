@@ -824,3 +824,16 @@ async def test_probe_fixture_calls_raise_no_image_sent_event(tmp_env, monkeypatc
     await grounding.run_probe(["p/m"], targets=3)
     await grounding._run({"id": "j", "models": ["p/m"], "by": "t", "running": True})
     assert got and all(g[0] == "grounding_probe" for g in got)
+
+
+def test_score_model_records_mean_confidence_of_hits_and_misses():
+    box = (100, 100, 40, 40)
+    answers = [(120.0, 120.0, 0.9), (130.0, 110.0, 0.7),      # hits
+               (600.0, 600.0, 0.4), (700.0, 300.0, 0.2),      # misses
+               None]                                          # error: no confidence
+    row = grounding.score_model("p/m", answers, [box] * 5, [(1280, 800)] * 5,
+                                [10] * 4, 1)
+    assert row["convention"] == "px"
+    assert row["conf_hit"] == 0.8 and row["conf_miss"] == 0.3
+    empty = grounding.score_model("p/m", [None], [box], [(1280, 800)], [], 1)
+    assert empty["conf_hit"] is None and empty["conf_miss"] is None
