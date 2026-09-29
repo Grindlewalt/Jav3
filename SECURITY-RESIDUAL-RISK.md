@@ -459,7 +459,7 @@ a watched, policy-gated, cuttable pipe to the internet.
       false), not OS input: some sites ignore them, and no debugger
       permission is taken to do better.
 
-19. **Memory and the other channels into the prompt (rewritten 2026-09-29).**
+19. **Memory and the other channels into the prompt (added 2026-09-29).**
     Text that rides the system prompt is what an injection wants to reach. The
     channels differ in how well they are guarded, and this is the honest list:
     - **Approval-gated (nothing reaches the prompt until the operator acts).**
