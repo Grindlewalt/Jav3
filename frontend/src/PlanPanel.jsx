@@ -43,6 +43,16 @@ export default function PlanPanel({ slug, state, setState }) {
     return () => unfollow?.()
   }, [plan?.root_id, running]) // eslint-disable-line
 
+  // While a run is live, look again every few seconds. The live events are the
+  // fast path, but they can only start once the head's id is known, and the
+  // response to Run comes back before it is: a panel that had missed both stayed
+  // on "draft / todo / Stop" after the run had long finished.
+  useEffect(() => {
+    if (!running) return undefined
+    const t = setInterval(load, plan?.root_id ? 10000 : 2500)
+    return () => clearInterval(t)
+  }, [running, plan?.root_id, slug]) // eslint-disable-line
+
   async function call(path, options) {
     setBusy(true)
     try {

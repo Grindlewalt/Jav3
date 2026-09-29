@@ -25,7 +25,7 @@ import { atBottom, readerLeft } from './turnEvents.js'
 export function useFollow(ref, { mark = 0, resetKey = null } = {}) {
   const stuck = useRef(true)
   const last = useRef(0)          // where the scroller was when we last looked
-  const input = useRef(0)         // when the reader last touched it
+  const input = useRef(-Infinity) // when the reader last touched it
   const leftAt = useRef(mark)
   const markRef = useRef(mark)
   markRef.current = mark
