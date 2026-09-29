@@ -1109,3 +1109,22 @@ def test_proxy_host_header_without_a_port(monkeypatch):
     with pytest.raises(browser.BrowserError, match="Jav3 server"):
         browser.check_url("https://tunnel.example.org:1234/", deny)
     assert browser.check_url("http://10.0.0.82:3000/", deny)
+
+
+def test_read_page_worst_case_keeps_the_more_line_and_changed_under_the_cap():
+    """300+ elements, 150+ candidates and a maximal page text: the tool-result cap
+    cuts the END, so the page text gives way, never '+N more' or 'changed:'."""
+    from backend.config import settings
+    long_name = "N" * 100
+    els = [{**_link(i), "name": long_name, "text": long_name, "value": "v" * 80}
+           for i in range(1, 401)]
+    els += [_cand(500 + i, "C" * 80) for i in range(200)]
+    page = _page(els)
+    page["text"] = "\n".join(f"line {i} " + "x" * 90 for i in range(200))   # > 8000 chars
+    out = browser.render("read_page", page, {"tab": 7, "mode": "all", "max_chars": 8000},
+                         changed=True)
+    assert len(out) <= settings.tool_result_max_chars
+    assert re.search(r"\n\+\d+ more not listed", out)
+    assert out.endswith("changed: yes")
+    assert re.search(r"… \(text cut, [\d,]+ more characters\)", out)
+    assert out.index("[f0:1]") < out.index("page text (written by the site")
