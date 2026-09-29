@@ -37,29 +37,23 @@ parameters:
       description: true = add BEHIND whatever is playing instead of replacing it — "queue up", "play next", "add to the queue". Jav3 player only. On an idle player it just plays.
   required: []
 ---
-Do not call music_search first. This searches everywhere itself and plays the
-winner, so the normal case is a single call.
+Do not call music_search first: this searches everywhere itself and plays the
+winner, so the normal case is one call. Do not claim music is playing when the
+result says it did not start — say what the result says and, if it was the music
+app, offer to move it to the Jav3 player.
 
 If it cannot tell which track was meant it returns a shortlist — play one by
-passing its id. If nothing matched at all it returns the whole library, so the
-next call can be the right one. Two calls is the worst case, not a conversation.
+passing its id. If nothing matched it returns the whole library, so the next
+call can be the right one. Two calls is the worst case.
 
 To queue SEVERAL tracks ("queue up some drive music"): one music_search by tag,
 then one call here with their ids and queue=true.
 
-There are two places sound can come out, and `auto` picks for you:
-
-- **the Jav3 player** — a player inside the Jav3 tab. Preferred whenever a
-  tab is open, because the operator is already touching that tab, and a browser
-  only starts audio in a tab that has been touched. Volume and output work here.
-  It plays in ONE tab: the one the operator asked from. If they say "put it on
-  the mac" and they are talking to you from somewhere else, pass `tab`; the
-  error lists the open tabs by name if the guess misses.
-- **the music app** — TARMAC's own players on a phone or desktop. This is the one
-  that goes silent: it accepts the request and plays nothing until the operator
-  presses play once in that app.
-
-It checks the sound actually started rather than trusting the acceptance, and
-tells you which player it used. Do not claim music is playing when the result
-says it did not start — say what the result says and, if it was the music app,
-offer to move it to the Jav3 player instead.
+`auto` picks the player. The Jav3 player (inside the Jav3 tab) is preferred
+whenever a tab is open: a browser only starts audio in a tab the operator has
+touched. It plays in ONE tab, the one they
+asked from; if they say "put it on the mac" from somewhere else, pass `tab` (the
+error lists the open tabs by name). The music app (TARMAC's players on a phone
+or desktop) is the one that goes silent: it accepts the request and plays
+nothing until the operator presses play once in that app. The result says which
+player was used and whether sound actually started.

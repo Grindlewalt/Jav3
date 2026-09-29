@@ -335,3 +335,51 @@ async def test_edit_file_on_a_binary_file_is_a_plain_error(proj):
     (proj / "b.bin").write_bytes(b"\xff\xfe\x00\x80")
     out = await _tool("edit_file", path="b.bin", find="a", replace="b")
     assert out.startswith("error: b.bin is binary"), out
+
+
+# --- TOOLS-06: a TOOL.md body reaches the model whole, or visibly cut ---
+
+def _entry(md: Path) -> dict:
+    """The registry entry for a TOOL.md, with the gates (desk connected, a
+    browser attached, settings) removed so the spec is built."""
+    from backend.agent.tools import registry
+    e = registry._parse_md(md)
+    for k in [k for k in e if k.startswith("requires_")]:
+        del e[k]
+    e["enabled"] = True
+    return e
+
+
+TOOL_ONLY = [m for m in TOOL_MDS if m.name == "TOOL.md"]
+
+
+@pytest.mark.parametrize("md", TOOL_ONLY, ids=lambda p: p.parent.name)
+def test_tool_body_fits_the_spec_cap(md):
+    """The tail of a long body is where the failure-recovery guidance lives; past
+    the cap it was cut mid-sentence and the model never saw it. Shorten the body
+    (lead with what matters) or raise SPEC_NOTES_MAX deliberately."""
+    from backend.agent.tools.registry import SPEC_NOTES_MAX
+    body = _entry(md)["body"]
+    assert len(body) <= SPEC_NOTES_MAX, (
+        f"{md.parent.name}: body is {len(body)} chars, the spec carries {SPEC_NOTES_MAX}")
+
+
+@pytest.mark.parametrize("md", TOOL_ONLY, ids=lambda p: p.parent.name)
+def test_the_spec_carries_the_whole_body(md):
+    from backend.agent.tools import registry
+    e = _entry(md)
+    if not e["body"]:
+        return
+    (spec,) = registry.openai_tool_specs([e])
+    assert spec["function"]["description"].endswith(e["body"])
+
+
+def test_a_body_over_the_cap_is_cut_with_a_marker():
+    from backend.agent.tools import registry
+    e = {"name": "t", "kind": "tool", "description": "d", "parameters": {},
+         "body": "x" * (registry.SPEC_NOTES_MAX + 500)}
+    (spec,) = registry.openai_tool_specs([e])
+    notes = spec["function"]["description"].partition("\nNotes: ")[2]
+    assert notes == "x" * registry.SPEC_NOTES_MAX + "…"
+    (spec,) = registry.openai_tool_specs([e], notes_max=50)      # the local voice tier
+    assert spec["function"]["description"].endswith("x" * 50 + "…")
