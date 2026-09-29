@@ -1136,9 +1136,35 @@ async def _resolve_point(d: Desk, verb: str, params: dict) -> tuple[dict, dict |
     if loc is None:
         raise DeskError(f"could not find {_q(tgt)} on the latest screenshot; click by "
                         "element id or coordinates, or zoom with region")
-    return {**rest, "x": int(loc.x), "y": int(loc.y)}, {
-        "how": "grounded", "target": tgt, "model": loc.model,
-        "confidence": round(float(loc.confidence), 2)}
+    gx, gy = int(loc.x), int(loc.y)
+    under = _element_at(f.get("elements") or [], gx, gy)
+    via = {"how": "grounded", "target": tgt, "model": loc.model,
+           "confidence": round(float(loc.confidence), 2)}
+    if under is not None:
+        # the grounding model is a guess from pixels; the accessibility tree
+        # says what is really there. A named control that has nothing to do
+        # with the description is a wrong click on something else.
+        via["under"] = f"[{under['id']}] {under['role']} {_q(under['label'])}".rstrip()
+        if under["label"] and not (_content_words(under["label"]) & _content_words(tgt)):
+            raise DeskError(f"the grounding model pointed at {via['under']}, which does "
+                            f"not match {_q(tgt)} — click by element id instead")
+    elif f.get("elements"):
+        via["under"] = None
+    return {**rest, "x": gx, "y": gy}, via
+
+
+_FILLER = frozenset(("the", "a", "an", "of", "in", "on", "to", "for", "and", "at", "this"))
+
+
+def _content_words(s: str) -> set[str]:
+    return {w for w in _label_words(s) if w not in _ROLE_WORDS and w not in _FILLER}
+
+
+def _element_at(els: list[dict], x: int, y: int) -> dict | None:
+    """The smallest listed element whose box holds the image point."""
+    hit = [e for e in els if e["x"] <= x < e["x"] + max(1, e["w"])
+           and e["y"] <= y < e["y"] + max(1, e["h"])]
+    return min(hit, key=lambda e: e["w"] * e["h"]) if hit else None
 
 
 def _stale_frame(d: Desk, params: dict) -> str | None:
@@ -1173,8 +1199,11 @@ def _stale_frame(d: Desk, params: dict) -> str | None:
 def _via_line(verb: str, via: dict, p: dict) -> str:
     at = f"at {p.get('x')},{p.get('y')}"
     if via["how"] == "grounded":
+        there = ("" if "under" not in via else
+                 f"; element there: {via['under']}" if via["under"]
+                 else "; no listed element at that point")
         return (f"{_PAST[verb]} {_q(via['target'])} {at} (grounded by {via['model']}, "
-                f"confidence {via['confidence']:.2f})")
+                f"confidence {via['confidence']:.2f}{there})")
     return f"{_PAST[verb]} [{via['element']}] {via['role']} {_q(via['label'])} {at}"
 
 

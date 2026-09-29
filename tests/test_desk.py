@@ -919,7 +919,7 @@ async def test_click_by_target_label_then_grounding(env, monkeypatch):
         monkeypatch.setattr(grounding, "locate", locate)
         text, _ = imageresult.split(await _tool("desk_click")(target="the gear icon"))
         assert text.splitlines()[0] == ('clicked "the gear icon" at 900,120 '
-                                        '(grounded by p/vis-1, confidence 0.82)')
+                                        '(grounded by p/vis-1, confidence 0.82; no listed element at that point)')
         assert seen == {"image": PNG, "w": W, "h": H, "d": "the gear icon"}
         assert fd.reqs[-1]["params"]["x"] == 900
         row = json.loads([a for a in await _actions() if a["verb"] == "click"][-1]["params"])
@@ -941,6 +941,36 @@ async def test_click_by_target_label_then_grounding(env, monkeypatch):
                                      convention="px", latency_ms=1)
         monkeypatch.setattr(grounding, "locate", outside)
         assert "outside" in await _tool("desk_click")(target="beyond")   # still bounds-checked
+    finally:
+        await fd.stop()
+
+
+async def test_grounded_point_is_checked_against_the_element_under_it(env, monkeypatch):
+    from backend import grounding
+    fd = await _nav(env)
+    at = {}
+
+    async def locate(image, w, h, description, *, op_id=None):
+        return grounding.Located(x=at["x"], y=at["y"], confidence=0.82, model="p/vis-1",
+                                 convention="px", latency_ms=1)
+    monkeypatch.setattr(grounding, "locate", locate)
+    try:
+        await _tool("desk_screenshot")()
+        # an element there whose label matches: reported in the result line
+        at.update(x=640, y=410)
+        text, _ = imageresult.split(await _tool("desk_click")(target="Save the file please"))
+        assert text.splitlines()[0] == ('clicked "Save the file please" at 640,410 (grounded by '
+                                        'p/vis-1, confidence 0.82; element there: [1] button "Save")')
+        # an element there that has nothing to do with the description: refused, not clicked
+        n = len(fd.reqs)
+        out = await _tool("desk_click")(target="Delete account")
+        assert out == ('error: the grounding model pointed at [1] button "Save", which does not '
+                       'match "Delete account" — click by element id instead')
+        assert len(fd.reqs) == n
+        # nothing listed there: clicked, and said so
+        at.update(x=900, y=120)
+        text, _ = imageresult.split(await _tool("desk_click")(target="the gear icon"))
+        assert "no listed element at that point" in text.splitlines()[0]
     finally:
         await fd.stop()
 
