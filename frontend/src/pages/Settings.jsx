@@ -10,7 +10,7 @@ import { Copy } from '../copy.jsx'
 import { ts } from '../format.js'
 import { notifyError } from '../notify.js'
 import { useAuth } from '../auth.jsx'
-import { Button, Card, EmptyState, Input, Tag } from '../components/index.js'
+import { Button, Card, EmptyState, Input, Select, Tag } from '../components/index.js'
 import Page from '../components/Page.jsx'
 import BackupPanel from '../BackupPanel.jsx'
 import BrowserPanel from '../BrowserPanel.jsx'
@@ -29,6 +29,7 @@ export default function Settings() {
   return (
     <Page title="Settings" className="settings-page">
       <ProvidersPanel />
+      <NotificationsPanel />
       <DevicesPanel />
       <DeskPanel />
       <GroundingPanel />
@@ -39,6 +40,44 @@ export default function Settings() {
       <MusicPanel />
       <SessionPanel />
     </Page>
+  )
+}
+
+// --- notifications ---------------------------------------------------------------
+// One server-side level (backend/security.py) that the web toasts and the
+// terminal client's sidebar both follow. It only decides what interrupts:
+// every event is still in Security's queue and log either way.
+const LEVEL_OPTIONS = [
+  { value: 'critical', label: 'Critical only' },
+  { value: 'approvals', label: 'Needs my approval' },
+  { value: 'all', label: 'Everything' },
+]
+
+function NotificationsPanel() {
+  const [level, setLevel] = useState(null)
+  useEffect(() => {
+    api('/api/notifications/settings').then((r) => setLevel(r.level))
+      .catch(() => setLevel(''))
+  }, [])
+  async function change(v) {
+    const was = level
+    setLevel(v)
+    try {
+      const r = await api('/api/notifications/settings',
+        { method: 'PUT', body: JSON.stringify({ level: v }) })
+      setLevel(r.level)
+    } catch (e) { setLevel(was); notifyError(e) }
+  }
+  return (
+    <Card title="Notifications" headingLevel={2}>
+      <div className="settings-inline">
+        <Select label="Ping me for" value={level || 'approvals'} disabled={level === null}
+                onChange={(e) => change(e.target.value)} options={LEVEL_OPTIONS} />
+      </div>
+      <p className="dim small settings-note">
+        Critical alerts always ping; everything is still recorded in Security.
+      </p>
+    </Card>
   )
 }
 
