@@ -1330,8 +1330,9 @@ async def test_tui_security_tabs_and_queue_verdicts_after_confirm(cfg):
         # tab / → forward, ← back, numbers jump, wraps round
         for key, tab in (("tab", "network"), ("right", "logs"), ("left", "network"),
                          ("4", "secrets"), ("tab", "persistent"), ("6", "profiles"),
-                         ("tab", "rules"), ("tab", "queue"), ("left", "rules"),
-                         ("left", "profiles"), ("7", "rules"), ("1", "queue")):
+                         ("tab", "rules"), ("tab", "calls"), ("tab", "queue"),
+                         ("left", "calls"), ("left", "rules"), ("left", "profiles"),
+                         ("7", "rules"), ("8", "calls"), ("1", "queue")):
             await pilot.press(key)
             assert scr.tab == tab, key
             assert scr.query_one(f"#sec-tab-{tab}").has_class("-on")
