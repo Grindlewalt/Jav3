@@ -69,17 +69,25 @@ class ApproveBody(BaseModel):
     # the project an UNATTRIBUTED (shared-box, no turn) row belongs to: an
     # approval always writes a project's own list, so the operator names one
     project: str | None = None
+    # allow for an hour only, without writing any list (egress.approve_host_once)
+    once: bool = False
 
 
 @router.post("/pending/{pid}/approve")
 async def approve(pid: int, body: ApproveBody | None = None):
     db = await get_db()
     try:
-        res = await egress.approve_host(db, pid, project=body.project if body else None)
+        proj = body.project if body else None
+        if body and body.once:
+            res = await egress.approve_host_once(db, pid, project=proj)
+        else:
+            res = await egress.approve_host(db, pid, project=proj)
     finally:
         await db.close()
     if not res.get("ok") and res.get("needs_project"):
         raise HTTPException(status_code=409, detail="needs_project")
+    if not res.get("ok") and "cannot be allowed" in res.get("error", ""):
+        raise HTTPException(status_code=400, detail=res["error"])
     return res
 
 

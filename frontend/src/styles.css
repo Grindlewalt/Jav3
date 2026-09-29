@@ -4198,3 +4198,12 @@ a:has(> .nav-dot) { position: relative; }
 .plan-progress { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .plan-failed { color: var(--red); }
 .plan-item.running { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Security pages: plain-language pass (backlog B5, WEB-02..23) */
+.net-lede { margin: 0 0 var(--sp-4); max-width: 80ch; }
+.net-wait { flex-wrap: wrap; row-gap: var(--sp-3); }
+.net-wait-meta { flex: 1 1 220px; }
+.net-refused { flex: 1 1 100%; }
+.rev-egress { flex-wrap: wrap; row-gap: var(--sp-3); }
+.rev-egress-btns { display: flex; gap: var(--sp-3); flex-shrink: 0; }
+.rev-egress-btns button { padding: 4px 12px; font-size: var(--fs-md); }
