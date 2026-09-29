@@ -660,6 +660,9 @@ NOT_LOGGED_IN = ("not logged in — /login: paste the line from Settings → Add
                  "(chat only), or use your password (full access)")
 SESSION_LOST = "not logged in (session expired, or token revoked) — /login"
 NEW_PROJECT = "+new"               # the /project picker's "+ New project" row
+DIALOG_GRACE = 0.6                 # seconds a dialog that opens by itself takes no keys,
+                                   # and how long the operator must pause typing after
+DIALOG_MAX_INERT = 3.0             # ... but never longer than this in all
 
 
 def tui_available() -> bool:
@@ -1312,6 +1315,41 @@ class Command:
                  takes_arg: bool = False, leader: str = ""):
         self.fn, self.help, self.usage = fn, help, usage
         self.busy_ok, self.takes_arg, self.leader = busy_ok, takes_arg, leader
+
+
+def ask_view(ev: dict, question: str) -> tuple[str, str]:
+    """(headline, detail markup) for an ask. A permission ask's headline already
+    names the command or the path and its detail repeats it, so each is said once:
+    `Run in the VM` over the command, `Write a.txt` over what goes into it, the
+    old and new text of an edit in red and green."""
+    detail = str(ev.get("detail") or "").strip("\n")
+    if not detail:
+        return question, ""
+    cut = len(detail) > 2000
+    lines = detail[:2000].splitlines()
+    tool = ev.get("tool") if ev.get("kind") == "permission" else None
+    head, contents = question, False
+    if tool == "run_code" and question.startswith("Run in the VM: "):
+        cmd = question[len("Run in the VM: "):].rstrip("…").strip()
+        if " ".join(detail.split()).startswith(cmd):
+            head = "Run in the VM"
+    elif tool in ("write_file", "edit_file"):
+        path = question.split(" ", 1)[1] if " " in question else ""
+        if path and lines[0].strip() == path:
+            lines, contents = lines[1:], tool == "write_file"
+    out = ["[$text-muted]contents[/]"] if contents else []
+    if contents and not lines:
+        lines = ["(empty file)"]
+    for ln in lines:
+        if tool == "edit_file" and ln.startswith("- "):
+            out.append(f"[$error]{_esc(ln)}[/]")
+        elif tool == "edit_file" and ln.startswith("+ "):
+            out.append(f"[$success]{_esc(ln)}[/]")
+        else:
+            out.append(f"[$text-muted]{_esc(ln)}[/]")
+    if cut:
+        out.append("[$text-muted]…[/]")
+    return head, "\n".join(out)
 
 
 # --- /local: the agent's file and shell tools, run on this machine ----------------------
@@ -2325,6 +2363,38 @@ def build_tui(base: str, token: str, **kw):
         def action_cancel(self) -> None:
             self.dismiss(None)
 
+    class Inert:
+        """A dialog that can open by itself while the operator is typing (an
+        agent's ask, a /local approval) takes no keys until they pause: the tail
+        of a sentence must not answer a question they have not seen. Printable
+        keys it turns away go back to the prompt they were typed at; enter and
+        esc are dropped. Each turned-away key restarts the pause, up to a limit."""
+
+        GRACE = DIALOG_GRACE
+        MAX_INERT = DIALOG_MAX_INERT
+
+        def _opened(self) -> None:
+            self.opened = self._last_key = time.monotonic()
+            self.ate = False
+
+        def inert(self) -> bool:
+            if self.GRACE <= 0:
+                return False
+            now = time.monotonic()
+            return now - self.opened < self.MAX_INERT and now - self._last_key < self.GRACE
+
+        def swallow(self, event) -> bool:
+            """True when this key was turned away."""
+            if not self.inert():
+                return False
+            self._last_key = time.monotonic()
+            self.ate = True
+            event.stop()
+            event.prevent_default()
+            if event.is_printable and event.character:
+                self.app.type_ahead(event.character)
+            return True
+
     class Confirm(ModalScreen):
         BINDINGS = [Binding("y,enter", "yes", show=False),
                     Binding("n,escape", "no", show=False)]
@@ -2355,24 +2425,23 @@ def build_tui(base: str, token: str, **kw):
             if not self._early():
                 self.dismiss(False)
 
-    class LocalApprove(ModalScreen):
-        """/local: may this write, edit or command run on this machine?"""
+    class LocalApprove(Inert, ModalScreen):
+        """/local: may this read, write, edit or command run on this machine?"""
 
         BINDINGS = [Binding("y,enter", "answer('yes')", show=False),
                     Binding("a", "answer('always')", show=False),
                     Binding("n,escape", "answer('no')", show=False)]
 
-        GRACE = 0.6      # seconds: it opens mid-turn, often while the operator
-                         # types a message; a stray y, a or enter must not approve
-
-        def __init__(self, kind: str, summary: str) -> None:
+        def __init__(self, kind: str, summary: str, scope: str = "") -> None:
             super().__init__()
-            self.kind, self.summary = kind, summary
-            self.opened = time.monotonic()
+            self.kind, self.summary, self.scope = kind, summary, scope
+            self._opened()
 
         def compose(self) -> ComposeResult:
             what = {"shell": "Run this command here?", "write": "Write this file?",
-                    "edit": "Make this edit?"}.get(self.kind, f"Allow this {self.kind}?")
+                    "edit": "Make this edit?",
+                    "read": "Read this outside the working directory?"
+                    }.get(self.kind, f"Allow this {self.kind}?")
             lines = []
             for ln in self.summary.splitlines():
                 style = ("$success" if ln.startswith("+") and not ln.startswith("+++")
@@ -2384,39 +2453,47 @@ def build_tui(base: str, token: str, **kw):
                              f"{_esc(self.kind)} on this machine[/]")
                 with VerticalScroll(id="approve-body"):
                     yield Static("\n".join(lines))
-                yield Static(f"\n[$primary]y[/] yes   [$primary]a[/] always "
-                             f"({_esc(self.kind)}, this session)   "
+                always = (f"[$primary]a[/] always for {_esc(self.scope)}" if self.scope else
+                          f"[$primary]a[/] always ({_esc(self.kind)}, this session)")
+                yield Static(f"\n[$primary]y[/] yes   {always}   "
                              "[$text-muted]n / esc[/] no")
 
+        def on_key(self, event) -> None:
+            self.swallow(event)
+
         def action_answer(self, what: str) -> None:
-            if time.monotonic() - self.opened >= self.GRACE:
+            if not self.inert():
                 self.dismiss(what)
 
-    class AskUser(ModalScreen):
+    class AskUser(Inert, ModalScreen):
         """ask_user / a permission ask (backend/operator_ask.py): the agent's
         questions, one at a time. ↑ ↓ move, 1-5 pick, space toggles (multi),
         typing goes to the free-text last option (and picks it), enter
-        confirms and moves on, esc skips the whole ask. Dismisses with a list
-        of {selected, text} answers, None (skipped) or "gone" (answered or
-        closed elsewhere: ask_done)."""
+        confirms and moves on, esc skips the whole ask, pgup/pgdn scroll a long
+        command. Says which agent asks and how many more asks wait behind this
+        one. Dismisses with a list of {selected, text} answers, None (skipped)
+        or "gone" (answered or closed elsewhere: ask_done)."""
 
         BINDINGS = [Binding("escape", "skip", show=False)]
-        GRACE = 0.6      # opens mid-turn while the operator may be typing
         AUTO_FOCUS = None    # open on the options, not the free-text line
         DEFAULT_CSS = """
         AskUser { align: center middle; background: $background 60%; }
+        #ask-top { height: auto; }
         #ask-opts { margin-top: 1; }
-        #ask-text { margin-top: 1; }
+        #ask-text { margin-top: 1; border: none; background: $panel; padding: 0 1;
+                    height: 1; }
+        #ask-text:focus { border: none; }
         #ask-foot { margin-top: 1; }
         """
 
-        def __init__(self, ev: dict) -> None:
+        def __init__(self, ev: dict, who: str = "", waiting: int = 0) -> None:
             super().__init__()
-            self.ev = ev
+            self.ev, self.who, self.waiting = ev, who, waiting
             self.qs = [q for q in ev.get("questions") or [] if isinstance(q, dict)]
             self.free_label = ev.get("free_text_label") or "Type something…"
             self.i, self.answers = 0, []
-            self.opened = time.monotonic()
+            self.resolved = self.gone = False
+            self._opened()
             self._reset()
 
         def _reset(self) -> None:
@@ -2432,7 +2509,8 @@ def build_tui(base: str, token: str, **kw):
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog"):
-                yield Static("", id="ask-head")
+                with VerticalScroll(id="ask-top"):
+                    yield Static("", id="ask-head")
                 yield Static("", id="ask-opts")
                 yield Input(placeholder=self.free_label, id="ask-text")
                 yield Static("", id="ask-foot")
@@ -2444,28 +2522,68 @@ def build_tui(base: str, token: str, **kw):
             self._draw()
             self.set_focus(None)
             self.call_after_refresh(self.set_focus, None)
+            if self.GRACE > 0:
+                self.set_timer(self.GRACE + 0.05, self._draw)     # the "just opened" note goes
+
+        def on_resize(self, event) -> None:
+            self._fit()
+
+        def dismiss(self, result=None):
+            """Once: a second dismiss (an ask_done racing an answer) would pop
+            whatever dialog sits on top now."""
+            if self.resolved:
+                from textual.await_complete import AwaitComplete
+                return AwaitComplete.nothing()
+            self.resolved = True
+            return super().dismiss(result)
+
+        def close_gone(self) -> None:
+            """ask_done: the server settled this ask. Buried under another dialog
+            it closes when that one is answered (on_screen_resume)."""
+            if self.resolved:
+                return
+            self.gone = True
+            if self.app.screen is self:
+                self.dismiss("gone")
+
+        def on_screen_resume(self) -> None:
+            if self.gone:
+                self.dismiss("gone")
+
+        def set_waiting(self, n: int) -> None:
+            if n != self.waiting:
+                self.waiting = n
+                if self.is_mounted and self.qs:
+                    self._draw()
 
         def _text(self) -> str:
             return self.query_one("#ask-text", Input).value.strip()
 
         @staticmethod
         def markup(ev: dict, qs: list, i: int, cur: int, sel: set, typed: str,
-                   free_label: str) -> tuple[str, str]:
+                   free_label: str, who: str = "", waiting: int = 0) -> tuple[str, str]:
             """(head, options) markup for question i; pure, for tests."""
             q = qs[i]
             opts = [str(o) for o in q.get("options") or []]
             multi = bool(q.get("multi_select"))
             if ev.get("kind") == "permission":
-                who = "[$warning b]Permission[/]"
+                title = "[$warning b]Permission[/]"
                 if ev.get("reason"):
-                    who += f"  [$text-muted]{_esc(str(ev['reason']))}[/]"
+                    title += f"  [$text-muted]{_esc(str(ev['reason']))}[/]"
             else:
-                who = "[$accent b]The agent asks[/]"
+                title = "[$accent b]The agent asks[/]"
             if len(qs) > 1:
-                who += f"  [$text-muted]{i + 1}/{len(qs)}[/]"
-            head = f"{who}\n[b]{_esc(str(q.get('question') or ''))}[/]"
-            if ev.get("detail"):
-                head += f"\n[$text-muted]{_esc(_short(str(ev['detail']), 600))}[/]"
+                title += f"  [$text-muted]{i + 1}/{len(qs)}[/]"
+            head = title
+            if who or waiting:
+                line = f"[$text-muted]from[/] {_esc(who)}" if who else ""
+                if waiting:
+                    line += ("  " if line else "") + f"[$accent]{waiting} more waiting[/]"
+                head += "\n" + line
+            question, detail = ask_view(ev, str(q.get("question") or ""))
+            head += f"\n[b]{_esc(question)}[/]"
+            if detail:
+                head += "\n" + detail
             rows = []
             for j, label in enumerate(opts + [free_label]):
                 on = (j in sel) if j < len(opts) else bool(typed)
@@ -2476,15 +2594,35 @@ def build_tui(base: str, token: str, **kw):
                 rows.append(f"[reverse]{line}[/]" if j == cur else line)
             return head, "\n".join(rows)
 
+        def _foot_text(self) -> str:
+            n = len(self.opts)
+            multi = bool(self.q.get("multi_select"))
+            pick = f"1-{n} pick" if n > 1 else "1 picks"
+            if self.ate and self.inert():
+                return "just opened: keys go back to your prompt for a moment"
+            return (f"↑↓ move · {pick}" + (" · space toggles" if multi else "")
+                    + " · type your own answer · enter confirms · esc skips")
+
         def _draw(self) -> None:
             head, rows = self.markup(self.ev, self.qs, self.i, self.cur, self.sel,
-                                     self._text(), self.free_label)
+                                     self._text(), self.free_label, self.who, self.waiting)
             self.query_one("#ask-head", Static).update(head)
             self.query_one("#ask-opts", Static).update(rows)
-            multi = bool(self.q.get("multi_select"))
-            self.query_one("#ask-foot", Static).update(
-                "[$text-muted]↑↓ move · 1-5 pick" + (" · space toggles" if multi else "")
-                + " · type to answer in your own words · enter confirms · esc skips[/]")
+            self.query_one("#ask-foot", Static).update(f"[$text-muted]{_esc(self._foot_text())}[/]")
+            self._fit()
+
+        def _fit(self) -> None:
+            """The options and the key line stay on screen whatever the command
+            is: what is left of the terminal goes to the head, which scrolls."""
+            if not self.is_mounted or not self.qs:
+                return
+            height, width = self.app.size.height, self.app.size.width
+            inner = max(20, min(72, int(width * 0.9)) - 4)
+            foot = -(-len(self._foot_text()) // inner)
+            fixed = (len(self.opts) + 1) + 1 + 2 + foot + 1          # rows, gap, input, foot
+            room = max(4, height - 2 - 2 - fixed)                     # gutter, dialog padding
+            self.query_one("#dialog").styles.max_height = max(8, height - 2)
+            self.query_one("#ask-top").styles.max_height = room
 
         def _free_row(self) -> int:
             return len(self.opts)
@@ -2508,7 +2646,7 @@ def build_tui(base: str, token: str, **kw):
                 self.set_focus(None)
 
         def _confirm(self) -> None:
-            if time.monotonic() - self.opened < self.GRACE:
+            if self.inert():
                 return
             typed = self._text()
             if not self.sel and not typed:
@@ -2530,8 +2668,16 @@ def build_tui(base: str, token: str, **kw):
             self._draw()
 
         def on_key(self, event) -> None:
+            if self.swallow(event):
+                self._draw()
+                return
             key = event.key
             typing = self.query_one("#ask-text", Input).has_focus
+            if key in ("pageup", "pagedown"):
+                event.stop()
+                top = self.query_one("#ask-top")
+                (top.scroll_page_up if key == "pageup" else top.scroll_page_down)(animate=False)
+                return
             if key in ("up", "down"):
                 event.stop()
                 self._move(-1 if key == "up" else 1)
@@ -2574,7 +2720,8 @@ def build_tui(base: str, token: str, **kw):
             self._confirm()
 
         def action_skip(self) -> None:
-            self.dismiss(None)
+            if not self.inert():
+                self.dismiss(None)
 
     class Ask(ModalScreen):
         """One line of input; `secret` hides it (the login line is a credential)."""
@@ -7374,8 +7521,8 @@ def build_tui(base: str, token: str, **kw):
                     here = None
                 me = socket.gethostname() or "localhost"
                 if here and here.get("hostname") == me and Path(here.get("cwd", "")).is_dir():
-                    async def approve(kind, summary):
-                        ans = await self.local_approve(kind, summary)
+                    async def approve(kind, summary, scope=""):
+                        ans = await self.local_approve(kind, summary, scope)
                         # a dialog answered after the turn was stopped must not
                         # run anything: nobody is waiting for the result
                         live = self.turn is not None and self.turn.cid == cid
@@ -7429,46 +7576,99 @@ def build_tui(base: str, token: str, **kw):
                 self.perm_mode = r["mode"]
                 self.refresh_chrome()
 
+        def _ask_who(self, ev: dict, cid: int | None) -> str:
+            """Who is asking, for the dialog: this chat, or the agent by its title
+            (the server names it) and id."""
+            n = ev.get("conversation_id")
+            if n in (None, cid):
+                return "this chat"
+            title = " ".join(str(ev.get("agent") or "").split())
+            return f"{_short(title, 50)} #{n}" if title else f"agent #{n}"
+
+        def _asks_done(self) -> dict:
+            """Ask ids this client has settled lately: a copy of the same event that
+            arrives late (two channels carry it) is not a new question."""
+            done = self.__dict__.setdefault("_asks_seen", {})
+            now = time.monotonic()
+            for k in [k for k, t in done.items() if now - t > 120]:
+                del done[k]
+            return done
+
+        def _ask_recount(self) -> None:
+            """Tell the dialog on screen how many asks wait behind it."""
+            asks = self.__dict__.get("_asks", {})
+            waiting = sum(1 for e in asks.values() if e["scr"] is None and not e["gone"])
+            for e in asks.values():
+                if e["scr"] is not None:
+                    e["scr"].set_waiting(waiting)
+
         async def _ask_user(self, ev: dict, cid: int | None) -> None:
-            """ask_user / a permission ask: show the dialog once per ask id and
-            POST the answer to the conversation this view is on (the asker or
-            an ancestor that showed it)."""
+            """ask_user / a permission ask: one dialog at a time, in the order the
+            asks came, each naming the agent that asks; the answer is POSTed to the
+            conversation this view is on (the asker or an ancestor that showed it).
+            An ask the server has settled (ask_done) before its turn never gets a
+            dialog."""
             aid = ev.get("id")
             asks = self.__dict__.setdefault("_asks", {})
-            if cid is None or not aid or aid in asks:
+            if cid is None or not aid or aid in asks or aid in self._asks_done():
                 return
-            asks[aid] = None
+            ent = asks[aid] = {"ev": ev, "scr": None, "gone": False}
+            self._ask_recount()
+            lock = self.__dict__.setdefault("_ask_lock", asyncio.Lock())
+            settled = False
             try:
-                if ev.get("conversation_id") not in (None, cid):
-                    await self.note(f"? agent #{ev['conversation_id']} is asking you")
-                scr = AskUser(ev)
-                asks[aid] = scr
-                self.bell()
-                res = await self.push_screen_wait(scr)
-                if res == "gone":
-                    return
-                body = ({"id": aid, "skipped": True} if res is None
-                        else {"id": aid, "answers": res})
-                try:
-                    await self.api("POST", f"/api/chat/{cid}/answer", json=body)
-                except CliError as e:
-                    await self.note(f"answer not delivered: {e}", "error")
+                async with lock:
+                    if ent["gone"]:
+                        settled = True
+                        return
+                    who = self._ask_who(ev, cid)
+                    if ev.get("conversation_id") not in (None, cid):
+                        await self.note(f"? {who} is asking you")
+                    scr = AskUser(ev, who)
+                    ent["scr"] = scr
+                    self._ask_recount()
+                    self.bell()
+                    res = await self.push_screen_wait(scr)
+                    ent["scr"] = None
+                    if res == "gone":
+                        settled = True
+                        return
+                    body = ({"id": aid, "skipped": True} if res is None
+                            else {"id": aid, "answers": res})
+                    try:
+                        await self.api("POST", f"/api/chat/{cid}/answer", json=body)
+                        settled = True
+                    except CliError as e:
+                        # the server still holds the ask: a re-attached view gets it again
+                        await self.note(f"answer not delivered: {e}", "error")
             finally:
-                asks[aid] = False
+                asks.pop(aid, None)
+                if settled:
+                    self._asks_done()[aid] = time.monotonic()
+                self._ask_recount()
 
         def _ask_gone(self, aid) -> None:
             """ask_done: answered elsewhere (the web, another view), timed out
-            or stopped; close our copy if it is still open."""
-            scr = self.__dict__.get("_asks", {}).get(aid)
-            if scr:
-                try:
-                    scr.dismiss("gone")
-                except Exception:  # noqa: BLE001 — already closing
-                    pass
+            or stopped: drop it from the queue, or close its dialog."""
+            ent = self.__dict__.get("_asks", {}).get(aid)
+            if ent is None:
+                return
+            ent["gone"] = True
+            if ent["scr"] is not None:
+                ent["scr"].close_gone()
+            self._ask_recount()
 
-        async def local_approve(self, kind: str, summary: str):
+        def type_ahead(self, text: str) -> None:
+            """Keys a dialog turned away because it had just opened go back to the
+            prompt they were typed at (when that prompt is what is behind it)."""
+            base = [s for s in self.screen_stack if not isinstance(s, ModalScreen)]
+            if base and base[-1] is self.screen_stack[0]:
+                with contextlib.suppress(Exception):
+                    base[-1].query_one("#editor", Editor).insert(text)
+
+        async def local_approve(self, kind: str, summary: str, scope: str = ""):
             """yes / always / no (None: closed with ctrl+c) from the operator."""
-            return await self.push_screen_wait(LocalApprove(kind, summary))
+            return await self.push_screen_wait(LocalApprove(kind, summary, scope))
 
         async def _close_seg(self) -> None:
             turn = self.turn
@@ -7852,6 +8052,8 @@ def build_tui(base: str, token: str, **kw):
 
         def action_ctrl_c(self) -> None:
             if isinstance(self.screen, ModalScreen):
+                if getattr(self.screen, "inert", lambda: False)():
+                    return          # opened a moment ago while they typed: not an answer
                 self.screen.dismiss(None)
                 return
             if isinstance(self.screen, (AgentsScreen, SecurityScreen)):
