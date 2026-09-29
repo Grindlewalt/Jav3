@@ -4256,3 +4256,4 @@ a:has(> .nav-dot) { position: relative; }
 .builtin-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); }
 .builtin-desc { margin-top: var(--sp-2); }
 .builtin-why { margin-top: var(--sp-2); color: var(--amber); }
+.logs-new { margin: 0 0 var(--sp-3); width: 100%; }
