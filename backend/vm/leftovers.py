@@ -42,6 +42,7 @@ SCAN_TTL = 15.0
 PROC = Path("/proc")
 SYS_NET = Path("/sys/class/net")
 _TAP_RE = re.compile(r"^jv(?:tap|br)(\d+)$")
+_ORDER = {"qemu": 0, "container": 1, "overlay": 2, "box_dir": 3, "sock_dir": 4}
 _cache: tuple[float, dict] | None = None
 
 
@@ -191,7 +192,9 @@ async def scan(*, cached: bool = False) -> dict:
                       "why": f"QEMU running in {where} directory that no box here "
                              "started (left over from an app restart)",
                       "cleanable": True, "detail": q})
-    running_dirs = {q["cwd"] for q in qemus}
+    # a directory a LIVE box's QEMU runs in is in use; one a leftover QEMU
+    # runs in is a leftover too (clean kills the QEMU first)
+    running_dirs = {q["cwd"] for q in qemus if q["pid"] in live}
     try:
         live_names = _live_containers() if settings.docker_enabled else set()
         conts = await _containers()
@@ -266,6 +269,8 @@ async def clean(ids: list[str] | None = None) -> dict:
     _cache = None
     fresh = {i["id"]: i for i in (await scan())["items"]}
     want = list(fresh) if ids is None else [i for i in ids if isinstance(i, str)]
+    # processes and containers before the directories they run in
+    want.sort(key=lambda i: _ORDER.get((fresh.get(i) or {}).get("type"), 9))
     removed, failed, skipped = [], [], []
     for iid in want:
         it = fresh.get(iid)
@@ -302,8 +307,9 @@ async def _remove(it: dict) -> None:
             raise RuntimeError("not a directory of this server's vm_dir")
         shutil.rmtree(p)
     elif t == "overlay":
-        from .lifecycle import vm
-        if vm.running() or vm._lock.locked():
+        from . import lifecycle
+        lock = getattr(lifecycle.vm, "_lock", None)
+        if lifecycle.vm.running() or (lock is not None and lock.locked()):
             raise RuntimeError("the shared box is booting or running")
         for name in ("overlay.qcow2", "efi_vars_run.fd"):
             (settings.vm_dir / name).unlink(missing_ok=True)
