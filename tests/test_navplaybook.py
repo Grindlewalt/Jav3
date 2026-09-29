@@ -46,8 +46,10 @@ def test_key_guidance_present():
     browser = navplaybook.browser_block()
     for s in ("browser_read_page", "browser_select", "browser_key",
               "browser_hover", "browser_screenshot_tab", "stale", "changed:",
-              "secrets store", "untrusted"):
+              "untrusted"):
         assert s in browser, s
+    assert "secrets store" not in browser
+    assert "You cannot sign in" in browser and "ask the operator to sign in" in browser
     assert 'desk_wait(mode="stable")' in desk and 'mode="change" only' in desk
     assert "latest result only" in desk and "If a screenshot fails" in desk
 
