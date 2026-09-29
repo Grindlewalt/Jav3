@@ -113,7 +113,9 @@ ELEMENTS_KEEP = 1000        # element registry per frame (the client caps at 400
 ELEMENTS_SHOWN = 150        # listed to the model, in-view first
 WAIT_MAX_MS = 10_000        # desk_wait
 STUCK_N = 3                 # identical unchanged input actions before the note
-STUCK_NOTE = ("note: the screen has not changed after 3 identical actions; use "
+# never the FIRST line of a result: the loop counts a result that starts with
+# "note:" as failed, drops its screenshot and raises the error streak
+STUCK_NOTE = ("stuck: the screen has not changed after 3 identical actions; use "
               "an element id, zoom with region, or the keyboard")
 # the same sentences the client refuses with (clients/jav3-desk LOCKED_ERR)
 LOCKED_ERR = "the screen is locked — ask the operator to unlock it"
@@ -1346,12 +1348,12 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     if f is None and verb in ("screenshot", "wait"):
         return "error: the computer sent no usable screenshot"
     head = []
-    if verb in INPUT_VERBS and _stuck(d, verb, p, changed):
-        head.append(STUCK_NOTE)
     if via is not None:
         head.append(_via_line(verb, via, p))
     head.append(text[:2000] or f"{verb} done")
     took = took_line(res.get("timing")) if verb in INPUT_VERBS else None
+    if verb in INPUT_VERBS and _stuck(d, verb, p, changed):
+        head.append(STUCK_NOTE)
     if f is None:
         if changed is not None:
             head.append(changed_line(changed, elements_only))

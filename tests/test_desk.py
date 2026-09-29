@@ -1168,14 +1168,39 @@ async def test_stuck_note_after_three_unchanged_identical_actions(env):
         outs = [imageresult.split(await _tool("desk_click")(x=50, y=50))[0]
                 for _ in range(3)]
         assert not outs[0].startswith("note:") and not outs[1].startswith("note:")
-        assert outs[2].startswith(desk.STUCK_NOTE)
+        assert desk.STUCK_NOTE in outs[2].splitlines()       # after the action's own line
         assert "changed: no" in outs[2]
         # a different action starts the count again; a change clears it
-        assert not (await _tool("desk_click")(x=51, y=50)).startswith("note:")
+        assert desk.STUCK_NOTE not in await _tool("desk_click")(x=51, y=50)
         fd.answer = rich(changed=True)
-        assert not (await _tool("desk_click")(x=50, y=50)).startswith("note:")
+        assert desk.STUCK_NOTE not in await _tool("desk_click")(x=50, y=50)
         fd.answer = rich(changed=False)
-        assert not (await _tool("desk_click")(x=50, y=50)).startswith("note:")
+        assert desk.STUCK_NOTE not in await _tool("desk_click")(x=50, y=50)
+    finally:
+        await fd.stop()
+
+
+# --- overnight B2: desk navigation findings (NAV-03..NAV-22) ---------------------------------
+
+# the loop treats a result starting with one of these as a failed call and drops
+# its screenshot (backend/agent/loop.py, `failed = ...`)
+LOOP_FAILED = ("error:", "no matches", "note:", "duplicate call:")
+
+
+async def test_stuck_note_keeps_the_result_a_success_and_the_screenshot(env):
+    """NAV-08: the stuck note used to be line 1, so the loop counted the desk
+    result as failed, dropped the screenshot and raised its error streak."""
+    fd = await _nav(env, changed=False)
+    try:
+        await _tool("desk_screenshot")()
+        outs = [await _tool("desk_click")(x=50, y=50) for _ in range(3)]
+        text, img = imageresult.split(outs[2])
+        assert img is not None
+        assert not text.startswith(LOOP_FAILED)
+        assert text.splitlines()[0] == "click ok"           # the action's own line first
+        assert desk.STUCK_NOTE in text.splitlines()[1:]
+        assert not desk.STUCK_NOTE.startswith(LOOP_FAILED)
+        assert all(not imageresult.split(o)[0].startswith(LOOP_FAILED) for o in outs)
     finally:
         await fd.stop()
 
