@@ -41,7 +41,7 @@ A locked screen or a sleeping display is reported, not fought: the hello and
 a `state {locked, asleep}` frame (sent when it changes, polled every
 STATE_POLL_S) carry it, and screenshot / wait / input verbs are refused with
 one sentence asking the operator to unlock or wake it (macOS: CGSession +
-CGDisplayIsAsleep; Linux: loginctl LockedHint when logind knows the session).
+CGDisplayIsAsleep; Linux: logind LockedHint, then the ScreenSaver D-Bus; unknown = null).
 
 Files, in $XDG_CONFIG_HOME/jav3 (default ~/.config/jav3), dir 0700:
   desk.json          {"address", "token"} 0600
@@ -1549,20 +1549,94 @@ def screen_refusal(state: dict) -> str | None:
     return None
 
 
-def logind_locked() -> bool:
-    """systemd-logind's LockedHint for this session (set by most lockers via
-    `loginctl lock-session` or the idle hint). False when there is no
-    loginctl, no session, or the answer is anything but yes."""
-    lc = find_bin("loginctl")
-    if not lc:
-        return False
-    sid = os.environ.get("XDG_SESSION_ID") or "auto"
+def _probe(argv: list[str], env: dict | None = None) -> str | None:
+    """stdout of one short read-only command, None when it is missing,
+    fails, or times out. The default runner of linux_locked (tests pass a fake)."""
     try:
-        r = subprocess.run([lc, "show-session", sid, "-p", "LockedHint", "--value"],
-                           shell=False, capture_output=True, text=True, timeout=2)
+        r = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=2,
+                           env=env)
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return r.returncode == 0 and r.stdout.strip() == "yes"
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _logind_hint(lc: str, run, uid: int, environ) -> bool | None:
+    """LockedHint of this session, found by XDG_SESSION_ID or else by the
+    user's active graphical session (a systemd --user service has no
+    XDG_SESSION_ID). True / False when a session answered, None when none did."""
+    sids = [environ["XDG_SESSION_ID"]] if environ.get("XDG_SESSION_ID") else []
+    if not sids:
+        listing = run([lc, "list-sessions", "--no-legend"]) or ""
+        for line in listing.splitlines():
+            f = line.split()
+            if len(f) >= 2 and f[1] == str(uid):
+                sids.append(f[0])
+    seen = None
+    for sid in sids:
+        out = run([lc, "show-session", sid, "-p", "Type", "-p", "State",
+                   "-p", "LockedHint"])
+        if out is None:
+            continue
+        kv = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+        if not environ.get("XDG_SESSION_ID") and (
+                kv.get("Type") not in ("x11", "wayland", "mir")
+                or kv.get("State") not in ("active", "online")):
+            continue                                  # a tty / ssh session
+        if kv.get("LockedHint") == "yes":
+            return True
+        if kv.get("LockedHint") == "no":
+            seen = False
+    return seen
+
+
+def _screensaver_active(run, environ, uid: int) -> bool | None:
+    """The freedesktop ScreenSaver's GetActive over the session bus (gdbus,
+    else dbus-send); None when neither tool nor any answering service exists."""
+    env = dict(environ)
+    sock = f"/run/user/{uid}/bus"
+    if not env.get("DBUS_SESSION_BUS_ADDRESS") and os.path.exists(sock):
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={sock}"
+    services = (("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver"),
+                ("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver"))
+    gd, ds = find_bin("gdbus"), find_bin("dbus-send")
+    for dest, path in services:
+        if gd:
+            out = run([gd, "call", "--session", "--dest", dest, "--object-path", path,
+                       "--method", f"{dest}.GetActive"], env)
+        elif ds:
+            out = run([ds, "--session", f"--dest={dest}", "--print-reply", path,
+                       f"{dest}.GetActive"], env)
+        else:
+            return None
+        if out and "true" in out.lower().split("boolean")[-1]:
+            return True
+        if out and "false" in out.lower():
+            return False
+    return None
+
+
+def linux_locked(run=None, environ=None, uid: int | None = None) -> bool | None:
+    """Whether the Linux session is locked: True / False, or None = unknown.
+    logind's LockedHint first (session by XDG_SESSION_ID, else the user's
+    graphical session); "yes" is believed at once. Many lockers never set it,
+    so "no" (or no session) goes on to the ScreenSaver D-Bus GetActive. With
+    no D-Bus answer, a session that said "no" reads unlocked; no session and
+    no answer at all is None, never a guess of False."""
+    run = run or _probe
+    environ = os.environ if environ is None else environ
+    uid = os.getuid() if uid is None else uid
+    lc = find_bin("loginctl")
+    hint = _logind_hint(lc, run, uid, environ) if lc else None
+    if hint is True:
+        return True
+    dbus = _screensaver_active(run, environ, uid)
+    if dbus is not None:
+        return dbus
+    return hint
+
+
+def logind_locked() -> bool | None:
+    return linux_locked()
 
 
 def drag_path(x0: int, y0: int, x1: int, y1: int, n: int = 12) -> list[tuple[int, int]]:
@@ -2590,7 +2664,10 @@ class Session:
             st = self.b.screen_state()
         except Exception:  # noqa: BLE001
             st = {}
-        return {"locked": st.get("locked") is True, "asleep": st.get("asleep") is True}
+        # locked: True / False, or None = unknown (Linux with no answer)
+        lk = st.get("locked", False)
+        return {"locked": lk if lk is None or isinstance(lk, bool) else False,
+                "asleep": st.get("asleep") is True}
 
     def hello(self) -> dict:
         try:
@@ -3139,7 +3216,8 @@ def cmd_status(args) -> int:
     print(f"paused:  {'yes' if paused() else 'no'}")
     try:
         st = BACKENDS[args.backend or detect_backend()]().screen_state()
-        print(f"screen:  {'locked' if st.get('locked') else 'unlocked'}, display "
+        lk = st.get("locked")
+        print(f"screen:  {'unknown' if lk is None else 'locked' if lk else 'unlocked'}, display "
               f"{'asleep' if st.get('asleep') else 'awake'}")
     except Exception as e:  # noqa: BLE001 — status reports, never dies
         print(f"screen:  unknown ({e})")

@@ -1137,3 +1137,87 @@ def test_thumbnail_falls_back_to_bmp_and_a_locked_screen_is_refused(monkeypatch)
     b._cg_thumbnail = lambda mon, rect: None
     with pytest.raises(jd.DeskError):
         b.thumbnail(MON)
+
+
+# --- Linux lock detection ---------------------------------------------------------------
+
+def _runner(table, calls=None):
+    """A fake command runner: the first table key that is a prefix of the
+    argv tail (after the binary) answers; anything else is 'command failed'."""
+    def run(argv, env=None):
+        if calls is not None:
+            calls.append(list(argv))
+        for key, out in table.items():
+            if " ".join(argv[1:]).startswith(key):
+                return out
+        return None
+    return run
+
+
+@pytest.fixture
+def bins(monkeypatch):
+    def setup(**have):
+        monkeypatch.setattr(jd, "find_bin",
+                            lambda n: f"/usr/bin/{n}" if have.get(n.replace("-", "_"), True) else None)
+    return setup
+
+
+_X11_NO = "Type=x11\nState=active\nLockedHint=no\n"
+
+
+def test_linux_lock_logind_by_xdg_session_id(bins):
+    bins()
+    run = _runner({"show-session c2 -p Type": "Type=x11\nState=active\nLockedHint=yes\n"})
+    assert jd.linux_locked(run, {"XDG_SESSION_ID": "c2"}, 1000) is True
+
+
+def test_linux_lock_finds_the_graphical_session_without_xdg_session_id(bins):
+    bins()
+    run = _runner({
+        "list-sessions": "1 1000 me seat0 tty1\n3 1000 me seat0 -\n4 0 root seat0 -\n",
+        "show-session 1 ": "Type=tty\nState=active\nLockedHint=yes\n",
+        "show-session 3 ": "Type=wayland\nState=active\nLockedHint=yes\n"})
+    assert jd.linux_locked(run, {}, 1000) is True
+    # only the tty session says yes: not the graphical one, so not locked
+    run = _runner({
+        "list-sessions": "1 1000 me seat0 tty1\n3 1000 me seat0 -\n",
+        "show-session 1 ": "Type=tty\nState=active\nLockedHint=yes\n",
+        "show-session 3 ": "Type=wayland\nState=active\nLockedHint=no\n"})
+    assert jd.linux_locked(run, {}, 1000) is False
+
+
+def test_linux_lock_falls_back_to_screensaver_dbus_when_logind_says_no(bins):
+    bins()
+    logind = {"show-session c2 -p Type": _X11_NO}
+    env = {"XDG_SESSION_ID": "c2", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x"}
+    yes = _runner({**logind, "call --session --dest org.freedesktop.ScreenSaver": "(true,)\n"})
+    no = _runner({**logind, "call --session --dest org.freedesktop.ScreenSaver": "(false,)\n"})
+    assert jd.linux_locked(yes, env, 1000) is True
+    assert jd.linux_locked(no, env, 1000) is False
+
+
+def test_linux_lock_dbus_send_when_no_gdbus_and_gnome_name_last(bins):
+    bins(gdbus=False, loginctl=False)
+    run = _runner({"--session --dest=org.gnome.ScreenSaver --print-reply":
+                   "method return\n   boolean true\n"})
+    assert jd.linux_locked(run, {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/x"}, 1000) is True
+
+
+def test_linux_lock_unknown_is_none_not_false(bins):
+    bins(gdbus=False, dbus_send=False, loginctl=False)
+    assert jd.linux_locked(_runner({}), {}, 1000) is None
+    bins()                                    # tools exist but nothing answers
+    assert jd.linux_locked(_runner({}), {}, 1000) is None
+    # a session that answered "no" and no D-Bus: unlocked, the best evidence
+    bins(gdbus=False, dbus_send=False)
+    run = _runner({"show-session c2 -p Type": _X11_NO})
+    assert jd.linux_locked(run, {"XDG_SESSION_ID": "c2"}, 1000) is False
+
+
+def test_session_state_carries_unknown_lock_through():
+    c = object.__new__(jd.Session)
+    c.b = _NS(screen_state=lambda: {"locked": None, "asleep": False})
+    assert c.state() == {"locked": None, "asleep": False}
+    c.b = _NS(screen_state=lambda: {"locked": "yes", "asleep": 1})
+    assert c.state() == {"locked": False, "asleep": False}
+    assert jd.screen_refusal({"locked": None, "asleep": False}) is None

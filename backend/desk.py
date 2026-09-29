@@ -160,7 +160,8 @@ class Desk:
     send_lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
     turns: dict = dataclasses.field(default_factory=dict)   # conversation id -> monotonic
     grants: dict = dataclasses.field(default_factory=dict)  # cached from get_grants
-    locked: bool = False               # from the client's hello / latest state frame
+    locked: bool | None = False        # from the client's hello / latest state frame;
+                                       # None = the client could not tell (not refused)
     asleep: bool = False
 
     @property
@@ -393,7 +394,7 @@ async def attach(device_id: int, name: str, ws, hello: dict) -> Desk:
         except Exception:  # noqa: BLE001
             pass
     d = Desk(device_id=device_id, name=name, ws=ws, hello=_clean_hello(hello))
-    d.locked, d.asleep = hello.get("locked") is True, hello.get("asleep") is True
+    d.locked, d.asleep = _lock_flag(hello), hello.get("asleep") is True
     d.grants = await get_grants(device_id)
     _desks[device_id] = d
     await d.send(_wire_grants(d.grants))
@@ -443,7 +444,7 @@ def on_frame(d: Desk, msg: dict) -> dict | None:
                               for k in ("screen", "input", "shell")}
         return None
     if t == "state":
-        d.locked, d.asleep = msg.get("locked") is True, msg.get("asleep") is True
+        d.locked, d.asleep = _lock_flag(msg), msg.get("asleep") is True
         return None
     if t == "res":
         fut = d.pending.get(msg.get("id")) if isinstance(msg.get("id"), str) else None
@@ -515,6 +516,14 @@ def _op_key() -> str | None:
         return str(op)
     cid = runtime.conversation_id.get()
     return f"conv:{cid}" if cid is not None else None
+
+
+def _lock_flag(msg: dict) -> bool | None:
+    """True = locked, None = the client said "unknown" (an explicit null: a
+    Linux box whose locker reports nothing), False = unlocked or never sent.
+    Unknown is not refused: the capture itself then says what is wrong."""
+    v = msg.get("locked")
+    return True if v is True else None if ("locked" in msg and v is None) else False
 
 
 def _tainted(op: str | None) -> bool:

@@ -1086,3 +1086,23 @@ async def test_stuck_note_after_three_unchanged_identical_actions(env):
         assert not (await _tool("desk_click")(x=50, y=50)).startswith("note:")
     finally:
         await fd.stop()
+
+
+async def test_unknown_lock_state_is_not_refused(env):
+    """A Linux client whose locker reports nothing says locked: null — the
+    server neither refuses nor claims it is unlocked."""
+    fd = await FakeDesk(env["desk_tok"], hello={"locked": None, "asleep": False}).start()
+    try:
+        await _grant(env, screen=True, input=True)
+        assert "1280x800" in imageresult.split(await _tool("desk_screenshot")())[0]
+        row = next(d for d in (await env["op"].get("/api/desk")).json()["desks"]
+                   if d["id"] == env["desk_id"])
+        assert row["locked"] is None and row["asleep"] is False
+        await fd.ws.send({"type": "state", "locked": True, "asleep": False})
+        await asyncio.sleep(0.05)
+        assert (await _tool("desk_screenshot")()).startswith("error: the screen is locked")
+        await fd.ws.send({"type": "state", "locked": None, "asleep": False})
+        await asyncio.sleep(0.05)
+        assert "1280x800" in imageresult.split(await _tool("desk_screenshot")())[0]
+    finally:
+        await fd.stop()
