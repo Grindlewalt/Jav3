@@ -900,45 +900,98 @@ def memory_block() -> str:
     return "\n\n".join(out)
 
 
+# What reads as a behavioural rule. Whole words: 'hate' is not in 'whatever',
+# 'must' is not in 'mustard'. `only` counts at the start of a line or right after
+# an instruction verb ("Only use metric", "Use only apt"); mid-sentence it is a
+# fact ("the lab is only on the LAN"). A heading is never a rule, but the list
+# items under one that names a rule word are (## Never / ## Things I hate /
+# ## Always).
+_RULE_HINT = re.compile(
+    r"\b(never|always|avoid|don['’]?t|do not|must|prefer|pet peeves?|hates?|dislikes?)\b", re.I)
+_RULE_LEAD = re.compile(
+    r"^(?:(?:use|reply|answer|respond|write|speak|keep|include|show|give|call|run|ask)\s+)?only\b",
+    re.I)
+_HEAD_NEG = re.compile(
+    r"\b(never|avoid|don['’]?t|do not|hates?|hated|dislikes?|pet peeves?)\b", re.I)
+_HEAD_POS = re.compile(r"\b(always|must)\b", re.I)
+_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(\S.*)$")
+RULE_MAX = 300           # chars of one rule in the tail
+_EM_RULE = ('Never use em dashes. Wrong: "fast, cheap — pick one". '
+            'Right: "fast, cheap, pick one".')
+
+
+def _shape_rule(ln: str) -> str:
+    low = ln.lower()
+    # "X pet peeve: Y" -> an imperative "Avoid Y"
+    if "pet peeve" in low and ":" in ln:
+        ln = ln.split(":", 1)[1].strip()
+        low = ln.lower()
+        if not low.startswith(("never", "avoid", "don't", "dont", "no ")):
+            ln = "Avoid " + ln
+    # negative examples beat bare prohibitions on this model
+    if "em dash" in low:
+        return _EM_RULE
+    return flat_line(ln, RULE_MAX)
+
+
+def note_rules(meta: dict, body: str) -> list[str]:
+    """The rules one TRUSTED note contributes to the tail. `rules:` in its
+    frontmatter, when a list, is the operator saying exactly which lines they are
+    and is used verbatim; otherwise the body is read for rule-shaped lines."""
+    explicit = meta.get("rules")
+    if isinstance(explicit, list):
+        return [flat_line(r, RULE_MAX) for r in explicit if isinstance(r, str) and r.strip()]
+    out, mode = [], None
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            head = line.lstrip("#").strip()
+            mode = ("avoid" if _HEAD_NEG.search(head)
+                    else "always" if _HEAD_POS.search(head) else None)
+            continue
+        m = _BULLET.match(raw)
+        item = (m.group(1) if m else line.strip("-*# ")).strip()
+        if not item:
+            continue
+        if _RULE_HINT.search(item) or _RULE_LEAD.match(item):
+            out.append(_shape_rule(item))
+        elif m and mode == "avoid":
+            plain = item.lower().startswith(("no ", "not ", "without "))
+            out.append(flat_line(item if plain else "Avoid " + item, RULE_MAX))
+        elif m and mode == "always":
+            out.append(flat_line("Always: " + item, RULE_MAX))
+    return out
+
+
 def standing_rules_tail() -> str:
     """Restate the operator's hard preferences at the very END of the system
     prompt. Models weigh the start and end of context heavily and lose the
     middle ("lost in the middle"), so a single rule buried mid-prompt gets
     ignored. This compact imperative restatement is the bottom slice of the
     "task sandwich" — empirically it's what makes constraints actually stick on
-    deepseek-v4-flash (0/5 em-dash violations with it, ~2/5 without)."""
+    deepseek-v4-flash (0/5 em-dash violations with it, ~2/5 without).
+
+    Sources: trusted notes with 'pref' or 'rule' in the name, and any trusted
+    note that says `rules: true` (or gives a `rules:` list) in its frontmatter;
+    `rules: false` opts a note out. Only rule-shaped lines belong here: plain
+    facts (Editor:, Shell:) stay up top in standing memory and would only
+    dilute it."""
     notes = settings.memory_dir / "notes"
-    files = ([p for p in sorted(notes.glob("*.md"))
-              if "pref" in p.stem.lower() or "rule" in p.stem.lower()]
-             if notes.exists() else [])
-    # only lines that read as behavioural rules belong in the tail; plain facts
-    # (Editor:, Shell:) stay up top in standing memory and would only dilute it
-    HINTS = ("never", "always", "avoid", "don't", "dont", "must", "only",
-             "prefer", "pet peeve", "hate", "dislike")
     rules = []
-    for p in files:
+    for p in (sorted(notes.glob("*.md")) if notes.exists() else []):
         try:
             meta, body = parse_note(p.read_text())
         except OSError:
             continue
         if not note_trusted(meta):
             continue  # an unapproved agent note must not reach the binding tail
-        for ln in body.splitlines():
-            ln = ln.strip("-*# ").strip()
-            low = ln.lower()
-            if not ln or not any(h in low for h in HINTS):
-                continue
-            # "X pet peeve: Y" -> an imperative "Avoid Y"
-            if "pet peeve" in low and ":" in ln:
-                ln = ln.split(":", 1)[1].strip()
-                low = ln.lower()
-                if not low.startswith(("never", "avoid", "don't", "dont", "no ")):
-                    ln = "Avoid " + ln
-            # negative examples beat bare prohibitions on this model
-            if "em dash" in low:
-                ln = 'Never use em dashes. Wrong: "fast, cheap — pick one". ' \
-                     'Right: "fast, cheap, pick one".'
-            rules.append(ln)
+        flag = meta.get("rules")
+        named = "pref" in p.stem.lower() or "rule" in p.stem.lower()
+        if flag is False or not (named or flag):
+            continue
+        rules.extend(note_rules(meta, body))
     if not rules:
         return ""
     out = ["# Operator rules (non-negotiable): apply to THIS reply",
