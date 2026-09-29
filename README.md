@@ -50,6 +50,17 @@ Roughly 21k lines of Python and 8k of JS across ~80 test modules and 43 tools.
 - `docs/SELF.md` — the agent's own technical manual, served by the `self_docs` tool
 - `scripts/` — Pi setup, systemd units, backup + image-rebuild timers, E2E smoke
 
+## Computer and browser use
+
+The agent can see and drive a computer you pair (`clients/jav3-desk`) and a
+Chromium browser with the `jav3-browser` extension. Nothing is on by default:
+you grant screen, input and shell per computer, and Read and Act per browser and
+project, in Settings. Clicks go by element id, by description or by coordinates;
+a description click sends the screenshot to the vision model you choose under
+Settings → Grounding. Pairing, the grants, that model finder and what to do
+about a locked screen are in [`docs/navigation.md`](docs/navigation.md); the
+risks that remain are in `SECURITY-RESIDUAL-RISK.md`.
+
 ## Install
 
 ```
