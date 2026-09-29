@@ -29,7 +29,7 @@ _WEAKENING = [re.compile(p, re.I) for p in (
 
 # What can taint a turn, and how the quarantine note names it. The broker
 # records the kind (and, for a desk, its name) when the taint happens.
-TAINT_KINDS = ("web", "desk", "browser", "local", "service", "peer", "skill")
+TAINT_KINDS = ("web", "desk", "desk_shell", "browser", "local", "service", "peer", "skill")
 _TAINT_WHAT = {
     "web": "read a web page",
     "browser": "read a page in the operator's browser (browser)",
@@ -46,6 +46,10 @@ def taint_phrase(kind: str, detail: str | None = None) -> str:
         name = " ".join(str(detail or "").replace('"', "'").split())[:64]
         return f'read the screen of "{name}" (desk)' if name else \
             "read a computer's screen (desk)"
+    if kind == "desk_shell":
+        name = " ".join(str(detail or "").replace('"', "'").split())[:64]
+        return f'read shell output from "{name}" (desk shell)' if name else \
+            "read shell output from a computer (desk shell)"
     return _TAINT_WHAT.get(kind, "consumed untrusted external content")
 
 

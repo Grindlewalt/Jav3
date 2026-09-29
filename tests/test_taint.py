@@ -164,3 +164,13 @@ async def test_unlabelled_taint_keeps_the_generic_note(tmp_env, monkeypatch):
             in res[0]["result"]
     finally:
         broker.release_turn("op-t")
+
+
+async def test_shell_taint_is_recorded_as_its_own_source(tmp_env):
+    _reg()
+    try:
+        broker.mark_tainted("op-sh", "desk_shell", "grant-mac-desk")
+        assert broker.taint_sources("op-sh") == [("desk_shell", "grant-mac-desk")]
+        assert broker.op_tainted("op-sh")
+    finally:
+        broker.release_turn("op-sh")

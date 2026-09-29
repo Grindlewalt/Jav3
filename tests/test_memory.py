@@ -220,3 +220,13 @@ def test_quarantine_note_wording_per_source():
     assert "already read a web page and read a page in the operator's browser" in \
         memory.quarantine_note([("web", None), ("browser", None)])
     assert "already consumed untrusted external content." in memory.quarantine_note([])
+
+
+def test_quarantine_note_names_shell_output_separately():
+    from backend import memory
+    from backend.vm import broker
+    assert memory.taint_phrase("desk_shell", "grant-mac-desk") == \
+        'read shell output from "grant-mac-desk" (desk shell)'
+    assert memory.taint_phrase("desk_shell") == "read shell output from a computer (desk shell)"
+    assert broker.taint_kind("desk_shell") == "desk_shell"
+    assert broker.taint_kind("desk_click") == "desk"

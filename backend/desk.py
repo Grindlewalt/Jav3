@@ -1276,7 +1276,7 @@ async def _shell(d: Desk, p: dict, g: dict, op: str | None) -> str:
                      detail={"device_id": d.device_id, "cmd": p["cmd"][:1000],
                              "cwd": p.get("cwd"), "approver": approver,
                              "tainted": _tainted(op)})
-        _taint(d.name)  # after the trust decision: its own output can't un-trust it
+        _taint(d.name, "desk_shell")  # after the trust decision: its own output can't un-trust it
         wire = {**p, "mode": mode}
         if mode == "argv":
             wire["argv"] = argv

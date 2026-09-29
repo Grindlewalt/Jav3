@@ -204,6 +204,8 @@ def taint_kind(name: str) -> str | None:
         return "local"
     if name == "service_logs":
         return "service"
+    if name == "desk_shell":
+        return "desk_shell"
     return _nav_source(name)
 
 
@@ -254,8 +256,8 @@ def mark_tainted(op_id: str, source: str | None = None,
     _nav_tainted)."""
     if op_id:
         _tainted.add(op_id)
-        if source in ("desk", "browser"):
-            _nav_tainted.setdefault(op_id, source)
+        if source in ("desk", "desk_shell", "browser"):
+            _nav_tainted.setdefault(op_id, "desk" if source == "desk_shell" else source)
         _note_source(op_id, source, detail)
 
 
