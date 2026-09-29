@@ -277,7 +277,7 @@ async def test_ws_with_operator_cookie_from_extension_origin(env):
     fe = FakeExt(env["btok"], headers=[(b"origin", b"chrome-extension://abcdef"),
                                        (b"cookie", cookie.encode())])
     await fe.start()
-    assert "jav3.lan" in fe.welcome["deny_hosts"]
+    assert "jav3.lan:8000" in fe.welcome["deny_hosts"]
     await fe.stop()
 
 
@@ -1063,3 +1063,49 @@ def test_read_page_lists_controls_first_and_neutralises_forged_ids():
     assert '  |   (f0:12] button "Cancel"' in tail and '  | (f3:1] link "Pay"' in tail
     assert "  | not [f0:2] at start" in tail
     assert '[f0:12] button' not in out and '[f3:1] link' not in out
+
+
+# --- own-host deny set (host + port) ----------------------------------------------
+
+def _own(monkeypatch, header="10.0.0.82:8000", csrf=("jarvis.atomos.network",)):
+    from backend import lan
+    from backend.config import settings
+    monkeypatch.setattr(lan, "lan_ips", lambda: ["10.0.0.82"])
+    monkeypatch.setattr(lan, "own_hosts", lambda: ["macbook-pro-5.local", "10.0.0.82"])
+    monkeypatch.setattr(lan, "advertised_hostname", lambda: "jav3.local")
+    monkeypatch.setattr(settings, "csrf_allowed_hosts", list(csrf))
+    monkeypatch.setattr(settings, "lan_port", 8000)
+    monkeypatch.setattr(settings, "gitea_port", 3000)
+    return browser._own_hosts(header)
+
+
+def test_own_names_are_refused_on_the_servers_port(monkeypatch):
+    deny = _own(monkeypatch)
+    for u in ("http://jarvis.atomos.network/#settings", "https://JARVIS.atomos.network./x",
+              "http://jarvis.atomos.network:8443/", "http://macbook-pro-5.local:8000/",
+              "http://jav3.local:8000/", "http://localhost:8000/", "http://localhost.:8000/",
+              "http://127.0.0.1:8000/", "http://127.9.9.9:8000/", "http://[::1]:8000/",
+              "http://[::ffff:127.0.0.1]:8000/", "http://10.0.0.82:8000/api/x",
+              "http://LOCALHOST:8000/"):
+        with pytest.raises(browser.BrowserError, match="Jav3 server"):
+            browser.check_url(u, deny)
+
+
+def test_gitea_and_other_sites_are_allowed(monkeypatch):
+    deny = _own(monkeypatch)
+    for u in ("http://10.0.0.82:3000/owner/repo", "http://localhost:3000/",
+              "http://macbook-pro-5.local:3000/", "http://[::1]:3000/",
+              "https://example.com/", "http://10.0.0.99:8000/"):
+        assert browser.check_url(u, deny) == u
+
+
+def test_host_only_entries_from_older_setups_still_deny_every_port():
+    with pytest.raises(browser.BrowserError, match="Jav3 server"):
+        browser.check_url("http://jav3.lan:3000/", frozenset({"jav3.lan"}))
+
+
+def test_proxy_host_header_without_a_port(monkeypatch):
+    deny = _own(monkeypatch, header="tunnel.example.org", csrf=())
+    with pytest.raises(browser.BrowserError, match="Jav3 server"):
+        browser.check_url("https://tunnel.example.org:1234/", deny)
+    assert browser.check_url("http://10.0.0.82:3000/", deny)

@@ -76,6 +76,7 @@ import asyncio
 import collections
 import dataclasses
 import hashlib
+import ipaddress
 import json
 import re
 import secrets as _secrets
@@ -310,23 +311,119 @@ async def set_grant(device_id: int, project: str, *, read: bool, act: bool) -> l
 
 # --- registry ---------------------------------------------------------------------
 
-def _own_hosts(host_header: str) -> frozenset:
-    """The names this server answers to. The operator is logged in to Jav3 in
-    that very browser, so a Jav3 tab would be the agent driving its own
-    control plane (approving its own egress, secrets, grants)."""
-    from . import lan
-    hosts = {"localhost", "127.0.0.1", "[::1]", "::1"}
-    h = (host_header or "").strip().lower()
-    if h:
-        hosts.add(h.rsplit(":", 1)[0] if not h.endswith("]") else h)
+def _norm_host(h: str) -> str:
+    """Lowercase, no brackets, no trailing dot, IPv4-mapped IPv6 as plain IPv4."""
+    h = (h or "").strip().lower().strip("[]").rstrip(".")
+    if "%" in h:                       # zone id on a link-local address
+        h = h.split("%", 1)[0]
     try:
-        hosts.update(i.lower() for i in lan.lan_ips())
+        ip = ipaddress.ip_address(h)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return str(ip)
+    except ValueError:
+        return h
+
+
+def _split_entry(entry: str):
+    """'host', 'host:port', '[v6]:port' or a bare v6 -> (host, port|None)."""
+    e = (entry or "").strip().lower()
+    if not e:
+        return "", None
+    if e.count(":") > 1 and not e.startswith("["):
+        return _norm_host(e), None     # a bare IPv6 literal
+    try:
+        u = urlsplit("//" + e)
+        port = u.port
+        host = u.hostname or ""
+    except ValueError:
+        return _norm_host(e), None
+    return _norm_host(host), port
+
+
+def _entry(host: str, port) -> str:
+    host = _norm_host(host)
+    if not host:
+        return ""
+    if port is None:
+        return f"[{host}]" if ":" in host else host
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _is_ip(h: str) -> bool:
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_denied(host: str, port: int, deny) -> bool:
+    """deny: entries 'host' (every port) or 'host:port'. 127.0.0.0/8 counts as
+    one loopback host."""
+    h = _norm_host(host)
+
+    def same(a: str) -> bool:
+        if a == h:
+            return True
+        try:
+            return (ipaddress.ip_address(a).is_loopback
+                    and ipaddress.ip_address(h).is_loopback)
+        except ValueError:
+            return False
+    for d in deny:
+        dh, dp = _split_entry(d)
+        if dh and same(dh) and (dp is None or dp == port):
+            return True
+    return False
+
+
+def _own_hosts(host_header: str) -> frozenset:
+    """Every name and address this server answers at, each with the ports it
+    listens on (host:port), so Gitea and the like on the same machine stay
+    reachable. The operator is logged in to Jav3 in that very browser, so a
+    Jav3 tab would be the agent driving its own control plane.
+
+    - local names (localhost, loopback, the machine's interface and LAN
+      addresses, the .local names): the lan_port and the port of the Host
+      header the browser connected with (80 and 443 when it had none);
+    - public names (a bare Host header that is a name, every
+      csrf_allowed_hosts entry): as configured; a bare name denies every port
+      (a tunnel hostname is Jav3 and nothing else)."""
+    from . import lan
+    from .config import settings
+    hh_host, hh_port = _split_entry(host_header)
+    ports = {int(settings.lan_port)}
+    ports.update({hh_port} if hh_port else {80, 443})
+    local = {"localhost", "127.0.0.1", "::1"}
+    if hh_host:
+        local.add(hh_host)
+    try:
+        local.update(lan.lan_ips())
+        local.update(lan.own_hosts())
         adv = lan.advertised_hostname()
         if adv:
-            hosts.add(adv.lower())
+            local.add(adv)
     except Exception:  # noqa: BLE001 — best effort; the Host header is the main one
         pass
-    return frozenset(x for x in hosts if x)
+    try:
+        import ifaddr   # zeroconf dependency
+        for ad in ifaddr.get_adapters():
+            for ip in ad.ips:
+                a = ip.ip if isinstance(ip.ip, str) else (ip.ip[0] if ip.ip else "")
+                if a:
+                    local.add(a)
+    except Exception:  # noqa: BLE001
+        pass
+    out = {_entry(h, p) for h in local for p in ports}
+    for e in list(getattr(settings, "csrf_allowed_hosts", []) or []):
+        e = str(e)
+        h, p = _split_entry(urlsplit(e).netloc if "://" in e else e)
+        out.add(_entry(h, p))
+    if hh_host and hh_port is None and not _is_ip(hh_host) and not hh_host.endswith(".local"):
+        out.add(_entry(hh_host, None))
+    out.discard("")
+    return frozenset(out)
 
 
 async def attach(device_id: int, name: str, ws, hello: dict, host_header: str = "") -> Browser:
@@ -544,7 +641,8 @@ def check_url(url, deny_hosts=frozenset()) -> str:
         raise BrowserError("that URL has no host")
     if u.username is not None or u.password is not None:
         raise BrowserError("URLs with a user:password@ part are refused")
-    if host in deny_hosts or f"[{host}]" in deny_hosts:
+    port = u.port or (443 if u.scheme.lower() == "https" else 80)
+    if _is_denied(host, port, deny_hosts):
         raise BrowserError("that is the Jav3 server itself; the browser extension "
                            "never opens it")
     _no_secret(url, "URL")

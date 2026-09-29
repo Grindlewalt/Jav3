@@ -135,6 +135,13 @@ skipped for the rest of that walk. On macOS the screenshot and the
 thumbnails are captured in process (CoreGraphics + ImageIO), with
 screencapture + sips as the fallback.
 
+A zoom is a look, not a mode. An input verb (and `wait`) taken from a zoomed
+frame maps its x,y through that zoomed frame, but `changed`,
+`pixels_changed` and `elements_changed` are judged on the WHOLE monitor, and
+the automatic screenshot is the whole monitor again (`frame.region` null, a
+new frame serial, `note: the zoom ended: ...`). To look closer again the model
+sends `region` (always in pixels of the last full-frame image).
+
 Once an input verb has been sent, the client never answers it with an error
 that invites a repeat: a failed post-action capture is `ok` with `note: the
 action was sent but the screen could not be captured afterwards — take

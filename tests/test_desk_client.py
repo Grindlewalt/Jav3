@@ -576,7 +576,8 @@ async def test_screenshot_carries_elements_frame_and_zoom(cfg, monkeypatch):
     await s.handle(ws, {"id": "4", "verb": "click", "params": {"x": 360, "y": 260}})
     r = ws.sent[-1]
     assert r["ok"] and ("move", 320 + 180, 200 + 130) in b.calls
-    assert r["frame"]["region"] == {"x": 160, "y": 100, "w": 320, "h": 200}   # zoom kept
+    assert r["frame"]["region"] is None                # NAV-07: the zoom ended
+    assert (r["image"]["w"], r["image"]["h"]) == (1280, 800) and "zoom ended" in r["note"]
     # elements=false skips the walk and says so
     await s.handle(ws, {"id": "5", "verb": "screenshot",
                         "params": {"monitor": "HDMI-A-1", "elements": False}})
@@ -742,7 +743,6 @@ async def test_an_action_reuses_the_last_responses_walk_and_thumbnail(cfg, monke
     monkeypatch.setattr(jd, "PRE_REUSE_S", 2.0)
     await s.handle(ws, {"id": "4", "verb": "screenshot",
                         "params": {"region": {"x": 0, "y": 0, "w": 640, "h": 400}}})
-    s.pre["key"] = ("DP-1", None)
     n = src.walks
     await s.handle(ws, {"id": "5", "verb": "click", "params": {"x": 10, "y": 10}})
     assert src.walks == n + 2
@@ -823,14 +823,14 @@ def test_background_windows_are_capped_and_covered_ones_dropped():
     assert by["menu bar"] == ["File"]
     assert by["Discord: Switch Device"] == ["", "", "Zoom", "Search", "Message"]
     assert "Finder: benchmark-game" not in by                     # covered: nothing
-    assert wins == {"Discord: Switch Device": {"shown": 5, "total": 41, "more": False}}
+    assert wins == {"Discord: Switch Device": {"shown": 5, "total": 13, "more": False}}  # rows under TextEdit are not counted
     # at most BG_SHOWN, buttons and fields only
     roots[2]["children"][:0] = [{"role": "button", "label": f"b{i}",
                                  "box": (1000 + i * 20, 70, 16, 16)} for i in range(10)]
     wins = {}
     raw, _ = jd.FakeElementSource(roots).collect((0, 0, 2560, 1600), 1e18, "front", wins)
     assert len([e for e in raw if e["window"].startswith("Discord")]) == jd.BG_SHOWN
-    assert wins["Discord: Switch Device"]["total"] == 51
+    assert wins["Discord: Switch Device"]["total"] == 23
     # walk="all": every window in full, no counts
     wins = {}
     raw, _ = jd.FakeElementSource(roots).collect((0, 0, 2560, 1600), 1e18, "all", wins)
@@ -846,7 +846,7 @@ async def test_screenshot_walk_front_or_all_reports_background_counts(cfg):
     await s.handle(ws, {"id": "1", "verb": "screenshot", "params": {}})
     r = ws.sent[-1]
     assert r["windows"] == [{"window": "Discord: Switch Device", "background": True,
-                             "shown": 5, "total": 41}]
+                             "shown": 5, "total": 13}]
     assert len(r["elements"]) == 2 + 1 + 5
     await s.handle(ws, {"id": "2", "verb": "screenshot", "params": {"walk": "all"}})
     r = ws.sent[-1]
@@ -1371,3 +1371,72 @@ def test_macos_key_codes_cover_the_keys_the_combos_can_name():
         with pytest.raises(jd.DeskError, match="no macOS key"):
             b.key(k)
     assert posted == []
+
+
+
+
+def test_controls_under_a_window_in_front_are_not_listed():
+    """NAV-05: a window behind a dialog, only partly covered, lists the
+    controls that stay reachable and not those whose centre is under the dialog."""
+    dialog = {"role": "", "kind": "front", "window": "Mail: Send?",
+              "box": (400, 300, 800, 500), "children": [
+                  {"role": "button", "label": "Cancel", "box": (500, 700, 80, 30)},
+                  {"role": "button", "label": "Send", "box": (900, 700, 80, 30)}]}
+    behind = {"role": "", "kind": "background", "window": "Mail: Inbox",
+              "box": (100, 100, 900, 600), "children": [
+                  {"role": "button", "label": "Delete All", "box": (500, 350, 100, 30)},
+                  {"role": "button", "label": "Archive", "box": (120, 120, 80, 30)}]}
+    raw, _ = jd.FakeElementSource([dialog, behind]).collect((0, 0, 2560, 1600), 1e18)
+    assert [(e["window"], e["label"]) for e in raw] == [
+        ("Mail: Send?", "Cancel"), ("Mail: Send?", "Send"), ("Mail: Inbox", "Archive")]
+
+
+async def test_a_change_outside_the_zoom_is_seen_and_the_zoom_ends(cfg, monkeypatch):
+    """NAV-07: an input verb taken from a zoomed frame lands by the zoomed
+    pixels, but `changed` is judged on the whole monitor and the auto-shot
+    is the whole monitor."""
+    monkeypatch.setattr(jd, "SETTLE_S", 0)
+    monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)
+    b = NavBackend()
+    thumbs = []
+    real_thumb = b.thumbnail
+    b.thumbnail = lambda mon, rect=None: thumbs.append(rect) or real_thumb(mon, rect)
+    s = jd.Session(b, "a", "t")
+    s.grants = {"screen": True, "input": True, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "1", "verb": "screenshot", "params": {}})
+    await s.handle(ws, {"id": "2", "verb": "screenshot",
+                        "params": {"region": {"x": 160, "y": 100, "w": 320, "h": 200}}})
+    thumbs.clear()
+    b.thumbs = [b"A", b"A", b"A"]
+    await s.handle(ws, {"id": "3", "verb": "click", "params": {"x": 360, "y": 260}})
+    r = ws.sent[-1]
+    assert ("move", 320 + 180, 200 + 130) in b.calls          # zoomed pixels still land
+    assert thumbs and all(t is None for t in thumbs)          # judged on the whole screen
+    assert r["frame"]["region"] is None and s.frame.rect is None
+    assert "zoom ended" in r["note"]
+
+
+def test_mac_source_switches_on_chromium_and_electron_accessibility_once_per_app():
+    """NAV-15: AXManualAccessibility (Electron) and AXEnhancedUserInterface
+    (Chromium) are set on an app element before it is walked, once per app
+    per session, and a failure changes nothing."""
+    import types
+    calls = []
+    src = object.__new__(jd.MacAXSource)
+    src._woken = set()
+    src.ct = types.SimpleNamespace(c_void_p=types.SimpleNamespace(
+        in_dll=lambda lib, name: name))
+    src.cf = object()
+    src.cfstr = lambda n: n
+    src.ax = types.SimpleNamespace(
+        AXUIElementSetAttributeValue=lambda a, n, v: calls.append((a, n, v)) or 0)
+    src.wake("app-1", 1)
+    src.wake("app-1", 1)
+    src.wake("app-2", 2)
+    assert calls == [("app-1", "AXManualAccessibility", "kCFBooleanTrue"),
+                     ("app-1", "AXEnhancedUserInterface", "kCFBooleanTrue"),
+                     ("app-2", "AXManualAccessibility", "kCFBooleanTrue"),
+                     ("app-2", "AXEnhancedUserInterface", "kCFBooleanTrue")]
+    src.ax = types.SimpleNamespace(AXUIElementSetAttributeValue=lambda *a: 1 / 0)
+    src.wake("app-3", 3)          # a broken call is ignored

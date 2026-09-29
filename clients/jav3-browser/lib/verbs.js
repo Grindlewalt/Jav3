@@ -85,13 +85,67 @@ export function checkUrl(url, denyHosts = []) {
   if (u.username || u.password) throw new VerbError('URLs with a user:password@ part are refused');
   const host = hostOf(url);
   if (!host) throw new VerbError('that URL has no host');
-  if (isDenied(host, denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never opens it');
+  if (isDeniedUrl(url, denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never opens it');
   return url;
 }
 
-export function isDenied(host, denyHosts) {
-  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
-  return (denyHosts || []).some(d => String(d).toLowerCase().replace(/^\[|\]$/g, '') === h);
+// Normalise a host for the deny compare: lowercase, no brackets, no trailing
+// dot, IPv4-mapped IPv6 ("::ffff:127.0.0.1") as the plain IPv4.
+export function normHost(h) {
+  h = String(h || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(h);
+  if (m) return m[1];
+  const w = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (w) {
+    const a = parseInt(w[1], 16), b = parseInt(w[2], 16);
+    return `${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`;
+  }
+  return h;
+}
+
+function isLoopback(h) { return h === '::1' || /^127\.\d+\.\d+\.\d+$/.test(h); }
+
+// "host", "host:port", "[v6]:port" or a bare v6 -> { host, port|null }
+function splitEntry(e) {
+  e = String(e || '').trim().toLowerCase();
+  let m = /^\[([^\]]+)\](?::(\d+))?$/.exec(e);
+  if (m) return { host: normHost(m[1]), port: m[2] ? Number(m[2]) : null };
+  if ((e.match(/:/g) || []).length > 1) return { host: normHost(e), port: null };
+  m = /^(.*?)(?::(\d+))?$/.exec(e);
+  return { host: normHost(m[1]), port: m[2] ? Number(m[2]) : null };
+}
+
+// denyHosts entries: "host" (every port) or "host:port" (that port only), the
+// second form from servers that send ports; 127.0.0.0/8 is one loopback host.
+// port is optional: without it only host-wide entries can match.
+export function isDenied(host, denyHosts, port = null) {
+  const h = normHost(host);
+  return (denyHosts || []).some(d => {
+    const e = splitEntry(d);
+    if (!e.host) return false;
+    const same = e.host === h || (isLoopback(e.host) && isLoopback(h));
+    return same && (e.port === null || e.port === port);
+  });
+}
+
+// "host:port" for a URL (default port from the scheme), or '' -- the paired
+// server's own address as a deny entry.
+export function endpointOf(url) {
+  try {
+    const u = new URL(url);
+    const h = normHost(u.hostname);
+    const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+    return h.includes(':') ? `[${h}]:${port}` : `${h}:${port}`;
+  } catch { return ''; }
+}
+
+// The same check for a full URL (the port defaults from the scheme).
+export function isDeniedUrl(url, denyHosts) {
+  try {
+    const u = new URL(url);
+    const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+    return isDenied(u.hostname, denyHosts, port);
+  } catch { return false; }
 }
 
 // An element id encodes the frame it lives in: "f<frameIndex>:<n>", where the
