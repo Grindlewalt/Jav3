@@ -16,7 +16,7 @@ export async function listBoxes() {
     const r = await get('/api/vm/boxes')
     return {
       enabled: !!r.enabled, boxes: r.boxes || [], budget: r.budget || null,
-      runtimes: normRuntimes(r.runtimes), legacy: false,
+      runtimes: normRuntimes(r.runtimes), legacy: false, idle: r.idle || null,
     }
   } catch (e) {
     if (!missing(e)) throw e
@@ -45,11 +45,29 @@ export const startBox = (id) => post(`/api/vm/boxes/${enc(id)}/start`)
 export const stopBox = (id) => post(`/api/vm/boxes/${enc(id)}/stop`)
 export const destroyBox = (id, deleteData) =>
   post(`/api/vm/boxes/${enc(id)}/destroy`, { confirm: true, delete_data: !!deleteData })
+// stop + start from a fresh overlay / container; returns the row
+export const restartBox = (id) => post(`/api/vm/boxes/${enc(id)}/restart`)
+
+// GET /api/vm/boxes/{id}/events -> {box_id, events:[{id, event, reason, actor,
+// created_at (UTC), kind, project, runtime}]}, newest first. event: started |
+// stopped | restarted | idle_stopped | wiped | nuked | destroyed | crashed | error
+export const boxEvents = (id, limit = 50) =>
+  get(`/api/vm/boxes/${enc(id)}/events?limit=${limit}`).then((r) => r.events || [])
+
+// GET /api/vm/leftovers -> {items:[{id, type, name, why, cleanable, bytes?,
+// detail}], cleanable, docker}: what boxes left behind that no box owns.
+export const listLeftovers = (fresh = false) =>
+  get(`/api/vm/leftovers${fresh ? '?fresh=true' : ''}`)
+// removes only the cleanable ones, each re-identified first -> {removed,
+// failed:[{id, error}], skipped, left}
+export const cleanLeftovers = (ids = null) =>
+  post('/api/vm/leftovers/clean', ids ? { confirm: true, ids } : { confirm: true })
 
 // Live: topic `vm-boxes` on the shared stream: {type:"box_up"|"box_down",
-// box:<static half of a row>}. Refetch listBoxes on either.
+// box:<static half of a row>} and {type:"box_event", box_id, event, ...}
+// (the history). Refetch listBoxes on any.
 export const followBoxes = (fn) => follow('vm-boxes', (ev) => {
-  if (ev && (ev.type === 'box_up' || ev.type === 'box_down')) fn(ev)
+  if (ev && (ev.type === 'box_up' || ev.type === 'box_down' || ev.type === 'box_event')) fn(ev)
 })
 
 // the shared guest's existing controls (vm_api.py), kept from the old VM chip

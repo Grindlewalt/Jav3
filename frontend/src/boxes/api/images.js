@@ -27,6 +27,12 @@ export const buildVariant = (variant) =>
   post(`/api/vm/images/${enc(variant)}/build`, { confirm: true })
 // -> {variant, recipe_sha256, dockerfile} (the docker runtime's recipe)
 export const variantDockerfile = (variant) => get(`/api/vm/images/${enc(variant)}/dockerfile`)
+// One build's whole log: the running build, else that version's (or the newest
+// finished one's). Variant `base` = the golden image's rebuild since the app
+// started. -> {variant, version, running, phase, ok, error, finished_at,
+// lines:[str], source}. The lines are builder output: render as text only.
+export const imageLog = (variant, version = null) =>
+  get(`/api/vm/images/${enc(variant)}/log${version != null ? `?version=${enc(version)}` : ''}`)
 
 // Live: topic `vm-images` on the shared stream: {type:"image_build", phase,
 // variant, box?, line?, ...}. Fold with logic.applyBuildEvent.

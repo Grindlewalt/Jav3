@@ -2,16 +2,21 @@ import { useEffect, useMemo, useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import Page from '../components/Page.jsx'
 import Tabs from '../components/Tabs.jsx'
-import { Button, EmptyState, Input, Select, Tag } from '../components/index.js'
+import { Button, EmptyState, Input, Modal, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { ago, ts } from '../format.js'
 import {
-  destroyBox, followBoxes, listBoxes, nukeShared, rebuildBase, startBox, stopBox, vmStatus,
+  boxEvents, cleanLeftovers, destroyBox, followBoxes, listBoxes, listLeftovers, nukeShared,
+  rebuildBase, restartBox, startBox, stopBox, vmStatus,
 } from '../boxes/api/vms.js'
 import {
-  buildVariant, createVariant, followBuilds, listImages, variantDockerfile,
+  buildVariant, createVariant, followBuilds, imageLog, listImages, variantDockerfile,
 } from '../boxes/api/images.js'
+import {
+  EVENT_TONE, activityWord, doingNow, eventWord, idlePolicy, idleTimer, leftoverSummary,
+  localTime, mins,
+} from '../boxes/glance.js'
 import { requestPackages } from '../boxes/api/packages.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import { deletePersist, getPersist, importPersist, listProjects } from '../boxes/api/persist.js'
@@ -59,26 +64,37 @@ const KIND_TEXT = {
 
 export function Boxes() {
   const { data, error, reload } = useLoad(listBoxes, { every: 8000 })
+  const left = useLoad(listLeftovers, { every: 30000 })
   const [dlg, setDlg] = useState(null)       // {verb, box}
+  const [open, setOpen] = useState(null)     // the box id whose history shows
+  const [histTick, setHistTick] = useState(0)
 
   const boxes = useMemo(() => sortBoxes(data?.boxes), [data])
-  // box_up / box_down on the shared stream: refetch (the poll is the fallback)
-  useEffect(() => followBoxes(() => reload()), [reload])
+  const reloadLeft = left.reload
+  // box_up / box_down / box_event on the shared stream: refetch (the poll is
+  // the fallback); a history event also refreshes the open history
+  useEffect(() => followBoxes((ev) => {
+    reload()
+    if (ev.type === 'box_event') { setHistTick((n) => n + 1); reloadLeft() }
+  }), [reload, reloadLeft])
 
   async function act(verb, box, flag) {
     try {
       if (verb === 'start') await startBox(box.id)
       else if (verb === 'stop') await stopBox(box.id)
+      else if (verb === 'restart') await restartBox(box.id)
       else if (verb === 'destroy') await destroyBox(box.id, flag)
       else if (verb === 'nuke') {
         if (box.inflight > 0) {
           notify(`${box.inflight} turn(s) in flight — wait for them to finish before nuking.`)
           return
         }
-        await nukeShared()
+        const s = await nukeShared()
+        notify(`nuked the shared box — fresh from main ${s?.image_version || ''}`.trim())
       }
       setDlg(null)
       reload()
+      setHistTick((n) => n + 1)
     } catch (e) {
       notifyError(e)
       if (e.status === 409) setDlg(null)
@@ -99,68 +115,40 @@ export function Boxes() {
 
       <Budget data={data} />
       {data && !data.legacy && <RuntimeStatus runtimes={data.runtimes} />}
+      {data?.idle && <div className="dim small bx-idle-policy">{idlePolicy(data.idle, data.enabled)}</div>}
 
       <section className="sbx-sec">
         <div className="sbx-sec-head"><h3>Boxes</h3>
-          <span className="sec-count">{boxes.length}</span></div>
+          <span className="sec-count">{boxes.length}</span>
+          <span className="dim small">{running(boxes)}</span></div>
         {!data && !error && <div className="dim">…</div>}
         {data && boxes.length === 0 && <EmptyState>no boxes</EmptyState>}
-        <div className="bx-table" role="table" aria-label="boxes">
+        <div className="bx-table bx-glance" role="table" aria-label="boxes">
           {boxes.length > 0 && (
             <div className="bx-tr bx-th" role="row">
               <span role="columnheader">Box</span>
+              <span role="columnheader">Doing now</span>
+              <span role="columnheader">Stops</span>
               <span role="columnheader">Runtime</span>
-              <span role="columnheader">Image</span>
-              <span role="columnheader">RAM</span>
-              <span role="columnheader">CPU</span>
-              <span role="columnheader">Disk</span>
+              <span role="columnheader">Image · RAM · CPU</span>
               <span role="columnheader">Up</span>
               <span role="columnheader" />
             </div>
           )}
           {boxes.map((b) => (
-            <div key={b.id} className={`bx-tr${b.state === 'running' ? '' : ' off'}`} role="row">
-              <span className="bx-box" role="cell">
-                <StateDot state={b.state} inflight={b.inflight} />
-                <span className="bx-box-main">
-                  <span className="mono">{b.id}</span>
-                  <span className="dim small">
-                    {KIND_TEXT[b.kind] || b.kind}
-                    {b.project ? ` · ${b.project}` : ''}
-                    {b.joined?.length ? ` · shared with ${b.joined.join(', ')}` : ''}
-                    {b.state === 'running' && b.inflight > 0 ? ` · ${b.inflight} turn(s) now` : ''}
-                    {b.state !== 'running' ? ` · ${b.state}` : ''}
-                  </span>
-                  {b.kind === 'service' && <PlacementTag placement={b.placement} />}
-                </span>
-              </span>
-              <span role="cell"><RuntimeTag runtime={b.runtime} /></span>
-              <span role="cell" className="mono small">
-                {b.image?.variant || 'main'}{b.image?.version ? ` ${b.image.version}` : ' (active)'}</span>
-              <span role="cell" className="small">
-                {mb(b.mem_mb)}
-                {b.rss_bytes != null && <span className="dim"> · {bytes(b.rss_bytes)} used</span>}</span>
-              <span role="cell" className="small">{b.cpu_pct != null ? `${b.cpu_pct}%` : '–'}</span>
-              <span role="cell" className="small" title="overlay · /srv data">
-                {bytes(b.disk?.overlay_bytes)}
-                {b.disk?.data_bytes != null && <span className="dim"> · {bytes(b.disk.data_bytes)} data</span>}</span>
-              <span role="cell" className="small">{b.state === 'running' ? uptime(b.uptime_s) : '–'}</span>
-              <span role="cell" className="bx-actions">
-                {b.state === 'running'
-                  ? <Button variant="ghost" disabled={data?.legacy}
-                            onClick={() => setDlg({ verb: 'stop', box: b })}>Stop</Button>
-                  : <Button variant="ghost" disabled={data?.legacy}
-                            onClick={() => setDlg({ verb: 'start', box: b })}>Start</Button>}
-                {b.kind === 'shared'
-                  ? <Button variant="ghost" danger disabled={b.state !== 'running'}
-                            onClick={() => setDlg({ verb: 'nuke', box: b })}>Nuke</Button>
-                  : <Button variant="ghost" danger
-                            onClick={() => setDlg({ verb: 'destroy', box: b })}>Destroy</Button>}
-              </span>
-            </div>
+            <BoxRow key={b.id} b={b} legacy={data?.legacy} open={open === b.id}
+                    histTick={histTick}
+                    onToggle={() => setOpen((o) => (o === b.id ? null : b.id))}
+                    onVerb={(verb) => setDlg({ verb, box: b })} />
           ))}
         </div>
       </section>
+
+      {!left.unavailable && (
+        <Leftovers data={left.data} error={left.error}
+                   onDone={() => { left.reload(); reload() }}
+                   onRefresh={() => listLeftovers(true).then(left.setData).catch(notifyError)} />
+      )}
 
       {data && !data.legacy && data.enabled && <WarmUp boxes={boxes} onDone={reload} />}
 
@@ -169,6 +157,190 @@ export function Boxes() {
       <BoxDialog dlg={dlg} budget={data?.budget} runtimes={data?.runtimes}
                  onClose={() => setDlg(null)} onAct={act} />
     </div>
+  )
+}
+
+// "2 running · 1 busy": the head of the table, in words
+function running(boxes) {
+  const up = boxes.filter((b) => b.state === 'running').length
+  const busy = boxes.filter((b) => b.state === 'running' && b.inflight > 0).length
+  return boxes.length ? `${up} running${busy ? ` · ${busy} busy` : ''}` : ''
+}
+
+const STOPS_OTHER = { service: 'stays up (its services)', builder: 'when the build ends' }
+
+// One box: where it runs, what it is doing, when the reaper acts on it, what
+// it costs, and its actions. Agent-supplied strings (titles, tool arguments,
+// errors) are text nodes.
+function BoxRow({ b, legacy, open, histTick, onToggle, onVerb }) {
+  const up = b.state === 'running'
+  const word = activityWord(b)
+  const turns = doingNow(b)
+  const timer = idleTimer(b)
+  const last = b.last_event
+  const projects = b.projects?.length ? b.projects : (b.project ? [b.project] : [])
+  return (
+    <>
+      <div className={`bx-tr${up ? '' : ' off'}${open ? ' open' : ''}`} role="row">
+        <span className="bx-box" role="cell">
+          <StateDot state={word === 'failed' ? 'failed' : b.state} inflight={b.inflight} />
+          <span className="bx-box-main">
+            <span className="mono">{b.id}</span>
+            <span className="dim small">
+              {KIND_TEXT[b.kind] || b.kind}
+              {projects.length ? ` · ${projects[0]}` : ''}
+              {projects.length > 1 ? ` + ${projects.slice(1).join(', ')} (joined)` : ''}
+            </span>
+            {b.kind === 'service' && <PlacementTag placement={b.placement} />}
+            {b.last_error && <span className="error small bx-row-err">{b.last_error}</span>}
+          </span>
+        </span>
+        <span role="cell" className="bx-now small">
+          {turns.length > 0 ? turns.map((t) => (
+            <span key={t.key} className="bx-turn">
+              <span><b>{t.head}</b>{t.title ? ` ${t.title}` : ''}
+                {t.project && <span className="dim"> · {t.project}</span>}</span>
+              {t.tool && (
+                <span className="mono dim bx-tool" title={t.detail || undefined}>
+                  {t.tool}{t.detail ? ` ${t.detail}` : ''}</span>)}
+            </span>
+          )) : (
+            <span className={word === 'failed' ? 'error' : 'dim'}>
+              {word === 'busy' ? `${b.inflight} turn(s)` : word}
+              {!up && last && (
+                <span title={last.reason || undefined}>
+                  {' · '}{eventWord(last)} {localTime(last.created_at)}
+                  {last.actor ? ` by ${last.actor}` : ''}</span>)}
+            </span>
+          )}
+        </span>
+        <span role="cell" className="small">
+          {timer
+            ? <span className={timer.tone === 'pending' ? 'warn' : ''} title={timer.title}>{timer.text}</span>
+            : up && b.stop_after_s && b.inflight > 0
+              ? <span className="dim" title="the idle clock starts when the last turn ends">
+                  {b.stop_action === 'scrub' ? 'scrub' : 'stop'} after {mins(b.stop_after_s)} idle</span>
+              : <span className="dim">{up ? (STOPS_OTHER[b.kind] || '–') : '–'}</span>}
+        </span>
+        <span role="cell"><RuntimeTag runtime={b.runtime} /></span>
+        <span role="cell" className="small">
+          <span className="mono">{b.image?.variant || 'main'}{b.image?.version ? ` v${String(b.image.version).replace(/^v/, '')}` : ''}</span>
+          <span className="dim"> · {mb(b.mem_mb)}</span>
+          {b.rss_bytes != null && <span className="dim"> ({bytes(b.rss_bytes)} used)</span>}
+          {b.cpu_pct != null && <span className="dim"> · {b.cpu_pct}%</span>}
+          {b.restart_needed && <Tag tone="pending" title="a newer image is waiting for its next boot">restart to update</Tag>}
+        </span>
+        <span role="cell" className="small" title={b.started_at ? `since ${localTime(b.started_at)}` : undefined}>
+          {up ? uptime(b.uptime_s) : '–'}</span>
+        <span role="cell" className="bx-actions">
+          {up
+            ? <Button variant="ghost" disabled={legacy} onClick={() => onVerb('stop')}>Stop</Button>
+            : <Button variant="ghost" disabled={legacy} onClick={() => onVerb('start')}>Start</Button>}
+          {up && !legacy && <Button variant="ghost" onClick={() => onVerb('restart')}>Restart</Button>}
+          {b.kind === 'shared'
+            ? <Button variant="ghost" danger disabled={!up} onClick={() => onVerb('nuke')}>Nuke</Button>
+            : <Button variant="ghost" danger onClick={() => onVerb('destroy')}>Destroy</Button>}
+          {!legacy && (
+            <Button variant="ghost" aria-expanded={open} onClick={onToggle}>
+              {open ? 'Hide history' : 'History'}</Button>)}
+        </span>
+      </div>
+      {open && <BoxHistory b={b} tick={histTick} />}
+    </>
+  )
+}
+
+// A box's history, newest first: what happened, why, and who asked.
+function BoxHistory({ b, tick }) {
+  const [evs, setEvs] = useState(null)
+  const [err, setErr] = useState(null)
+  useEffect(() => {
+    let live = true
+    boxEvents(b.id, 50).then((e) => { if (live) { setEvs(e); setErr(null) } })
+      .catch((e) => { if (live) setErr(e) })
+    return () => { live = false }
+  }, [b.id, tick])
+  return (
+    <div className="bx-history" role="row">
+      <div className="bx-history-facts dim small" role="cell">
+        {b.started_at && <span>up since {localTime(b.started_at)}</span>}
+        <span>disk {bytes(b.disk?.overlay_bytes)} overlay
+          {b.disk?.data_bytes != null ? ` · ${bytes(b.disk.data_bytes)} data` : ''}</span>
+        {b.net?.tap && <span className="mono">{b.net.tap} {b.net.guest_ip || ''}</span>}
+        {b.ram_cost_mb && b.ram_cost_mb !== b.mem_mb && (
+          <span title="guest RAM plus QEMU's own">costs {mb(b.ram_cost_mb)} of the budget</span>)}
+      </div>
+      {err && <div className="error small">{err.detail || String(err)}</div>}
+      {!evs && !err && <div className="dim small">…</div>}
+      {evs && evs.length === 0 && <div className="dim small">no history yet</div>}
+      {evs && evs.length > 0 && (
+        <ol className="bx-events">
+          {evs.map((e) => (
+            <li key={e.id ?? `${e.created_at}${e.event}`}>
+              <span className="mono dim small">{localTime(e.created_at)}</span>
+              <Tag tone={EVENT_TONE[e.event]}>{eventWord(e)}</Tag>
+              <span className="small grow">{e.reason || ''}</span>
+              {e.actor && <span className="dim small">by {e.actor}</span>}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+// What boxes left behind that no box of this server owns: a QEMU from before
+// an app restart, a container, a box directory. Only this server's things are
+// listed; Clean removes only those (each checked again first).
+function Leftovers({ data, error, onDone, onRefresh }) {
+  const [ask, setAsk] = useState(false)
+  const items = data?.items || []
+  const clean = items.filter((i) => i.cleanable)
+  async function go() {
+    try {
+      const r = await cleanLeftovers()
+      const n = r.removed?.length || 0
+      notify(`cleaned ${n} leftover${n === 1 ? '' : 's'}`
+        + (r.failed?.length ? ` — ${r.failed.length} failed: ${r.failed.map((f) => f.error).join('; ')}` : ''))
+      setAsk(false)
+      onDone()
+    } catch (e) { notifyError(e) }
+  }
+  return (
+    <section className="sbx-sec">
+      <div className="sbx-sec-head"><h3>Leftovers</h3>
+        <span className="sec-count">{data ? items.length : '…'}</span>
+        <span className="grow" />
+        <Button variant="ghost" onClick={onRefresh}>Check again</Button>
+        {clean.length > 0 && (
+          <Button variant="ghost" danger onClick={() => setAsk(true)}>Clean {clean.length}…</Button>)}
+      </div>
+      <LoadError error={error} />
+      {data && items.length === 0 && (
+        <div className="sbx-card dim small bx-left-none">Nothing left behind: every QEMU, container
+          and box directory of this server belongs to a box.</div>)}
+      {items.length > 0 && (
+        <ul className="staged-list rev-list bx-left">
+          {items.map((i) => (
+            <li key={i.id} className={i.cleanable ? '' : 'dim'}>
+              <Tag tone={i.cleanable ? 'pending' : undefined}>{i.type.replace('_', ' ')}</Tag>
+              <span className="mono small">{i.name}</span>
+              <span className="small grow">{i.why}</span>
+              {i.bytes ? <span className="dim small">{bytes(i.bytes)}</span> : null}
+              {!i.cleanable && <span className="dim small">listed only</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      <Confirm open={ask} title={`Clean ${clean.length} leftover${clean.length === 1 ? '' : 's'}?`}
+               confirmLabel="Clean" danger onClose={() => setAsk(false)} onConfirm={go}>
+        <p>Removes {leftoverSummary(clean)}: {clean.slice(0, 6).map((i) => i.name).join(', ')}
+          {clean.length > 6 ? ` and ${clean.length - 6} more` : ''}.</p>
+        <p>Only what this server identifies as its own (Jav3&apos;s container label and socket
+          directory, its own box directories and QEMU processes); each is checked again first.
+          Network interfaces are listed, never removed.</p>
+      </Confirm>
+    </section>
   )
 }
 
@@ -252,6 +424,17 @@ function BoxDialog({ dlg, budget, runtimes, onClose, onAct }) {
             : <p>Anything installed or written inside the VM since it booted is gone at the
                 next boot. Project files live on the host and are not touched.
                 {b.inflight > 0 ? ` ${b.inflight} turn(s) running in it now will fail.` : ''}</p>}
+      </Confirm>
+    )
+  }
+  if (verb === 'restart') {
+    return (
+      <Confirm open title={`Restart ${who}?`} confirmLabel="Restart" danger onClose={onClose}
+               onConfirm={() => onAct('restart', b)}>
+        <p>Stops it and boots it again from a fresh {b.runtime === 'docker' ? 'container' : 'overlay'}:
+          anything written inside it since it booted is gone. Project files live on the host and
+          are not touched.{b.inflight > 0 ? ` ${b.inflight} turn(s) running in it now will fail.` : ''}</p>
+        {b.kind === 'service' && <p>Its services restart with it. Its <code>/srv</code> data disk is kept.</p>}
       </Confirm>
     )
   }
@@ -390,6 +573,7 @@ export function Images() {
   const { data, error, unavailable, reload } = useLoad(listImages, { every: 0 })
   const [bs, setBs] = useState(null)       // the build panel: logic.buildState
   const [dlg, setDlg] = useState(null)
+  const [log, setLog] = useState(null)     // {variant, version}: the build log dialog
 
   // seed from the REST read; the `vm-images` topic on the shared stream
   // carries the rest (start, boot, log lines, done, resolved)
@@ -412,18 +596,21 @@ export function Images() {
 
   return (
     <div className="bx-page">
-      <BaseImage />
+      <BaseImage onLog={() => setLog({ variant: 'base', version: null })} />
       {unavailable && <Unavailable what="The image manager" />}
       <LoadError error={error} />
-      {bs && (bs.running || bs.last || bs.log.length > 0) && <BuildPanel bs={bs} />}
+      {bs && (bs.running || bs.last || bs.log.length > 0) && (
+        <BuildPanel bs={bs} onLog={(v) => setLog({ variant: v, version: null })} />)}
       <section className="sbx-sec">
         <div className="sbx-sec-head"><h3>Variants</h3>
           <span className="sec-count">{data?.variants.length ?? '…'}</span></div>
         {(data?.variants || []).map((v) => (
           <Variant key={v.name} v={v} building={building}
-                   onBuild={() => setDlg(v)} />
+                   onBuild={() => setDlg(v)}
+                   onLog={(version) => setLog({ variant: v.name, version })} />
         ))}
       </section>
+      {log && <BuildLog variant={log.variant} version={log.version} onClose={() => setLog(null)} />}
       {data && <AddPackages variants={data.variants} onDone={reload} />}
       <Confirm open={!!dlg} title={`Build a new version of ${dlg?.name}?`} confirmLabel="Build"
                onClose={() => setDlg(null)} onConfirm={() => build(dlg.name)}>
@@ -441,10 +628,13 @@ export function Images() {
 
 // The running (or last) build: phase, box, and the builder's log lines. The
 // lines come from the builder guest: one text node.
-function BuildPanel({ bs }) {
+function BuildPanel({ bs, onLog }) {
+  const which = bs.running ? bs.variant : bs.last?.variant
   return (
     <section className="sbx-card bx-building-card">
       <div className="bx-building">
+        {which && (
+          <Button variant="ghost" className="bx-log-btn" onClick={() => onLog(which)}>Whole log</Button>)}
         {bs.running && <span className="run-dot running" aria-hidden="true" />}
         {bs.running
           ? <>Building <b className="mono">{bs.variant}</b>
@@ -472,8 +662,9 @@ function BuildPanel({ bs }) {
   )
 }
 
-function Variant({ v, building, onBuild }) {
+function Variant({ v, building, onBuild, onLog }) {
   const versions = v.versions || []
+  const lb = v.last_build
   const [docker, setDocker] = useState(null)
   const loadDocker = (e) => {
     if (!e.currentTarget.open || docker) return
@@ -492,6 +683,15 @@ function Variant({ v, building, onBuild }) {
         <Button variant="ghost" disabled={building} onClick={onBuild}>Build new version</Button>
       </div>
       <div className="small bx-used">used by: <ProjectList slugs={v.used_by} empty="no project" /></div>
+      <div className="small bx-lastbuild">
+        {lb
+          ? <>last build <span className="mono">{verLabel(lb.version)}</span>{' '}
+              {lb.ok ? <Tag tone="done">built</Tag> : <Tag tone="error">failed</Tag>}
+              {lb.error && <span className="error"> {lb.error}</span>}
+              <span className="dim"> {ts(lb.finished_at)}</span>{' '}
+              <Button variant="ghost" onClick={() => onLog(lb.version)}>Build log</Button></>
+          : <span className="dim">no finished build yet</span>}
+      </div>
       {(v.layer_packages || []).length > 0 && (
         <div className="small">this layer: <span className="mono">{v.layer_packages.join('  ')}</span></div>)}
       <details className="bx-recipe">
@@ -521,6 +721,8 @@ function Variant({ v, building, onBuild }) {
                 <span className="grow" />
                 {(x.in_use_by || []).length > 0 && (
                   <span className="small">in use by boxes <ProjectList slugs={x.in_use_by} /></span>)}
+                {(x.status === 'built' || x.status === 'failed') && (
+                  <Button variant="ghost" onClick={() => onLog(x.version)}>Log</Button>)}
               </li>
             ))}
           </ul>
@@ -530,11 +732,13 @@ function Variant({ v, building, onBuild }) {
 }
 
 // The shared guest's golden image and its rebuild, kept from the old VM chip.
-function BaseImage() {
+function BaseImage({ onLog }) {
   const [s, setS] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [hasLog, setHasLog] = useState(false)   // a rebuild ran since the app started
   const ask = useAsk()
   useEffect(() => { vmStatus().then(setS).catch(() => setS(null)) }, [])
+  useEffect(() => { imageLog('base').then(() => setHasLog(true)).catch(() => setHasLog(false)) }, [busy])
   if (!s) return null
   async function rebuild() {
     if (!await ask.confirm('Rebuild the base image from scratch?', {
@@ -552,10 +756,54 @@ function BaseImage() {
       <span className={s.image_stale ? 'warn' : 'mono small'}>{s.image_version || '?'}</span>
       {s.image_built_at && <span className="dim small">built {String(s.image_built_at).slice(0, 10)}</span>}
       {s.image_stale && <Tag tone="pending">stale — rebuild suggested</Tag>}
+      {s.rebuilding && <Tag tone="running">rebuilding</Tag>}
       <span className="grow" />
+      {(hasLog || s.rebuilding) && <Button variant="ghost" onClick={onLog}>Rebuild log</Button>}
       <Button variant="ghost" disabled={busy} onClick={rebuild}>
         {busy ? 'Rebuilding…' : 'Rebuild base…'}</Button>
     </section>
+  )
+}
+
+// One build's whole log (GET /api/vm/images/{variant}/log), re-read every few
+// seconds while the build runs. The lines come from the builder guest (or
+// build_base.sh for `base`): one text node, never markup.
+function BuildLog({ variant, version, onClose }) {
+  const [r, setR] = useState(null)
+  const [err, setErr] = useState(null)
+  useEffect(() => {
+    let live = true
+    let t = null
+    const load = () => imageLog(variant, version)
+      .then((x) => {
+        if (!live) return
+        setR(x); setErr(null)
+        if (x.running) t = setTimeout(load, 3000)
+      })
+      .catch((e) => { if (live) setErr(e) })
+    load()
+    return () => { live = false; clearTimeout(t) }
+  }, [variant, version])
+  const what = variant === 'base' ? 'base image rebuild' : `${variant}${r?.version != null ? ` ${verLabel(r.version)}` : ''}`
+  return (
+    <Modal open title={`Build log · ${what}`} onClose={onClose} width={820}
+           footer={<Button variant="ghost" onClick={onClose}>Close</Button>}>
+      {err && <div className={err.status === 404 ? 'dim small' : 'error small'}>
+        {err.status === 404 ? (err.detail || 'no build log') : (err.detail || String(err))}</div>}
+      {!r && !err && <div className="dim">…</div>}
+      {r && (
+        <>
+          <div className="bx-building small">
+            {r.running ? <Tag tone="running">running{r.phase ? ` · ${r.phase}` : ''}</Tag>
+              : r.ok ? <Tag tone="done">built</Tag> : <Tag tone="error">failed</Tag>}
+            {r.error && <span className="error">{r.error}</span>}
+            <span className="dim">{r.lines.length} line{r.lines.length === 1 ? '' : 's'} · written by
+              the {variant === 'base' ? 'build script' : 'builder guest'}</span>
+          </div>
+          <pre className="mono small bx-log-tail bx-log-full">{r.lines.join('\n') || '(empty)'}</pre>
+        </>
+      )}
+    </Modal>
   )
 }
 

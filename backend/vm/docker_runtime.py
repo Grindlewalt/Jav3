@@ -810,15 +810,15 @@ async def runtimes_json() -> dict:
 
 
 async def reap_orphans() -> list[str]:
-    """Remove jav3-managed containers no registered box owns (left over from an
-    app restart: a docker box never outlives the app that started it)."""
-    rc, out, _ = await cli.run("ps", "--all", "--filter", f"label={LABEL}=1",
-                               "--format", "{{.Names}}", timeout=30)
-    if rc != 0:
-        return []
+    """Remove this server's containers no registered box owns (left over from
+    an app restart: a docker box never outlives the app that started it).
+    "This server's" is leftovers.py's positive identification: Jav3's label,
+    the jav3-<box> name AND a socket mount under this server's vm_dir, so a
+    second Jav3 install on the same daemon keeps its running boxes."""
+    from . import leftovers
     live = {container_name(b) for b in boxes.all_boxes()
             if b.runtime == "docker" and b.ctl is not None and b.ctl.running()}
-    gone = [n for n in out.split() if n.startswith("jav3-") and n not in live]
+    gone = [c["name"] for c in await leftovers._containers() if c["name"] not in live]
     for n in gone:
         await cli.run("rm", "--force", n, timeout=60)
     return gone

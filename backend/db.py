@@ -783,6 +783,7 @@ async def init_db() -> None:
         await _migrate_calls(db)
         await _migrate_logging(db)
         await _migrate_secnotify(db)
+        await _migrate_boxlog(db)
         await db.commit()
     finally:
         await db.close()
@@ -918,6 +919,27 @@ async def _migrate_secnotify(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_security_events_cause "
         "ON security_events(kind, cause, acknowledged)")
+
+
+async def _migrate_boxlog(db: aiosqlite.Connection) -> None:
+    """Each box's history (backend/vm/boxlog.py): started, stopped, restarted,
+    idle_stopped, wiped, nuked, destroyed, crashed, error, with the reason and
+    who asked. Rows outlive the box (a destroyed box's history still reads).
+    Idempotent and additive."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS box_events ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " box_id TEXT NOT NULL,"
+        " kind TEXT,"
+        " project TEXT,"
+        " runtime TEXT,"
+        " event TEXT NOT NULL,"
+        " reason TEXT,"
+        " actor TEXT,"
+        " detail TEXT,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_box_events_box "
+                     "ON box_events(box_id, id)")
 
 
 async def get_state(db: aiosqlite.Connection, key: str) -> str | None:

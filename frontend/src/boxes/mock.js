@@ -48,7 +48,10 @@ const S = {
     { name: 'dev', from: 'main', builtin: true, min_mem_mb: 768, used_by: ['alpha', 'bravo'],
       recipe: 'apt: golang rustc cargo default-jdk-headless python3-pytest\npip: uv\nnpm: pnpm typescript\n',
       recipe_sha256: 'ffee00112233', layer_packages: ['golang', 'rustc', 'cargo', 'uv', 'pnpm', 'typescript'],
-      needs_build: true, versions: [
+      needs_build: true,
+      last_build: { version: 3, ok: false, error: 'apt-get install exited 100',
+        finished_at: '2026-09-27 21:00:00', log_tail: ['E: Unable to fetch some archives'] },
+      versions: [
         { version: 'v2', base_version: 'base-v7', size_bytes: 0.9 * 2 ** 30, built_at: '2026-09-22 09:10:00',
           status: 'built', active: true, in_use_by: ['p-alpha'] }] },
     { name: 'desktop', from: 'main', builtin: true, min_mem_mb: 1280, used_by: [],
@@ -245,9 +248,67 @@ function budget() {
 }
 const usedBy = (variant) => S.variants.find((v) => v.name === variant)?.used_by || []
 
+// at a glance (vm_api.list_boxes): idle timers, what a box is doing, history
+const GLANCE = {
+  shared: { activity: 'busy', projects: [], stop_action: 'scrub', stop_after_s: 900, idle_s: null,
+    now: [{ op_id: 'chat:42', conversation_id: 42, title: 'Fix the failing build', project: 'alpha',
+      tool: { name: 'shell', detail: 'npm test -- --watch=false', since: Date.now() / 1000 - 40 } }] },
+  'p-alpha': { activity: 'stopped', projects: ['alpha', 'notes'], stop_action: 'stop', stop_after_s: 600,
+    last_event: { event: 'idle_stopped', reason: 'idle 10m (stops at 10m)', actor: 'reaper',
+      created_at: '2026-09-28 13:10:00' } },
+  's-alpha': { activity: 'idle', projects: ['alpha'] },
+  's-bravo': { activity: 'idle', projects: ['bravo'], idle_s: 700, last_error: null },
+}
+function glance(b) {
+  const g = GLANCE[b.id] || {}
+  const up = b.state === 'running'
+  const idle = up && !(b.inflight > 0) ? (g.idle_s ?? 240) : null
+  const after = g.stop_after_s ?? null
+  return { now: [], last_event: null, last_error: null, stop_action: null, ...g,
+    activity: up ? (b.inflight > 0 ? 'busy' : 'idle') : (g.activity === 'failed' ? 'failed' : 'stopped'),
+    now: up ? (g.now || []) : [], idle_s: idle, stop_after_s: after,
+    stops_in_s: idle != null && after ? Math.max(0, after - idle) : null,
+    started_at: up ? Date.now() / 1000 - (b.uptime_s || 0) : null, ram_cost_mb: b.mem_mb + (b.runtime === 'kvm' ? 144 : 0) }
+}
+S.leftovers = [
+  { id: 'container:jav3-p-ghost', type: 'container', name: 'jav3-p-ghost', cleanable: true,
+    why: 'container exited: no box p-ghost exists (left over from an app restart)' },
+  { id: 'box_dir:p-ghost', type: 'box_dir', name: 'boxes/p-ghost', cleanable: true, bytes: 96 * 2 ** 20,
+    why: 'box directory with no box registered (overlay disk and runtime files; destroy would have deleted it)' },
+  { id: 'tap:jvtap12', type: 'tap', name: 'jvtap12', cleanable: false,
+    why: 'network interface no box here uses (another install may; removing it needs sudo vm/net_up.sh)' },
+]
+const EVENTS = [
+  { id: 4, event: 'started', reason: null, actor: 'turn chat:42', created_at: '2026-09-28 14:00:05' },
+  { id: 3, event: 'wiped', reason: 'idle scrub after 15m', actor: 'reaper', created_at: '2026-09-28 13:40:00' },
+  { id: 2, event: 'nuked', reason: 'overlay discarded, rebooted from the golden image', actor: 'operator grindlewalt', created_at: '2026-09-28 11:02:00' },
+  { id: 1, event: 'crashed', reason: 'the guest exited on its own (QEMU exit code 137)', actor: 'app', created_at: '2026-09-27 22:15:00' },
+]
+
 const routes = [
-  ['GET', /^\/api\/vm\/boxes$/, () => ({ enabled: S.enabled, boxes: S.boxes, budget: budget(),
-    runtimes: S.runtimes })],
+  ['GET', /^\/api\/vm\/boxes$/, () => ({ enabled: S.enabled, boxes: S.boxes.map((b) => ({ ...b, ...glance(b) })),
+    budget: budget(), runtimes: S.runtimes,
+    idle: { project_stop_s: 600, shared_scrub_s: 900, reaper_interval_s: 30 } })],
+  ['GET', /^\/api\/vm\/boxes\/([^/]+)\/events$/, ([id]) => ({ box_id: id,
+    events: id === 'shared' ? EVENTS : EVENTS.slice(0, 1) })],
+  ['POST', /^\/api\/vm\/boxes\/([^/]+)\/restart$/, ([id]) => Object.assign(box(id), { uptime_s: 1 })],
+  ['GET', /^\/api\/vm\/leftovers$/, () => ({ items: S.leftovers, docker: 'on',
+    cleanable: S.leftovers.filter((i) => i.cleanable).length, scanned_at: Date.now() / 1000 })],
+  ['POST', /^\/api\/vm\/leftovers\/clean$/, (_, b) => {
+    if (!b.confirm) fail(400, 'clean requires confirm=true')
+    const removed = S.leftovers.filter((i) => i.cleanable).map((i) => i.id)
+    S.leftovers = S.leftovers.filter((i) => !i.cleanable)
+    return { removed, failed: [], skipped: [], left: { items: S.leftovers } }
+  }],
+  ['GET', /^\/api\/vm\/images\/([^/]+)\/log$/, ([v], _, q) => {
+    if (v === 'base') fail(404, 'no base image rebuild since the app started')
+    const ok = v !== 'dev'
+    return { variant: v, version: Number(String(q.get('version') || '2').replace(/^v/, '')),
+      running: false, phase: null, ok, error: ok ? null : 'apt-get install exited 100',
+      finished_at: '2026-09-22 09:10:00', source: 'stored',
+      lines: ['Reading package lists...', 'Setting up golang-1.22 (1.22.2-2) ...', '<b>not markup</b>',
+        ...(ok ? ['layer frozen'] : ['E: Unable to fetch some archives'])] }
+  }],
   ['POST', /^\/api\/vm\/boxes\/([^/]+)\/start$/, ([id]) => {
     let b = S.boxes.find((x) => x.id === id)
     if (!b && id.startsWith('p-')) {

@@ -218,6 +218,7 @@ async def test_runs_topic_carries_every_jobs_tree_events_stamped(token):
     """A JobTree used to hold GET /api/runs/{cid}/stream open per expanded run;
     now the job's events ride the shared stream, tagged with their job_id."""
     job = "0123456789abcdef" * 2
+    before = set(bus._taps)          # vm/boxlog.py keeps one app-long tracker tap
     it = await _open(token, "runs")
     try:
         assert await _next(it) == {"topic": "runs", "event": {
@@ -232,7 +233,7 @@ async def test_runs_topic_carries_every_jobs_tree_events_stamped(token):
         assert (await _next(it))["event"]["type"] == "job_final"
     finally:
         await it.aclose()
-    assert bus._taps == {}, "the tap goes with the connection"
+    assert set(bus._taps) == before, "the tap goes with the connection"
 
 
 async def test_runs_topic_says_when_a_chat_turn_or_agent_run_ends(token):
