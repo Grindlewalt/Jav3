@@ -1138,7 +1138,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     err = res.get("err") if isinstance(res.get("err"), str) else ""
     await _audit(d, verb, ap, ok, None if ok else (err or "failed"))
     if not ok:
-        return f"error: {(err or 'the computer refused')[:500]}"
+        text = f"error: {(err or 'the computer refused')[:500]}"
+        # a refusal ends here; a failed action that still carries the screen
+        # (desk_type whose text did not appear) shows it under the error
+        if verb not in INPUT_VERBS or _image(res) is None:
+            return text
     # `changed` means "since before this action": only input verbs and wait
     # have a before. On a plain screenshot it would be noise.
     changed = (res.get("changed") if isinstance(res.get("changed"), bool)

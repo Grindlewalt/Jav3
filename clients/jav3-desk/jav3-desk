@@ -602,20 +602,72 @@ class ElementSource:
     def collect(self, clip: tuple, deadline: float) -> tuple[list[dict], bool]:
         return [], False
 
+    def focused(self) -> dict | None:
+        """The element with keyboard focus: {role (ours), label, value (str or
+        None), selected, secure, truncated}; {} when nothing has focus; None
+        when this source cannot tell (then typing is not read back)."""
+        return None
+
 
 class FakeElementSource(ElementSource):
     """Tests: a recorded tree of dicts ({role, label, box, children, ...},
-    roles already ours) walked by the real walker."""
+    roles already ours) walked by the real walker; `focus` is what
+    focused() answers (a dict, {} or None, or a callable returning one)."""
 
-    def __init__(self, roots: list[dict], src: str = "ax", note: str | None = None):
+    def __init__(self, roots: list[dict], src: str = "ax", note: str | None = None,
+                 focus=None):
         super().__init__(note or "")
-        self.roots, self.src = roots, src
+        self.roots, self.src, self.focus = roots, src, focus
+
+    def focused(self):
+        return self.focus() if callable(self.focus) else self.focus
 
     def unavailable(self):
         return self.note or None
 
     def collect(self, clip, deadline):
         return walk_tree(self.roots, lambda n: n, clip, deadline)
+
+
+TYPED_TAIL = 40           # read-back compares at most this many trailing characters
+
+
+def typed_check(text: str, focus: dict | None, changed: bool | None = None) -> str | None:
+    """Did `text` land in the focused field? None = yes, or cannot tell
+    (no reader, a secure field, a newline/tab that may have submitted or
+    moved focus, a value too long to read); else the error for the model.
+    A field whose value lacks the text is always an error; "nothing
+    focused" / "not a text field" only when the screen did not change
+    either (Chromium reports no focused element until its accessibility is
+    on, and a canvas editor has no text field, yet typing there works).
+    Never quotes the field's value — only its role and label."""
+    if focus is None or any(c in text for c in "\n\r\t"):
+        return None
+    want = " ".join(text.split()).casefold()
+    if not want:
+        return None
+    if not focus:
+        if changed is True:
+            return None
+        return ("typed text did not appear: nothing on this computer has keyboard "
+                "focus — click the field first, then type")
+    role = focus.get("role") or "element"
+    label = " ".join(str(focus.get("label") or "").split())[:60]
+    what = f"{role} {label}".strip().replace('"', "'")
+    value, sel = focus.get("value"), focus.get("selected")
+    if focus.get("secure") or focus.get("truncated"):
+        return None
+    if role not in ("textfield", "combobox") and not isinstance(value, str):
+        if changed is True:
+            return None
+        return (f'typed text did not appear: the focused element is not a text field '
+                f'("{what}") — click the field first, then type')
+    hay = " ".join(f"{value if isinstance(value, str) else ''} "
+                   f"{sel if isinstance(sel, str) else ''}".split()).casefold()
+    if want[-TYPED_TAIL:] in hay:
+        return None
+    return (f'typed text did not appear in the focused field ("{what}") — click the '
+            f"field first, then type")
 
 
 def ax_info(v: dict) -> dict:
@@ -739,7 +791,7 @@ class MacAXSource(ElementSource):
             return "no Accessibility permission"
         return None
 
-    def py(self, obj):
+    def py(self, obj, cap: int = 400):
         """A CF object -> Python (str, bool, float, list of borrowed refs,
         (a, b) for an AXValue point/size); None for anything else, including
         the AXError values CopyMultiple puts in place of missing attributes."""
@@ -751,7 +803,7 @@ class MacAXSource(ElementSource):
             n = cf.CFStringGetLength(obj)
             buf = c.create_string_buffer(n * 4 + 1)
             if cf.CFStringGetCString(obj, buf, len(buf), 0x08000100):
-                return buf.value.decode(errors="replace")[:400]
+                return buf.value.decode(errors="replace")[:cap]
             return ""
         if t == self.T["Boolean"]:
             return bool(cf.CFBooleanGetValue(obj))
@@ -816,6 +868,72 @@ class MacAXSource(ElementSource):
                 if mb:
                     out.append(mb)
         return out
+
+    FOCUS_CAP = 200_000
+    AX_NO_VALUE = -25212
+
+    def _attr_err(self, el, name: str):
+        out = self.ct.c_void_p()
+        err = self.ax.AXUIElementCopyAttributeValue(el, self.cfstr(name), self.ct.byref(out))
+        if err == 0 and out.value:
+            self._keep.append(out.value)
+        return err, out.value if err == 0 else None
+
+    def _front_app(self):
+        """The app owning the front-most normal on-screen window."""
+        info = self.cg.CGWindowListCopyWindowInfo(1 | 16, 0)
+        if not info:
+            return None
+        self._keep.append(info)
+        for d in self.py(info) or []:
+            layer = self.py(self.cf.CFDictionaryGetValue(d, self.cfstr("kCGWindowLayer")))
+            pid = self.py(self.cf.CFDictionaryGetValue(d, self.cfstr("kCGWindowOwnerPID")))
+            if layer == 0 and pid:
+                a = self.ax.AXUIElementCreateApplication(int(pid))
+                if a:
+                    self._keep.append(a)
+                    self.ax.AXUIElementSetMessagingTimeout(a, 0.5)
+                return a
+        return None
+
+    def focused(self):
+        """AXFocusedUIElement of the system: role, label, AXValue (read in
+        full up to FOCUS_CAP), AXSelectedText. None without permission or
+        when a walk holds the lock too long."""
+        if self.unavailable() or not self._lock.acquire(timeout=1.0):
+            return None
+        try:
+            sysw = self.ax.AXUIElementCreateSystemWide()
+            self._keep.append(sysw)
+            self.ax.AXUIElementSetMessagingTimeout(sysw, 0.5)
+            err, el = self._attr_err(sysw, "AXFocusedUIElement")
+            if err:
+                # the system-wide query can fail outright (CannotComplete);
+                # ask the front app instead. Only "no value" means no focus.
+                app = self.attr(sysw, "AXFocusedApplication") or self._front_app()
+                if not app:
+                    return None
+                err, el = self._attr_err(app, "AXFocusedUIElement")
+            if err == self.AX_NO_VALUE:
+                return {}
+            if err or not el:
+                return None
+            v = {n: self.py(self.attr(el, n), self.FOCUS_CAP) for n in
+                 ("AXRole", "AXSubrole", "AXTitle", "AXDescription",
+                  "AXPlaceholderValue", "AXValue", "AXSelectedText")}
+            val = v["AXValue"] if isinstance(v["AXValue"], str) else None
+            return {"role": ax_role(v["AXRole"], v["AXSubrole"]) or str(v["AXRole"] or ""),
+                    "label": v["AXTitle"] or v["AXDescription"] or v["AXPlaceholderValue"]
+                    or "",
+                    "value": val, "selected": v["AXSelectedText"],
+                    "secure": v["AXSubrole"] == "AXSecureTextField",
+                    "truncated": val is not None and len(val) >= self.FOCUS_CAP}
+        finally:
+            for o in self._keep:
+                if o:
+                    self.cf.CFRelease(o)
+            self._keep = []
+            self._lock.release()
 
     def collect(self, clip, deadline):
         """One walk at a time: screenshots run concurrently in worker
@@ -1208,6 +1326,10 @@ class Backend:
             raise DeskError("no opener (xdg-open) installed")
         subprocess.Popen([opener, url], shell=False, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def secure_input(self) -> bool:
+        """Is another app holding secure keyboard entry (macOS)?"""
+        return False
 
     def deny_keys(self) -> set[str]:
         return set()
@@ -1708,8 +1830,9 @@ class MacBackend(Backend):
         self.cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.cg.CGEventSetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                                         ctypes.c_int64]
+        # UniChar* (UTF-16 units), not wchar_t* (UTF-32 on macOS)
         self.cg.CGEventKeyboardSetUnicodeString.argtypes = [
-            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p]
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_uint16)]
         self.cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
         self.cf.CFRelease.argtypes = [ctypes.c_void_p]
         self.cg.CGGetActiveDisplayList.argtypes = [ctypes.c_uint32,
@@ -1867,13 +1990,53 @@ class MacBackend(Backend):
     def scroll(self, dx, dy):
         self._post(self.cg.CGEventCreateScrollWheelEvent(None, 1, 2, -dy, -dx))
 
+    _SHIFTED = {**{c.upper(): c for c in "abcdefghijklmnopqrstuvwxyz"},
+                "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7",
+                "*": "8", "(": "9", ")": "0", "?": "slash", "<": "comma", ">": "period",
+                "_": "minus", "+": "equal"}
+    _PLAIN = {" ": "space", ".": "period", ",": "comma", "/": "slash", "-": "minus",
+              "=": "equal"}
+
+    def _source(self):
+        """A private HID-state event source, so posted keys carry their own
+        modifier state instead of whatever the operator is holding."""
+        if getattr(self, "_src", None) is None:
+            self.cg.CGEventSourceCreate.restype = self.ct.c_void_p
+            self.cg.CGEventSourceCreate.argtypes = [self.ct.c_int32]
+            self._src = self.cg.CGEventSourceCreate(1) or None   # HIDSystemState
+        return self._src
+
     def type_text(self, text):
+        """Each character is a key down/up pair posted to the HID tap
+        (kCGHIDEventTap, as every event here) with the character attached
+        (CGEventKeyboardSetUnicodeString, as UTF-16 units) and the matching
+        US key code when there is one, so apps that read the key code see
+        the same key; flags are set explicitly (shift or none), never
+        inherited from keys the operator is holding."""
+        src = self._source()
         for ch in text:
+            name = self._PLAIN.get(ch) or self._SHIFTED.get(ch) or ch
+            known = ch.isascii() and name in self._KEYCODES
+            code = self._KEYCODES[name] if known else 0
+            flags = self._FLAGS["shift"] if known and ch in self._SHIFTED else 0
+            units = ch.encode("utf-16-le")
+            buf = (self.ct.c_uint16 * (len(units) // 2)).from_buffer_copy(units)
             for down in (True, False):
-                ev = self.cg.CGEventCreateKeyboardEvent(None, 0, down)
-                self.cg.CGEventKeyboardSetUnicodeString(ev, 1, ch)
+                ev = self.cg.CGEventCreateKeyboardEvent(src, code, down)
+                self.cg.CGEventSetFlags(ev, flags)
+                self.cg.CGEventKeyboardSetUnicodeString(ev, len(buf), buf)
                 self._post(ev)
+                time.sleep(0.004)
             time.sleep(0.008)
+
+    def secure_input(self) -> bool:
+        try:
+            carbon = self.ct.cdll.LoadLibrary(
+                "/System/Library/Frameworks/Carbon.framework/Carbon")
+            carbon.IsSecureEventInputEnabled.restype = self.ct.c_bool
+            return bool(carbon.IsSecureEventInputEnabled())
+        except (OSError, AttributeError):
+            return False
 
     def key(self, combo):
         *mods, k = combo.split("+")
@@ -2258,9 +2421,31 @@ class Session:
         out = {"ok": True, "text": f"{verb} done", "changed": changed, "settled_ms": ms}
         if changed is None:
             del out["changed"]
-        if p.get("screenshot_after"):
+        if verb == "type":
+            why = typed_check(p["text"], self._focus(), changed)
+            if why:
+                if self._secure():
+                    why += (" (secure keyboard entry is on in another app, which "
+                            "blocks typed keys)")
+                out.update(ok=False, err=why)
+        if p.get("screenshot_after") or not out["ok"]:
             out.update(self._auto_shot(f))
         return out
+
+    def _focus(self) -> dict | None:
+        """The focused element, from the element source; None = cannot tell."""
+        try:
+            if self.elements is None:
+                self.elements = self.b.elements_source()
+            return self.elements.focused()
+        except Exception:  # noqa: BLE001 — a broken reader never fails the typing
+            return None
+
+    def _secure(self) -> bool:
+        try:
+            return self.b.secure_input()
+        except Exception:  # noqa: BLE001
+            return False
 
     def _auto_shot(self, f: Frame | None) -> dict:
         """The screenshot an input verb returns: same monitor, same zoom."""

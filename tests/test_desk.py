@@ -935,6 +935,33 @@ async def test_wait_and_drag(env):
         await fd.stop()
 
 
+async def test_type_that_did_not_land_is_an_error_with_the_screen(env):
+    why = ('typed text did not appear in the focused field ("textfield Spotlight '
+           'Search") — click the field first, then type')
+    fd = await _nav(env, changed=False)
+    base = fd.answer
+
+    async def answer(m):
+        res = await base(m)
+        if m["verb"] == "type":
+            res.update(ok=False, err=why)
+        return res
+    fd.answer = answer
+    try:
+        await _tool("desk_screenshot")()
+        text, img = imageresult.split(await _tool("desk_type")(text="TextEdit"))
+        assert img is not None
+        assert text.splitlines()[0] == "error: " + why
+        assert "elements (click by id" in text and "changed: no" in text
+        # a refusal with no screen stays a bare error
+        async def refuse(m):
+            return {"ok": False, "err": "bad text"}
+        fd.answer = refuse
+        assert await _tool("desk_type")(text="x") == "error: bad text"
+    finally:
+        await fd.stop()
+
+
 async def test_stuck_note_after_three_unchanged_identical_actions(env):
     fd = await _nav(env, changed=False)
     try:

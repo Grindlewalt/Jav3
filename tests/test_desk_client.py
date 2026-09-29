@@ -529,6 +529,9 @@ class NavBackend(jd.Backend):
     def drag(self, x0, y0, x1, y1, button):
         self.calls.append(("drag", x0, y0, x1, y1, button))
 
+    def type_text(self, text):
+        self.calls.append(("type", text))
+
     def notify(self, text):
         pass
 
@@ -699,6 +702,60 @@ def test_linux_apps_add_desktop_entries(cfg, tmp_path, monkeypatch):
                     "Text Editor": ["/usr/bin/gtk-launch", "org.gnome.TextEditor"]}
     monkeypatch.setattr(jd, "find_bin", lambda n: None)     # no gtk-launch: PATH only
     assert jd.local_apps("linux", linux_dirs=(str(d),)) == {}
+
+
+def test_typed_check_reads_the_focused_field_back():
+    field = {"role": "textfield", "label": "Spotlight Search", "value": ""}
+    assert jd.typed_check("TextEdit", field) == (
+        'typed text did not appear in the focused field ("textfield Spotlight Search")'
+        " — click the field first, then type")
+    assert jd.typed_check("TextEdit", {**field, "value": "Open textedit"}) is None
+    assert jd.typed_check("TextEdit", {**field, "value": None,
+                                       "selected": "TextEdit"}) is None
+    long = "word " * 100
+    assert jd.typed_check(long, {**field, "value": "x " + long.strip()}) is None
+    assert "nothing on this computer has keyboard focus" in jd.typed_check("a", {})
+    # no focus reported but the screen changed (Chromium, canvas editors): no claim
+    assert jd.typed_check("a", {}, changed=True) is None
+    assert jd.typed_check("a", {"role": "", "label": "", "value": None}, True) is None
+    assert jd.typed_check("TextEdit", field, changed=True) is not None   # value is proof
+    assert 'not a text field ("button Save")' in jd.typed_check(
+        "a", {"role": "button", "label": "Save", "value": None})
+    # cannot tell: no reader, a secure field, a newline that may have submitted
+    assert jd.typed_check("a", None) is None
+    assert jd.typed_check("pw", {**field, "secure": True}) is None
+    assert jd.typed_check("hi\n", field) is None
+    # the error names the field, never its value
+    assert "hunter2" not in jd.typed_check("x", {**field, "value": "hunter2"})
+
+
+async def test_type_is_read_back_and_fails_with_the_screen(cfg, monkeypatch):
+    monkeypatch.setattr(jd, "SETTLE_S", 0)
+    monkeypatch.setattr(jd, "SETTLE_POLL_S", 0)
+    b = NavBackend(tree=TREE)
+    focus = {"role": "textfield", "label": "Search", "value": ""}
+    b.elements_source = lambda: jd.FakeElementSource(TREE, focus=lambda: focus)
+    s = jd.Session(b, "a", "t")
+    s.grants = {"screen": True, "input": True, "shell": "off"}
+    ws = FakeWS()
+    await s.handle(ws, {"id": "0", "verb": "screenshot", "params": {}})
+    await s.handle(ws, {"id": "1", "verb": "type",
+                        "params": {"text": "TextEdit", "screenshot_after": False}})
+    r = ws.sent[-1]
+    assert r["ok"] is False and r["err"].startswith("typed text did not appear in the "
+                                                    'focused field ("textfield Search")')
+    assert "image" in r and r["elements"]          # the screen comes back anyway
+    assert ("type", "TextEdit") in b.calls
+    focus["value"] = "TextEdit"
+    await s.handle(ws, {"id": "2", "verb": "type",
+                        "params": {"text": "TextEdit", "screenshot_after": False}})
+    assert ws.sent[-1]["ok"] is True and "image" not in ws.sent[-1]
+    # a backend that cannot read focus never blocks typing
+    s2 = jd.Session(NavBackend(tree=TREE), "a", "t")
+    s2.grants = s.grants
+    await s2.handle(ws, {"id": "3", "verb": "screenshot", "params": {}})
+    await s2.handle(ws, {"id": "4", "verb": "type", "params": {"text": "x"}})
+    assert ws.sent[-1]["ok"] is True
 
 
 def test_drag_path_moves_in_steps_and_ends_on_target():
