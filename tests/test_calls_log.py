@@ -217,8 +217,8 @@ async def test_refusals_are_logged(gw, monkeypatch):
         # a kind that may not call the model
         r = await _send({"op": "model_call", "op_id": "guest:1", "op_token": "tok"}, box=svc)
         assert r[0]["error"] == "op_not_allowed"
-        # an op that does not exist, and a broker call with a bad token
-        assert (await _send({"op": "frobnicate"}, box=box))[0]["error"] == "unknown_op"
+        # an op no kind may use, and a broker call with a bad token
+        assert (await _send({"op": "frobnicate"}, box=box))[0]["error"] == "op_not_allowed"
         r = await _send({"op": "tool_broker_call", "op_id": "guest:1", "op_token": "bad",
                          "name": "x", "args": {}}, box=box)
         assert r[0]["error"] == "unknown_op_id"
@@ -232,11 +232,20 @@ async def test_refusals_are_logged(gw, monkeypatch):
         ("model_call", "wrong_box", other.id, "homelab"),
         ("model_call", "budget_exceeded", box.id, "homelab"),
         ("model_call", "op_not_allowed", svc.id, "homelab"),
-        ("frobnicate", "unknown_op", box.id, "homelab"),
+        ("frobnicate", "op_not_allowed", box.id, "homelab"),
         ("tool_broker_call", "unknown_op_id", box.id, "homelab"),
     ]
     assert not await _q("SELECT * FROM model_calls")           # nothing reached the model
     assert "tok" not in json.dumps(rows) and "sk-secret" not in json.dumps(rows)
+
+
+async def test_unknown_op_is_logged_when_boxes_are_off(tmp_env):
+    await init_db()
+    assert settings.vm_boxes_enabled is False
+    r = await _send({"op": "frobnicate"})
+    assert r[0]["error"] == "unknown_op"
+    row = (await _q("SELECT * FROM gateway_refusals"))[0]
+    assert (row["op_name"], row["reason"], row["box_id"]) == ("frobnicate", "unknown_op", None)
 
 
 async def test_refusal_log_is_capped_and_printable(tmp_env, monkeypatch):
@@ -271,42 +280,38 @@ async def client(tmp_env, monkeypatch):
 
 
 async def _seed():
-    await _x("INSERT INTO projects (id, slug, name) VALUES (1, 'homelab', 'Homelab')")
+    """Times are relative to now: a call an hour ago, one two hours ago, a
+    refusal three hours ago, and one of each five days ago (outside 24h)."""
+    await _x("INSERT INTO projects (id, slug, name, path) "
+             "VALUES (1, 'homelab', 'Homelab', '/tmp/homelab')")
     await _x("INSERT INTO conversations (id, kind, project_id) VALUES (42, 'chat', 1)")
     await _x("INSERT INTO conversations (id, kind) VALUES (43, 'chat')")
     ins = ("INSERT INTO model_calls (conversation_id, model, input_tokens, output_tokens, "
            "cache_hit, cache_miss, context, op_id, box_id, created_at) "
-           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))")
     await _x(ins, (42, "deepseek/deepseek-flash", 12431, 812, 9102, 3329, '{"messages": []}',
-                   "guest:42", "p-homelab", "2026-09-27 14:03:11"))
+                   "guest:42", "p-homelab", "-1 hours"))
     await _x(ins, (43, "deepseek/deepseek-flash", 1000, 100, 0, 1000, None,
-                   "chat:43", None, "2026-09-27 14:02:00"))
+                   "chat:43", None, "-2 hours"))
     await _x(ins, (42, "deepseek/deepseek-flash", 500, 50, 0, 500, None,
-                   "guest:42", "p-homelab", "2000-01-01 00:00:00"))          # out of the window
-    await _x("INSERT INTO gateway_refusals (ts, op_name, reason, box_id, project_slug) "
-             "VALUES ('2026-09-27 13:40:00', 'model_call', 'unknown_op_id', 'p-homelab', 'homelab')")
-    await _x("INSERT INTO gateway_refusals (ts, op_name, reason, box_id) "
-             "VALUES ('2000-01-01 00:00:00', 'model_call', 'wrong_box', 'shared')")
-
-
-class _Now:
-    """Pin datetime('now') by asking for a window wide enough to hold the seeded
-    rows regardless of today's date."""
-    hours = 24 * 365 * 3
+                   "guest:42", "p-homelab", "-5 days"))
+    ref = ("INSERT INTO gateway_refusals (ts, op_name, reason, box_id, project_slug) "
+           "VALUES (datetime('now', ?), 'model_call', ?, ?, ?)")
+    await _x(ref, ("-3 hours", "unknown_op_id", "p-homelab", "homelab"))
+    await _x(ref, ("-5 days", "wrong_box", "shared", None))
 
 
 async def test_calls_endpoint_shape(client):
     await _seed()
-    r = await client.get("/api/logs/calls", params={"hours": _Now.hours})
+    r = await client.get("/api/logs/calls")
     assert r.status_code == 200
     d = r.json()
-    assert d["hours"] == _Now.hours and d["conversation_id"] is None
+    assert d["hours"] == 24 and d["conversation_id"] is None
     assert d["key_hosts"] == ["api.deepseek.com"]
     assert d["totals"]["calls"] == 2 and d["totals"]["refused"] == 1
     assert d["totals"]["cost_usd"] > 0
-    kinds = [(x["kind"], x["ts"]) for x in d["rows"]]
-    assert kinds == [("call", "2026-09-27 14:03:11"), ("call", "2026-09-27 14:02:00"),
-                     ("refused", "2026-09-27 13:40:00")]          # newest first, merged
+    assert [x["kind"] for x in d["rows"]] == ["call", "call", "refused"]   # merged, newest first
+    assert [x["ts"] for x in d["rows"]] == sorted((x["ts"] for x in d["rows"]), reverse=True)
     call = d["rows"][0]
     assert call["op_id"] == "guest:42" and call["box_id"] == "p-homelab"
     assert call["conversation_id"] == 42 and call["project_slug"] == "homelab"
@@ -323,20 +328,20 @@ async def test_calls_endpoint_shape(client):
 
 async def test_calls_endpoint_window_and_conversation_filter(client):
     await _seed()
-    wide = (await client.get("/api/logs/calls", params={"hours": _Now.hours})).json()
-    assert wide["totals"]["calls"] == 2
-    # the default 24h window is measured from now, so the seeded 2026 rows fall out
-    # of it once the calendar moves on; the year-2000 rows never count
-    d = (await client.get("/api/logs/calls", params={"conversation_id": 42,
-                                                     "hours": _Now.hours})).json()
+    wide = (await client.get("/api/logs/calls", params={"hours": 24 * 10})).json()
+    assert wide["totals"]["calls"] == 3 and wide["totals"]["refused"] == 2
+    d = (await client.get("/api/logs/calls", params={"conversation_id": 42})).json()
     assert [x["conversation_id"] for x in d["rows"]] == [42]
     assert d["totals"]["calls"] == 1 and d["totals"]["refused"] == 0   # refusals name no chat
     assert d["conversation_id"] == 42
+    # a window is at least an hour and at most a year, whatever is asked for
+    assert (await client.get("/api/logs/calls", params={"hours": 0})).json()["hours"] == 1
+    assert (await client.get("/api/logs/calls", params={"hours": 10**9})).json()["hours"] == 8760
 
 
 async def test_calls_endpoint_caps_rows_and_says_so(client):
     await _seed()
-    d = (await client.get("/api/logs/calls", params={"hours": _Now.hours, "limit": 2})).json()
+    d = (await client.get("/api/logs/calls", params={"limit": 2})).json()
     assert len(d["rows"]) == 2 and d["truncated"] is True
     assert d["totals"]["calls"] == 2 and d["totals"]["refused"] == 1
 
