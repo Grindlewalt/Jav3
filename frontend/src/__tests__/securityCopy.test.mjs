@@ -5,7 +5,7 @@ import {
   PERSISTENT_LEGEND, SECURITY_LEDES, VMS_LEDES, WAITING_LEDE, allowedLine, baselineAsk,
   askAge, askKindText, decidedText, dockerLead, dockerMemoryUnlimited, faultText, ledeFor, plural,
   IMPORT_TIP, TOOLS_LEDE, builtinState, postureItems, ramLabel, secretChecklist, tallyLine,
-  variantBuilds, variantSource,
+  tabTitle, variantBuilds, variantSource,
 } from '../securityCopy.js'
 
 // WEB-12: every Security tab that has no line of its own gets one, found by path
@@ -159,5 +159,16 @@ assert.equal(builtinState({ enabled: true }).word, 'on')      // an older host: 
 assert.equal(builtinState({ enabled: false }).word, 'off')
 assert.match(TOOLS_LEDE, /each arrives off/)
 assert.match(IMPORT_TIP, /switched off/)
+
+// WEB-23: each route has its own tab title, and the pending count leads it
+assert.equal(tabTitle('/', 0), 'Work · Jav3')
+assert.equal(tabTitle('/security', 3), '(3) Security · Jav3')
+assert.equal(tabTitle('/security/logs', 0), 'Security: Logs · Jav3')
+assert.equal(tabTitle('/vms/images/', 12), '(12) VMs: Images · Jav3')
+assert.equal(tabTitle('/security', 140), '(99+) Security · Jav3')
+assert.equal(tabTitle('/c/646', 0), 'Work · Jav3')
+assert.equal(tabTitle('/security/bogus', 0), 'Security · Jav3')      // an unknown tab keeps its section
+assert.equal(tabTitle('/nowhere', 0), 'Not found · Jav3')
+assert.equal(tabTitle(undefined, undefined), 'Work · Jav3')
 
 console.log('securityCopy ok')

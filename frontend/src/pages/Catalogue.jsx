@@ -6,6 +6,7 @@ import { listPackages, removePackage, resolvePackages } from '../boxes/api/packa
 import { listImages } from '../boxes/api/images.js'
 import { filterCatalogue, PKG_REMOVABLE, PKG_STATUSES } from '../boxes/logic.js'
 import { LoadError, Unavailable, useLoad } from '../boxes/ui.jsx'
+import { plural } from '../securityCopy.js'
 import { PackageApprove, PackageSummary, usePackageReject } from '../boxes/RequestCards.jsx'
 
 // Every package request, the agent's and the operator's: what was asked
@@ -33,7 +34,7 @@ export default function Catalogue() {
     setResolving(true)
     try {
       const r = await resolvePackages()
-      notify(r?.error ? `resolve: ${r.error}` : `resolved ${r?.resolved ?? 0} package(s)`)
+      notify(r?.error ? `resolve: ${r.error}` : `resolved ${plural(r?.resolved ?? 0, 'package')}`)
       pk.reload()
     } catch (e) { notifyError(e) }
     setResolving(false)

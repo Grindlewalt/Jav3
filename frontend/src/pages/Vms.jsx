@@ -6,7 +6,8 @@ import { Button, EmptyState, Input, Modal, Select, Tag } from '../components/ind
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import {
-  NEEDS_BUILD_WHY, VMS_LEDES, dockerMemoryUnlimited, ledeFor, ramLabel, variantBuilds, variantSource,
+  NEEDS_BUILD_WHY, VMS_LEDES, dockerMemoryUnlimited, ledeFor, plural, ramLabel, variantBuilds,
+  variantSource,
 } from '../securityCopy.js'
 import { ago, ts } from '../format.js'
 import {
@@ -96,7 +97,7 @@ export function Boxes() {
       else if (verb === 'destroy') await destroyBox(box.id, flag)
       else if (verb === 'nuke') {
         if (box.inflight > 0) {
-          notify(`${box.inflight} turn(s) in flight — wait for them to finish before nuking.`)
+          notify(`${plural(box.inflight, 'turn')} in flight: wait for ${box.inflight === 1 ? 'it' : 'them'} to finish before nuking.`)
           return
         }
         const s = await nukeShared()
@@ -217,7 +218,7 @@ function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
             </span>
           )) : (
             <span className={word === 'failed' ? 'error' : 'dim'}>
-              {word === 'busy' ? `${b.inflight} turn(s)` : word}
+              {word === 'busy' ? plural(b.inflight, 'turn') : word}
               {!up && last && (
                 <span title={last.reason || undefined}>
                   {' · '}{eventWord(last)} {localTime(last.created_at)}

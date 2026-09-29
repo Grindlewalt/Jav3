@@ -319,3 +319,25 @@ export function builtinState(t) {
   if (offered) return { word: 'on', tone: 'done' }
   return t?.enabled === false ? { word: 'off', tone: '' } : { word: 'waiting', tone: 'pending' }
 }
+
+// ---- the browser tab's title (WEB-23) ------------------------------------------------------
+// Every route used to be titled "Jav3", so a background tab could not say that
+// approvals were waiting. `count` is the same number the Security nav link wears.
+
+const TAB_NAMES = [
+  ['/security/persistent', 'Security: Persistent'], ['/security/network', 'Security: Network'],
+  ['/security/profiles', 'Security: Profiles'], ['/security/logs', 'Security: Logs'],
+  ['/security/secrets', 'Security: Secrets'], ['/security', 'Security'],
+  ['/vms/images', 'VMs: Images'], ['/vms/catalogue', 'VMs: Catalogue'], ['/vms', 'VMs'],
+  ['/agents', 'Agents'], ['/tools', 'Tools'], ['/settings', 'Settings'], ['/memory', 'Memory'],
+  ['/schedules', 'Schedules'], ['/shell', 'Shell'], ['/voice', 'Voice'],
+  ['/artifacts', 'Artifacts'], ['/projects', 'Work'],
+]
+
+export function tabTitle(pathname, count = 0) {
+  const path = String(pathname || '/').replace(/\/+$/, '') || '/'
+  const hit = TAB_NAMES.find(([p]) => path === p || path.startsWith(`${p}/`))
+  const name = hit ? hit[1] : (path === '/' || path.startsWith('/c/') ? 'Work' : 'Not found')
+  const n = Number(count) > 0 ? `(${Number(count) > 99 ? '99+' : count}) ` : ''
+  return `${n}${name} · Jav3`
+}

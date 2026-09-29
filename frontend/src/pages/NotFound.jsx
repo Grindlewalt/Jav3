@@ -12,10 +12,10 @@ export default function NotFound() {
     // one left edge: the heading, the line under it and the link share the
     // column's inset — a centred body under a left heading read as two layouts
     <Page title="Not found" className="not-found">
-      <EmptyState as="div" hint="Pick a destination from the menu, or go back to the chat.">
+      <EmptyState as="div" hint="Pick a destination from the menu, or go back to Work.">
         Nothing lives at <code>{pathname}</code>.
       </EmptyState>
-      <p><Link to="/">Back to Chat</Link></p>
+      <p><Link to="/">Back to Work</Link></p>
     </Page>
   )
 }

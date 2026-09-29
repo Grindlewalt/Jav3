@@ -4,7 +4,7 @@ import { notify, notifyError } from '../notify.js'
 import { ago } from '../format.js'
 import AllowedProcesses from '../AllowedProcesses.jsx'
 import {
-  PERSISTENT_EMPTY_ALL, PERSISTENT_EMPTY_ODD, PERSISTENT_LEGEND, REPORTED_NEVER,
+  PERSISTENT_EMPTY_ALL, PERSISTENT_EMPTY_ODD, PERSISTENT_LEGEND, REPORTED_NEVER, plural,
 } from '../securityCopy.js'
 import { followProcs, listProcesses } from '../boxes/api/procs.js'
 import {
@@ -172,7 +172,7 @@ function ServiceList({ services, relays, onStop, onStart, onRevoke, onLogs }) {
                 const bad = r && (r.error || !r.listening)
                 return (
                   <Tag key={p.port} tone={bad ? 'error' : undefined}
-                       title={r ? `${r.address || ''} · ${r.conns} conn(s) · ${bytes(r.bytes_out)}↑ ${bytes(r.bytes_in)}↓${r.error ? ` · ${r.error}` : ''}`
+                       title={r ? `${r.address || ''} · ${plural(r.conns, 'connection')} · ${bytes(r.bytes_out)}↑ ${bytes(r.bytes_in)}↓${r.error ? ` · ${r.error}` : ''}`
                          : 'no relay open'}>
                     {p.port} → {p.bind === 'lan' ? 'LAN' : 'loopback'}</Tag>
                 )
