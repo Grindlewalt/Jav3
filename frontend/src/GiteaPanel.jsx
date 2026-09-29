@@ -19,9 +19,10 @@ export default function GiteaPanel() {
     api('/api/gitea/status').then((s) => {
       setSt(s)
       if (!s.configured) return
+      if (!s.running) { setRepos([]); setUsers([]); return }   // nothing to ask
       api('/api/gitea/repos').then((r) => setRepos(r.repos || [])).catch(() => setRepos([]))
       api('/api/gitea/users').then((r) => setUsers(r.users || [])).catch(() => setUsers([]))
-    }).catch(() => setSt({ configured: false }))
+    }).catch(() => setSt({ configured: false, unknown: true }))
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -55,9 +56,14 @@ export default function GiteaPanel() {
   if (!st) return null
   return (
     <Card title="Gitea" headingLevel={2}>
-      {!st.configured ? (
+      {st.unknown ? (
         <p className="dim small settings-note">
-          Not set up. Agents can still ask for commits. To give them pull requests
+          Couldn't load Gitea's status from Jav3. Reload the page to try again.
+        </p>
+      ) : !st.configured ? (
+        <p className="dim small settings-note">
+          Not set up{st.missing?.length ? ` (missing: ${st.missing.join(', ')})` : ''}.
+          Agents can still ask for commits. To give them pull requests
           for you to review, run <code>python -m backend.cli gitea-setup</code> on
           the host, then restart Jav3.
         </p>
@@ -70,13 +76,20 @@ export default function GiteaPanel() {
             {' '}· owner <strong>{st.owner}</strong> · agents push as <code>{st.bot}</code>
             {' '}to <code>agent/*</code> branches only
           </p>
+          {!st.running && (
+            <p className="warn settings-note">
+              Gitea isn't answering, so agents' push requests will fail until it is back.
+              Start it on the host with <code>systemctl --user start jav3-gitea-{st.port}</code>{' '}
+              <Button variant="ghost" onClick={load}>Check again</Button>
+            </p>)}
           {st.tokens_private === false && (
             <p className="warn settings-note">The Gitea token files are readable by
               other users on the host: chmod 600 them.</p>)}
           <h3 className="small">Repos</h3>
           {repos === null ? <EmptyState>loading…</EmptyState>
-            : repos.length === 0 ? <EmptyState>No repos yet. One is made per project
-              the first time it is pushed.</EmptyState>
+            : repos.length === 0 ? <EmptyState>{st.running
+              ? 'No repos yet. One is made per project the first time it is pushed.'
+              : "Can't list repos while Gitea isn't answering."}</EmptyState>
             : (
               <ul className="device-list">
                 {repos.map((r) => (
