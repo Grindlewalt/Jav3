@@ -91,7 +91,9 @@ from .db import get_db
 
 # --- limits -------------------------------------------------------------------
 
-FRESH_FRAME_S = 60          # input needs a screenshot of that desk this recent
+ROUND_GAP_S = 0.5           # a result younger than this cannot have been read yet:
+                            # a call that follows it is in the same batch
+FRESH_FRAME_S = 60         # input needs a screenshot of that desk this recent
 INPUT_PER_S = 10            # per desk
 SHOTS_PER_S = 2             # per desk
 CALL_TIMEOUT_S = 30         # one non-shell action, round trip
@@ -163,6 +165,9 @@ class Desk:
     locked: bool | None = False        # from the client's hello / latest state frame;
                                        # None = the client could not tell (not refused)
     asleep: bool = False
+    serial: int = 0                    # frame serial counter (monotonic per desk)
+    # [(serial, monotonic)]: frames whose result went back to the model
+    delivered: list = dataclasses.field(default_factory=list)
 
     @property
     def ceiling(self) -> dict:
@@ -918,7 +923,8 @@ def _store_frame(d: Desk, res: dict, img: dict, op: str | None) -> dict:
               if isinstance(cur, dict) and _isnum(cur.get("x")) and _isnum(cur.get("y"))
               else None)
     idx, cnt = fr.get("index"), fr.get("count")
-    f = {"w": img["w"], "h": img["h"], "at": time.monotonic(), "op": op,
+    d.serial += 1
+    f = {"serial": d.serial, "w": img["w"], "h": img["h"], "at": time.monotonic(), "op": op,
          "data": img["data"], "mime": img["mime"], "hash": img["hash"],
          "monitor": _clean_str(fr.get("monitor") if isinstance(fr.get("monitor"), str)
                                else str(fr.get("monitor") or ""), 64),
@@ -991,6 +997,8 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
             if others:
                 head += "; others: " + ", ".join(_q(_clean_str(o, 64)) for o in others)
             head += ")"
+    if f.get("serial"):
+        head += f" — frame {f['serial']}"
     lines = [head]
     if same:
         lines.append("(same as the previous screenshot)")
@@ -1124,6 +1132,35 @@ async def _resolve_point(d: Desk, verb: str, params: dict) -> tuple[dict, dict |
         "confidence": round(float(loc.confidence), 2)}
 
 
+def _stale_frame(d: Desk, params: dict) -> str | None:
+    """The refusal text when an element id or a coordinate refers to a frame
+    that is no longer the desk's latest, else None. The model names the frame
+    (`frame`); when it does not, it means the last frame whose result had
+    already been returned to it before this round began - a result returned a
+    moment ago (ROUND_GAP_S) is one the model has not read, so the second call
+    of a batch is refused instead of clicking whatever is now at that id."""
+    f = d.frame
+    if f is None or not f.get("serial"):
+        return None
+    el = params.get("element")
+    ref = params.get("frame")
+    if ref not in (None, ""):
+        try:
+            ref = int(str(ref).strip())
+        except ValueError:
+            raise DeskError(f"frame must be a frame number like 17, not {str(ref)[:40]!r}")
+    else:
+        cut = time.monotonic() - ROUND_GAP_S
+        seen = [n for n, t in d.delivered if t <= cut]
+        ref = seen[-1] if seen else None
+    if ref is None or ref == f["serial"]:
+        return None
+    what = (f"element {str(el).strip().strip('[]')[:12]} was" if el not in (None, "")
+            else "the coordinates were")
+    return (f"{what} listed in frame {ref}, but the screen is now frame "
+            f"{f['serial']} — use the ids from the latest result, or take desk_screenshot")
+
+
 def _via_line(verb: str, via: dict, p: dict) -> str:
     at = f"at {p.get('x')},{p.get('y')}"
     if via["how"] == "grounded":
@@ -1196,12 +1233,27 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         # for. Everything after this sees only a coordinate action.
         asked = {k: params[k] for k in ("element", "target") if params.get(k) not in (None, "")}
         try:
+            if (params.get("element") not in (None, "") or params.get("x") is not None
+                    or params.get("y") is not None):
+                late = _stale_frame(d, params)
+                if late:
+                    raise DeskError(late)
+            params = {k: v for k, v in params.items() if k != "frame"}
             params, via = await _resolve_point(d, verb, params)
         except DeskError as e:
             await _audit(d, verb, asked, False, str(e))
             return f"error: {e}"
     elif "element" in params or "target" in params:
         return await _refuse(d, verb, {}, f"{verb} does not take an element or target")
+    elif verb == "drag":
+        try:
+            late = _stale_frame(d, params) if cap == "input" else None
+        except DeskError as e:
+            late = str(e)
+        if late:
+            await _audit(d, verb, {}, False, late)
+            return f"error: {late}"
+    params = {k: v for k, v in params.items() if k != "frame"}
     try:
         p = validate(verb, params, d.frame, d.hello.get("apps") or [],
                      full=_full_for(d, params.get("monitor")) if verb == "screenshot" else None)
@@ -1267,6 +1319,7 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     body = render_frame(d, f, same=verb == "screenshot" and prev_hash == f["hash"],
                         changed=changed, settled_ms=settled,
                         asked_elements=p.get("elements", True), elements_only=elements_only)
+    d.delivered = (d.delivered + [(f["serial"], time.monotonic())])[-8:]
     return imageresult.with_inline(
         "\n".join([*head, body, *([took] if took else []),
                    f"[{d.name}: screenshot {img['w']}x{img['h']} attached]"]),

@@ -24,7 +24,9 @@ W, H = 1280, 800
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
+    # tests answer in microseconds; a real model needs seconds to read a result
+    monkeypatch.setattr(desk, "ROUND_GAP_S", 0)
     desk.reset_for_tests()
     pastelogin.reset_for_tests()
     yield
@@ -720,7 +722,7 @@ async def test_frame_renders_the_element_registry(env):
         assert img is not None
         assert text.splitlines()[:5] == [
             "screenshot ok",
-            'screen 1280x800 of "DP-1" (monitor 1 of 2; others: "HDMI-A-1")',
+            'screen 1280x800 of "DP-1" (monitor 1 of 2; others: "HDMI-A-1") — frame 1',
             "cursor at 612,388",
             "elements (click by id; coordinates are pixels of this image):",
             '  [1] button "Save" @ 640,410 80x28']
@@ -768,7 +770,7 @@ async def test_old_client_without_elements_still_works(env):
         text, img = imageresult.split(await _tool("desk_screenshot")())
         assert img is not None and fd.reqs[-1]["params"] == {}      # nothing new on the wire
         assert text.splitlines()[1:3] == [
-            "screen 1280x800",
+            "screen 1280x800 — frame 1",
             "(no elements: this computer reported none — click by coordinates)"]
         assert (await _tool("desk_click")(x=5, y=5)).startswith("click ok")
         assert "changed:" not in await _tool("desk_click")(x=5, y=5)
@@ -827,6 +829,37 @@ async def test_click_by_element_resolves_to_the_centre(env):
         assert rows[-1]["element"] == 1 and rows[-1]["x"] == 640
         bad = [a for a in await _actions() if a["verb"] == "click" and not a["ok"]]
         assert any(json.loads(a["params"]).get("element") == 14 for a in bad)
+    finally:
+        await fd.stop()
+
+
+async def test_second_click_of_a_batch_on_old_ids_is_refused(env, monkeypatch):
+    fd = await _nav(env)
+    try:
+        text, _ = imageresult.split(await _tool("desk_screenshot")())
+        assert text.splitlines()[1].endswith("— frame 1")
+        # both calls of one round: the second returns before the model read the first
+        monkeypatch.setattr(desk, "ROUND_GAP_S", 60)
+        dk = desk._desks[env["desk_id"]]
+        dk.delivered = [(n, t - 100) for n, t in dk.delivered]     # frame 1 was read long ago
+        out, _ = imageresult.split(await _tool("desk_click")(element=1))
+        assert "— frame 2" in out
+        n = len(fd.reqs)
+        assert await _tool("desk_click")(element=3) == (
+            "error: element 3 was listed in frame 1, but the screen is now frame 2 — "
+            "use the ids from the latest result, or take desk_screenshot")
+        assert "coordinates were listed in frame 1" in await _tool("desk_click")(x=5, y=5)
+        assert len(fd.reqs) == n                       # nothing reached the computer
+        # naming the frame the ids really came from is still the same refusal
+        assert "frame 1, but the screen is now frame 2" in await _tool("desk_click")(
+            element=3, frame=1)
+        # the model reads frame 2 and says so: accepted
+        out, _ = imageresult.split(await _tool("desk_click")(element=3, frame=2))
+        assert out.startswith("clicked [3]") and "— frame 3" in out
+        assert "frame must be" in await _tool("desk_click")(element=3, frame="x")
+        # a later round (the result was read) needs no frame at all
+        monkeypatch.setattr(desk, "ROUND_GAP_S", 0)
+        assert (await _tool("desk_click")(element=1)).startswith("clicked [1]")
     finally:
         await fd.stop()
 
