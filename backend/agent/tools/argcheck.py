@@ -24,6 +24,7 @@ argument 'min_elements'" and the model had to guess again. Now:
 Pure: copied verbatim into the guest package (backend/vm/guest_pkg.py).
 """
 import difflib
+import errno
 import inspect
 import json
 import math
@@ -251,7 +252,7 @@ def _user_fault(e: BaseException) -> str | None:
         return "that path is a folder, not a file"
     if isinstance(e, ValueError) and "embedded null" in str(e):
         return "the path contains a NUL character"
-    if isinstance(e, OSError) and e.errno == 36:     # ENAMETOOLONG
+    if isinstance(e, OSError) and e.errno == errno.ENAMETOOLONG:
         return "that path is too long"
     return None
 

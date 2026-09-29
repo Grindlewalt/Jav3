@@ -360,6 +360,14 @@ async def test_paths_that_leave_the_project_read_as_the_models_path(proj, path):
         assert "harness fault" not in out
 
 
+async def test_a_path_too_long_for_the_filesystem_is_a_path_error(proj):
+    for tool, args in (("read_file", {}), ("write_file", {"content": "x"}),
+                       ("search_codebase", {"query": "a"})):
+        key = "subdir" if tool == "search_codebase" else "path"
+        out = await _tool(tool, **{key: "x" * 400}, **args)
+        assert out.startswith(f"error: {tool}:") and "too long" in out, out
+
+
 async def test_a_nul_in_a_path_is_a_path_error(proj):
     out = await _tool("read_file", path="a\x00b")
     assert out.startswith("error: read_file:") and "NUL" in out, out
