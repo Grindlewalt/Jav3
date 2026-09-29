@@ -70,6 +70,8 @@ class FakeServer:
         self.local_info: dict | None = None      # what /info says about a /local chat
         self.local_results: list[dict] = []
         self.perm_puts: list[dict] = []
+        self.conv_messages: dict[int, dict] = {}   # cid -> /messages payload
+        self.streams: dict[int, list[Feed]] = {}   # cid -> feeds handed to GET .../stream
         self.running: list[int] = []
         self.calls: list[tuple[str, str]] = []
 
@@ -107,6 +109,16 @@ class FakeServer:
             return httpx.Response(200, json={"conversations": []})
         if path == "/api/chat/running":
             return httpx.Response(200, json={"running": self.running})
+        if path.startswith("/api/conversations/") and path.endswith("/messages"):
+            cid = int(path.split("/")[3])
+            return httpx.Response(200, json=self.conv_messages.get(
+                cid, {"messages": [], "running": False, "pending_activity": [],
+                      "agent_slug": None}))
+        if (path.startswith("/api/chat/") and path.endswith("/stream") and method == "GET"
+                and path.split("/")[3].isdigit()):
+            feed = Feed()
+            self.streams.setdefault(int(path.split("/")[3]), []).append(feed)
+            return httpx.Response(200, stream=feed, headers={"content-type": "text/event-stream"})
         if path.endswith("/info"):
             return httpx.Response(200, json={"title": "t", "files": [],
                                              "local": self.local_info})

@@ -502,6 +502,48 @@ def iter_sse(lines):
         yield json.loads("\n".join(buf))
 
 
+def net_error_text(e: Exception) -> str:
+    """A network error in words: '[Errno 104] Connection reset by peer' and 'All
+    connection attempts failed' say nothing about what to do."""
+    if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return "nothing answers there (is the server running?)"
+    if isinstance(e, httpx.TransportError):
+        return "the connection dropped (the server may be restarting)"
+    return str(e) or type(e).__name__
+
+
+def reflow(text: str) -> str:
+    """Join the lines of a hard-wrapped paragraph (a brief the server wrapped at
+    72 columns) so the terminal wraps it once, at its own width. Lists, headings,
+    code and indented lines keep their breaks."""
+    out, para = [], []
+
+    def flush():
+        if para:
+            out.append(" ".join(x.strip() for x in para))
+            para.clear()
+
+    keep = re.compile(r"^\s*([-*+•>#]|\d+[.)]|```|\|)|^\s{2,}\S")
+    fenced = False
+    for ln in text.splitlines():
+        if ln.lstrip().startswith("```"):
+            flush()
+            fenced = not fenced
+            out.append(ln)
+        elif fenced:
+            out.append(ln)
+        elif not ln.strip():
+            flush()
+            out.append("")
+        elif keep.match(ln):
+            flush()
+            out.append(ln)
+        else:
+            para.append(ln)
+    flush()
+    return "\n".join(out)
+
+
 def _short(v, n: int = 80) -> str:
     s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
     s = " ".join(s.split())
@@ -6625,6 +6667,7 @@ def build_tui(base: str, token: str, **kw):
             self.queue: list[str] = []
             self.pending: list = []          # QueuedMsg posted mid-turn, not yet delivered
             self.orchestrator = False        # this chat is an orchestrator (/orchestration)
+            self.child_of: int | None = None   # this view is an agent under that conversation
             self.attachments: list[str] = []
             self.last_user: str | None = None
             self.last_reply = ""
@@ -6990,7 +7033,7 @@ def build_tui(base: str, token: str, **kw):
             try:
                 r = await self.client.request(method, path, **kw)
             except httpx.HTTPError as e:
-                raise CliError(f"could not reach {self.base}: {e}")
+                raise CliError(f"could not reach {self.base}: {net_error_text(e)}")
             if r.is_redirect:
                 raise CliError(redirect_hint(self.base, r.headers.get("location", "")))
             if r.status_code == 401:
@@ -7374,8 +7417,9 @@ def build_tui(base: str, token: str, **kw):
             # sending means following the reply, wherever the transcript was scrolled
             self.log_view.scroll_end(animate=False)
             self.unseen = 0
+            um = UserMsg(_esc(text))
             try:
-                await self.mount_log(UserMsg(_esc(text)))
+                await self.mount_log(um)
                 message, attached, skipped = expand_attachments(text)
                 for a in attached:
                     await self.note(f"attached {a}")
@@ -7391,12 +7435,40 @@ def build_tui(base: str, token: str, **kw):
                 await self._post(body)
             except CliError as e:
                 await self.note(str(e), "error")
+                if self.turn is not None and self.turn.cid is None:
+                    # refused before the turn began (a 404, a 409, a login): nothing
+                    # was sent, so the words go back where they were typed
+                    self._not_sent(um, [text])
             except httpx.HTTPError as e:
-                await self.note(f"connection to {self.base} failed: {e}", "error")
+                await self._lost_connection(e, text, um)
             finally:
                 await self._end_turn()
             if self.queue and not self.busy:
                 self.send(self.queue.pop(0))
+
+        def _not_sent(self, um, texts: list[str]) -> None:
+            """Put messages back in the prompt, ahead of what is typed there now."""
+            if um is not None and um.is_mounted:
+                um.add_class("failed")
+            ed = self.editor
+            ed.text = "\n".join(texts + ([ed.text] if ed.text else []))
+            ed.move_cursor(ed.document.end)
+
+        async def _lost_connection(self, e: Exception, text: str, um) -> None:
+            """The stream broke, or the server never answered: one line saying which,
+            and the message (with any typed while it ran) back in the prompt."""
+            started = self.turn is not None and self.turn.cid is not None
+            if not started or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                line = (f"can't reach {self.base}: {net_error_text(e)}. Your message was "
+                        "not sent; it is back in the prompt.")
+            elif isinstance(e, httpx.TransportError):
+                line = ("the server went away mid-turn (restarting?). Your message is back "
+                        "in the prompt; if the turn kept running, /sessions shows it.")
+            else:
+                line = f"connection to {self.base} failed: {e}"
+            await self.note(line, "error")
+            back, self.queue = [text, *self.queue], []
+            self._not_sent(um if not started else None, back)
 
         async def _post(self, body: dict) -> None:
             async with self.client.stream("POST", "/api/chat", json=body) as r:
@@ -7420,7 +7492,10 @@ def build_tui(base: str, token: str, **kw):
         async def _consume(self, lines) -> bool:
             """Render a stream; True if it carried anything but `idle`."""
             seen = False
+            turn = self.turn
             async for ev in aiter_sse(lines):
+                if self.turn is not turn:
+                    break          # this view moved on: the rest belongs to a turn no longer here
                 seen = seen or ev.get("type") != "idle"
                 if await self.handle_event(ev):
                     break
@@ -7446,7 +7521,7 @@ def build_tui(base: str, token: str, **kw):
                                                json={"text": message})
                 except httpx.HTTPError as e:
                     self._unpend(w)
-                    w.fail(f"not sent: {e}")
+                    w.fail(f"not sent: {net_error_text(e)}")
                     continue
                 if r.status_code in (404, 405, 409):
                     # 409 no_turn_running: it just ended. 404/405: a server without
@@ -7894,8 +7969,8 @@ def build_tui(base: str, token: str, **kw):
                         t.footer.update(self._footer_markup(t))
             await self.refresh_info()
 
-        async def _stop_remote(self) -> None:
-            cid = self.turn.cid if self.turn and self.turn.cid else self.cid
+        async def _stop_remote(self, cid: int | None = None) -> None:
+            cid = cid or (self.turn.cid if self.turn and self.turn.cid else self.cid)
             if cid is None:
                 return
             try:
@@ -7915,7 +7990,8 @@ def build_tui(base: str, token: str, **kw):
                 ed.move_cursor(ed.document.end)
                 self.queue.clear()
             if self.turn and self.turn.cid is not None:
-                self.run_worker(self._stop_remote(), group="stop")
+                # the id is taken now: a stop that runs late must not hit the next turn
+                self.run_worker(self._stop_remote(self.turn.cid), group="stop")
             # no start event yet: on_event("start") sends the stop when the id arrives
 
         async def attach(self, cid: int) -> None:
@@ -7935,7 +8011,7 @@ def build_tui(base: str, token: str, **kw):
                         if await self._consume(r.aiter_lines()):
                             break
             except httpx.HTTPError as e:
-                await self.note(f"lost the stream: {e}", "error")
+                await self.note(f"lost the stream: {net_error_text(e)}", "error")
             finally:
                 await self._end_turn()
             await self._drain_queue()
@@ -8224,6 +8300,10 @@ def build_tui(base: str, token: str, **kw):
                 self._leader_off()
             elif self.popup_open():
                 self.hide_popup()
+            elif self.child_of is not None and not self.editor.text:
+                # someone else's agent: the habit from the other screens (esc back)
+                # must not stop it. ctrl+c or /stop does that.
+                self.run_worker(self._back_to_parent(), group="nav")
             elif self.busy:
                 if time.monotonic() - self.esc_armed < 2:
                     self.esc_armed = 0.0
@@ -8252,7 +8332,8 @@ def build_tui(base: str, token: str, **kw):
             running, its live stream (typing then messages it mid-turn)."""
             await self._leave_turn()
             try:
-                await self.open_conversation(node["id"], running=bool(node.get("running")))
+                await self.open_conversation(node["id"], running=bool(node.get("running")),
+                                             parent=node.get("parent_id"))
             except CliError as e:
                 await self.note(str(e), "error")
                 return
@@ -8260,6 +8341,17 @@ def build_tui(base: str, token: str, **kw):
                 self.orchestrator = True
             if node.get("title"):
                 self.title_text = self.title_text or node["title"]
+            self.refresh_chrome()
+
+        async def _back_to_parent(self) -> None:
+            parent = self.child_of
+            if parent is None:
+                return
+            await self._leave_turn()
+            try:
+                await self.open_conversation(parent)
+            except CliError as e:
+                await self.note(str(e), "error")
             self.refresh_chrome()
 
         async def _leave_turn(self) -> None:
@@ -8528,6 +8620,7 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_new(self, arg: str = "") -> None:
             self.cid, self.title_text, self.last_reply = None, None, ""
+            self.child_of = None
             self.shown_model, self.info, self.todos = None, None, []
             self.orchestrator = False
             await self.show_home()
@@ -8560,9 +8653,11 @@ def build_tui(base: str, token: str, **kw):
                 arg = str(hits[0]["id"])
             await self.open_conversation(int(arg))
 
-        async def open_conversation(self, cid: int, running: bool = False) -> None:
+        async def open_conversation(self, cid: int, running: bool = False,
+                                    parent: int | None = None) -> None:
             r = await self.api("GET", f"/api/conversations/{cid}/messages")
             self.cid, self.ephemeral = cid, False
+            self.child_of = parent          # an agent's chat: esc goes back to its parent
             self.orchestrator = r.get("kind") == "orchestrator" or r.get("mode") == "orchestrate"
             meta = next((cv for cv in self.convs if cv.get("id") == cid), {})
             self.title_text = meta.get("summary")
@@ -8577,7 +8672,10 @@ def build_tui(base: str, token: str, **kw):
                 await self.note(f"… {len(msgs) - 60} earlier messages (/export has them all)")
             for m in msgs[-60:]:
                 if m["role"] == "user":
-                    await self.log_view.mount(UserMsg(_esc(m.get("content") or "")))
+                    body = m.get("content") or ""
+                    # an agent's brief is server-wrapped text: let the terminal wrap it
+                    await self.log_view.mount(UserMsg(_esc(reflow(body) if self.child_of
+                                                           else body)))
                     continue
                 for a in m.get("activity") or []:
                     tv = ToolView(a["name"], a.get("args"), ok=a.get("ok"),
@@ -8600,7 +8698,9 @@ def build_tui(base: str, token: str, **kw):
                 for a in r.get("pending_activity") or []:
                     await self.log_view.mount(ToolView(a["name"], a.get("args"), ok=a.get("ok"),
                                                        result=a.get("result"), done=True))
-                await self.note("a turn is running — attached", "warn")
+                await self.note("a turn is running — attached" + (
+                    f" · esc goes back to #{self.child_of}, ctrl+c stops it"
+                    if self.child_of else ""), "warn")
                 self.run_worker(self.attach(cid), group="turn")
 
         async def c_model(self, arg: str) -> None:
