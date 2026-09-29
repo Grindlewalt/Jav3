@@ -138,7 +138,7 @@ def _misses(steps: list[dict], ranking: list[dict], limit: int) -> None:
             w, h = s["size"]
             pt = None
             if s["answer"] is not None:
-                pt = grounding.to_pixels(s["answer"][0], s["answer"][1], conv[mid], w, h)
+                pt = grounding.checked_pixels(s["answer"], conv[mid], w, h)
             hit, err = gf.score(pt, s["box"])
             if not hit:
                 miss.append((s, pt, err))
@@ -162,7 +162,7 @@ def _refine_effect(steps: list[dict], ranking: list[dict]) -> None:
             w, h = s["size"]
             hits = []
             for ans in (s.get("first"), s["answer"]):
-                pt = None if ans is None else grounding.to_pixels(ans[0], ans[1], c, w, h)
+                pt = grounding.checked_pixels(ans, c, w, h)
                 hits.append(gf.score(pt, s["box"])[0])
             first += hits[0]
             final += hits[1]

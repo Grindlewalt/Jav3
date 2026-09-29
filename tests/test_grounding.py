@@ -661,3 +661,47 @@ async def test_client_extra_merges_but_never_overrides_protected(tmp_env, monkey
     # no extra = today's payload, no thinking field
     [ev async for ev in m.complete(msgs, model_name="deepseek-flash")]
     assert "thinking" not in sent[1]["payload"]
+
+
+@pytest.mark.parametrize("conv,answer,reason", [
+    ("px", '{"x": -1, "y": -1, "confidence": 0.9}', "negative"),
+    ("px", '{"x": 100, "y": -5, "confidence": 0.9}', "negative"),
+    ("px", '{"x": 1300, "y": 100, "confidence": 0.9}', "outside the image"),
+    ("px", '{"x": 100, "y": 900, "confidence": 0.9}', "outside the image"),
+    ("k1000", '{"x": 1200, "y": 100, "confidence": 0.9}', "outside 0-1000"),
+    ("unit", '{"x": 640, "y": 400, "confidence": 0.9}', "outside 0-1"),
+    ("px", '{"x": 300, "y": 300, "confidence": 0}', "confidence"),
+    ("px", '{"x": 300, "y": 300, "confidence": 0.1}', "confidence"),
+    ("px", '{"x": 0, "y": 0, "confidence": 0.9}', "top-left"),
+    ("k1000", '{"x": 0, "y": 0, "confidence": 0.9}', "top-left"),
+])
+async def test_locate_rejects_out_of_range_low_confidence_and_corner(
+        tmp_env, monkeypatch, caplog, conv, answer, reason):
+    _write_state({"ranking": [{"model": "p/m", "hit_rate": 0.9, "unusable": False,
+                               "convention": conv}]})
+    monkeypatch.setattr(model_mod.model, "complete", _fake_complete(answer))
+    with caplog.at_level("INFO", logger="backend.grounding"):
+        assert await grounding.locate(gf.fixture(0)["png"], 1280, 800, "x",
+                                      refine=False) is None
+    assert any(reason in r.getMessage() and "p/m" in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_locate_accepts_normal_and_edge_slack_answers(tmp_env, monkeypatch):
+    _write_state({"ranking": [{"model": "p/m", "hit_rate": 0.9, "unusable": False,
+                               "convention": "px"}]})
+    png = gf.fixture(0)["png"]
+    monkeypatch.setattr(model_mod.model, "complete",
+                        _fake_complete('{"x": 300, "y": 200, "confidence": 0.2}'))
+    loc = await grounding.locate(png, 1280, 800, "x", refine=False)
+    assert (loc.x, loc.y) == (300, 200)
+    monkeypatch.setattr(model_mod.model, "complete",
+                        _fake_complete('{"x": 1282, "y": 802}'))
+    loc = await grounding.locate(png, 1280, 800, "x", refine=False)
+    assert (loc.x, loc.y) == (1279, 799)          # within 2 px: clamped, accepted
+
+
+def test_score_model_counts_rejected_answers_as_misses():
+    box = (0, 0, 40, 40)
+    row = grounding.score_model("p/m", [(0.0, 0.0, 0.9)], [box], [(1280, 800)], [10], 0)
+    assert row["hit_rate"] == 0.0

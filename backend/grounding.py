@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 
 CONVENTIONS = ("px", "k1000", "unit")
 DEFAULT_CONVENTION = "px"         # what the prompt asks for; a pin with no probe
+MIN_CONFIDENCE = 0.2              # a stated confidence below this is "not found"
+EDGE_SLACK_PX = 2                 # px answers may overshoot the image by this much
 UNUSABLE_BELOW = 0.5              # hit rate under which a model is never picked
 EST_TOKENS_IN = 1100              # one screenshot + the prompt
 EST_TOKENS_OUT = 25               # the JSON answer; DeepSeek Flash with thinking
@@ -94,6 +96,38 @@ def to_pixels(rx: float, ry: float, convention: str, width: int, height: int) ->
         raise ValueError(f"unknown convention {convention!r}")
     return (max(0, min(width - 1, int(round(x)))),
             max(0, min(height - 1, int(round(y)))))
+
+
+def reject_reason(rx: float, ry: float, conf: float | None, convention: str,
+                  width: int, height: int) -> str | None:
+    """Why a raw answer must be treated as NOT FOUND instead of clamped and
+    clicked, or None when it is acceptable."""
+    if rx < 0 or ry < 0:
+        return "negative coordinates"
+    if convention == "px":
+        if rx > width + EDGE_SLACK_PX or ry > height + EDGE_SLACK_PX:
+            return "outside the image for px"
+    elif convention == "k1000":
+        if rx > 1000 or ry > 1000:
+            return "outside 0-1000 for k1000"
+    elif convention == "unit":
+        if rx > 1.0 or ry > 1.0:
+            return "outside 0-1 for unit"
+    if conf is not None and conf < MIN_CONFIDENCE:
+        return f"confidence {conf:g} below {MIN_CONFIDENCE:g}"
+    if rx == 0 and ry == 0:
+        x, y = to_pixels(rx, ry, convention, width, height)
+        if x <= EDGE_SLACK_PX and y <= EDGE_SLACK_PX:
+            return "answer (0,0) is the top-left corner"
+    return None
+
+
+def checked_pixels(ans, convention: str, width: int, height: int) -> tuple[int, int] | None:
+    """to_pixels for a raw (rx, ry, conf) answer, or None when it is rejected
+    (or `ans` is None). The probe scores through this so it counts misses."""
+    if ans is None or reject_reason(ans[0], ans[1], ans[2], convention, width, height):
+        return None
+    return to_pixels(ans[0], ans[1], convention, width, height)
 
 
 # --- state (grounding.json) ------------------------------------------------------
@@ -462,6 +496,11 @@ async def locate(image: bytes, width: int, height: int, description: str,
     if ans is None:
         return None
     rx, ry, conf = ans
+    why = reject_reason(rx, ry, conf, conv, width, height)
+    if why:
+        log.info("grounding: %s answer (%s, %s, conf %s) rejected as not found: %s "
+                 "(convention %s)", model_id, rx, ry, conf, why, conv)
+        return None
     x, y = to_pixels(rx, ry, conv, width, height)
     if do_refine and _small(size, conv, width, height):
         try:
@@ -567,9 +606,10 @@ def score_model(model_id: str, answers: list, boxes: list, sizes: list,
     for conv in CONVENTIONS:
         hits, errs = 0, []
         for ans, box, (w, h) in zip(answers, boxes, sizes):
-            if ans is None:
+            pt = checked_pixels(ans, conv, w, h)
+            if pt is None:
                 continue
-            hit, err = score(to_pixels(ans[0], ans[1], conv, w, h), box)
+            hit, err = score(pt, box)
             hits += hit
             errs.append(err)
         med = statistics.median(errs) if errs else None
