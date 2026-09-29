@@ -2,7 +2,6 @@
 pure row / detail / header markup, and the tab itself against a fake server."""
 import importlib.machinery
 import importlib.util
-import json
 from pathlib import Path
 
 import httpx

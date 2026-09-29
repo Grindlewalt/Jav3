@@ -3468,7 +3468,7 @@ def build_tui(base: str, token: str, **kw):
         DEFAULT_CSS = """
         SecurityScreen { background: $background; }
         #sec-tabs { height: 1; padding: 0 2; margin: 1 0 0 0; }
-        SecTab { width: auto; padding: 0 1; margin-right: 1; color: $text-muted; }
+        SecTab { width: auto; padding: 0 1; color: $text-muted; }  /* 8 tabs must fit 80 columns */
         SecTab.-on { background: $primary; color: auto 95%; text-style: bold; }
         #sec-sub { height: auto; max-height: 4; padding: 0 2; margin: 1 0 0 0; }
         #sec-list { height: 1fr; padding: 0 1; margin-top: 1; scrollbar-size-vertical: 1; }
