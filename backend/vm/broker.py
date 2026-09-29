@@ -166,6 +166,11 @@ _UNTRUSTED_TOOLS = frozenset({"web_read", "web_search", "read_and_summarize",
                               # (agent-written, network-facing) service printed
                               "service_logs"})
 
+# ...and whole families by prefix. The projector verbs return text an MCP
+# server wrote (backend/mcp.py: results are data, and tainted); a new verb
+# added under the same prefix is covered without anyone remembering this list.
+_UNTRUSTED_PREFIXES = ("projector_",)
+
 # Tools that promote content INTO a trusted store the agent later relies on.
 # memory_write is the one such store the guest can reach through the broker
 # (git goes via the commit gate — operator-gated, not guest-brokered; file
@@ -196,7 +201,8 @@ _PROMOTION_QUARANTINE_NOTE = (
 
 
 def classify_taint(name: str) -> str:
-    return "untrusted" if name in _UNTRUSTED_TOOLS else "trusted"
+    return ("untrusted" if name in _UNTRUSTED_TOOLS
+            or name.startswith(_UNTRUSTED_PREFIXES) else "trusted")
 
 
 def op_tainted(op_id: str) -> bool:

@@ -503,8 +503,10 @@ def note_taint(meta: dict) -> str:
     """'untrusted' if the note carries a persisted taint stamp (it was written in
     a turn that had consumed web/research content), else 'trusted'. Set by the
     memory_write handler off the broker's runtime taint ledger; cleared only by
-    the operator's promote action."""
-    return "untrusted" if str(meta.get("taint", "")).lower() == "untrusted" else "trusted"
+    the operator's promote action. ANY non-empty stamp counts ('untrusted',
+    'mcp:projector', a hand-typed 'yes'): a reader that only knew one spelling
+    would treat every other as clean."""
+    return "untrusted" if meta.get("taint") else "trusted"
 
 
 def note_trusted(meta: dict) -> bool:
