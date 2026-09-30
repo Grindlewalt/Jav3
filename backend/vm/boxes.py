@@ -81,6 +81,7 @@ PORT_SVCD = 5558
 SHARED_ID = "shared"
 SHARED_MAC = "52:54:00:12:34:60"
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_CHAT_STORE_RE = re.compile(r"^chat-\d+$")
 _VARIANT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
@@ -639,7 +640,9 @@ async def for_project(slug: str | None) -> Box:
     join     another project's box (Box.joined records it for attribution);
              re-created from its owner's placement if it was reaped, refused
              (BoxError) if the owner no longer runs in a box of its own."""
-    if not settings.vm_boxes_enabled or not slug:
+    if not settings.vm_boxes_enabled or not slug or _CHAT_STORE_RE.match(slug):
+        # (a project-less chat's artifact store, chat-<id>, is its guest
+        # workspace: scratch work runs on the shared box, never one box a chat)
         return registry.shared()
     live = registry.live_box(slug)
     if live is not None:
