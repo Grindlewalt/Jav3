@@ -204,7 +204,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                 # buffer. The stream ends when the guest closes.
                 if owns_ws:
                     await workspace_xfer.apply_guest_writes(
-                        active_slug, base64.b64decode(ev.get("tar_b64") or ""))
+                        active_slug, base64.b64decode(ev.get("tar_b64") or ""), op_id)
                 continue
             if ev.get("type") == "turn_stats":
                 # the loop's per-turn counters (RUNS-08): recorded here, never

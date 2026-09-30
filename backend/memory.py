@@ -1222,6 +1222,8 @@ def _active_project_blocks(slug: str) -> list[str]:
     base = settings.projects_dir / slug
     skipped: list[str] = []
     for rel in context_selection(slug):
+        if rel == "project.md":        # already above; the always-loaded list counts it once
+            continue
         path = base / rel
         if not path.is_file():
             continue
@@ -1240,4 +1242,10 @@ def _active_project_blocks(slug: str) -> list[str]:
             "# Selected project files NOT inlined (over the context budget)\n"
             "Read any of these on demand with read_file:\n"
             + "\n".join(f"- {s}" for s in skipped))
+    # a tainted turn's write to one of these files is held for the operator
+    # (alwaysloaded.py): say so, or the agent reads the old text and writes again
+    from . import alwaysloaded
+    held = alwaysloaded.prompt_note(slug)
+    if held:
+        blocks.append(held)
     return blocks

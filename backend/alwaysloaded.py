@@ -264,7 +264,16 @@ def list_held(slug: str | None = None) -> list[dict]:
 
 
 def held_paths(slug: str) -> list[str]:
-    return [v["path"] for v in list_held(slug)]
+    """Just the paths, oldest first: cheap enough for every prompt assembly."""
+    d = _dir(slug)
+    out = []
+    for p in (d.glob("*.json") if d is not None and d.is_dir() else ()):
+        try:
+            item = json.loads(p.read_text())
+            out.append((item.get("held_at") or "", str(item["path"])))
+        except (OSError, ValueError, KeyError):
+            continue
+    return [path for _, path in sorted(out)]
 
 
 def pending_total() -> int:
