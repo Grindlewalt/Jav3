@@ -468,6 +468,98 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
         assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
 
 
+# --- TUIB-13: a permission ask has a numbered No, and esc says what it drops --------------------------
+
+def _perm(aid="perm_1"):
+    return {"type": "ask_user", "id": aid, "conversation_id": 4, "kind": "permission",
+            "reason": "ask mode", "detail": "npm test",
+            "free_text_label": "No, tell the agent what to do instead",
+            "questions": [{"question": "Run in the VM: npm test",
+                           "options": ["Yes", "Yes, always allow this and similar commands "
+                                              "(run_code: npm)"], "multi_select": False}]}
+
+
+async def test_the_permission_ask_numbers_its_no_and_declines_with_it_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put(_perm())
+        assert await wait_for(lambda: top(app) == "AskUser")
+        scr = app.screen
+        type(scr).GRACE = 0
+        head, rows = scr.markup(scr.ev, scr.qs, 0, 0, set(), "", scr.free_label)
+        assert rows.splitlines()[2].lstrip("[reverse]").startswith("3. ( ) No")
+        foot = scr._foot_text()
+        assert "1-3 pick" in foot and "esc declines" in foot and "skips" not in foot
+        await pilot.press("3", "enter")                  # the numbered No
+        assert await wait_for(lambda: srv.answers)
+        assert srv.answers[0] == {"id": "perm_1", "skipped": True}   # the server reads it as a decline
+        await finish(srv, app)
+
+
+async def test_yes_still_answers_yes_and_never_sends_the_no_row_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put(_perm())
+        assert await wait_for(lambda: top(app) == "AskUser")
+        type(app.screen).GRACE = 0
+        await pilot.press("enter")
+        assert await wait_for(lambda: srv.answers)
+        assert srv.answers[0] == {"id": "perm_1", "answers": [{"selected": ["Yes"], "text": None}]}
+        await finish(srv, app)
+
+
+async def test_esc_on_a_later_question_warns_before_dropping_the_earlier_answers_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put({"type": "ask_user", "id": "q2", "conversation_id": 4, "questions": [
+            {"question": "DB?", "options": ["Postgres", "SQLite"]},
+            {"question": "Port?", "options": ["80", "8080"]}]})
+        assert await wait_for(lambda: top(app) == "AskUser")
+        scr = app.screen
+        type(scr).GRACE = 0
+        await pilot.press("1", "enter")                 # question 1 answered
+        await pilot.press("escape")                     # question 2: warns, does not skip
+        await pilot.pause(0.2)
+        assert top(app) == "AskUser" and not srv.answers
+        assert "answers to the earlier" in scr._foot_text()
+        await pilot.press("down")                       # any other key goes on
+        assert "answers to the earlier" not in scr._foot_text()
+        await pilot.press("escape", "escape")           # warn again, then skip
+        assert await wait_for(lambda: srv.answers)
+        assert srv.answers[0] == {"id": "q2", "skipped": True}
+        await finish(srv, app)
+
+
+async def test_a_free_text_only_question_reads_right_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put({"type": "ask_user", "id": "f1", "conversation_id": 4, "questions": [
+            {"question": "Name it", "options": []}]})
+        assert await wait_for(lambda: top(app) == "AskUser")
+        type(app.screen).GRACE = 0
+        foot = app.screen._foot_text()
+        assert "1 picks" not in foot and "type your answer" in foot
+        await pilot.press("escape")
+        assert await wait_for(lambda: srv.answers)
+        await finish(srv, app)
+
+
 # --- the small ones -----------------------------------------------------------------------------------
 
 async def test_one_shift_tab_too_many_does_not_land_on_yolo_TUIB14():

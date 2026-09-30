@@ -715,6 +715,7 @@ COLLAPSED_LINES = 10
 EXPANDED_LINES = 40                # an open tool row, inline; → shows the rest
 DELEGATION_TOOLS = frozenset({"spawn_agent", "spawn_temp_agent", "deploy_agents", "research"})
 NOTICE_CAP = 50                   # notifications kept in the sidebar
+NO_ROW = "No"                     # the permission ask's plain decline (never sent)
 SIDEBAR_MIN_COLS = 100            # narrower than this the sidebar (42 wide) would leave
                                   # the chat 38 columns: it stays hidden until there is room
 NOT_LOGGED_IN = ("not logged in — /login: paste the line from Settings → Add computer "
@@ -2852,6 +2853,7 @@ def build_tui(base: str, token: str, **kw):
             self.free_label = ev.get("free_text_label") or "Type something…"
             self.i, self.answers = 0, []
             self.resolved = self.gone = False
+            self._skip_armed = False       # esc on a later question: once to warn, twice to skip
             self._opened()
             self._reset()
 
@@ -2863,8 +2865,15 @@ def build_tui(base: str, token: str, **kw):
             return self.qs[self.i]
 
         @property
+        def permission(self) -> bool:
+            """A permission ask (one question: yes / always / type why not). Its last
+            numbered row is a plain No, so declining has a number and not only esc."""
+            return self.ev.get("kind") == "permission" and len(self.qs) == 1
+
+        @property
         def opts(self) -> list:
-            return [str(o) for o in self.q.get("options") or []]
+            return [str(o) for o in self.q.get("options") or []] + (
+                [NO_ROW] if self.permission else [])
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog"):
@@ -2924,6 +2933,8 @@ def build_tui(base: str, token: str, **kw):
             """(head, options) markup for question i; pure, for tests."""
             q = qs[i]
             opts = [str(o) for o in q.get("options") or []]
+            if ev.get("kind") == "permission" and len(qs) == 1:
+                opts.append(NO_ROW)
             multi = bool(q.get("multi_select"))
             if ev.get("kind") == "permission":
                 title = "[$warning b]Permission[/]"
@@ -2956,11 +2967,17 @@ def build_tui(base: str, token: str, **kw):
         def _foot_text(self) -> str:
             n = len(self.opts)
             multi = bool(self.q.get("multi_select"))
-            pick = f"1-{n} pick" if n > 1 else "1 picks"
+            pick = "" if n == 0 else "1 picks it" if n == 1 else f"1-{n} pick"
             if self.ate and self.inert():
                 return "just opened: keys go back to your prompt for a moment"
-            return (f"↑↓ move · {pick}" + (" · space toggles" if multi else "")
-                    + " · or type · enter confirms · esc skips")
+            if self._skip_armed:
+                return ("esc again skips the whole ask: the answers to the earlier "
+                        "questions are dropped · any other key goes on")
+            return ("↑↓ move" + (f" · {pick}" if pick else "")
+                    + (" · space toggles" if multi else "")
+                    + (" · or type" if n else " · type your answer")
+                    + " · enter confirms · "
+                    + ("esc declines" if self.permission else "esc skips"))
 
         def _draw(self) -> None:
             head, rows = self.markup(self.ev, self.qs, self.i, self.cur, self.sel,
@@ -3028,6 +3045,9 @@ def build_tui(base: str, token: str, **kw):
                 else:
                     self._focus_text()
                     return
+            if self.permission and len(self.opts) - 1 in self.sel:
+                self.dismiss(None)         # the No row: the server reads a skip as a decline
+                return
             self.answers.append({"selected": [self.opts[j] for j in sorted(self.sel)],
                                  "text": typed or None})
             if self.i + 1 >= len(self.qs):
@@ -3045,6 +3065,8 @@ def build_tui(base: str, token: str, **kw):
                 self._draw()
                 return
             key = event.key
+            if key != "escape" and self._skip_armed:
+                self._skip_armed = False
             typing = self.query_one("#ask-text", Input).has_focus
             if key in ("pageup", "pagedown"):
                 event.stop()
@@ -3091,8 +3113,15 @@ def build_tui(base: str, token: str, **kw):
             self._confirm()
 
         def action_skip(self) -> None:
-            if not self.inert():
-                self.dismiss(None)
+            if self.inert():
+                return
+            if self.i > 0 and not self._skip_armed:
+                # the server takes all the answers or none: skipping here would drop
+                # the ones already given, so say so once before doing it
+                self._skip_armed = True
+                self._draw()
+                return
+            self.dismiss(None)
 
     class Ask(ModalScreen):
         """One line of input; `secret` hides it (the login line is a credential)."""
