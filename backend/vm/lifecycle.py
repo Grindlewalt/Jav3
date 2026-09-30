@@ -70,18 +70,28 @@ def base_built() -> bool:
     return _base_image().exists()
 
 
+def docker_only_host() -> bool:
+    """Docker boxes carry the agent turns here: the runtime and boxes are on and
+    KVM cannot be used (no /dev/kvm). Such a host needs none of the KVM pieces
+    (vsock, the golden image), so they are not blockers there. A KVM-capable
+    host keeps every one of them: its shared box needs them."""
+    return bool(settings.docker_enabled and settings.vm_boxes_enabled
+                and not os.path.exists("/dev/kvm"))
+
+
 def blockers() -> list[str]:
     """Everything that stops an agent turn on this host, all at once, so the
     operator does not fix KVM only to discover the missing key next."""
     out = []
-    if not os.path.exists("/dev/kvm"):
-        out.append("no /dev/kvm (CPU virtualization off in BIOS, or the kvm module "
-                   f"not loaded; `bash {settings.base_dir}/scripts/install.sh --check` says which)")
-    if not os.path.exists("/dev/vhost-vsock"):
-        out.append("no /dev/vhost-vsock (sudo modprobe vhost_vsock)")
-    if not base_built():
-        out.append("no guest image (VM_DIR=%s bash %s/vm/build_base.sh, once KVM works)"
-                   % (settings.vm_dir, settings.base_dir))
+    if not docker_only_host():
+        if not os.path.exists("/dev/kvm"):
+            out.append("no /dev/kvm (CPU virtualization off in BIOS, or the kvm module "
+                       f"not loaded; `bash {settings.base_dir}/scripts/install.sh --check` says which)")
+        if not os.path.exists("/dev/vhost-vsock"):
+            out.append("no /dev/vhost-vsock (sudo modprobe vhost_vsock)")
+        if not base_built():
+            out.append("no guest image (VM_DIR=%s bash %s/vm/build_base.sh, once KVM works)"
+                       % (settings.vm_dir, settings.base_dir))
     try:
         from .. import providers
         pid = providers.default_provider()
@@ -96,6 +106,10 @@ def no_image_message() -> str:
     """Why there is no guest image, and the next step, from facts on this host:
     without /dev/kvm build_base.sh cannot run either, so saying "run it" alone
     sends the operator into a second failure."""
+    if docker_only_host():
+        return ("this project runs in the shared KVM guest, which this host cannot run "
+                "(no /dev/kvm); agent turns run in Docker boxes here: give the project "
+                "its own box on the docker runtime (Runs in)")
     b = blockers()
     if len(b) > 1:
         return "cannot run an agent turn on this host yet:\n" + "\n".join(
@@ -198,6 +212,8 @@ class GuestVM:
                 "egress": settings.vm_egress,
                 "rebuilding": self._rebuilding,
                 "blockers": blockers(),
+                "notes": (["no /dev/kvm here: the shared KVM guest cannot run and agent "
+                           "turns run in Docker boxes"] if docker_only_host() else []),
                 "persist": persist_status(),
                 **_image_meta()}
 

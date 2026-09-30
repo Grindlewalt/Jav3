@@ -50,11 +50,20 @@ def _warn_missing_guest_devices() -> None:
     import logging
     import os
     missing = [d for d in ("/dev/kvm", "/dev/vhost-vsock") if not os.path.exists(d)]
-    if missing:
+    if not missing:
+        return
+    if settings.docker_enabled and settings.vm_boxes_enabled:
+        # Docker boxes need neither: only a project that runs in the shared KVM
+        # guest fails here
         logging.getLogger("jav3").warning(
-            "no %s: the web UI works, but agent turns will fail until KVM and "
-            "vhost_vsock are available (bash scripts/install.sh --check says why)",
-            " or ".join(missing))
+            "no %s: KVM guests are unavailable, so agent turns run in Docker boxes "
+            "only; a project that runs in the shared box will fail until it is given "
+            "its own box on the docker runtime (Runs in)", " or ".join(missing))
+        return
+    logging.getLogger("jav3").warning(
+        "no %s: the web UI works, but agent turns will fail until KVM and "
+        "vhost_vsock are available (bash scripts/install.sh --check says why)",
+        " or ".join(missing))
 
 
 async def _announce_setup_link() -> None:
