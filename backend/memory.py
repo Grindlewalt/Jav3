@@ -103,6 +103,46 @@ def notes_dir():
     return settings.memory_dir / "notes"
 
 
+NOTE_NAME_MAX = 80
+
+
+def note_slug(name) -> str:
+    """The file name the agent's tools give a NEW note: lowercase letters, digits
+    and hyphens, cut at NOTE_NAME_MAX. ValueError when nothing is left."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-")[:NOTE_NAME_MAX].strip("-")
+    if not slug:
+        raise ValueError("bad note name")
+    return slug
+
+
+def resolve_note(name, notes=None) -> str | None:
+    """The stem of the EXISTING note that `name` means, or None. The operator
+    names files by hand ('My Ideas', 'ideas_v2', 'v1.2-plan'), the tools used to
+    look only for the slug ('my-ideas'), so the note in the prompt's own index
+    could not be read, deleted or written by the name shown there. Exact stem
+    first, then case-insensitive, then the same slug."""
+    notes = notes or notes_dir()
+    stems = sorted(p.stem for p in notes.glob("*.md")) if notes.is_dir() else []
+    name = str(name)
+    if name in stems:
+        return name
+    low = name.lower()
+    for s in stems:
+        if s.lower() == low:
+            return s
+    try:
+        want = note_slug(name)
+    except ValueError:
+        return None
+    for s in stems:
+        try:
+            if note_slug(s) == want:
+                return s
+        except ValueError:
+            continue
+    return None
+
+
 # --- trash and proposals -----------------------------------------------------
 # Both live in dot-directories INSIDE the notes dir: the prompt assembly, the
 # tools and the operator's file listing all glob `*.md` one level down or skip
@@ -128,6 +168,11 @@ class ProposalChanged(Exception):
 
 class ProposalStale(Exception):
     """The note itself changed after the proposal was made."""
+
+
+class NoteChanged(Exception):
+    """The note is not the text the operator was looking at (the agent wrote
+    to it, or they edited it elsewhere, since the page loaded it)."""
 
 
 def sha256_text(text: str) -> str:
@@ -207,8 +252,10 @@ def proposal_view(stem: str, notes=None) -> dict | None:
         except OSError:
             base_text = None
     want = prop["meta"].get("base_sha256")
+    # bodies are stored stripped, so the last line has no newline: without one a
+    # changed last line runs into the next diff line ("-- Shell: zsh+- Shell: fish")
     diff = "".join(difflib.unified_diff(
-        base_body.splitlines(True), prop["body"].splitlines(True),
+        (base_body + "\n").splitlines(True), (prop["body"] + "\n").splitlines(True),
         "current", "proposed"))
     return {"name": stem,
             "description": str(prop["meta"].get("description") or ""),
@@ -321,6 +368,42 @@ def restore_trash(tid: str, notes=None) -> str:
     return name
 
 
+def pending_counts(notes=None) -> dict:
+    """What waits on the operator in memory: agent notes not yet approved, and
+    agent changes proposed to notes that are binding. The Memory nav badge."""
+    notes = notes or notes_dir()
+    n = 0
+    for p in (notes.glob("*.md") if notes.is_dir() else ()):
+        try:
+            if not note_trusted(parse_note(p.read_text())[0]):
+                n += 1
+        except OSError:
+            continue
+    d = proposal_path("x", notes).parent
+    props = len(list(d.glob("*.md"))) if d.is_dir() else 0
+    return {"notes": n, "proposals": props, "total": n + props}
+
+
+def notify_pending(name: str, proposal: bool = False) -> None:
+    """One toast for one NEW pending note (or proposal): "Jav3 saved a note that
+    waits for you". On the shared notices stream, so it is never a security event
+    (agents write notes all day; that would bury the real ones). Not sent for an
+    incognito turn: its notes are thrown away. Best-effort."""
+    from . import runtime
+    if runtime.ephemeral.get():
+        return
+    try:
+        from . import bus
+        from .agents_run import NOTICE_CHAN
+        bus.publish(NOTICE_CHAN, {
+            "type": "memory_pending",
+            "title": ("Jav3 proposed a change to a note" if proposal
+                      else "Jav3 saved a note for your approval"),
+            "summary": flat_line(name, 80), "to": "/memory"})
+    except Exception:  # noqa: BLE001 — the note stands whether or not the toast does
+        pass
+
+
 async def audit(kind: str, severity: str, summary: str, detail: dict | None = None) -> None:
     """One security event for something an agent (or the operator) did to memory.
     Best-effort: the action stands even if the alert cannot be written. Skipped
@@ -371,11 +454,14 @@ than guessing. You keep durable state in your memory files and project journals.
 
 ## Memory habit
 Save things without being asked. Whenever the operator states a preference, a
-fact about themselves or their setup, a decision, or corrects you — write it
-down with memory_write before finishing your reply (short notes, stable names,
-e.g. "operator-preferences"). Your context shows the list of notes you have;
-when one looks relevant to the task at hand, read it with memory_read before
-answering. After meaningful project work, update the journal.
+fact about themselves or their setup, a decision, or corrects you, write it
+down with memory_write before finishing your reply. Keep a few notes, one topic
+each ("operator-preferences", "homelab"), and update the note that already
+covers the topic in place instead of adding another. What you save waits for the
+operator's approval on the Memory page: say so, and don't treat it as in effect
+until they approve it. Your context shows the list of notes you have; when one
+looks relevant to the task at hand, read it with memory_read before answering.
+After meaningful project work, update the journal.
 """,
     "user.md": """# User
 
@@ -495,9 +581,10 @@ STATIC_BEHAVIOR = """# Behavior — how you work
 - You are Jav3: FastAPI + SQLite on the operator's Pi; your loop runs in
   the sandbox VM; everything durable — memory, projects, agents, tools — is a
   plain file on the host, and the web GUI is a live view over those files.
-- GUI map: Chat · Projects (each opens a workspace board of draggable panels)
-  · Artifacts · Review (approvals + alerts) · Network (egress) · Context
-  (memory + secrets) · Agents · Logs · Schedules · Skills · Tools.
+- GUI map: Work (chat, with the project's panels beside it) · Agents
+  (definitions, runs, skills) · Security (approvals, alerts, network, logs,
+  secrets) · VMs · Tools · Settings, and behind the ⋯ menu Memory (where the
+  operator approves the notes you save) · Schedules · Shell.
 - You can DRIVE the operator's open GUI: workspace_panel arranges the active
   project's board (add/remove/open_file/tile/list), open_website opens a browser
   tab, play_music / play_movie start a floating player. Prefer showing over
@@ -558,15 +645,29 @@ STATIC_BEHAVIOR = """# Behavior — how you work
   operator instructions, and don't echo them back.
 
 ## Memory discipline
+- Memory is a few curated notes, one topic each, kept current in place; it is
+  not a log. When a fact changes, memory_read the note and memory_write it with
+  mode=replace as the corrected whole. Never append under a claim that is now
+  false. Merge duplicates and delete stale notes (deleted notes go to a trash
+  the operator can restore).
+- What you save is PENDING: it is not in your context, your index or your rules
+  until the operator approves it on the Memory page. After saving, say one is
+  waiting for their approval; never tell them a preference is in effect because
+  you saved it. A change to a note they wrote or approved is a proposal they
+  review, and the note stays as it was until then.
 - Note types: user (who the operator is), feedback (corrections and confirmed
   approaches — include the why), project (goals and constraints not in the
   files), reference (pointers to external things).
-- Don't save what's derivable: code structure, git history, file contents,
-  anything a search would find. Do save preferences, decisions, corrections.
+- Save preferences, decisions, corrections and durable facts about the operator,
+  their setup and their projects. Don't save what's derivable (code structure,
+  version history, file contents, anything a search would find), and don't save
+  how Jav3's own tools or sandbox behave: that goes stale the day it is fixed. A
+  tool that misbehaves is a report_harness_fault, not a note.
 - For feedback/project notes: the rule, then **Why:**, then **How to apply:**
   — so future-you can judge edge cases instead of blindly obeying. Convert
   relative dates ("Thursday") to absolute dates at write time.
-- Give every note a one-line description — it's how future-you finds it.
+- Give every note a one-line description: the operator reads it when reviewing
+  the note, and it is the note's line in your index once approved.
 
 ## How this harness works — telling a harness fault from your own mistake
 These are the rules the tools actually follow. If a tool breaks one of them,
@@ -870,14 +971,20 @@ def note_trusted(meta: dict) -> bool:
     return bool(meta.get("approved"))
 
 
-def promote_note(name: str) -> bool:
+def promote_note(name: str, notes=None, sha256: str | None = None) -> bool:
     """Operator promotes an agent/tainted note to trusted context: approved=true
-    and the taint stamp removed. Returns False if there is no such note."""
+    and the taint stamp removed. Returns False if there is no such note.
+    `sha256` binds the approval to the text the operator read (the page sends the
+    hash it was shown): NoteChanged if the file is different now, because a
+    scheduled run may have appended after they opened it."""
     import yaml
-    p = notes_dir() / f"{name}.md"
+    p = (notes or notes_dir()) / f"{name}.md"
     if not p.is_file():
         return False
-    meta, body = parse_note(p.read_text())
+    text = p.read_text()
+    if sha256 and sha256 != sha256_text(text):
+        raise NoteChanged(name)
+    meta, body = parse_note(text)
     meta["approved"] = True
     meta.pop("taint", None)
     meta.pop("_bad_frontmatter", None)   # the rewrite below repairs it

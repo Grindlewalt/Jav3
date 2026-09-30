@@ -4257,3 +4257,43 @@ a:has(> .nav-dot) { position: relative; }
 .builtin-desc { margin-top: var(--sp-2); }
 .builtin-why { margin-top: var(--sp-2); color: var(--amber); }
 .logs-new { margin: 0 0 var(--sp-3); width: 100%; }
+/* memory: the review queue, proposals with a diff, the trash */
+.mem-list li .mem-blurb { font-size: 11.5px; white-space: normal; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mem-aside .ghost { margin: 8px 0 0; }
+.mem-legend { margin-top: 10px; font-size: 12px; color: var(--dim); }
+.mem-legend summary { cursor: pointer; }
+.mem-legend dl { margin: 8px 0 0; display: grid; gap: 4px 0; }
+.mem-legend dt { margin-top: 6px; }
+.mem-legend dd { margin: 0; line-height: 1.4; }
+.mem-queue { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
+  gap: 12px; padding-bottom: 20px; }
+.mem-intro, .mem-empty { margin: 0; font-size: 13px; line-height: 1.5; }
+.mem-empty { color: var(--dim); padding: 24px 0; }
+.mem-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+.mem-card.mem-trash { padding: 8px 14px; }
+.mem-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mem-card-head h3 { margin: 0; font-size: 14px; font-family: ui-monospace, Menlo, monospace;
+  overflow-wrap: anywhere; }
+.mem-card-head h3 .dim { font-family: inherit; font-weight: 400; }
+.mem-card-head .mem-when { margin-left: auto; font-size: 12px; }
+.mem-card-head .tag { margin-left: 0; }
+.mem-desc { margin: 0; font-size: 13.5px; line-height: 1.4; }
+.mem-why { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--dim); }
+.mem-body, .mem-diff { margin: 0; padding: 9px 11px; background: var(--bg-soft);
+  border: 1px solid var(--border); border-radius: 8px;
+  font: 12.5px/1.5 ui-monospace, Menlo, monospace;
+  max-height: 16em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mem-diff { padding: 6px 0; white-space: pre; overflow-wrap: normal; }
+.mem-dl { display: block; padding: 0 11px; }
+.mem-dl.add { background: color-mix(in srgb, var(--green) 16%, transparent); }
+.mem-dl.del { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.mem-dl.hunk { color: var(--dim); }
+.mem-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mem-banner { margin: 0 0 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px;
+  background: var(--panel-2); border: 1px solid var(--border); }
+.mem-banner.warn { border-color: var(--amber); color: var(--text); font-size: 13px; }
+.mem-banner .link { padding: 0 2px; margin-left: 0; text-decoration: underline; }
+.nav-more { position: relative; }
+.nav-more > .nav-dot { top: 6px; left: auto; right: 6px; }

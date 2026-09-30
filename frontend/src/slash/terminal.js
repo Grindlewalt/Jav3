@@ -18,10 +18,13 @@ export const TERMINAL_ONLY = {
     + 'screenshot tool',
   exit: 'there is nothing to quit in the browser — close the tab (/stop ends a running '
     + 'turn first)',
+  permissions: 'the permission mode (yolo / auto / ask) is the picker in the chat’s '
+    + 'toolbar, at the top of the chat',
 }
 
 // the terminal client's aliases for the above
-const ALIASES = { theme: 'themes', 'stop-project': 'stop-a', quit: 'exit' }
+const ALIASES = { theme: 'themes', 'stop-project': 'stop-a', quit: 'exit',
+  perms: 'permissions', mode: 'permissions' }
 
 // name (any case, an alias fine) -> the line, or null
 export function terminalAnswer(name) {

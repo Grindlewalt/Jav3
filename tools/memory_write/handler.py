@@ -1,19 +1,11 @@
-import re
-
 import yaml
 
 from backend import memory
 from backend import secrets as secrets_mod
-from backend.memory import notes_dir, parse_note, strip_leading_frontmatter
+from backend.memory import (note_slug, notes_dir, parse_note, resolve_note,
+                            strip_leading_frontmatter)
 from backend.memory import weakening_advice
 from backend.runtime import nav_taint, write_taint
-
-
-def _safe_name(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
-    if not slug:
-        raise ValueError("bad note name")
-    return slug
 
 
 def _with_frontmatter(description: str | None, body: str, taint: str | None = None,
@@ -61,6 +53,24 @@ async def _refused_event(note: str, src: str, hit: str) -> None:
 
 _MODES = ("append", "replace", "delete")
 
+# What every save of an agent's own note must tell the model. The note is stamped
+# `approved: false`, so prompt assembly lists it by name only and it never reaches
+# the rules; the agent used to be told "written" and then told the operator their
+# preference was now in effect.
+_PENDING = ("It is PENDING: not in your context, your index or your rules until "
+            "the operator approves it on the Memory page. Tell them it is waiting; "
+            "do not say the preference is in effect.")
+
+
+def _saved(verb: str, label: str) -> str:
+    """The result of a write that lands as the agent's own, pending, note."""
+    from backend import runtime
+    if runtime.ephemeral.get():
+        # an incognito turn writes to a throwaway dir: nothing waits for approval
+        return (f"{verb} {label} for this incognito chat only: it is gone when the "
+                "chat ends and the operator never sees it.")
+    return f"{verb} {label}. {_PENDING}"
+
 
 def _label(stem: str, name: str) -> str:
     """The note as the model should name it from now on: when the name it gave
@@ -68,7 +78,7 @@ def _label(stem: str, name: str) -> str:
     calling the note by a name it never wrote."""
     if stem == name:
         return f"'{stem}'"
-    return (f"'{stem}' (your name {name!r} was normalised; use '{stem}' with "
+    return (f"'{stem}' (your name {name[:60]!r} was normalised; use '{stem}' with "
             "memory_read and memory_write)")
 
 
@@ -96,13 +106,15 @@ async def _propose(stem, label, mode, description, content, op_taint, notes,
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(_with_frontmatter(desc, new_body, taint=taint,
                                    extra={"proposal_for": stem, "base_sha256": base_sha}))
+    if cur is None:
+        memory.notify_pending(stem, proposal=True)
     await memory.audit("memory_proposed", "warn",
                        f"an agent proposed a change to note '{stem}'"
                        + (" (written after untrusted content)" if taint else ""),
                        {"note": stem, "mode": mode, "tainted": bool(taint)})
     return (f"note {label} is one the operator wrote or approved, so it is unchanged "
             "and still binding. Your change is saved as a proposal that takes effect "
-            "only when the operator approves it. Tell them.")
+            "only when the operator approves it on the Memory page. Tell them.")
 
 
 async def _delete(stem: str, name: str, notes, path) -> str:
@@ -144,14 +156,16 @@ async def run(name: str, content: str, mode: str | None = "append",
         return (f"error: unknown mode {mode!r}. Use one of: append (add to the "
                 "note), replace (rewrite it), delete (remove it).")
     name = str(name)
+    notes = notes_dir()
     try:
-        stem = _safe_name(name)
+        # a note that exists is addressed by the name it has (the operator's
+        # 'My Ideas.md'), a new one gets the plain slug
+        stem = resolve_note(name, notes) or note_slug(name)
     except ValueError:
         return "error: bad note name. Use letters, digits and hyphens."
     label = _label(stem, name)
     content = "" if content is None else str(content)
     description = None if description is None else str(description)
-    notes = notes_dir()
     notes.mkdir(parents=True, exist_ok=True)
     path = notes / f"{stem}.md"
     # same hard line as writes.apply_write: a real secret VALUE never lands in
@@ -200,12 +214,15 @@ async def run(name: str, content: str, mode: str | None = "append",
                 prior = parse_note(path.read_text())[0].get("taint")
             except OSError:
                 pass
+        was_pending = path.exists()
         path.write_text(_with_frontmatter(description, content, taint=op_taint or prior))
-        return f"memory note {label} written"
+        if not was_pending:
+            memory.notify_pending(stem)
+        return _saved("memory note", f"{label} saved")
     # append: keep (or update) the existing frontmatter, never duplicate it, and
     # carry the taint forward (a new untrusted write escalates a clean note).
     meta, body = parse_note(path.read_text())
     desc = description or meta.get("description")
     taint = op_taint or meta.get("taint")
     path.write_text(_with_frontmatter(desc, body + "\n\n" + content.strip(), taint=taint))
-    return f"appended to memory note {label}"
+    return _saved("appended to memory note", label)

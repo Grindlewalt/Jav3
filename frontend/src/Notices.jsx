@@ -45,6 +45,7 @@ export const PendingCountContext = createContext(0)
 export function useNotices(enabled) {
   const [toasts, setToasts] = useState([])
   const [count, setCount] = useState(0)
+  const [memoryPending, setMemoryPending] = useState(0)  // Memory nav badge, not in `count`
   const prev = useRef(null)      // last /api/notifications snapshot
   const seen = useRef(new Set()) // security event ids already toasted
 
@@ -62,6 +63,7 @@ export function useNotices(enabled) {
       let d
       try { d = await api('/api/notifications') } catch { return }
       setCount(d.count || 0)
+      setMemoryPending(d.memory_pending || 0)
       const p = prev.current
       prev.current = d
       if (!p) {
@@ -107,7 +109,10 @@ export function useNotices(enabled) {
     }
     load()
     const t = setInterval(load, 15000)
-    return () => clearInterval(t)
+    // the Memory page approved or rejected something: the badge should not wait
+    // for the next poll
+    window.addEventListener('jarvis-memory-changed', load)
+    return () => { clearInterval(t); window.removeEventListener('jarvis-memory-changed', load) }
   }, [enabled, push])
 
   useEffect(() => {
@@ -152,6 +157,15 @@ export function useNotices(enabled) {
                body: ev.summary || '', to: ev.to || '/security/logs', life: 30 })
         return
       }
+      // a note (or a change to one) waits for approval: one card, straight to
+      // Memory. Not a security event, so it never joins the Review count.
+      if (ev.type === 'memory_pending') {
+        setMemoryPending((n) => n + 1)   // the next poll re-syncs the real total
+        window.dispatchEvent(new Event('jarvis-memory-arrived'))  // an open Memory page reloads
+        push({ sev: 'warn', title: ev.title || 'A note waits for your approval',
+               body: ev.summary || '', to: ev.to || '/memory', life: 12 })
+        return
+      }
       if (ev.type !== 'agent_run_done') return
       if (isWatched(ev.conversation_id)) return   // they're looking right at it
       push({
@@ -165,7 +179,7 @@ export function useNotices(enabled) {
     })
   }, [enabled, push])
 
-  return { toasts, count, dismiss, clear }
+  return { toasts, count, memoryPending, dismiss, clear }
 }
 
 // A queue card (not the app's own message, not an agent run's result) exists

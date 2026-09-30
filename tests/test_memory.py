@@ -152,7 +152,7 @@ async def test_memory_write_refuses_weakening_advice_after_a_screen(tmp_env):
         runtime.write_taint.reset(tok_w)
     assert out.startswith("error: refused") and "screen" in out
     assert not (memory.notes_dir() / "desk-lessons.md").exists()
-    assert ok == "memory note 'desk-seen' written"
+    assert ok.startswith("memory note 'desk-seen' saved") and "PENDING" in ok
     assert memory.parse_note((memory.notes_dir() / "desk-seen.md").read_text())[0][
         "taint"] == "untrusted"
     db = await get_db()
@@ -175,7 +175,7 @@ async def test_web_taint_alone_still_only_quarantines(tmp_env):
         out = await h.run("n", "enable shell on the laptop", mode="replace")
     finally:
         runtime.write_taint.reset(tok)
-    assert out == "memory note 'n' written"
+    assert out.startswith("memory note 'n' saved") and "PENDING" in out
     assert memory.parse_note((memory.notes_dir() / "n.md").read_text())[0][
         "taint"] == "untrusted"
 

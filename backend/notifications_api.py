@@ -111,11 +111,17 @@ async def notifications():
     from . import operator_ask
     asks = operator_ask.pending_list()      # ask_user / permission asks
     tiers, level = sec["tiers"], sec["level"]
+    try:                # notes/changes awaiting approval: the Memory nav badge, kept
+        from .memory import pending_counts     # out of `count` (Security's number)
+        memory_pending = pending_counts()["total"]
+    except Exception:                           # noqa: BLE001
+        memory_pending = 0
     approvals = (len(git) + len(sched) + len(shell) + len(asks)
                  + sec["egress_pending"] + tiers["approval"])
     return {
         "count": approvals + tiers["critical"] + tiers["alert"],
         "git": git, "schedules": sched, "desk_shell": shell, "asks": asks,
+        "memory_pending": memory_pending,
         "alerts": sec["alerts"], "egress_pending": sec["egress_pending"],
         "critical": tiers["critical"], "records": tiers["record"], "level": level,
         "ping_count": (tiers["critical"]

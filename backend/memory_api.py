@@ -5,11 +5,11 @@ from pydantic import BaseModel
 from .auth import require_user
 from .config import settings
 from .fsutil import list_tree, read_text_or_binary, safe_join
-from .memory import (ProposalChanged, ProposalStale, approve_proposal, audit,
+from .memory import (NoteChanged, ProposalChanged, ProposalStale, approve_proposal, audit,
                      ensure_memory_seeds, estimate_tokens, list_proposals, list_trash,
                      note_description, note_taint, note_trusted, notes_dir, parse_note,
-                     promote_note, proposal_path, proposal_view, reject_proposal,
-                     restore_trash, trash_note)
+                     pending_counts, promote_note, proposal_path, proposal_view,
+                     reject_proposal, restore_trash, sha256_text, trash_note)
 
 router = APIRouter(prefix="/api/memory", tags=["memory"],
                    dependencies=[Depends(require_user)])
@@ -21,6 +21,12 @@ AUTO_GENERATED = {"all-projects.md"}
 class SaveFile(BaseModel):
     path: str
     content: str
+    # the sha256 of the text the editor loaded: a save over a file that is
+    # different now (the agent appended, a scheduled run wrote) is a 409, not a
+    # silent last-write-wins
+    if_sha256: str | None = None
+    # a new note must not replace one that exists
+    create_only: bool = False
 
 
 @router.get("")
@@ -40,44 +46,91 @@ async def list_memory():
 @router.get("/file")
 async def read_memory(path: str):
     p = safe_join(settings.memory_dir, path)
-    return {"path": path, **read_text_or_binary(p)}
+    r = read_text_or_binary(p)
+    if not r.get("binary"):
+        r["sha256"] = sha256_text(r["content"])
+    return {"path": path, **r}
 
 
 @router.put("/file")
 async def save_memory(body: SaveFile):
     p = safe_join(settings.memory_dir, body.path)
+    if body.create_only and p.exists():
+        raise HTTPException(status_code=409, detail="a note with that name already exists")
+    if body.if_sha256 and p.is_file():
+        try:
+            now = sha256_text(p.read_text())
+        except (UnicodeDecodeError, OSError):
+            now = None
+        if now != body.if_sha256:
+            raise HTTPException(
+                status_code=409,
+                detail="this file changed since you opened it (the agent may have written "
+                       "to it); reload it before saving")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body.content)
-    return {"ok": True, "path": body.path}
+    return {"ok": True, "path": body.path, "sha256": sha256_text(body.content)}
 
 
 @router.get("/notes")
 async def list_notes():
-    """Notes with their trust/taint metadata — the Memory page uses this to
-    badge agent-written and web/research-tainted notes and offer 'Promote'."""
+    """Notes with their trust/taint metadata — the Memory page's review queue and
+    badges. A note that is not binding (`pending`) also carries its body, so the
+    operator approves the text they read, bound to `sha256`."""
     nd = notes_dir()
     out = []
     if nd.exists():
         for p in sorted(nd.glob("*.md")):
             try:
-                meta, body = parse_note(p.read_text())
+                text = p.read_text()
+                st = p.stat()
             except OSError:
                 continue
-            out.append({"name": p.stem,
-                        "description": note_description(meta, body),
-                        "source": str(meta.get("source", "operator")),
-                        "approved": bool(meta.get("approved")),
-                        "taint": note_taint(meta),
-                        "trusted": note_trusted(meta),
-                        # an agent's change waiting for review (GET /proposals)
-                        "proposal": proposal_path(p.stem, nd).is_file()})
+            meta, body = parse_note(text)
+            trusted = note_trusted(meta)
+            row = {"name": p.stem,
+                   "description": note_description(meta, body),
+                   "source": str(meta.get("source", "operator")),
+                   "approved": bool(meta.get("approved")),
+                   "taint": note_taint(meta),
+                   "trusted": trusted,
+                   "pending": not trusted,
+                   # frontmatter that would not parse: read as untrusted until repaired
+                   "bad_frontmatter": bool(meta.get("_bad_frontmatter")),
+                   "sha256": sha256_text(text),
+                   "size": st.st_size, "mtime": st.st_mtime,
+                   # an agent's change waiting for review (GET /proposals)
+                   "proposal": proposal_path(p.stem, nd).is_file()}
+            if not trusted:
+                row["body"] = body[:20000]
+            out.append(row)
     return {"notes": out}
 
 
+@router.get("/pending")
+async def pending():
+    """How many things wait on the operator here: agent notes not yet approved
+    plus agent changes proposed to binding notes."""
+    return pending_counts()
+
+
+class Promote(BaseModel):
+    sha256: str | None = None
+
+
 @router.post("/notes/{name}/promote")
-async def promote(name: str):
-    """Operator clears an agent/tainted note into trusted binding context."""
-    if not promote_note(name):
+async def promote(name: str, body: Promote | None = None):
+    """Operator clears an agent/tainted note into trusted binding context. With
+    `sha256` (what the page showed) a note that changed since answers 409."""
+    name = _check_name(name)
+    try:
+        ok = promote_note(name, sha256=(body.sha256 if body else None))
+    except NoteChanged:
+        raise HTTPException(
+            status_code=409,
+            detail="the note changed since you opened it (the agent wrote to it); "
+                   "reload it and read it again before approving") from None
+    if not ok:
         raise HTTPException(status_code=404, detail="no such note")
     return {"ok": True, "name": name}
 
