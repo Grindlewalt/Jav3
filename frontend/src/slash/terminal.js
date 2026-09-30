@@ -20,6 +20,7 @@ export const TERMINAL_ONLY = {
     + 'turn first)',
   permissions: 'the permission mode (yolo / auto / ask) is the picker in the chat’s '
     + 'toolbar, at the top of the chat',
+  persona: 'agent presets live on the Agents page — /agents takes you there',
 }
 
 // the terminal client's aliases for the above
