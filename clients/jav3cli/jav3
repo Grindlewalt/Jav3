@@ -982,6 +982,11 @@ async def aiter_sse(lines):
 
 # -- how tool calls read -----------------------------------------------------------------
 
+_LOCAL_TWINS = {"local_read_file": "read_file", "local_write_file": "write_file",
+                "local_edit_file": "edit_file", "local_list_files": "list_files",
+                "local_search": "search_codebase"}
+
+
 def tool_title(name: str, args) -> tuple[str, str]:
     """(icon, title) for a tool call, opencode-style: → reads, ← writes, $ runs,
     ◈ web, ✱ search, ◆ agents, ⚙ everything else."""
@@ -992,6 +997,14 @@ def tool_title(name: str, args) -> tuple[str, str]:
         return _short(v, n) if v not in (None, "") else ""
     if name == "local_shell":
         return "$", f"{_short(_cmd_line(a.get('command')), 100)}  (local)"
+    if name in _LOCAL_TWINS:
+        # a local tool reads like its server twin, marked (local): not its raw name
+        twin = _LOCAL_TWINS[name]
+        if name == "local_search" and a.get("query") and "query" in a:
+            sub = f" in {s('path')}" if a.get("path") not in (None, "", ".") else ""
+            return "✱", f'Grep "{s("query")}"{sub}  (local)'
+        icon, title = tool_title(twin, a)
+        return icon, f"{title}  (local)"
     if name == "read_file":
         rng = f" [{a['offset']}:{a.get('limit', '')}]" if a.get("offset") else ""
         return "→", f"Read {s('path')}{rng}"
@@ -9218,11 +9231,12 @@ def build_tui(base: str, token: str, **kw):
                                   "/stop-project)", "[project]",
                                   takes_arg=True, busy_ok=True),
                 "copy": Command(self.c_copy, "copy the last reply", busy_ok=True, leader="y"),
-                "export": Command(self.c_export, "save this chat as markdown (default "
-                                  "<location> sets where)", "[location|default <location>]",
+                "export": Command(self.c_export, "save this chat as markdown, here by "
+                                  "default (default <location> sets where)", "[location|default <location>]",
                                   takes_arg=True, busy_ok=True, leader="x"),
-                "screenshot": Command(self.c_screenshot, "save a picture of this screen "
-                                      "(svg, txt, png); help · default <format> [dir]",
+                "screenshot": Command(self.c_screenshot, "save a picture of this screen into "
+                                      "Pictures/jav3 (svg, txt, png); help · default "
+                                      "<format> [dir]",
                                       "[name] [format] [location]", takes_arg=True,
                                       busy_ok=True),
                 "details": Command(self.c_details, "expand or collapse tool output (ctrl+o)",
@@ -9776,7 +9790,7 @@ def build_tui(base: str, token: str, **kw):
             text = transcript_markdown(self.title_text or f"Jav3 chat #{self.cid}",
                                        r.get("messages", []))
             path = write_new(directory, stem, "md", text.encode("utf-8"))
-            self.notify(f"saved {path}")
+            await self.note(f"saved {path}")         # in the log: a toast wraps and goes
 
         def _shot_defaults(self) -> tuple[str, str]:
             st = self._load_settings()
@@ -9817,6 +9831,11 @@ def build_tui(base: str, token: str, **kw):
             name, fmt, loc = parse_shot_args(toks)
             fmt = fmt or fmt0
             directory = safe_output_dir(loc or loc0)
+            # the picture is of the chat, not of the command being run: the completion
+            # list and any toast go first (and the screen gets a frame to redraw)
+            self.hide_popup()
+            self.clear_notifications()
+            await asyncio.sleep(0.15)
             if fmt == "txt":
                 data = self.screen_text().encode("utf-8")
             else:
@@ -9824,7 +9843,7 @@ def build_tui(base: str, token: str, **kw):
                 data = svg_to_png(svg) if fmt == "png" else svg.encode("utf-8")
             path = write_new(directory, safe_stem(name, time.strftime("jav3-%Y%m%d-%H%M%S")),
                              fmt, data)
-            self.notify(f"saved {path}")
+            await self.note(f"saved {path}")
 
         async def c_details(self, arg: str) -> None:
             self.action_toggle_tools()

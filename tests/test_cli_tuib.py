@@ -468,6 +468,39 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
         assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
 
 
+# --- TUI-14 / TUI-18 leftovers -----------------------------------------------------------------------
+
+async def test_a_text_screenshot_leaves_out_the_completion_popup_TUI14(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    home = tmp_path / "home"
+    (home / "Pictures").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.editor.text = "/screenshot "                   # the format list is open
+        await pilot.pause(0.3)
+        assert app.popup_open()
+        await app.c_screenshot("snap txt")
+        assert not app.popup_open()
+        shot = (home / "Pictures" / "jav3" / "snap.txt").read_text()
+        assert "plain text" not in shot and "txt  " not in shot
+        assert "saved " in " ".join(str(w.render()) for w in app.query("Static"))   # in the log
+
+
+def test_local_tool_rows_read_like_their_server_twins_TUI18():
+    assert jav3.tool_title("local_read_file", {"path": "/etc/hosts"}) == \
+        ("→", "Read /etc/hosts  (local)")
+    icon, title = jav3.tool_title("local_write_file", {"path": "a.txt", "content": "hi\nyo"})
+    assert icon == "←" and title == "Write a.txt (2 lines)  (local)"
+    assert jav3.tool_title("local_edit_file", {"path": "a.txt"}) == ("←", "Edit a.txt  (local)")
+    assert jav3.tool_title("local_list_files", {"path": "."}) == ("✱", "List .  (local)")
+    assert jav3.tool_title("local_search", {"query": "TODO", "path": "src"}) == \
+        ("✱", 'Grep "TODO" in src  (local)')
+    assert jav3.tool_title("local_shell", {"command": "ls -la"}) == ("$", "ls -la  (local)")
+    assert jav3.tool_title("read_file", {"path": "x"}) == ("→", "Read x")      # a server tool: as before
+
+
 # --- TUIB-15 / TUIB-16: the login flows ----------------------------------------------------------------
 
 async def test_the_tui_login_warns_about_plain_http_before_the_password_is_asked_TUIB15(
