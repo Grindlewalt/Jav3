@@ -210,7 +210,7 @@ export default function Chat({
   const [runsView, setRunsView] = useState(false)
   // bumped when something may have joined the approval queue (see below)
   const [needsPoke, setNeedsPoke] = useState(0)
-  const asks = useOperatorAsks(conversationId)   // ask_user / permission asks
+  const asks = useOperatorAsks(conversationId, busy)   // ask_user / permission asks
   const [permMode, setPermMode] = usePermissionMode(conversationId)
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
@@ -547,6 +547,7 @@ export default function Chat({
     const id = conversationId ?? liveId.current
     if (!id) return
     try { await api(`/api/chat/${id}/stop`, { method: 'POST' }) } catch { /* already done */ }
+    asks.settle()   // the turn's open question is void now; do not leave a dead card
   }
 
   async function send(resend = null) {

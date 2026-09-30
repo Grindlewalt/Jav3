@@ -81,7 +81,7 @@ export default function Shell() {
   // ask_user / permission asks from the turn in flight, answered above the
   // composer with the Work chat's card. Fed from both paths: a send's stream
   // and a reopened chat's tail (which replays the asks still waiting).
-  const asks = useOperatorAsks(cid)
+  const asks = useOperatorAsks(cid, busy)
   const onAskEvent = asks.onEvent
 
   const refreshSide = useCallback(

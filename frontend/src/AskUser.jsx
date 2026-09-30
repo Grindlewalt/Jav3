@@ -2,14 +2,28 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import {
   answerBody, foldAsks, freeLabel, initAsk, initialMode, keyToAction, MODE_HINT, MODE_LABEL, nextMode,
-  PERMISSION_MODES, reduceAsk,
+  PERMISSION_MODES, reduceAsk, settleAsks,
 } from './askUser.js'
 
 // The chat's open ask_user / permission asks (backend/operator_ask.py). Fed
 // from the turn's stream; a re-attached tail replays the ones still waiting.
-export function useOperatorAsks(cid) {
+//
+// `busy` is whether this chat's turn is running. An ask only exists while its
+// turn does, so when busy falls (Stop, a finish, a failure) this chat's own
+// asks are void: the server dropped them, and answering a card it no longer
+// holds was silently discarded (WEBA-04). Asks from a child agent's own turn
+// (another conversation_id) stay until their ask_done.
+export function useOperatorAsks(cid, busy = null) {
   const [asks, setAsks] = useState([])
   const prev = useRef(cid)
+  const cidRef = useRef(cid)
+  cidRef.current = cid
+  const settle = useCallback(() => setAsks((a) => settleAsks(a, cidRef.current)), [])
+  const wasBusy = useRef(busy)
+  useEffect(() => {
+    if (wasBusy.current && busy === false) settle()
+    wasBusy.current = busy
+  }, [busy, settle])
   // switching chats drops the old chat's asks; a new chat getting its id
   // (null -> id, on `start`) keeps the ask that may already have arrived
   useEffect(() => {
@@ -20,7 +34,7 @@ export function useOperatorAsks(cid) {
     if (ev.type === 'ask_user' || ev.type === 'ask_done') setAsks((a) => foldAsks(a, ev))
   }, [])
   const drop = useCallback((id) => setAsks((a) => a.filter((x) => x.id !== id)), [])
-  return { asks, onEvent, drop }
+  return { asks, onEvent, drop, settle }
 }
 
 // The first open ask, answered in place above the composer. Keys as in the

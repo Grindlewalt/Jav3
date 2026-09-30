@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import {
   answerBody, foldAsks, initAsk, initialMode, keyToAction, MODE_LABEL, nextMode, PERMISSION_MODES,
-  reduceAsk,
+  reduceAsk, settleAsks,
 } from '../askUser.js'
 
 let n = 0
@@ -60,5 +60,14 @@ t('mode labels say what each mode does; a new chat starts where the last pick wa
   assert.equal(initialMode('ask'), 'ask')
   assert.equal(initialMode('bogus'), 'yolo')
   assert.equal(initialMode(null), 'yolo')
+})
+t('a turn that ended voids its own asks and keeps a child agent\'s', () => {
+  const own = { id: 'a', conversation_id: 7 }
+  const bare = { id: 'b' }
+  const child = { id: 'c', conversation_id: 9 }
+  assert.deepEqual(settleAsks([own, bare, child], 7), [child])
+  assert.deepEqual(settleAsks([], 7), [])
+  const same = [child]
+  assert.equal(settleAsks(same, 7).length, 1)
 })
 console.log(`${n} passed`)
