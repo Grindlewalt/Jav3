@@ -333,7 +333,9 @@ roster; null means a general worker.
 Write every brief for an agent that must FINISH on its own: name the files it
 owns, the command that proves it works (a test, a run, a build) and what done
 looks like. A root item gates everything after it, so keep roots small and
-certain. Tell items that depend on unfinished work to stub or build what they
+certain. Depend on an item only if you read its output: an environment or setup
+proof (does pip work, does the toolchain run) never gates items that just write
+files. Tell items that depend on unfinished work to stub or build what they
 need rather than wait for it."""
 
 # appended to the planner's instructions only when the operator made explicit
@@ -589,6 +591,12 @@ REPORT_RULES = """# Keep moving
 - "blocked" is ONLY for what an agent cannot do at all: a credential or
   account, a paid service, a decision only the operator can make. Everything
   else you solve.
+- The work is written and only the proof RUN is blocked (a host the egress
+  proxy refuses, a tool the box lacks): report "done" with the caveat and the
+  exact command still to run, or "blocked" naming the hosts. Never "failed": a
+  failed attempt is re-spawned from scratch. A proxy 403 means that host is
+  refused or queued for the operator: say which hosts in your report at once;
+  do not probe the proxy, the gateway or the sandbox for a way around it.
 
 # Reporting — required
 When the item is finished, call plan_report with status "done" and a summary
@@ -901,6 +909,10 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
     meta: dict[str, dict] = {}
     spawned = 0
     pausing = False
+    # PLANS-02: the guest's shared write buffer comes home after every settle
+    # and every plan_flush_seconds (orchestrator.flush_workspace), and once more
+    # on the way out; `flush_cid` is the item whose flags the pull should name
+    need_flush, flush_cid, last_flush = False, None, time.monotonic()
     async with edit(slug) as plan:
         base_tokens = plan.get("tokens_used", 0)     # earlier runs of this plan
         _driving.add(slug)
@@ -925,7 +937,9 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                 for iid, t in list(tasks.items()):
                     if t.done():
                         tasks.pop(iid)
-                        if await _settle(plan, idx[iid], t, meta.pop(iid), job_id) and not pausing:
+                        m_done = meta.pop(iid)
+                        need_flush, flush_cid = True, m_done.get("cid")
+                        if await _settle(plan, idx[iid], t, m_done, job_id) and not pausing:
                             pausing = True
                             plan["paused_reason"] = ("the token budget ran out mid-item "
                                                      f"({iid} is back to todo, no attempt spent)")
@@ -951,14 +965,25 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                     tasks.pop(iid)
                     meta.pop(iid)
                     _live_items.pop(m.get("cid"), None)
+                    need_flush, flush_cid = True, m.get("cid")
                     it["stalls"] += 1
                     it["last_error"] = "stalled: no tool call or message for too long"
+                    progress = ""
+                    if m.get("in_flight"):
+                        # the hung call is never recorded by the guest; say which
+                        # one it was so the retry does not walk into it again
+                        progress = (f"interrupted: {m['in_flight']} had been running "
+                                    f"{int(now - m.get('in_flight_at', now))}s with no result")
+                        it["last_error"] += f" (in flight: {m['in_flight']})"
                     it.setdefault("history", []).append(
                         {"attempt": it["attempts"], "outcome": "stalled",
-                         "error": it["last_error"], "progress": "",
+                         "error": it["last_error"], "progress": progress,
                          "conversation_id": m.get("cid"), "at": _now()})
                     it["history"] = it["history"][-HISTORY_KEEP:]
-                    it["status"] = "todo" if it["stalls"] <= 1 else "failed"
+                    # a stall respawn counts against attempts_max like any retry
+                    # (attempt 3 of 2 was seen)
+                    it["status"] = ("todo" if it["stalls"] <= 1
+                                    and it["attempts"] < plan["attempts_max"] else "failed")
                     _emit_item(job_id, it)
                 # the review checkpoint: past it, start nothing new, let what is
                 # running finish its turn, then pause for the operator
@@ -1001,6 +1026,12 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                             _emit_item(job_id, it)
                     return ("done" if all(it["status"] in SETTLED for it in plan["items"])
                             else "failed")
+            if tasks and time.monotonic() - last_flush >= settings.plan_flush_seconds:
+                need_flush = True
+            if need_flush:
+                need_flush, last_flush = False, time.monotonic()
+                await orchestrator.flush_workspace(slug, flush_cid)
+                flush_cid = None
             if tasks:
                 await asyncio.wait(list(tasks.values()), timeout=settings.plan_tick_seconds,
                                    return_when=asyncio.FIRST_COMPLETED)
@@ -1014,6 +1045,8 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
             _live_items.pop(m.get("cid"), None)
         if tasks:
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+        if need_flush:              # the last settle before a return / a stop
+            await orchestrator.flush_workspace(slug, flush_cid)
 
 
 async def _notify_paused(slug: str, plan: dict) -> None:
@@ -1057,6 +1090,10 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
 
     def on_event(ev: dict) -> None:
         m["last_activity"] = time.monotonic()
+        if ev.get("type") == "tool":
+            m["in_flight"], m["in_flight_at"] = ev.get("name"), m["last_activity"]
+        elif ev.get("type") == "tool_result":
+            m["in_flight"] = None
         if ev.get("type") == "tool" and m["cid"] is not None:
             bus.publish(job_id, {"type": "tool", "name": ev.get("name"), "node_id": m["cid"]})
 
@@ -1235,7 +1272,12 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
    done or skipped. Exception: every {pause_tokens} tokens the run PAUSES for the
    operator's review (running turns finish, nothing new starts). Then report
    where it stands and stop; only the operator resumes it. Go to the operator ONLY for what agents cannot do at all:
-   a credential or account, money, a decision that is genuinely theirs.
+   a credential or account, money, a decision that is genuinely theirs. While
+   a run is live never park on that question: nobody watches the plan while you
+   wait. Put open questions in your final report; if one truly cannot wait,
+   ask_user hands control back after about two minutes with the question left
+   open (the answer then reaches you as a message), so check first that it is
+   still a real question (plan_status, the project's Network tab) before asking.
 5. A single focused task outside the plan can go to spawn_agent or
    spawn_temp_agent; you wait for that one's report.
 6. When everything is done, report to the operator: what got done (exact

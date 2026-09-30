@@ -245,6 +245,33 @@ async def job_workspace(project: str | None, *, top_level: bool):
             guest_vm.release()
 
 
+async def flush_workspace(project: str | None, cid: int | None = None, *,
+                          timeout: float = 60) -> bool:
+    """Pull the shared guest write buffer home NOW (PLANS-02). A plan's items
+    write into the one guest copy, and the buffer only came home when the last
+    holder of the workspace let go, i.e. when the orchestrator's own turn ended:
+    until then git_status, the Workspace and Plan panels and the review flags saw
+    an empty project, and a guest crash or scrub lost every file. Idempotent (the
+    guest's pull does not clear the buffer, applying it again is a no-op), and a
+    no-op unless a guest workspace is held for the project. `cid` is the turn
+    the write flags should name (the item that just finished). Best-effort."""
+    if not project:
+        return False
+    from . import runtime
+    from .vm import guest_turn
+    if not guest_turn._ws_holds.get(project):
+        return False
+    token = runtime.conversation_id.set(cid) if cid else None
+    try:
+        await asyncio.wait_for(guest_turn.pull_writes(project), timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001 — the next flush, or the turn-end pack, retries
+        return False
+    finally:
+        if token is not None:
+            runtime.conversation_id.reset(token)
+
+
 async def run_job(job_id: str, brief: str, project: str, *,
                   leaf_tools=None, title: str = "") -> dict:
     """Open the head node, run the tree, publish job lifecycle events. Returns

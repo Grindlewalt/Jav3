@@ -376,7 +376,8 @@ async def test_chat_thread_opens_in_the_definition_project(client, monkeypatch):
     await client.post("/api/chat", json={"message": "b", "confirm_peak": True,
                                          "agent": "builder", "project_mode": "none"})
     await _settle()
-    assert seen[-1]["active_slug"] is None
+    # ...so the guest's workspace is that chat's artifact store, not "beta"
+    assert seen[-1]["active_slug"].startswith("chat-")
 
 
 async def test_spawned_children_get_parent_and_identity(client, monkeypatch):

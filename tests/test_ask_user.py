@@ -197,3 +197,72 @@ async def test_agent_ask_shows_in_parent_conversation(client):
     assert r.status_code == 200
     assert (await task) == {"answers": [{"selected": [], "text": "neither"}]}
     assert (await q_root.get())["type"] == "ask_done"
+
+
+async def _orchestrator(client, slug="alpha"):
+    await client.post("/api/projects", json={"name": "Alpha", "summary": "a"})
+    from backend.db import open_conversation
+    db = await get_db()
+    try:
+        return await open_conversation(db, project=slug, title="orch", mode="orchestrate")
+    finally:
+        await db.close()
+
+
+async def test_an_orchestrators_ask_does_not_park_the_supervision_loop(client, monkeypatch):
+    """PLANS-04: ask_user held an orchestrator for up to an hour while its plan
+    ran unobserved (items blocked, a stall, the run finished). With a plan run
+    live the ask waits a short window, then hands the turn back to keep
+    supervising; the question stays open and the answer reaches it as a message."""
+    from backend import agentmsg, plan as plan_mod
+    cid = await _orchestrator(client)
+    monkeypatch.setattr(plan_mod, "is_running", lambda slug: True)
+    monkeypatch.setattr(operator_ask, "ORCH_ASK_WAIT_S", 0.05)
+    agentmsg.open_operator_inbox(cid)
+    t1 = runtime.conversation_id.set(cid)
+    t2 = runtime.event_chan.set(f"chat:{cid}")
+    try:
+        got = await asyncio.wait_for(
+            operator_ask.ask(operator_ask.clean_questions(Q[:1])), 5)
+    finally:
+        runtime.conversation_id.reset(t1)
+        runtime.event_chan.reset(t2)
+    assert got.get("detached")
+    text = operator_ask.render_result(operator_ask.clean_questions(Q[:1]), got)
+    assert "plan_status" in text and "final report" in text
+    # still open for the operator: shown, listed, answerable
+    a = next(iter(operator_ask._pending.values()))
+    assert operator_ask.pending_events(cid)[0]["id"] == a.id
+    r = await client.post(f"/api/chat/{cid}/answer",
+                          json={"id": a.id, "answers": [{"selected": ["SQLite"]}]})
+    assert r.status_code == 200
+    assert not operator_ask._pending
+    db = await get_db()
+    try:
+        async with db.execute("SELECT body, from_operator FROM agent_messages "
+                              "WHERE to_conversation_id = ?", (cid,)) as cur:
+            rows = await cur.fetchall()
+    finally:
+        await db.close()
+    assert len(rows) == 1 and rows[0]["from_operator"] == 1
+    assert "SQLite" in rows[0]["body"] and "Which database?" in rows[0]["body"]
+    agentmsg.forget_operator_inbox(cid)
+
+
+async def test_an_orchestrators_ask_still_waits_when_no_run_is_live(client, monkeypatch):
+    from backend import plan as plan_mod
+    cid = await _orchestrator(client)
+    monkeypatch.setattr(plan_mod, "is_running", lambda slug: False)
+    monkeypatch.setattr(operator_ask, "ORCH_ASK_WAIT_S", 0.05)
+    t1 = runtime.conversation_id.set(cid)
+    t2 = runtime.event_chan.set(f"chat:{cid}")
+    try:
+        task = asyncio.create_task(operator_ask.ask(operator_ask.clean_questions(Q[:1])))
+        a = await _wait_ask()
+        await asyncio.sleep(0.2)                    # well past the short window
+        assert not task.done()
+    finally:
+        runtime.conversation_id.reset(t1)
+        runtime.event_chan.reset(t2)
+    assert operator_ask.answer(cid, a.id, [{"text": "x"}], False) == "ok"
+    assert (await task) == {"answers": [{"selected": [], "text": "x"}]}

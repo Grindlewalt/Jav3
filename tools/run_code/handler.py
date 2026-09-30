@@ -18,6 +18,7 @@ import os
 import re
 import resource
 import signal
+import tempfile
 import time
 
 from backend import writes
@@ -34,7 +35,34 @@ ARTIFACT_TOTAL_CAP = 8 * 1024 * 1024  # total capture cap per run
 # package-manager cache trees. Once npm works in-guest a single `npm install`
 # would otherwise try to reconcile thousands of node_modules files back into
 # the project (each through the secret-scan + diff-gate) — skip them wholesale.
-SKIP_DIRS = {".staging", ".git", "node_modules", ".npm", ".cache"}
+#
+# The same trees the turn-end pack drops (workspace_xfer.SKIP_OUT), so nothing is
+# reported as "kept" that the host then throws away (BUILD-04: .pytest_cache and
+# __pycache__ used to be listed as kept, and agents spent calls cleaning them).
+SKIP_DIRS = {".staging", ".git", "node_modules", ".npm", ".cache", ".venv",
+             "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+PIPE_GRACE = 2.0     # seconds the pipes get to close after the shell exits
+
+
+def _group_pids(pgid: int) -> list[int]:
+    """Pids still in the run's process group (Linux /proc; [] elsewhere)."""
+    pids = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return pids
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat") as f:
+                # pid (comm) state ppid pgrp ...: comm may hold spaces/parens
+                rest = f.read().rsplit(")", 1)[1].split()
+            if int(rest[2]) == pgid:
+                pids.append(int(name))
+        except (OSError, IndexError, ValueError):
+            continue
+    return sorted(pids)[:5]
 
 
 def _limits(cpu_seconds: int) -> None:
@@ -214,13 +242,27 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         before = None               # no project: nothing to stage artifacts into
 
     argv = (["python3", "-c", code] if code else ["/bin/sh", "-c", command])
+    script = None
+    if command:
+        # Run the command from a script file, not `sh -c <command>`: with -c the
+        # whole text sits in the shell's own cmdline, so `pkill -f <text from
+        # it>` matched and killed the shell itself (exit -15, ten times across
+        # three plan runs; PLANS-10). The shell reads it as it runs, so it is
+        # removed as soon as the shell has exited.
+        try:
+            fd, script = tempfile.mkstemp(prefix="rc-", suffix=".sh", dir="/tmp")
+            with os.fdopen(fd, "w") as f:
+                f.write(command + "\n")
+            argv = ["/bin/sh", script]
+        except OSError:
+            script = None               # fall back to -c
     path = "/usr/local/bin:/usr/bin:/bin"
     if os.path.isdir(PIP_VENV_BIN):
         # an image variant with approved pip packages: its venv comes first
         # (absent on the main image, so PATH there is exactly as before)
         path = f"{PIP_VENV_BIN}:{path}"
     env = {"PATH": path, "HOME": str(cwd),
-           "PYTHONUNBUFFERED": "1", "LANG": "C.UTF-8",
+           "PYTHONUNBUFFERED": "1", "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
            # Package-manager caches/scratch go to /tmp, never the project copy,
            # so they don't ride the turn-end reconcile back as artifacts.
            "npm_config_cache": "/tmp/.npm", "XDG_CACHE_HOME": "/tmp/.cache",
@@ -237,7 +279,10 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         _local = "localhost,127.0.0.1,::1"
         env.update(HTTP_PROXY=_proxy, HTTPS_PROXY=_proxy,
                    http_proxy=_proxy, https_proxy=_proxy,
-                   NO_PROXY=_local, no_proxy=_local)
+                   NO_PROXY=_local, no_proxy=_local,
+                   # a refused host answers 403 every time: pip's default five
+                   # retries only cost 10-18 s per attempt (BUILD-05)
+                   PIP_RETRIES="1")
     # CPU-seconds backstop = a few cores busy for the whole wall window, plus
     # headroom; the wall-clock SIGKILL below is the real deadline.
     cpu_cap = timeout * 4 + 30
@@ -249,33 +294,64 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL)
     except OSError as e:
+        if script:
+            try:
+                os.unlink(script)
+            except OSError:
+                pass
         return f"error: could not start the process: {e}"
 
-    # Drain the pipes into buffers with our OWN tasks, then wait on process
-    # exit with a timeout. On timeout we SIGKILL the group and still await the
-    # readers, so output emitted before the kill survives (wait_for around
-    # communicate() would discard it when it cancels the read mid-stream).
-    async def drain(stream) -> bytes:
-        chunks = []
+    # Drain the pipes into buffers with our OWN tasks and watch for the SHELL's
+    # exit ourselves. proc.wait() also waits for the pipes to close, and a
+    # background process the command left behind (`server &`, output not
+    # redirected) holds them open: the call hung until that process died and
+    # the timeout could not rescue it (PLANS-01). On timeout we SIGKILL the
+    # group (pgid == pid, _limits() setsid()s; getpgid() on a reaped shell
+    # raised and skipped the kill). Once the shell is gone the pipes get a short
+    # grace, then we detach from them, still reading into the void so the
+    # background process never blocks on a full pipe. Output emitted before the
+    # kill or the detach is kept.
+    bufs: dict[str, list] = {"out": [], "err": []}
+
+    async def drain(stream, key: str) -> None:
         while True:
             chunk = await stream.read(65536)
             if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
-    out_task = asyncio.ensure_future(drain(proc.stdout))
-    err_task = asyncio.ensure_future(drain(proc.stderr))
+                return
+            if bufs[key] is not None:
+                bufs[key].append(chunk)
+    tasks = {asyncio.ensure_future(drain(proc.stdout, "out")),
+             asyncio.ensure_future(drain(proc.stderr, "err"))}
 
     timed_out = False
-    try:
-        await asyncio.wait_for(proc.wait(), timeout)
-    except asyncio.TimeoutError:
-        timed_out = True
+    delay = 0.005
+    while proc.returncode is None:
+        if time.monotonic() - t0 >= timeout:
+            timed_out = True
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            break
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 0.1)
+    if script:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
+            os.unlink(script)
+        except OSError:
             pass
-        await proc.wait()
-    out_b, err_b = await out_task, await err_task
+    _done, pending = await asyncio.wait(tasks, timeout=PIPE_GRACE)
+    detached = ""
+    if pending:
+        out_b, err_b = b"".join(bufs["out"]), b"".join(bufs["err"])
+        bufs["out"] = bufs["err"] = None          # keep reading, keep nothing
+        pids = _group_pids(proc.pid)
+        detached = ("(background process" + (f" {', '.join(map(str, pids))}" if pids else "")
+                    + " from this command is still running; its output is detached. "
+                    "Redirect the output when you use &: `cmd > /tmp/x.log 2>&1 &`, "
+                    "and kill it when you are done)")
+    else:
+        out_b, err_b = b"".join(bufs["out"]), b"".join(bufs["err"])
     dur = time.monotonic() - t0
 
     out = _cap(out_b.decode(errors="replace"), "stdout")
@@ -288,6 +364,8 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         lines += ["--- stderr ---", err.rstrip()]
     if not out.strip() and not err.strip():
         lines.append("(no output)")
+    if detached:
+        lines.append(detached)
 
     # network failures here are almost always the monitored-egress gate, not a
     # permanent wall — surface the fix instead of letting the model give up.
@@ -296,9 +374,17 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
                    "name or service not known", "network is unreachable",
                    "connection refused", "failed to establish a new connection",
                    "no route to host", "proxyerror", "connection timed out",
-                   "could not resolve proxy")
+                   "could not resolve proxy", "tunnel connection failed",
+                   "connect tunnel failed", "no matching distribution found",
+                   "could not find a version that satisfies")
+    # `pip install ... | tail`, `cmd; echo done` and a curl that prints only its
+    # tunnel error all exit 0 and got no hint (PLANS-06 / BUILD-05). A clean exit
+    # gets it only for the markers that name the proxy or a package that could
+    # not be fetched; a mere "connection refused" in a passing test's output does not.
+    strong = ("proxyerror", "tunnel connection failed", "connect tunnel failed",
+              "no matching distribution found", "could not find a version that satisfies")
     proxy_on = bool(os.environ.get("JARVIS_EGRESS_PROXY"))
-    if proc.returncode != 0 and any(m in combined for m in net_markers):
+    if any(m in combined for m in (net_markers if proc.returncode != 0 else strong)):
         if proxy_on:
             lines.append(_egress_note(code or command, out + "\n" + err))
         else:

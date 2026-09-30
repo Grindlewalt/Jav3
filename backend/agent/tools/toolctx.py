@@ -51,6 +51,21 @@ async def _ensure_artifact_project(slug: str) -> None:
         await db.close()
 
 
+async def adopt_artifact_store(slug: str) -> bool:
+    """After a project-less GUEST turn: the turn's workspace was the chat's
+    artifact store (chat.py passes chat-<id> as the guest's active slug), and
+    the guest's writes landed in it at turn end without any of the bookkeeping
+    the host-loop fallback did on first use. Register it (hidden project row,
+    project.md, marker) once it holds a file, so /artifacts lists it. A chat
+    that wrote nothing leaves nothing behind. Idempotent."""
+    from ...fsutil import list_tree
+    project_dir = settings.projects_dir / slug
+    if not any(f["path"] != "project.md" for f in list_tree(project_dir)):
+        return False
+    await _ensure_artifact_project(slug)
+    return True
+
+
 async def require_project() -> str:
     from ... import runtime
     slug = await active_slug()

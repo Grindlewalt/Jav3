@@ -28,6 +28,7 @@ parameters:
         required: [question, options]
   required: [questions]
 ---
-Blocks until the operator answers (up to an hour). The result lists what they
-picked and anything they typed. If they skip, proceed on your best judgement
+Blocks until the operator answers (up to an hour; an orchestrator with a live
+plan run gets control back after ~2 minutes and the answer arrives as a
+message). The result lists what they picked and anything they typed. If they skip, proceed on your best judgement
 and say what you assumed; do not immediately ask the same thing again.

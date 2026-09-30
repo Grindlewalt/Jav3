@@ -18,14 +18,20 @@ parameters:
       type: integer
       description: Kill the run after this many seconds (default 60, max 300).
 ---
-The sandbox has NO network and no secrets — pip/npm installs and web fetches
-will fail by design; use web tools for anything remote, then process it here.
-`node` and `npm` ARE installed, so JS projects run and test in place (e.g.
-`node --test`, or your package.json's own `npm test`/`npm run …` scripts).
+The sandbox has no direct network and no secrets. With monitored egress on,
+pip/npm/curl go through the host's proxy and reach only hosts the project's
+Network policy allows (a proxy 403 = refused or queued: report the exact hosts,
+do not probe the sandbox); with it off they fail by design. `node`, `npm` and
+(in current images) `pytest` are installed: run and test in place.
+
+Background jobs: redirect output (`cmd > /tmp/x.log 2>&1 &`) and kill what you
+start; an unredirected one is detached after ~2 s but keeps running, and keeps
+its port for everyone on the shared box.
 
 Your working directory is the project copy: read its files directly, and write
 results as files — they sync back to the project at turn end. That sync keeps
-EVERYTHING the run created under the project, so put throwaway scratch (probe
-scripts, scratch logs, one-off experiments) under /tmp instead, where it is NOT
-kept; node_modules and package caches are never kept. stdout/stderr are
-truncated past ~6k chars — print what matters, write the rest to a file.
+EVERYTHING the run created, so put small throwaway scratch under /tmp, where it
+is NOT kept (it is RAM-backed and small, ~350 MB: no venvs or big installs
+there; use .venv in the project). node_modules, .venv, __pycache__,
+.pytest_cache and package caches are never kept. stdout/stderr are truncated
+past ~6k chars: print what matters, write the rest to a file.

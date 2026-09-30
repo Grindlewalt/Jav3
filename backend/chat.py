@@ -13,7 +13,7 @@ from .agent import budget
 from .agent.model import model
 from . import narration
 from .agent.loop import db_tool_sink
-from .agent.tools import toolsections
+from .agent.tools import toolctx, toolsections
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
 from .auth import require_actor
 from .config import settings
@@ -920,7 +920,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                             rules=standing_rules_tail(), tool_specs=tools,
                             read_only=list(read_only_names(entries)),
                             op_id=op_id, envelope=envelope,
-                            active_slug=active, push_workspace=True,
+                            # no project: the guest's workspace is the chat's
+                            # artifact store, or its file tools have nowhere to
+                            # write (WEBA-01); adopted in the finally below
+                            active_slug=active or envelope.artifact_slug,
+                            push_workspace=True,
                             # voice turns skip the second-pass rules rewrite:
                             # the streamed text was already spoken aloud
                             rewrite_rules=not voice,
@@ -1104,6 +1108,10 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             except Exception:
                 pass
         if atoken is not None:
+            try:
+                await toolctx.adopt_artifact_store(f"chat-{conversation_id}")
+            except Exception:  # noqa: BLE001 — bookkeeping only
+                pass
             runtime.artifact_slug.reset(atoken)
         if ptoken is not None:
             runtime.active_project.reset(ptoken)
