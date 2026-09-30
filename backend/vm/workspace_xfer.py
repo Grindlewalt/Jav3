@@ -3,6 +3,9 @@
 The guest edits a COPY of the project, never the canonical files directly. So:
 - `build_merged_tar(slug)` ships the project's workspace into the guest, minus
   junk and any legacy `.staging` dir (the guest uses its own as a write buffer).
+  Dotfiles ship too (.gitignore, .eslintrc, .github/): without them the guest
+  saw a project with no .gitignore and an agent wrote one that replaced the
+  real one. Credential files stay out (see _withheld).
 - `apply_guest_writes(slug, tar)` takes back the guest's write buffer and applies
   each file through the HOST `writes.apply_write` — so the PROTECTED guard, 0644,
   the secret-leak refusal and the advisory diff-gate scan stay authoritative
@@ -16,6 +19,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from .. import secrets as secrets_mod
 from .. import taintpaths, writes
 from ..config import settings
 from ..fsutil import list_tree
@@ -32,9 +36,36 @@ SKIP = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "dist",
 # 2026-09-27). run_code's per-file and per-run caps still bound its size.
 SKIP_OUT = SKIP - {"dist"}
 
+# ...of which these are the harness's own: a write to one is REFUSED and said so.
+# The rest (.venv, node_modules, __pycache__, .pytest_cache) is generated junk
+# that run_code sweeps up by accident and is dropped quietly, as it always was.
+PROTECTED_OUT = {".git", ".staging", ".workspace.json", ".context.json"}
+
+# Dotfiles that ship into the guest are only those with no credentials in them.
+_SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
+_SECRET_FILES = {".netrc", ".pypirc", ".git-credentials"}
+_ENV_TEMPLATE = {"example", "sample", "template", "dist", "defaults"}
+
 
 def _skip(rel: str, skip=SKIP) -> bool:
     return any(part in skip for part in Path(rel).parts)
+
+
+def _withheld(rel: str) -> bool:
+    """A file that stays out of the guest although dotfiles go in: env files
+    (real values live in them), credential files and dirs. A project's
+    `.env.example` is a template and ships."""
+    p = Path(rel)
+    if any(part in _SECRET_DIRS for part in p.parts):
+        return True
+    name = p.name
+    if name in _SECRET_FILES or name == ".env":
+        return True
+    return name.startswith(".env.") and name.rsplit(".", 1)[-1] not in _ENV_TEMPLATE
+
+
+def _is_dot(rel: str) -> bool:
+    return any(part.startswith(".") for part in Path(rel).parts)
 
 
 def build_merged_tar(slug: str) -> bytes:
@@ -42,19 +73,41 @@ def build_merged_tar(slug: str) -> bytes:
     proj = settings.projects_dir / slug
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for entry in sorted(list_tree(proj), key=lambda e: e["path"]):
+        for entry in sorted(list_tree(proj, dotfiles=True), key=lambda e: e["path"]):
             rel = entry["path"]
-            if _skip(rel):
+            if _skip(rel) or _withheld(rel):
                 continue
             p = writes.resolve(slug, rel)
             if p is None or not p.is_file():
                 continue
             data = p.read_bytes()
+            if _is_dot(rel) and secrets_mod.find_in_bytes(data):
+                # a dotfile holding a stored secret's value must not reach the
+                # guest (the guest holds no secrets); it was never shipped before
+                log.warning("not shipping %s/%s into the guest: it contains a stored secret",
+                            slug, rel)
+                continue
             ti = tarfile.TarInfo(rel)
             ti.size = len(data)
             ti.mode = 0o644
             tar.addfile(ti, io.BytesIO(data))
     return buf.getvalue()
+
+
+def _keep_harness_ignores(data: bytes) -> bytes:
+    """The project's root .gitignore always keeps the harness's own lines
+    (.staging/, .workspace.json, .context.json, data/). An agent that rewrites the
+    file drops them, and the next `git add -A` would stage the buffer, the
+    workspace file, the context list and the data dir. Missing lines are put back
+    at the end; whatever else the agent wrote stays."""
+    from .. import gitgate
+    have = {line.strip() for line in data.splitlines()}
+    missing = [ln for ln in gitgate.GITIGNORE.splitlines()
+               if ln.strip() and ln.strip().encode() not in have]
+    if not missing:
+        return data
+    sep = b"" if not data or data.endswith(b"\n") else b"\n"
+    return data + sep + ("\n".join(missing) + "\n").encode()
 
 
 async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = None) -> dict:
@@ -63,9 +116,9 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = No
     advisory flags raised (rel -> [triggers]), `held`: writes to files that
     ride every prompt (alwaysloaded.py) that a tainted turn made, which wait for
     the operator instead of landing, and what did NOT land for any other reason:
-    `refused` (rel -> why: a protected or excluded path) and `failed` (rel ->
-    the error). Nothing here is silent: describe_unapplied() turns the result
-    into what the reader is told.
+    `refused` (rel -> why: a protected path) and `failed` (rel -> the error).
+    Nothing here is silent: describe_unapplied() turns the result into what the
+    reader is told.
 
     Tainted = the turn that owns `op_id` read untrusted content, or any turn on
     the project did while live or since the project was last idle (the buffer is
@@ -88,13 +141,17 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = No
             if not m.isfile():
                 continue
             rel = m.name
-            if _skip(rel, SKIP_OUT):
-                refused[rel] = "an excluded path (.git, .staging, node_modules, ...)"
+            if set(Path(rel).parts) & PROTECTED_OUT:
+                refused[rel] = "a protected path"
                 continue
+            if _skip(rel, SKIP_OUT):
+                continue                   # generated junk, dropped quietly as ever
             f = tar.extractfile(m)
             if f is None:
                 continue
             data = f.read()
+            if rel == ".gitignore":
+                data = _keep_harness_ignores(data)
             try:
                 triggers, was_held = await writes.apply_write_gated(
                     slug, rel, data, tainted=tainted)
