@@ -7752,6 +7752,8 @@ def build_tui(base: str, token: str, **kw):
                         if not data.get("running"):
                             await self._settle(turn, data)
                             return True
+                        self.reconnecting = False       # attached: the status line says working
+                        self._refresh_status()
                         await self._resync(turn, data)
                         t0, tries = time.monotonic(), 1
                         if self.stop_requested:
@@ -7761,6 +7763,8 @@ def build_tui(base: str, token: str, **kw):
                         return True
                     # `idle`, or a clean close with no final: look again
                 except httpx.TransportError:
+                    self.reconnecting = True            # dropped again: back to trying
+                    self._refresh_status()
                     continue
             return True                          # this view moved on to another turn
 
