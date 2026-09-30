@@ -292,6 +292,9 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                     else workspace_xfer.LOST_NOTE)}
             yield held_final
     finally:
+        # a stop must also stop what the guest had brokered to the host (a
+        # spawn_agent child, a research job, a model stream): nothing else will
+        getattr(broker, "cancel_inflight", lambda _op: None)(op_id)
         if s is not None:
             s.close()
         last_out = False

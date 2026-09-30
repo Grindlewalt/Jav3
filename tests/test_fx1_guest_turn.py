@@ -359,6 +359,16 @@ async def test_a_completed_turn_does_not_pull_again(env, monkeypatch):
     assert (settings.projects_dir / "fx1" / "e.txt").read_text() == "e\n"
 
 
+async def test_a_stop_cancels_what_the_guest_had_brokered(env, monkeypatch):
+    """Whatever the host was running for the turn (a brokered child agent, a model
+    stream) is cancelled in the same finally, first, so a stop really stops it."""
+    seen = []
+    monkeypatch.setattr(broker, "cancel_inflight", lambda op: seen.append(op), raising=False)
+    _pull_returns(monkeypatch, {})
+    await _stop_after_first_token(monkeypatch)
+    assert seen == ["op-fx1"]
+
+
 # --- ROBUST-03 ------------------------------------------------------------------
 
 async def test_refused_and_failed_files_are_told_in_the_answer(env, monkeypatch):
