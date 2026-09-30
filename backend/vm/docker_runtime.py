@@ -545,6 +545,9 @@ class DockerBox:
         # set when boxes.destroy starts: a turn that reached this controller
         # while the box was going would boot a container nothing owns any more
         self.retired = False
+        # a container by this box's name that THIS controller started (or is
+        # about to replace after checking it is ours): only then may it be removed
+        self._ours = False
 
     # GuestVM interface -------------------------------------------------------
     @property
@@ -634,6 +637,13 @@ class DockerBox:
             await self._start_listeners()
             await boxes.box_up(self.box)      # WP2 et al.; raising fails closed
             self._hooked = True
+            if await self._foreign():
+                raise DockerError(
+                    f"a container named {container_name(self.box)} already exists and "
+                    "is not this install's (another Jav3 install on this Docker daemon "
+                    "has a box with the same id); it is left running, so this box "
+                    "will not start")
+            self._ours = True
             await cli.run("rm", "--force", container_name(self.box), timeout=30)
             rc, out, err = await cli.run(*argv, timeout=120)
             if rc != 0:
@@ -728,8 +738,22 @@ class DockerBox:
         await self._cleanup()
         self.state = "stopped"
 
+    async def _foreign(self) -> bool:
+        """A container by this box's name that this server did not start: it
+        carries no label of ours, or its socket mount is under another
+        install's vm_dir (leftovers.py's positive identification). `rm --force`
+        by name alone killed a second install's running box."""
+        name = container_name(self.box)
+        rc, _, _ = await cli.run("inspect", "--format", "{{.Name}}", name, timeout=20)
+        if rc != 0:
+            return False          # none by that name (or the daemon is down: run says so)
+        from . import leftovers
+        return name not in {c["name"] for c in await leftovers._containers()}
+
     async def _cleanup(self) -> None:
-        await cli.run("rm", "--force", container_name(self.box), timeout=60)
+        if self._ours:
+            self._ours = False
+            await cli.run("rm", "--force", container_name(self.box), timeout=60)
         for lst in self._listeners:
             await lst.stop()
         self._listeners.clear()
@@ -887,17 +911,34 @@ async def runtimes_json() -> dict:
 
 async def reap_orphans() -> list[str]:
     """Remove this server's containers no registered box owns (left over from
-    an app restart: a docker box never outlives the app that started it).
+    an app restart: a docker box never outlives the app that started it, so
+    one found here means that app was killed while it ran). Each one gets a
+    `stopped` line in its box's history: the registry that knew the box is gone
+    and the container would otherwise leave no trace.
     "This server's" is leftovers.py's positive identification: Jav3's label,
     the jav3-<box> name AND a socket mount under this server's vm_dir, so a
     second Jav3 install on the same daemon keeps its running boxes."""
     from . import leftovers
     live = {container_name(b) for b in boxes.all_boxes()
             if b.runtime == "docker" and b.ctl is not None and b.ctl.running()}
-    gone = [c["name"] for c in await leftovers._containers() if c["name"] not in live]
-    for n in gone:
-        await cli.run("rm", "--force", n, timeout=60)
-    return gone
+    gone = [c for c in await leftovers._containers() if c["name"] not in live]
+    for c in gone:
+        await cli.run("rm", "--force", c["name"], timeout=60)
+        await _record_orphan(c)
+    return [c["name"] for c in gone]
+
+
+async def _record_orphan(c: dict) -> None:
+    from types import SimpleNamespace
+    from . import boxlog
+    bid = c["box_id"]
+    kind = {"p-": "project", "s-": "service", "b-": "builder"}.get(bid[:2])
+    box = SimpleNamespace(id=bid, kind=kind, runtime="docker",
+                          project=bid[2:] if kind == "project" else None)
+    await boxlog.record(
+        box, "stopped", actor="app",
+        reason=f"container was {c['status']} when the app started: the app that "
+               "started it was killed, so it was removed at startup")
 
 
 # --- registration ----------------------------------------------------------------------

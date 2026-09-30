@@ -688,7 +688,9 @@ async def test_prepare_sock_dir_acl_for_the_container_uid(short_dir, monkeypatch
     assert os.path.exists("/etc/passwd")
 
 
-async def test_reap_orphans(harness):
+async def test_reap_orphans(tmp_env, harness):
+    from backend.db import init_db
+    await init_db()                          # the reap writes each box's history
     fake = harness["cli"]
     gone = await dr.reap_orphans()
     assert gone == ["jav3-p-alpha", "jav3-p-ghost"]      # none registered+running
@@ -978,3 +980,62 @@ async def test_a_failed_destroy_leaves_the_box_usable(hist, monkeypatch):
     with pytest.raises(RuntimeError):
         await boxes.destroy(box)
     assert boxes.get(box.id) is box and ctl.retired is False
+
+
+class _Squatter(FakeCLI):
+    """A container named jav3-p-other exists that this server did not start."""
+
+    async def run(self, *args, timeout=120):
+        if args[0] == "inspect" and args[2] == "{{.Name}}":
+            self.calls.append(list(args))
+            return 0, "/jav3-p-other\n", ""
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_a_container_of_another_install_is_never_replaced(harness, monkeypatch):
+    """Two installs on one daemon: the pre-run `docker rm --force jav3-<box>`
+    replaced (killed) the other install's running box of the same id."""
+    box = make_box(harness["box"].dir.parent, bid="p-other", project="other")
+    fake = _Squatter(on_run=harness["cli"].on_run)
+    monkeypatch.setattr(dr, "cli", fake)
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError, match="not this install's"):
+        await ctl.acquire()
+    assert ctl.state == "failed" and fake.ran("run") == []
+    assert ["rm", "--force", "jav3-p-other"] not in fake.calls     # not at boot, not in cleanup
+    assert harness["hooks"][-1] == ("box_down", "p-other")         # its own listeners are undone
+
+
+async def test_our_own_stale_container_is_still_replaced(harness, monkeypatch):
+    box = harness["box"]                                           # jav3-p-alpha: ours by its mount
+    fake = harness["cli"]
+    real = fake.run
+
+    async def stale(*args, timeout=120):
+        if args[0] == "inspect" and args[2] == "{{.Name}}":
+            fake.calls.append(list(args))
+            return 0, "/jav3-p-alpha\n", ""
+        return await real(*args, timeout=timeout)
+    monkeypatch.setattr(fake, "run", stale)
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    assert ["rm", "--force", "jav3-p-alpha"] in fake.calls and len(fake.ran("run")) == 1
+    await ctl.teardown()
+
+
+async def test_reaped_orphans_leave_a_stopped_event(tmp_env, harness):
+    """A container reaped at startup after a hard kill left nothing in the
+    box's history."""
+    from backend.db import init_db
+    from backend.vm import boxlog
+    await init_db()
+    boxlog.reset()
+    gone = await dr.reap_orphans()
+    assert gone == ["jav3-p-alpha", "jav3-p-ghost"]
+    for bid, proj in (("p-alpha", "alpha"), ("p-ghost", "ghost")):
+        (ev,) = await boxlog.events(bid)
+        assert (ev["event"], ev["actor"], ev["kind"], ev["project"], ev["runtime"]) == (
+            "stopped", "app", "project", proj, "docker")
+        assert "removed at startup" in ev["reason"] and "exited" in ev["reason"]
+    assert await boxlog.events("p-other") == []                # another install's: untouched
