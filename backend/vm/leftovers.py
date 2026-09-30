@@ -119,6 +119,11 @@ def _qemu_procs() -> list[dict]:
             continue
         cid = next((a.decode(errors="replace").split("guest-cid=", 1)[1].split(",")[0]
                     for a in argv if b"guest-cid=" in a), None)
+        # A box's QEMU always has a vsock CID. One without (the image build's
+        # provisioning VM runs in vm_dir too, booting base-work.qcow2) is not a
+        # box's, so never a leftover: cleaning it once killed a rebuild.
+        if cid is None or any(b"-work.qcow2" in a for a in argv):
+            continue
         out.append({"pid": int(p.name), "cwd": str(c), "box_id": bid, "cid": cid})
     return out
 

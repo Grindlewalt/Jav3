@@ -435,6 +435,25 @@ async def test_leftovers_scan_and_clean_only_ours(env, tmp_path, monkeypatch):
     assert elsewhere.exists()
 
 
+async def test_an_image_build_qemu_is_never_a_leftover(env, tmp_path, monkeypatch):
+    """The base-image build boots its provisioning VM from vm_dir, where the
+    shared box's QEMU also runs; a clean during a rebuild once killed it."""
+    vm_dir = settings.vm_dir
+    proc = tmp_path / "proc"
+    _fake_proc(proc, 5001, ["qemu-system-aarch64", "-drive",
+                            "file=base-work.qcow2,if=virtio"], str(vm_dir))
+    _fake_proc(proc, 5002, ["qemu-system-aarch64", "-netdev", "user,id=n0"], str(vm_dir))
+    monkeypatch.setattr(leftovers, "PROC", proc)
+    monkeypatch.setattr(leftovers, "SYS_NET", tmp_path / "nonet")
+    monkeypatch.setattr(settings, "docker_enabled", False)
+    killed = []
+    monkeypatch.setattr(leftovers.os, "kill", lambda pid, sig: killed.append(pid))
+    res = await vm_api.list_leftovers(fresh=True)
+    assert not [i for i in res["items"] if i["type"] == "qemu"]
+    await vm_api.clean_leftovers(vm_api.CleanBody(confirm=True))
+    assert killed == []
+
+
 async def test_leftovers_docker_off_never_calls_docker(env, monkeypatch, tmp_path):
     monkeypatch.setattr(leftovers, "PROC", tmp_path / "noproc")
     monkeypatch.setattr(leftovers, "SYS_NET", tmp_path / "nonet")
