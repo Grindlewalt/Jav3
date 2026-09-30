@@ -7308,12 +7308,19 @@ def build_tui(base: str, token: str, **kw):
                        f"{self._access_label()}[/]" if self.logged_in else
                        "[$warning]not logged in[/] [$text-muted]— /login[/]"
                        if self.logged_in is False else f"[$text-muted]{_esc(self.base)}[/]")
+                proj = self._project_label()
+                where = (f"\n[$text-muted]files and chats go to ⌂ {_esc(proj)}[/]"
+                         if proj and not self._here() else "")
                 home_hints.update(
-                    f"{who}\n\n"
+                    f"{who}{where}\n\n"
                     "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
+                    "[$text]←[/]           [$text-muted]agents: what is running, on an empty "
+                    "prompt[/]\n"
+                    "[$text]ctrl+j[/]      [$text-muted]new line (enter sends)[/]\n"
+                    "[$text]shift+tab[/]   [$text-muted]permissions: yolo → auto → ask · "
+                    "ctrl+x u picks[/]\n"
                     "[$text]ctrl+x l[/]    [$text-muted]sessions[/]\n"
                     "[$text]ctrl+x m[/]    [$text-muted]models[/]\n"
-                    "[$text]ctrl+x u[/]    [$text-muted]permissions: make agents ask first[/]\n"
                     "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
             show = self.sidebar_shown()        # hidden unless the operator opened it
             self.query_one("#sidebar").display = show
@@ -8798,7 +8805,7 @@ def build_tui(base: str, token: str, **kw):
                     rows.append((str(cv["id"]), _short(title, max(16, width - len(meta) - 2)),
                                  meta))
                 arg = await self.pick("Sessions", rows, str(self.cid) if self.cid else None,
-                                      hint="type to filter · enter opens", wide=True) or ""
+                                      wide=True) or ""
                 if not arg:
                     return
             if not arg.isdigit():

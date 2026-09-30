@@ -200,6 +200,33 @@ async def test_hidden_rows_wait_for_a_filter_and_a_line_says_how_many():
         assert ids[:2] == ["lm/a", "lm/b"]
 
 
+# TUI-21
+
+async def test_home_names_the_keys_a_new_user_needs_and_where_chats_go():
+    srv, app = make_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        hints = str(app.query_one("#home-hints").render())
+        for key in ("/help", "←", "ctrl+j", "shift+tab", "ctrl+x u", "ctrl+x l", "ctrl+p"):
+            assert key in hints, key
+        assert "files and chats go to" not in hints           # no project loaded
+        app.project = "benchmark-game"
+        app.refresh_chrome()
+        hints = str(app.query_one("#home-hints").render())
+        assert "files and chats go to ⌂ benchmark-game" in hints
+        assert app.query_one("#home-hints").region.bottom <= 24   # fits the screen
+
+
+async def test_sessions_picker_does_not_repeat_its_own_hint():
+    srv = SessionsServer([{"id": 7, "summary": "one", "started_at": "2026-09-20 10:00:00"}])
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/sessions")
+        assert await wait_for(lambda: top(app) == "Picker")
+        assert app.screen.hint == ""
+
+
 # TUI-19, TUI-20
 
 def test_fit_row_drops_whole_hints_by_rank_and_the_right_side_first():
