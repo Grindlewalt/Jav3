@@ -242,8 +242,18 @@ def base_url(address: str) -> str:
     if "://" in a:
         if not a.startswith(("http://", "https://")):
             raise CliError(f"unsupported scheme in {address!r}")
-        return a
-    return "http://" + a
+        url = a
+    else:
+        url = "http://" + a
+    # a typo ("10.0.0.999", "host:abc") must read as one line, not crash whoever asked
+    try:
+        host = httpx.URL(url).host
+    except (httpx.InvalidURL, ValueError) as e:
+        raise CliError(f"not a valid server address: {address.strip()!r} ({e})")
+    if not host or " " in host or "%20" in host:
+        raise CliError(f"not a valid server address: {address.strip()!r} "
+                       "(try host:port, like 10.0.0.82:8000)")
+    return url
 
 
 # --- HTTP -------------------------------------------------------------------------------
@@ -4338,8 +4348,8 @@ def build_tui(base: str, token: str, **kw):
                            "[$primary]v[/] new value  [$primary]d[/] delete",
                 "persistent": "[$primary]enter[/] open  [$primary]s[/] stop / start service  "
                               "[$primary]l[/] service logs  [$primary]d[/] revoke service",
-                "profiles": "[$primary]a[/] new  [$primary]e[/] edit  [$primary]p[/] assign "
-                            "to project  [$primary]d[/] delete",
+                "profiles": "[$primary]enter[/] details  [$primary]a[/] new  [$primary]e[/] edit  "
+                            "[$primary]p[/] assign to project  [$primary]d[/] delete",
                 "rules": "[$primary]d[/] revoke the always-allow rule",
                 "calls": "[$primary]c[/] conversation  [$primary]enter[/] context"}
         POLL_SECONDS = 4.0
@@ -5398,10 +5408,13 @@ def build_tui(base: str, token: str, **kw):
                 self.entries["persistent"] = self.persistent_entries_again()
                 await self.rebuild()
             elif e["type"] == "profile":
-                await self.app.push_screen_wait(View(
-                    f"Profile {e['raw'].get('name') or ''}", "\n".join(_profile_lines(e["raw"]))))
+                self._act(self._show_profile(e))            # a dialog needs a worker
             elif e["type"] == "call":
                 self._act(self._view_call_context(e))       # a dialog needs a worker
+
+        async def _show_profile(self, e: dict) -> None:
+            await self.app.push_screen_wait(View(
+                f"Profile {e['raw'].get('name') or ''}", "\n".join(_profile_lines(e["raw"]))))
 
         def persistent_entries_again(self) -> list[dict]:
             """Re-flatten the last report with the new open set (no request)."""
@@ -8463,6 +8476,8 @@ def build_tui(base: str, token: str, **kw):
                 await cmd.fn(arg.strip())
             except CliError as e:
                 await self.note(str(e), "error")
+            except Exception as e:      # noqa: BLE001 - one bad command must not take the app down
+                await self.note(f"/{name} failed: {type(e).__name__}: {e}", "error")
 
         async def local_shell(self, command: str) -> None:
             """`!cmd` runs on THIS machine; its output rides along with the next message."""
