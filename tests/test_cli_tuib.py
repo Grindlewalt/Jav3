@@ -468,6 +468,41 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
         assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
 
 
+# --- TUIB-11: the sidebar never squeezes the chat to 38 columns ---------------------------------------
+
+async def test_the_sidebar_waits_for_room():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        app.sidebar_pref = True                         # what the operator's tui.json says
+        app.refresh_chrome()
+        await pilot.pause(0.1)
+        assert app.query_one("#sidebar").display is False
+        assert app.query_one("#editor").region.width >= 70   # the whole width is the chat's
+        seen: list = []
+        app.notify = lambda msg, **kw: seen.append(msg)
+        await pilot.press("ctrl+b")                     # says why, changes nothing
+        assert seen and "100 columns" in seen[0] and app.sidebar_pref is True
+        await pilot.resize_terminal(130, 30)
+        await pilot.pause(0.3)
+        assert app.query_one("#sidebar").display is True
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause(0.3)
+        assert app.query_one("#sidebar").display is False
+
+
+async def test_a_notice_while_the_sidebar_waits_still_counts_as_unread():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        app.sidebar_pref = True
+        app.refresh_chrome()
+        app.push_notice("something finished", toast=False)
+        assert app.unread == 1
+
+
 # --- TUIB-10: the profile form keeps its Save row and its hint on a 24-row terminal --------------
 
 async def test_the_profile_form_fits_80x24_and_follows_the_cursor():

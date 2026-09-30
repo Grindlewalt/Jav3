@@ -715,6 +715,8 @@ COLLAPSED_LINES = 10
 EXPANDED_LINES = 40                # an open tool row, inline; → shows the rest
 DELEGATION_TOOLS = frozenset({"spawn_agent", "spawn_temp_agent", "deploy_agents", "research"})
 NOTICE_CAP = 50                   # notifications kept in the sidebar
+SIDEBAR_MIN_COLS = 100            # narrower than this the sidebar (42 wide) would leave
+                                  # the chat 38 columns: it stays hidden until there is room
 NOT_LOGGED_IN = ("not logged in — /login: paste the line from Settings → Add computer "
                  "(chat only), or use your password (full access)")
 SESSION_LOST = "not logged in (session expired, or token revoked) — /login"
@@ -7323,7 +7325,7 @@ def build_tui(base: str, token: str, **kw):
         # -- notifications ---------------------------------------------------------------------
 
         def sidebar_shown(self) -> bool:
-            return bool(self.sidebar_pref)
+            return bool(self.sidebar_pref) and self.size.width >= SIDEBAR_MIN_COLS
 
         def push_notice(self, text: str, kind: str = "info", toast: bool = True,
                         timeout: float = 5) -> None:
@@ -7800,6 +7802,7 @@ def build_tui(base: str, token: str, **kw):
 
         def on_resize(self, event) -> None:
             self.refresh_chrome()
+            self.call_after_refresh(self.refresh_chrome)     # once the new size has settled
 
         def watch_theme(self, theme: str) -> None:
             global DIFF_TINT
@@ -9002,6 +9005,10 @@ def build_tui(base: str, token: str, **kw):
             self.turn, self.busy, self.stop_requested = None, False, False
 
         def action_toggle_sidebar(self) -> None:
+            if self.size.width < SIDEBAR_MIN_COLS:
+                self.notify(f"the sidebar needs {SIDEBAR_MIN_COLS} columns; this window has "
+                            f"{self.size.width}", severity="warning")
+                return
             shown = self.query_one("#sidebar").display
             self.sidebar_pref = not shown
             if self.sidebar_pref:
