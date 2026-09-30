@@ -2483,8 +2483,8 @@ def build_tui(base: str, token: str, **kw):
 
     class Picker(ModalScreen):
         """opencode's DialogSelect, arrow-first. It opens on the list: ↑ ↓ move,
-        enter picks, esc closes. `t` (or any other printable key, which is kept
-        as the first letter) starts typing a filter: rows then sort by how
+        enter picks, esc closes. Any printable key (kept as the first letter of
+        the text, `t` included) starts typing a filter: rows then sort by how
         closely they match (picker_score) with the closest highlighted, ↑ ↓
         still move, backspace edits (and on an empty filter goes back to the
         list). With `custom`, enter on text that matches nothing returns the
@@ -2542,7 +2542,7 @@ def build_tui(base: str, token: str, **kw):
 
         def _show_hint(self) -> None:
             keys = ["↑↓ move", "enter pick"]
-            keys.append("backspace back to the list" if self.typing else "t type to filter")
+            keys.append("backspace back to the list" if self.typing else "type to filter")
             if not self.typing:
                 keys += [f"{'␣' if k == 'space' else k} {label}"
                          for k, (label, _) in self.actions.items()]
@@ -2669,7 +2669,7 @@ def build_tui(base: str, token: str, **kw):
             if event.is_printable and ch and not ch.isspace():
                 event.stop()
                 event.prevent_default()
-                self.start_typing("" if key == "t" else ch)
+                self.start_typing(ch)
 
         async def _run_action(self, key: str) -> None:
             ol = self.query_one("#choices", OptionList)
@@ -2725,12 +2725,18 @@ def build_tui(base: str, token: str, **kw):
             return True
 
     class Confirm(ModalScreen):
-        BINDINGS = [Binding("y,enter", "yes", show=False),
+        """y says yes, n / esc say no. `strict` (an approval, a delete, anything that
+        cannot be taken back) answers only to y: enter, the key a hand reaches for
+        twice, says no. Otherwise enter is yes, and the hint says so."""
+
+        BINDINGS = [Binding("y", "yes", show=False),
+                    Binding("enter", "enter", show=False),
                     Binding("n,escape", "no", show=False)]
 
-        def __init__(self, question: str, detail: str = "", grace: float = 0.0) -> None:
+        def __init__(self, question: str, detail: str = "", grace: float = 0.0,
+                     strict: bool = False) -> None:
             super().__init__()
-            self.question, self.detail = question, detail
+            self.question, self.detail, self.strict = question, detail, strict
             # a dialog that pops up on its own (not from the key just pressed)
             # ignores keys for `grace` seconds: the tail of what the operator
             # was typing must not answer a question they have not seen
@@ -2741,7 +2747,10 @@ def build_tui(base: str, token: str, **kw):
                 yield Static(f"[b]{_esc(self.question)}[/]")
                 if self.detail:
                     yield Static(f"[$text-muted]{_esc(self.detail)}[/]")
-                yield Static("\n[$primary]y[/] yes   [$text-muted]n / esc[/] no")
+                yield Static("\n[$primary]y[/] yes   [$text-muted]n / esc / enter[/] no"
+                             if self.strict else
+                             "\n[$primary]y / enter[/] yes   [$text-muted]n / esc[/] no",
+                             id="confirm-keys")
 
         def _early(self) -> bool:
             return time.monotonic() - self.opened < self.grace
@@ -2749,6 +2758,10 @@ def build_tui(base: str, token: str, **kw):
         def action_yes(self) -> None:
             if not self._early():
                 self.dismiss(True)
+
+        def action_enter(self) -> None:
+            if not self._early():
+                self.dismiss(not self.strict)
 
         def action_no(self) -> None:
             if not self._early():
@@ -5554,7 +5567,7 @@ def build_tui(base: str, token: str, **kw):
             return ok
 
         async def _confirm(self, q: str, detail: str) -> bool:
-            return bool(await self.app.push_screen_wait(Confirm(q, detail)))
+            return bool(await self.app.push_screen_wait(Confirm(q, detail, strict=True)))
 
         async def _verdict(self, yes: bool) -> None:
             e = self.selected()
@@ -5874,7 +5887,8 @@ def build_tui(base: str, token: str, **kw):
                 return
             wipe = bool(await self.app.push_screen_wait(Confirm(
                 f"Also delete {s.get('name')}'s /srv data?",
-                "y deletes the data disk for good; n (or esc) keeps it.")))
+                "y deletes the data disk for good; n (or esc or enter) keeps it.",
+                strict=True)))
             ok = await self._send("POST", f"/api/services/{s.get('id')}/revoke",
                                   f"revoked {s.get('name')}",
                                   json={"confirm": True, "delete_data": wipe})
@@ -6713,7 +6727,8 @@ def build_tui(base: str, token: str, **kw):
             if bid != "shared" and (b.get("disk") or {}).get("data_bytes"):
                 wipe = bool(await self.app.push_screen_wait(Confirm(
                     f"Also delete {bid}'s data disk?",
-                    "y deletes it for good; n (or esc) keeps it.")))
+                    "y deletes it for good; n (or esc or enter) keeps it.",
+                    strict=True)))
             await self._send("POST", f"/api/vm/boxes/{bid}/destroy", f"destroyed {bid}",
                              json={"confirm": True, "delete_data": wipe})
 
@@ -9087,7 +9102,7 @@ def build_tui(base: str, token: str, **kw):
                          ("ctrl+p", "command palette"),
                          ("ctrl+n", "new chat"),
                          ("ctrl+b", "notifications sidebar (● n = unread)"),
-                         ("in a picker", "↑↓ enter esc · t or any letter filters"),
+                         ("in a picker", "↑↓ enter esc · any letter filters"),
                          ("exit · quit", "alone on the prompt: quit"),
                          ("/theme create", "tab next field · ctrl+s save · esc cancel "
                                            "(the previous theme comes back)"),
@@ -9415,7 +9430,8 @@ def build_tui(base: str, token: str, **kw):
             if cid is None:
                 raise CliError("no chat to delete")
             if not await self.push_screen_wait(Confirm(f"Delete chat #{cid}?",
-                                                       "This cannot be undone.")):
+                                                       "This cannot be undone.",
+                                                       strict=True)):
                 return
             await self.api("DELETE", f"/api/conversations/{cid}")
             self.notify(f"deleted #{cid}")

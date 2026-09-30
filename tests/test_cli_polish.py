@@ -194,7 +194,7 @@ async def test_hidden_rows_wait_for_a_filter_and_a_line_says_how_many():
         prompts = [ol.get_option_at_index(i).prompt for i in range(ol.option_count)]
         assert "LMStudio" not in "".join(str(p) for p in prompts)      # no empty heading
         assert "3 more hidden" in str(prompts[-1])
-        await pilot.press("t", "l", "l", "a")
+        await pilot.press("l", "l", "a")
         await pilot.pause(0.2)
         ids = [ol.get_option_at_index(i).id for i in range(ol.option_count)]
         assert ids[:2] == ["lm/a", "lm/b"]

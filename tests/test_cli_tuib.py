@@ -317,6 +317,75 @@ async def test_the_selected_security_row_drops_its_own_colours():
             next(r for r in scr.query("SecRow") if r.has_class("-sel"))))
 
 
+# --- TUIB-05: enter never says yes to something that cannot be taken back --------------------
+
+async def test_enter_declines_the_destroy_and_the_data_disk_prompts():
+    pytest.importorskip("textual")
+    from test_cli_vms import _server as vms_server
+    seen: list = []
+    tr, state = vms_server(seen)
+    state["boxes"][1]["disk"] = {"overlay_bytes": 10_000_000, "data_bytes": 250_000_000}
+    app = jav3.build_tui("http://h:1", SESSION, transport=tr)
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "boxes", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        scr.select_key("Xp-alpha")
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        keys = str(app.screen.query_one("#confirm-keys").render())
+        assert "enter" in keys and "y" in keys
+        await pilot.press("enter")                   # a habit: nothing is destroyed
+        await pilot.pause(0.3)
+        assert _top(app) == "VmsScreen"
+        assert not [c for c in seen if c[0] == "POST"]
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        await pilot.press("y")                       # destroy it ...
+        assert await _until(pilot, lambda: _top(app) == "Confirm"
+                            and "data disk" in app.screen.question)
+        await pilot.press("enter")                   # ... a second habitual enter keeps the disk
+        assert await _until(pilot, lambda: any(
+            c[0] == "POST" and c[1] == "/api/vm/boxes/p-alpha/destroy" for c in seen))
+        post = next(c for c in seen if c[0] == "POST" and c[1].endswith("/destroy"))
+        assert post[3] == {"confirm": True, "delete_data": False}
+
+
+async def test_a_plain_confirm_still_takes_enter_and_says_so():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, top
+    srv = FakeServer(projects=["alpha"], full=True)
+    app = jav3.build_tui("http://h:1", SESSION, transport=srv.transport())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.4)
+        app.dispatch("/project brandnew")
+        assert await wait_for(lambda: top(app) == "Confirm")
+        assert "y / enter" in str(app.screen.query_one("#confirm-keys").render())
+        await pilot.press("enter")
+        assert await wait_for(lambda: srv.created == [{"name": "brandnew"}])
+
+
+# --- TUIB-06: a name typed into a picker keeps its first letter, t included ------------------------
+
+async def test_a_picker_keeps_the_first_letter_when_it_is_t():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer
+    srv = FakeServer(projects=["alpha"], full=True)
+    app = jav3.build_tui("http://h:1", SESSION, transport=srv.transport())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.4)
+        app.dispatch("/project")
+        assert await wait_for(lambda: _top(app) == "Picker")
+        hint = str(app.screen.query_one("#dialog-hint").render())
+        assert "type to filter" in hint and "t type" not in hint
+        await pilot.press(*"tetris")
+        f = app.screen.query_one("#filter")
+        assert f.value == "tetris"
+        await pilot.press("enter")
+        assert await wait_for(lambda: _top(app) == "Confirm")
+        assert "'tetris'" in app.screen.question
+        await pilot.press("n")
+
+
 async def test_the_selected_vms_box_row_keeps_its_bold_and_its_text():
     pytest.importorskip("textual")
     app = jav3.build_tui("http://h:1", SESSION, transport=_everything())

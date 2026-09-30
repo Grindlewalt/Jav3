@@ -135,7 +135,6 @@ async def test_the_pickers_typed_name_is_checked_the_same_way():
         await pilot.pause(0.3)
         app.dispatch("/project")
         assert await wait_for(lambda: top(app) == "Picker")
-        await pilot.press("t")
         await pilot.press(*"brandnew")
         await pilot.press("enter")
         assert await wait_for(lambda: any("no project named" in n for n in notes(app)))

@@ -714,11 +714,9 @@ async def test_picker_opens_on_the_list_and_typing_highlights_the_closest(cfg):
         app.run_worker(go())
         await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
         scr = app.screen
-        await pilot.press("t")                                 # t: type mode, no letter
+        await pilot.press("o", "t")                            # any letter, t too, is text
         await pilot.pause(0.1)
-        assert scr.typing and scr.query_one("#filter").value == ""
-        await pilot.press("o", "t")
-        await pilot.pause(0.1)
+        assert scr.typing and scr.query_one("#filter").value == "ot"
         ol = scr.query_one("#choices")
         assert ol.get_option_at_index(ol.highlighted).id == "d"
         await pilot.press("backspace", "backspace", "backspace")  # the 3rd leaves typing
