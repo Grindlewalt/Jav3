@@ -242,7 +242,12 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                 break                     # the guest closed the connection
             if not line.strip():
                 continue
-            ev = json.loads(line)
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                ev = None
+            if not isinstance(ev, dict):
+                raise GuestStreamError("guest sent a line that is not an event (not a JSON object)")
             kind = ev.get("type")
             if kind == "staged":
                 # the guest's write buffer, sent AFTER `final` — apply it
@@ -309,7 +314,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                     # pack already happened (or never will): sweep the buffer home.
                     # Repeat applies of the same bytes are idempotent.
                     try:
-                        await pull_writes(active_slug)
+                        await asyncio.wait_for(pull_writes(active_slug), RESCUE_TIMEOUT)
                     except Exception:  # noqa: BLE001 — best-effort sweep
                         pass
                 if persist_fact:

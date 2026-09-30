@@ -95,6 +95,22 @@ async def test_a_turn_whose_guest_floods_a_line_fails_cleanly(env, monkeypatch):
     assert all(_books_clear().values()), _books_clear()
 
 
+@pytest.mark.parametrize("junk", [b"not json at all", b"[1, 2]", b"\"a string\""])
+async def test_a_line_that_is_not_an_event_fails_the_turn_cleanly(env, monkeypatch, junk):
+    (settings.projects_dir / "fx1").mkdir(parents=True)
+
+    async def nothing(spec, box):
+        return None
+    monkeypatch.setattr(gt, "_pinned_rpc", nothing)
+
+    async def garbage(loop, sock, spec):
+        await loop.sock_sendall(sock, junk + b"\n")
+
+    with pytest.raises(gt.GuestStreamError, match="not an event"):
+        await _drive(monkeypatch, garbage)
+    assert all(_books_clear().values()), _books_clear()
+
+
 # --- unpacking the buffer --------------------------------------------------------
 
 async def _events(kind):
