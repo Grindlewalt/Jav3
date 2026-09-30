@@ -25,7 +25,10 @@ from .config import settings
 from .fsutil import safe_join
 
 # .staging: legacy quarantine dirs may linger on disk; keep them inert.
-PROTECTED = {".staging", ".git"}
+# .context.json is the operator's list of always-loaded files (alwaysloaded.py):
+# no write of an agent's, from any channel, may edit it (case-folded: a
+# case-insensitive filesystem would land '.Context.json' on it).
+PROTECTED = {".staging", ".git", ".context.json"}
 
 
 class SecretLeakError(ValueError):
@@ -49,14 +52,13 @@ def pending_paths(slug: str) -> dict[str, str]:
     return {}
 
 
-async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
-    """Write canonical content for <rel>. Returns the advisory flag triggers
-    raised (empty for a clean write). Raises SecretLeakError (write refused)
-    or ValueError (protected path)."""
+async def _check(slug: str, rel: str, content: bytes) -> Path:
+    """The refusals every write gets, landing or held: the path (PROTECTED, no
+    escape) and a real secret value. Returns the destination."""
     project = settings.projects_dir / slug
     dest = safe_join(project, rel)
     top = dest.relative_to(project.resolve()).parts[0]  # normalized: '../' resolved
-    if top in PROTECTED:
+    if top in PROTECTED or top.casefold() == ".context.json":
         raise ValueError(f"cannot write into {top}")
 
     leaks = secrets_mod.find_in_bytes(content)
@@ -67,6 +69,31 @@ async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
                           {"secrets": leaks, "bytes": len(content)},
                           severity="critical", refused=True)
         raise SecretLeakError(leaks)
+    return dest
+
+
+async def apply_write_gated(slug: str, rel: str, content: bytes, *,
+                            tainted: bool) -> tuple[list[str], bool]:
+    """apply_write for a caller that knows whether the turn behind the write had
+    read untrusted content. A tainted write to a file that rides every prompt of
+    the project (alwaysloaded.is_loaded: project.md, the operator's ticked
+    context files) is HELD for the operator instead of landing: same path and
+    secret refusals, nothing written, the prompt keeps the file as it was.
+    Everything else lands exactly as apply_write does. Returns (triggers, held)."""
+    if tainted:
+        from . import alwaysloaded
+        if alwaysloaded.is_loaded(slug, rel):
+            await _check(slug, rel, content)
+            await alwaysloaded.hold(slug, rel, content)
+            return [], True
+    return await apply_write(slug, rel, content), False
+
+
+async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
+    """Write canonical content for <rel>. Returns the advisory flag triggers
+    raised (empty for a clean write). Raises SecretLeakError (write refused)
+    or ValueError (protected path)."""
+    dest = await _check(slug, rel, content)
 
     old_text = ""
     if dest.is_file():
