@@ -61,8 +61,21 @@ def find_file(base: Path, wanted: str, only=None) -> tuple[str | None, list[str]
     return None, (hits or entries)
 
 
-def list_tree(base: Path) -> list[dict]:
-    """All files under base (relative paths), skipping junk dirs."""
+# With dotfiles shown a listing still never carries the harness's own files,
+# nor the caches tools leave next to a project's real dotfiles.
+HARNESS_HIDDEN = {".git", ".staging", ".workspace.json", ".context.json"}
+CACHE_HIDDEN = {".cache", ".npm", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".next",
+                ".nuxt", ".parcel-cache", ".turbo", ".svelte-kit", ".gradle", ".idea",
+                ".DS_Store"}
+
+
+def list_tree(base: Path, dotfiles: bool = True) -> list[dict]:
+    """All files under base (relative paths), skipping junk dirs. Dotfiles and
+    dot-dirs are listed unless `dotfiles` is False: the host ships a project's
+    dotfiles into this copy (a .gitignore, .eslintrc, .github/ are part of the
+    project), so the in-guest listing shows them too. This is the one place the
+    guest's copy differs from the host's, whose default hides them from the
+    operator's listings."""
     out = []
     if not base.exists():
         return out
@@ -70,10 +83,15 @@ def list_tree(base: Path) -> list[dict]:
         if p.is_dir():
             continue
         parts = p.relative_to(base).parts
-        if any(part in LIST_SKIP_DIRS or part.startswith(".") for part in parts[:-1]):
-            continue
-        if p.name.startswith(".") and p.name != ".gitkeep":
-            continue
+        if dotfiles:
+            if any(part in LIST_SKIP_DIRS or part in HARNESS_HIDDEN or part in CACHE_HIDDEN
+                   for part in parts):
+                continue
+        else:
+            if any(part in LIST_SKIP_DIRS or part.startswith(".") for part in parts[:-1]):
+                continue
+            if p.name.startswith(".") and p.name != ".gitkeep":
+                continue
         stat = p.stat()
         out.append({
             "path": str(p.relative_to(base)),

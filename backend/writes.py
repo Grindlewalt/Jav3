@@ -121,6 +121,49 @@ async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
     return [f["trigger"] for f in flags]
 
 
+class DeleteRefused(ValueError):
+    """A delete the chokepoint will not make (see apply_delete)."""
+
+
+async def apply_delete(slug: str, rel: str, *, tainted: bool = False) -> list[str]:
+    """Delete canonical <rel>: the guest removed or renamed it. The path refusals
+    of a write apply (PROTECTED, no escape). A turn that had read untrusted content
+    may not delete a file that rides every prompt (alwaysloaded.py): a write to
+    one is HELD for the operator, and a hold cannot express a deletion, so the
+    delete is refused. The diff gate scans the removal as a rewrite to nothing
+    (advisory: a deleted test file loses its assertions). Returns the flag
+    triggers; raises FileNotFoundError when there is no such file, DeleteRefused
+    or ValueError (protected path) when it will not."""
+    dest = await _check(slug, rel, b"")
+    if tainted:
+        from . import alwaysloaded
+        if alwaysloaded.is_loaded(slug, rel):
+            raise DeleteRefused("a file that rides every prompt cannot be deleted by a "
+                                "turn that read untrusted content")
+    if not dest.is_file():
+        raise FileNotFoundError(rel)
+    try:
+        old_bytes = dest.read_bytes()
+    except OSError:
+        old_bytes = b""
+    flags = diffgate.scan(old_bytes.decode("utf-8", errors="replace"), "", rel)
+    dest.unlink()
+    # a directory the delete emptied goes too (git does not track it; an empty
+    # folder left behind is only clutter), never past the project root
+    project = (settings.projects_dir / slug).resolve()
+    d = dest.parent
+    while d != project and d.is_relative_to(project):
+        try:
+            d.rmdir()
+        except OSError:
+            break
+        d = d.parent
+    for f in flags:
+        await _raise_flag(slug, rel, f["trigger"],
+                          {**f["detail"], "bytes": len(old_bytes), "deleted": True})
+    return [f["trigger"] for f in flags]
+
+
 async def _raise_flag(slug: str, rel: str, trigger: str, detail: dict, *,
                       severity: str = "warn", refused: bool = False) -> None:
     """One deduped security event per (project, path, trigger): an agent
