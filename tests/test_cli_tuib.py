@@ -120,19 +120,19 @@ async def test_slash_login_with_a_bad_address_leaves_the_app_running():
     app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.3)
+        notes: list = []
+        real = app.note
+
+        async def note(text, kind="info"):
+            notes.append((text, kind))
+            await real(text, kind)
+        app.note = note
         app.dispatch("/login password")
         assert await _until(pilot, lambda: _top(app) == "Ask")
         app.screen.query_one("#answer").value = "10.0.0.999:8000"
         await pilot.press("enter")
-        assert await _until(pilot, lambda: _top(app) == "Ask")      # username
-        app.screen.query_one("#answer").value = "bob"
-        await pilot.press("enter")
-        assert await _until(pilot, lambda: _top(app) == "Ask")      # password
-        app.screen.query_one("#answer").value = "x"
-        await pilot.press("enter")
-        assert await _until(pilot, lambda: any(
-            "not a valid server address" in str(getattr(w, "render", lambda: "")())
-            for w in app.query("Static")) or _top(app) != "Ask")
+        assert await _until(pilot, lambda: any("not a valid server address" in t
+                                               for t, _ in notes))      # said at the address step
         await pilot.pause(0.3)
         assert app.is_running and _top(app) != "Ask"
 
