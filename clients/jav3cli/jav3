@@ -4029,12 +4029,47 @@ def build_tui(base: str, token: str, **kw):
     # the frame for boxes, images and the package catalogue. Every route is
     # operator-only, so a chat-only login gets a locked message and no requests.
 
+    _KEEP_ON_BAR = {"b", "bold", "i", "italic", "u", "underline", "strike"}
+
+    def on_the_bar(markup: str):
+        """A row's markup as it reads on the selection bar: the row's own colours
+        (muted grey, amber, purple) are 1-1.7:1 against the bar and vanish, so only
+        bold, italic and underline stay, and a chip that carries its own background
+        keeps everything. The bar's own contrast colour does the rest."""
+        from textual.content import Content, Span
+        c = Content.from_markup(markup)
+        spans = []
+        for sp in c.spans:
+            st = sp.style if isinstance(sp.style, str) else None
+            if st is None:
+                continue
+            if " on " in f" {st} ":
+                keep = st
+            else:
+                keep = " ".join(t for t in st.split() if t in _KEEP_ON_BAR)
+            if keep:
+                spans.append(Span(sp.start, sp.end, keep))
+        return Content(c.plain, spans=spans)
+
     class SecRow(Static):
         """One row of the security screen's list; `key` None is a note."""
 
         def __init__(self, markup: str, key: str | None) -> None:
             super().__init__(markup, classes="row" if key is not None else "note")
             self.key = key
+            self.markup = markup
+            self.picked = False
+
+        def show(self, markup: str) -> None:
+            self.markup = markup
+            self.update(on_the_bar(markup) if self.picked else markup)
+
+        def pick(self, on: bool) -> None:
+            """Select or deselect: the bar gets the row's plain form, so it stays readable."""
+            self.set_class(on, "-sel")
+            if on != self.picked:
+                self.picked = on
+                self.update(on_the_bar(self.markup) if on else self.markup)
 
         def on_click(self) -> None:
             if self.key is not None:
@@ -5339,7 +5374,7 @@ def build_tui(base: str, token: str, **kw):
             target = None
             for row in self.query(SecRow):
                 on = row.key is not None and row.key == self.sel[self.tab]
-                row.set_class(on, "-sel")
+                row.pick(on)
                 if on:
                     target = row
             if target is not None:
@@ -6314,7 +6349,7 @@ def build_tui(base: str, token: str, **kw):
                 prev = self._sig[4] if self._sig and len(self._sig) > 4 else ()
                 for i, (w, m) in enumerate(zip(rows, marks)):
                     if i >= len(prev) or prev[i] != m:
-                        w.update(m)
+                        w.show(m)
                 self._sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys),
                              tuple(marks))
                 self.refresh_sel()

@@ -280,3 +280,49 @@ async def test_security_rows_details_and_footer_use_local_time(monkeypatch):
         await pilot.press("4")                                   # Secrets: no times, no label
         await pilot.pause(0.2)
         assert "times PDT" not in str(scr.query_one("#sec-foot").render())
+
+
+# --- TUIB-04: the selected row stays readable on the selection bar ------------------------------
+
+def _content(row):
+    from textual.content import Content
+    c = row.content
+    return Content.from_markup(c) if isinstance(c, str) else c
+
+
+def _styles(row) -> list[str]:
+    return [sp.style for sp in _content(row).spans if isinstance(sp.style, str)]
+
+
+def _colours(styles) -> list[str]:
+    """The foreground colour tokens on spans that have no background of their own."""
+    return [t for s in styles if " on " not in f" {s} " for t in s.split() if t not in
+            ("b", "bold", "i", "italic", "u", "underline", "strike")]
+
+
+async def test_the_selected_security_row_drops_its_own_colours():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "logs")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        rows = list(scr.query("SecRow"))
+        sel = next(r for r in rows if r.has_class("-sel"))
+        other = next(r for r in rows if not r.has_class("-sel"))
+        assert _colours(_styles(other))                       # unselected rows are coloured
+        assert not _colours(_styles(sel)), _styles(sel)       # the bar's row is not
+        assert "gate_flag" in _content(sel).plain or "host_cut" in _content(sel).plain
+        await pilot.press("down")                             # moving hands the colours back
+        assert _colours(_styles(sel)) and not _colours(_styles(
+            next(r for r in scr.query("SecRow") if r.has_class("-sel"))))
+
+
+async def test_the_selected_vms_box_row_keeps_its_bold_and_its_text():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "boxes", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        sel = next(r for r in scr.query("SecRow") if r.has_class("-sel"))
+        assert "running" in _content(sel).plain or "stopped" in _content(sel).plain
+        assert not _colours(_styles(sel)), _styles(sel)
