@@ -4,6 +4,7 @@ description: Drive the universe simulation on the projector — pause or resume 
 when_to_use: When the operator asks about or wants to change what the space simulation is doing on the wall.
 enabled: true
 section: projector
+action: universe
 requires_settings: [mcp_projector_url, mcp_projector_token]
 parameters:
   type: object

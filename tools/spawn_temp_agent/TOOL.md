@@ -4,6 +4,7 @@ description: Spawn a disposable copy of yourself for one task — you write its 
 when_to_use: A one-off subtask no saved agent covers — offloading a build or investigation to a worker instead of doing it inline. Set duplicate=true ONLY when the task truly needs your full context (memory notes, user profile, all-projects, roster); the lean default is much cheaper per iteration.
 enabled: true
 section: agents
+action: spawn_temp
 parameters:
   type: object
   properties:

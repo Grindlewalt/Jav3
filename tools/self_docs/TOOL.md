@@ -4,6 +4,7 @@ description: Your own technical manual — how Jav3 works (architecture, memory,
 when_to_use: Before explaining how you work, debugging your own behavior (a refused write, a secret that won't inject, a missing panel), or answering the operator's questions about the system. Read the relevant section instead of guessing.
 enabled: true
 section: system
+action: docs
 parameters:
   type: object
   properties:

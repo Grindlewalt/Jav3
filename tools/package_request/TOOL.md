@@ -4,6 +4,7 @@ description: Ask the operator to add a package permanently to this project's san
 when_to_use: Only when a tool is needed on EVERY run and a per-run `pip install`/`npm install` in run_code is not enough (it is wiped after each turn). Never for one-off use.
 enabled: true
 section: project
+action: packages
 requires_settings: [vm_boxes_enabled]
 parameters:
   type: object

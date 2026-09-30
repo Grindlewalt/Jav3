@@ -4,6 +4,7 @@ description: The double-clap song list â€” the tracks that start instantly on ðŸ
 when_to_use: When the operator wants a song added to or dropped from the clap / startup-music list, or asks what is on it. To actually play something use music_play.
 enabled: true
 section: media
+action: clap
 parameters:
   type: object
   properties:

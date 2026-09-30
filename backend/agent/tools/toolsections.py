@@ -4,9 +4,9 @@ Eighty tool schemas rode every model call (about 20k tokens with everything
 connected). Published practice agrees that a model picks tools worse as the
 list grows and that the fix is a small always-on core plus on-demand loading
 (Anthropic's tool search, OpenAI's tool_search/namespaces, Cursor's dynamic MCP
-tools). So each TOOL.md names its `section:`, at most CORE_MAX - 1 tools say
-`core: true`, and one meta-tool, `tools`, loads a section for the rest of the
-turn.
+tools). So each TOOL.md names its `section:`, `core: true` tools (as the model
+sees them, merged ones counted once) number at most CORE_MAX - 1, and one
+meta-tool, `tools`, loads a section for the rest of the turn.
 
 What this module decides is only what the model is SHOWN. The granted set is
 computed on the host exactly as before (autonomy dial, agent exclusions,
@@ -16,8 +16,14 @@ dispatches under its real tool name, so the broker's gates, taint, approvals
 and the tool_calls ledger see exactly what they saw before.
 
 * `action:` in a TOOL.md folds that tool into one merged tool named after its
-  section (desk, browser, git, services, memory): `browser(action="click",
-  ...)` runs browser_click. The old names still work when called directly.
+  section (desk, browser, git, services, memory, web, media, project, agents,
+  plans, projector, system): `browser(action="click", ...)` runs
+  browser_click. The old names still work when called directly. A tool that
+  has an `action` argument of its own (music_control, plan_fix, ...) keeps it
+  as `do`: `media(action="control", do="pause")` runs
+  music_control(action="pause"). Folding happens only when a turn is
+  sectioned; a granted set of FLAT_MAX tools or fewer is shown as granted (the
+  voice tier's eight tools stay eight).
 * A call to a granted tool that is not loaded yet loads its section and runs
   (argcheck still checks the arguments); a name that is not granted gets a
   did-you-mean instead of a dispatch.
@@ -25,6 +31,7 @@ and the tool_calls ledger see exactly what they saw before.
   plainly needs it (SECTIONS triggers), when it is `autoload` (plan tools in a
   plan item, the /local tools in a local chat), or when the host marked its
   specs `load` (used earlier in this conversation; a Gitea-backed project).
+  A core tool used earlier never loads its section: it was shown anyway.
 
 Pure: copied verbatim into the guest package (backend/vm/guest_pkg.py), so a
 host turn and a guest turn expose tools the same way.
@@ -33,28 +40,37 @@ import difflib
 import json
 import re
 
-CORE_MAX = 15            # tools in the prompt before any section loads, META included
+CORE_MAX = 11            # tools in the prompt before any section loads, META included
+FLAT_MAX = 14            # a granted set this small is shown as granted: no sections, no folding
 META = "tools"           # the meta-tool's name
+SUB = "do"               # a merged tool's name for a member's own `action` argument
 MERGED_NOTES_MAX = 300   # per-action Notes kept in a merged tool's description
 
 # The order here is the order sections are listed in. `about` is the one-line
 # listing; `merged` describes the merged tool when the section has one;
 # `triggers` load the section at turn start when the latest user message
 # matches; `autoload` loads it whenever any of its tools is granted (they are
-# only granted to the kind of turn that needs them); `guide` names the
-# navigation playbook block that rides the section when it loads; `lead`
-# puts a merged tool's first-step actions first.
+# only granted to the kind of turn that needs them); `with` names sections
+# that load along with an autoloaded one; `guide` names the navigation
+# playbook block that rides the section when it loads; `lead` puts a merged
+# tool's first-step actions first; `notes_max` overrides MERGED_NOTES_MAX.
 SECTIONS: dict[str, dict] = {
     "files": {"about": "project files and the sandbox: read, write, edit, search, run code"},
     "project": {
-        "about": "switch project, workspace panels, dashboards, codebase index, "
-                 "sandbox packages, sandbox screenshots",
+        "about": "switch project, index the code, dashboards, workspace panels, sandbox "
+                 "packages and screenshots, the journal",
+        "merged": "The active project: switch to another, index its code, build a dashboard, "
+                  "arrange its workspace panels, request a sandbox package, screenshot the "
+                  "sandbox, add a journal entry.",
         "triggers": r"\b(load|switch|open) (the |a |another )?project\b|\b(workspace|panels?|"
-                    r"dashboards?|crawl|index the (code|codebase)|screenshot)\b|"
-                    r"\b(install|add) (a |an |the )?(apt |pip |npm )?packages?\b"},
+                    r"dashboards?|crawl|index the (code|codebase)|screenshot|journal)\b|"
+                    r"\b(install|add) (a |an |the )?(apt |pip |npm )?packages?\b",
+        "lead": ["load", "journal"]},
     "web": {
-        "about": "read one web page as plain text",
-        "triggers": r"https?://|\b(web ?page|article|url)\b"},
+        "about": "search the web, read pages",
+        "merged": "Search the web and read pages. Pages come back as inert text; the host "
+                  "fetches and sanitizes them for you.",
+        "lead": ["search", "summarize", "read", "research"], "notes_max": 450},
     "browser": {
         "about": "operate web pages in Jav3's own tabs in the operator's browser",
         "merged": "Operate web pages in Jav3's own tabs in the operator's browser: read a "
@@ -85,11 +101,16 @@ SECTIONS: dict[str, dict] = {
         "triggers": r"\b(services?|daemons?|systemd|logs?|keep (it )?running|long[- ]running|"
                     r"server|bot|worker)\b"},
     "agents": {
-        "about": "named and disposable agents, agent teams, defining agents, plan runs",
+        "about": "run or define agents, agent teams, plan runs, message a running agent",
+        "merged": "Other agents: run a saved one, spawn a disposable one, deploy a team, "
+                  "define a new agent, turn a big ask into a plan, or message a running agent.",
         "triggers": r"\b(agents?|subagents?|team|delegate|spawn|orchestrate|in parallel|"
-                    r"checklist)\b"},
+                    r"checklist)\b",
+        "lead": ["spawn", "spawn_temp", "send"]},
     "plans": {"about": "the running plan: status, repairs, an item's report",
-              "autoload": True},
+              "merged": "The running plan, the team's checklist: follow it, repair a failed "
+                        "or blocked item, report your own item's outcome.",
+              "autoload": True, "with": ["agents"], "lead": ["status"]},
     "schedules": {
         "about": "propose recurring headless runs",
         "triggers": r"\b(schedules?|scheduled|every (day|morning|evening|night|hour|week|"
@@ -101,16 +122,25 @@ SECTIONS: dict[str, dict] = {
                   "read lists them or reads one; write saves, updates or deletes one.",
         "triggers": r"\b(remember|memory|memories|forget)\b"},
     "media": {
-        "about": "the operator's music, the clap songs, videos and web pages on their screen",
+        "about": "the operator's music (play, pause, volume, download), the clap songs, "
+                 "videos and web pages on their screen",
+        "merged": "The operator's music and screen: search, play, pause and download songs "
+                  "from their library, edit the double-clap list, put a video or web page on "
+                  "their screen.",
         "triggers": r"\b(music|songs?|play|playing|playlist|album|artist|tracks?|volume|"
-                    r"pause|skip|movie|video|clap|youtube)\b"},
+                    r"pause|skip|movie|video|clap|youtube)\b",
+        "lead": ["play", "search", "control", "status"]},
     "projector": {
         "about": "the projection mapper: surfaces, scenes, output window, universe",
-        "triggers": r"\b(projector|projection|universe|surfaces?)\b"},
+        "merged": "The projection mapper: put something on a surface, see what is showing, "
+                  "run the output window, drive the universe simulation.",
+        "triggers": r"\b(projector|projection|universe|surfaces?)\b",
+        "lead": ["show", "status"]},
     "local": {"about": "files and shell on the operator's own computer (a /local chat)",
               "autoload": True},
     "system": {
         "about": "your own manual, reporting a harness fault",
+        "merged": "Your own technical manual, and a report that the harness itself misbehaved.",
         "triggers": r"\b(jav3|jarvis|harness|your (own )?(docs|manual|architecture|tools)|"
                     r"how do you work)\b"},
     "skills": {"about": "installed skills (calling one loads its instructions)"},
@@ -154,9 +184,28 @@ def _clip(text: str, n: int) -> str:
 
 
 def _takes(params: dict) -> str:
+    """The argument list of one merged action. A member's own `action` shows
+    as `do` (with its values), the name it has in the merged tool."""
     props = (params or {}).get("properties") or {}
     req = set((params or {}).get("required") or [])
-    return ", ".join(k + ("" if k in req else "?") for k in props) or "nothing"
+    out = []
+    for k, v in props.items():
+        opt = "" if k in req else "?"
+        if k == "action":
+            enum = (v or {}).get("enum")
+            out.append(SUB + opt + ("=" + "|".join(map(str, enum)) if enum else ""))
+        else:
+            out.append(k + opt)
+    return ", ".join(out) or "nothing"
+
+
+def _props(spec: dict) -> dict:
+    return (_fn(spec).get("parameters") or {}).get("properties") or {}
+
+
+def _own_action(spec: dict) -> dict | None:
+    """The `action` argument a tool takes for itself, if it has one."""
+    return _props(spec).get("action")
 
 
 def _latest_user_text(history) -> str:
@@ -177,11 +226,14 @@ class View:
     def __init__(self, specs, history=None):
         self.specs = [s for s in (specs or []) if spec_name(s)]
         self.by_name = {spec_name(s): s for s in self.specs}
+        # a set this small is shown as granted: nothing to fold or defer
+        self.flat = len(self.by_name) <= FLAT_MAX
         # merged tools: section -> {action: real name}, in spec order. A group
         # is folded only when it has two members or more, its name is not a
-        # real tool's, and no member already takes an `action` argument
+        # real tool's, and no member already takes a `do` argument (a member's
+        # own `action` argument becomes `do`)
         groups: dict[str, dict[str, str]] = {}
-        for s in self.specs:
+        for s in () if self.flat else self.specs:
             if s.get("action") and s.get("section"):
                 groups.setdefault(s["section"], {})[str(s["action"])] = spec_name(s)
         for g, acts in groups.items():      # the actions to start with lead
@@ -190,10 +242,12 @@ class View:
                 lead.index(kv[0]) if kv[0] in lead else len(lead))))
         self.groups = {g: acts for g, acts in groups.items()
                        if len(acts) > 1 and g not in self.by_name and g != META
-                       and not any("action" in ((_fn(self.by_name[r]).get("parameters") or {})
-                                                .get("properties") or {}) for r in acts.values())}
+                       and not any(SUB in (_props(self.by_name[r])) for r in acts.values())}
         self.member_of = {real: (g, act) for g, acts in self.groups.items()
                           for act, real in acts.items()}
+        # members whose own `action` argument is `do` in the merged tool
+        self.sub_action = {real for real in self.member_of
+                           if _own_action(self.by_name[real]) is not None}
         # units: what the model sees as one tool (a merged group, or a spec)
         self.units: list[str] = []
         for s in self.specs:
@@ -206,7 +260,8 @@ class View:
         # sectioning is on only when there is something to defer and the whole
         # set would not fit in the core budget anyway (a voice or subagent
         # toolset of a dozen stays exactly as it was)
-        self.active = bool(deferred) and len(self.units) > CORE_MAX and META not in self.by_name
+        self.active = (not self.flat and bool(deferred) and len(self.units) > CORE_MAX
+                       and META not in self.by_name)
         # a registry-built list (annotated) is the whole grant: a name outside
         # it is refused, not dispatched. A hand-built list (tests, a caller
         # that stubs the specs) keeps the old contract: whatever the model
@@ -225,6 +280,11 @@ class View:
                         and re.search(meta["triggers"], text, re.I))
                     or self._named_in(u, text)):
                 self.loaded.add(sec)
+        # sections that ride along with a loaded one (the plan's team messages)
+        for sec in list(self.loaded):
+            for w in (SECTIONS.get(sec) or {}).get("with") or ():
+                if any(self.section_of(u) == w for u in deferred):
+                    self.loaded.add(w)
 
     # --- units ----------------------------------------------------------------
 
@@ -289,7 +349,9 @@ class View:
         return out
 
     def _merged(self, group: str) -> dict:
-        about = (SECTIONS.get(group) or {}).get("merged") or f"{group} tools."
+        meta = SECTIONS.get(group) or {}
+        about = meta.get("merged") or f"{group} tools."
+        notes_max = meta.get("notes_max") or MERGED_NOTES_MAX
         props: dict = {"action": {"type": "string", "enum": list(self.groups[group]),
                                   "description": "What to do. Each action's parameters "
                                                  "are listed in the description."}}
@@ -297,17 +359,32 @@ class View:
         for act, real in self.groups[group].items():
             fn = _fn(self.by_name[real])
             params = fn.get("parameters") or {}
+            own = None
             for k, v in (params.get("properties") or {}).items():
+                v = dict(v or {})
+                if k == "action":               # the member's own action: `do`
+                    k, own = SUB, v
                 if k not in props:
-                    props[k] = dict(v or {})
-                elif (props[k].get("type") != (v or {}).get("type")
-                      and "type" in props[k]):
+                    props[k] = v
+                elif k == SUB:                  # values of every member, or open
+                    a, b = props[k].get("enum"), v.get("enum")
+                    if a and b:
+                        props[k]["enum"] = a + [x for x in b if x not in a]
+                    else:
+                        props[k].pop("enum", None)
+                elif props[k].get("type") != v.get("type") and "type" in props[k]:
                     props[k].pop("type")        # same name, different types: leave it open
             head, notes = _split_desc(fn.get("description", ""))
             line = f"- {act}({_takes(params)}): {head}"
             if notes:
-                line += f" {_clip(notes, MERGED_NOTES_MAX)}"
+                line += f" {_clip(notes, notes_max)}"
+            if own and len(own.get("description") or "") > 70:   # more than a restatement
+                line += f" do: {_clip(own['description'], MERGED_NOTES_MAX)}"
             lines.append(line)
+        if SUB in props:
+            props[SUB] = {"type": "string", **{k: v for k, v in props[SUB].items()
+                                                if k == "enum"},
+                          "description": "For the actions that list do=...: what to do."}
         desc = (f"{about} Pass `action` plus that action's parameters "
                 f"(? = optional):\n" + "\n".join(lines))
         return {"type": "function", "function": {
@@ -378,7 +455,11 @@ class View:
         if not names:
             return "Sections [their tools]:\n" + self._listing()
         out, guides = [], []
+        core_secs = {self.section_of(u) for u in self.core_units()}
         for n in names:
+            if n not in secs and n in core_secs:
+                out.append(f"Section '{n}' is part of your core tools: call them directly.")
+                continue
             if n not in secs:
                 close = difflib.get_close_matches(n, list(secs), n=1, cutoff=0.5)
                 hint = f" (did you mean '{close[0]}'?)" if close else ""
@@ -408,6 +489,12 @@ class View:
                     "Nothing ran.")
             real = acts[act]
             rest = {k: v for k, v in args.items() if k != "action"}
+            if real in self.sub_action:         # `do` is the real tool's own `action`
+                err = self._sub_error(name, act, real, rest)
+                if err:
+                    return name, args, "", err
+                if SUB in rest:
+                    rest["action"] = rest.pop(SUB)
             return real, rest, self._autoload_note(name), None
         if name in self.by_name:
             unit = self.member_of.get(name, (name,))[0]
@@ -415,6 +502,27 @@ class View:
         if not self.strict:
             return name, args, "", None
         return name, args, "", self._unknown(name)
+
+    def _sub_error(self, name: str, act: str, real: str, rest: dict) -> str | None:
+        """A merged action whose real tool takes its own `action` (`do` here):
+        say what to pass instead of letting the real tool's message name an
+        argument the model never saw."""
+        own = _own_action(self.by_name[real]) or {}
+        enum = own.get("enum") or []
+        req = "action" in ((_fn(self.by_name[real]).get("parameters") or {}).get("required") or [])
+        do = rest.get(SUB)
+        if do is None:
+            if not req:
+                return None
+            bad = None
+        elif not enum or do in enum:
+            return None
+        else:
+            bad = do
+        close = difflib.get_close_matches(str(bad or ""), enum, n=1, cutoff=0.5)
+        hint = f" (did you mean '{close[0]}'?)" if close and bad else ""
+        return (f"error: {name}(action=\"{act}\") needs do, one of: "
+                f"{', '.join(map(str, enum))}{hint}. Nothing ran.")
 
     def _autoload_note(self, unit: str) -> str:
         sec = self.section_of(unit)
@@ -445,11 +553,16 @@ class View:
 
 def sections_for(names, specs) -> set[str]:
     """The sections that tool names (real, merged or 'tools' rows' sections)
-    belong to, among `specs`."""
-    by = {spec_name(s): s.get("section") for s in specs or ()}
+    belong to, among `specs`. A core tool says nothing about its section: it
+    was shown either way, and the rest of the section is not wanted for it."""
+    by = {spec_name(s): s.get("section") for s in specs or ()
+          if s.get("core") is not True}
+    core = {spec_name(s) for s in specs or () if s.get("core") is True}
     groups = {s.get("section") for s in specs or () if s.get("action")}
     out = set()
     for n in names or ():
+        if n in core:
+            continue
         if n in by and by[n]:
             out.add(by[n])
         elif n in groups or n in SECTIONS:

@@ -3,6 +3,7 @@ name: plan_report
 description: Report the outcome of the plan item you are working on — done, failed or blocked — with a summary the items after you will read. Required before you stop.
 enabled: false
 section: plans
+action: report
 parameters:
   type: object
   properties:

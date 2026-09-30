@@ -4,6 +4,7 @@ description: Play music — searches the operator's library, finds the best matc
 when_to_use: Whenever they ask for music by name. Just pass what they said in `query`; do not search first.
 enabled: true
 section: media
+action: play
 parameters:
   type: object
   properties:

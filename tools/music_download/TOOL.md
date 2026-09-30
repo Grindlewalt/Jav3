@@ -4,6 +4,7 @@ description: Rip a track from YouTube into the operator's self-hosted library (T
 when_to_use: When they ask you to add, save, download or "get" a song into their library from a YouTube or YouTube Music link.
 enabled: true
 section: media
+action: download
 parameters:
   type: object
   properties:

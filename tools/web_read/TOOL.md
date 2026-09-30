@@ -4,6 +4,8 @@ description: Fetch one web page and return it as inert plain text (all scripts, 
 when_to_use: When you need ONE page's full text verbatim (e.g. exact quotes, code). If you are surveying several sources, or don't need the page word-for-word, use read_and_summarize instead — full pages left in context are the main driver of runaway token cost.
 enabled: true
 section: web
+core: true
+action: read
 read_only: true
 parameters:
   type: object

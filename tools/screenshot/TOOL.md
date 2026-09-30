@@ -4,6 +4,7 @@ description: Take a screenshot inside the sandbox box, of a web page (url mode, 
 when_to_use: Checking what a page or app you built actually renders (a local dev server, a generated HTML file served locally, a GUI). Needs the `desktop` image variant.
 enabled: true
 section: project
+action: screenshot
 requires_settings: [vm_boxes_enabled]
 parameters:
   type: object

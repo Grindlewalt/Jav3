@@ -4,6 +4,7 @@ description: Repair the project's plan run instead of handing its failures to th
 when_to_use: As soon as plan_status shows an item failed or blocked. Work out the cause first (its error, how far it got, the files it wrote). If the work is in place and you have checked it (run the proof, read the files), accept it. Otherwise retry with guidance that removes the cause, or edit/add/skip to change the plan itself.
 enabled: false
 section: plans
+action: fix
 requires_project: true
 parameters:
   type: object
