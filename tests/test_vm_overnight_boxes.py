@@ -476,3 +476,18 @@ async def test_clean_skips_what_is_no_longer_a_leftover(env, monkeypatch, tmp_pa
     out = await leftovers.clean(["box_dir:p-beta", "tap:jvtap9"])
     assert out["removed"] == [] and out["skipped"] == ["box_dir:p-beta", "tap:jvtap9"]
     assert (settings.vm_dir / "boxes" / "p-beta").exists()
+
+
+# --- second box hunt -----------------------------------------------------------------
+
+async def test_a_box_that_never_booted_is_released_after_the_window(env):
+    """A start for a project that failed before the guest ever booted left a
+    box that never idle-stopped (idle_since stayed None)."""
+    b = boxes.allocate("project", project="typo")
+    b.allocated_at = time.time() - 30
+    await boxes.reap_idle()
+    assert boxes.get("p-typo") is b                       # window is 10 minutes
+    b.allocated_at = time.time() - 700
+    await boxes.reap_idle()
+    assert boxes.get("p-typo") is None
+    assert boxes.budget()["project_boxes"] == 0

@@ -205,13 +205,18 @@ async def watch(box) -> None:
         msg, key, ev = f"the guest exited on its own (QEMU exit code {rc})", ("rc", id(proc)), "crashed"
     elif getattr(ctl, "state", None) == "failed" and getattr(ctl, "error", None):
         msg, key, ev = str(ctl.error), ("err", ctl.error), "error"
-    elif getattr(ctl, "state", None) == "running" and hasattr(ctl, "_alive"):
-        try:
-            alive = await ctl._alive()
-        except Exception:  # noqa: BLE001
-            alive = True
-        if not alive:
-            msg, key, ev = "the container is no longer running", ("dead", ctl.booted_at), "crashed"
+    elif getattr(ctl, "state", None) == "running" and hasattr(ctl, "crashed"):
+        # a container that died under a box that says running: the controller
+        # moves the box to failed (its row stops claiming a live box)
+        tok = _scope.set({"boxes": {box.id}, "actor": "app", "reason": None})
+        try:                     # quiet: the cleanup's box_down is not a 'stopped'
+            msg = await ctl.crashed()
+        finally:
+            _scope.reset(tok)
+        if msg:
+            _noted[box.id] = ("err", msg)     # the failed state is not a second event
+            await record(box, "crashed", reason=msg, actor="app")
+        return
     if msg is None or _noted.get(box.id) == key:
         return
     _noted[box.id] = key

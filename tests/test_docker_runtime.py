@@ -786,3 +786,146 @@ async def test_forget_leaves_a_running_boxs_dir(harness):
     assert box.transport.host_dir.is_dir() and box.transport.gateway_path().exists()
     ctl.release()
     await boxes.stop(box)
+
+
+# --- second box hunt: failed and crashed boxes, diagnostics ----------------------------
+
+@pytest.fixture
+async def hist(tmp_env, harness, monkeypatch):
+    """The harness plus the box history in a temp DB, with box_up/box_down
+    reaching boxlog like the real _emit."""
+    from backend.db import init_db
+    from backend.vm import boxlog
+    await init_db()
+    boxlog.reset()
+
+    async def emit(event, box):
+        for fn in list(boxes._hooks):
+            await fn(event, box)
+        await boxlog.on_emit(event, box)
+    monkeypatch.setattr(boxes, "_emit", emit)
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    monkeypatch.setattr(settings, "vm_box_idle_stop_seconds", 60)
+    boxes.registry.reset()
+    boxes.registry._boxes[harness["box"].id] = harness["box"]
+    yield harness
+    boxes.registry.reset()
+    boxlog.reset()
+
+
+async def _events(box_id):
+    from backend.vm import boxlog
+    return [(e["event"], e["actor"], e["reason"]) for e in await boxlog.events(box_id)]
+
+
+async def test_a_dead_container_is_failed_not_running(hist):
+    """`docker kill` from outside: the row used to stay running/idle with a stop
+    countdown until the reaper destroyed the box."""
+    from backend.vm import boxlog
+    box, fake = hist["box"], hist["cli"]
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    assert boxes.status_json(box)["activity"] == "idle"
+    fake.alive = False
+    await boxlog.watch(box)
+    row = boxes.status_json(box)
+    assert (row["state"], row["activity"]) == ("stopped", "failed")
+    assert "no longer running" in row["last_error"] and row["stops_in_s"] is None
+    await boxlog.watch(box)                                  # once per occurrence
+    assert [e[:2] for e in await _events(box.id)] == [("crashed", "app"), ("started", "app")]
+    assert hist["hooks"][-1] == ("box_down", box.id)         # listeners and hook cleaned
+    await ctl.acquire()                                      # the next use boots it again
+    ctl.release()
+    assert ctl.state == "running" and boxes.status_json(box)["activity"] == "idle"
+    await ctl.teardown()
+
+
+async def test_an_unanswering_daemon_is_not_a_crash(hist, monkeypatch):
+    from backend.vm import boxlog
+    box, fake = hist["box"], hist["cli"]
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    real = fake.run
+
+    async def wedged(*args, timeout=120):
+        if args[0] == "inspect":
+            return 124, "", "docker inspect: timed out"
+        return await real(*args, timeout=timeout)
+    monkeypatch.setattr(fake, "run", wedged)
+    await boxlog.watch(box)
+    assert ctl.state == "running" and boxes.status_json(box)["activity"] == "idle"
+    await ctl.teardown()
+
+
+async def test_a_failed_boot_is_released_by_the_reaper(hist):
+    """A box whose boot failed held its project-box slot and RAM reservation
+    until someone destroyed it."""
+    box, fake = hist["box"], hist["cli"]
+    fake.run_rc = 125
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError):
+        await ctl.acquire()
+    assert ctl.state == "failed" and boxes.budget()["project_boxes"] == 1
+    await boxes.reap_idle()
+    assert boxes.get(box.id) is box                          # the window counts from the failure
+    ctl.idle_since -= 61
+    await boxes.reap_idle()
+    assert boxes.get(box.id) is None and boxes.budget()["project_boxes"] == 0
+    ev = (await _events(box.id))[0]
+    assert ev[0] == "idle_stopped" and ev[1] == "reaper" and "boot failed" in ev[2]
+    assert "boom" in ev[2]
+
+
+class _Diag(FakeCLI):
+    """docker run says the image is missing, or logs say why the guest died."""
+    run_err = "boom"
+    logs = ""
+
+    async def run(self, *args, timeout=120):
+        if args[0] == "run" and self.run_rc:
+            self.calls.append(list(args))
+            return self.run_rc, "", self.run_err
+        if args[0] == "logs":
+            self.calls.append(list(args))
+            return 0, self.logs, ""
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_a_missing_image_says_what_to_do(hist, monkeypatch):
+    fake = _Diag(run_rc=125)
+    fake.run_err = ("Unable to find image 'jav3-guest-nope:latest' locally\n"
+                    "docker: Error response from daemon: pull access denied")
+    monkeypatch.setattr(dr, "cli", fake)
+    monkeypatch.setattr(settings, "docker_image_turn", "jav3-guest-nope:latest")
+    ctl = boxes.controller(hist["box"])
+    with pytest.raises(dr.DockerError) as e:
+        await ctl.acquire()
+    msg = str(e.value)
+    assert "jav3-guest-nope:latest is not built on this host" in msg
+    assert "docker-setup" in msg and "pull access" not in msg
+    assert ["--pull", "never"] == fake.ran("run")[0][2:4]
+
+
+async def test_a_guest_that_never_served_leaves_its_output(hist, monkeypatch):
+    """The container was removed before anyone could read its logs."""
+    box = hist["box"]
+    fake = _Diag(on_run=None)
+    fake.logs = "GUEST-BOOT: starting\nTraceback (most recent call last):\nImportError: no module named x\n"
+
+    async def no_guest():
+        pass
+    fake.on_run = no_guest
+    monkeypatch.setattr(dr, "cli", fake)
+    monkeypatch.setattr(settings, "vm_boot_timeout_seconds", 1)
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError, match="did not become ready"):
+        await ctl.acquire()
+    assert "ImportError: no module named x" in ctl.error
+    order = [c[0] for c in fake.calls]
+    assert order.index("logs") < len(order) - 1 - order[::-1].index("rm")   # read before the last rm
+    from backend.vm import boxlog
+    await boxlog.watch(box)                       # the reaper's pass records the failure
+    ev = (await _events(box.id))[0]
+    assert ev[0] == "error" and "ImportError" in ev[2]

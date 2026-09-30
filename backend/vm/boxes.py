@@ -937,23 +937,34 @@ async def stop_all() -> None:
 
 async def reap_idle() -> None:
     """Stop + release project boxes idle past vm_box_idle_stop_seconds (the
-    same as a scrub: they are disposable). Service/builder boxes are managed
-    by their owners (WP3/WP5)."""
+    same as a scrub: they are disposable). A box that never came up counts
+    too: one whose boot failed (its docker controller starts the clock at the
+    failure) or that was never booted at all (counted from its allocation),
+    which would otherwise hold a slot and its RAM reservation until someone
+    destroyed it. Service/builder boxes are managed by their owners (WP3/WP5)."""
     from . import boxlog
     window = settings.vm_box_idle_stop_seconds
     if not settings.vm_boxes_enabled or not window:
         return
     now = time.monotonic()
     for box in list(registry.all()):
-        if box.kind != "project" or box.ctl is None:
+        if box.kind != "project":
             continue
         ctl = box.ctl
+        if ctl is not None and ctl.inflight:
+            continue
         idle = getattr(ctl, "idle_since", None)
-        if ctl.inflight == 0 and idle is not None and now - idle >= window:
-            async with boxlog.action(box, "idle_stopped", actor="reaper",
-                                     reason=f"idle {_mins(now - idle)} "
-                                            f"(stops at {_mins(window)})"):
-                await destroy(box)
+        if idle is None and not (ctl is not None and ctl.running()):
+            idle = now - (time.time() - box.allocated_at)
+        if idle is None or now - idle < window or _bound(box):
+            continue
+        if getattr(ctl, "state", None) == "failed":
+            why = (f"boot failed {_mins(now - idle)} ago, released after "
+                   f"{_mins(window)}: {getattr(ctl, 'error', None) or 'no reason recorded'}")
+        else:
+            why = f"idle {_mins(now - idle)} (stops at {_mins(window)})"
+        async with boxlog.action(box, "idle_stopped", actor="reaper", reason=why):
+            await destroy(box)
 
 
 def _mins(s) -> str:

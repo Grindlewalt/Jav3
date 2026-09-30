@@ -276,7 +276,10 @@ def run_spec(box: "boxes.Box", iso: Isolation) -> list[str]:
     labels = {LABEL: "1", "jav3.box": box.id, "jav3.kind": box.kind,
               **({"jav3.project": box.project} if box.project else {}),
               **_EXTRA_LABELS}
-    argv = ["run", "--detach", "--name", container_name(box),
+    # --pull never: a box image is built here (docker-setup), never fetched; a
+    # missing one fails at once with a message that says so, instead of the
+    # daemon asking Docker Hub for a name it does not own
+    argv = ["run", "--detach", "--pull", "never", "--name", container_name(box),
             "--hostname", box.id]
     for k, v in labels.items():
         argv += ["--label", f"{k}={v}"]
@@ -577,6 +580,21 @@ class DockerBox:
         async with self._lock:
             await self._teardown_locked()
 
+    async def crashed(self) -> str | None:
+        """A box that says `running` whose container is gone (killed, OOM, the
+        guest exited): move it to `failed` with the reason and clean up, so the
+        row stops claiming a live box with a stop countdown. The next acquire
+        boots it again. Returns the reason, or None when it is fine (or busy
+        booting/stopping: the reaper looks again on its next pass)."""
+        if self.state != "running" or self._lock.locked() or await self._gone() is not True:
+            return None
+        async with self._lock:
+            if self.state != "running" or await self._gone() is not True:
+                return None
+            self._failed("the container is no longer running")
+            await self._cleanup()
+            return self.error
+
     # boot / teardown -----------------------------------------------------------
     async def _boot_locked(self) -> None:
         if not settings.docker_enabled:
@@ -609,7 +627,7 @@ class DockerBox:
             await cli.run("rm", "--force", container_name(self.box), timeout=30)
             rc, out, err = await cli.run(*argv, timeout=120)
             if rc != 0:
-                raise DockerError(f"docker run failed: {err.strip()[:300]}")
+                raise DockerError(self._run_failed(err))
             self.container_id = out.strip()[:64] or None
             self.pid = await self._inspect_pid()
             observed = _proc_uid(self.pid)
@@ -625,10 +643,36 @@ class DockerBox:
             self.booted_at = time.monotonic()
             self.idle_since = time.monotonic()
         except BaseException as e:
-            self.error = str(e)
-            self.state = "failed"
+            self._failed(str(e))
             await self._cleanup()
             raise
+
+    def _failed(self, msg: str) -> None:
+        """A boot that did not finish, or a container that died: the row says
+        `failed` with the reason, and the idle clock starts here, so the
+        reaper releases a box that never came back (its slot and RAM) after
+        the idle window instead of holding them until someone destroys it."""
+        self.error = msg
+        self.state = "failed"
+        self.idle_since = time.monotonic()
+
+    def _run_failed(self, err: str) -> str:
+        err = err.strip()
+        if "Unable to find image" in err or "No such image" in err:
+            return (f"image {image_for(self.box)} is not built on this host: "
+                    "run `python -m backend.cli docker-setup`")
+        return f"docker run failed: {err[:300]}"
+
+    async def _logs_tail(self, n: int = 12) -> str:
+        """The container's last output, read before _cleanup removes the
+        container (and its logs with it): the only trace of why a guest that
+        started never served."""
+        rc, out, err = await cli.run("logs", "--tail", str(n),
+                                     container_name(self.box), timeout=15)
+        if rc != 0:
+            return ""
+        lines = [ln.strip() for ln in (out + err).splitlines() if ln.strip()]
+        return " | ".join(lines)[-400:]
 
     async def _start_listeners(self) -> None:
         t = self.box.transport
@@ -651,8 +695,7 @@ class DockerBox:
                 self._to("running")
                 return
             except transport_unix.TransportError as e:
-                self.error = str(e)
-                self.state = "failed"
+                self._failed(str(e))
                 await self._cleanup()
                 await security_event("docker_socket_refused", str(e), "warn",
                                      self.box, {"box": self.box.id})
@@ -661,8 +704,9 @@ class DockerBox:
                 if not await self._alive():
                     break
                 await asyncio.sleep(0.5)
-        self.error = "run-turn server did not become ready"
-        self.state = "failed"
+        msg = "run-turn server did not become ready"
+        tail = await self._logs_tail()
+        self._failed(f"{msg}; container output: {tail}" if tail else msg)
         await self._cleanup()
         raise DockerError(f"{self.box.id}: {self.error}")
 
@@ -721,6 +765,15 @@ class DockerBox:
         rc, out, _ = await cli.run("inspect", "--format", "{{.State.Running}}",
                                    container_name(self.box), timeout=20)
         return rc == 0 and out.strip() == "true"
+
+    async def _gone(self) -> bool | None:
+        """True: the container exited or does not exist. None: the daemon did
+        not say (down, timed out): not proof of anything."""
+        rc, out, err = await cli.run("inspect", "--format", "{{.State.Running}}",
+                                     container_name(self.box), timeout=20)
+        if rc == 0:
+            return out.strip() != "true"
+        return True if "no such" in err.lower() else None
 
     async def stats(self) -> dict:
         """{rss_bytes, cpu_pct, pids} from `docker stats` (works rootless,
