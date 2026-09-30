@@ -366,7 +366,9 @@ async def test_a_stop_cancels_what_the_guest_had_brokered(env, monkeypatch):
     monkeypatch.setattr(broker, "cancel_inflight", lambda op: seen.append(op), raising=False)
     _pull_returns(monkeypatch, {})
     await _stop_after_first_token(monkeypatch)
-    assert seen == ["op-fx1"]
+    # first in the finally; release_token (FX2) cancels again on the way out,
+    # which is harmless: cancel_inflight is idempotent
+    assert seen and set(seen) == {"op-fx1"}
 
 
 # --- ROBUST-03 ------------------------------------------------------------------
