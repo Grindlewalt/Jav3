@@ -1148,6 +1148,24 @@ def _age(ts, now: float | None = None) -> str:
     return f"{s}s"
 
 
+def session_when(ts, now: float | None = None) -> str:
+    """When a chat started, in local time: 'today 04:19', 'yesterday 21:03', else
+    '09-27 14:02'. The server's started_at is UTC; '' when it is unreadable."""
+    import calendar
+    try:
+        t = calendar.timegm(time.strptime(str(ts).replace("T", " ")[:16], "%Y-%m-%d %H:%M"))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    now = time.time() if now is None else now
+    day = lambda x: time.strftime("%Y-%m-%d", time.localtime(x))  # noqa: E731
+    clock = time.strftime("%H:%M", time.localtime(t))
+    if day(t) == day(now):
+        return f"today {clock}"
+    if day(t) == day(now - 86400):
+        return f"yesterday {clock}"
+    return time.strftime("%m-%d ", time.localtime(t)) + clock
+
+
 def _esc(s: str) -> str:
     """Text made safe to splice into Textual markup. textual.markup.escape only
     escapes a `[` that already looks like a whole tag, so an unbalanced one
@@ -2351,17 +2369,22 @@ def build_tui(base: str, token: str, **kw):
         list). With `custom`, enter on text that matches nothing returns the
         text itself. Rows are (value, label, meta); a None value is a heading.
         `actions` maps a key, live in list mode only, to (label, async
-        fn(value) -> new rows or None) — space toggling a model, say."""
+        fn(value) -> new rows or None) — space toggling a model, say. `hidden`
+        is a set of values that stay off the list until a filter is typed (a
+        line at the end says how many); `wide` lets the dialog use up to 90% of
+        the terminal for rows that carry a lot of meta."""
 
         BINDINGS = [Binding("escape", "cancel", show=False)]
 
         def __init__(self, title: str, rows: list[tuple[str, str, str]],
                      current: str | None = None, custom: bool = False,
-                     hint: str = "", actions: dict | None = None) -> None:
+                     hint: str = "", actions: dict | None = None,
+                     hidden=(), wide: bool = False) -> None:
             super().__init__()
             self.title_text, self.rows, self.current = title, rows, current
             self.custom, self.hint = custom, hint
             self.actions = actions or {}
+            self.hidden, self.wide = set(hidden), wide
             self.typing = False
 
         def compose(self) -> ComposeResult:
@@ -2376,9 +2399,25 @@ def build_tui(base: str, token: str, **kw):
 
         def on_mount(self) -> None:
             self.query_one("#filter", Input).display = False
+            if self.wide:
+                dlg = self.query_one("#dialog")
+                dlg.styles.width, dlg.styles.max_width = "90%", 110
             self.fill("")
             self.query_one("#choices", OptionList).focus()
             self._show_hint()
+
+        def on_resize(self, event) -> None:
+            self._fit()
+
+        def _fit(self) -> None:
+            """The list gives up rows so the hint under it stays on a short terminal:
+            the dialog is at most 80% of the screen, less its padding, title, the
+            filter box while typing and the hint's own lines."""
+            text = getattr(self, "hint_text", "")
+            inner = max(20, (self.app.size.width * 9 // 10 if self.wide else 72) - 4)
+            lines = sum(max(1, -(-len(ln) // inner)) for ln in (text.split("\n") or [""]))
+            room = self.app.size.height * 8 // 10 - 2 - 2 - (4 if self.typing else 0) - 1 - lines
+            self.query_one("#choices", OptionList).styles.max_height = max(3, min(20, room))
 
         def _show_hint(self) -> None:
             keys = ["↑↓ move", "enter pick"]
@@ -2387,7 +2426,9 @@ def build_tui(base: str, token: str, **kw):
                 keys += [f"{'␣' if k == 'space' else k} {label}"
                          for k, (label, _) in self.actions.items()]
             text = "  ".join(keys) + (f"\n{self.hint}" if self.hint else "")
+            self.hint_text = text
             self.query_one("#dialog-hint", Static).update(f"[$text-muted]{_esc(text)}[/]")
+            self._fit()
 
         def fill(self, q: str, keep: str | None = None) -> None:
             ol = self.query_one("#choices", OptionList)
@@ -2398,6 +2439,20 @@ def build_tui(base: str, token: str, **kw):
                           for i, (v, lb, m) in enumerate(rows) if v is not None]
                 rows = [r for sc, _, r in sorted((x for x in scored if x[0] > 0),
                                                  key=lambda x: (-x[0], x[1]))]
+            elif self.hidden:
+                shown, head, n = [], None, 0
+                for r in rows:
+                    if r[0] is None:
+                        head = r               # only kept with a row under it
+                    elif r[0] in self.hidden:
+                        n += 1
+                    else:
+                        if head is not None:
+                            shown.append(head)
+                            head = None
+                        shown.append(r)
+                rows = shown + ([(None, f"{n} more hidden (off or deprecated): type to find "
+                                        "them", "")] if n else [])
             hit = None
             for value, label, meta in rows:
                 if value is None:
@@ -3425,7 +3480,7 @@ def build_tui(base: str, token: str, **kw):
                        "looks like. The orchestrator splits it into tasks, sends an agent "
                        "to each and messages them as they work.\n\nEvery agent uses the "
                        "default model unless you name one for a task — \"use "
-                       "deepseek-pro for the migration\" pins that model to that task.")
+                       "deepseek-flash for the migration\" pins that model to that task.")
 
         def __init__(self, project: str) -> None:
             super().__init__()
@@ -8607,9 +8662,9 @@ def build_tui(base: str, token: str, **kw):
             return []
 
         async def pick(self, title: str, rows, current=None, custom=False, hint="",
-                       actions=None):
+                       actions=None, hidden=(), wide=False):
             return await self.push_screen_wait(Picker(title, rows, current, custom, hint,
-                                                      actions))
+                                                      actions, hidden, wide))
 
         async def c_help(self, arg: str) -> None:
             cmds = [(f"/{name} {cmd.usage}".rstrip(), cmd.help,
@@ -8677,21 +8732,26 @@ def build_tui(base: str, token: str, **kw):
             convs = await self.refresh_convs()
             if not arg:
                 rows = []
+                # the dialog is 90% of the terminal, 110 at most, less its padding (4),
+                # the list's (2 and a scrollbar's 1) and the mark (2); a row is the
+                # title, two spaces and the meta, and the title gives way so the
+                # meta stays on the same line
+                width = min(self.size.width * 9 // 10, 110) - 4 - 3 - 2
                 for cv in convs[:100]:
-                    meta = (cv.get("started_at") or "")[:16]
+                    meta = session_when(cv.get("started_at"))
                     if cv.get("project_slug"):
-                        meta += f"  ⌂ {cv['project_slug']}"
+                        meta += f"  ⌂ {_short(cv['project_slug'], 18)}"
                     if cv.get("running"):
                         meta += "  ● running"
                     if cv.get("starred"):
                         meta = "★ " + meta
                     # one row per chat: a summary that is still the first
                     # message can carry newlines
-                    rows.append((str(cv["id"]),
-                                 " ".join(str(cv.get("summary") or "").split()) or "(untitled)",
+                    title = " ".join(str(cv.get("summary") or "").split()) or "(untitled)"
+                    rows.append((str(cv["id"]), _short(title, max(16, width - len(meta) - 2)),
                                  meta))
                 arg = await self.pick("Sessions", rows, str(self.cid) if self.cid else None,
-                                      hint="type to filter · enter opens") or ""
+                                      hint="type to filter · enter opens", wide=True) or ""
                 if not arg:
                     return
             if not arg.isdigit():
@@ -9271,10 +9331,16 @@ def build_tui(base: str, token: str, **kw):
                 return rows()
 
             cur = self.model or self.shown_model or (self.options or {}).get("default")
-            v = await self.pick("Models", rows(), cur,
+            first = rows()
+            # off providers and deprecated models stay off the list until a filter is
+            # typed: a switched-off provider used to add a heading and all its models
+            hidden = {v for v, (pv, m) in state.items()
+                      if not pv.get("enabled") or m.get("deprecated")
+                      or "deprecated" in f"{m.get('label')} {m['id']}".lower()} - {cur}
+            v = await self.pick("Models", first, cur,
                                 actions={"space": ("on/off", toggle),
                                          "d": ("make default", make_default)},
-                                hint="enter pins the model to this chat")
+                                hint="enter pins the model to this chat", hidden=hidden)
             if not v:
                 return
             if v == "default":

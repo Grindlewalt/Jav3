@@ -98,3 +98,103 @@ async def test_watching_means_this_chat_on_the_main_screen():
         assert not app._watching(4)
         await app.pop_screen()
         assert app._watching(4)
+
+
+# TUI-12
+
+def test_session_when_is_local_and_says_today_or_yesterday(monkeypatch):
+    import time
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        now = 1790000000.0                     # 2026-09-21 13:33 UTC = 06:33 PDT
+        assert jav3.session_when("2026-09-21 11:19:05", now) == "today 04:19"
+        assert jav3.session_when("2026-09-21T02:10", now) == "yesterday 19:10"
+        assert jav3.session_when("2026-09-12 20:00:00", now) == "09-12 13:00"
+        assert jav3.session_when(None, now) == "" and jav3.session_when("soon", now) == ""
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+class SessionsServer(FakeServer):
+    def __init__(self, convs):
+        super().__init__()
+        self.convs = convs
+
+    def handle(self, request):
+        import httpx
+        if request.url.path == "/api/conversations":
+            return httpx.Response(200, json={"conversations": self.convs})
+        return super().handle(request)
+
+
+async def test_sessions_rows_keep_the_meta_on_one_line():
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    long_title = "Explain why the sky is blue in two long sentences, then compare it to sunsets"
+    srv = SessionsServer([{"id": 7, "summary": long_title, "started_at": now,
+                           "project_slug": "benchmark-game", "running": True}])
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/sessions")
+        assert await wait_for(lambda: top(app) == "Picker")
+        await pilot.pause(0.2)
+        (value, label, meta), = app.screen.rows
+        assert value == "7" and meta.startswith("today ") and "⌂ benchmark-game" in meta
+        assert label.endswith("…")
+        ol = app.screen.query_one("#choices")
+        assert ol.virtual_size.height == 1              # one line: nothing wrapped
+
+
+# TUI-13
+
+def model_rows():
+    rows = [("default", "Server default", "")]
+    for p in ("deepseek", "moonshot"):
+        rows.append((None, p, ""))
+        rows += [(f"{p}/m{i}", f"Model {i}", "") for i in range(12)]
+    rows += [(None, "LMStudio  (provider off)", ""), ("lm/a", "Llama A", "off"),
+             ("lm/b", "Llama B", "off")]
+    return rows
+
+
+async def test_picker_hint_stays_visible_on_24_rows():
+    srv, app = make_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+
+        async def noop(v):
+            return None
+        app.run_worker(app.pick("Models", model_rows(), None, hint="enter pins the model",
+                                actions={"space": ("on/off", noop),
+                                         "d": ("make default", noop)}))
+        assert await wait_for(lambda: top(app) == "Picker")
+        await pilot.pause(0.2)
+        dlg, hint = app.screen.query_one("#dialog"), app.screen.query_one("#dialog-hint")
+        assert dlg.region.bottom <= 24
+        assert hint.region.bottom <= dlg.region.bottom - 1      # inside the padding
+        await pilot.press("t")                                  # the filter box takes rows too
+        await pilot.pause(0.2)
+        assert hint.region.bottom <= dlg.region.bottom - 1
+
+
+async def test_hidden_rows_wait_for_a_filter_and_a_line_says_how_many():
+    srv, app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        hidden = {"lm/a", "lm/b", "moonshot/m3"}
+        app.run_worker(app.pick("Models", model_rows(), None, hidden=hidden))
+        assert await wait_for(lambda: top(app) == "Picker")
+        await pilot.pause(0.2)
+        ol = app.screen.query_one("#choices")
+        ids = [ol.get_option_at_index(i).id for i in range(ol.option_count)]
+        assert "lm/a" not in ids and "moonshot/m3" not in ids and "moonshot/m4" in ids
+        prompts = [ol.get_option_at_index(i).prompt for i in range(ol.option_count)]
+        assert "LMStudio" not in "".join(str(p) for p in prompts)      # no empty heading
+        assert "3 more hidden" in str(prompts[-1])
+        await pilot.press("t", "l", "l", "a")
+        await pilot.pause(0.2)
+        ids = [ol.get_option_at_index(i).id for i in range(ol.option_count)]
+        assert ids[:2] == ["lm/a", "lm/b"]
