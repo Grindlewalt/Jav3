@@ -1250,7 +1250,12 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
    done or skipped. Exception: every {pause_tokens} tokens the run PAUSES for the
    operator's review (running turns finish, nothing new starts). Then report
    where it stands and stop; only the operator resumes it. Go to the operator ONLY for what agents cannot do at all:
-   a credential or account, money, a decision that is genuinely theirs.
+   a credential or account, money, a decision that is genuinely theirs. While
+   a run is live never park on that question: nobody watches the plan while you
+   wait. Put open questions in your final report; if one truly cannot wait,
+   ask_user hands control back after about two minutes with the question left
+   open (the answer then reaches you as a message), so check first that it is
+   still a real question (plan_status, the project's Network tab) before asking.
 5. A single focused task outside the plan can go to spawn_agent or
    spawn_temp_agent; you wait for that one's report.
 6. When everything is done, report to the operator: what got done (exact
