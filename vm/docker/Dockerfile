@@ -19,7 +19,7 @@ FROM ${BASE}
 
 # the same curated toolchain as the KVM golden image (vm/build_base.sh), so
 # run_code behaves the same in both runtimes
-ARG JAV3_PACKAGES="python3-pip python3-venv python3-dev git curl ca-certificates nodejs npm build-essential pkg-config jq ripgrep sqlite3 unzip zip xz-utils"
+ARG JAV3_PACKAGES="python3-pip python3-venv python3-dev python3-pytest git curl ca-certificates nodejs npm build-essential pkg-config jq ripgrep sqlite3 unzip zip xz-utils"
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
