@@ -353,14 +353,22 @@ async def move_file(slug: str, body: MoveRequest):
 # Selection lives in projects/<slug>/.context.json (a list of relative paths).
 # assemble_system_prompt reads it when the project is active. Token counts are
 # a cheap chars/4 estimate — enough to budget, not exact.
+#
+# This list, plus project.md, IS the project's always-loaded set
+# (backend/alwaysloaded.py): the files that ride every prompt, and so the ones a
+# tainted turn's write is held for approval on. Only these two routes change it;
+# they are the operator's cookie session (this router is require_user, a device
+# token never reaches them) and a change is an info security event.
 
-from .memory import context_selection, set_context_selection, estimate_tokens  # noqa: E402
+from .memory import context_selection, estimate_tokens  # noqa: E402
+from . import alwaysloaded, taintpaths  # noqa: E402
 
 
 @router.get("/context")
 async def get_context(slug: str):
     base = await project_dir(slug)
     selected = set(context_selection(slug))
+    tainted = set(taintpaths.paths(slug))
     files = []
     total = 0
     for f in list_tree(base):
@@ -371,8 +379,14 @@ async def get_context(slug: str):
         if is_sel:
             total += tokens
         files.append({"path": path, "tokens": tokens,
-                      "binary": info["binary"], "selected": is_sel})
-    return {"files": files, "selected_tokens": total}
+                      "binary": info["binary"], "selected": is_sel,
+                      # project.md rides every prompt whatever is ticked
+                      "locked": path == alwaysloaded.PROJECT_MD,
+                      # last written by a turn that had read untrusted content
+                      "tainted": path in tainted})
+    return {"files": files, "selected_tokens": total,
+            "always_loaded": alwaysloaded.files(slug),
+            "held": len(alwaysloaded.list_held(slug))}
 
 
 class ContextSelection(BaseModel):
@@ -384,8 +398,10 @@ async def put_context(slug: str, body: ContextSelection):
     base = await project_dir(slug)
     valid = {f["path"] for f in list_tree(base)}
     chosen = [p for p in body.files if p in valid]
-    set_context_selection(slug, chosen)
-    return {"ok": True, "files": chosen}
+    added, removed = alwaysloaded.set_selection(slug, chosen)
+    await alwaysloaded.record_change(slug, added, removed)
+    return {"ok": True, "files": [f for f in chosen if f != alwaysloaded.PROJECT_MD],
+            "always_loaded": alwaysloaded.files(slug)}
 
 
 # --- control-board layout (persisted per project, hidden from file views) ----

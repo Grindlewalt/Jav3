@@ -27,7 +27,7 @@ from .agent.model import complete_text
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import standing_rules_tail
-from .writes import apply_write
+from .writes import apply_write, apply_write_gated
 
 MAX_QUERIES = 8
 RESULTS_PER_QUERY = 6
@@ -48,9 +48,11 @@ def _dom(u: str) -> str:
 
 async def _write_doc(project: str, doc_path: str, doc: str) -> str:
     """Write the FINAL research document straight to the project (the staging
-    queue is gone; writes are live and advisory-scanned in apply_write)."""
-    await apply_write(project, doc_path, doc.encode())
-    return "canonical"
+    queue is gone; writes are live and advisory-scanned in apply_write). The
+    document is built from web pages, so it counts as a tainted write: over a
+    file the operator listed as always loaded it waits for approval instead."""
+    _, held = await apply_write_gated(project, doc_path, doc.encode(), tainted=True)
+    return "held for approval" if held else "canonical"
 
 
 async def _node(project, parent, job_id, kind, title) -> int:

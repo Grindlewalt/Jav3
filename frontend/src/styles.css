@@ -4306,3 +4306,9 @@ a:has(> .nav-dot) { position: relative; }
 .log-msg.narration { margin-left: 16px; border-left: 3px solid var(--accent);
   background: var(--bg-soft); }
 .log-msg.narration .log-role { color: var(--accent); }
+/* always-loaded files */
+.ctx-flag { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.ctx-flag.warn { color: var(--amber); }
+.ctx-held { margin: 0 0 6px; padding: 7px 10px; border: 1px solid var(--amber);
+  border-radius: 7px; font-size: 12.5px; }
+.ctx-held a { text-decoration: underline; }

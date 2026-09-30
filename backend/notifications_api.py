@@ -113,7 +113,9 @@ async def notifications():
     tiers, level = sec["tiers"], sec["level"]
     try:                # notes/changes awaiting approval: the Memory nav badge, kept
         from .memory import pending_counts     # out of `count` (Security's number)
-        memory_pending = pending_counts()["total"]
+        from . import alwaysloaded
+        # ...plus writes to always-loaded project files held for approval
+        memory_pending = pending_counts()["total"] + alwaysloaded.pending_total()
     except Exception:                           # noqa: BLE001
         memory_pending = 0
     approvals = (len(git) + len(sched) + len(shell) + len(asks)

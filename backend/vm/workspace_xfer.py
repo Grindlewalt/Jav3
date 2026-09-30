@@ -52,15 +52,25 @@ def build_merged_tar(slug: str) -> bytes:
     return buf.getvalue()
 
 
-async def apply_guest_writes(slug: str, tar_bytes: bytes) -> dict:
+async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = None) -> dict:
     """Apply the guest's write buffer to the canonical files host-side. Returns
-    the applied rel-paths, any refused secret leaks (rel -> [secret names]) and
-    any advisory flags raised (rel -> [triggers])."""
+    the applied rel-paths, any refused secret leaks (rel -> [secret names]), any
+    advisory flags raised (rel -> [triggers]) and `held`: writes to files that
+    ride every prompt (alwaysloaded.py) that a tainted turn made, which wait for
+    the operator instead of landing.
+
+    Tainted = the turn that owns `op_id` read untrusted content, or any turn on
+    the project did while live or since the project was last idle (the buffer is
+    the project's, and turns share it, so the wider reading is the safe one)."""
     applied: list[str] = []
     leaks: dict[str, list[str]] = {}
     flagged: dict[str, list[str]] = {}
+    held: list[str] = []
     if not tar_bytes:
-        return {"applied": applied, "secret_files": leaks, "flags": flagged}
+        return {"applied": applied, "secret_files": leaks, "flags": flagged, "held": held}
+    from . import broker
+    tainted = bool(broker.project_tainted(slug, consume=True)
+                   or (op_id and broker.op_tainted(op_id)))
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
         for m in tar.getmembers():
             if not m.isfile():
@@ -73,11 +83,15 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes) -> dict:
                 continue
             data = f.read()
             try:
-                triggers = await writes.apply_write(slug, rel, data)
+                triggers, was_held = await writes.apply_write_gated(
+                    slug, rel, data, tainted=tainted)
             except writes.SecretLeakError as e:
                 leaks[rel] = e.names       # refused — never lands canonical
                 continue
             except Exception:  # noqa: BLE001 — one bad path must not drop the rest
+                continue
+            if was_held:
+                held.append(rel)           # not on disk: not in the tainted-paths ledger either
                 continue
             if triggers:
                 flagged[rel] = triggers
@@ -85,6 +99,5 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes) -> dict:
     # remember which of these files a tainted turn wrote (backend/taintpaths.py):
     # a later turn that reads one is told, by the guest, that it read untrusted
     # text; a clean turn's write of a path clears it
-    from . import broker
-    taintpaths.record(slug, applied, broker.project_tainted(slug, consume=True))
-    return {"applied": applied, "secret_files": leaks, "flags": flagged}
+    taintpaths.record(slug, applied, tainted)
+    return {"applied": applied, "secret_files": leaks, "flags": flagged, "held": held}
