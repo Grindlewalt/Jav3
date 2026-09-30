@@ -8,11 +8,37 @@ project); the op name and reason are truncated to printable text because the
 op name is whatever the guest typed. Best effort: a failed write must never
 change what the gateway answers.
 """
+import time
+
 from ..db import get_db
 
 # a compromised guest can ask for a refusal as fast as it can send lines; the
 # log keeps the newest rows only
 KEEP = 5000
+# ...and only this many rows a second per box are written at all (a burst of
+# 30, then 5 a second): each row is a DB write, and a hostile guest can ask for
+# a refusal as fast as it can send a line
+ROWS_PER_S = 5.0
+ROWS_BURST = 30
+_buckets: dict[str, list] = {}         # box key -> [tokens, last refill]
+# a cap trip raises one security event per box and cap per this many seconds
+TRIP_EVERY_S = 10.0
+_trips: dict[tuple, float] = {}
+
+
+def _row_allowed(key: str) -> bool:
+    now = time.monotonic()
+    b = _buckets.get(key)
+    if b is None:
+        if len(_buckets) > 512:
+            _buckets.clear()
+        b = _buckets[key] = [float(ROWS_BURST), now]
+    b[0] = min(float(ROWS_BURST), b[0] + (now - b[1]) * ROWS_PER_S)
+    b[1] = now
+    if b[0] < 1.0:
+        return False
+    b[0] -= 1.0
+    return True
 
 
 def _clean(v, n: int = 80) -> str | None:
@@ -24,6 +50,8 @@ def _clean(v, n: int = 80) -> str | None:
 
 async def record_refusal(op_name, reason: str, box_id=None,
                          project_slug=None) -> None:
+    if not _row_allowed(str(box_id or "?")):
+        return
     try:
         db = await get_db()
         try:
@@ -39,4 +67,33 @@ async def record_refusal(op_name, reason: str, box_id=None,
         finally:
             await db.close()
     except Exception:  # noqa: BLE001 — the log must never fail a gateway reply
+        pass
+
+
+async def record_cap_trip(cap: str, message: str, box_id=None, project_slug=None,
+                          detail: dict | None = None) -> None:
+    """A hard cap on what the guest may make the host hold tripped (a request
+    line too large, too many connections, a spent buffer budget...). One
+    refusal row, and one security event that counts its repeats, per box and
+    cap every TRIP_EVERY_S seconds. Best effort, like the refusal log."""
+    now = time.monotonic()
+    key = (str(box_id or "?"), cap)
+    if now - _trips.get(key, -1e9) < TRIP_EVERY_S:
+        return
+    if len(_trips) > 512:
+        _trips.clear()
+    _trips[key] = now
+    await record_refusal("gateway", f"cap:{cap}", box_id, project_slug)
+    try:
+        from .. import security
+        db = await get_db()
+        try:
+            await security.raise_event(
+                db, kind="gateway_cap", severity="warn", project=project_slug,
+                summary=f"Gateway cap tripped ({cap}) by {box_id or 'an unknown box'}: {message}",
+                detail={"cap": cap, "box": box_id, **(detail or {})},
+                cause=f"gateway_cap:{box_id}:{cap}")
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — as above
         pass
