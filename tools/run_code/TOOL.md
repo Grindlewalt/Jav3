@@ -30,7 +30,8 @@ its port for everyone on the shared box.
 
 Your working directory is the project copy: read its files directly, and write
 results as files — they sync back to the project at turn end. That sync keeps
-EVERYTHING the run created, so put throwaway scratch under /tmp, where it is NOT
-kept; node_modules, __pycache__, .pytest_cache and package caches are never
-kept. stdout/stderr are truncated past ~6k chars: print what matters, write the
-rest to a file.
+EVERYTHING the run created, so put small throwaway scratch under /tmp, where it
+is NOT kept (it is RAM-backed and small, ~350 MB: no venvs or big installs
+there; use .venv in the project). node_modules, .venv, __pycache__,
+.pytest_cache and package caches are never kept. stdout/stderr are truncated
+past ~6k chars: print what matters, write the rest to a file.
