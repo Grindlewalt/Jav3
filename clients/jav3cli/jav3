@@ -5373,9 +5373,18 @@ def build_tui(base: str, token: str, **kw):
             return False
 
         def render_foot(self) -> None:
+            from textual.content import Content
             common = self.common_foot(live=self._live())
-            self.query_one("#sec-foot", Static).update(
-                common if self.locked else f"{self.foot_keys()}   {common}")
+            line = common if self.locked else f"{self.foot_keys()}   {common}"
+            extras = self.foot_extras()
+            if extras:
+                # an extra never splits across two lines: it goes on its own line
+                # when it does not fit after the keys
+                room = max(20, self.size.width - 4)
+                fits = (len(Content.from_markup(line).plain) + 2
+                        + len(Content.from_markup(extras).plain) <= room)
+                line += ("  " if fits else "\n") + extras
+            self.query_one("#sec-foot", Static).update(line)
 
         TIMED = ("queue", "network", "logs", "persistent", "rules", "calls")
 
@@ -5384,21 +5393,24 @@ def build_tui(base: str, token: str, **kw):
             form, so the list keeps some rows."""
             return self.size.width < 100 or self.size.height < 30
 
-        def _more_hint(self) -> str:
+        def foot_extras(self) -> str:
+            """What the footer adds when it applies: [ ] scrolls a pane that overflows,
+            and the times on the rows are this machine's (the server keeps UTC)."""
             self._more = False if self.locked else self._detail_more()
-            return (f"  [$primary]{_esc('[ ]')}[/] scroll the details" if self._more else "")
+            bits = []
+            if self._more:
+                bits.append(f"[$primary]{_esc('[ ]')}[/] scroll the details")
+            if self.tab in self.TIMED and not self.locked:
+                bits.append(f"[$text-muted]times {_esc(tz_label())}[/]")
+            return "  ".join(bits)
 
         def common_foot(self, live: bool = False) -> str:
-            """The keys every tab has; the times on the rows are this machine's, and
-            the footer says which zone once (the server keeps UTC)."""
+            """The keys every tab has."""
             return (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
                     "[$primary]↑↓[/] select  "
                     + ("" if live else "[$primary]r[/] refresh  ")
                     + "[$primary]esc[/] back"
-                    + ("  [$text-muted](live)[/]" if live else "")
-                    + self._more_hint()
-                    + (f"  [$text-muted]times {_esc(tz_label())}[/]"
-                       if self.tab in self.TIMED and not self.locked else ""))
+                    + ("  [$text-muted](live)[/]" if live else ""))
 
         def sub_markup(self) -> str:
             if self.locked:
@@ -7752,7 +7764,8 @@ def build_tui(base: str, token: str, **kw):
             header.display = not show
             header.update(f"[b]{_esc(self.title_text or 'New chat')}[/]"
                           + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
-                          + "  [$text-muted]ctrl+b notifications[/]")
+                          + ("  [$text-muted]ctrl+b notifications[/]"
+                             if self.size.width >= SIDEBAR_MIN_COLS else ""))
 
         def _status_parts(self) -> list[tuple[str, str, int]]:
             """The status row's left side as (plain, markup, rank) parts — while a

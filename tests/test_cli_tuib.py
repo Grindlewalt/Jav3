@@ -5,7 +5,6 @@ small ones. The client file is loaded from tests/cli_fake.py (JAV3_CLIENT points
 at another copy, to watch a test fail on the base commit)."""
 import io
 import json
-from pathlib import Path
 
 import httpx
 import pytest
