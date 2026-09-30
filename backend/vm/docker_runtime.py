@@ -695,6 +695,19 @@ class DockerBox:
         self.pid = None
         self.booted_at = None
 
+    async def forget(self) -> None:
+        """boxes.destroy calls this once the box is released: its
+        <vm_dir>/sock/<cid> directory goes with it. A merely stopped box keeps
+        the (empty) directory for its next start; without this every idle-stopped
+        box left one behind for the leftovers scan to list ("no docker box uses
+        slot N"), 2026-09-29 on atomosserver."""
+        d = self.box.transport.host_dir
+        if self.state not in ("stopped", "failed") or d.is_symlink() or not d.is_dir():
+            return
+        if any(b.runtime == "docker" and b.cid == self.box.cid for b in boxes.all_boxes()):
+            return                          # the slot was handed to another box
+        shutil.rmtree(d, ignore_errors=True)
+
     # docker queries ---------------------------------------------------------------
     async def _inspect_pid(self) -> int | None:
         rc, out, _ = await cli.run("inspect", "--format", "{{.State.Pid}}",

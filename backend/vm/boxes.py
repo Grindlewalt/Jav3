@@ -911,6 +911,9 @@ async def destroy(box: Box, *, delete_data: bool = False,
             for fn in list(_data_deleters):
                 await fn(box)
         registry.release(box.id)
+        forget = getattr(box.ctl, "forget", None)
+        if forget is not None:              # a docker box's socket directory
+            await forget()
         shutil.rmtree(box.dir, ignore_errors=True)
 
 
