@@ -6,6 +6,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { useIsPhone } from '../breakpoints.js'
 import { useDismiss } from '../useDismiss.js'
+import { onProjectsChanged } from '../projectsChanged.js'
 import ErrorBoundary from '../ErrorBoundary.jsx'
 import Menu, { MenuItem } from '../components/Menu.jsx'
 import Chat from '../pages/Chat.jsx'
@@ -99,6 +100,7 @@ export default function Work({ openProjects = false }) {
   const reloadProjects = useCallback(() =>
     api('/api/projects').then((r) => setProjects(r.projects || [])).catch(() => {}), [])
   useEffect(() => { reloadProjects() }, [reloadProjects])
+  useEffect(() => onProjectsChanged(reloadProjects), [reloadProjects])
 
   const onProjectChange = useCallback((slug) => setProject(slug || null), [])
 

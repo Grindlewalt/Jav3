@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
 import { isPhone, useIsPhone } from '../breakpoints.js'
 import { notify, notifyError } from '../notify.js'
+import { onProjectsChanged } from '../projectsChanged.js'
 import { useChatStream } from '../useChatStream.js'
 import { listTitle } from '../ChatGroups.jsx'
 import { AskPanel, useOperatorAsks } from '../AskUser.jsx'
@@ -92,7 +93,8 @@ export default function Shell() {
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') refreshSide()
     }, SIDEBAR_POLL_MS)
-    return () => clearInterval(t)
+    const off = onProjectsChanged(refreshSide)
+    return () => { clearInterval(t); off() }
   }, [refreshSide])
 
   useEffect(() => {

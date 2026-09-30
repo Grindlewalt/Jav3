@@ -4,6 +4,7 @@ import {
 import { api, chatStream, tailStream } from '../api.js'
 import { NavSlotContext } from '../nav.jsx'
 import { useDismiss } from '../useDismiss.js'
+import { onProjectsChanged } from '../projectsChanged.js'
 import { isPhone, useIsPhone } from '../breakpoints.js'
 import { MessageBody } from '../ToolActivity.jsx'
 import { activityMark, makeTurnFolder, newTurn, seedParts } from '../turnEvents.js'
@@ -269,7 +270,12 @@ export default function Chat({
       else localStorage.removeItem('jarvis.chat.last')
     }).catch(() => {})
     api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
-    return () => tailAbort.current?.abort()
+    // the Projects sheet made a change: the sidebar's Projects list is this copy
+    const offProjects = onProjectsChanged(() => {
+      api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
+        .catch(() => {})
+    })
+    return () => { offProjects(); tailAbort.current?.abort() }
   }, [])
 
   // "Chat" in the nav is a destination, not a reset. It used to mount a blank
