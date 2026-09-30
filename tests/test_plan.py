@@ -359,6 +359,29 @@ async def _const(v):
     return v
 
 
+async def test_a_stall_names_the_hung_tool_and_respects_attempts_max(client, monkeypatch):
+    """PLANS-08: the call a stalled attempt was stuck in was never recorded (the
+    retry started blind), and the stall respawn ran past attempts_max."""
+    monkeypatch.setattr(settings, "plan_stall_seconds", 0.05)
+    await _put(client, [{"title": "hangs", "brief": "h"}], attempts_max=1)
+
+    async def turn(cid, system_prompt, history, **kw):
+        yield {"type": "tool", "id": "c1", "name": "run_code", "args": {}}
+        await asyncio.Event().wait()             # the call never returns
+        yield {"type": "final", "content": "never"}
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", turn)
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    it = _by_id(plan_mod.load(SLUG))["i1"]
+    assert it["status"] == "failed" and it["attempts"] == 1       # not respawned past the cap
+    h = it["history"][-1]
+    assert h["outcome"] == "stalled" and "run_code" in h["progress"]
+    assert "in flight: run_code" in it["last_error"]
+
+
 async def test_siblings_talk_by_item_id_and_leave_notes(client, monkeypatch):
     await _put(client, [{"title": "left hand", "brief": "l"},
                         {"title": "right hand", "brief": "r"},

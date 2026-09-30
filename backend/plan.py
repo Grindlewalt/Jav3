@@ -333,7 +333,9 @@ roster; null means a general worker.
 Write every brief for an agent that must FINISH on its own: name the files it
 owns, the command that proves it works (a test, a run, a build) and what done
 looks like. A root item gates everything after it, so keep roots small and
-certain. Tell items that depend on unfinished work to stub or build what they
+certain. Depend on an item only if you read its output: an environment or setup
+proof (does pip work, does the toolchain run) never gates items that just write
+files. Tell items that depend on unfinished work to stub or build what they
 need rather than wait for it."""
 
 # appended to the planner's instructions only when the operator made explicit
@@ -589,6 +591,12 @@ REPORT_RULES = """# Keep moving
 - "blocked" is ONLY for what an agent cannot do at all: a credential or
   account, a paid service, a decision only the operator can make. Everything
   else you solve.
+- The work is written and only the proof RUN is blocked (a host the egress
+  proxy refuses, a tool the box lacks): report "done" with the caveat and the
+  exact command still to run, or "blocked" naming the hosts. Never "failed": a
+  failed attempt is re-spawned from scratch. A proxy 403 means that host is
+  refused or queued for the operator: say which hosts in your report at once;
+  do not probe the proxy, the gateway or the sandbox for a way around it.
 
 # Reporting — required
 When the item is finished, call plan_report with status "done" and a summary
@@ -960,12 +968,22 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                     need_flush, flush_cid = True, m.get("cid")
                     it["stalls"] += 1
                     it["last_error"] = "stalled: no tool call or message for too long"
+                    progress = ""
+                    if m.get("in_flight"):
+                        # the hung call is never recorded by the guest; say which
+                        # one it was so the retry does not walk into it again
+                        progress = (f"interrupted: {m['in_flight']} had been running "
+                                    f"{int(now - m.get('in_flight_at', now))}s with no result")
+                        it["last_error"] += f" (in flight: {m['in_flight']})"
                     it.setdefault("history", []).append(
                         {"attempt": it["attempts"], "outcome": "stalled",
-                         "error": it["last_error"], "progress": "",
+                         "error": it["last_error"], "progress": progress,
                          "conversation_id": m.get("cid"), "at": _now()})
                     it["history"] = it["history"][-HISTORY_KEEP:]
-                    it["status"] = "todo" if it["stalls"] <= 1 else "failed"
+                    # a stall respawn counts against attempts_max like any retry
+                    # (attempt 3 of 2 was seen)
+                    it["status"] = ("todo" if it["stalls"] <= 1
+                                    and it["attempts"] < plan["attempts_max"] else "failed")
                     _emit_item(job_id, it)
                 # the review checkpoint: past it, start nothing new, let what is
                 # running finish its turn, then pause for the operator
@@ -1072,6 +1090,10 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
 
     def on_event(ev: dict) -> None:
         m["last_activity"] = time.monotonic()
+        if ev.get("type") == "tool":
+            m["in_flight"], m["in_flight_at"] = ev.get("name"), m["last_activity"]
+        elif ev.get("type") == "tool_result":
+            m["in_flight"] = None
         if ev.get("type") == "tool" and m["cid"] is not None:
             bus.publish(job_id, {"type": "tool", "name": ev.get("name"), "node_id": m["cid"]})
 
