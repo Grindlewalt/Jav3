@@ -364,6 +364,51 @@ async def test_a_plain_confirm_still_takes_enter_and_says_so():
         assert await wait_for(lambda: srv.created == [{"name": "brandnew"}])
 
 
+# --- TUIB-07: the detail pane scrolls with plain keys ----------------------------------------------
+
+def _long_alert():
+    ev = {"id": 798, "kind": "harness_fault", "severity": "warn", "project_slug": "demo",
+          "summary": "the harness said something long", "acknowledged": 0,
+          "created_at": "2026-09-30 04:56:59",
+          "detail": json.dumps({"expected": " ".join(f"word{i}" for i in range(400))})}
+    return ev
+
+
+async def test_the_detail_pane_scrolls_with_plain_keys_and_the_footer_says_so():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": [_long_alert()]}}))
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        wrap = scr.query_one("#sec-detail-wrap")
+        assert await _until(pilot, lambda: wrap.max_scroll_y > 0)
+        assert await _until(pilot, lambda: "scroll the details" in str(
+            scr.query_one("#sec-foot").render()))
+        assert wrap.scroll_y == 0
+        await pilot.press("right_square_bracket")
+        await pilot.pause(0.2)
+        assert wrap.scroll_y > 0
+        seen = wrap.scroll_y
+        await pilot.press("pagedown")                 # one row: the list fits, so the pane pages
+        await pilot.pause(0.2)
+        assert wrap.scroll_y > seen
+        await pilot.press("left_square_bracket", "left_square_bracket", "left_square_bracket")
+        await pilot.pause(0.2)
+        assert wrap.scroll_y == 0
+
+
+async def test_a_short_detail_does_not_advertise_scrolling():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": [{**_long_alert(), "detail": None}]}}))
+    async with app.run_test(size=(120, 40)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        await pilot.pause(0.3)
+        assert "scroll the details" not in str(scr.query_one("#sec-foot").render())
+
+
 # --- TUIB-06: a name typed into a picker keeps its first letter, t included ------------------------
 
 async def test_a_picker_keeps_the_first_letter_when_it_is_t():

@@ -4470,6 +4470,8 @@ def build_tui(base: str, token: str, **kw):
             Binding("down,j", "move(1)", show=False),
             Binding("pageup", "page(-1)", show=False),
             Binding("pagedown", "page(1)", show=False),
+            Binding("left_square_bracket", "detail(-1)", show=False),
+            Binding("right_square_bracket", "detail(1)", show=False),
             Binding("r", "reload", show=False),
             Binding("y", "approve", show=False),
             Binding("n", "deny", show=False),
@@ -5224,6 +5226,10 @@ def build_tui(base: str, token: str, **kw):
 
         TIMED = ("queue", "network", "logs", "persistent", "rules", "calls")
 
+        def _more_hint(self) -> str:
+            self._more = False if self.locked else self._detail_more()
+            return (f"  [$primary]{_esc('[ ]')}[/] scroll the details" if self._more else "")
+
         def common_foot(self, live: bool = False) -> str:
             """The keys every tab has; the times on the rows are this machine's, and
             the footer says which zone once (the server keeps UTC)."""
@@ -5232,6 +5238,7 @@ def build_tui(base: str, token: str, **kw):
                     + ("" if live else "[$primary]r[/] refresh  ")
                     + "[$primary]esc[/] back"
                     + ("  [$text-muted](live)[/]" if live else "")
+                    + self._more_hint()
                     + (f"  [$text-muted]times {_esc(tz_label())}[/]"
                        if self.tab in self.TIMED and not self.locked else ""))
 
@@ -5394,6 +5401,11 @@ def build_tui(base: str, token: str, **kw):
                 target.scroll_visible(animate=False)
             self.query_one("#sec-detail", Static).update(
                 "" if self.locked else self.detail_markup(self.selected()))
+            here = (self.tab, self.sel[self.tab])
+            if here != getattr(self, "_detail_for", None):
+                self._detail_for = here
+                self.query_one("#sec-detail-wrap", VerticalScroll).scroll_home(animate=False)
+            self.call_after_refresh(self._foot_again)
 
         # -- keys -------------------------------------------------------------------------
 
@@ -5428,7 +5440,27 @@ def build_tui(base: str, token: str, **kw):
 
         def action_page(self, d: int) -> None:
             lst = self.query_one("#sec-list", VerticalScroll)
+            if lst.max_scroll_y <= 0:            # the list fits: the pane under it is what pages
+                self.action_detail(d)
+                return
             lst.scroll_page_up() if d < 0 else lst.scroll_page_down()
+
+        def action_detail(self, d: int) -> None:
+            """[ and ] (PgUp / PgDn when the list is short) scroll the pane under the list:
+            a diff or an evidence block runs past it, and Terminal.app has no shift+arrows."""
+            wrap = self.query_one("#sec-detail-wrap", VerticalScroll)
+            wrap.scroll_page_up(animate=False) if d < 0 else wrap.scroll_page_down(animate=False)
+            self.call_after_refresh(self._foot_again)
+
+        def _detail_more(self) -> bool:
+            wrap = self.query_one("#sec-detail-wrap", VerticalScroll)
+            return wrap.max_scroll_y > 0
+
+        def _foot_again(self) -> None:
+            """The footer names [ ] when the pane overflows; layout settles after the
+            text changes, so this runs once it has."""
+            if self._detail_more() != getattr(self, "_more", False):
+                self.render_chrome()
 
         async def action_reload(self) -> None:
             if not self.locked:
