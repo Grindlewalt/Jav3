@@ -2031,6 +2031,7 @@ def build_tui(base: str, token: str, **kw):
     from textual.screen import ModalScreen, Screen
     from textual.theme import Theme
     from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
+    from textual.widgets._markdown import MarkdownFence
     from textual.widgets.option_list import Option
 
     # Boxes (docs/boxes-contract.md). Emphasis is a solid theme colour behind
@@ -2077,8 +2078,17 @@ def build_tui(base: str, token: str, **kw):
             self.add_class("failed")
             self.update(self._markup(self.text, why, "$error"))
 
+    class WrapFence(MarkdownFence):
+        """Textual's code fence scrolls sideways with its scrollbars hidden, so
+        the rest of a long line was out of reach (TUI-17): this one wraps."""
+
+        DEFAULT_CSS = """
+        WrapFence { overflow-x: hidden; }
+        WrapFence > #code-content { width: 1fr; }
+        """
+
     class Reply(Markdown):
-        pass
+        BLOCKS = {**Markdown.BLOCKS, "fence": WrapFence, "code_block": WrapFence}
 
     class Footer(Static):
         pass
@@ -6697,7 +6707,7 @@ def build_tui(base: str, token: str, **kw):
         #sb-notes { margin-top: 1; }
         Home { height: 1fr; align: center middle; }
         #logo { width: auto; }
-        #home-hints { width: auto; margin-top: 2; color: $text-muted; }
+        #home-hints { width: auto; margin-top: 1; color: $text-muted; }
         UserMsg { border-left: thick $primary; background: $surface; padding: 1 2; margin-top: 1; }
         Reply { margin: 1 0 0 0; padding: 0 1 0 2; background: transparent; }
         Footer { color: $text-muted; padding-left: 2; margin-top: 1; }
@@ -7340,8 +7350,8 @@ def build_tui(base: str, token: str, **kw):
                     "[$text]ctrl+j[/]      [$text-muted]new line (enter sends)[/]\n"
                     "[$text]shift+tab[/]   [$text-muted]permissions: yolo → auto → ask · "
                     "ctrl+x u picks[/]\n"
-                    "[$text]ctrl+x l[/]    [$text-muted]sessions[/]\n"
-                    "[$text]ctrl+x m[/]    [$text-muted]models[/]\n"
+                    "[$text]ctrl+x l[/]    [$text-muted]sessions · [/][$text]ctrl+x m[/] "
+                    "[$text-muted]models[/]\n"
                     "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
             show = self.sidebar_shown()        # hidden unless the operator opened it
             self.query_one("#sidebar").display = show

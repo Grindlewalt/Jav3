@@ -200,6 +200,25 @@ async def test_hidden_rows_wait_for_a_filter_and_a_line_says_how_many():
         assert ids[:2] == ["lm/a", "lm/b"]
 
 
+# TUI-17
+
+async def test_a_long_code_line_wraps_instead_of_scrolling_out_of_sight():
+    long = ("# Jupiter is the largest planet in the solar system; its mass exceeds that of "
+            "all the other planets combined, more than two and a half times over")
+    srv, app = make_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put({"type": "final", "conversation_id": 4,
+                      "content": f"```python\n{long}\nx = 1\n```\n"})
+        srv.feed.close()
+        assert await wait_for(lambda: not app.busy)
+        assert await wait_for(lambda: list(app.query("MarkdownFence")))
+        await pilot.pause(0.3)
+        fence = list(app.query("MarkdownFence"))[0]
+        assert fence.virtual_size.width <= fence.size.width      # nothing off to the side
+        assert fence.size.height >= 5                            # the long line took 2+ rows
+
+
 # security rows and the agents screen at 80 columns / 256 colours
 
 def _plain(markup: str) -> str:
