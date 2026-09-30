@@ -23,6 +23,18 @@ from .agent.loop import run_turn
 PORT = 5556                                 # guest run-turn server (host dials this)
 
 
+# slug -> the files the host put in the workspace copy, plus every file staged
+# since. Deletions are measured against it: the shell's rm and mv act on the copy
+# (write_file buffers into .staging), so a file that is in here but no longer in
+# the tree or the buffer was deleted or renamed away, and the host is told.
+# In memory on purpose: nothing the agent runs can reach this process.
+_known: dict[str, set[str]] = {}
+
+# the member of the staged tarball that carries that list; `.staging` is a name
+# the guest's own write tools refuse, so no file the agent writes can collide
+DELETED_MEMBER = ".staging/deleted.json"
+
+
 def _unpack_workspace(slug: str, tar_b64: str) -> None:
     dest = guest_config.settings.projects_dir / slug
     if dest.exists():
@@ -30,16 +42,30 @@ def _unpack_workspace(slug: str, tar_b64: str) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(base64.b64decode(tar_b64)), mode="r:gz") as t:
         t.extractall(dest, filter="data")
+        _known[slug] = {m.name for m in t.getmembers() if m.isfile()}
 
 
 def _pack_staging(slug: str) -> str:
-    staging_dir = guest_config.settings.projects_dir / slug / ".staging"
+    root = guest_config.settings.projects_dir / slug
+    staging_dir = root / ".staging"
     buf = io.BytesIO()
+    staged: set[str] = set()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         if staging_dir.is_dir():
             for p in sorted(staging_dir.rglob("*")):
                 if p.is_file():
-                    tar.add(p, arcname=str(p.relative_to(staging_dir)))
+                    rel = str(p.relative_to(staging_dir))
+                    staged.add(rel)
+                    tar.add(p, arcname=rel)
+        known = _known.setdefault(slug, set())
+        known |= staged
+        # a staged file is a write, not a deletion, even if the tree copy is gone
+        gone = sorted(r for r in known if r not in staged and not (root / r).is_file())
+        if gone:
+            data = json.dumps(gone).encode()
+            ti = tarfile.TarInfo(DELETED_MEMBER)
+            ti.size = len(data)
+            tar.addfile(ti, io.BytesIO(data))
     return base64.b64encode(buf.getvalue()).decode()
 
 
