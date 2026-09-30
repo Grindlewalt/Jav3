@@ -690,6 +690,13 @@ TUI_HINT = ("the interactive TUI needs textual — re-run the installer "
 INTERRUPTED = "[Request interrupted"
 ATTACH_LIMIT = 256 * 1024          # per @file
 SHELL_KEEP = 20_000                # chars of a `!command`'s output kept for the next turn
+# a stream that breaks after the server took the turn is picked up again: seconds
+# between tries (the last one repeats), and how long a silent server is tried for
+RECONNECT_STEPS = (1, 2, 3, 5)
+RECONNECT_GIVE_UP = 300.0
+# after re-attaching, live tool events this soon after the transcript fetch may be
+# calls the fetch already drew (the stream was opened first so nothing is missed)
+CLAIM_WINDOW = 2.0
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 EXAMPLES = ("Fix the failing test in tests/", "What changed in the last commit?",
             "Summarise this week's journal", "Research a quiet NAS for the rack",
@@ -1332,6 +1339,36 @@ class TurnState:
         self.failed = False
         self.idle = False                 # attached, and nothing was running
         self.footer = None
+        self.sent: str | None = None      # the message this turn answers (to find it again)
+        self.seeded: list[dict] = []      # calls drawn before this view followed the turn
+        # after a re-attach: calls drawn from the saved transcript that the live stream
+        # may repeat for a moment, and the ids of the ones already matched
+        self.synced: list[dict] = []
+        self.skip: set = set()
+        self.claim_until = 0.0
+
+    def claim(self, ev: dict) -> bool:
+        """True when this live tool event repeats a call the saved transcript already
+        put on screen (the stream is opened before the transcript is read, so a call
+        that ends in between shows up in both): drop it."""
+        if time.monotonic() > self.claim_until:
+            self.synced = []
+            return False
+        name, eid = ev.get("name"), ev.get("id")
+        if ev.get("type") == "tool":
+            for i, c in enumerate(self.synced):
+                if c["name"] == name and c["args"] == (ev.get("args") or {}):
+                    del self.synced[i]
+                    self.skip.add(eid)
+                    return True
+        elif eid in self.skip:
+            return True
+        elif eid not in self.running:
+            for i, c in enumerate(self.synced):
+                if c["name"] == name:
+                    del self.synced[i]
+                    return True
+        return False
 
     def count(self, name: str) -> None:
         self.ntools += 1
@@ -7386,11 +7423,13 @@ def build_tui(base: str, token: str, **kw):
                         ("/ commands", "[$text-muted]/ commands[/]", 2),
                         ("@ file", "[$text-muted]@ file[/]", 3),
                         ("! shell", "[$text-muted]! shell[/]", 4)]
-            verb = "interrupting" if self.stop_requested else "working"
+            verb = ("interrupting" if self.stop_requested
+                    else "reconnecting…" if self.reconnecting else "working")
+            vm = f"[$warning]{verb}[/]" if self.reconnecting and not self.stop_requested else verb
             stats = t.stats()
             armed = time.monotonic() - self.esc_armed < 2
             nq = len(self.queue) + len(self.pending)
-            parts = [(f"x {verb} {stats[0]}", f"{spin}{verb} [$text-muted]{stats[0]}[/]", 0)]
+            parts = [(f"x {verb} {stats[0]}", f"{spin}{vm} [$text-muted]{stats[0]}[/]", 0)]
             for s in stats[1:]:
                 rank = 2 if s.startswith("$") else 1 if s.endswith(("tool", "tools")) else 3
                 parts.append((s, f"[$text-muted]{s}[/]", rank))
@@ -7575,7 +7614,7 @@ def build_tui(base: str, token: str, **kw):
                 # the turn has an id: the server hands it to the agent at its next
                 # step; before `start` it waits here and is posted when the id comes
                 if self.turn is not None and self.turn.cid is not None \
-                        and not self.stop_requested:
+                        and not self.stop_requested and not self.reconnecting:
                     self.run_worker(self._midturn([text]), group="midturn")
                 else:
                     self.queue.append(text)
@@ -7609,6 +7648,7 @@ def build_tui(base: str, token: str, **kw):
                 await self._explain_permissions()
                 body = self._body(message)
                 self.turn.local = bool(body.get("local"))
+                self.turn.sent = message
                 await self._post(body)
                 t = self.turn
                 if t is not None and not (t.done or t.failed or t.idle or t.interrupted
@@ -7637,20 +7677,181 @@ def build_tui(base: str, token: str, **kw):
             ed.move_cursor(ed.document.end)
 
         async def _lost_connection(self, e: Exception, text: str, um) -> None:
-            """The stream broke, or the server never answered: one line saying which,
-            and the message (with any typed while it ran) back in the prompt."""
+            """The stream broke, or the server never answered. Once the server has
+            taken the turn (`start` arrived) the message is its, not ours: the client
+            keeps trying and picks the turn up again (_reattach). A message that
+            never got there goes back in the prompt, with a line saying so."""
             started = self.turn is not None and self.turn.cid is not None
+            if started and isinstance(e, httpx.TransportError):
+                if await self._reattach():
+                    return
+                await self.note(f"lost {self.base} mid-turn and it has not answered since. "
+                                "The turn may still be running there: /sessions shows it.",
+                                "error")
+                if self.queue:              # typed while it ran: these never left here
+                    ed = self.editor
+                    ed.text = "\n".join(self.queue + ([ed.text] if ed.text else []))
+                    ed.move_cursor(ed.document.end)
+                    self.queue = []
+                return
             if not started or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
                 line = (f"can't reach {self.base}: {net_error_text(e)}. Your message was "
                         "not sent; it is back in the prompt.")
-            elif isinstance(e, httpx.TransportError):
-                line = ("the server went away mid-turn (restarting?). Your message is back "
-                        "in the prompt; if the turn kept running, /sessions shows it.")
             else:
                 line = f"connection to {self.base} failed: {e}"
             await self.note(line, "error")
             back, self.queue = [text, *self.queue], []
             self._not_sent(um if not started else None, back)
+
+        # -- re-attaching after a lost connection ---------------------------------------------
+        # The web app does the same in useChatStream.openThread: read the saved
+        # transcript (GET /api/conversations/<id>/messages: `running`, the calls so
+        # far as `pending_activity`, the reply once it is saved) and, when the turn
+        # still runs, tail GET /api/chat/<id>/stream, whose final event carries the
+        # whole reply. Here the stream is opened FIRST, then the transcript read, so a
+        # call that ends in between is in both (TurnState.claim drops the repeat)
+        # rather than in neither.
+
+        async def _reattach(self) -> bool:
+            """Keep trying until the server answers, then follow the turn to its end:
+            still running, re-attach; finished meanwhile, draw what was missed. False
+            when the server never came back (or esc gave up on it)."""
+            turn = self.turn
+            self.reconnecting = True
+            self._refresh_status()
+            try:
+                return await self._reattach_loop(turn)
+            finally:
+                self.reconnecting = False
+                self._refresh_status()
+
+        async def _reattach_loop(self, turn: TurnState) -> bool:
+            cid, t0, tries = turn.cid, time.monotonic(), 0
+            while self.turn is turn:
+                if tries:
+                    if self.stop_requested or time.monotonic() - t0 > RECONNECT_GIVE_UP:
+                        return False
+                    await asyncio.sleep(RECONNECT_STEPS[min(tries - 1, len(RECONNECT_STEPS) - 1)])
+                tries += 1
+                try:
+                    async with self.client.stream("GET", f"/api/chat/{cid}/stream") as r:
+                        if r.status_code == 401:
+                            self._login_lost()
+                            await self.note(SESSION_LOST, "error")
+                            return True
+                        if r.status_code >= 500:
+                            continue            # a proxy that is up before the server behind it
+                        if r.status_code >= 400:
+                            return False        # the chat is gone (a temporary one, wiped)
+                        saved = await self.client.get(f"/api/conversations/{cid}/messages")
+                        if saved.status_code >= 500:
+                            continue
+                        if saved.status_code != 200:
+                            return False
+                        data = saved.json()
+                        if not data.get("running"):
+                            await self._settle(turn, data)
+                            return True
+                        self.reconnecting = False       # attached: the status line says working
+                        self._refresh_status()
+                        await self._resync(turn, data)
+                        t0, tries = time.monotonic(), 1
+                        if self.stop_requested:
+                            await self._stop_remote(cid)    # esc came while it was down
+                        await self._consume(r.aiter_lines())
+                    if turn.done or turn.failed or turn.interrupted:
+                        return True
+                    # `idle`, or a clean close with no final: look again
+                except httpx.TransportError:
+                    self.reconnecting = True            # dropped again: back to trying
+                    self._refresh_status()
+                    continue
+            return True                          # this view moved on to another turn
+
+        async def _sync_calls(self, turn: TurnState, acts: list[dict], watch: bool) -> int:
+            """Draw the saved calls of this turn the view has not drawn (a finished
+            row with the same name, arguments and result counts as drawn): a row still
+            spinning here is finished in place, the rest are new rows. `watch`: the
+            turn goes on, so remember them for TurnState.claim. Returns how many
+            rows this added or finished."""
+            pool = list(turn.seeded) + list(turn.tools)
+            todo = []
+            for a in acts:
+                for i, d in enumerate(pool):
+                    if d["name"] == a["name"] and (d.get("args") or {}) == (a.get("args") or {}) \
+                            and d.get("result") == a.get("result"):
+                        del pool[i]
+                        break
+                else:
+                    todo.append(a)
+            if todo:
+                await self._gap_mark(turn, close=True)
+            for a in todo:
+                args = a.get("args") or {}
+                key = next((k for k, v in turn.running.items()
+                            if v.tname == a["name"] and (not v.args or v.args == args)), None)
+                tv = turn.running.pop(key, None) if key is not None else None
+                if tv is None:
+                    tv = ToolView(a["name"], args)
+                    turn.count(a["name"])
+                    await self.mount_log(tv)
+                ok = a.get("ok") is not False
+                tv.finish(ok, a.get("result", ""))
+                turn.tools.append({"name": a["name"], "args": args, "ok": ok,
+                                   "result": a.get("result", "")})
+                if watch:
+                    turn.synced.append({"name": a["name"], "args": args})
+                if a["name"] == "todo_update" and ok and parse_todos(a.get("result") or ""):
+                    self.todos = parse_todos(a["result"])
+                    self._refresh_sidebar()
+            return len(todo)
+
+        async def _gap_mark(self, turn: TurnState, close: bool) -> None:
+            """Text streaming into the log when the connection dropped is missing what
+            came while it was down: end it with an ellipsis (a final reply replaces
+            the whole text anyway); `close` when more rows go below it."""
+            if turn.stream is not None and turn.seg.strip() and not turn.seg.endswith("…"):
+                turn.seg += " …"
+                await turn.stream.write(" …")
+            if close:
+                await self._close_seg()
+
+        async def _resync(self, turn: TurnState, data: dict) -> None:
+            """The turn still runs: draw the calls it made while this view was away,
+            then let the live stream carry on."""
+            n = await self._sync_calls(turn, data.get("pending_activity") or [], watch=True)
+            if not n:
+                await self._gap_mark(turn, close=False)
+            turn.claim_until = time.monotonic() + CLAIM_WINDOW
+            if self.queue:                      # typed while it was down
+                texts, self.queue = self.queue, []
+                self.run_worker(self._midturn(texts), group="midturn")
+
+        async def _settle(self, turn: TurnState, data: dict) -> None:
+            """The turn ended while this view was away: draw its missed calls and its
+            reply from the saved transcript, or say it left none."""
+            msgs = [m for m in data.get("messages", []) if m.get("role") in ("user", "assistant")]
+            sent = (turn.sent or "").strip()
+            users = [i for i, m in enumerate(msgs) if m["role"] == "user"]
+            start = next((i for i in reversed(users)
+                          if sent and (msgs[i].get("content") or "").strip() == sent),
+                         users[-1] if users else -1)
+            tail = [m for m in msgs[start + 1:] if m["role"] == "assistant"]
+            if not tail and turn.sent is None:
+                return              # only watching (an agent's node keeps no reply of its own)
+            if not tail:
+                turn.failed = True
+                await self._close_seg()
+                self._stop_rows(turn, "no result: the turn did not finish")
+                await self.note("the server is back, but this turn has no saved reply: it "
+                                "ended when the server went away, or it failed. Your message "
+                                "is in the chat; send it again to try again.", "warn")
+                return
+            await self._sync_calls(turn, [a for m in tail for a in m.get("activity") or []],
+                                   watch=False)
+            turn.done = True
+            await self._finish(next((m["content"] for m in reversed(tail)
+                                     if (m.get("content") or "").strip()), ""))
 
         async def _post(self, body: dict) -> None:
             async with self.client.stream("POST", "/api/chat", json=body) as r:
@@ -7787,6 +7988,8 @@ def build_tui(base: str, token: str, **kw):
                 turn.seg += chunk
                 await turn.stream.write(chunk)
             elif t == "tool":
+                if turn.claim(ev):
+                    return False
                 await self._close_seg()
                 name = ev.get("name") or "?"
                 tv = ToolView(name, ev.get("args") or {})
@@ -7798,6 +8001,8 @@ def build_tui(base: str, token: str, **kw):
                 turn.count(name)
                 await self.mount_log(tv)
             elif t == "tool_result":
+                if turn.claim(ev):
+                    return False
                 name = ev.get("name") or "?"
                 key = ev.get("id")
                 if key is None or key not in turn.running:
@@ -7901,6 +8106,7 @@ def build_tui(base: str, token: str, **kw):
                      "auto": "a cheap judge reviews each write/run; risky ones ask you",
                      "ask": "every write/run asks you first"}
         perm_mode = "yolo"
+        reconnecting = False       # the stream broke and the client is trying to get it back
 
         async def _explain_permissions(self) -> None:
             """Once, the first time a turn starts with the default: what the chip in
@@ -8183,12 +8389,16 @@ def build_tui(base: str, token: str, **kw):
                 self.run_worker(self._stop_remote(self.turn.cid), group="stop")
             # no start event yet: on_event("start") sends the stop when the id arrives
 
-        async def attach(self, cid: int) -> None:
-            """Watch a turn that is still running server-side."""
+        async def attach(self, cid: int, seen: list[dict] | None = None) -> None:
+            """Watch a turn that is still running server-side. `seen`: the calls the
+            view drew from the saved transcript before attaching (a lost connection
+            is picked up again without drawing them twice)."""
             self.busy, self.stop_requested = True, False
             self.turn = TurnState()
             self.turn.cid = cid
+            self.turn.seeded = list(seen or [])
             self.refresh_chrome()
+            turn = self.turn
             try:
                 # a job's agents stream from their own endpoint: try it when the
                 # chat stream 404s or only says idle
@@ -8199,8 +8409,13 @@ def build_tui(base: str, token: str, **kw):
                             continue
                         if await self._consume(r.aiter_lines()):
                             break
+                if self.turn is turn and not (turn.done or turn.failed or turn.interrupted
+                                              or turn.idle or self.stop_requested):
+                    # closed with no final: the server going down
+                    raise httpx.RemoteProtocolError("the stream ended without a final")
             except httpx.HTTPError as e:
-                await self.note(f"lost the stream: {net_error_text(e)}", "error")
+                if not (isinstance(e, httpx.TransportError) and await self._reattach()):
+                    await self.note(f"lost the stream: {net_error_text(e)}", "error")
             finally:
                 await self._end_turn()
             await self._drain_queue()
@@ -8676,7 +8891,8 @@ def build_tui(base: str, token: str, **kw):
                                busy_ok=True, leader="c"),
                 "login": Command(self.c_login, "log in: the line from Settings (chat only) "
                                  "or your password (full access)", "[line|password]"),
-                "logout": Command(self.c_logout, "log out (a device token is revoked)"),
+                "logout": Command(self.c_logout, "log out: /logout says who, /logout yes does it "
+                                 "(a device token is revoked)", "[yes]", takes_arg=True),
                 "exit": Command(self.c_exit, "quit (a running turn keeps going)",
                                 busy_ok=True, leader="q"),
             }
@@ -8707,6 +8923,8 @@ def build_tui(base: str, token: str, **kw):
                 return [(m["id"], m.get("label", "") + ("  (default)" if m["id"] == o.get("default")
                                                         else ""))
                         for m in o.get("models", [])]
+            if fn == self.c_logout:
+                return [("yes", "sign out (a device token is revoked)")]
             if fn == self.c_agent:
                 return [("none", "plain Jav3")] + [(a["slug"], a.get("name", ""))
                                                   for a in o.get("agents", [])]
@@ -8894,7 +9112,8 @@ def build_tui(base: str, token: str, **kw):
                 await self.note("a turn is running — attached" + (
                     f" · esc goes back to #{self.child_of}, ctrl+c stops it"
                     if self.child_of else ""), "warn")
-                self.run_worker(self.attach(cid), group="turn")
+                self.run_worker(self.attach(cid, r.get("pending_activity") or []),
+                                group="turn")
 
         async def c_model(self, arg: str) -> None:
             if not arg and self.full_access:
@@ -9338,12 +9557,16 @@ def build_tui(base: str, token: str, **kw):
             self.notify(msg)
 
         async def c_logout(self, arg: str) -> None:
+            """/logout says who is signed in and what signing out does; /logout yes
+            does it (the web app's two steps: one slip of a finger costs a login)."""
             if not self.token:
                 self.notify("not logged in")
                 return
-            detail = ("Forgets this password session." if is_session(self.token)
-                      else "Revokes this computer's token.")
-            if not await self.push_screen_wait(Confirm("Log out?", detail)):
+            what = ("forgets this password session" if is_session(self.token)
+                    else "revokes this computer's token and forgets it")
+            if arg.strip().lower() != "yes":
+                await self.note(f"signed in as {self.whoami} on {self.base} "
+                                f"({self._access_label()}) — /logout yes {what}")
                 return
             ns = argparse.Namespace(server=self.server_override)
             await asyncio.to_thread(cmd_logout, ns, io.StringIO())
