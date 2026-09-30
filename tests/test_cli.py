@@ -605,9 +605,14 @@ async def test_tui_password_login_stores_a_session_and_sends_the_cookie(cfg, mon
         await pilot.press("enter")
         await _until(pilot, lambda: type(app.screen).__name__ == "Ask")
         await pilot.press(*"h:1", "enter")                         # address
-        await pilot.pause(0.1)
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert "plain http" in app.screen.question                 # said before the password
+        await pilot.press("y")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
+                            and app.screen.question == "Username")
         await pilot.press(*"operator", "enter")                    # username
-        await pilot.pause(0.1)
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
+                            and app.screen.question == "Password")
         assert app.screen.query_one("#answer").password is True     # hidden
         await pilot.press("p", "w", "enter")
         assert await _until(pilot, lambda: app.logged_in is True)
@@ -714,11 +719,9 @@ async def test_picker_opens_on_the_list_and_typing_highlights_the_closest(cfg):
         app.run_worker(go())
         await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
         scr = app.screen
-        await pilot.press("t")                                 # t: type mode, no letter
+        await pilot.press("o", "t")                            # any letter, t too, is text
         await pilot.pause(0.1)
-        assert scr.typing and scr.query_one("#filter").value == ""
-        await pilot.press("o", "t")
-        await pilot.pause(0.1)
+        assert scr.typing and scr.query_one("#filter").value == "ot"
         ol = scr.query_one("#choices")
         assert ol.get_option_at_index(ol.highlighted).id == "d"
         await pilot.press("backspace", "backspace", "backspace")  # the 3rd leaves typing
@@ -1415,11 +1418,15 @@ async def test_tui_security_network_and_logs(cfg):
         assert "gate_flag" in rows[0] and "host_cut" in rows[1]
         assert "CRIT" in rows[0] and "✓" in rows[1]
         assert ("GET", "/api/security/events", {"limit": "200"}, None) in seen
-        await pilot.press("f")                                  # all -> gate_flag
-        assert scr.log_filter == "gate_flag"
+        await pilot.press("f")                                  # a list of kinds
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("down", "enter")                      # all -> gate_flag
+        assert await _until(pilot, lambda: scr.log_filter == "gate_flag")
         assert await _until(pilot, lambda: len(_rows(scr)) == 1)
-        await pilot.press("f")                                  # -> host_cut
-        assert await _until(pilot, lambda: "host_cut" in _rows(scr)[0])
+        await pilot.press("f")
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("down", "enter")                      # -> host_cut
+        assert await _until(pilot, lambda: "host_cut" in " ".join(_rows(scr)))
         assert "acknowledged" in _text(scr.query_one("#sec-detail"))
         await pilot.press("a")                                  # already acked: nothing
         await pilot.pause(0.2)
@@ -1482,8 +1489,8 @@ async def test_tui_security_locked_for_a_chat_only_login(cfg):
         assert not app.full_access
         scr = await _open_security(pilot, app)
         await pilot.pause(0.2)
-        assert "needs full access" in _text(scr.query_one("#sec-sub"))
-        assert "needs full access" in " ".join(_rows(scr))
+        assert "chat only" in _text(scr.query_one("#sec-sub"))
+        assert "logged in" in " ".join(_rows(scr))
         for key in ("2", "3", "4", "y", "a", "p", "r"):
             await pilot.press(key)
         await pilot.pause(0.3)
@@ -2512,18 +2519,18 @@ async def test_tui_boxes_surfaces_locked_for_a_chat_only_login(cfg):
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
         scr = await _screen(pilot, app, "/security", "SecurityScreen")
-        for key in ("5", "enter", "s", "d", "6", "a", "e", "p", "y"):
+        for key in ("5", "s", "d", "6", "a", "e", "p", "y"):
             await pilot.press(key)
         await pilot.pause(0.3)
         assert type(app.screen).__name__ == "SecurityScreen"
-        assert "needs full access" in _text(scr.query_one("#sec-sub"))
+        assert "chat only" in _text(scr.query_one("#sec-sub"))
         await pilot.press("escape")
         scr = await _screen(pilot, app, "/vms", "VmsScreen")
         for key in ("s", "d", "2", "b", "3", "y", "n"):
             await pilot.press(key)
         await pilot.pause(0.3)
         assert type(app.screen).__name__ == "VmsScreen"
-        assert "needs full access" in " ".join(_rows(scr))
+        assert "logged in" in " ".join(_rows(scr))
         guarded = ("/api/services", "/api/packages", "/api/vm", "/api/profiles",
                    "/api/egress", "/api/projects", "/api/security", "/api/secrets")
         assert not [p for _, p, _, _ in seen if p.startswith(guarded)]

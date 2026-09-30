@@ -107,7 +107,9 @@ async def test_someone_who_already_changed_the_mode_is_not_told():
     app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.3)
-        await pilot.press("shift+tab", "shift+tab", "shift+tab")     # around to yolo again
+        await pilot.press("shift+tab", "shift+tab", "shift+tab")     # ask: one more press is asked twice
+        assert app.perm_mode == "ask"
+        await pilot.press("shift+tab")                               # around to yolo again
         await pilot.pause(0.2)
         assert app.perm_mode == "yolo"
         await open_chat(pilot, app, srv)

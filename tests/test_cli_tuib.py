@@ -1,0 +1,1040 @@
+"""Second terminal-client hunt (TUIB-*): /login with a bad address, Enter on every
+/security row, times, selected-row colours, Confirm keys, the picker's first letter,
+scrolling the detail pane, 80x24 layouts, logged-out and server-down wording, and the
+small ones. The client file is loaded from tests/cli_fake.py (JAV3_CLIENT points a run
+at another copy, to watch a test fail on the base commit)."""
+import io
+import json
+
+import httpx
+import pytest
+
+from cli_fake import load_client, pin_zone, wait_for
+
+jav3 = load_client("jav3cli_tuib")
+
+SESSION = "session:sess"
+
+
+@pytest.fixture(autouse=True)
+def _env(tmp_path, monkeypatch):
+    """A throwaway config dir (the client saves tui.json, credentials) and UTC unless
+    a test picks another zone."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    yield from pin_zone(monkeypatch)
+
+
+def _zone(monkeypatch, name: str) -> None:
+    import time
+    monkeypatch.setenv("TZ", name)
+    time.tzset()
+
+
+def _srv(routes=None, seen=None):
+    """A logged-in operator's server: `routes` maps a path to a JSON body (or a
+    function of the request) and every other /api/... read is an empty list."""
+    routes = routes or {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        if seen is not None:
+            seen.append((method, path, dict(request.url.params),
+                         request.content.decode() if request.content else ""))
+        if ("jarvis_token=sess" not in request.headers.get("cookie", "")
+                and request.headers.get("authorization") != "Bearer jvd_x"):
+            return httpx.Response(401, json={"detail": "not authenticated"})
+        hit = routes.get((method, path)) or routes.get(path)
+        if hit is not None:
+            body = hit(request) if callable(hit) else hit
+            if isinstance(body, httpx.Response):
+                return body
+            return httpx.Response(200, json=body)
+        if path == "/api/devices/whoami":
+            return httpx.Response(200, json={"username": "operator"})
+        if path == "/api/chat/options":
+            return httpx.Response(200, json={"default": "deepseek/deepseek-flash",
+                                             "models": [], "projects": [], "agents": []})
+        if path == "/api/conversations":
+            return httpx.Response(200, json={"conversations": []})
+        if path in ("/api/agents/notices/stream", "/api/events"):
+            return httpx.Response(200, text="", headers={"content-type": "text/event-stream"})
+        if path.startswith("/api/"):
+            return httpx.Response(200, json={
+                "projects": [], "pending": [], "events": [], "services": [], "packages": [],
+                "secrets": [], "profiles": [], "boxes": [], "rows": [], "rules": []})
+        return httpx.Response(404, json={"detail": "nope"})
+    return httpx.MockTransport(handler)
+
+
+async def _until(pilot, cond, tries=80):
+    for _ in range(tries):
+        if cond():
+            return True
+        await pilot.pause(0.05)
+    return cond()
+
+
+def _top(app) -> str:
+    return type(app.screen).__name__
+
+
+def _rows(scr):
+    return [str(r.render()) for r in scr.query("SecRow")]
+
+
+async def _security(pilot, app, tab="queue", cmd="/security"):
+    await pilot.pause(0.3)
+    app.dispatch(f"{cmd} {tab}".strip() if tab else cmd)
+    assert await _until(pilot, lambda: _top(app) in ("SecurityScreen", "VmsScreen"))
+    scr = app.screen
+    assert await _until(pilot, lambda: scr.loaded.get(tab, True))
+    await pilot.pause(0.15)
+    return scr
+
+
+# --- TUIB-01: a malformed server address is a note, never a crash -------------------------
+
+@pytest.mark.parametrize("address", ["10.0.0.999:8000", "localhost:abc", "http://a b",
+                                     "http://[::1"])
+def test_base_url_rejects_a_malformed_address(address):
+    with pytest.raises(jav3.CliError) as e:
+        jav3.base_url(address)
+    assert "not a valid server address" in str(e.value)
+
+
+def test_base_url_still_takes_the_usual_forms():
+    assert jav3.base_url("10.0.0.82:8000") == "http://10.0.0.82:8000"
+    assert jav3.base_url(" http://box.local:8000/ ") == "http://box.local:8000"
+    assert jav3.base_url("https://jarvis.example.com") == "https://jarvis.example.com"
+    assert jav3.base_url("[::1]:8000") == "http://[::1]:8000"
+
+
+def test_login_with_a_bad_address_is_a_cli_error():
+    with pytest.raises(jav3.CliError):
+        jav3.login_with_password("10.0.0.999:8000", "bob", "x")
+
+
+async def test_slash_login_with_a_bad_address_leaves_the_app_running():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        notes: list = []
+        real = app.note
+
+        async def note(text, kind="info"):
+            notes.append((text, kind))
+            await real(text, kind)
+        app.note = note
+        app.dispatch("/login password")
+        assert await _until(pilot, lambda: _top(app) == "Ask")
+        app.screen.query_one("#answer").value = "10.0.0.999:8000"
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: any("not a valid server address" in t
+                                               for t, _ in notes))      # said at the address step
+        await pilot.pause(0.3)
+        assert app.is_running and _top(app) != "Ask"
+
+
+async def test_an_unexpected_error_in_a_command_is_a_note_not_a_crash():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+
+        async def boom(arg):
+            raise RuntimeError("kaboom")
+        app.commands["theme"].fn = boom
+        notes: list = []
+        real = app.note
+
+        async def note(text, kind="info"):
+            notes.append((text, kind))
+            await real(text, kind)
+        app.note = note
+        app.dispatch("/theme")
+        assert await wait_for(lambda: notes)
+        assert app.is_running
+        assert "kaboom" in notes[-1][0] and notes[-1][1] == "error"
+
+
+# --- TUIB-02: Enter on a row never crashes ---------------------------------------------------
+
+PROFILE = {"id": 1, "name": "Default", "hosts": ["pypi.org"], "allow_hosts": ["pypi.org"],
+           "deny_hosts": [], "builtin": True}
+
+
+async def test_enter_on_a_profile_row_opens_its_details():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION,
+                         transport=_srv({"/api/profiles": {"profiles": [PROFILE]}}))
+    async with app.run_test(size=(100, 30)) as pilot:
+        scr = await _security(pilot, app, "profiles")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: _top(app) == "View")
+        assert app.is_running
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+        assert "enter" in str(scr.query_one("#sec-foot").render())
+
+
+def _everything(seen=None):
+    """The routes of test_cli's two fake servers, plus the Rules and Calls tabs: every
+    /security and /vms tab has a row to open."""
+    from test_cli import _boxes_server, _security_server
+    a, b = _boxes_server([]), _security_server([])
+    extra = {
+        "/api/permissions/rules": {"rules": [{"id": 3, "tool": "run_code", "prefix": "npm",
+                                              "project_slug": None,
+                                              "created_at": "2026-09-30 04:00:00"}]},
+        "/api/logs/calls": {"hours": 24, "conversation_id": None,
+                            "key_hosts": ["api.deepseek.com"],
+                            "rows": [{"kind": "call", "id": 12, "ts": "2026-09-30 04:03:11",
+                                      "model": "deepseek/deepseek-flash", "op_id": "7f3a",
+                                      "box_id": "p-homelab", "conversation_id": 42,
+                                      "project_slug": "homelab", "input_tokens": 12431,
+                                      "output_tokens": 812, "cache_hit": 9102,
+                                      "cache_miss": 3329, "cost_usd": 0.0021,
+                                      "has_context": True}],
+                            "truncated": False, "capture_context": True,
+                            "totals": {"calls": 1, "cost_usd": 0.0021, "refused": 0}},
+        "/api/logs/calls/12/context": {"messages": [{"role": "user", "content": "hi"}],
+                                       "n_tools": 1, "input_tokens": 5, "cache_hit": 1,
+                                       "cache_miss": 4},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append((request.method, request.url.path))
+        if request.url.path in extra and "jarvis_token=sess" in request.headers.get("cookie", ""):
+            return httpx.Response(200, json=extra[request.url.path])
+        r = a.handle_request(request)
+        return r if r.status_code != 404 else b.handle_request(request)
+    return httpx.MockTransport(handler)
+
+
+async def _leave(pilot, app, scr, tries=6):
+    """Close whatever dialog is open with esc until we are back on the screen."""
+    for _ in range(tries):
+        if app.screen is scr or not app.is_running:
+            return
+        await pilot.press("escape")
+        await pilot.pause(0.15)
+
+
+@pytest.mark.parametrize("cmd,tabs", [
+    ("/security", ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules",
+                   "calls")),
+    ("/vms", ("boxes", "images"))])
+async def test_enter_on_the_first_row_of_every_tab_never_crashes(cmd, tabs):
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(160, 45)) as pilot:
+        await pilot.pause(0.3)
+        for tab in tabs:
+            app.dispatch(f"{cmd} {tab}")
+            assert await _until(pilot, lambda: _top(app) in ("SecurityScreen", "VmsScreen"))
+            scr = app.screen
+            assert await _until(pilot, lambda: scr.loaded.get(tab))
+            await pilot.pause(0.15)
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            assert app.is_running, tab
+            await _leave(pilot, app, scr)
+            assert app.screen is scr, f"{tab}: stuck on {_top(app)}"
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+
+
+# --- TUIB-03: every time on /security is this machine's, in one format ------------------------
+
+def test_times_are_shown_in_the_local_zone(monkeypatch):
+    _zone(monkeypatch, "America/Los_Angeles")
+    assert jav3.local_ts("2026-09-30 04:56:59") == "09-29 21:56"
+    assert jav3.local_ts("2026-09-30T04:56:59Z") == "09-29 21:56"
+    assert jav3.local_ts(1_790_000_000) == jav3.local_ts(1_790_000_000.0) != ""
+    assert jav3.full_ts("2026-09-30 04:56:59") == "2026-09-29 21:56:59"
+    assert jav3.tz_label() == "PDT"
+    assert jav3.row_ts("2026-09-30 04:56:59") == "09-29 21:56"
+    assert jav3.row_ts("") == "" and jav3.full_ts(None) == "" and jav3.local_ts("soon") == ""
+    assert jav3.full_ts("2026-09-20") == "2026-09-20"          # a date alone stays as sent
+    _zone(monkeypatch, "UTC")
+    assert jav3.tz_label() == "UTC"
+
+
+async def test_security_rows_details_and_footer_use_local_time(monkeypatch):
+    pytest.importorskip("textual")
+    _zone(monkeypatch, "America/Los_Angeles")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "logs")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        # test_cli's alert #7 is 2026-09-25 10:05:00 UTC = 03:05 PDT
+        row = next(r for r in _rows(scr) if "gate_flag" in r)
+        assert "09-25 03:05" in row and "10:05" not in row
+        scr.select_key("s7")
+        detail = str(scr.query_one("#sec-detail").render())
+        assert "2026-09-25 03:05:00" in detail
+        assert "times PDT" in str(scr.query_one("#sec-foot").render())
+        await pilot.press("4")                                   # Secrets: no times, no label
+        await pilot.pause(0.2)
+        assert "times PDT" not in str(scr.query_one("#sec-foot").render())
+
+
+# --- TUIB-04: the selected row stays readable on the selection bar ------------------------------
+
+def _content(row):
+    from textual.content import Content
+    c = row.content
+    return Content.from_markup(c) if isinstance(c, str) else c
+
+
+def _styles(row) -> list[str]:
+    return [sp.style for sp in _content(row).spans if isinstance(sp.style, str)]
+
+
+def _colours(styles) -> list[str]:
+    """The foreground colour tokens on spans that have no background of their own."""
+    return [t for s in styles if " on " not in f" {s} " for t in s.split() if t not in
+            ("b", "bold", "i", "italic", "u", "underline", "strike")]
+
+
+async def test_the_selected_security_row_drops_its_own_colours():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "logs")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        rows = list(scr.query("SecRow"))
+        sel = next(r for r in rows if r.has_class("-sel"))
+        other = next(r for r in rows if not r.has_class("-sel"))
+        assert _colours(_styles(other))                       # unselected rows are coloured
+        assert not _colours(_styles(sel)), _styles(sel)       # the bar's row is not
+        assert "gate_flag" in _content(sel).plain or "host_cut" in _content(sel).plain
+        await pilot.press("down")                             # moving hands the colours back
+        assert _colours(_styles(sel)) and not _colours(_styles(
+            next(r for r in scr.query("SecRow") if r.has_class("-sel"))))
+
+
+# --- TUIB-05: enter never says yes to something that cannot be taken back --------------------
+
+async def test_enter_declines_the_destroy_and_the_data_disk_prompts():
+    pytest.importorskip("textual")
+    from test_cli_vms import _server as vms_server
+    seen: list = []
+    tr, state = vms_server(seen)
+    state["boxes"][1]["disk"] = {"overlay_bytes": 10_000_000, "data_bytes": 250_000_000}
+    app = jav3.build_tui("http://h:1", SESSION, transport=tr)
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "boxes", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        scr.select_key("Xp-alpha")
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        keys = str(app.screen.query_one("#confirm-keys").render())
+        assert "enter" in keys and "y" in keys
+        await pilot.press("enter")                   # a habit: nothing is destroyed
+        await pilot.pause(0.3)
+        assert _top(app) == "VmsScreen"
+        assert not [c for c in seen if c[0] == "POST"]
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        await pilot.press("y")                       # destroy it ...
+        assert await _until(pilot, lambda: _top(app) == "Confirm"
+                            and "data disk" in app.screen.question)
+        await pilot.press("enter")                   # ... a second habitual enter keeps the disk
+        assert await _until(pilot, lambda: any(
+            c[0] == "POST" and c[1] == "/api/vm/boxes/p-alpha/destroy" for c in seen))
+        post = next(c for c in seen if c[0] == "POST" and c[1].endswith("/destroy"))
+        assert post[3] == {"confirm": True, "delete_data": False}
+
+
+async def test_a_plain_confirm_still_takes_enter_and_says_so():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, top
+    srv = FakeServer(projects=["alpha"], full=True)
+    app = jav3.build_tui("http://h:1", SESSION, transport=srv.transport())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.4)
+        app.dispatch("/project brandnew")
+        assert await wait_for(lambda: top(app) == "Confirm")
+        assert "y / enter" in str(app.screen.query_one("#confirm-keys").render())
+        await pilot.press("enter")
+        assert await wait_for(lambda: srv.created == [{"name": "brandnew"}])
+
+
+# --- TUIB-07: the detail pane scrolls with plain keys ----------------------------------------------
+
+def _long_alert():
+    ev = {"id": 798, "kind": "harness_fault", "severity": "warn", "project_slug": "demo",
+          "summary": "the harness said something long", "acknowledged": 0,
+          "created_at": "2026-09-30 04:56:59",
+          "detail": json.dumps({"expected": " ".join(f"word{i}" for i in range(400))})}
+    return ev
+
+
+async def test_the_detail_pane_scrolls_with_plain_keys_and_the_footer_says_so():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": [_long_alert()]}}))
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        wrap = scr.query_one("#sec-detail-wrap")
+        assert await _until(pilot, lambda: wrap.max_scroll_y > 0)
+        assert await _until(pilot, lambda: "scroll the details" in str(
+            scr.query_one("#sec-foot").render()))
+        assert wrap.scroll_y == 0
+        await pilot.press("right_square_bracket")
+        await pilot.pause(0.2)
+        assert wrap.scroll_y > 0
+        seen = wrap.scroll_y
+        await pilot.press("pagedown")                 # one row: the list fits, so the pane pages
+        await pilot.pause(0.2)
+        assert wrap.scroll_y > seen
+        await pilot.press("left_square_bracket", "left_square_bracket", "left_square_bracket")
+        await pilot.pause(0.2)
+        assert wrap.scroll_y == 0
+
+
+async def test_a_short_detail_does_not_advertise_scrolling():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": [{**_long_alert(), "detail": None}]}}))
+    async with app.run_test(size=(120, 40)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        await pilot.pause(0.3)
+        assert "scroll the details" not in str(scr.query_one("#sec-foot").render())
+
+
+# --- TUIB-08: the /vms and Network heads fit 80x24 ---------------------------------------------------
+
+def _plain(markup: str) -> str:
+    from textual.content import Content
+    return Content.from_markup(markup).plain
+
+
+def _wrapped(text: str, width: int) -> int:
+    """Rows a text takes when each logical line wraps at `width`."""
+    return sum(max(1, -(-len(ln) // width)) for ln in text.splitlines())
+
+
+async def test_the_vms_head_fits_80x24_with_the_weak_isolation_badge_whole():
+    pytest.importorskip("textual")
+    from test_cli_vms import _server as vms_server
+    tr, state = vms_server([])
+
+    def weak(request):
+        r = tr.handle_request(request)
+        if request.url.path == "/api/vm/boxes" and r.status_code == 200:
+            d = json.loads(r.content)
+            d["runtimes"]["docker"] = {"available": True, "weak": True,
+                                       "warnings": ["no gVisor: the container shares the host "
+                                                    "kernel's full syscall surface",
+                                                    "docker is neither rootless nor "
+                                                    "userns-remapped: container uid 10001 is host "
+                                                    "uid 10001"]}
+            return httpx.Response(200, json=d)
+        return r
+    app = jav3.build_tui("http://h:1", SESSION, transport=httpx.MockTransport(weak))
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "boxes", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        sub = scr.query_one("#sec-sub")
+        text = _plain(scr.sub_markup())
+        assert "WEAK ISOLATION" in text and "docker" in text
+        lines = text.splitlines()
+        assert all(len(ln) <= 76 for ln in lines), lines        # no line wraps
+        assert sub.size.height >= len(lines)                    # nothing cut off
+        assert len(list(scr.query("SecRow"))) >= 2
+        assert sum(1 for r in scr.query("SecRow") if r.region.height and
+                   r.region.bottom <= scr.query_one("#sec-list").region.bottom) >= 3
+        await pilot.resize_terminal(160, 48)                    # wide: the whole warnings return
+        await pilot.pause(0.4)
+        assert "neither rootless" in _plain(scr.sub_markup())
+
+
+async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "network")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        text = _plain(scr.sub_markup())
+        assert "last 24h" in text, text
+        assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
+
+
+# --- TUI-14 / TUI-18 leftovers -----------------------------------------------------------------------
+
+async def test_a_text_screenshot_leaves_out_the_completion_popup_TUI14(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    home = tmp_path / "home"
+    (home / "Pictures").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.editor.text = "/screenshot "                   # the format list is open
+        await pilot.pause(0.3)
+        assert app.popup_open()
+        await app.c_screenshot("snap txt")
+        assert not app.popup_open()
+        shot = (home / "Pictures" / "jav3" / "snap.txt").read_text()
+        assert "plain text" not in shot and "txt  " not in shot
+        assert "saved " in " ".join(str(w.render()) for w in app.query("Static"))   # in the log
+
+
+def test_local_tool_rows_read_like_their_server_twins_TUI18():
+    assert jav3.tool_title("local_read_file", {"path": "/etc/hosts"}) == \
+        ("→", "Read /etc/hosts  (local)")
+    icon, title = jav3.tool_title("local_write_file", {"path": "a.txt", "content": "hi\nyo"})
+    assert icon == "←" and title == "Write a.txt (2 lines)  (local)"
+    assert jav3.tool_title("local_edit_file", {"path": "a.txt"}) == ("←", "Edit a.txt  (local)")
+    assert jav3.tool_title("local_list_files", {"path": "."}) == ("✱", "List .  (local)")
+    assert jav3.tool_title("local_search", {"query": "TODO", "path": "src"}) == \
+        ("✱", 'Grep "TODO" in src  (local)')
+    assert jav3.tool_title("local_shell", {"command": "ls -la"}) == ("$", "ls -la  (local)")
+    assert jav3.tool_title("read_file", {"path": "x"}) == ("→", "Read x")      # a server tool: as before
+
+
+async def test_agents_screen_counts_a_blocked_child_and_shows_why_before_the_age_TUI15():
+    pytest.importorskip("textual")
+    nodes = [
+        {"id": 1, "parent_id": None, "kind": "orchestrator", "title": "Ship it",
+         "status": "running", "running": True, "project": "demo",
+         "started_at": "2026-09-30T04:00:00"},
+        {"id": 2, "parent_id": 1, "kind": "agent", "title": "coder", "status": "needs_you",
+         "needs": "waiting on your permission: Run in the VM: npm test", "running": True,
+         "project": "demo", "started_at": "2026-09-30T04:01:00"}]
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/chat/agents": {"nodes": nodes, "total": 0}}))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/agents-view")
+        assert await _until(pilot, lambda: _top(app) == "AgentsScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded and len(list(scr.query("AgentRow"))) > 2)
+        head = _plain(str(scr.query_one("#ag-head").render()))
+        assert "1 running" in head and "1 need you" in head
+        row = next(_plain(str(r.render())) for r in scr.query("AgentRow")
+                   if "Ship it" in str(r.render()))
+        import re
+        assert "!" in row and re.search(r"waiting on your permission.*\d+[smhd]\s*$", row), row
+
+
+async def test_persona_is_the_preset_picker_and_agents_still_works_TUI15():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        assert app.commands["persona"] is app.commands["agents"] is app.commands["agent"]
+        assert "agents-view" in app.commands["persona"].help
+        assert "/persona" in app.commands["agents-view"].help
+        names = [n for n, _ in app.unique_commands()]
+        assert "persona" in names and "agents" not in names
+        app.dispatch("/agents frontend")                     # the old spelling still takes a slug
+        assert await _until(pilot, lambda: app.agent == "frontend")
+        await pilot.press(*"/agents")                        # bare, it finds the running-agents view
+        await pilot.pause(0.2)
+        assert app.popup_items and app.popup_items[0][1] == "agents-view"
+
+
+# --- TUIB-15 / TUIB-16: the login flows ----------------------------------------------------------------
+
+async def test_the_tui_login_warns_about_plain_http_before_the_password_is_asked_TUIB15(
+        monkeypatch):
+    pytest.importorskip("textual")
+    sent: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        if request.url.path == "/api/auth/login":
+            return httpx.Response(401, json={"detail": "no"})
+        return httpx.Response(404, json={"detail": "nope"})
+    real = httpx.Client
+    monkeypatch.setattr(jav3.httpx, "Client",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    app = jav3.build_tui("", None, transport=httpx.MockTransport(handler))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/login password")
+        assert await _until(pilot, lambda: _top(app) == "Ask")
+        ask = app.screen
+        assert "10.0.0.82:8000" in ask.query_one("#answer").placeholder    # an example
+        await pilot.press(*"203.0.113.1:8000", "enter")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")         # before the password
+        assert "plain http" in app.screen.question and "/api/auth/login" not in sent
+        await pilot.press("n")                                             # declined: stops here
+        await pilot.pause(0.3)
+        assert _top(app) not in ("Ask", "Confirm") and "/api/auth/login" not in sent
+
+
+async def test_a_loopback_address_needs_no_plain_http_confirm_TUIB15(monkeypatch):
+    pytest.importorskip("textual")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "no"})
+    real = httpx.Client
+    monkeypatch.setattr(jav3.httpx, "Client",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    app = jav3.build_tui("", None, transport=httpx.MockTransport(handler))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/login password")
+        assert await _until(pilot, lambda: _top(app) == "Ask")
+        await pilot.press(*"127.0.0.1:8000", "enter")
+        assert await _until(pilot, lambda: _top(app) == "Ask"
+                            and app.screen.question == "Username")
+        await pilot.press("escape")
+
+
+def test_jav3_login_password_asks_for_address_user_and_password_TUIB16(monkeypatch, capsys):
+    monkeypatch.setattr(jav3, "login_with_password", lambda addr, user, pw, **kw: (
+        f"http://{addr}", "session:x", user))
+    answers = iter(["127.0.0.1:8000", "bob"])
+    out = io.StringIO()
+    ns = jav3.build_parser().parse_args(["login", "--password"])
+    assert ns.password is True
+    rc = jav3.cmd_login_password(ns, out, ask=lambda prompt: next(answers),
+                                 secret=lambda prompt: "hunter2")
+    assert rc == 0
+    assert "you are bob (full access)" in out.getvalue()
+    with pytest.raises(jav3.CliError):                                  # an empty password
+        jav3.cmd_login_password(ns, out, ask=lambda p: "x", secret=lambda p: "")
+
+
+def test_the_not_logged_in_hint_names_both_logins_and_a_lapsed_session_the_password_TUIB16(
+        monkeypatch):
+    assert "jav3 login --password" in jav3.RELOGIN and "chat only" in jav3.RELOGIN
+    monkeypatch.setattr(jav3, "load_credentials", lambda: {"address": "h", "session": "x"})
+    assert jav3.relogin() == jav3.RELOGIN_SESSION and "--password" in jav3.relogin()
+    monkeypatch.setattr(jav3, "load_credentials", lambda: {"address": "h", "token": "jvd_x"})
+    assert jav3.relogin() == jav3.RELOGIN
+
+
+# --- TUIB-13: a permission ask has a numbered No, and esc says what it drops --------------------------
+
+def _perm(aid="perm_1"):
+    return {"type": "ask_user", "id": aid, "conversation_id": 4, "kind": "permission",
+            "reason": "ask mode", "detail": "npm test",
+            "free_text_label": "No, tell the agent what to do instead",
+            "questions": [{"question": "Run in the VM: npm test",
+                           "options": ["Yes", "Yes, always allow this and similar commands "
+                                              "(run_code: npm)"], "multi_select": False}]}
+
+
+async def test_the_permission_ask_numbers_its_no_and_declines_with_it_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put(_perm())
+        assert await wait_for(lambda: top(app) == "AskUser")
+        scr = app.screen
+        type(scr).GRACE = 0
+        head, rows = scr.markup(scr.ev, scr.qs, 0, 0, set(), "", scr.free_label)
+        assert rows.splitlines()[2].lstrip("[reverse]").startswith("3. ( ) No")
+        foot = scr._foot_text()
+        assert "1-3 pick" in foot and "esc declines" in foot and "skips" not in foot
+        await pilot.press("3", "enter")                  # the numbered No
+        assert await wait_for(lambda: srv.answers)
+        assert srv.answers[0] == {"id": "perm_1", "skipped": True}   # the server reads it as a decline
+        await finish(srv, app)
+
+
+async def test_yes_still_answers_yes_and_never_sends_the_no_row_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put(_perm())
+        assert await wait_for(lambda: top(app) == "AskUser")
+        type(app.screen).GRACE = 0
+        await pilot.press("enter")
+        assert await wait_for(lambda: srv.answers)
+        assert srv.answers[0] == {"id": "perm_1", "answers": [{"selected": ["Yes"], "text": None}]}
+        await finish(srv, app)
+
+
+async def test_esc_on_a_later_question_warns_before_dropping_the_earlier_answers_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put({"type": "ask_user", "id": "q2", "conversation_id": 4, "questions": [
+            {"question": "DB?", "options": ["Postgres", "SQLite"]},
+            {"question": "Port?", "options": ["80", "8080"]}]})
+        assert await wait_for(lambda: top(app) == "AskUser")
+        scr = app.screen
+        type(scr).GRACE = 0
+        await pilot.press("1", "enter")                 # question 1 answered
+        await pilot.press("escape")                     # question 2: warns, does not skip
+        await pilot.pause(0.2)
+        assert top(app) == "AskUser" and not srv.answers
+        assert "answers to the earlier" in scr._foot_text()
+        await pilot.press("down")                       # any other key goes on
+        assert "answers to the earlier" not in scr._foot_text()
+        await pilot.press("escape", "escape")           # warn again, then skip
+        assert await wait_for(lambda: srv.answers)
+        assert srv.answers[0] == {"id": "q2", "skipped": True}
+        await finish(srv, app)
+
+
+async def test_a_free_text_only_question_reads_right_TUIB13():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer, finish, open_chat, top
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put({"type": "ask_user", "id": "f1", "conversation_id": 4, "questions": [
+            {"question": "Name it", "options": []}]})
+        assert await wait_for(lambda: top(app) == "AskUser")
+        type(app.screen).GRACE = 0
+        foot = app.screen._foot_text()
+        assert "1 picks" not in foot and "type your answer" in foot
+        await pilot.press("escape")
+        assert await wait_for(lambda: srv.answers)
+        await finish(srv, app)
+
+
+# --- the small ones -----------------------------------------------------------------------------------
+
+async def test_one_shift_tab_too_many_does_not_land_on_yolo_TUIB14():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        told: list = []
+        app.notify = lambda msg, **kw: told.append(msg)
+        await pilot.press("shift+tab", "shift+tab")
+        assert app.perm_mode == "ask"
+        await pilot.press("shift+tab")                   # one too many: it asks first
+        assert app.perm_mode == "ask" and any("again for yolo" in t for t in told)
+        await pilot.press("shift+tab")                   # meant it
+        assert app.perm_mode == "yolo"
+        await pilot.press("shift+tab", "shift+tab")      # ask again; the arming timed out
+        app._yolo_armed = -100.0
+        await pilot.press("shift+tab")
+        assert app.perm_mode == "ask"
+
+
+
+async def test_a_box_that_has_not_reported_is_not_stale_TUIB17():
+    pytest.importorskip("textual")
+    fresh = {"box_id": "shared", "kind": "shared", "reported_at": None, "stale": True,
+             "tree": [], "totals": {}}
+    old = {"box_id": "p-alpha", "kind": "project", "project": "alpha", "stale": True,
+           "reported_at": "2026-09-30 04:00:00", "tree": [], "totals": {}}
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/vm/processes": {"enabled": True, "boxes": [fresh, old]}}))
+    async with app.run_test(size=(150, 40)) as pilot:
+        scr = await _security(pilot, app, "persistent")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        first, second = _rows(scr)[0], _rows(scr)[1]
+        assert "not reported yet" in first and "stale" not in first and "never" not in first
+        assert "stale" in second and "reported 09-30 04:00" in second
+        detail = str(scr.query_one("#sec-detail").render())
+        assert "not reported yet" in detail and "stale" not in detail
+        sub = _plain(scr.sub_markup())
+        assert "1 box reporting" in sub and "1 waiting for a first report" in sub
+
+
+async def test_y_and_n_on_an_alert_say_why_nothing_happens_TUIB20():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": [_long_alert()]}}))
+    async with app.run_test(size=(120, 35)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        foot = str(scr.query_one("#sec-foot").render())
+        assert "acknowledge" in foot and "approve" not in foot       # an alert has no y / n
+        await pilot.press("y")
+        await pilot.pause(0.2)
+        assert "not an approval" in _plain(scr.sub_markup())
+        assert _top(app) == "SecurityScreen"
+
+
+async def test_a_pending_host_shows_y_and_n_in_the_footer_TUIB20():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        scr.select_key(next(e["key"] for e in scr.entries["queue"] if e["type"] == "egress"))
+        foot = str(scr.query_one("#sec-foot").render())
+        assert "approve" in foot and "deny" in foot
+
+
+async def test_the_logs_filter_is_a_list_you_can_type_into_TUIB19():
+    pytest.importorskip("textual")
+    kinds = [f"kind_{i:02d}" for i in range(17)]
+    events = [{"id": i + 1, "kind": k, "severity": "warn", "summary": k, "acknowledged": 1,
+               "created_at": "2026-09-30 04:00:00"} for i, k in enumerate(kinds)]
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": events}}))
+    async with app.run_test(size=(100, 30)) as pilot:
+        scr = await _security(pilot, app, "logs")
+        assert await _until(pilot, lambda: len(_rows(scr)) == 17)
+        await pilot.press("f")
+        assert await _until(pilot, lambda: _top(app) == "Picker")
+        await pilot.press(*"kind_16", "enter")                # the last of 17: one step, not 16
+        assert await _until(pilot, lambda: scr.log_filter == "kind_16")
+        assert await _until(pilot, lambda: len(_rows(scr)) == 1)
+
+
+async def test_the_needs_a_build_badge_has_a_separator_TUIB23():
+    pytest.importorskip("textual")
+    from test_cli_vms import _server as vms_server
+    tr, state = vms_server([])
+    app = jav3.build_tui("http://h:1", SESSION, transport=tr)
+    async with app.run_test(size=(150, 40)) as pilot:
+        scr = await _security(pilot, app, "images", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+    row = scr.row_markup({"type": "variant", "key": "Idev", "raw": {
+        "name": "dev", "from": "main", "min_mem_mb": 768, "used_by": [], "needs_build": True}})
+    assert "used by no project" in _plain(row) and "no project · needs a build" in _plain(row)
+
+
+async def test_revoking_an_always_allow_rule_asks_first_TUIB24():
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/permissions/rules": {"rules": [{"id": 3, "tool": "run_code", "prefix": "npm",
+                                              "project_slug": None,
+                                              "created_at": "2026-09-30 04:00:00"}]}}, seen))
+    async with app.run_test(size=(120, 35)) as pilot:
+        scr = await _security(pilot, app, "rules")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        assert "run_code" in app.screen.question and "npm" in app.screen.question
+        await pilot.press("n")
+        await pilot.pause(0.3)
+        assert not [c for c in seen if c[0] == "DELETE"]
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: any(
+            c[0] == "DELETE" and c[1] == "/api/permissions/rules/3" for c in seen))
+
+
+async def test_the_help_and_palette_list_every_security_tab_TUIB21():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        cmd = app.commands["security"]
+        for tab in ("rules", "calls", "profiles"):
+            assert tab in cmd.help and tab in cmd.usage
+        app.dispatch("/help")
+        assert await _until(pilot, lambda: _top(app) == "Help")
+        text = app.screen.text                                # the plain form of the list
+        assert "1-8" in text and "1-6" not in text
+
+
+async def test_the_security_tabs_fit_60_columns_and_the_active_one_shows_TUIB22():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(60, 24)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        await pilot.pause(0.2)
+        bar = scr.query_one("#sec-tabs")
+        for tab in scr.TABS:
+            w = scr.query_one(f"#sec-tab-{tab}")
+            assert w.region.right <= bar.region.right, (tab, w.region, bar.region)
+        await pilot.press("8")                                 # Calls, the last tab
+        await pilot.pause(0.3)
+        active = scr.query_one("#sec-tab-calls")
+        assert active.has_class("-on") and active.region.right <= bar.region.right
+        assert str(active.render()).startswith("Calls")
+
+
+# --- TUIB-11: the sidebar never squeezes the chat to 38 columns ---------------------------------------
+
+async def test_the_sidebar_waits_for_room():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        app.sidebar_pref = True                         # what the operator's tui.json says
+        app.refresh_chrome()
+        await pilot.pause(0.1)
+        assert app.query_one("#sidebar").display is False
+        assert app.query_one("#editor").region.width >= 70   # the whole width is the chat's
+        seen: list = []
+        app.notify = lambda msg, **kw: seen.append(msg)
+        await pilot.press("ctrl+b")                     # says why, changes nothing
+        assert seen and "100 columns" in seen[0] and app.sidebar_pref is True
+        await pilot.resize_terminal(130, 30)
+        await pilot.pause(0.3)
+        assert app.query_one("#sidebar").display is True
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause(0.3)
+        assert app.query_one("#sidebar").display is False
+
+
+async def test_a_notice_while_the_sidebar_waits_still_counts_as_unread():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        app.sidebar_pref = True
+        app.refresh_chrome()
+        app.push_notice("something finished", toast=False)
+        assert app.unread == 1
+
+
+# --- TUIB-10: the profile form keeps its Save row and its hint on a 24-row terminal --------------
+
+async def test_the_profile_form_fits_80x24_and_follows_the_cursor():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION,
+                         transport=_srv({"/api/profiles": {"profiles": [PROFILE]}}))
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "profiles")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        await pilot.press("a")
+        assert await _until(pilot, lambda: _top(app) == "ProfileForm")
+        form = app.screen
+        await pilot.pause(0.3)
+        dlg, hint = form.query_one("#dialog"), form.query_one("#pf-hint")
+        body = form.query_one("#view-body")
+        assert hint.region.height >= 1 and hint.region.bottom <= dlg.region.bottom
+        assert "ctrl+s" in str(hint.render())
+        assert body.region.bottom <= hint.region.y                  # the body never covers it
+        n = len(form.FIELDS)
+        for _ in range(n):                                          # down to the Save row
+            await pilot.press("down")
+        await pilot.pause(0.3)
+        assert form.cur == n
+        save_line = n + 1
+        assert body.scroll_y <= save_line < body.scroll_y + body.size.height, (
+            body.scroll_y, body.size.height)
+        for _ in range(n):                                          # and back up to the top
+            await pilot.press("up")
+        await pilot.pause(0.3)
+        assert body.scroll_y == 0
+        await pilot.press("escape")
+
+
+# --- TUIB-09: logged out and chat-only read differently, once ----------------------------------------
+
+async def test_logged_out_says_not_logged_in_once_and_enter_offers_the_login():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", None, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/security")
+        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+        scr = app.screen
+        await pilot.pause(0.2)
+        sub = str(scr.query_one("#sec-sub").render())
+        assert "not logged in" in sub and "device token" not in sub
+        assert sub.count("logged in") == 1
+        assert not any("logged in" in r and "not logged in" in r for r in _rows(scr))
+        assert "device token" not in " ".join(_rows(scr))
+        await pilot.press("enter")                    # offers the password login
+        assert await _until(pilot, lambda: _top(app) == "Ask")
+        assert "Server address" in str(app.screen.query_one("Static").render())
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+
+
+async def test_a_chat_only_token_is_told_so():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/vms")
+        assert await _until(pilot, lambda: _top(app) == "VmsScreen")
+        await pilot.pause(0.2)
+        sub = str(app.screen.query_one("#sec-sub").render())
+        assert "chat only" in sub and "full access" in sub and "not logged in" not in sub
+
+
+# --- TUIB-12: a server that cannot be reached never reads as an all-clear -----------------------
+
+def _down_transport():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ("/api/devices/whoami", "/api/chat/options", "/api/conversations"):
+            return httpx.Response(200, json={"username": "op", "default": "x", "models": [],
+                                             "projects": [], "agents": [], "conversations": []})
+        raise httpx.ConnectError("All connection attempts failed")
+    return httpx.MockTransport(handler)
+
+
+async def test_an_unreachable_server_is_not_an_all_clear():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_down_transport())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/security")
+        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded["queue"] and scr.loaded["secrets"])
+        await pilot.pause(0.2)
+        sub = _plain(scr.sub_markup())
+        assert "could not load" in sub and "r retries" in sub
+        assert "0 hosts waiting" not in sub
+        assert sub.count("could not reach") == 1, sub          # one line for the shared cause
+        assert "projects" in sub and "egress" in sub           # naming the calls that failed
+        assert "nothing waits on you" not in " ".join(_rows(scr))
+        assert any("could not load" in r for r in _rows(scr))
+        tabs = str(scr.query_one("#sec-tab-queue").render())
+        assert "?" in tabs and "Queue 0" not in tabs
+        assert "?" in str(scr.query_one("#sec-tab-secrets").render())
+        assert _wrapped(sub, 76) <= scr.query_one("#sec-sub").size.height
+
+
+def test_collapse_errors_names_the_calls_that_share_a_cause():
+    out = jav3.collapse_errors(["projects: could not reach http://h:1: nothing answers there",
+                                "egress: could not reach http://h:1: nothing answers there",
+                                "alerts: the server said 500"])
+    assert out == ["could not reach http://h:1: nothing answers there (projects, egress)",
+                   "alerts: the server said 500"]
+    assert jav3.collapse_errors([]) == []
+
+
+# --- TUIB-06: a name typed into a picker keeps its first letter, t included ------------------------
+
+async def test_a_picker_keeps_the_first_letter_when_it_is_t():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer
+    srv = FakeServer(projects=["alpha"], full=True)
+    app = jav3.build_tui("http://h:1", SESSION, transport=srv.transport())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.4)
+        app.dispatch("/project")
+        assert await wait_for(lambda: _top(app) == "Picker")
+        hint = str(app.screen.query_one("#dialog-hint").render())
+        assert "type to filter" in hint and "t type" not in hint
+        await pilot.press(*"tetris")
+        f = app.screen.query_one("#filter")
+        assert f.value == "tetris"
+        await pilot.press("enter")
+        assert await wait_for(lambda: _top(app) == "Confirm")
+        assert "'tetris'" in app.screen.question
+        await pilot.press("n")
+
+
+async def test_the_selected_vms_box_row_keeps_its_bold_and_its_text():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "boxes", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        sel = next(r for r in scr.query("SecRow") if r.has_class("-sel"))
+        assert "running" in _content(sel).plain or "stopped" in _content(sel).plain
+        assert not _colours(_styles(sel)), _styles(sel)

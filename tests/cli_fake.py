@@ -23,6 +23,21 @@ def load_client(name: str = "jav3cli_dialogs"):
     return mod
 
 
+def pin_zone(monkeypatch, name: str = "UTC"):
+    """Use as `yield from pin_zone(monkeypatch)` in an autouse fixture: the client shows
+    the server's UTC times in the machine's zone, so a test that pins '14:03' pins a zone."""
+    import time
+    was = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", name)
+    time.tzset()
+    yield
+    if was is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = was
+    time.tzset()
+
+
 class Feed(httpx.AsyncByteStream):
     """One open SSE response: put() events in, close() ends the stream, drop()
     breaks it the way a restarting server does."""

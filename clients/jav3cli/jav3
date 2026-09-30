@@ -5,8 +5,9 @@
     jav3 fix the flaky test    the TUI, starting with that message
     jav3 -c | -r ID            resume the latest chat | chat ID
     jav3 -p "message"          one turn, plain output (also: cmd | jav3 -p)
-    jav3 login                 paste the line from Settings -> Add computer
-                               (or /login inside the TUI: that line, or a password)
+    jav3 login                 paste the line from Settings -> Add computer (chat only)
+    jav3 login --password      server address, username, password (full access)
+                               (or /login inside the TUI: either of the two)
     jav3 chat [message]        one turn, or the TUI with no message
     jav3 whoami
     jav3 logout
@@ -43,7 +44,15 @@ except ImportError:  # pragma: no cover — the installer provides it
     sys.exit("jav3 needs httpx: pip install httpx (or install your distro's python3-httpx)")
 
 PROMPT = "Paste the line from Settings → Add computer: "
-RELOGIN = "not logged in (token missing, revoked or expired) — run: jav3 login"
+RELOGIN = ("not logged in (token missing, revoked or expired) — run: jav3 login --password "
+           "(full access) or jav3 login (chat only)")
+RELOGIN_SESSION = "your login expired or was revoked — run: jav3 login --password"
+
+
+def relogin() -> str:
+    """What to run next: a password session that lapsed is renewed with the password."""
+    creds = load_credentials()
+    return RELOGIN_SESSION if creds and creds.get("session") else RELOGIN
 COOKIE_NAME = "jarvis_token"       # backend/auth.py: the operator session cookie
 SESSION_PREFIX = "session:"        # a credential string that is a session, not a token
 
@@ -242,8 +251,18 @@ def base_url(address: str) -> str:
     if "://" in a:
         if not a.startswith(("http://", "https://")):
             raise CliError(f"unsupported scheme in {address!r}")
-        return a
-    return "http://" + a
+        url = a
+    else:
+        url = "http://" + a
+    # a typo ("10.0.0.999", "host:abc") must read as one line, not crash whoever asked
+    try:
+        host = httpx.URL(url).host
+    except (httpx.InvalidURL, ValueError) as e:
+        raise CliError(f"not a valid server address: {address.strip()!r} ({e})")
+    if not host or " " in host or "%20" in host:
+        raise CliError(f"not a valid server address: {address.strip()!r} "
+                       "(try host:port, like 10.0.0.82:8000)")
+    return url
 
 
 # --- HTTP -------------------------------------------------------------------------------
@@ -274,7 +293,7 @@ def _check(r: httpx.Response) -> httpx.Response:
         raise CliError(redirect_hint(f"{u.scheme}://{u.netloc.decode()}",
                                      r.headers.get("location", "")))
     if r.status_code == 401:
-        raise CliError(RELOGIN)
+        raise CliError(relogin())
     if r.status_code >= 400:
         raise CliError(f"server said {r.status_code}: {_detail(r)}")
     return r
@@ -326,7 +345,32 @@ def upgrade_to_https(base: str) -> str:
     return base
 
 
+def cmd_login_password(args, out=sys.stdout, ask=input, secret=getpass.getpass) -> int:
+    """`jav3 login --password`: the web app's own login, from the terminal (full
+    access). Address, username, then the password without echo."""
+    creds = load_credentials() or {}
+    default = args.server or creds.get("address") or ""
+    addr = (ask(f"Server address [{default}]: " if default else
+                "Server address (host:port or URL, like 10.0.0.82:8000): ")
+            or default).strip()
+    if not addr:
+        raise CliError("no server address")
+    user = (ask(f"Username [{creds['username']}]: " if creds.get("username") else
+                "Username: ") or creds.get("username") or "").strip()
+    if not user:
+        raise CliError("no username")
+    password = secret("Password: ")
+    if not password:
+        raise CliError("no password")
+    base, _, who = login_with_password(addr, user, password)
+    print(f"logged in to {base} — credentials in {cred_path()}", file=out)
+    print(f"you are {who} (full access)", file=out)
+    return 0
+
+
 def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
+    if getattr(args, "password", False):
+        return cmd_login_password(args, out)
     line = read()
     address, code = parse_login_line(line)
     if args.server:
@@ -451,7 +495,7 @@ def _session_cookie(r: httpx.Response) -> str | None:
 
 
 def login_with_password(address: str, username: str, password: str,
-                        server: str | None = None) -> tuple[str, str, str]:
+                        server: str | None = None, warn: bool = True) -> tuple[str, str, str]:
     """POST /api/auth/login, the web app's own login — the operator session
     cookie, full rights. Saved to the credentials file; (base, cred, username)."""
     if server:
@@ -459,7 +503,7 @@ def login_with_password(address: str, username: str, password: str,
     base = upgrade_to_https(base_url(address))
     if base.startswith("https://") and not address.startswith("https://"):
         address = base
-    if base.startswith("http://") and not _loopback_base(base):
+    if warn and base.startswith("http://") and not _loopback_base(base):
         print(PLAIN_HTTP_PASSWORD.format(base=base), file=sys.stderr)
     # the server slows repeated failures down (up to 8s each): leave room for it
     with _client(base, timeout=40) as c:
@@ -705,6 +749,9 @@ COLLAPSED_LINES = 10
 EXPANDED_LINES = 40                # an open tool row, inline; → shows the rest
 DELEGATION_TOOLS = frozenset({"spawn_agent", "spawn_temp_agent", "deploy_agents", "research"})
 NOTICE_CAP = 50                   # notifications kept in the sidebar
+NO_ROW = "No"                     # the permission ask's plain decline (never sent)
+SIDEBAR_MIN_COLS = 100            # narrower than this the sidebar (42 wide) would leave
+                                  # the chat 38 columns: it stays hidden until there is room
 NOT_LOGGED_IN = ("not logged in — /login: paste the line from Settings → Add computer "
                  "(chat only), or use your password (full access)")
 SESSION_LOST = "not logged in (session expired, or token revoked) — /login"
@@ -779,9 +826,9 @@ def fit_parts(parts: list[tuple[str, str, int]], width: int, sep: str = " · ",
 
 
 def verdict_label(v: str) -> str:
-    """A network verdict as its row label, whole words in seven columns: `pending`
-    was cut to PENDI and `auto_allow` to A·ALL."""
-    return str(v or "?").replace("auto_", "a·").upper()[:7]
+    """A network verdict as its row label, whole words in eight columns: `pending`
+    was cut to PENDI, `auto_allow` to A·ALL and `reviewed` to REVIEWE."""
+    return str(v or "?").replace("auto_", "a·").upper()[:8]
 
 
 def fit_row(left: list[tuple[str, str, int]], right: list[tuple[str, str, int]],
@@ -935,6 +982,11 @@ async def aiter_sse(lines):
 
 # -- how tool calls read -----------------------------------------------------------------
 
+_LOCAL_TWINS = {"local_read_file": "read_file", "local_write_file": "write_file",
+                "local_edit_file": "edit_file", "local_list_files": "list_files",
+                "local_search": "search_codebase"}
+
+
 def tool_title(name: str, args) -> tuple[str, str]:
     """(icon, title) for a tool call, opencode-style: → reads, ← writes, $ runs,
     ◈ web, ✱ search, ◆ agents, ⚙ everything else."""
@@ -945,6 +997,14 @@ def tool_title(name: str, args) -> tuple[str, str]:
         return _short(v, n) if v not in (None, "") else ""
     if name == "local_shell":
         return "$", f"{_short(_cmd_line(a.get('command')), 100)}  (local)"
+    if name in _LOCAL_TWINS:
+        # a local tool reads like its server twin, marked (local): not its raw name
+        twin = _LOCAL_TWINS[name]
+        if name == "local_search" and a.get("query") and "query" in a:
+            sub = f" in {s('path')}" if a.get("path") not in (None, "", ".") else ""
+            return "✱", f'Grep "{s("query")}"{sub}  (local)'
+        icon, title = tool_title(twin, a)
+        return icon, f"{title}  (local)"
     if name == "read_file":
         rng = f" [{a['offset']}:{a.get('limit', '')}]" if a.get("offset") else ""
         return "→", f"Read {s('path')}{rng}"
@@ -1922,6 +1982,54 @@ _REFUSED_WHY = {
 }
 
 
+def local_ts(v, full: bool = False) -> str:
+    """The server's UTC times ('YYYY-MM-DD HH:MM:SS', ISO with a T, or epoch
+    seconds) in THIS machine's time zone: 'MM-DD HH:MM', or the whole
+    'YYYY-MM-DD HH:MM:SS' when `full`. '' when unreadable."""
+    try:
+        if isinstance(v, (int, float)):
+            t = float(v)
+        else:
+            import calendar
+            s = str(v).strip().replace("T", " ")[:19]
+            t = calendar.timegm(time.strptime(s, "%Y-%m-%d %H:%M:%S"))
+        return time.strftime("%Y-%m-%d %H:%M:%S" if full else "%m-%d %H:%M",
+                             time.localtime(t))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def collapse_errors(errs: list[str]) -> list[str]:
+    """Per-endpoint load errors ('projects: could not reach ...', 'egress: could not
+    reach ...') as one line per distinct cause, naming the endpoints that shared it."""
+    causes: dict[str, list[str]] = {}
+    for e in errs:
+        what, sep, why = e.partition(": ")
+        causes.setdefault(why if sep else e, []).append(what if sep else "")
+    out = []
+    for why, whats in causes.items():
+        whats = [w for w in whats if w]
+        out.append(why + (f" ({', '.join(whats)})" if len(whats) > 1 else "")
+                   if len(whats) != 1 else f"{whats[0]}: {why}")
+    return out
+
+
+def row_ts(v) -> str:
+    """A row's short local time; a text that is not a time is cut the old way."""
+    return local_ts(v) or str(v or "")[5:16]
+
+
+def full_ts(v) -> str:
+    """A detail line's whole local time ('' stays '', an unreadable text is kept)."""
+    return local_ts(v, True) or str(v or "")
+
+
+def tz_label() -> str:
+    """This machine's zone name for a footer ('PDT', or 'UTC' at offset 0)."""
+    off = time.localtime().tm_gmtoff or 0
+    return "UTC" if off == 0 else (time.strftime("%Z") or f"UTC{off // 3600:+d}")
+
+
 def calls_tok(n) -> str:
     """Token counts in the row's short form: 812, 12.4k, 1.2M."""
     try:
@@ -1955,7 +2063,7 @@ def calls_row(e: dict, compact: bool = False) -> str:
     """One Calls list row (spec: BACKLOG.md 'TUI: make the security story visible').
     Compact (a terminal under 100 columns) leaves out the op and the project, which
     the pane under the list has, so the tokens, cache and cost are not cut off."""
-    r, ts = e["raw"], (e.get("ts") or "")[5:16]
+    r, ts = e["raw"], row_ts(e.get("ts"))
     if e["type"] == "refusal":
         return (f"[$error]●[/] [$text-muted]{ts}[/] [$error b]REFU[/] "
                 f"{_esc(r.get('op_name') or '?')} {_esc(r.get('reason') or '?')} "
@@ -1986,7 +2094,7 @@ def calls_detail(e: dict) -> str:
             f"{_esc(r.get('reason') or '?')}",
             f"[$text-muted]from box {_esc(r.get('box_id') or 'unknown')}"
             + (f" · ⌂ {_esc(r['project_slug'])}" if r.get("project_slug") else "")
-            + f" · {_esc(r.get('ts') or '')}[/]",
+            + f" · {_esc(full_ts(r.get('ts')))}[/]",
             *([_esc(why)] if why else [])])
     who = [f"op {_esc(r.get('op_id') or '-')}"]
     who.append(f"conversation #{r['conversation_id']}" if r.get("conversation_id") is not None
@@ -2000,7 +2108,7 @@ def calls_detail(e: dict) -> str:
             else "[$text-muted]enter: no context stored for this call[/]")
     return "\n".join([
         " · ".join(who), numbers,
-        f"[$text-muted]{_esc(r.get('ts') or '')}"
+        f"[$text-muted]{_esc(full_ts(r.get('ts')))}"
         + (f" · ⌂ {_esc(r['project_slug'])}" if r.get("project_slug") else "") + "[/]",
         f"{keys}   [$primary]c[/] this conversation only"])
 
@@ -2440,8 +2548,8 @@ def build_tui(base: str, token: str, **kw):
 
     class Picker(ModalScreen):
         """opencode's DialogSelect, arrow-first. It opens on the list: ↑ ↓ move,
-        enter picks, esc closes. `t` (or any other printable key, which is kept
-        as the first letter) starts typing a filter: rows then sort by how
+        enter picks, esc closes. Any printable key (kept as the first letter of
+        the text, `t` included) starts typing a filter: rows then sort by how
         closely they match (picker_score) with the closest highlighted, ↑ ↓
         still move, backspace edits (and on an empty filter goes back to the
         list). With `custom`, enter on text that matches nothing returns the
@@ -2499,7 +2607,7 @@ def build_tui(base: str, token: str, **kw):
 
         def _show_hint(self) -> None:
             keys = ["↑↓ move", "enter pick"]
-            keys.append("backspace back to the list" if self.typing else "t type to filter")
+            keys.append("backspace back to the list" if self.typing else "type to filter")
             if not self.typing:
                 keys += [f"{'␣' if k == 'space' else k} {label}"
                          for k, (label, _) in self.actions.items()]
@@ -2626,7 +2734,7 @@ def build_tui(base: str, token: str, **kw):
             if event.is_printable and ch and not ch.isspace():
                 event.stop()
                 event.prevent_default()
-                self.start_typing("" if key == "t" else ch)
+                self.start_typing(ch)
 
         async def _run_action(self, key: str) -> None:
             ol = self.query_one("#choices", OptionList)
@@ -2682,12 +2790,18 @@ def build_tui(base: str, token: str, **kw):
             return True
 
     class Confirm(ModalScreen):
-        BINDINGS = [Binding("y,enter", "yes", show=False),
+        """y says yes, n / esc say no. `strict` (an approval, a delete, anything that
+        cannot be taken back) answers only to y: enter, the key a hand reaches for
+        twice, says no. Otherwise enter is yes, and the hint says so."""
+
+        BINDINGS = [Binding("y", "yes", show=False),
+                    Binding("enter", "enter", show=False),
                     Binding("n,escape", "no", show=False)]
 
-        def __init__(self, question: str, detail: str = "", grace: float = 0.0) -> None:
+        def __init__(self, question: str, detail: str = "", grace: float = 0.0,
+                     strict: bool = False) -> None:
             super().__init__()
-            self.question, self.detail = question, detail
+            self.question, self.detail, self.strict = question, detail, strict
             # a dialog that pops up on its own (not from the key just pressed)
             # ignores keys for `grace` seconds: the tail of what the operator
             # was typing must not answer a question they have not seen
@@ -2698,7 +2812,10 @@ def build_tui(base: str, token: str, **kw):
                 yield Static(f"[b]{_esc(self.question)}[/]")
                 if self.detail:
                     yield Static(f"[$text-muted]{_esc(self.detail)}[/]")
-                yield Static("\n[$primary]y[/] yes   [$text-muted]n / esc[/] no")
+                yield Static("\n[$primary]y[/] yes   [$text-muted]n / esc / enter[/] no"
+                             if self.strict else
+                             "\n[$primary]y / enter[/] yes   [$text-muted]n / esc[/] no",
+                             id="confirm-keys")
 
         def _early(self) -> bool:
             return time.monotonic() - self.opened < self.grace
@@ -2706,6 +2823,10 @@ def build_tui(base: str, token: str, **kw):
         def action_yes(self) -> None:
             if not self._early():
                 self.dismiss(True)
+
+        def action_enter(self) -> None:
+            if not self._early():
+                self.dismiss(not self.strict)
 
         def action_no(self) -> None:
             if not self._early():
@@ -2779,6 +2900,7 @@ def build_tui(base: str, token: str, **kw):
             self.free_label = ev.get("free_text_label") or "Type something…"
             self.i, self.answers = 0, []
             self.resolved = self.gone = False
+            self._skip_armed = False       # esc on a later question: once to warn, twice to skip
             self._opened()
             self._reset()
 
@@ -2790,8 +2912,15 @@ def build_tui(base: str, token: str, **kw):
             return self.qs[self.i]
 
         @property
+        def permission(self) -> bool:
+            """A permission ask (one question: yes / always / type why not). Its last
+            numbered row is a plain No, so declining has a number and not only esc."""
+            return self.ev.get("kind") == "permission" and len(self.qs) == 1
+
+        @property
         def opts(self) -> list:
-            return [str(o) for o in self.q.get("options") or []]
+            return [str(o) for o in self.q.get("options") or []] + (
+                [NO_ROW] if self.permission else [])
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog"):
@@ -2851,6 +2980,8 @@ def build_tui(base: str, token: str, **kw):
             """(head, options) markup for question i; pure, for tests."""
             q = qs[i]
             opts = [str(o) for o in q.get("options") or []]
+            if ev.get("kind") == "permission" and len(qs) == 1:
+                opts.append(NO_ROW)
             multi = bool(q.get("multi_select"))
             if ev.get("kind") == "permission":
                 title = "[$warning b]Permission[/]"
@@ -2883,11 +3014,17 @@ def build_tui(base: str, token: str, **kw):
         def _foot_text(self) -> str:
             n = len(self.opts)
             multi = bool(self.q.get("multi_select"))
-            pick = f"1-{n} pick" if n > 1 else "1 picks"
+            pick = "" if n == 0 else "1 picks it" if n == 1 else f"1-{n} pick"
             if self.ate and self.inert():
                 return "just opened: keys go back to your prompt for a moment"
-            return (f"↑↓ move · {pick}" + (" · space toggles" if multi else "")
-                    + " · or type · enter confirms · esc skips")
+            if self._skip_armed:
+                return ("esc again skips the whole ask: the answers to the earlier "
+                        "questions are dropped · any other key goes on")
+            return ("↑↓ move" + (f" · {pick}" if pick else "")
+                    + (" · space toggles" if multi else "")
+                    + (" · or type" if n else " · type your answer")
+                    + " · enter confirms · "
+                    + ("esc declines" if self.permission else "esc skips"))
 
         def _draw(self) -> None:
             head, rows = self.markup(self.ev, self.qs, self.i, self.cur, self.sel,
@@ -2955,6 +3092,9 @@ def build_tui(base: str, token: str, **kw):
                 else:
                     self._focus_text()
                     return
+            if self.permission and len(self.opts) - 1 in self.sel:
+                self.dismiss(None)         # the No row: the server reads a skip as a decline
+                return
             self.answers.append({"selected": [self.opts[j] for j in sorted(self.sel)],
                                  "text": typed or None})
             if self.i + 1 >= len(self.qs):
@@ -2972,6 +3112,8 @@ def build_tui(base: str, token: str, **kw):
                 self._draw()
                 return
             key = event.key
+            if key != "escape" and self._skip_armed:
+                self._skip_armed = False
             typing = self.query_one("#ask-text", Input).has_focus
             if key in ("pageup", "pagedown"):
                 event.stop()
@@ -3018,22 +3160,32 @@ def build_tui(base: str, token: str, **kw):
             self._confirm()
 
         def action_skip(self) -> None:
-            if not self.inert():
-                self.dismiss(None)
+            if self.inert():
+                return
+            if self.i > 0 and not self._skip_armed:
+                # the server takes all the answers or none: skipping here would drop
+                # the ones already given, so say so once before doing it
+                self._skip_armed = True
+                self._draw()
+                return
+            self.dismiss(None)
 
     class Ask(ModalScreen):
         """One line of input; `secret` hides it (the login line is a credential)."""
 
         BINDINGS = [Binding("escape", "cancel", show=False)]
 
-        def __init__(self, question: str, secret: bool = False, value: str = "") -> None:
+        def __init__(self, question: str, secret: bool = False, value: str = "",
+                     placeholder: str = "") -> None:
             super().__init__()
             self.question, self.secret, self.value = question, secret, value
+            self.placeholder = placeholder
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog", classes="small"):
                 yield Static(f"[b]{_esc(self.question)}[/]")
-                yield Input(value=self.value, password=self.secret, id="answer")
+                yield Input(value=self.value, password=self.secret, id="answer",
+                            placeholder=self.placeholder)
                 yield Static("[$text-muted]enter to confirm · esc to cancel[/]")
 
         def on_mount(self) -> None:
@@ -3419,7 +3571,7 @@ def build_tui(base: str, token: str, **kw):
                 with Horizontal(id="dialog-head"):
                     yield Static(f"[b]{_esc(what)}[/]", id="dialog-title")
                     yield Static("[$text-muted]esc[/]", id="dialog-esc")
-                with VerticalScroll(id="view-body"):
+                with VerticalScroll(id="view-body", can_focus=False):   # ↑↓ move the cursor
                     yield Static(id="pf-body")
                 yield Static(id="pf-hint")
 
@@ -3460,11 +3612,19 @@ def build_tui(base: str, token: str, **kw):
             if self.error:
                 lines.append(f"\n[$error b]{_esc(self.error)}[/]")
             self.query_one("#pf-body", Static).update("\n".join(lines))
+            # one line that fits 80 columns; the body scrolls, the hint never does
             self.query_one("#pf-hint", Static).update(
-                "[$primary]↑↓[/] field  [$primary]enter[/] edit / toggle / pick  "
-                "[$primary]ctrl+s[/] or the Save row saves  [$text-muted]esc[/] cancel"
+                "[$primary]↑↓[/] field  [$primary]enter[/] edit  [$primary]ctrl+s[/] save  "
+                "[$text-muted]esc[/] cancel"
                 + ("\n[$text-muted]secrets are names only: "
-                   + _esc(", ".join(self.secret_names)) + "[/]" if self.secret_names else ""))
+                   + _esc(_short(", ".join(self.secret_names), 50)) + "[/]"
+                   if self.secret_names else ""))
+            # keep the field under the cursor on screen (the Save row is the 16th line)
+            from textual.geometry import Region
+            row = self.cur if self.cur < len(self.FIELDS) else len(self.FIELDS) + 1
+            body = self.query_one("#view-body", VerticalScroll)
+            self.call_after_refresh(
+                lambda: body.scroll_to_region(Region(0, row, 1, 1), animate=False))
 
         def action_move(self, d: int) -> None:
             self.cur = max(0, min(len(self.FIELDS), self.cur + d))
@@ -3788,6 +3948,10 @@ def build_tui(base: str, token: str, **kw):
             st = tr.root_status(nd["id"]) if root else node_status(nd)
             glyph = (f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/]" if st == "running"
                      else STATUS_GLYPH.get(st, ""))
+            why = tr.needs(nd["id"]) if root else (nd.get("needs") if st == "needs_you"
+                                                    else None)
+            if why and st == "running":            # running, and something under it waits on you
+                glyph += " " + STATUS_GLYPH["needs_you"]
             title = clean_title(nd.get("title")) or f"#{nd['id']}"
             meta = [node_role(nd)]
             if root and nd.get("project") and not (self.mode == "finished"
@@ -3797,19 +3961,16 @@ def build_tui(base: str, token: str, **kw):
                 meta.append(str(nd["model"]).split("/")[-1])
             if nk:
                 meta.append(f"{nk} agent{'s' * (nk != 1)}")
-            line = (f"{fold} {indent}[$secondary]{icon}[/] [b]{_esc(title)}[/]  "
-                    f"[$text-muted]{_esc(' · '.join(meta))}[/]  {glyph} "
+            # what it waits on comes before the age: a narrow terminal cuts the end
+            ask = f" [$warning]{_esc(_short(why, 60))}[/]" if why else ""
+            return (f"{fold} {indent}[$secondary]{icon}[/] [b]{_esc(title)}[/]  "
+                    f"[$text-muted]{_esc(' · '.join(meta))}[/]  {glyph}{ask} "
                     f"[$text-muted]{_age(nd.get('ended_at') or nd.get('started_at'))}[/]")
-            why = tr.needs(nd["id"]) if root else (nd.get("needs") if st == "needs_you"
-                                                    else None)
-            if why:
-                line += f"  [$warning]{_esc(_short(why, 60))}[/]"
-            return line
 
         def render_chrome(self) -> None:
             act = self.trees["active"]
             run = sum(1 for r in act.roots if act.root_status(r["id"]) == "running")
-            need = sum(1 for r in act.roots if act.root_status(r["id"]) == "needs_you")
+            need = sum(1 for r in act.roots if act.needs(r["id"]))    # a blocked child counts
             if self.mode == "active":
                 head = (f"[b]Agents[/]   [$accent]{run} running[/] [$text-muted]·[/] "
                         + (f"[$warning]{need} need you[/]" if need else
@@ -3974,7 +4135,7 @@ def build_tui(base: str, token: str, **kw):
 
     # -- the security screen -------------------------------------------------------------
     #
-    # /security (alias /review): the web app's Security area in six tabs. The
+    # /security (alias /review): the web app's Security area in eight tabs. The
     # queue is Review.jsx's (egress hosts waiting, git commit/remote requests
     # pending in every project, service and package requests, unacknowledged
     # alerts, which carry the diff-gate flags); Network is each project's allow
@@ -3986,12 +4147,47 @@ def build_tui(base: str, token: str, **kw):
     # the frame for boxes, images and the package catalogue. Every route is
     # operator-only, so a chat-only login gets a locked message and no requests.
 
+    _KEEP_ON_BAR = {"b", "bold", "i", "italic", "u", "underline", "strike"}
+
+    def on_the_bar(markup: str):
+        """A row's markup as it reads on the selection bar: the row's own colours
+        (muted grey, amber, purple) are 1-1.7:1 against the bar and vanish, so only
+        bold, italic and underline stay, and a chip that carries its own background
+        keeps everything. The bar's own contrast colour does the rest."""
+        from textual.content import Content, Span
+        c = Content.from_markup(markup)
+        spans = []
+        for sp in c.spans:
+            st = sp.style if isinstance(sp.style, str) else None
+            if st is None:
+                continue
+            if " on " in f" {st} ":
+                keep = st
+            else:
+                keep = " ".join(t for t in st.split() if t in _KEEP_ON_BAR)
+            if keep:
+                spans.append(Span(sp.start, sp.end, keep))
+        return Content(c.plain, spans=spans)
+
     class SecRow(Static):
         """One row of the security screen's list; `key` None is a note."""
 
         def __init__(self, markup: str, key: str | None) -> None:
             super().__init__(markup, classes="row" if key is not None else "note")
             self.key = key
+            self.markup = markup
+            self.picked = False
+
+        def show(self, markup: str) -> None:
+            self.markup = markup
+            self.update(on_the_bar(markup) if self.picked else markup)
+
+        def pick(self, on: bool) -> None:
+            """Select or deselect: the bar gets the row's plain form, so it stays readable."""
+            self.set_class(on, "-sel")
+            if on != self.picked:
+                self.picked = on
+                self.update(on_the_bar(self.markup) if on else self.markup)
 
         def on_click(self) -> None:
             if self.key is not None:
@@ -4160,7 +4356,7 @@ def build_tui(base: str, token: str, **kw):
         ]
 
     def _row_service(e) -> str:
-        r, ts = e["raw"], (e.get("ts") or "")[5:16]
+        r, ts = e["raw"], row_ts(e.get("ts"))
         return (f"[$warning b]SVC [/] [$text-muted]{ts}[/] [b]{_esc(r.get('name') or '?')}[/] "
                 f"[$text-muted]{_esc(_short(_argv(r.get('command')), 40))} · in "
                 f"{_esc(r.get('project_slug') or '?')} · ports "
@@ -4169,7 +4365,7 @@ def build_tui(base: str, token: str, **kw):
                 + (" [$warning]changed[/]" if r.get("supersedes_id") else ""))
 
     def _row_package(e) -> str:
-        r, ts = e["raw"], (e.get("ts") or "")[5:16]
+        r, ts = e["raw"], row_ts(e.get("ts"))
         ver = r.get("resolved_version") or r.get("version_req") or ""
         st = r.get("status") or "pending"
         col = ("$error" if st in ("failed", "rejected") else
@@ -4232,7 +4428,8 @@ def build_tui(base: str, token: str, **kw):
         t = r.get("totals") or {}
         n = t.get("procs") if isinstance(t.get("procs"), int) else e.get("count", 0)
         orph = len(_jlist(r.get("orphan_conns")))
-        flags = (f" {AMBER} stale [/]" if r.get("stale") else "")
+        first = not r.get("reported_at")             # booted, not yet heard from: not stale
+        flags = (f" {AMBER} stale [/]" if r.get("stale") and not first else "")
         if orph:
             flags += f" {RED} {orph} possibly hidden process{'es' * (orph != 1)} [/]"
         if r.get("error"):
@@ -4246,7 +4443,9 @@ def build_tui(base: str, token: str, **kw):
                 f"{' ⌂ ' + _esc(r['project']) if r.get('project') else ''} · "
                 f"{n} process{'es' * (n != 1)}"
                 + (f" · {t['unexpected']} unexpected" if t.get("unexpected") else "")
-                + f" · reported {_esc(str(r.get('reported_at') or 'never'))}[/]{flags}")
+                + (" · not reported yet" if first else
+                   f" · reported {_esc(local_ts(r.get('reported_at')) or str(r['reported_at']))}")
+                + f"[/]{flags}")
 
     def _row_orphan(e) -> str:
         c = e["raw"]
@@ -4313,7 +4512,7 @@ def build_tui(base: str, token: str, **kw):
 
     class SecurityScreen(Screen):
         """Tabs: Queue · Network · Logs · Secrets · Persistent · Profiles. tab / →
-        next, ← previous, 1-6 jump, ↑↓ select (detail below), esc back. Plain
+        next, ← previous, 1-8 jump, ↑↓ select (detail below), esc back. Plain
         keys only (Terminal.app: no shift+arrows)."""
 
         TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules",
@@ -4338,15 +4537,13 @@ def build_tui(base: str, token: str, **kw):
                            "[$primary]v[/] new value  [$primary]d[/] delete",
                 "persistent": "[$primary]enter[/] open  [$primary]s[/] stop / start service  "
                               "[$primary]l[/] service logs  [$primary]d[/] revoke service",
-                "profiles": "[$primary]a[/] new  [$primary]e[/] edit  [$primary]p[/] assign "
-                            "to project  [$primary]d[/] delete",
+                "profiles": "[$primary]enter[/] details  [$primary]a[/] new  [$primary]e[/] edit  "
+                            "[$primary]p[/] assign to project  [$primary]d[/] delete",
                 "rules": "[$primary]d[/] revoke the always-allow rule",
                 "calls": "[$primary]c[/] conversation  [$primary]enter[/] context"}
         POLL_SECONDS = 4.0
         LIMIT = 200
         GENERAL = "__general__"          # egress.py's shared baseline policy row
-        LOCKED = ("needs full access — /login with your password "
-                  "(a device token is chat only)")
         DEFAULT_CSS = """
         SecurityScreen { background: $background; }
         #sec-tabs { height: 1; padding: 0 2; margin: 1 0 0 0; }
@@ -4379,6 +4576,8 @@ def build_tui(base: str, token: str, **kw):
             Binding("down,j", "move(1)", show=False),
             Binding("pageup", "page(-1)", show=False),
             Binding("pagedown", "page(1)", show=False),
+            Binding("left_square_bracket", "detail(-1)", show=False),
+            Binding("right_square_bracket", "detail(1)", show=False),
             Binding("r", "reload", show=False),
             Binding("y", "approve", show=False),
             Binding("n", "deny", show=False),
@@ -4428,6 +4627,18 @@ def build_tui(base: str, token: str, **kw):
         @property
         def locked(self) -> bool:
             return not self.app.full_access
+
+        def locked_text(self) -> str:
+            """Said once, in the head: who is asking, and the one key that fixes it."""
+            if not self.app.token or self.app.logged_in is False:
+                return "not logged in — press enter to log in"
+            return ("this login is chat only — press enter to log in with your password "
+                    "for full access")
+
+        async def _login_from_here(self) -> None:
+            await self.app.run_command("/login password")
+            if not self.locked:                  # the poll would notice in a few seconds
+                await self._first_load()
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="sec-tabs"):
@@ -4638,6 +4849,10 @@ def build_tui(base: str, token: str, **kw):
             if e is None or e["type"] != "rule":
                 return
             r = e["raw"]
+            if not await self._confirm(
+                    f"Revoke: {r.get('tool')} {r.get('prefix')}?",
+                    "Calls like it will ask you again."):
+                return
             await self._send("DELETE", f"/api/permissions/rules/{r.get('id')}",
                              f"revoked {r.get('tool')}: {r.get('prefix')}")
 
@@ -4784,14 +4999,20 @@ def build_tui(base: str, token: str, **kw):
             return ["all"] + sorted({str(e["raw"].get("kind")) for e in self.entries["logs"]
                                      if e["raw"].get("kind")})
 
+        def _count(self, tab: str, n: int | None = None):
+            """A tab's count for the tab bar: None before it loads, and a '?' when a
+            load failed, so an unreachable server never reads as 'nothing waits'."""
+            if not self.loaded[tab]:
+                return None
+            n = len(self.entries[tab]) if n is None else n
+            return (f"{n}?" if n else "?") if self.errors[tab] else n
+
         def counts(self) -> dict:
-            q = self.entries["queue"]
-            return {"queue": len(q) if self.loaded["queue"] else None,
-                    "secrets": len(self.entries["secrets"]) if self.loaded["secrets"] else None}
+            return {"queue": self._count("queue"), "secrets": self._count("secrets")}
 
         @staticmethod
         def row_markup(e: dict, all_projects: bool = True, compact: bool = False) -> str:
-            r, ts = e["raw"], (e.get("ts") or "")[5:16]
+            r, ts = e["raw"], row_ts(e.get("ts"))
             t = e["type"]
             if t == "call":
                 return calls_row(e, compact)
@@ -4835,7 +5056,7 @@ def build_tui(base: str, token: str, **kw):
                 meter = (f" [$text-muted]↑{_bytes(r.get('bytes_out'))} "
                          f"↓{_bytes(r.get('bytes_in'))}[/]")
                 return (f"[{col}]●[/] [$text-muted]{ts}[/] "
-                        f"[{col} b]{verdict_label(v):<7}[/] "
+                        f"[{col} b]{verdict_label(v):<8}[/] "
                         f"{_esc(_short(what.strip(), 70))}{proj}{meter}")
             if t in _ROWS:
                 return _ROWS[t](e)
@@ -4856,8 +5077,8 @@ def build_tui(base: str, token: str, **kw):
                          f"[b]{_esc(r.get('host') or '?')}[/]  asked by "
                          f"{_esc(r.get('project_slug') or 'general')}",
                          f"[$text-muted]{r.get('hit_count') or 0}× · first "
-                         f"{_esc(r.get('first_seen') or '?')} · last "
-                         f"{_esc(r.get('last_seen') or '?')}[/]"]
+                         f"{_esc(full_ts(r.get('first_seen')) or '?')} · last "
+                         f"{_esc(full_ts(r.get('last_seen')) or '?')}[/]"]
                 if r.get("triage_verdict"):
                     lines.append(f"reviewer: [b]{_esc(r['triage_verdict'])}[/] "
                                  f"{_esc(r.get('triage_reason') or '')}")
@@ -4870,7 +5091,7 @@ def build_tui(base: str, token: str, **kw):
                 lines = ["[$primary]y[/] approve   [$primary]n[/] reject", "",
                          f"[b]{'remote connect' if remote else 'commit'} request "
                          f"#{r.get('id')}[/] in {_esc(r.get('project_slug') or '?')}  "
-                         f"[$text-muted]{_esc(r.get('created_at') or '')}[/]"]
+                         f"[$text-muted]{_esc(full_ts(r.get('created_at')))}[/]"]
                 if remote:
                     lines.append(f"remote: {_esc(r.get('message') or '')}")
                 else:
@@ -4885,16 +5106,16 @@ def build_tui(base: str, token: str, **kw):
                 col = _SEV_COL.get(sev, "$text-muted")
                 head = ("" if r.get("acknowledged") else
                         "[$primary]a[/] acknowledge\n\n")
-                ack = (f"  [$text-muted]acknowledged {_esc(r.get('acknowledged_at') or '')}[/]"
+                ack = (f"  [$text-muted]acknowledged {_esc(full_ts(r.get('acknowledged_at')))}[/]"
                        if r.get("acknowledged") else "")
                 body = _detail_markup(r.get("detail"))
                 n = r.get("count") or 1
-                again = (f"\n[$text-muted]seen {n}× · last {_esc(r.get('last_seen') or '?')} "
+                again = (f"\n[$text-muted]seen {n}× · last {_esc(full_ts(r.get('last_seen')) or '?')} "
                          "· the evidence below is the first[/]"
                          if isinstance(n, int) and n > 1 else "")
                 return (f"{head}[{col} b]{_esc(sev.upper())}[/] "
                         f"[$secondary]{_esc(r.get('kind') or '?')}[/] "
-                        f"[$text-muted]#{r.get('id')} · {_esc(r.get('created_at') or '')}"
+                        f"[$text-muted]#{r.get('id')} · {_esc(full_ts(r.get('created_at')))}"
                         f" · {_esc(r.get('project_slug') or 'no project')}[/]{ack}\n"
                         f"[b]{_esc(r.get('summary') or '')}[/]{again}"
                         + (f"\n\n{body}" if body else ""))
@@ -4917,7 +5138,7 @@ def build_tui(base: str, token: str, **kw):
                 "[$primary]n[/] reject", "",
                 f"[b]service request #{r.get('id')}: {_esc(r.get('name') or '?')}[/] in "
                 f"{_esc(r.get('project_slug') or '?')}  [$text-muted]"
-                f"{_esc(r.get('created_at') or '')}[/]",
+                f"{_esc(full_ts(r.get('created_at')))}[/]",
                 _esc(r.get("description") or ""),
                 f"placement (from the profile, changeable when approving): "
                 f"[b]{_esc(r.get('placement') or 'not set')}[/]",
@@ -4935,7 +5156,7 @@ def build_tui(base: str, token: str, **kw):
                   f"[$text-muted]{_esc(r.get('status') or 'pending')} · from "
                   f"{_esc(r.get('source') or 'agent')} · "
                   f"{_esc(r.get('project_slug') or 'operator')} · "
-                  f"{_esc(r.get('created_at') or '')}[/]",
+                  f"{_esc(full_ts(r.get('created_at')))}[/]",
                 f"{_esc(r.get('manager') or '?')} [b]{_esc(r.get('package') or '?')}[/]  "
                 f"asked version: {_esc(r.get('version_req') or 'any')}  resolved: "
                 f"[b]{_esc(r.get('resolved_version') or 'not yet resolved')}[/]",
@@ -4948,7 +5169,7 @@ def build_tui(base: str, token: str, **kw):
                 (f"built into {_esc(r.get('target_variant') or '?')} "
                  f"v{_esc(str(r['built_version']))}" if r.get("built_version") else ""),
                 (f"[$text-muted]decided by {_esc(r.get('decided_by') or '?')} "
-                 f"{_esc(r.get('decided_at') or '')}[/]" if r.get("decided_at") else "")])
+                 f"{_esc(full_ts(r.get('decided_at')))}[/]" if r.get("decided_at") else "")])
 
         def _detail_policy(self, e) -> str:
             slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
@@ -5004,9 +5225,11 @@ def build_tui(base: str, token: str, **kw):
             lines = [
                 f"[b]{_esc(r.get('box_id') or '?')}[/] {_esc(r.get('kind') or '')} "
                 f"{_esc(r.get('project') or '')}",
-                f"reported {_esc(str(r.get('reported_at') or 'never'))}"
-                + (f"  {AMBER} stale: the guest stopped reporting [/]"
-                   if r.get("stale") else "")]
+                ("not reported yet: a box takes a minute after it boots"
+                 if not r.get("reported_at") else
+                 f"reported {_esc(full_ts(r.get('reported_at')))}"
+                 + (f"  {AMBER} stale: the guest stopped reporting [/]"
+                    if r.get("stale") else ""))]
             if r.get("error"):
                 lines.append(f"[$error b]report failed:[/] {_esc(str(r['error']))}")
             if orph:
@@ -5087,9 +5310,9 @@ def build_tui(base: str, token: str, **kw):
                 (f"[$error b]error:[/] {_esc(str(r['error']))}" if r.get("error") else ""),
                 ("[$warning]unreported: its box has not answered for it; the state is "
                  "unknown[/]" if st == "unreported" else ""),
-                f"[$text-muted]last reported {_esc(str(r.get('last_reported_at') or 'never'))}"
+                f"[$text-muted]last reported {_esc(full_ts(r.get('last_reported_at')) or 'never')}"
                 f" · {_esc(r.get('status') or '?')} by {_esc(r.get('decided_by') or '?')} "
-                f"{_esc(r.get('decided_at') or '')}[/]",
+                f"{_esc(full_ts(r.get('decided_at')))}[/]",
                 f"placement: [b]{_esc(r.get('placement') or '?')}[/]  exposed: "
                 + _esc(", ".join(f"{x.get('port')}→{x.get('bind')}"
                                  for x in _jlist(r.get("expose_ports"))) or "nothing"),
@@ -5116,25 +5339,89 @@ def build_tui(base: str, token: str, **kw):
 
         # -- drawing ----------------------------------------------------------------------
 
+        # short tab names for a window under 80 columns: eight tabs must fit, and the
+        # active one must be on screen
+        SHORT = {"network": "Net", "secrets": "Sec", "persistent": "Proc", "profiles": "Prof"}
+
         def render_chrome(self) -> None:
             n = self.counts()
+            narrow = self.size.width < 80
             for t in self.TABS:
-                lab = self.LABELS[t]
+                lab = (self.SHORT.get(t) if narrow else None) or self.LABELS[t]
                 if not self.locked and n.get(t) is not None:
                     lab += f" {n[t]}"
                 w = self.query_one(f"#sec-tab-{t}", SecTab)
                 w.update(lab)
                 w.set_class(t == self.tab, "-on")
+            self.query_one("#sec-tabs").scroll_to_widget(
+                self.query_one(f"#sec-tab-{self.tab}", SecTab), animate=False)
             self.query_one("#sec-sub", Static).update(self.sub_markup())
-            foot = self.FOOT[self.tab]
-            common = (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
-                      "[$primary]↑↓[/] select  [$primary]r[/] refresh  [$primary]esc[/] back")
-            self.query_one("#sec-foot", Static).update(
-                common if self.locked else f"{foot}   {common}")
+            self.render_foot()
+
+        def foot_keys(self) -> str:
+            """This tab's keys. On the Queue they follow the selected row: an approval
+            takes y / n, an alert only a (there is nothing to approve in an alert)."""
+            if self.tab == "queue" and not self.locked:
+                e = self.selected()
+                if e is not None and e["type"] == "alert":
+                    return "[$primary]a[/] acknowledge"
+                if e is not None:
+                    return "[$primary]y[/] approve  [$primary]n[/] deny"
+            return self.FOOT[self.tab]
+
+        def _live(self) -> bool:
+            return False
+
+        def render_foot(self) -> None:
+            from textual.content import Content
+            common = self.common_foot(live=self._live())
+            line = common if self.locked else f"{self.foot_keys()}   {common}"
+            extras = self.foot_extras()
+            if extras:
+                # an extra never splits across two lines: it goes on its own line
+                # when it does not fit after the keys
+                room = max(20, self.size.width - 4)
+                fits = (len(Content.from_markup(line).plain) + 2
+                        + len(Content.from_markup(extras).plain) <= room)
+                line += ("  " if fits else "\n") + extras
+            self.query_one("#sec-foot", Static).update(line)
+
+        TIMED = ("queue", "network", "logs", "persistent", "rules", "calls")
+
+        def _tight(self) -> bool:
+            """A small terminal (under 100 columns or 30 rows): heads use their short
+            form, so the list keeps some rows."""
+            return self.size.width < 100 or self.size.height < 30
+
+        def foot_extras(self) -> str:
+            """What the footer adds when it applies: [ ] scrolls a pane that overflows,
+            and the times on the rows are this machine's (the server keeps UTC)."""
+            self._more = False if self.locked else self._detail_more()
+            bits = []
+            if self._more:
+                bits.append(f"[$primary]{_esc('[ ]')}[/] scroll the details")
+            if self.tab in self.TIMED and not self.locked:
+                bits.append(f"[$text-muted]times {_esc(tz_label())}[/]")
+            return "  ".join(bits)
+
+        def common_foot(self, live: bool = False) -> str:
+            """The keys every tab has."""
+            return (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
+                    "[$primary]↑↓[/] select  "
+                    + ("" if live else "[$primary]r[/] refresh  ")
+                    + "[$primary]esc[/] back"
+                    + ("  [$text-muted](live)[/]" if live else ""))
 
         def sub_markup(self) -> str:
             if self.locked:
-                return f"[$warning b]{_esc(self.LOCKED)}[/]"
+                return f"[$warning b]{_esc(self.locked_text())}[/]"
+            if self.errors[self.tab] and not self.entries[self.tab]:
+                # nothing came back: no '0 hosts waiting' over a queue that never loaded
+                return "\n".join(
+                    [f"[$error b]could not load the {self.LABELS[self.tab].lower()} tab — "
+                     "r retries[/]"]
+                    + [f"[$error]{_esc(x)}[/]" for x in collapse_errors(self.errors[self.tab])]
+                    + ([self.status] if self.status else []))
             bits = []
             if self.tab == "queue":
                 es = self.entries["queue"]
@@ -5159,7 +5446,9 @@ def build_tui(base: str, token: str, **kw):
                             + "  [$text-muted]· newest first[/]")
             elif self.tab == "persistent":
                 es = self.entries["persistent"]
-                nb = sum(e["type"] == "pbox" for e in es)
+                boxes = [e for e in es if e["type"] == "pbox"]
+                nb = sum(1 for e in boxes if e["raw"].get("reported_at"))
+                waiting = len(boxes) - nb
                 bad = _tree_bad_count([n for b in self._last_boxes for n in b.get("tree") or []])
                 orph = sum(e["type"] == "orphan" for e in es)
                 if self.procs_enabled is False:
@@ -5167,8 +5456,10 @@ def build_tui(base: str, token: str, **kw):
                                 "there is no process view; approved services are listed "
                                 "below[/]")
                 else:
-                    bits.append(f"[$text-muted]{nb} box{'es' * (nb != 1)} reporting · non-OS "
-                                "processes only · guest-reported vs host-verified bytes[/]"
+                    bits.append(f"[$text-muted]{nb} box{'es' * (nb != 1)} reporting"
+                                + (f" · {waiting} waiting for a first report" if waiting else "")
+                                + " · non-OS processes only · guest-reported vs "
+                                  "host-verified bytes[/]"
                                 + (f"  {RED} {bad} need a look [/]" if bad else "")
                                 + (f"  {RED} {orph} possibly hidden process"
                                    f"{'es' * (orph != 1)} [/]" if orph else ""))
@@ -5188,7 +5479,7 @@ def build_tui(base: str, token: str, **kw):
                             "never read back[/]")
             if self.status:
                 bits.append(self.status)
-            bits += [f"[$error]{_esc(x)}[/]" for x in self.errors[self.tab]]
+            bits += [f"[$error]{_esc(x)}[/]" for x in collapse_errors(self.errors[self.tab])]
             return "\n".join(bits)
 
         def net_markup(self) -> str:
@@ -5197,7 +5488,10 @@ def build_tui(base: str, token: str, **kw):
             where = (f"[b]⌂ {_esc(self.project)}[/]" if self.project
                      else "[b]all projects[/]")
             line = where
-            if not self.project and pol and "profile" in pol:
+            if not self.project and pol and "profile" in pol and self._tight():
+                line += "  [$text-muted]grouped by project; the rest follows the profile[/] " \
+                        f"[b]{_esc((pol.get('profile') or {}).get('name') or '?')}[/]"
+            elif not self.project and pol and "profile" in pol:
                 prof = pol.get("profile") or {}
                 line += ("  [$text-muted]grouped by project: each project's own allow and "
                          "deny lists over its profile's baseline[/]\n[$text-muted]traffic "
@@ -5249,6 +5543,11 @@ def build_tui(base: str, token: str, **kw):
                     and type(self) is SecurityScreen:
                 self.run_worker(self.rebuild(), group="rebuild", exclusive=True)
             self._narrow = narrow
+            tight = self._tight()
+            if (tight, self.size.width < 80) != getattr(self, "_was_tight", (tight, self.size.width < 80)):
+                self.render_chrome()                       # the head and tab names have short forms
+            self._was_tight = (tight, self.size.width < 80)
+            self.call_after_refresh(self._foot_again)
 
         async def rebuild(self) -> None:
             async with self._lock:
@@ -5258,11 +5557,15 @@ def build_tui(base: str, token: str, **kw):
                     self.sel[self.tab] = keys[0] if keys else None
                 allp = self.project is None
                 marks = [self.row_markup(e, allp, self.size.width < 100) for e in shown]
-                sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys), tuple(marks))
+                sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys), tuple(marks),
+                       bool(self.errors[self.tab]))
                 if sig != self._sig:
                     self._sig = sig
                     if self.locked:
-                        rows = [SecRow(f"[$warning]{_esc(self.LOCKED)}[/]", None)]
+                        rows = [SecRow("[$text-muted]nothing to show until you are logged in "
+                                       "with a password[/]", None)]
+                    elif not shown and self.loaded[self.tab] and self.errors[self.tab]:
+                        rows = [SecRow("[$error]could not load — r retries[/]", None)]
                     elif not shown:
                         msg = self.empty_text() if self.loaded[self.tab] else "loading…"
                         rows = [SecRow(f"[$text-muted]{msg}[/]", None)]
@@ -5284,13 +5587,19 @@ def build_tui(base: str, token: str, **kw):
             target = None
             for row in self.query(SecRow):
                 on = row.key is not None and row.key == self.sel[self.tab]
-                row.set_class(on, "-sel")
+                row.pick(on)
                 if on:
                     target = row
             if target is not None:
                 target.scroll_visible(animate=False)
             self.query_one("#sec-detail", Static).update(
                 "" if self.locked else self.detail_markup(self.selected()))
+            self.render_foot()
+            here = (self.tab, self.sel[self.tab])
+            if here != getattr(self, "_detail_for", None):
+                self._detail_for = here
+                self.query_one("#sec-detail-wrap", VerticalScroll).scroll_home(animate=False)
+            self.call_after_refresh(self._foot_again)
 
         # -- keys -------------------------------------------------------------------------
 
@@ -5325,7 +5634,27 @@ def build_tui(base: str, token: str, **kw):
 
         def action_page(self, d: int) -> None:
             lst = self.query_one("#sec-list", VerticalScroll)
+            if lst.max_scroll_y <= 0:            # the list fits: the pane under it is what pages
+                self.action_detail(d)
+                return
             lst.scroll_page_up() if d < 0 else lst.scroll_page_down()
+
+        def action_detail(self, d: int) -> None:
+            """[ and ] (PgUp / PgDn when the list is short) scroll the pane under the list:
+            a diff or an evidence block runs past it, and Terminal.app has no shift+arrows."""
+            wrap = self.query_one("#sec-detail-wrap", VerticalScroll)
+            wrap.scroll_page_up(animate=False) if d < 0 else wrap.scroll_page_down(animate=False)
+            self.call_after_refresh(self._foot_again)
+
+        def _detail_more(self) -> bool:
+            wrap = self.query_one("#sec-detail-wrap", VerticalScroll)
+            return wrap.max_scroll_y > 0
+
+        def _foot_again(self) -> None:
+            """The footer names [ ] when the pane overflows; layout settles after the
+            text changes, so this runs once it has."""
+            if self._detail_more() != getattr(self, "_more", False):
+                self.render_chrome()
 
         async def action_reload(self) -> None:
             if not self.locked:
@@ -5390,31 +5719,48 @@ def build_tui(base: str, token: str, **kw):
             pass
 
         async def action_enter(self) -> None:
+            if self.locked:
+                self.run_worker(self._login_from_here(), group="sec-act", exclusive=True)
+                return
             e = self.selected()
-            if self.locked or e is None:
+            if e is None:
                 return
             if e["type"] == "proc" and e["raw"].get("children"):
                 self.open_nodes ^= {e["key"]}
                 self.entries["persistent"] = self.persistent_entries_again()
                 await self.rebuild()
             elif e["type"] == "profile":
-                await self.app.push_screen_wait(View(
-                    f"Profile {e['raw'].get('name') or ''}", "\n".join(_profile_lines(e["raw"]))))
+                self._act(self._show_profile(e))            # a dialog needs a worker
             elif e["type"] == "call":
                 self._act(self._view_call_context(e))       # a dialog needs a worker
+
+        async def _show_profile(self, e: dict) -> None:
+            await self.app.push_screen_wait(View(
+                f"Profile {e['raw'].get('name') or ''}", "\n".join(_profile_lines(e["raw"]))))
 
         def persistent_entries_again(self) -> list[dict]:
             """Re-flatten the last report with the new open set (no request)."""
             return self.persistent_entries(self._last_boxes, self._last_services,
                                            self.open_nodes)
 
-        async def action_filter(self) -> None:
-            if self.tab != "logs" or self.locked:
-                return
-            kinds = self.log_kinds()
-            i = kinds.index(self.log_filter) if self.log_filter in kinds else 0
-            self.log_filter = kinds[(i + 1) % len(kinds)]
-            await self.rebuild()
+        def action_filter(self) -> None:
+            if self.tab == "logs" and not self.locked:
+                self._act(self._pick_kind())
+
+        async def _pick_kind(self) -> None:
+            """f opens the kinds as a list (there are a dozen and more): type to find
+            one, enter keeps it. The chips above the log show which is on."""
+            n: dict[str, int] = {}
+            for e in self.entries["logs"]:
+                k = str(e["raw"].get("kind") or "")
+                if k:
+                    n[k] = n.get(k, 0) + 1
+            rows = [("all", "all kinds", f"{len(self.entries['logs'])}")]
+            rows += [(k, k, str(n[k])) for k in sorted(n)]
+            v = await self.app.pick("Show one kind of event", rows, self.log_filter)
+            if v and v != self.log_filter:
+                self.log_filter = v
+                await self.rebuild()
 
         def action_hosts(self) -> None:
             if self.tab == "secrets":
@@ -5461,7 +5807,7 @@ def build_tui(base: str, token: str, **kw):
             return ok
 
         async def _confirm(self, q: str, detail: str) -> bool:
-            return bool(await self.app.push_screen_wait(Confirm(q, detail)))
+            return bool(await self.app.push_screen_wait(Confirm(q, detail, strict=True)))
 
         async def _verdict(self, yes: bool) -> None:
             e = self.selected()
@@ -5472,6 +5818,11 @@ def build_tui(base: str, token: str, **kw):
             if e is not None and e["type"] == "package":
                 await (self._approve_package(e["raw"]) if yes
                        else self._reject("package", e["raw"]))
+                return
+            if e is not None and e["type"] == "alert":
+                self.status = ("[$warning]an alert is not an approval: a acknowledges it, "
+                               "the detail below says what happened[/]")
+                self.render_chrome()
                 return
             if e is None or e["type"] not in ("egress", "git"):
                 return
@@ -5487,8 +5838,8 @@ def build_tui(base: str, token: str, **kw):
                     if slug is None:
                         return
                     body, proj = {"project": slug}, slug
-                seen = (f"Asked {r.get('hit_count') or 0}× (first {r.get('first_seen') or '?'},"
-                        f" last {r.get('last_seen') or '?'}).")
+                seen = (f"Asked {r.get('hit_count') or 0}× (first {full_ts(r.get('first_seen')) or '?'},"
+                        f" last {full_ts(r.get('last_seen')) or '?'}).")
                 review = (f" Reviewer: {r.get('triage_verdict')}"
                           f"{' — ' + r['triage_reason'] if r.get('triage_reason') else ''}."
                           if r.get("triage_verdict") else "")
@@ -5781,7 +6132,8 @@ def build_tui(base: str, token: str, **kw):
                 return
             wipe = bool(await self.app.push_screen_wait(Confirm(
                 f"Also delete {s.get('name')}'s /srv data?",
-                "y deletes the data disk for good; n (or esc) keeps it.")))
+                "y deletes the data disk for good; n (or esc or enter) keeps it.",
+                strict=True)))
             ok = await self._send("POST", f"/api/services/{s.get('id')}/revoke",
                                   f"revoked {s.get('name')}",
                                   json={"confirm": True, "delete_data": wipe})
@@ -6011,18 +6363,8 @@ def build_tui(base: str, token: str, **kw):
         return (f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600
                 else f"{s // 3600}h{s % 3600 // 60:02d}m")
 
-    def _local_ts(v) -> str:
-        """MM-DD HH:MM in local time, from epoch seconds or a UTC
-        'YYYY-MM-DD HH:MM:SS' (SQLite datetime('now')); '' when unreadable."""
-        try:
-            if isinstance(v, (int, float)):
-                t = float(v)
-            else:
-                import calendar
-                t = calendar.timegm(time.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S"))
-            return time.strftime("%m-%d %H:%M", time.localtime(t))
-        except (TypeError, ValueError, OverflowError):
-            return ""
+    _local_ts = local_ts
+
 
     def _box_timer(r) -> str:
         """BACKLOG "Idle timers on /vms box rows": a project box says
@@ -6132,7 +6474,8 @@ def build_tui(base: str, token: str, **kw):
                 f"{_esc(r.get('from') or 'base')}{' · builtin' if r.get('builtin') else ''}"
                 f" · min {r.get('min_mem_mb') or '?'}MB · used by "
                 f"{_esc(', '.join(users)) if users else 'no project'}[/]"
-                + (" [$warning b]needs a build[/]" if r.get("needs_build") else ""))
+                + (" [$text-muted]·[/] [$warning b]needs a build[/]" if r.get("needs_build")
+                   else ""))
 
     def _row_version(e) -> str:
         r = e["raw"]
@@ -6143,7 +6486,7 @@ def build_tui(base: str, token: str, **kw):
         inuse = _jlist(r.get("in_use_by"))
         return (f"  [$text-muted]v[/]{_esc(str(r.get('version') or '?'))}{active} "
                 f"[{col}]{_esc(st)}[/] [$text-muted]{_bytes(r.get('size_bytes'))}B · built "
-                f"{_esc(str(r.get('built_at') or '-'))} · in use by "
+                f"{_esc(full_ts(r.get('built_at')) or '-')} · in use by "
                 f"{_esc(', '.join(map(str, inuse))) if inuse else 'no box'}"
                 f"{' · older recipe' if r.get('stale_recipe') else ''}[/]")
 
@@ -6162,7 +6505,8 @@ def build_tui(base: str, token: str, **kw):
         EMPTY = {"boxes": "no boxes", "images": "no image variants",
                  "catalogue": "no package requests"}
         COUNTED = ("catalogue",)
-        FOOT = {"boxes": "[$primary]enter[/] history  [$primary]s[/] start / stop  "
+        TIMED = ("boxes", "images", "catalogue")
+        FOOT = {"boxes": "[$primary]enter[/] history [$primary]s[/] start / stop  "
                          "[$primary]r[/] restart  [$primary]x[/] nuke shared  "
                          "[$primary]d[/] destroy  [$primary]c[/] clean leftovers",
                 "images": "[$primary]b[/] build a new version  [$primary]l[/] build log",
@@ -6186,7 +6530,7 @@ def build_tui(base: str, token: str, **kw):
         def counts(self) -> dict:
             pend = sum((e["raw"].get("status") or "pending") == "pending"
                        for e in self.entries["catalogue"])
-            return {"catalogue": pend if self.loaded["catalogue"] else None}
+            return {"catalogue": self._count("catalogue", pend)}
 
         async def _load_boxes(self):
             hist = self.hist_box
@@ -6265,20 +6609,14 @@ def build_tui(base: str, token: str, **kw):
                 prev = self._sig[4] if self._sig and len(self._sig) > 4 else ()
                 for i, (w, m) in enumerate(zip(rows, marks)):
                     if i >= len(prev) or prev[i] != m:
-                        w.update(m)
+                        w.show(m)
                 self._sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys),
-                             tuple(marks))
+                             tuple(marks), bool(self.errors[self.tab]))
                 self.refresh_sel()
                 self.render_chrome()
 
-        def render_chrome(self) -> None:
-            super().render_chrome()
-            if self.tab == "boxes" and not self.locked:
-                # r restarts here; the list refreshes itself
-                common = (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
-                          "[$primary]↑↓[/] select  [$primary]esc[/] back  "
-                          "[$text-muted](live)[/]")
-                self.query_one("#sec-foot", Static).update(f"{self.FOOT['boxes']}   {common}")
+        def _live(self) -> bool:
+            return self.tab == "boxes" and not self.locked    # r restarts here; rows refresh
 
         def vms_sub(self) -> str:
             if self.tab == "boxes":
@@ -6287,12 +6625,14 @@ def build_tui(base: str, token: str, **kw):
                     return "[$text-muted]…[/]"
                 off = ("" if self.vm.get("enabled") else
                        "[$warning]boxes are off: the one shared box only[/] · ")
+                tight = self._tight()
                 return (f"{off}[$text-muted]RAM {b.get('ram_mb_used', '?')}/"
                         f"{b.get('ram_mb_cap', '?')} MB · boxes {b.get('boxes', '?')}/"
                         f"{b.get('boxes_cap', '?')} · project boxes "
-                        f"{b.get('project_boxes', '?')}/{b.get('project_boxes_cap', '?')} "
-                        "(reservations count, running or not)[/]\n"
-                        + self.idle_markup() + self.runtimes_markup())
+                        f"{b.get('project_boxes', '?')}/{b.get('project_boxes_cap', '?')}"
+                        + ("" if tight else " (reservations count, running or not)")
+                        + "[/]\n"
+                        + self.idle_markup(tight) + self.runtimes_markup(tight))
             if self.tab == "images":
                 bd = self.vm.get("build") or {}
                 tail = [str(x) for x in _jlist(bd.get("log_tail"))]
@@ -6307,29 +6647,51 @@ def build_tui(base: str, token: str, **kw):
             return ("[$text-muted]packages the agents asked for and the operator added; "
                     "an approved one goes into its variant's next version[/]")
 
-        def idle_markup(self) -> str:
-            """When the reaper acts, and what was left behind (one line)."""
+        def idle_markup(self, tight: bool = False) -> str:
+            """When the reaper acts, and what was left behind (one line; shorter when
+            the terminal is small, so the head leaves the list its rows)."""
             idle = self.vm.get("idle") or {}
             bits = []
             if idle.get("project_stop_s") and self.vm.get("enabled"):
                 bits.append(f"project boxes stop after {_mins(idle['project_stop_s'])} idle")
             if idle.get("shared_scrub_s"):
-                bits.append(f"the shared box is scrubbed after {_mins(idle['shared_scrub_s'])} idle")
+                bits.append((f"shared box scrubbed after {_mins(idle['shared_scrub_s'])}" if tight
+                             else f"the shared box is scrubbed after "
+                                  f"{_mins(idle['shared_scrub_s'])} idle"))
             elif idle:
-                bits.append("the shared box is never scrubbed (vm_idle_scrub_seconds 0)")
+                bits.append("shared box never scrubbed" if tight else
+                            "the shared box is never scrubbed (vm_idle_scrub_seconds 0)")
             line = f"[$text-muted]{' · '.join(bits)}[/]" if bits else ""
             lo = _jlist(self.leftovers.get("items"))
             n = sum(1 for i in lo if isinstance(i, dict) and i.get("cleanable"))
             if lo:
-                line += (("   " if line else "") + f"[$warning]{len(lo)} leftover"
+                line += (("\n" if tight else "   ") if line else "") + (
+                         f"[$warning]{len(lo)} leftover"
                          f"{'s' * (len(lo) != 1)} no box owns[/]"
                          + (" [$text-muted]— c cleans[/]" if n else ""))
             return line + "\n" if line else ""
 
-        def runtimes_markup(self) -> str:
+        def runtimes_markup(self, tight: bool = False) -> str:
             rt = self.runtimes or {}
             if not rt:
                 return ""
+            if tight:
+                # one line that always fits: the full warnings are in the detail of a
+                # docker box and of a docker profile
+                docker = rt.get("docker") if isinstance(rt.get("docker"), dict) else {}
+                bits = []
+                for name in ("kvm", "docker"):
+                    info = rt.get(name)
+                    if not isinstance(info, dict):
+                        continue
+                    if info.get("available") is False:
+                        bits.append(f"[$text-muted]{name} unavailable[/]")
+                    elif name == "docker":
+                        bits.append("docker " + (f"{RED} WEAK ISOLATION [/]" if docker.get("weak")
+                                                 else f"{AMBER} less isolated [/]"))
+                    else:
+                        bits.append(f"[$success]{name}[/]")
+                return "[$text-muted]runtimes:[/] " + "  ".join(bits)
             bits = []
             for name in ("kvm", "docker"):
                 info = rt.get(name)
@@ -6455,7 +6817,7 @@ def build_tui(base: str, token: str, **kw):
                 (f"last build: v{_esc(str(lb.get('version')))} "
                  + ("[$success]built[/]" if lb.get("ok") else
                     f"[$error]failed[/] {_esc(str(lb.get('error') or ''))}")
-                 + f" [$text-muted]{_esc(str(lb.get('finished_at') or ''))}[/]"
+                 + f" [$text-muted]{_esc(full_ts(lb.get('finished_at')))}[/]"
                  if lb else "last build: none"),
                 f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}",
                 "", _esc(str(r.get("recipe") or ""))] + self._build_log(r.get("name")))
@@ -6469,7 +6831,7 @@ def build_tui(base: str, token: str, **kw):
                 f"{_esc(str(r.get('base_version') or '?'))}"
                 + ("  [$primary b]active[/]" if r.get("active") else ""),
                 f"status {_esc(r.get('status') or '?')} · {_bytes(r.get('size_bytes'))}B · "
-                f"built {_esc(str(r.get('built_at') or '-'))}",
+                f"built {_esc(full_ts(r.get('built_at')) or '-')}",
                 "in use by: " + (_esc(", ".join(map(str, _jlist(r.get("in_use_by")))))
                                  or "no box"),
                 (f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}"
@@ -6518,7 +6880,10 @@ def build_tui(base: str, token: str, **kw):
                 self._act(self._image_log())
 
         async def action_enter(self) -> None:
-            if self.tab != "boxes" or self.locked:
+            if self.locked:
+                self.run_worker(self._login_from_here(), group="sec-act", exclusive=True)
+                return
+            if self.tab != "boxes":
                 return
             b = self._box()
             if b is None:
@@ -6631,7 +6996,8 @@ def build_tui(base: str, token: str, **kw):
             if bid != "shared" and (b.get("disk") or {}).get("data_bytes"):
                 wipe = bool(await self.app.push_screen_wait(Confirm(
                     f"Also delete {bid}'s data disk?",
-                    "y deletes it for good; n (or esc) keeps it.")))
+                    "y deletes it for good; n (or esc or enter) keeps it.",
+                    strict=True)))
             await self._send("POST", f"/api/vm/boxes/{bid}/destroy", f"destroyed {bid}",
                              json={"confirm": True, "delete_data": wipe})
 
@@ -6777,6 +7143,7 @@ def build_tui(base: str, token: str, **kw):
         Picker, Confirm, Ask, Help, LocalApprove, View, ServiceApprove, ProfileForm {
             align: center middle; background: $background 60%; }
         #view-body, #sa-body { height: auto; max-height: 20; }
+        ProfileForm #view-body { height: 1fr; max-height: 100%; }
         #sa-choice, #pf-hint, #sa-hint { margin-top: 1; }
         #approve-body { height: auto; max-height: 24; margin-top: 1; }
         #dialog { width: 72; max-width: 90%; height: auto; max-height: 80%;
@@ -6860,6 +7227,7 @@ def build_tui(base: str, token: str, **kw):
             self.esc_armed = 0.0
             self.ctrl_c_at = 0.0
             self.sidebar_pref: bool | None = None     # None = follow the width
+            self._yolo_armed = -100.0                 # when shift+tab last stopped short of yolo
             self.tools_expanded = False
             self.history: list[str] = []
             self.hist_pos: int | None = None
@@ -7100,7 +7468,7 @@ def build_tui(base: str, token: str, **kw):
         # -- notifications ---------------------------------------------------------------------
 
         def sidebar_shown(self) -> bool:
-            return bool(self.sidebar_pref)
+            return bool(self.sidebar_pref) and self.size.width >= SIDEBAR_MIN_COLS
 
         def push_notice(self, text: str, kind: str = "info", toast: bool = True,
                         timeout: float = 5) -> None:
@@ -7396,7 +7764,8 @@ def build_tui(base: str, token: str, **kw):
             header.display = not show
             header.update(f"[b]{_esc(self.title_text or 'New chat')}[/]"
                           + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
-                          + "  [$text-muted]ctrl+b notifications[/]")
+                          + ("  [$text-muted]ctrl+b notifications[/]"
+                             if self.size.width >= SIDEBAR_MIN_COLS else ""))
 
         def _status_parts(self) -> list[tuple[str, str, int]]:
             """The status row's left side as (plain, markup, rank) parts — while a
@@ -7577,6 +7946,7 @@ def build_tui(base: str, token: str, **kw):
 
         def on_resize(self, event) -> None:
             self.refresh_chrome()
+            self.call_after_refresh(self.refresh_chrome)     # once the new size has settled
 
         def watch_theme(self, theme: str) -> None:
             global DIFF_TINT
@@ -8122,8 +8492,19 @@ def build_tui(base: str, token: str, **kw):
             return f"[{col}]⏵ {self.perm_mode}[/]"
 
         def cycle_permission(self) -> None:
+            """yolo → auto → ask, and back to yolo only on a second press within four
+            seconds: one press too many from ask must not drop every guardrail."""
             modes = self.PERM_MODES
-            self.set_permission(modes[(modes.index(self.perm_mode) + 1) % len(modes)])
+            nxt = modes[(modes.index(self.perm_mode) + 1) % len(modes)]
+            if nxt == "yolo" and self.perm_mode != "yolo":
+                now = time.monotonic()
+                if now - self._yolo_armed > 4.0:
+                    self._yolo_armed = now
+                    self.notify("shift+tab again for yolo: everything runs in the VM without "
+                                "asking (/permissions picks a mode too)", severity="warning")
+                    return
+            self._yolo_armed = -100.0
+            self.set_permission(nxt)
 
         def set_permission(self, mode: str) -> None:
             self.perm_mode = mode
@@ -8463,6 +8844,8 @@ def build_tui(base: str, token: str, **kw):
                 await cmd.fn(arg.strip())
             except CliError as e:
                 await self.note(str(e), "error")
+            except Exception as e:      # noqa: BLE001 - one bad command must not take the app down
+                await self.note(f"/{name} failed: {type(e).__name__}: {e}", "error")
 
         async def local_shell(self, command: str) -> None:
             """`!cmd` runs on THIS machine; its output rides along with the next message."""
@@ -8777,6 +9160,10 @@ def build_tui(base: str, token: str, **kw):
             self.turn, self.busy, self.stop_requested = None, False, False
 
         def action_toggle_sidebar(self) -> None:
+            if self.size.width < SIDEBAR_MIN_COLS:
+                self.notify(f"the sidebar needs {SIDEBAR_MIN_COLS} columns; this window has "
+                            f"{self.size.width}", severity="warning")
+                return
             shown = self.query_one("#sidebar").display
             self.sidebar_pref = not shown
             if self.sidebar_pref:
@@ -8829,8 +9216,9 @@ def build_tui(base: str, token: str, **kw):
                                   takes_arg=True, leader="m"),
                 "provider": Command(self.c_provider, "add a provider's API key / base URL, "
                                     "then test it", "[id]", takes_arg=True, leader="k"),
-                "agents": Command(self.c_agent, "start a new chat as an agent", "[slug]",
-                                  takes_arg=True, leader="a"),
+                "persona": Command(self.c_agent, "start a new chat as an agent preset (what "
+                                   "is running now: /agents-view)", "[slug]",
+                                   takes_arg=True, leader="a"),
                 "project": Command(self.c_project, "pin this chat to a project (or make "
                                    "a new one)", "[slug|none|follow]", takes_arg=True,
                                    leader="p"),
@@ -8858,11 +9246,12 @@ def build_tui(base: str, token: str, **kw):
                                   "/stop-project)", "[project]",
                                   takes_arg=True, busy_ok=True),
                 "copy": Command(self.c_copy, "copy the last reply", busy_ok=True, leader="y"),
-                "export": Command(self.c_export, "save this chat as markdown (default "
-                                  "<location> sets where)", "[location|default <location>]",
+                "export": Command(self.c_export, "save this chat as markdown, here by "
+                                  "default (default <location> sets where)", "[location|default <location>]",
                                   takes_arg=True, busy_ok=True, leader="x"),
-                "screenshot": Command(self.c_screenshot, "save a picture of this screen "
-                                      "(svg, txt, png); help · default <format> [dir]",
+                "screenshot": Command(self.c_screenshot, "save a picture of this screen into "
+                                      "Pictures/jav3 (svg, txt, png); help · default "
+                                      "<format> [dir]",
                                       "[name] [format] [location]", takes_arg=True,
                                       busy_ok=True),
                 "details": Command(self.c_details, "expand or collapse tool output (ctrl+o)",
@@ -8880,11 +9269,12 @@ def build_tui(base: str, token: str, **kw):
                                          "orchestrator sends agents at it", "[project]",
                                          takes_arg=True, leader="o"),
                 "agents-view": Command(self.c_agents_view, "every agent and chat that is "
-                                       "working, across projects (← on an empty prompt)",
+                                       "running, across projects (← on an empty prompt; "
+                                       "/persona starts one)",
                                        busy_ok=True, leader="g"),
-                "security": Command(self.c_security, "the Security area: queue, network, "
-                                    "logs, secrets, persistent, profiles (full access)",
-                                    "[queue|network|logs|secrets|persistent|profiles]",
+                "security": Command(self.c_security, "the Security area: "
+                                    + ", ".join(SecurityScreen.TABS) + " (full access)",
+                                    "[" + "|".join(SecurityScreen.TABS) + "]",
                                     takes_arg=True, busy_ok=True, leader="v"),
                 "vms": Command(self.c_vms, "boxes, images and the package catalogue "
                                "(full access)", "[boxes|images|catalogue]", takes_arg=True,
@@ -8898,7 +9288,8 @@ def build_tui(base: str, token: str, **kw):
             }
             for alias, name in (("quit", "exit"), ("resume", "sessions"),
                                 ("history", "sessions"), ("model", "models"),
-                                ("agent", "agents"), ("theme", "themes"),
+                                ("agent", "persona"), ("agents", "persona"),
+                                ("theme", "themes"),
                                 ("clear", "new"), ("tools", "details"),
                                 ("providers", "provider"),
                                 ("orchestrate", "orchestration"),
@@ -8980,9 +9371,11 @@ def build_tui(base: str, token: str, **kw):
                                        "without asking) → auto → ask; /permissions picks"),
                          ("← (empty prompt)", "agents screen: everything working, "
                                               "across projects"),
-                         ("/security (ctrl+x v)", "queue · network · logs · secrets · "
-                                                  "persistent · profiles: tab → ← or 1-6 "
-                                                  "switch, esc back"),
+                         ("/security (ctrl+x v)",
+                          " · ".join(SecurityScreen.TABS)
+                          + f": tab → ← or 1-{len(SecurityScreen.TABS)} switch, esc back. "
+                            "Rules are the always-allow answers; Calls is how the model "
+                            "key is used"),
                          ("in /security", "y approve · n reject (services: 1 2 3 placement, "
                                           "↑↓ port, space expose) · a acknowledge / add · "
                                           "e edit · p project · enter open · s stop · "
@@ -9003,7 +9396,7 @@ def build_tui(base: str, token: str, **kw):
                          ("ctrl+p", "command palette"),
                          ("ctrl+n", "new chat"),
                          ("ctrl+b", "notifications sidebar (● n = unread)"),
-                         ("in a picker", "↑↓ enter esc · t or any letter filters"),
+                         ("in a picker", "↑↓ enter esc · any letter filters"),
                          ("exit · quit", "alone on the prompt: quit"),
                          ("/theme create", "tab next field · ctrl+s save · esc cancel "
                                            "(the previous theme comes back)"),
@@ -9144,8 +9537,8 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_agent(self, arg: str) -> None:
             if not arg:
-                rows = [(v, meta or v, "") for v, meta in self.arg_options("agents")]
-                arg = await self.pick("Agents", rows, self.agent or "none", custom=True,
+                rows = [(v, meta or v, "") for v, meta in self.arg_options("persona")]
+                arg = await self.pick("Agent presets", rows, self.agent or "none", custom=True,
                                       hint="a new chat starts as the agent you pick") or ""
                 if not arg:
                     return
@@ -9331,7 +9724,8 @@ def build_tui(base: str, token: str, **kw):
             if cid is None:
                 raise CliError("no chat to delete")
             if not await self.push_screen_wait(Confirm(f"Delete chat #{cid}?",
-                                                       "This cannot be undone.")):
+                                                       "This cannot be undone.",
+                                                       strict=True)):
                 return
             await self.api("DELETE", f"/api/conversations/{cid}")
             self.notify(f"deleted #{cid}")
@@ -9413,7 +9807,7 @@ def build_tui(base: str, token: str, **kw):
             text = transcript_markdown(self.title_text or f"Jav3 chat #{self.cid}",
                                        r.get("messages", []))
             path = write_new(directory, stem, "md", text.encode("utf-8"))
-            self.notify(f"saved {path}")
+            await self.note(f"saved {path}")         # in the log: a toast wraps and goes
 
         def _shot_defaults(self) -> tuple[str, str]:
             st = self._load_settings()
@@ -9454,6 +9848,11 @@ def build_tui(base: str, token: str, **kw):
             name, fmt, loc = parse_shot_args(toks)
             fmt = fmt or fmt0
             directory = safe_output_dir(loc or loc0)
+            # the picture is of the chat, not of the command being run: the completion
+            # list and any toast go first (and the screen gets a frame to redraw)
+            self.hide_popup()
+            self.clear_notifications()
+            await asyncio.sleep(0.15)
             if fmt == "txt":
                 data = self.screen_text().encode("utf-8")
             else:
@@ -9461,7 +9860,7 @@ def build_tui(base: str, token: str, **kw):
                 data = svg_to_png(svg) if fmt == "png" else svg.encode("utf-8")
             path = write_new(directory, safe_stem(name, time.strftime("jav3-%Y%m%d-%H%M%S")),
                              fmt, data)
-            self.notify(f"saved {path}")
+            await self.note(f"saved {path}")
 
         async def c_details(self, arg: str) -> None:
             self.action_toggle_tools()
@@ -9524,9 +9923,21 @@ def build_tui(base: str, token: str, **kw):
                 saved = load_credentials() or {}
                 addr = await self.push_screen_wait(Ask(
                     "Server address (host:port or URL)",
-                    value=self.server_override or saved.get("address") or self.base))
+                    value=self.server_override or saved.get("address") or self.base,
+                    placeholder="like 10.0.0.82:8000"))
                 if not (addr or "").strip():
                     return
+                # the plain-http warning comes before the password is typed, not after
+                # it was sent: find out where this address really goes first
+                self.notify(f"checking {addr.strip()}…")
+                target = await asyncio.to_thread(
+                    lambda: upgrade_to_https(base_url(addr.strip())))
+                if target.startswith("http://") and not _loopback_base(target):
+                    if not await self.push_screen_wait(Confirm(
+                            f"{target.split('://', 1)[1]} is plain http. Send your password anyway?",
+                            "It and the session it is traded for cross the network "
+                            "unencrypted. Only say yes on a network you trust.", strict=True)):
+                        return
                 user = await self.push_screen_wait(Ask(
                     "Username", value=saved.get("username") or ""))
                 if not (user or "").strip():
@@ -9537,7 +9948,9 @@ def build_tui(base: str, token: str, **kw):
 
                 def go():
                     with contextlib.redirect_stderr(err):
-                        return login_with_password(addr.strip(), user.strip(), password)
+                        return login_with_password(addr.strip(), user.strip(), password,
+                                                   warn=False)
+            self.notify(f"logging in to {how == 'line' and 'the server' or addr.strip()}…")
             try:
                 base, cred, who = await asyncio.to_thread(go)
             finally:
@@ -10527,7 +10940,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
     # the line is read from the terminal (or a pipe), never argv: argv lands in
     # shell history and is visible to every user via ps
-    sub.add_parser("login", help="log in with the line from Settings → Add computer")
+    lg = sub.add_parser("login", help="log in with the line from Settings → Add computer "
+                                      "(chat only), or --password for full access")
+    lg.add_argument("--password", action="store_true",
+                    help="ask for the server address, username and password instead "
+                         "(full access: /security, /vms, providers)")
     ch = sub.add_parser("chat", help="send a message, or start the TUI with none")
     ch.add_argument("message", nargs="*")
     ch.add_argument("--project", help="pin a new conversation to this project slug")
