@@ -404,9 +404,11 @@ class View:
             "name": META,
             "description": (
                 "Load more tools. Your core tools are always here; the rest wait in "
-                "sections. tools(section=\"...\") makes a section's tools callable for "
-                "the rest of this turn; calling one of them by name also loads its "
-                "section. Sections [their tools]:\n" + self._listing()),
+                "sections. Any tool already in your tool list is loaded: call it "
+                "directly, don't load its section. tools(section=\"...\") makes a "
+                "section's tools callable for the rest of this turn; calling one of "
+                "them by name also loads its section. Sections [their tools]:\n"
+                + self._listing()),
             "parameters": {"type": "object", "properties": {"section": {
                 "type": "string", "enum": secs,
                 "description": "The section to load. Omit to list the sections."}}}}}
@@ -464,7 +466,10 @@ class View:
                 close = difflib.get_close_matches(n, list(secs), n=1, cutoff=0.5)
                 hint = f" (did you mean '{close[0]}'?)" if close else ""
                 return (f"error: no section '{n}' in this turn{hint}. Sections: "
-                        f"{', '.join(secs)}.")
+                        f"{', '.join(secs)}. The desk (a connected computer), browser "
+                        "and local sections are offered only while one is connected: "
+                        "if the one you need is not listed, none is connected, so say "
+                        "that plainly.")
             was = n in self.loaded
             g = self._load(n)
             if g:

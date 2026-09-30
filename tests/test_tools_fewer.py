@@ -204,6 +204,15 @@ def test_asking_the_meta_tool_for_a_core_section_is_not_an_error(monkeypatch):
     assert "media" in v.loaded
 
 
+def test_an_unoffered_section_says_nothing_is_connected(monkeypatch):
+    """V3 (live, 2026-09-29): with no computer paired the model asked for a
+    'computer' section, got a bare list, and blamed the project."""
+    v = View(_specs(monkeypatch), _hist("take a screenshot of my desktop"))
+    out = v.meta_call({"section": "computer"})
+    assert out.startswith("error:") and "none is connected" in out
+    assert "already in your tool list is loaded" in v._meta_spec()["function"]["description"]
+
+
 def test_an_unloaded_merged_tool_called_by_name_loads_and_runs(monkeypatch):
     v = View(_specs(monkeypatch), _hist("hi"))
     assert "media" not in _names(v.wire())
