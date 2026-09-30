@@ -541,3 +541,53 @@ async def test_cpu_pct_is_never_negative_after_a_restart(env, monkeypatch, tmp_p
     assert boxes.status_json(b)["cpu_pct"] > 0
     b.ctl._run = False
     assert boxes.status_json(b)["cpu_pct"] is None and b.id not in boxes._cpu_prev
+
+
+async def test_an_idle_shared_vm_is_scrubbed_once_not_every_window(env, monkeypatch):
+    """Every window of idleness rebooted the guest again (boot restarted the
+    idle clock) and wrote a 'wiped' row each time."""
+    g = lifecycle.GuestVM()
+    boots = []
+
+    async def fake_boot():
+        boots.append(1)
+        g._proc = type("P", (), {"returncode": None, "pid": 1})()
+        g._idle_since = time.monotonic()
+        g._fresh = True                          # what the real boot() ends with
+
+    async def fake_teardown():
+        g._proc = None
+    monkeypatch.setattr(g, "boot", fake_boot)
+    monkeypatch.setattr(g, "teardown", fake_teardown)
+    await fake_boot()
+    g._fresh = False                             # a turn used it
+    g._idle_since = time.monotonic() - 1000
+    await g.reap_if_idle()
+    assert len(boots) == 2                       # scrubbed: rebooted fresh
+    for _ in range(3):
+        g._idle_since = time.monotonic() - 1000  # the next windows pass, nobody came
+        await g.reap_if_idle()
+    assert len(boots) == 2
+    assert [e[0] for e in await _events("shared")] == ["wiped"]
+    g._proc = type("P", (), {"returncode": None, "pid": 1})()
+    g.starting = False
+
+    async def ready():
+        return None
+    monkeypatch.setattr(g, "_ensure_ready_locked", ready)
+    await g.acquire()                            # someone used it: the next idle scrubs again
+    g.release()
+    g._idle_since = time.monotonic() - 1000
+    await g.reap_if_idle()
+    assert len(boots) == 3
+
+
+async def test_history_is_pruned_per_box(env, monkeypatch):
+    monkeypatch.setattr(boxlog, "KEEP_PER_BOX", 4)
+    s = boxes.shared()
+    p = boxes.allocate("project", project="alpha")
+    await boxlog.record(p, "started")
+    for _ in range(9):
+        await boxlog.record(s, "wiped")
+    assert len(await boxlog.events("shared")) == 4
+    assert [e["event"] for e in await boxlog.events("p-alpha")] == ["started"]

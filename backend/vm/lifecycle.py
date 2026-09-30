@@ -135,6 +135,9 @@ class GuestVM:
         self._inflight = 0
         self._idle_since: float | None = None
         self._booted_at: float | None = None
+        # booted and not used since: a scrub would only reboot a fresh guest
+        # (every window, forever, and a "wiped" history row each time)
+        self._fresh = False
         self._rebuilding = False
         # the /vms rows: booting but not yet serving, and the last boot error
         # (cleared by the next good start)
@@ -320,6 +323,7 @@ class GuestVM:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         self._booted_at = time.monotonic()
         self._idle_since = time.monotonic()
+        self._fresh = True
         if self.box is None:
             # a non-shared box's boot is recorded at box_up (boxes._emit)
             from . import boxlog
@@ -440,6 +444,7 @@ class GuestVM:
             finally:
                 self.starting = False
             self.error = None
+            self._fresh = False
             self._inflight += 1
 
     def release(self) -> None:
@@ -451,9 +456,10 @@ class GuestVM:
     async def reap_if_idle(self) -> None:
         """If scrubbing is on and the guest has sat idle past the threshold, reboot
         it so the next operation batch starts fresh. No-op while a turn is in
-        flight or scrubbing is disabled."""
+        flight, while scrubbing is disabled, and once it is fresh: a guest nothing
+        has used since its last boot has nothing to scrub."""
         window = settings.vm_idle_scrub_seconds
-        if not window or not self.running() or self._inflight > 0:
+        if not window or not self.running() or self._inflight > 0 or self._fresh:
             return
         if self._idle_since is None or time.monotonic() - self._idle_since < window:
             return
