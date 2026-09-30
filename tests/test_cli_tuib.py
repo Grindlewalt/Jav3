@@ -501,6 +501,48 @@ def test_local_tool_rows_read_like_their_server_twins_TUI18():
     assert jav3.tool_title("read_file", {"path": "x"}) == ("→", "Read x")      # a server tool: as before
 
 
+async def test_agents_screen_counts_a_blocked_child_and_shows_why_before_the_age_TUI15():
+    pytest.importorskip("textual")
+    nodes = [
+        {"id": 1, "parent_id": None, "kind": "orchestrator", "title": "Ship it",
+         "status": "running", "running": True, "project": "demo",
+         "started_at": "2026-09-30T04:00:00"},
+        {"id": 2, "parent_id": 1, "kind": "agent", "title": "coder", "status": "needs_you",
+         "needs": "waiting on your permission: Run in the VM: npm test", "running": True,
+         "project": "demo", "started_at": "2026-09-30T04:01:00"}]
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/chat/agents": {"nodes": nodes, "total": 0}}))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/agents-view")
+        assert await _until(pilot, lambda: _top(app) == "AgentsScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded and len(list(scr.query("AgentRow"))) > 2)
+        head = _plain(str(scr.query_one("#ag-head").render()))
+        assert "1 running" in head and "1 need you" in head
+        row = next(_plain(str(r.render())) for r in scr.query("AgentRow")
+                   if "Ship it" in str(r.render()))
+        import re
+        assert "!" in row and re.search(r"waiting on your permission.*\d+[smhd]\s*$", row), row
+
+
+async def test_persona_is_the_preset_picker_and_agents_still_works_TUI15():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        assert app.commands["persona"] is app.commands["agents"] is app.commands["agent"]
+        assert "agents-view" in app.commands["persona"].help
+        assert "/persona" in app.commands["agents-view"].help
+        names = [n for n, _ in app.unique_commands()]
+        assert "persona" in names and "agents" not in names
+        app.dispatch("/agents frontend")                     # the old spelling still takes a slug
+        assert await _until(pilot, lambda: app.agent == "frontend")
+        await pilot.press(*"/agents")                        # bare, it finds the running-agents view
+        await pilot.pause(0.2)
+        assert app.popup_items and app.popup_items[0][1] == "agents-view"
+
+
 # --- TUIB-15 / TUIB-16: the login flows ----------------------------------------------------------------
 
 async def test_the_tui_login_warns_about_plain_http_before_the_password_is_asked_TUIB15(

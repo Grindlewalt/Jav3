@@ -32,7 +32,7 @@ async def type_line(pilot, text: str) -> None:
 
 @pytest.mark.parametrize("typed, title", [
     ("/models", "Models"), ("/mod", "Models"), ("/orchestration", "Orchestrate which project?"),
-    ("/project", "Projects"), ("/agents", "Agents"), ("/sessions", "Sessions"),
+    ("/project", "Projects"), ("/persona", "Agent presets"), ("/sessions", "Sessions"),
     ("/themes", "Themes")])
 async def test_enter_on_a_bare_command_runs_its_picker(typed, title):
     srv, app = await boot(projects=["alpha", "beta"])

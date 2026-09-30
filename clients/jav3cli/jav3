@@ -3948,6 +3948,10 @@ def build_tui(base: str, token: str, **kw):
             st = tr.root_status(nd["id"]) if root else node_status(nd)
             glyph = (f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/]" if st == "running"
                      else STATUS_GLYPH.get(st, ""))
+            why = tr.needs(nd["id"]) if root else (nd.get("needs") if st == "needs_you"
+                                                    else None)
+            if why and st == "running":            # running, and something under it waits on you
+                glyph += " " + STATUS_GLYPH["needs_you"]
             title = clean_title(nd.get("title")) or f"#{nd['id']}"
             meta = [node_role(nd)]
             if root and nd.get("project") and not (self.mode == "finished"
@@ -3957,19 +3961,16 @@ def build_tui(base: str, token: str, **kw):
                 meta.append(str(nd["model"]).split("/")[-1])
             if nk:
                 meta.append(f"{nk} agent{'s' * (nk != 1)}")
-            line = (f"{fold} {indent}[$secondary]{icon}[/] [b]{_esc(title)}[/]  "
-                    f"[$text-muted]{_esc(' · '.join(meta))}[/]  {glyph} "
+            # what it waits on comes before the age: a narrow terminal cuts the end
+            ask = f" [$warning]{_esc(_short(why, 60))}[/]" if why else ""
+            return (f"{fold} {indent}[$secondary]{icon}[/] [b]{_esc(title)}[/]  "
+                    f"[$text-muted]{_esc(' · '.join(meta))}[/]  {glyph}{ask} "
                     f"[$text-muted]{_age(nd.get('ended_at') or nd.get('started_at'))}[/]")
-            why = tr.needs(nd["id"]) if root else (nd.get("needs") if st == "needs_you"
-                                                    else None)
-            if why:
-                line += f"  [$warning]{_esc(_short(why, 60))}[/]"
-            return line
 
         def render_chrome(self) -> None:
             act = self.trees["active"]
             run = sum(1 for r in act.roots if act.root_status(r["id"]) == "running")
-            need = sum(1 for r in act.roots if act.root_status(r["id"]) == "needs_you")
+            need = sum(1 for r in act.roots if act.needs(r["id"]))    # a blocked child counts
             if self.mode == "active":
                 head = (f"[b]Agents[/]   [$accent]{run} running[/] [$text-muted]·[/] "
                         + (f"[$warning]{need} need you[/]" if need else
@@ -9202,8 +9203,9 @@ def build_tui(base: str, token: str, **kw):
                                   takes_arg=True, leader="m"),
                 "provider": Command(self.c_provider, "add a provider's API key / base URL, "
                                     "then test it", "[id]", takes_arg=True, leader="k"),
-                "agents": Command(self.c_agent, "start a new chat as an agent", "[slug]",
-                                  takes_arg=True, leader="a"),
+                "persona": Command(self.c_agent, "start a new chat as an agent preset (what "
+                                   "is running now: /agents-view)", "[slug]",
+                                   takes_arg=True, leader="a"),
                 "project": Command(self.c_project, "pin this chat to a project (or make "
                                    "a new one)", "[slug|none|follow]", takes_arg=True,
                                    leader="p"),
@@ -9254,7 +9256,8 @@ def build_tui(base: str, token: str, **kw):
                                          "orchestrator sends agents at it", "[project]",
                                          takes_arg=True, leader="o"),
                 "agents-view": Command(self.c_agents_view, "every agent and chat that is "
-                                       "working, across projects (← on an empty prompt)",
+                                       "running, across projects (← on an empty prompt; "
+                                       "/persona starts one)",
                                        busy_ok=True, leader="g"),
                 "security": Command(self.c_security, "the Security area: "
                                     + ", ".join(SecurityScreen.TABS) + " (full access)",
@@ -9272,7 +9275,8 @@ def build_tui(base: str, token: str, **kw):
             }
             for alias, name in (("quit", "exit"), ("resume", "sessions"),
                                 ("history", "sessions"), ("model", "models"),
-                                ("agent", "agents"), ("theme", "themes"),
+                                ("agent", "persona"), ("agents", "persona"),
+                                ("theme", "themes"),
                                 ("clear", "new"), ("tools", "details"),
                                 ("providers", "provider"),
                                 ("orchestrate", "orchestration"),
@@ -9520,8 +9524,8 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_agent(self, arg: str) -> None:
             if not arg:
-                rows = [(v, meta or v, "") for v, meta in self.arg_options("agents")]
-                arg = await self.pick("Agents", rows, self.agent or "none", custom=True,
+                rows = [(v, meta or v, "") for v, meta in self.arg_options("persona")]
+                arg = await self.pick("Agent presets", rows, self.agent or "none", custom=True,
                                       hint="a new chat starts as the agent you pick") or ""
                 if not arg:
                     return
