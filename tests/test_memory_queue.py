@@ -136,6 +136,20 @@ async def test_a_new_note_never_replaces_an_existing_one(op):
     assert r.status_code == 200
 
 
+async def test_a_changed_last_line_stays_on_its_own_diff_line(op):
+    # bodies are stored stripped, so their last line has no newline: the diff
+    # used to run "-Shell: zsh" into "+Shell: fish" on one line
+    _note("operator-preferences", "Editor: vim\nShell: zsh\n")
+    await _handler().run("operator-preferences", "x", mode="replace")
+    memory.proposal_path("operator-preferences").write_text(
+        "---\nsource: agent\napproved: false\nproposal_for: operator-preferences\n"
+        f"base_sha256: {memory.sha256_text('Editor: vim' + chr(10) + 'Shell: zsh' + chr(10))}\n---\n"
+        "Editor: vim\nShell: fish\n")
+    diff = (await op.get("/api/memory/proposals")).json()["items"][0]["diff"]
+    lines = diff.splitlines()
+    assert "-Shell: zsh" in lines and "+Shell: fish" in lines
+
+
 # --- one toast per new pending note ------------------------------------------
 
 async def test_a_new_pending_note_raises_one_notice_and_no_security_event(tmp_env, notices):

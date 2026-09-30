@@ -252,8 +252,10 @@ def proposal_view(stem: str, notes=None) -> dict | None:
         except OSError:
             base_text = None
     want = prop["meta"].get("base_sha256")
+    # bodies are stored stripped, so the last line has no newline: without one a
+    # changed last line runs into the next diff line ("-- Shell: zsh+- Shell: fish")
     diff = "".join(difflib.unified_diff(
-        base_body.splitlines(True), prop["body"].splitlines(True),
+        (base_body + "\n").splitlines(True), (prop["body"] + "\n").splitlines(True),
         "current", "proposed"))
     return {"name": stem,
             "description": str(prop["meta"].get("description") or ""),
