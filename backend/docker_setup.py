@@ -56,6 +56,16 @@ def _image_sha(ref: str) -> str | None:
     return r.stdout.strip() or None
 
 
+def has_buildx() -> bool:
+    """True when `docker buildx` exists, i.e. BuildKit can be asked for. A host
+    without the plugin (Arch ships docker-buildx as a separate package) has the
+    classic builder only, and DOCKER_BUILDKIT=1 there aborts the build."""
+    try:
+        return _docker("buildx", "version", timeout=20).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def check_docker() -> str | None:
     """None when this user can drive a running daemon, else what is wrong."""
     if shutil.which(settings.docker_bin) is None:
@@ -86,10 +96,15 @@ def ensure_image(plan: Plan, rebuild: bool) -> bool:
                                                else f"vm/docker changed ({have} -> {want})")
         plan.say(f"docker build -t {turn} {SRC}  ({why}; several minutes on a Pi)")
         if not plan.dry:
+            # BuildKit when the plugin is there; else the classic builder (the
+            # Dockerfile builds under both)
+            kit = "1" if has_buildx() else "0"
+            if kit == "0":
+                print("  note  docker buildx is not installed: using the classic builder")
             r = subprocess.run(
                 [settings.docker_bin, "build", "--label", f"{LABEL}={want}",
                  "-t", turn, str(SRC)],
-                env={**os.environ, "DOCKER_BUILDKIT": "1"}, text=True)
+                env={**os.environ, "DOCKER_BUILDKIT": kit}, text=True)
             if r.returncode != 0:
                 print("  FAIL  docker build failed (output above). If apt could not "
                       "reach its mirrors, check the host's firewall lets Docker's "
@@ -148,9 +163,10 @@ def run(args: list[str]) -> int:
         return 1
     set_env(plan, {"JARVIS_DOCKER_ENABLED": "true", "JARVIS_VM_BOXES_ENABLED": "true"},
             what="Docker")
+    from .doctor import unit_name       # jarvis-<name> for a named instance
     print("done. Docker boxes are available (restart Jav3 to pick it up: "
-          "systemctl --user restart jarvis). A profile set to 'Runs in: own container' "
-          "uses them.")
+          f"systemctl --user restart {unit_name().removesuffix('.service')}). "
+          "A profile set to 'Runs in: own container' uses them.")
     return 0
 
 

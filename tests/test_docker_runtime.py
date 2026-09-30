@@ -753,3 +753,36 @@ def test_missing_memory_cgroup_is_a_warning():
     assert d.NO_MEMORY_LIMIT in d.plan_isolation(info).warnings
     ok = d.DaemonInfo(seccomp=True, raw={"MemoryLimit": True})
     assert d.NO_MEMORY_LIMIT not in d.plan_isolation(ok).warnings
+
+
+async def test_destroy_removes_the_box_socket_dir(harness, monkeypatch):
+    """A destroyed docker box (idle reaper, operator) takes its sock/<cid>
+    directory with it; a stopped one keeps it for the next start. The leftovers
+    scan lists a sock dir no box uses, so the reaper used to create one per box."""
+    import contextlib
+    from backend.vm import boxlog
+    box = harness["box"]
+    ctl = boxes.controller(box)
+    d = box.transport.host_dir
+
+    @contextlib.asynccontextmanager
+    async def quiet(*a, **k):
+        yield
+    monkeypatch.setattr(boxlog, "action", quiet)
+    await ctl.acquire()
+    ctl.release()
+    await boxes.stop(box)
+    assert d.is_dir()                              # stopped: the slot stays
+    await boxes.destroy(box)
+    assert not d.exists()
+    assert d.parent.is_dir()                       # only this box's slot
+
+
+async def test_forget_leaves_a_running_boxs_dir(harness):
+    box = harness["box"]
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    await ctl.forget()
+    assert box.transport.host_dir.is_dir() and box.transport.gateway_path().exists()
+    ctl.release()
+    await boxes.stop(box)
