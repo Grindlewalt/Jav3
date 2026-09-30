@@ -608,3 +608,44 @@ async def test_a_stopped_project_box_says_when_it_will_be_removed(env):
     await boxes.start(b)
     assert boxes.status_json(b)["removed_in_s"] is None      # running: the idle timer instead
     assert boxes.status_json(boxes.shared())["removed_in_s"] is None
+
+
+async def test_start_for_a_project_that_does_not_exist_is_a_404(client, env):
+    """A typo'd start reserved RAM and booted a box for nothing."""
+    r = await client.post("/api/vm/boxes/p-no-such-project/start")
+    assert r.status_code == 404 and "no project" in r.json()["detail"]
+    assert boxes.get("p-no-such-project") is None and boxes.budget()["project_boxes"] == 0
+    db = await get_db()
+    try:
+        await db.execute("INSERT INTO projects (slug, name, path) VALUES ('real', 'real', '/x')")
+        await db.commit()
+    finally:
+        await db.close()
+    r = await client.post("/api/vm/boxes/p-real/start")
+    assert r.status_code == 200 and r.json()["state"] == "running"
+
+
+async def test_events_of_an_unknown_box_is_a_404_and_a_gone_boxs_history_reads(client, env):
+    assert (await client.get("/api/vm/boxes/nope/events")).status_code == 404
+    b = boxes.allocate("project", project="alpha")
+    assert (await client.get("/api/vm/boxes/p-alpha/events")).json()["events"] == []
+    await client.post("/api/vm/boxes/p-alpha/start")
+    await client.post("/api/vm/boxes/p-alpha/destroy", json={"confirm": True})
+    assert boxes.get("p-alpha") is None
+    evs = (await client.get("/api/vm/boxes/p-alpha/events")).json()["events"]
+    assert evs[0]["event"] == "destroyed"
+    assert b.id == "p-alpha"
+
+
+async def test_operator_stop_says_when_it_cut_off_turns(client, env):
+    b = boxes.allocate("project", project="alpha")
+    await client.post("/api/vm/boxes/p-alpha/start")
+    b.ctl.inflight = 2
+    await client.post("/api/vm/boxes/p-alpha/stop")
+    ev = (await client.get("/api/vm/boxes/p-alpha/events")).json()["events"][0]
+    assert ev["event"] == "stopped"
+    assert ev["reason"] == "operator stop, cutting off 2 running turns"
+    r = await client.post("/api/vm/boxes/shared/destroy", json={"confirm": True})
+    assert r.json() == {"ok": True, "removed": False}          # only stopped
+    r = await client.post("/api/vm/boxes/p-alpha/destroy", json={"confirm": True})
+    assert r.json() == {"ok": True, "removed": True}
