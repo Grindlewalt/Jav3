@@ -4312,3 +4312,12 @@ a:has(> .nav-dot) { position: relative; }
 .ctx-held { margin: 0 0 6px; padding: 7px 10px; border: 1px solid var(--amber);
   border-radius: 7px; font-size: 12.5px; }
 .ctx-held a { text-decoration: underline; }
+
+/* web fixes (WEBA-02, WEBA-18): a floating menu opened inside the Projects
+   sheet (4000) sat behind it at 2000, so it is above every sheet and dialog
+   now; popups and dialogs are solid so text behind them cannot read through */
+.menu.floating { z-index: 5000; }
+.menu, .notif-drop, .proj-menu, .rc-menu, .work-picker, .modal, .sbd-modal, .ask-modal {
+  background: var(--panel);
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
