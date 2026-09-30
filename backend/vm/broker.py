@@ -118,6 +118,67 @@ def register_token(op_id: str, token: str) -> None:
 
 def release_token(op_id: str) -> None:
     _op_tokens.pop(op_id, None)
+    # the turn's capability is gone: so is anything it still has running
+    cancel_inflight(op_id)
+
+
+# --- work a turn has in flight ------------------------------------------------
+# A brokered call (spawn_agent, deploy_agents, research...) or a model call runs
+# in a task of the gateway, not of the turn, so stopping the turn cancelled
+# nothing of it: the child agent, the funnel or the research job kept spending
+# after the operator pressed stop. The gateway registers each such task here
+# under the op_id that asked; releasing the turn's token, or a stop naming its
+# conversation, cancels them, and the children they started with them.
+_inflight: dict[str, set] = {}
+
+
+def track_inflight(op_id: str, task) -> None:
+    _inflight.setdefault(op_id, set()).add(task)
+    task.add_done_callback(lambda t: _untrack(op_id, t))
+
+
+def _untrack(op_id: str, task) -> None:
+    s = _inflight.get(op_id)
+    if s is not None:
+        s.discard(task)
+        if not s:
+            _inflight.pop(op_id, None)
+
+
+def cancel_inflight(op_id: str) -> int:
+    """Cancel what `op_id` has in flight and, through parent_op, what the ops it
+    delegated to have in flight. Returns how many tasks were cancelled. A task
+    never cancels the task it is running in."""
+    import asyncio
+    me = None
+    try:
+        me = asyncio.current_task()
+    except RuntimeError:
+        pass
+    n, seen, stack = 0, set(), [op_id]
+    while stack:
+        o = stack.pop()
+        if o in seen:
+            continue
+        seen.add(o)
+        for t in list(_inflight.get(o, ())):
+            if not t.done() and t is not me:
+                t.cancel()
+                n += 1
+        stack.extend(e.op_id for e in list(_envelopes.values()) if e.parent_op == o)
+    return n
+
+
+def cancel_conversations(ids) -> int:
+    """The stop endpoints' hook: cancel the in-flight work of the turns running
+    for these conversation ids, or of every op when `ids` is None (the
+    operator's stop-all). Independent of the turn's own teardown, which can be
+    slow (its finally awaits the workspace sweep) or wedged."""
+    if ids is None:
+        ops = set(_inflight) | set(_envelopes)
+    else:
+        ops = {e.op_id for e in list(_envelopes.values()) if e.conversation_id in ids}
+    return sum(cancel_inflight(o) for o in ops)
 
 
 def verify_token(op_id, token) -> bool:

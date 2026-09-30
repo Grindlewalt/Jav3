@@ -22,6 +22,7 @@ from .memory import (assemble_system_prompt, estimate_tokens,
                      get_active_project, standing_rules_tail)
 # module level, not function level: it is the turn's single loop entry now, and
 # the offline tests substitute it here to run a turn without a model
+from .vm import broker as vm_broker
 from .vm.broker import TurnEnvelope
 from .vm.guest_turn import guest_turn
 
@@ -1549,6 +1550,10 @@ def _stop(conversation_id: int) -> bool:
     if task is None or task.done():
         return False
     task.cancel()
+    # what the turn delegated (spawn_agent, deploy_agents, research) runs in the
+    # gateway, not in this task: cancel it now rather than when the turn's own
+    # teardown gets round to releasing its token
+    vm_broker.cancel_conversations({conversation_id})
     return True
 
 
@@ -1634,6 +1639,10 @@ def _bulk_stop(targets, dry_run: bool, tree: set[int] | None = None,
                 t.cancel()
         for s in plans:
             plan_mod.stop_run(s)
+        # brokered calls beneath what was stopped (see _stop); a node in a box has
+        # no turn or run of its own to cancel, so name its conversation
+        vm_broker.cancel_conversations(
+            None if all_asks else {*turns, *runs, *(tree or ())})
         # asks parked by agents beneath what was stopped (a node in a box has no
         # turn or run of its own to cancel) would otherwise wait out their hour
         if all_asks:
