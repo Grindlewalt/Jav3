@@ -387,6 +387,8 @@ async def test_leftovers_scan_and_clean_only_ours(env, tmp_path, monkeypatch):
     (vm_dir / "boxes" / "p-ghost" / "overlay.qcow2").write_bytes(b"x" * 4096)
     (vm_dir / "boxes" / "p-alpha").mkdir(parents=True)        # registered below
     (vm_dir / "sock" / "12").mkdir(parents=True)
+    (vm_dir / "sock" / "12" / "gateway.sock").write_bytes(b"")     # a stale socket left in it
+    (vm_dir / "sock" / "14").mkdir(parents=True)                   # empty: not a leftover
     (vm_dir / "overlay.qcow2").write_bytes(b"y")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -649,3 +651,27 @@ async def test_operator_stop_says_when_it_cut_off_turns(client, env):
     assert r.json() == {"ok": True, "removed": False}          # only stopped
     r = await client.post("/api/vm/boxes/p-alpha/destroy", json={"confirm": True})
     assert r.json() == {"ok": True, "removed": True}
+
+
+async def test_a_dead_docker_daemon_is_not_no_leftovers(env, monkeypatch, tmp_path):
+    monkeypatch.setattr(leftovers, "PROC", tmp_path / "noproc")
+    monkeypatch.setattr(leftovers, "SYS_NET", tmp_path / "nonet")
+    monkeypatch.setattr(settings, "docker_enabled", True)
+    from backend.vm import docker_runtime as dr
+
+    class Dead:
+        rc = 1
+
+        async def run(self, *a, **k):
+            return self.rc, "", "Cannot connect to the Docker daemon at unix:///nonexistent.sock"
+    dead = Dead()
+    monkeypatch.setattr(dr, "cli", dead)
+    for rc in (1, 124):                     # refused, and timed out
+        dead.rc = rc
+        leftovers.reset()
+        res = await leftovers.scan()
+        assert res["docker"].startswith("unavailable") and "Cannot connect" in res["docker"]
+        assert res["items"] == []
+        assert "docker could not be asked" in leftovers.summary_line(res)
+    with pytest.raises(dr.DockerError):     # startup's orphan reap says it skipped
+        await dr.reap_orphans()
