@@ -92,6 +92,42 @@ function ProposalCard({ p, busy, onApprove, onReject, onOpen }) {
   )
 }
 
+// A write to a file that rides every prompt of a project (project.md, or a file
+// ticked in Context files), made by a turn that had read outside content. The
+// file is unchanged and the prompt still reads it as it was until approved.
+function HeldFileCard({ h, busy, onApprove, onReject }) {
+  return (
+    <section className="mem-card">
+      <div className="mem-card-head">
+        <h3><span className="dim">{h.project} / </span>{h.path}</h3>
+        <Tag tone="untrusted"
+             title="The turn that wrote this had read outside content. Read the diff before approving.">
+          read outside content</Tag>
+        {h.stale && <Tag tone="pending" title="The file was changed after this change was held">
+          file changed since</Tag>}
+        <span className="dim mem-when">{when(h.held_at)}</span>
+      </div>
+      <p className="mem-why">
+        This file is loaded into every prompt of the project. Jav3 wrote to it after reading
+        outside content, so the change is held: the file is unchanged and still in force until
+        you approve.
+      </p>
+      {h.binary
+        ? <p className="dim">Not text ({h.size.toLocaleString()} bytes); it would not load into
+          the prompt.</p>
+        : <DiffView diff={h.diff} body={h.base_exists ? '' : h.body} />}
+      {h.stale && (
+        <p className="warn">The file was changed after this change was held. Approving replaces
+          that with the held text.</p>)}
+      <div className="mem-actions">
+        <button disabled={busy} onClick={() => onApprove(h)}>
+          {h.stale ? 'Approve anyway' : 'Approve'}</button>
+        <button className="ghost" disabled={busy} onClick={() => onReject(h)}>Reject</button>
+      </div>
+    </section>
+  )
+}
+
 function NoteCard({ n, busy, onApprove, onReject, onOpen }) {
   return (
     <section className="mem-card">
@@ -131,6 +167,7 @@ export default function Memory() {
   const [conflict, setConflict] = useState(false)
   const [notes, setNotes] = useState({})   // stem -> the notes-API row
   const [proposals, setProposals] = useState([])
+  const [heldFiles, setHeldFiles] = useState([])   // writes to always-loaded project files
   const [trash, setTrash] = useState([])
   const [busy, setBusy] = useState('')
   const picked = useRef(false)              // the operator chose a view: don't move them
@@ -141,22 +178,24 @@ export default function Memory() {
     // a dotfile (.gitkeep) is plumbing that keeps a folder in version control, not memory
     setFiles(r.files.filter((f) => !f.path.split('/').pop().startsWith('.')))
     // the queue's three lists: an older server without them shows an empty one
-    const [n, p, t] = await Promise.all([
+    const [n, p, t, h] = await Promise.all([
       api('/api/memory/notes').catch(() => ({ notes: [] })),
       api('/api/memory/proposals').catch(() => ({ items: [] })),
       api('/api/memory/trash').catch(() => ({ items: [] })),
+      api('/api/memory/held-files').catch(() => ({ items: [] })),
     ])
     const m = {}; (n.notes || []).forEach((row) => { m[nkey(row.name)] = row })
     setNotes(m)
     setProposals(p.items || [])
+    setHeldFiles(h.items || [])
     setTrash(t.items || [])
-    return { notes: m, proposals: p.items || [] }
+    return { notes: m, proposals: p.items || [], held: h.items || [] }
   }, [])
 
   // first load: land on the queue when something waits, on soul.md otherwise
   useEffect(() => {
-    refresh().then(({ notes: m, proposals: p }) => {
-      if (!picked.current && (p.length || Object.values(m).some((x) => x.pending))) {
+    refresh().then(({ notes: m, proposals: p, held: h }) => {
+      if (!picked.current && (p.length || h.length || Object.values(m).some((x) => x.pending))) {
         setSelected(QUEUE)
       }
     }).catch(notifyError)
@@ -210,7 +249,7 @@ export default function Memory() {
   const special = SPECIAL.includes(selected)
   const pendingNotes = Object.values(notes).filter((n) => n.pending)
     .sort((a, b) => b.mtime - a.mtime)
-  const waiting = pendingNotes.length + proposals.length
+  const waiting = pendingNotes.length + proposals.length + heldFiles.length
   // the agent (or a scheduled run) wrote to this note after the editor loaded it
   const editedElsewhere = !!noteMeta && !!fileSha && !dirty && noteMeta.sha256 !== fileSha
 
@@ -242,6 +281,14 @@ export default function Memory() {
   const rejectProposal = (p) => act(`p:${p.name}`, () => api(
     `/api/memory/proposals/${encodeURIComponent(p.name)}/reject`, { method: 'POST' }),
   `Rejected the change to ${p.name}`)
+  const heldUrl = (h) => `/api/memory/held-files/${encodeURIComponent(h.project)}/${h.id}`
+  const approveHeld = (h) => act(`h:${h.project}/${h.id}`, () => api(
+    `${heldUrl(h)}/approve`,
+    { method: 'POST', body: JSON.stringify({ sha256: h.sha256, force: !!h.stale }) }),
+  `Applied the change to ${h.path}`)
+  const rejectHeld = (h) => act(`h:${h.project}/${h.id}`, () => api(
+    `${heldUrl(h)}/reject`, { method: 'POST' }),
+  `Rejected the change to ${h.path}`)
   const restore = (t) => act(`t:${t.id}`, () => api(
     `/api/memory/trash/${encodeURIComponent(t.id)}/restore`, { method: 'POST' }),
   `Restored ${t.name}`)
@@ -420,6 +467,9 @@ export default function Memory() {
                 {waiting
                   ? `${pendingNotes.length} note${pendingNotes.length === 1 ? '' : 's'}, `
                     + `${proposals.length} proposed change${proposals.length === 1 ? '' : 's'}`
+                    + (heldFiles.length
+                      ? `, ${heldFiles.length} project file change${heldFiles.length === 1 ? '' : 's'}`
+                      : '')
                   : 'nothing to review'}</span>
             </div>
             <div className="mem-queue">
@@ -427,6 +477,10 @@ export default function Memory() {
                 What Jav3 saves stays here until you approve it: it is not in its context and
                 not one of its rules before then. Notes you write yourself are trusted at once.
               </p>
+              {heldFiles.map((h) => (
+                <HeldFileCard key={`h:${h.project}/${h.id}`} h={h}
+                              busy={busy === `h:${h.project}/${h.id}`}
+                              onApprove={approveHeld} onReject={rejectHeld} />))}
               {proposals.map((p) => (
                 <ProposalCard key={`p:${p.name}`} p={p} busy={busy === `p:${p.name}`}
                               onApprove={approveProposal} onReject={rejectProposal}

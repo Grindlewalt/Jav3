@@ -52,8 +52,10 @@ a watched, policy-gated, cuttable pipe to the internet.
   operator approves it, whatever the turn read; a write onto a note that IS
   binding becomes a proposal and leaves the note as it was; a note written
   after untrusted content also carries a taint stamp the operator sees, and
-  approval is the only thing that clears it. (This covers memory NOTES only:
-  project files are a different channel, see residual #23. Canonical-file
+  approval is the only thing that clears it. (This covers memory NOTES; the
+  files that ride every prompt of a project, project.md and the ticked context
+  files, are a different channel with the same idea: a tainted turn's write to
+  one is held for approval, see residual #23. Canonical-file
   protection CHANGED 2026-07-20: guest edits now apply to the real files at turn
   end — see residual #5/#6.)
 - **base_url key-exfil seam.** The model gateway now refuses any guest-supplied
@@ -644,6 +646,31 @@ a watched, policy-gated, cuttable pipe to the internet.
       to the text they read). Frontmatter that cannot be read fails closed
       (pending and tainted). Schedules an agent proposes are created paused and
       wait for approval. Git commits and pushes wait for approval.
+    - **Files that ride every prompt: held when a tainted turn writes them
+      (added 2026-09-29).** Each project has one operator-controlled list of
+      always-loaded files: `project.md` (fixed) and the files ticked in the
+      Context files panel (`projects/<slug>/.context.json`), which prompt
+      assembly loads whole. Changing the list is the operator's cookie session
+      (a device token is refused) and raises an `always_loaded_changed` info
+      event; no agent path can edit it: the file is never shipped into the
+      guest, never taken back out (`workspace_xfer.SKIP`), and
+      `writes.apply_write` refuses it. A write to a listed file by a tainted
+      turn is HELD instead of landing (`writes.apply_write_gated`, called from
+      `apply_guest_writes` at turn end, and so from the operation's last-turn
+      and commit-gate flushes too): the change is stored on the host under
+      `data/heldwrites/<slug>/`, outside the project directory the guest is
+      given, the file stays as it was, and the prompt keeps reading it as it
+      was (with a fixed note naming the held paths, which the operator chose,
+      so the agent does not retry). The operator approves or rejects it in the
+      Memory page's queue: a diff, bound to the text they read, and a file
+      edited since the hold needs "approve anyway". Approving clears the file
+      from the tainted-paths ledger. Events: `always_loaded_held` (warn),
+      `always_loaded_approved` / `always_loaded_rejected` (info),
+      `always_loaded_refused` (warn, over 2 MB). A research document is built
+      from web pages and counts as tainted: written over a listed file it is
+      held the same way. `journal_update` keeps its own `[unverified]` tag (it
+      is a host-side write) and is not held as well. Untainted writes, and
+      writes to files off the list, land exactly as before.
     - **Tagged and withheld, live on the operator's say-so.** A journal line
       written in a turn that had read untrusted content is tagged
       `[unverified]` in `project.md`: it stays in the file, the operator sees
@@ -651,14 +678,21 @@ a watched, policy-gated, cuttable pipe to the internet.
       operator removes the tag. `create_agent` (which writes a description into
       the agents index and a prompt that runs unattended) is refused outright
       in such a turn. A binding note cannot be deleted from such a turn.
-    - **Not gated.** A journal line or an agent definition written from a turn
-      the ledger thinks is clean goes live at once. **Project files an agent
-      writes with `write_file` / `edit_file` / `run_code` are not taint-gated at
-      all:** `project.md` and any file the operator ticked for the context are
-      loaded whole into every prompt of that project, and the diff gates that
-      see the write are advisory. The all-projects rollup (`## Summary` of every
-      project's `project.md`, one line of at most 300 chars) and the agents index
-      (one line of at most 200 chars per agent) are size-capped, not vetted.
+    - **Not gated.** A journal line, an agent definition, or a write to an
+      always-loaded file from a turn the ledger thinks is clean goes live at
+      once: the gate is the taint ledger and is only as good as its coverage
+      (below). Project files that are NOT on the always-loaded list are not
+      gated at all: a tainted turn's write to one lands (the diff gates that see
+      it are advisory), is remembered in `taintpaths`, and reaches a prompt only
+      if a later turn reads it (which taints that turn) or the operator ticks
+      it, and ticking is their call: the panel flags a file last written after
+      outside content but does not hold the tick. Host-side writers other than
+      the research document (the plan file, an orchestrated run's `runs/`
+      rollups, the operator's artifact merge) pass no taint and are not gated;
+      none of them is normally on the list. The all-projects rollup (`## Summary`
+      of every project's `project.md`, one line of at most 300 chars) and the
+      agents index (one line of at most 200 chars per agent) are size-capped,
+      not vetted.
     - **What marks a turn as having read untrusted content.** By tool name:
       `web_read`, `web_search`, `read_and_summarize`, `research`, `desk_*`,
       `browser_*`, `local_*`, `service_logs`, `projector_*` (MCP results);
@@ -678,7 +712,11 @@ a watched, policy-gated, cuttable pipe to the internet.
       (the network half is host-side), and a compromised guest can leave the
       report out. Package-registry traffic (a hostile package's install output).
       A tool call issued in the same round as the call that taints the turn (the
-      ledger is read when the call arrives). The taint stamp on a note tells the
+      ledger is read when the call arrives). For the always-loaded gate, a write
+      from a turn the ledger never marked lands. The guest's write buffer is the
+      project's, so a clean turn that ends while another turn on the same project
+      is tainted is held too (over-cautious; the operator approves it). The taint
+      stamp on a note tells the
       operator where it came from; it does not stop the model from being
       steered inside the turn that read the text, and approving a note is a
       judgement the operator makes on text an injection may have shaped.
@@ -699,7 +737,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Exfil via allowed host (HTTP/S) | High | **Medium** | Policy + volume/entropy/cadence anomaly + auto-cut cap rate & shape; low-and-slow within limits is the residual. **The primary new risk.** |
 | HTTPS payload exfil / no injection | High | Medium | Host/bytes/cadence still watched + cuttable; payload opaque until MITM lands. Authenticated HTTPS via host tools. |
 | DNS covert channel | Medium | Medium | Forced through logged host resolver + entropy alert; tunnelling physically possible. |
-| Memory poisoning / laundering | Critical | **Medium** | Notes: agent-written = pending until approved, writes onto binding notes are proposals, deletes go to a trash with an audit event, unreadable frontmatter fails closed. Other channels into the prompt are NOT all approval-gated (residual #23: project files written with `write_file` are ungated). Taint is a warning and a partial gate, and its coverage has known gaps. Semantic influence on tainted context remains. |
+| Memory poisoning / laundering | Critical | **Medium** | Notes: agent-written = pending until approved, writes onto binding notes are proposals, deletes go to a trash with an audit event, unreadable frontmatter fails closed. Files that ride every prompt (project.md, the operator's ticked context files) are held for approval when a tainted turn writes them (residual #23); other channels are not all gated (a journal line or a definition from a turn the ledger thinks is clean, project files off the list). Taint is a warning and a partial gate, and its coverage has known gaps. Semantic influence on tainted context remains. |
 | Generated-code backdoor | Critical | **Medium-High** | Advisory gates + git history only — no pre-landing human review since 2026-07-20; execution stays guest-only and commits stay gated. Release gate (planned) is the compensating control. |
 | Secret exposure | Critical | Very Low | No secrets in guest; wire injection AND web_read substitution are grant-scoped per project (profile `secrets` + project grants, a project revoke wins; the web path ignored grants until 2026-09-26); service boxes never get injection; key never crosses to a non-DeepSeek endpoint. |
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. Holds for every project without LAN access (the default); the next row covers one that has it on. |

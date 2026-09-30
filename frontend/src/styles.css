@@ -4297,3 +4297,10 @@ a:has(> .nav-dot) { position: relative; }
 .mem-banner .link { padding: 0 2px; margin-left: 0; text-decoration: underline; }
 .nav-more { position: relative; }
 .nav-more > .nav-dot { top: 6px; left: auto; right: 6px; }
+
+/* always-loaded files */
+.ctx-flag { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.ctx-flag.warn { color: var(--amber); }
+.ctx-held { margin: 0 0 6px; padding: 7px 10px; border: 1px solid var(--amber);
+  border-radius: 7px; font-size: 12.5px; }
+.ctx-held a { text-decoration: underline; }

@@ -12,6 +12,11 @@ chokepoint:
   - diff-gate scan   diffgate.scan runs on every write as an ADVISORY tripwire:
                      the write lands, a deduped security event alerts the
                      operator (Review Center + bell). It no longer blocks.
+  - always-loaded    apply_write_gated: a write by a TAINTED turn to a file that
+                     rides every prompt (project.md, the operator's ticked
+                     context files) is held for the operator instead of landing
+                     (alwaysloaded.py). Only callers that know the turn's taint
+                     use it; apply_write itself never holds anything.
 
 The guest has its own backend/writes.py shim with this interface that buffers
 into the workspace .staging/ tarball for turn-end reconcile — which also funnels
