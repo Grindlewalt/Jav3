@@ -436,9 +436,15 @@ class Registry:
             raise BoxCapError("project box cap reached "
                               f"({b['project_boxes']}/{settings.vm_max_project_boxes})")
         if b["ram_mb_used"] + mem_mb > settings.vm_guest_ram_budget_mb:
-            raise BoxCapError(
-                f"guest RAM budget: {b['ram_mb_used']} + {mem_mb} MB > "
-                f"{settings.vm_guest_ram_budget_mb} MB")
+            raise BoxCapError(self._ram_refusal(mem_mb, b["ram_mb_used"]))
+
+    def _ram_refusal(self, need_mb: int, used_mb: int) -> str:
+        """The refusal with the arithmetic and the ways out: a stopped shared
+        VM still holds its reservation, which the bare sum hid."""
+        held = [f"{b.id} {ram_cost(b.mem_mb, b.runtime)}" for b in self.all()]
+        return (f"guest RAM budget: {used_mb} MB reserved ({', '.join(held)}) + "
+                f"{need_mb} MB for this box > {settings.vm_guest_ram_budget_mb} MB. "
+                "Destroy a box you do not need, or raise JARVIS_VM_GUEST_RAM_BUDGET_MB")
 
     # allocate / release ------------------------------------------------------
     def allocate(self, kind: str, *, project: str | None = None,
@@ -1005,21 +1011,62 @@ def idle_timer(box: Box, ctl, running: bool) -> dict:
     return out
 
 
-def _proc_stats(pid: int | None) -> dict:
-    """RSS (bytes) and cumulative CPU seconds of a QEMU pid from /proc."""
+_PROC = "/proc"          # tests point it at a fake tree
+
+
+def _proc_tree(root: int) -> list[int]:
+    """`root` and every process under it, by /proc/<pid>/stat's ppid (not
+    /proc/<pid>/task/*/children, which not every kernel builds)."""
+    kids: dict[int, list[int]] = {}
+    try:
+        names = os.listdir(_PROC)
+    except OSError:
+        return [root]
+    for n in names:
+        if not n.isdigit():
+            continue
+        try:
+            with open(f"{_PROC}/{n}/stat") as f:
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        kids.setdefault(ppid, []).append(int(n))
+    out, todo = [], [root]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo.extend(kids.get(p, ()))
+    return out
+
+
+def _proc_stats(pid: int | None, tree: bool = False) -> dict:
+    """RSS (bytes) and cumulative CPU seconds of a guest from /proc: a QEMU
+    pid alone, or (`tree`, a docker box) the container's init and everything
+    under it. Init alone is tini, about 1 MB of a box that uses 30 or more,
+    and `docker stats` reads the memory cgroup, which the Pi keeps off. A
+    tree's CPU includes the time of children that already exited (cutime,
+    cstime), so it does not fall when one does."""
     if not pid:
         return {"rss_bytes": None, "cpu_s": None}
-    try:
-        with open(f"/proc/{pid}/statm") as f:
-            rss = int(f.read().split()[1]) * 4096
-        with open(f"/proc/{pid}/stat") as f:
-            parts = f.read().rsplit(")", 1)[1].split()
-        import os
-        tck = os.sysconf("SC_CLK_TCK")
-        cpu = (int(parts[11]) + int(parts[12])) / tck
-        return {"rss_bytes": rss, "cpu_s": round(cpu, 2)}
-    except (OSError, ValueError, IndexError):
+    page = os.sysconf("SC_PAGE_SIZE")
+    tck = os.sysconf("SC_CLK_TCK")
+    rss = ticks = 0
+    seen = False
+    for p in (_proc_tree(pid) if tree else [pid]):
+        try:
+            with open(f"{_PROC}/{p}/statm") as f:
+                r = int(f.read().split()[1]) * page
+            with open(f"{_PROC}/{p}/stat") as f:
+                parts = f.read().rsplit(")", 1)[1].split()
+            t = int(parts[11]) + int(parts[12])
+            if tree:
+                t += int(parts[13]) + int(parts[14])
+        except (OSError, ValueError, IndexError):
+            continue                       # gone between the listing and the read
+        rss, ticks, seen = rss + r, ticks + t, True
+    if not seen:
         return {"rss_bytes": None, "cpu_s": None}
+    return {"rss_bytes": rss, "cpu_s": round(ticks / tck, 2)}
 
 
 def _disk(box: Box) -> dict:
@@ -1034,7 +1081,7 @@ def _disk(box: Box) -> dict:
     return {"overlay_bytes": used(box.dir / "overlay.qcow2"), "data_bytes": data}
 
 
-_cpu_prev: dict[str, tuple[float, float]] = {}
+_cpu_prev: dict[str, tuple[int | None, float, float]] = {}   # box id -> (pid, when, cpu_s)
 
 
 def status_json(box: Box) -> dict:
@@ -1042,14 +1089,18 @@ def status_json(box: Box) -> dict:
     ctl = controller(box) if box.is_shared else box.ctl
     running = bool(ctl and ctl.running())
     pid = getattr(ctl, "pid", None) if running else None
-    st = _proc_stats(pid)
+    st = _proc_stats(pid, tree=box.runtime == "docker")
     cpu_pct = None
     if st["cpu_s"] is not None:
         now = time.monotonic()
         prev = _cpu_prev.get(box.id)
-        _cpu_prev[box.id] = (now, st["cpu_s"])
-        if prev and now > prev[0]:
-            cpu_pct = round(100 * (st["cpu_s"] - prev[1]) / (now - prev[0]), 1)
+        _cpu_prev[box.id] = (pid, now, st["cpu_s"])
+        # a new guest (another pid) starts a new count: its ticks are below the
+        # old one's, which read as a negative load after a restart
+        if prev and prev[0] == pid and now > prev[1] and st["cpu_s"] >= prev[2]:
+            cpu_pct = round(100 * (st["cpu_s"] - prev[2]) / (now - prev[1]), 1)
+    else:
+        _cpu_prev.pop(box.id, None)
     booted = getattr(ctl, "booted_at", None) if ctl else None
     row = box.to_json()
     # the version it runs (running) or would boot (stopped); e2e BUG-11 had

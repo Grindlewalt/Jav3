@@ -207,3 +207,22 @@ def test_controller_per_box(reg):
     assert ctl._dir == b.dir and ctl._cid == 10 and not ctl.running()
     row = boxes.status_json(b)
     assert row["state"] == "stopped" and row["net"]["tap"] == "jvtap10"
+
+
+def test_ram_refusal_names_the_shared_reservation_and_the_way_out(reg, monkeypatch):
+    """The Pi's numbers: a stopped shared VM holds 912 MB, so a 2400 MB budget
+    fits two 512 MB docker boxes and refuses the third although the project
+    box cap is 3. The refusal must show that arithmetic and what to do."""
+    monkeypatch.setattr(settings, "docker_enabled", True)
+    monkeypatch.setattr(settings, "vm_kvm_box_overhead_mb", 144)
+    monkeypatch.setattr(settings, "vm_guest_ram_budget_mb", 2400)
+    monkeypatch.setattr(settings, "vm_max_project_boxes", 3)
+    monkeypatch.setattr(settings, "docker_box_mem_mb", 512)
+    boxes.allocate("project", project="a", runtime="docker")
+    boxes.allocate("project", project="b", runtime="docker")
+    with pytest.raises(boxes.BoxCapError) as e:
+        boxes.allocate("project", project="c", runtime="docker")
+    msg = str(e.value)
+    assert "1936 MB reserved" in msg and "shared 912" in msg and "p-a 512" in msg
+    assert "+ 512 MB for this box > 2400 MB" in msg
+    assert "JARVIS_VM_GUEST_RAM_BUDGET_MB" in msg and "Destroy a box" in msg

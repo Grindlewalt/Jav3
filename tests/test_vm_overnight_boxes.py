@@ -491,3 +491,53 @@ async def test_a_box_that_never_booted_is_released_after_the_window(env):
     await boxes.reap_idle()
     assert boxes.get("p-typo") is None
     assert boxes.budget()["project_boxes"] == 0
+
+
+def _fake_stat(root, pid, ppid, utime=0, stime=0, cutime=0, cstime=0, pages=0):
+    """/proc/<pid>/stat and statm as the kernel writes them (fields 3.. after
+    the comm; a comm with a space and a paren, as real ones can have)."""
+    d = root / str(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    rest = ["S", str(ppid)] + ["0"] * 9 + [str(utime), str(stime), str(cutime),
+                                           str(cstime)] + ["0"] * 5
+    (d / "stat").write_text(f"{pid} (py (x)) " + " ".join(rest) + "\n")
+    (d / "statm").write_text(f"999 {pages} 10 0 0 0 0\n")
+
+
+async def test_docker_box_rss_and_cpu_are_the_whole_container(env, monkeypatch, tmp_path):
+    """The row measured tini (PID 1): 1.1 MB for a box that uses about 36."""
+    root = tmp_path / "proc"
+    tck, page = os.sysconf("SC_CLK_TCK"), os.sysconf("SC_PAGE_SIZE")
+    _fake_stat(root, 1092, 1, utime=tck, pages=10)                          # tini
+    _fake_stat(root, 1200, 1092, utime=2 * tck, stime=tck, pages=100)       # server
+    _fake_stat(root, 1300, 1200, utime=tck, pages=50)                       # its child
+    _fake_stat(root, 1400, 1092, cutime=4 * tck, pages=5)                   # reaped work
+    _fake_stat(root, 2000, 1, utime=99 * tck, pages=9999)                   # not ours
+    monkeypatch.setattr(boxes, "_PROC", str(root))
+    st = boxes._proc_stats(1092, tree=True)
+    assert st == {"rss_bytes": 165 * page, "cpu_s": 9.0}
+    assert boxes._proc_stats(1092) == {"rss_bytes": 10 * page, "cpu_s": 1.0}   # a QEMU: one pid
+    assert boxes._proc_stats(31337, tree=True) == {"rss_bytes": None, "cpu_s": None}
+    b = boxes.allocate("project", project="alpha")
+    b.runtime = "docker"
+    b.ctl = FakeCtl(b, running=True)
+    b.ctl.pid = 1092
+    assert boxes.status_json(b)["rss_bytes"] == 165 * page
+
+
+async def test_cpu_pct_is_never_negative_after_a_restart(env, monkeypatch, tmp_path):
+    root = tmp_path / "proc"
+    _fake_stat(root, 500, 1, utime=100000)
+    monkeypatch.setattr(boxes, "_PROC", str(root))
+    boxes._cpu_prev.clear()
+    b = boxes.allocate("project", project="alpha")
+    b.ctl = FakeCtl(b, running=True)
+    b.ctl.pid = 500
+    assert boxes.status_json(b)["cpu_pct"] is None            # first sample
+    b.ctl.pid = 501                                           # restarted: fewer ticks
+    _fake_stat(root, 501, 1, utime=5)
+    assert boxes.status_json(b)["cpu_pct"] is None            # new guest, new count
+    _fake_stat(root, 501, 1, utime=205)
+    assert boxes.status_json(b)["cpu_pct"] > 0
+    b.ctl._run = False
+    assert boxes.status_json(b)["cpu_pct"] is None and b.id not in boxes._cpu_prev
