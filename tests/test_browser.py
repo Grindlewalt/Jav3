@@ -791,8 +791,15 @@ def test_click_needs_exactly_one_of_element_or_xy():
     for verb in ("read_page", "list_tabs", "screenshot_tab", "scroll", "navigate", "open_tab"):
         assert browser.needs_version(verb, {"tab": 7}) is None, verb
     assert browser.needs_version("back", {"tab": 7}) == "0.3.0"
-    assert browser.CURRENT_EXT_VERSION == "0.5.0"
-    assert browser.ext_outdated("0.4.0") and not browser.ext_outdated("0.5.0")
+    # the current version is whatever the shipped manifest says, so a version
+    # bump never needs this test edited
+    import json
+    import pathlib
+    manifest = json.loads((pathlib.Path(__file__).resolve().parents[1]
+                           / "clients/jav3-browser/manifest.json").read_text())
+    assert browser.CURRENT_EXT_VERSION == manifest["version"]
+    assert browser.ext_outdated("0.4.0")
+    assert not browser.ext_outdated(browser.CURRENT_EXT_VERSION)
 
 
 def test_shot_to_css_freshness_bounds_and_scale(monkeypatch):
