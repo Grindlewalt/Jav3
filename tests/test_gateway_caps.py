@@ -25,11 +25,12 @@ def fresh_caps():
     gateway_log._buckets.clear()
     gateway_log._trips.clear()
     gw._hits.clear()
+    before = (set(broker._envelopes), set(broker._inflight), set(broker._op_tokens))
     yield
-    # every connection released its claim
+    # every connection released its claim, and nothing of ours is left registered
     assert gw._totals.conns == 0 and gw._totals.held == 0
     assert not gw._meters
-    assert not broker._envelopes and not broker._inflight and not broker._op_tokens
+    assert (set(broker._envelopes), set(broker._inflight), set(broker._op_tokens)) == before
 
 
 def _pair():

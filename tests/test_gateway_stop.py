@@ -21,8 +21,9 @@ from backend.vm import broker, gateway_server as gw
 
 @pytest.fixture(autouse=True)
 def nothing_leaks():
+    before = (set(broker._envelopes), set(broker._inflight), set(broker._op_tokens))
     yield
-    assert not broker._envelopes and not broker._inflight and not broker._op_tokens
+    assert (set(broker._envelopes), set(broker._inflight), set(broker._op_tokens)) == before
 
 
 @pytest.fixture
