@@ -4297,3 +4297,12 @@ a:has(> .nav-dot) { position: relative; }
 .mem-banner .link { padding: 0 2px; margin-left: 0; text-decoration: underline; }
 .nav-more { position: relative; }
 .nav-more > .nav-dot { top: 6px; left: auto; right: 6px; }
+
+/* turn narration: the agent's own text between its tool calls, kept after the turn */
+.activity-group .narration { margin: 6px 0 6px 2px; padding-left: 10px;
+  border-left: 2px solid var(--border); color: var(--dim); font-size: 0.95em; }
+.activity-group .narration > :first-child { margin-top: 0; }
+.activity-group .narration > :last-child { margin-bottom: 0; }
+.log-msg.narration { margin-left: 16px; border-left: 3px solid var(--accent);
+  background: var(--bg-soft); }
+.log-msg.narration .log-role { color: var(--accent); }

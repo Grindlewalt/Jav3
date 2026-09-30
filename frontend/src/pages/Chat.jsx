@@ -6,7 +6,7 @@ import { NavSlotContext } from '../nav.jsx'
 import { useDismiss } from '../useDismiss.js'
 import { isPhone, useIsPhone } from '../breakpoints.js'
 import { MessageBody } from '../ToolActivity.jsx'
-import { activityMark, makeTurnFolder, newTurn } from '../turnEvents.js'
+import { activityMark, makeTurnFolder, newTurn, seedParts } from '../turnEvents.js'
 import { useDockHeight, useFollow } from '../useFollow.js'
 import TurnStatus from '../TurnStatus.jsx'
 import { useAsk } from '../ask.jsx'
@@ -415,7 +415,7 @@ export default function Chat({
     // a turn is still executing server-side — re-attach and watch it finish,
     // seeding the placeholder with the tool calls it already made
     setBusy(true)
-    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
+    const seed = seedParts(r)
     setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true,
                                 parts: seed, t0: Date.now() }])
     const ctl = new AbortController()
