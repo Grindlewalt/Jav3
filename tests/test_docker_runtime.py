@@ -929,3 +929,52 @@ async def test_a_guest_that_never_served_leaves_its_output(hist, monkeypatch):
     await boxlog.watch(box)                       # the reaper's pass records the failure
     ev = (await _events(box.id))[0]
     assert ev[0] == "error" and "ImportError" in ev[2]
+
+
+class _SlowRm(FakeCLI):
+    async def run(self, *args, timeout=120):
+        if args[0] == "rm":
+            await asyncio.sleep(0.05)
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_a_turn_arriving_while_destroy_runs_does_not_boot_a_ghost(hist, monkeypatch):
+    """destroy stopped, then released; acquire on the same box object took the
+    lock after the stop and booted a container the release left unowned."""
+    box = hist["box"]
+    fake = _SlowRm(on_run=hist["cli"].on_run)
+    monkeypatch.setattr(dr, "cli", fake)
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    t = asyncio.create_task(boxes.destroy(box))
+    await asyncio.sleep(0.01)                          # destroy is inside the slow rm
+    with pytest.raises(boxes.BoxError, match="was removed"):
+        await ctl.acquire()
+    await t
+    assert boxes.get(box.id) is None and not fake.alive and len(fake.ran("run")) == 1
+
+
+async def test_a_turn_waiting_on_the_lock_when_destroy_starts_is_refused(hist):
+    box = hist["box"]
+    ctl = boxes.controller(box)
+    await ctl._lock.acquire()
+    w = asyncio.create_task(ctl.acquire())
+    await asyncio.sleep(0)
+    ctl.retired = True
+    ctl._lock.release()
+    with pytest.raises(boxes.BoxError, match="was removed"):
+        await w
+    assert hist["cli"].ran("run") == []
+
+
+async def test_a_failed_destroy_leaves_the_box_usable(hist, monkeypatch):
+    box = hist["box"]
+    ctl = boxes.controller(box)
+
+    async def boom():
+        raise RuntimeError("docker is wedged")
+    monkeypatch.setattr(ctl, "teardown", boom)
+    with pytest.raises(RuntimeError):
+        await boxes.destroy(box)
+    assert boxes.get(box.id) is box and ctl.retired is False

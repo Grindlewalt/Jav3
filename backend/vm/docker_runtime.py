@@ -542,6 +542,9 @@ class DockerBox:
         self._listeners: list[UnixListener] = []
         self._gw_listening = False
         self._hooked = False
+        # set when boxes.destroy starts: a turn that reached this controller
+        # while the box was going would boot a container nothing owns any more
+        self.retired = False
 
     # GuestVM interface -------------------------------------------------------
     @property
@@ -556,8 +559,15 @@ class DockerBox:
             raise DockerError(f"{self.box.id}: {self.state} -> {state} is not a transition")
         self.state = state
 
+    def _check_retired(self) -> None:
+        if self.retired:
+            raise boxes.BoxError(f"box {self.box.id} was removed while your turn was "
+                                 "starting: send it again")
+
     async def acquire(self) -> None:
+        self._check_retired()
         async with self._lock:
+            self._check_retired()          # destroy began while this waited
             if self.state == "running" and not await self._alive():
                 await self._teardown_locked()
             if self.state in ("stopped", "failed"):

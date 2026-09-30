@@ -911,16 +911,26 @@ async def destroy(box: Box, *, delete_data: bool = False,
         await stop(box)
         return
     why = " ".join(x for x in (reason, "(data deleted)" if delete_data else None) if x)
-    async with boxlog.action(box, "destroyed", reason=why or None):
-        await stop(box)
-        if delete_data:
-            for fn in list(_data_deleters):
-                await fn(box)
-        registry.release(box.id)
-        forget = getattr(box.ctl, "forget", None)
-        if forget is not None:              # a docker box's socket directory
-            await forget()
-        shutil.rmtree(box.dir, ignore_errors=True)
+    ctl = controller(box)
+    # a turn reaching this controller from now on is refused: it would boot a
+    # guest the release below leaves nothing to own (a ghost outside the
+    # budget). Undone if the destroy fails and the box stays.
+    ctl.retired = True
+    try:
+        async with boxlog.action(box, "destroyed", reason=why or None):
+            await stop(box)
+            if delete_data:
+                for fn in list(_data_deleters):
+                    await fn(box)
+            registry.release(box.id)
+            forget = getattr(box.ctl, "forget", None)
+            if forget is not None:              # a docker box's socket directory
+                await forget()
+            shutil.rmtree(box.dir, ignore_errors=True)
+    except BaseException:
+        if registry.get(box.id) is box:
+            ctl.retired = False
+        raise
 
 
 async def restart(box: Box) -> None:

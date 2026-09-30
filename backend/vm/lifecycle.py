@@ -138,6 +138,8 @@ class GuestVM:
         # booted and not used since: a scrub would only reboot a fresh guest
         # (every window, forever, and a "wiped" history row each time)
         self._fresh = False
+        # set when boxes.destroy starts (see docker_runtime.DockerBox.retired)
+        self.retired = False
         self._rebuilding = False
         # the /vms rows: booting but not yet serving, and the last boot error
         # (cleared by the next good start)
@@ -432,7 +434,13 @@ class GuestVM:
     async def acquire(self) -> None:
         """Ensure the guest is up and pin it for one turn. Serialized so the reaper
         can't tear down between the readiness check and the pin."""
+        if self.retired:
+            raise VMError(f"box {self._record_box().id} was removed while your turn "
+                          "was starting: send it again")
         async with self._lock:
+            if self.retired:
+                raise VMError(f"box {self._record_box().id} was removed while your turn "
+                              "was starting: send it again")
             self.starting = not self.running()
             try:
                 await self._ensure_ready_locked()
