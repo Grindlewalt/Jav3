@@ -7979,10 +7979,17 @@ def build_tui(base: str, token: str, **kw):
             self.last_reply = final or "".join(turn.printed)
             await self._turn_footer(turn)
 
+        def _watching(self, cid: int) -> bool:
+            """This chat is the one on screen and the terminal has the focus (a
+            reply that lands in front of you needs no toast and no unread count).
+            A terminal that reports no focus changes always has it."""
+            elsewhere = len(self.screen_stack) > 1 and not isinstance(self.screen, ModalScreen)
+            return cid == self.cid and self.app_focus and not elsewhere
+
         async def _end_turn(self) -> None:
             t = self.turn
             if t is not None and t.done and not t.interrupted and t.cid is not None \
-                    and not self.ephemeral and (t.cid != self.cid or not self.sidebar_shown()):
+                    and not self.ephemeral and not self._watching(t.cid):
                 name = (self.title_text if t.cid == self.cid and self.title_text
                         else f"#{t.cid}")
                 self.push_notice(f"reply ready in {_short(name, 60)} · "

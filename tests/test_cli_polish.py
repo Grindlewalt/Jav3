@@ -58,3 +58,43 @@ async def test_help_dialog_uses_most_of_the_terminal():
         assert "/theme create" in app.screen.text and "ctrl+x then a key" in app.screen.text
         # keys first, the commands after them
         assert app.screen.text.index("Keys") < app.screen.text.index("Commands")
+
+
+# TUI-07
+
+def ready(app) -> list[str]:
+    return [t for _, _, t in app.notices if "reply ready" in t]
+
+
+async def test_no_reply_ready_toast_for_the_chat_you_are_looking_at():
+    srv, app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        await finish(srv, app)
+        await pilot.pause(0.2)
+        assert ready(app) == [] and app.unread == 0
+
+
+async def test_reply_ready_when_the_window_is_elsewhere():
+    srv, app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        app.app_focus = False
+        await finish(srv, app)
+        assert await wait_for(lambda: ready(app))
+        assert app.unread == 1
+
+
+async def test_watching_means_this_chat_on_the_main_screen():
+    srv, app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        assert await wait_for(lambda: app.cid == 4)
+        assert app._watching(4)
+        assert not app._watching(99)               # a reply in another chat
+        await finish(srv, app)
+        from textual.screen import Screen
+        await app.push_screen(Screen())            # like the agents screen
+        assert not app._watching(4)
+        await app.pop_screen()
+        assert app._watching(4)
