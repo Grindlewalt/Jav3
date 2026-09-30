@@ -771,6 +771,28 @@ def fit_parts(parts: list[tuple[str, str, int]], width: int, sep: str = " · ",
     return (sep if markup_sep is None else markup_sep).join(parts[j][1] for j in keep)
 
 
+def fit_row(left: list[tuple[str, str, int]], right: list[tuple[str, str, int]],
+            total: int, sep: str = " · ", markup_sep: str | None = None) -> tuple[str, str]:
+    """A status row's two sides, (plain, markup, rank) parts each, joined so the
+    row fits `total` columns with a gap between them: the highest ranks go first,
+    a right-hand part before a left-hand one of the same rank, so whole hints go
+    and none is cut mid-word. Each side keeps its first part."""
+    ls, rs = list(range(len(left))), list(range(len(right)))
+
+    def plain() -> int:
+        return (len(sep.join(left[i][0] for i in ls)) + len(sep.join(right[i][0] for i in rs)))
+
+    order = sorted([(left[i][2], 0, i) for i in range(1, len(left))]
+                   + [(right[i][2], 1, i) for i in range(1, len(right))],
+                   key=lambda k: (-k[0], -k[1], -k[2]))
+    for _, side, i in order:
+        if plain() + 2 <= total:
+            break
+        (rs if side else ls).remove(i)
+    msep = sep if markup_sep is None else markup_sep
+    return (msep.join(left[i][1] for i in ls), msep.join(right[i][1] for i in rs))
+
+
 _CD = re.compile(r"""^cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)(?:\s+2>\s*/dev/null)?"""
                  r"""\s*(?:;|&&|\|\||$)\s*""")
 
@@ -6766,6 +6788,7 @@ def build_tui(base: str, token: str, **kw):
             self.leader = False
             self._leader_timer = None
             self._status_tall = False        # the status row grown for the leader keys
+            self._status_text: dict[str, str] = {}   # what the status row shows now
             self.esc_armed = 0.0
             self.ctrl_c_at = 0.0
             self.sidebar_pref: bool | None = None     # None = follow the width
@@ -7300,13 +7323,14 @@ def build_tui(base: str, token: str, **kw):
                           + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
                           + "  [$text-muted]ctrl+b notifications[/]")
 
-        def _running_status(self) -> str:
-            """The status row while a turn runs — one steady line, `working 2m
-            13s · 14 tools · 2 agents · $0.02`, that the ▣ footer repeats when
-            it ends — or, while tool rows are being picked, their keys."""
+        def _status_parts(self) -> list[tuple[str, str, int]]:
+            """The status row's left side as (plain, markup, rank) parts — while a
+            turn runs one steady line, `working 2m 13s · 14 tools · 2 agents · $0.02`,
+            that the ▣ footer repeats when it ends; while tool rows are being
+            picked, their keys; otherwise the prompt's keys. A narrow terminal drops
+            the higher ranks first, so the row never wraps or gets cut mid-word."""
             t = self.turn if self.busy else None
             spin = f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/] " if t else ""
-            width = self.query_one("#status-left", Static).size.width or 200
             if self.log_view.picking:
                 parts = [("↑↓ pick", "[$primary]↑↓[/] pick", 0),
                          ("enter open/close", "[$primary]enter[/] open/close", 1),
@@ -7314,13 +7338,20 @@ def build_tui(base: str, token: str, **kw):
                          ("esc back", "[$primary]esc[/] back", 1)]
                 if t:
                     parts.append((f"x {t.stats()[0]}", f"{spin}[$text-muted]{t.stats()[0]}[/]", 3))
-                return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
+                return parts
+            if not (self.busy and self.turn is not None):
+                if self.logged_in is False:
+                    return [("not logged in — /login · / commands",
+                             "[$warning]not logged in[/] [$text-muted]— /login · / commands[/]", 0)]
+                return [("enter send", "[$text-muted]enter send[/]", 0),
+                        ("ctrl+j newline", "[$text-muted]ctrl+j newline[/]", 1),
+                        ("/ commands", "[$text-muted]/ commands[/]", 2),
+                        ("@ file", "[$text-muted]@ file[/]", 3),
+                        ("! shell", "[$text-muted]! shell[/]", 4)]
             verb = "interrupting" if self.stop_requested else "working"
             stats = t.stats()
             armed = time.monotonic() - self.esc_armed < 2
             nq = len(self.queue) + len(self.pending)
-            # (plain, markup, rank): a narrow terminal drops the higher ranks
-            # first, so the line never wraps or gets cut mid-word
             parts = [(f"x {verb} {stats[0]}", f"{spin}{verb} [$text-muted]{stats[0]}[/]", 0)]
             for s in stats[1:]:
                 rank = 2 if s.startswith("$") else 1 if s.endswith(("tool", "tools")) else 3
@@ -7329,7 +7360,28 @@ def build_tui(base: str, token: str, **kw):
                 parts.append((f"{nq} queued", f"[$accent]{nq} queued[/]", 1))
             parts.append(("esc again to interrupt", "[$warning]esc again to interrupt[/]", 0)
                          if armed else ("esc interrupt", "[$text-muted]esc interrupt[/]", 4))
-            return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
+            return parts
+
+        def _status_right(self) -> list[tuple[str, str, int]]:
+            """The right side: unread counts (critical security alerts not yet seen get
+            their own red one), then the leader and palette keys."""
+            parts = []
+            if self.crit_unread:
+                parts.append((f"✗ {self.crit_unread}", f"[$error b]✗ {self.crit_unread}[/]", 0))
+            if self.unread:
+                parts.append((f"● {self.unread} ctrl+b",
+                              f"[$warning b]● {self.unread}[/] [$text-muted]ctrl+b[/]", 0))
+            parts.append(("ctrl+x leader", "[$text-muted]ctrl+x leader[/]", 2))
+            parts.append(("ctrl+p commands", "[$text-muted]ctrl+p commands[/]", 3))
+            return parts
+
+        def _set_status(self, widget, text: str, **kw) -> None:
+            """Update a status Static only when its text changed: the row is rebuilt
+            ten times a second, and a repaint each time keeps an idle terminal busy
+            (TUI-20)."""
+            if self._status_text.get(widget.id) != text:
+                self._status_text[widget.id] = text
+                widget.update(text, **kw)
 
         def _refresh_status(self) -> None:
             left = self.query_one("#status-left", Static)
@@ -7342,22 +7394,17 @@ def build_tui(base: str, token: str, **kw):
             if self.leader:
                 keys = "  ".join(f"[$primary]{c.leader}[/] {name}"
                                  for name, c in self.unique_commands() if c.leader)
-                left.update(f"[$warning b]ctrl+x[/]  {keys}  [$primary]b[/] notifications")
-                right.update("")
+                self._set_status(left, f"[$warning b]ctrl+x[/]  {keys}  "
+                                       "[$primary]b[/] notifications")
+                self._set_status(right, "")
                 return
-            if self.log_view.picking or (self.busy and self.turn is not None):
-                left.update(self._running_status(), layout=False)
-            elif self.logged_in is False:
-                left.update("[$warning]not logged in[/] [$text-muted]— /login · "
-                            "/ commands[/]")
-            else:
-                left.update("[$text-muted]enter send · ctrl+j newline · / commands · "
-                            "@ file · ! shell[/]")
-            # critical security alerts not yet seen get their own red count
-            crit = f"[$error b]✗ {self.crit_unread}[/] " if self.crit_unread else ""
-            badge = (f"{crit}[$warning b]● {self.unread}[/] [$text-muted]ctrl+b[/]  "
-                     if self.unread else "")
-            right.update(f"{badge}[$text-muted]ctrl+x leader · ctrl+p commands[/]")
+            # both sides share one row: the width is the row's, not the left
+            # side's (which changes when the right one does)
+            total = self.query_one("#status").size.width or max(20, self.size.width - 6)
+            lm, rm = fit_row(self._status_parts(), self._status_right(), total,
+                             markup_sep=" [$text-muted]·[/] ")
+            self._set_status(left, lm, layout=False)
+            self._set_status(right, rm)
 
         def _refresh_sidebar(self) -> None:
             info = self.info or {}

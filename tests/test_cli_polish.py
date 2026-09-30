@@ -6,7 +6,7 @@ import io
 
 import pytest
 
-from cli_fake import FakeServer, finish, load_client, open_chat, send, top, wait_for
+from cli_fake import FakeServer, finish, load_client, open_chat, top, wait_for
 
 jav3 = load_client("jav3cli_polish")
 
@@ -198,3 +198,60 @@ async def test_hidden_rows_wait_for_a_filter_and_a_line_says_how_many():
         await pilot.pause(0.2)
         ids = [ol.get_option_at_index(i).id for i in range(ol.option_count)]
         assert ids[:2] == ["lm/a", "lm/b"]
+
+
+# TUI-19, TUI-20
+
+def test_fit_row_drops_whole_hints_by_rank_and_the_right_side_first():
+    left = [("enter send", "a", 0), ("ctrl+j newline", "b", 1), ("/ commands", "c", 2),
+            ("@ file", "d", 3), ("! shell", "e", 4)]
+    right = [("ctrl+x leader", "R1", 2), ("ctrl+p commands", "R2", 3)]
+    assert jav3.fit_row(left, right, 120) == ("a · b · c · d · e", "R1 · R2")
+    lm, rm = jav3.fit_row(left, right, 73)         # 80 columns less the prompt's margins
+    assert (lm, rm) == ("a · b · c · d", "R1")
+    lm, rm = jav3.fit_row(left, right, 44)
+    assert (lm, rm) == ("a · b", "R1")
+    assert jav3.fit_row(left, right, 5) == ("a", "R1")     # each side keeps its first
+
+
+def status_text(app) -> tuple[str, str]:
+    return (str(app.query_one("#status-left").render()),
+            str(app.query_one("#status-right").render()))
+
+
+async def test_80_column_status_row_shows_whole_hints_and_the_armed_esc_message():
+    import time
+    srv, app = make_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        left, right = status_text(app)
+        assert left.startswith("enter send · ctrl+j newline · / commands")
+        assert "@" not in left.replace("@ file", "") and right.startswith("ctrl+x leader")
+        assert len(left) + len(right) + 2 <= app.query_one("#status").size.width
+        await open_chat(pilot, app, srv)
+        app.unread, app.esc_armed = 5, time.monotonic()
+        app._refresh_status()
+        left, right = status_text(app)
+        assert "esc again to interrupt" in left and right.startswith("● 5 ctrl+b")
+        assert len(left) + len(right) + 2 <= app.query_one("#status").size.width
+        await finish(srv, app)
+
+
+async def test_an_idle_status_row_is_not_repainted_ten_times_a_second():
+    srv, app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        n = {"left": 0, "right": 0}
+        for side in n:
+            w = app.query_one(f"#status-{side}")
+            real = w.update
+
+            def counted(*a, _real=real, _side=side, **k):
+                n[_side] += 1
+                return _real(*a, **k)
+            w.update = counted
+        await pilot.pause(0.8)                     # eight ticks of the app's timer
+        assert n == {"left": 0, "right": 0}
+        app.unread = 2                             # a change does repaint, once
+        await pilot.pause(0.5)
+        assert n["right"] == 1 and n["left"] <= 1      # the left may give up a hint
