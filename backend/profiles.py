@@ -637,13 +637,16 @@ async def _raise_changed(db, summary: str, detail: dict, project: str | None = N
                                project=project, summary=summary, detail=detail)
 
 
-def _severity(changes: dict) -> str:
+def _severity(changes: dict, actor: str = "operator") -> str:
     """Widening the default or turning the network on is the one-click
-    high-impact change the threat model names: make it critical."""
+    high-impact change the threat model names. Made by the operator (a
+    cookie-session action) it is recorded as a warning: pinging the operator
+    about their own click was noise (operator decision 2026-09-29). Anything
+    else making it (setup, a legacy policy call) stays critical."""
     dv = changes.get("default_verdict", {})
     no = changes.get("network_off", {})
     if dv.get("to") == "allow" or no.get("to") is False:
-        return "critical"
+        return "warn" if actor == "operator" else "critical"
     return "warn"
 
 
@@ -674,7 +677,7 @@ async def create(db: aiosqlite.Connection, body: dict, *, actor: str = "operator
     await _raise_changed(db, f"profile {new['name']!r} {what} by {actor}",
                          {"profile": {"id": pid, "name": new["name"]}, "action": "create",
                           "is_default": new["is_default"], "changes": diff({}, new)},
-                         severity=_severity(diff({}, new)))
+                         severity=_severity(diff({}, new), actor))
     return new
 
 
@@ -711,7 +714,7 @@ async def set_default(db: aiosqlite.Connection, profile_id: int, *,
         {"profile": {"id": profile_id, "name": new["name"]}, "action": "make_default",
          "from": {"id": old["id"], "name": old["name"]} if old else None,
          "projects": following, "changes": changes},
-        severity=_severity(changes) if following else "warn")
+        severity=_severity(changes, actor) if following else "warn")
     return new
 
 
@@ -754,7 +757,7 @@ async def update(db: aiosqlite.Connection, profile_id: int, body: dict, *,
                              + ", ".join(sorted(changes)),
                          {"profile": {"id": profile_id, "name": p["name"]},
                           "action": "update", "changes": changes},
-                         severity=_severity(changes))
+                         severity=_severity(changes, actor))
     return await get(db, profile_id)
 
 
@@ -838,6 +841,6 @@ async def assign(db: aiosqlite.Connection, slug: str, profile_id: int, *,
             {"project": slug, "action": "assign",
              "from": {"id": old["id"], "name": old["name"]},
              "to": {"id": new["id"], "name": new["name"]}, "changes": changes},
-            project=slug, severity=_severity(changes))
+            project=slug, severity=_severity(changes, actor))
     return {"ok": True, "project": slug,
             "profile": {"id": new["id"], "name": new["name"]}}

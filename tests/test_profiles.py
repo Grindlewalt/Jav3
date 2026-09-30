@@ -238,7 +238,15 @@ async def test_edit_emits_profile_changed_with_diff(db):
     ch = ev["detail"]["changes"]
     assert ch["default_verdict"] == {"from": "deny", "to": "allow"}
     assert ch["allow_hosts"] == {"from": ["a.dev"], "to": ["a.dev", "b.dev"]}
-    assert ev["severity"] == "critical"               # widened to allow-by-default
+    # widened to allow-by-default: the operator's own click is recorded as a
+    # warning, not a critical ping (operator decision 2026-09-29) ...
+    assert ev["severity"] == "warn"
+    # ... anything else widening it is still critical
+    widen = {"default_verdict": {"from": "deny", "to": "allow"}}
+    assert profiles._severity(widen, "setup") == "critical"
+    assert profiles._severity({"network_off": {"from": True, "to": False}},
+                              "legacy policy call") == "critical"
+    assert profiles._severity(widen, "operator") == "warn"
 
 
 async def test_default_cannot_be_deleted_until_another_is_marked(db):
@@ -314,7 +322,7 @@ async def test_unassigned_projects_follow_the_marked_default(db):
     assert (await profiles.for_slug(db, None))["name"] == "Wide"
     assert (await egress.decide(db, "alpha", "anything.dev"))[0] == "allow"
     ev = (await events(db, "profile_changed"))[-1]
-    assert ev["detail"]["projects"] == ["alpha"] and ev["severity"] == "critical"
+    assert ev["detail"]["projects"] == ["alpha"] and ev["severity"] == "warn"
     listed = {p["name"]: p["projects"] for p in await profiles.list_all(db)}
     assert listed["Wide"] == ["alpha"] and listed["Default"] == []
 
