@@ -192,8 +192,9 @@ export default function Shell() {
   }
 
   async function deleteChat(c) {
-    if (!await ask.confirm(`Delete “${listTitle(c)}”?`,
-                           { confirmLabel: 'Delete', danger: true })) return
+    if (!await ask.confirm(`Permanently delete “${listTitle(c)}”?`,
+                           { body: 'Its messages and tool history are removed. This cannot be undone.',
+                             confirmLabel: 'Delete forever', danger: true })) return
     try {
       await api(`/api/conversations/${c.id}`, { method: 'DELETE' })
     } catch (err) { notifyError(err); return }

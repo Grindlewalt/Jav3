@@ -8,7 +8,8 @@ import { useIsPhone } from '../breakpoints.js'
 import { useDismiss } from '../useDismiss.js'
 import { onProjectsChanged } from '../projectsChanged.js'
 import ErrorBoundary from '../ErrorBoundary.jsx'
-import Menu, { MenuItem } from '../components/Menu.jsx'
+import { useAsk } from '../ask.jsx'
+import Menu, { MenuItem, MenuSep } from '../components/Menu.jsx'
 import Chat from '../pages/Chat.jsx'
 import { WorkContext } from './context.js'
 import {
@@ -743,10 +744,16 @@ function WindowPicker({
 // POST /api/chat/stop-all and /api/chat/stop-project {project}; a server
 // without the routes (404) says so instead of failing silently.
 function StopMenu({ project }) {
+  const ask = useAsk()
   const [open, setOpen] = useState(false)
   const [note, setNote] = useState('')
+  const [running, setRunning] = useState(null)   // ids of turns in flight, read when the menu opens
   const timer = useRef(null)
   useEffect(() => () => clearTimeout(timer.current), [])
+  useEffect(() => {
+    if (!open) return
+    api('/api/chat/running').then((r) => setRunning(r.running || [])).catch(() => setRunning(null))
+  }, [open])
   const say = (t) => {
     setNote(t)
     clearTimeout(timer.current)
@@ -772,11 +779,24 @@ function StopMenu({ project }) {
                       aria-expanded={open} title="stop running turns"
                       onClick={() => setOpen((o) => !o)}>■ ▾</button>
             )}>
-        <MenuItem danger onClick={() => run('/api/chat/stop-all')}>Stop all turns</MenuItem>
         <MenuItem danger disabled={!project}
                   sub={project ? undefined : 'no project on this chat'}
                   onClick={() => run('/api/chat/stop-project', { project })}>
           Stop all in this project</MenuItem>
+        <MenuSep />
+        {/* every project's turns, other tabs' and scheduled runs: say so, count them, confirm */}
+        <MenuItem danger
+                  sub="every project, other tabs and scheduled runs"
+                  onClick={async () => {
+                    setOpen(false)
+                    const n = running?.length
+                    if (!await ask.confirm(
+                      `Stop everything running on this server${n ? ` (${n} turn${n === 1 ? '' : 's'})` : ''}?`,
+                      { body: 'This ends the turns of every project, not only this chat.',
+                        confirmLabel: 'Stop all', danger: true })) return
+                    run('/api/chat/stop-all')
+                  }}>
+          Stop everything on this server{running?.length ? ` (${running.length} running)` : ''}</MenuItem>
       </Menu>
     </>
   )

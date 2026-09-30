@@ -491,8 +491,10 @@ export default function Chat({
   }
 
   async function deleteConversation(id) {
-    if (!await ask.confirm(`Delete chat #${id}?`,
-                           { confirmLabel: 'Delete', danger: true })) return
+    // unlike projects, agents and schedules, a chat has no bin: it is gone
+    if (!await ask.confirm(`Permanently delete chat #${id}?`,
+                           { body: 'Its messages and tool history are removed. This cannot be undone.',
+                             confirmLabel: 'Delete forever', danger: true })) return
     await api(`/api/conversations/${id}`, { method: 'DELETE' })
     if (id === conversationId) newConversation()
     refreshConvos()
