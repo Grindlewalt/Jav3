@@ -591,3 +591,20 @@ async def test_history_is_pruned_per_box(env, monkeypatch):
         await boxlog.record(s, "wiped")
     assert len(await boxlog.events("shared")) == 4
     assert [e["event"] for e in await boxlog.events("p-alpha")] == ["started"]
+
+
+async def test_a_stopped_project_box_says_when_it_will_be_removed(env):
+    """A stopped project box vanished from /vms with no warning (idle stop and
+    the operator's stop both end in a release)."""
+    b = boxes.allocate("project", project="alpha")
+    await boxes.start(b)
+    await boxes.stop(b)
+    b.ctl.idle_since = time.monotonic() - 240
+    row = boxes.status_json(b)
+    assert row["state"] == "stopped" and row["stops_in_s"] is None
+    assert 358 <= row["removed_in_s"] <= 362                 # 600 - 240
+    b.ctl.idle_since = time.monotonic() - 900
+    assert boxes.status_json(b)["removed_in_s"] == 0
+    await boxes.start(b)
+    assert boxes.status_json(b)["removed_in_s"] is None      # running: the idle timer instead
+    assert boxes.status_json(boxes.shared())["removed_in_s"] is None

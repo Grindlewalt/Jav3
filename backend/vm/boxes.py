@@ -959,9 +959,7 @@ async def reap_idle() -> None:
         ctl = box.ctl
         if ctl is not None and ctl.inflight:
             continue
-        idle = getattr(ctl, "idle_since", None)
-        if idle is None and not (ctl is not None and ctl.running()):
-            idle = now - (time.time() - box.allocated_at)
+        idle = _idle_ref(box, ctl, now)
         if idle is None or now - idle < window or _bound(box):
             continue
         if getattr(ctl, "state", None) == "failed":
@@ -971,6 +969,16 @@ async def reap_idle() -> None:
             why = f"idle {_mins(now - idle)} (stops at {_mins(window)})"
         async with boxlog.action(box, "idle_stopped", actor="reaper", reason=why):
             await destroy(box)
+
+
+def _idle_ref(box: Box, ctl, now: float) -> float | None:
+    """The monotonic stamp the box's idle window counts from: when its last
+    turn left, else (never booted, or a boot that failed before it started
+    one) when it was allocated. None for a box that is up with no stamp."""
+    idle = getattr(ctl, "idle_since", None) if ctl is not None else None
+    if idle is None and not (ctl is not None and ctl.running()):
+        idle = now - (time.time() - box.allocated_at)
+    return idle
 
 
 def _mins(s) -> str:
@@ -995,15 +1003,21 @@ def idle_timer(box: Box, ctl, running: bool) -> dict:
     when > 0). Services and builders have no idle stop. `idle_s` / `stops_in_s`
     are server-computed, so a client's clock does not matter."""
     out = {"idle_since": None, "idle_s": None, "stop_action": None,
-           "stop_after_s": None, "stops_at": None, "stops_in_s": None}
+           "stop_after_s": None, "stops_at": None, "stops_in_s": None,
+           "removed_in_s": None}
     if box.kind == "project" and settings.vm_boxes_enabled and settings.vm_box_idle_stop_seconds:
         out.update(stop_action="stop", stop_after_s=int(settings.vm_box_idle_stop_seconds))
     elif box.is_shared and settings.vm_idle_scrub_seconds:
         out.update(stop_action="scrub", stop_after_s=int(settings.vm_idle_scrub_seconds))
     idle = getattr(ctl, "idle_since", None) if ctl is not None else None
+    now = time.monotonic()
+    if not running and out["stop_action"] == "stop" and not getattr(ctl, "inflight", 0):
+        # a stopped or failed project box is released (row and reservation gone,
+        # only its history stays) once the window has passed since it went quiet
+        ref = _idle_ref(box, ctl, now)
+        out["removed_in_s"] = max(0, out["stop_after_s"] - int(now - ref))
     if not running or idle is None or getattr(ctl, "inflight", 0):
         return out
-    now = time.monotonic()
     out.update(idle_since=_wall(idle), idle_s=int(now - idle))
     if out["stop_after_s"]:
         left = max(0, out["stop_after_s"] - out["idle_s"])
