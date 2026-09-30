@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_narration(db)
         await _migrate_turnstats(db)
         await _migrate_calls(db)
         await _migrate_logging(db)
@@ -797,6 +798,26 @@ async def _add_columns(db: aiosqlite.Connection, table: str,
     for col, decl in cols:
         if col not in have:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+async def _migrate_narration(db: aiosqlite.Connection) -> None:
+    """The text a model writes between its tool calls, kept after the turn
+    (backend/narration.py). One row per stretch of text that sat between two
+    calls: `after_call_id` is the tool_calls row it follows (0 = it opened the
+    turn), `message_id` the assistant reply that closed the turn (NULL while
+    the turn runs, or for a run that never stored one). No foreign keys, so a
+    conversation's delete just clears its rows by conversation_id. Idempotent
+    and additive: a database from before this has no rows and reads as before."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS turn_narration ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " conversation_id INTEGER NOT NULL,"
+        " message_id INTEGER,"
+        " after_call_id INTEGER NOT NULL DEFAULT 0,"
+        " text TEXT NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_turn_narration_conv "
+                     "ON turn_narration(conversation_id, id)")
 
 
 async def _migrate_turnstats(db: aiosqlite.Connection) -> None:

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import agenttree, bus
+from . import agenttree, bus, narration
 from . import sse as feeds
 from .agent.loop import db_tool_sink
 from .agent.model import model
@@ -374,6 +374,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         history = [{"role": "user", "content": task}]
         final_content = ""
         stop = None      # why the loop ended other than an answer (loop.py "stop")
+        rec = narration.Recorder(db, conversation_id)
         try:
             async for event in run_agent_turn(conversation_id, system_prompt, history,
                                               tools=tools, model_name=mdl,
@@ -381,6 +382,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
                                               active_project=active,
                                               memory_slug=memory_slug(agent),
                                               on_tool_call=db_tool_sink(db, conversation_id)):
+                await rec.feed(event)
                 if on_event is not None:
                     on_event(event)
                 if event["type"] == "final":
@@ -390,10 +392,11 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
             runtime.conversation_id.reset(cidtoken)
             runtime.active_project.reset(ptoken)
             runtime.web_session.reset(wtoken)
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content) "
             "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
         await db.commit()
+        await rec.link(cur.lastrowid)
         return {"conversation_id": conversation_id, "agent": agent["name"],
                 "final": final_content, "stop": stop}
     finally:
@@ -477,6 +480,7 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
     chan = _chan(conversation_id)
     started = time.monotonic()
     db = None
+    rec = None       # the run's narration recorder (narration.py)
     final_content, error = "", None
     try:
         db = await get_db()
@@ -491,19 +495,22 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
         # cap (None), not the subagent fence for unattended nesting.
         cap = agent.get("max_iterations") or None
         history = [{"role": "user", "content": task}]
+        rec = narration.Recorder(db, conversation_id)
         async for event in run_agent_turn(conversation_id, system_prompt, history,
                                           tools=tools, model_name=mdl, base_url=burl,
                                           max_iterations=cap, active_project=active,
                                           memory_slug=memory_slug(agent),
                                           on_tool_call=db_tool_sink(db, conversation_id)):
+            await rec.feed(event)
             if event["type"] == "final":
                 final_content = event["content"]
             else:
                 bus.publish(chan, event)
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content) "
             "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
         await db.commit()
+        await rec.link(cur.lastrowid)
         bus.publish(chan, {"type": "final", "content": final_content})
     except asyncio.CancelledError:
         # the operator hit stop. Same contract as chat.py's stop: leave the
@@ -514,11 +521,13 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
         final_content = INTERRUPTED_MARKER
         if db is not None:
             try:
-                await db.execute(
+                cur = await db.execute(
                     "INSERT INTO messages (conversation_id, role, content) "
                     "VALUES (?, 'assistant', ?)",
                     (conversation_id, INTERRUPTED_MARKER))
                 await db.commit()
+                if rec is not None:
+                    await rec.link(cur.lastrowid)
             except Exception:  # noqa: BLE001 — the marker is best-effort
                 pass
         bus.publish(chan, {"type": "final", "content": INTERRUPTED_MARKER})
