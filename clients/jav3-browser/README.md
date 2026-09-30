@@ -31,8 +31,23 @@ your answer, and **Disconnect** (revokes the token).
 A closed list of verbs, checked on the server and again in the extension
 (`lib/verbs.js`): `open_tab`, `navigate`, `read_page` (text plus a list of
 links/buttons/fields across every frame, each with an id, role, visible text,
-size/position and an in-view flag), `click`, `type`, `scroll`,
-`scroll_to_element`, `screenshot_tab`, `close_tab`, `list_tabs`.
+size/position and an in-view flag), `click`, `type`, `select` (a native
+`<select>`), `hover`, `key` (Enter, Escape, Tab, shift+Tab, arrows, ctrl+…),
+`back` / `forward`, `scroll`, `scroll_to_element`, `screenshot_tab`,
+`close_tab`, `list_tabs`.
+
+- **Readable element list (0.3.0).** Web components' open shadow roots are
+  read; each control is named from its label (`aria-labelledby`, `<label>`,
+  placeholder, title, an icon's alt text); icon-only buttons are kept; what is
+  in view is listed first; a `<select>` shows its options. Password field
+  values are never read out. Every action waits for the page to go quiet and
+  reports whether it changed; an id whose element has disappeared is reported
+  as such instead of clicking something else. `lib/dom.js` holds the shared
+  helpers and is injected into a frame before each page function.
+- **Keys are synthetic.** They carry `isTrusted: false`, so the extension does
+  the default action itself when the page does not cancel it (Enter submits
+  the form, Tab moves focus, Escape closes a dialog/details). Browser
+  shortcuts do nothing.
 
 - **Only its own tabs.** Jav3 opens tabs in a separate, unfocused window
   (grouped as "Jav3") and refuses any tab it did not open. Your tabs, focus and
@@ -82,6 +97,24 @@ its `browser`-scoped device token in the first frame. That token opens nothing
 else: chat, the desk socket and every Settings route refuse it. See
 `backend/browser.py` and SECURITY-RESIDUAL-RISK.md #18.
 
+## Versions
+
+Reload the extension after an update (`chrome://extensions` → Reload); Settings
+shows a reload hint while the browser reports an older build than the server
+ships (currently **0.5.0**).
+
+- **0.5.0** — a click no longer activates a button through a cookie or consent
+  overlay (the covering element is named, with its id); `changed` also sees
+  typed text, selects, checkboxes, aria state and iframe changes; typing into a
+  checkbox is refused and Enter only submits when the browser would; a click by
+  screenshot coordinates is refused when the page moved a different element
+  under that point since the screenshot. Every action verb (click, type,
+  select, hover, key) needs 0.5.0; reading, scrolling, screenshots and tab
+  verbs still work on an older build, and the refusal says to reload.
+- **0.4.0** — real pointer clicks, clicks by screenshot coordinates, typing
+  into the focused element.
+- **0.3.0** — select, hover, key, back and forward.
+
 ## Test
 
-    node --test clients/jav3-browser/test/verbs.test.mjs
+    node --test clients/jav3-browser/test/*.test.mjs

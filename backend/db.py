@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cache_hit INTEGER NOT NULL DEFAULT 0,
     cache_miss INTEGER NOT NULL DEFAULT 0,
-    context TEXT,                        -- JSON {messages, n_tools}; only when capture is on
+    context TEXT,                        -- captured message array (backend/ctxstore.py): compressed frame, or legacy JSON text
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- Monitored egress (Layer 3). Per-project egress policy. A project with no row
@@ -780,6 +780,11 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_turnstats(db)
+        await _migrate_calls(db)
+        await _migrate_logging(db)
+        await _migrate_secnotify(db)
+        await _migrate_boxlog(db)
         await db.commit()
     finally:
         await db.close()
@@ -792,6 +797,68 @@ async def _add_columns(db: aiosqlite.Connection, table: str,
     for col, decl in cols:
         if col not in have:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+async def _migrate_turnstats(db: aiosqlite.Connection) -> None:
+    """One row per loop turn (backend/turnstats.py): the loop's own recoveries
+    and cut-offs, which no other table records. Idempotent and additive."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS turn_stats ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " conversation_id INTEGER,"
+        " op_id TEXT,"
+        " box_id TEXT,"
+        " rounds INTEGER NOT NULL DEFAULT 0,"
+        " dsml_recovered INTEGER NOT NULL DEFAULT 0,"
+        " markup_retries INTEGER NOT NULL DEFAULT 0,"
+        " forced_conclusion INTEGER NOT NULL DEFAULT 0,"
+        " cap_hit INTEGER NOT NULL DEFAULT 0,"
+        " evictions INTEGER NOT NULL DEFAULT 0,"
+        " rereads INTEGER NOT NULL DEFAULT 0,"
+        " stop TEXT NOT NULL DEFAULT 'final',"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_turn_stats_created "
+                     "ON turn_stats(created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_turn_stats_conv "
+                     "ON turn_stats(conversation_id)")
+
+
+async def _migrate_calls(db: aiosqlite.Connection) -> None:
+    """The Security > Calls view (how the model key is used): each model_calls
+    row learns which operation and which box it served, and the gateway's
+    refusals get a small log of their own. Idempotent and additive."""
+    await _add_columns(db, "model_calls", (
+        # the gateway op that made the call (chat:<cid>, guest:<cid>, a job
+        # id); NULL for incognito turns, whose op_id would name the chat
+        ("op_id", "TEXT"),
+        # the box the call came from (guest_turn's bound box); NULL = host-side
+        ("box_id", "TEXT")))
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS gateway_refusals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL DEFAULT (datetime('now')),
+            op_name TEXT,                -- the gateway op asked for (model_call, ...)
+            reason TEXT NOT NULL,        -- unknown_op_id, wrong_box, budget_exceeded, ...
+            box_id TEXT,                 -- the caller's box, when the host knows it
+            project_slug TEXT
+        )""")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gateway_refusals_ts ON gateway_refusals(ts)")
+
+
+async def _migrate_logging(db: aiosqlite.Connection) -> None:
+    """Captured-context storage (backend/ctxstore.py). ctx_key: the first row
+    of a delta chain, so a chain reads in one query and ages out as a unit.
+    The two partial indexes keep retention and the "how much is captured"
+    count off the rows that hold no context (nearly all of them, after a
+    prune). Idempotent, additive only."""
+    await _add_columns(db, "model_calls", (("ctx_key", "INTEGER"),))
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_calls_ctxkey "
+        "ON model_calls(ctx_key) WHERE ctx_key IS NOT NULL")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_calls_ctx "
+        "ON model_calls(created_at) WHERE context IS NOT NULL")
 
 
 async def _migrate_boxes(db: aiosqlite.Connection) -> None:
@@ -861,6 +928,43 @@ async def _migrate_boxes(db: aiosqlite.Connection) -> None:
         " set_by TEXT,"
         " updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         " CHECK (mode <> 'join' OR box_id IS NOT NULL))")
+
+
+async def _migrate_secnotify(db: aiosqlite.Connection) -> None:
+    """Coalesced security events (backend/security.py): a repeat of the same
+    kind + project + cause + severity while the first is still unacknowledged
+    bumps `count` and `last_seen` on that row instead of adding (and pinging)
+    another. `cause` is the coalescing key, the summary unless the raise site
+    names one. Old rows read as count 1, last_seen NULL (= created_at)."""
+    await _add_columns(db, "security_events", (
+        ("count", "INTEGER NOT NULL DEFAULT 1"),
+        ("last_seen", "TEXT"),
+        ("cause", "TEXT"),
+    ))
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_security_events_cause "
+        "ON security_events(kind, cause, acknowledged)")
+
+
+async def _migrate_boxlog(db: aiosqlite.Connection) -> None:
+    """Each box's history (backend/vm/boxlog.py): started, stopped, restarted,
+    idle_stopped, wiped, nuked, destroyed, crashed, error, with the reason and
+    who asked. Rows outlive the box (a destroyed box's history still reads).
+    Idempotent and additive."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS box_events ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " box_id TEXT NOT NULL,"
+        " kind TEXT,"
+        " project TEXT,"
+        " runtime TEXT,"
+        " event TEXT NOT NULL,"
+        " reason TEXT,"
+        " actor TEXT,"
+        " detail TEXT,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_box_events_box "
+                     "ON box_events(box_id, id)")
 
 
 async def get_state(db: aiosqlite.Connection, key: str) -> str | None:

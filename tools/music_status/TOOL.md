@@ -3,6 +3,7 @@ name: music_status
 description: The operator's music — library size, and what each of the two players (the one inside Jav3 and the music app) is doing right now.
 when_to_use: When they ask what's playing. You rarely need it before music_play, which picks a working player by itself.
 enabled: true
+section: media
 read_only: true
 parameters:
   type: object

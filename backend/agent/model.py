@@ -2,6 +2,7 @@
 and the gateway (key policy, budget, ledger) lives in front of it. `providers.resolve` routes each
 call — `provider/model` -> endpoint, key, wire kind — and the non-OpenAI
 wire formats live in adapters.py."""
+import contextvars
 import json
 import re
 from typing import AsyncIterator
@@ -87,9 +88,6 @@ def dsml_prose(content: str) -> str:
     return (content[:m.start()] if m else content).strip()
 
 
-CAPTURE_STATE_KEY = "capture_context"
-
-
 def _redact_images(messages: list[dict]) -> list[dict]:
     """Swap base64 image data-URIs for a short placeholder before a message
     array is logged — a captured screenshot is multi-MB and would bloat the
@@ -112,40 +110,56 @@ def _redact_images(messages: list[dict]) -> list[dict]:
     return out
 
 
+# The box a gateway-served call came from. The gateway (vm/gateway_server.py)
+# sets it around model.complete so the ledger row can say which box spent the
+# key; None = a host-side call.
+call_box_id: contextvars.ContextVar = contextvars.ContextVar("jav3_call_box", default=None)
+
+
 async def record_model_call(conversation_id: int | None, model_name: str,
                             usage: dict | None, messages: list[dict],
-                            tools: list[dict] | None) -> None:
+                            tools: list[dict] | None,
+                            op_id: str | None = None,
+                            box_id: str | None = None) -> None:
     """Ledger every API call: exact usage always (the Logs cost tab sums
     this — usage_log only covers chat turns, this covers everything), plus
-    the raw message array when the operator flipped capture on. Incognito
+    the raw message array unless the operator switched capture off (it is on by
+    default; backend/ctxstore.py holds the storage form). Incognito
     records usage unattributed (spend is real money) but never content.
-    Must never fail the model call — best effort by design."""
-    from ..db import get_db, get_state
-    from .. import runtime
+    `op_id` / `box_id` say which operation and which box made the call (the
+    Security > Calls view); an incognito turn drops the op_id, which names its
+    conversation. Must never fail the model call — best effort by design."""
+    from ..db import get_db
+    from .. import ctxstore, runtime
     u = usage or {}
     ephemeral = runtime.ephemeral.get()
     if ephemeral:
-        conversation_id = None
+        conversation_id, op_id = None, None
     db = await get_db()
     try:
-        context = None
-        if not ephemeral and await get_state(db, CAPTURE_STATE_KEY) == "1":
-            context = json.dumps({"messages": _redact_images(messages),
-                                  "n_tools": len(tools or [])})
-        await db.execute(
+        frame = None
+        if not ephemeral and await ctxstore.capture_enabled(db):
+            try:
+                frame = await ctxstore.build_frame(
+                    conversation_id, _redact_images(messages), len(tools or [])).pack()
+            except Exception:  # noqa: BLE001 — never cost the usage row
+                frame = None
+        cur = await db.execute(
             "INSERT INTO model_calls (conversation_id, model, input_tokens, "
-            "output_tokens, cache_hit, cache_miss, context) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "output_tokens, cache_hit, cache_miss, context, ctx_key, op_id, box_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (conversation_id, model_name,
              u.get("prompt_tokens", 0), u.get("completion_tokens", 0),
              u.get("prompt_cache_hit_tokens", 0),
-             u.get("prompt_cache_miss_tokens", 0), context))
+             u.get("prompt_cache_miss_tokens", 0),
+             frame.blob if frame else None, frame.key if frame else None,
+             str(op_id)[:80] if op_id else None,
+             str(box_id)[:80] if box_id else None))
+        if frame is not None:
+            ctxstore.remember(conversation_id, frame, cur.lastrowid)
         # retention: usage rows are tiny and kept forever; context blobs are
-        # the heavy part and age out
-        await db.execute(
-            "UPDATE model_calls SET context = NULL WHERE context IS NOT NULL "
-            "AND created_at < datetime('now', ?)",
-            (f"-{settings.context_capture_keep_days} days",))
+        # the heavy part and age out (a delta chain as one unit)
+        await ctxstore.prune_if_due(db)
         await db.commit()
     finally:
         await db.close()
@@ -183,6 +197,7 @@ class ModelClient:
         base_url: str | None = None,
         key: str | None = None,
         max_tokens: int | None = None,
+        extra: dict | None = None,
     ) -> AsyncIterator[dict]:
         """Stream {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} with any DSML
@@ -219,6 +234,7 @@ class ModelClient:
             key_name = ("max_completion_tokens" if "max_completion_tokens" in payload
                         else "max_tokens")
             payload[key_name] = max_tokens
+        _merge_extra(payload, extra)
 
         # Transient failures (connect errors, 5xx) retry with backoff — but only
         # while nothing has streamed to the caller yet (adapters.retrying).
@@ -325,6 +341,20 @@ def _shape_for_provider(payload: dict, base: str, name: str) -> None:
         payload.pop("stream_options", None)   # reports usage on the last chunk anyway
 
 
+# Request fields a caller's `extra` may never replace: they are what the call
+# IS (which model, which conversation, streamed, which tools).
+_PROTECTED = frozenset({"model", "messages", "stream", "tools"})
+
+
+def _merge_extra(payload: dict, extra: dict | None) -> None:
+    """Provider-specific request fields from the caller (grounding turns
+    DeepSeek's thinking off with {"thinking": {"type": "disabled"}}), merged
+    last so they win over the shaping above, except for _PROTECTED keys."""
+    for k, v in (extra or {}).items():
+        if k not in _PROTECTED:
+            payload[k] = v
+
+
 # Back-compat alias: tests construct Model(api_key=...) and patch Model._stream_once.
 Model = ModelClient
 
@@ -378,12 +408,17 @@ class ModelGateway:
         base_url: str | None = None,
         op_id: str | None = None,
         max_tokens: int | None = None,
+        extra: dict | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events: {"type": "token", "text": str} per delta, then one
         {"type": "message", "content", "tool_calls", "usage"} (+ an opaque
         `provider_blocks` for adapters that need replay state). Raises
         BudgetExceeded / ModelError before any
         network I/O.
+
+        `extra` = provider-specific request fields merged into an
+        OpenAI-compatible payload (ModelClient, via _merge_extra); the caller
+        sends only fields that provider accepts.
 
         model_name is `provider/model` (a bare id runs on the default model's
         provider); None = the default model. base_url pins an allowlisted
@@ -404,6 +439,8 @@ class ModelGateway:
         if route.key_error:
             raise ModelError(route.key_error)
 
+        # `extra` is OpenAI-wire only: the anthropic/google adapters build their
+        # own request shapes and ignore it.
         if route.kind == "anthropic":
             stream = adapters.anthropic_complete(route, messages, tools, temperature)
         elif route.kind == "google":
@@ -415,7 +452,8 @@ class ModelGateway:
             stream = self.transport.complete(
                 messages, tools=tools, temperature=temperature,
                 model_name=route.model, base_url=base, key=route.key,
-                **({"max_tokens": max_tokens} if max_tokens else {}))
+                **({"max_tokens": max_tokens} if max_tokens else {}),
+                **({"extra": extra} if extra else {}))
 
         final: dict | None = None
         try:
@@ -439,7 +477,9 @@ class ModelGateway:
             budget.add(usage or {}, cache_weight=_cache_weight(route))
         try:
             await record_model_call(conversation_id, route.model_id, usage,
-                                    messages, tools)
+                                    messages, tools,
+                                    op_id=op_id or budget_mod.active_op_id.get(),
+                                    box_id=call_box_id.get())
         except Exception:  # noqa: BLE001 — the ledger must never fail a call
             pass
         yield final

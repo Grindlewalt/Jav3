@@ -5,11 +5,14 @@ the phone, all slightly out of step. The tab that asked is the one that plays;
 see backend/gui.py:resolve_tab for the order it falls back through.
 """
 from backend import gui, runtime
+from backend.gitgate import flush_guest_writes
 from backend.agent.tools import toolctx
 
 
 async def run(source: str = "", title: str = "", tab: str = "") -> str:
     slug = await toolctx.active_slug()
+    if slug and not str(source).strip().startswith(("http://", "https://")):
+        await flush_guest_writes(slug)      # a file this turn wrote is still in the VM
     src, err = gui.media_src(source, slug)
     if err:
         return f"error: {err}"

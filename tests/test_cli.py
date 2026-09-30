@@ -835,11 +835,13 @@ async def test_notifications_badge_while_the_sidebar_is_hidden(cfg):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         assert app.query_one("#sidebar").display is False
+        app._watching = lambda cid: False         # the reply lands out of sight
         app.editor.text = "go"
         await pilot.press("enter")
         await _until(pilot, lambda: app.cid == 5 and not app.busy)
         await pilot.pause(0.2)
-        # a finished turn with the sidebar hidden is a notification
+        # a reply that finishes out of sight is a notification (one in the chat
+        # you are looking at is not: TUI-07, tests/test_cli_polish.py)
         assert app.unread == 1 and app.notices[0][1] == "done"
         assert "● 1" in _text(app.query_one("#status-right"))
         await app.note("boom", "error")                       # errors are too
@@ -1330,8 +1332,9 @@ async def test_tui_security_tabs_and_queue_verdicts_after_confirm(cfg):
         # tab / → forward, ← back, numbers jump, wraps round
         for key, tab in (("tab", "network"), ("right", "logs"), ("left", "network"),
                          ("4", "secrets"), ("tab", "persistent"), ("6", "profiles"),
-                         ("tab", "rules"), ("tab", "queue"), ("left", "rules"),
-                         ("left", "profiles"), ("7", "rules"), ("1", "queue")):
+                         ("tab", "rules"), ("tab", "calls"), ("tab", "queue"),
+                         ("left", "calls"), ("left", "rules"), ("left", "profiles"),
+                         ("7", "rules"), ("8", "calls"), ("1", "queue")):
             await pilot.press(key)
             assert scr.tab == tab, key
             assert scr.query_one(f"#sec-tab-{tab}").has_class("-on")

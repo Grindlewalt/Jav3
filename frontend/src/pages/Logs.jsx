@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
 import { ago, human, ts } from '../format.js'
-import { EmptyState, Tabs, Toggle } from '../components/index.js'
+import { notify, notifyError } from '../notify.js'
+import { Button, EmptyState, Select, Tabs, Toggle } from '../components/index.js'
+import { mergeConvos } from '../logsList.js'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
 // message and every tool call with its args and result — plus the numbers that
@@ -62,6 +64,13 @@ function Tile({ label, value, sub, bad }) {
   )
 }
 
+// human() stops at MB; captured context and the database can be GB
+const GB = 1024 ** 3
+const sizeOf = (n) => (Number(n) >= GB ? `${(Number(n) / GB).toFixed(1)} GB` : human(n))
+const KEEP_CHOICES = [1, 3, 7, 14, 30]
+const dayLabel = (d) => `${d} day${d === 1 ? '' : 's'}`
+const dayOptions = KEEP_CHOICES.map((d) => ({ value: d, label: dayLabel(d) }))
+
 function usd(n) {
   const v = Number(n) || 0
   return v >= 0.01 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`
@@ -102,8 +111,9 @@ function CallItem({ call, index, prevInput }) {
       {open && (
         <div className="log-tool-body">
           {!call.has_context && (
-            <div className="dim small">No raw context stored for this call —
-              turn on “Capture raw context” on the Cost tab before the run.</div>
+            <div className="dim small">No raw context is stored for this call:
+              capture was switched off when it ran, or it is past the retention
+              window. Both are set on the Cost tab.</div>
           )}
           {err && <div className="dim small">{err}</div>}
           {ctx && (
@@ -139,6 +149,85 @@ function CallItem({ call, index, prevInput }) {
   )
 }
 
+// The cost card's setting and what it costs: capture is on unless switched off,
+// so this says what is being kept, for how long, and how to shrink it. The
+// delete asks inline (no confirm() dialog: it freezes the extension and is
+// swallowed by iOS standalone).
+function CapturePanel({ data, onToggle }) {
+  const [st, setSt] = useState(null)      // /api/logs/storage
+  const [ageDays, setAgeDays] = useState(1)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const loadSt = () => api('/api/logs/storage').then(setSt).catch(() => {})
+  useEffect(() => { loadSt() }, [])
+  const on = !!data.capture_context
+
+  async function setKeep(days) {
+    try {
+      const r = await api('/api/logs/capture-retention', {
+        method: 'POST', body: JSON.stringify({ days }) })
+      if (r.deleted) notify(`Now keeping ${dayLabel(days)}: context of ${r.deleted} `
+                            + `calls deleted, ${sizeOf(r.freed_bytes)} freed`, { life: 8 })
+    } catch (e) { notifyError(e) }
+    loadSt()
+  }
+  async function del() {
+    setBusy(true)
+    try {
+      const r = await api('/api/logs/prune-context', {
+        method: 'POST', body: JSON.stringify({ older_than_days: ageDays }) })
+      notify(r.deleted
+        ? `Deleted the context of ${r.deleted} calls, ${sizeOf(r.freed_bytes)} freed`
+        : `Nothing captured is older than ${dayLabel(ageDays)}`, { life: 8 })
+    } catch (e) { notifyError(e) }
+    setBusy(false); setConfirming(false); loadSt()
+  }
+
+  return (
+    <>
+      <div className="logs-capture">
+        <Toggle checked={on} label="Capture raw context"
+                onText="Capture raw context" offText="Capture raw context"
+                onChange={async (v) => { await onToggle(v); loadSt() }} />
+        <span className="dim small">
+          {on ? 'Capturing every call' : 'Not capturing new calls'}
+          {st && (st.captured_calls > 0
+            ? ` · ${sizeOf(st.captured_bytes)} kept for ${dayLabel(st.keep_days)}`
+            : ' · nothing kept yet')}
+        </span>
+      </div>
+      {st?.over?.length > 0 && (
+        <div className="logs-storage-warn" role="status">{st.message}</div>
+      )}
+      {st && (confirming ? (
+        <div className="logs-retain">
+          <span className="grow small">
+            Delete captured context older than {dayLabel(ageDays)}? Token counts
+            and costs stay; only the stored message arrays go.</span>
+          <Button danger onClick={del} disabled={busy}>
+            {busy ? 'Deleting…' : 'Delete'}</Button>
+          <Button variant="ghost" onClick={() => setConfirming(false)} disabled={busy}>
+            Cancel</Button>
+        </div>
+      ) : (
+        <div className="logs-retain">
+          <span className="dim small">Keep for</span>
+          <Select aria-label="Keep captured context for" value={st.keep_days}
+                  options={dayOptions}
+                  onChange={(e) => setKeep(Number(e.target.value))} />
+          <span className="grow" />
+          <span className="dim small">Delete captured context older than</span>
+          <Select aria-label="Delete captured context older than" value={ageDays}
+                  options={dayOptions}
+                  onChange={(e) => setAgeDays(Number(e.target.value))} />
+          <Button variant="ghost" onClick={() => setConfirming(true)}
+                  disabled={!st.captured_calls}>Delete…</Button>
+        </div>
+      ))}
+    </>
+  )
+}
+
 function CostView() {
   const [data, setData] = useState(null)
   const load = () => api('/api/logs/costs').then(setData).catch(() => {})
@@ -149,21 +238,15 @@ function CostView() {
   return (
     <div className="log-detail">
       <div className="sbx-card">
-        {/* the tab strip already says "cost"; this row is the one setting */}
-        <div className="logs-capture">
-          <Toggle checked={!!data.capture_context} label="Capture raw context"
-                  onText="Capture raw context" offText="Capture raw context"
-                  onChange={async (on) => {
-                    setData((d) => ({ ...d, capture_context: on }))
-                    try {
-                      await api('/api/logs/capture-context', {
-                        method: 'POST', body: JSON.stringify({ enabled: on }) })
-                    } catch { /* load() below restores the real state */ }
-                    load()
-                  }} />
-          <span className="dim small">every model call's exact context —
-            heavy, kept a few days</span>
-        </div>
+        {/* the tab strip already says "cost"; this is the one setting */}
+        <CapturePanel data={data} onToggle={async (on) => {
+          setData((d) => ({ ...d, capture_context: on }))
+          try {
+            await api('/api/logs/capture-context', {
+              method: 'POST', body: JSON.stringify({ enabled: on }) })
+          } catch { /* load() below restores the real state */ }
+          load()
+        }} />
         <div className="sbx-tiles">
           {order.map((w) => (
             <Tile key={w} label={w === 'all' ? 'all time' : `last ${w}`}
@@ -245,16 +328,31 @@ export default function Logs() {
   const [view, setView] = useState('logs')   // 'logs' | 'cost'
   const selectedRef = useRef(null)
   const inFlight = useRef(false)
+  const shownRef = useRef(null)            // the list on screen, for the merge below
+  const latestRef = useRef(null)           // the server's newest list, behind the pill
+  const [fresh, setFresh] = useState(0)    // conversations that appeared since, not yet shown
 
-  // one request at a time: a tick that finds the last one still out skips,
-  // and a hidden tab does not ask at all
+  // one request at a time: a tick that finds the last one still out skips.
+  // A hidden tab does not POLL, but its first load still runs (it used to stay
+  // on "loading…" until the tab was shown and the next tick came round), and
+  // becoming visible refreshes at once (WEB-22).
   const refresh = () => {
-    if (inFlight.current || document.hidden) return
+    if (inFlight.current || (document.hidden && shownRef.current !== null)) return
     inFlight.current = true
     api('/api/logs/conversations')
-      .then((r) => setConvos(r.conversations || []))
+      .then((r) => {
+        const m = mergeConvos(shownRef.current, r.conversations || [])
+        latestRef.current = r.conversations || []
+        shownRef.current = m.list
+        setConvos(m.list); setFresh(m.newCount)
+      })
       .catch(() => setConvos((c) => c ?? []))
       .finally(() => { inFlight.current = false })
+  }
+  // new conversations are counted behind a pill, not slid in under the pointer
+  const showFresh = () => {
+    shownRef.current = latestRef.current
+    setConvos(latestRef.current); setFresh(0)
   }
 
   // only the transcripts view shows the list, so only it polls
@@ -262,7 +360,9 @@ export default function Logs() {
     if (view !== 'logs') return undefined
     refresh()
     const t = setInterval(refresh, POLL_MS)
-    return () => clearInterval(t)
+    const onShow = () => { if (!document.hidden) refresh() }
+    document.addEventListener('visibilitychange', onShow)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onShow) }
   }, [view]) // eslint-disable-line
 
   function open(id) {
@@ -302,6 +402,9 @@ export default function Logs() {
       ) : (
         <div className="split-layout logs-split" id="logs-panel" role="tabpanel">
           <aside className="logs-aside">
+            {fresh > 0 && (
+              <button type="button" className="ghost small logs-new" onClick={showFresh}>
+                {fresh} new conversation{fresh === 1 ? '' : 's'}: show</button>)}
             <ul className="file-list">
               {(convos || []).map((c) => {
                 const { title, tag } = cleanTitle(c.summary, c.id)

@@ -6,7 +6,8 @@
  * type; implies Read). "Every project" applies wherever a project has no row
  * of its own. The extension's own controls (per-site consent, Cancel, Pause)
  * sit on top and cannot be overridden from here. Stop removes every grant and
- * drops the socket. */
+ * drops the socket. The extension's version shows beside the name; one older
+ * than this server needs is flagged "outdated" with how to reload it. */
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ago } from './format.js'
@@ -79,12 +80,19 @@ function BrowserRow({ b, projects, put, stop }) {
               aria-label={b.online ? 'online' : 'offline'} />
         <strong className="ellipsis" title={b.name}>{b.name}</strong>
         {b.paused && <Tag>paused in the browser</Tag>}
+        {b.ext_version && <span className="dim small">v{b.ext_version}</span>}
+        {b.outdated && <Tag tone="error">outdated</Tag>}
         <span className="dim small desk-last">
           {b.last_action_at ? ago(b.last_action_at) : 'no actions'}
         </span>
         <Button variant="ghost" danger onClick={stop}
                 disabled={!b.online && b.grants.length === 0}>Stop</Button>
       </div>
+      {b.outdated && (
+        <div className="warn small">
+          Reload the extension in chrome://extensions (Developer mode → Reload) to
+          get {b.ext_current}</div>
+      )}
       {b.grants.map((g) => (
         <div className="desk-grants" key={g.project}>
           <span className="small">{label(g.project)}</span>

@@ -3,6 +3,7 @@ name: local_shell
 description: Run a shell command on the operator's computer (a /local chat), in the local working directory. Waits for the operator's approval.
 when_to_use: Running tests, builds, git or other commands the task needs on that machine.
 enabled: true
+section: local
 requires_local: true
 parameters:
   type: object

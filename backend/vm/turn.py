@@ -65,7 +65,10 @@ async def run_agent_turn(conversation_id, system_prompt, history, *, tools=None,
         ephemeral=runtime.ephemeral.get(), event_chan=runtime.event_chan.get(),
         # explicit, not ambient: a funnel leaf or temp agent launched from an
         # own_memory agent's turn must not write into that agent's notes
-        memory_slug=memory_slug)
+        memory_slug=memory_slug,
+        # the turn that delegated to this one: when this turn ends tainted, the
+        # broker taints that one too (its report is read there). Host-side only.
+        parent_op=(budget_mod.active_op_id.get() if nested else None))
 
     from .. import agentmsg, bus
     chan = node_chan(conversation_id)

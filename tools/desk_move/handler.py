@@ -2,5 +2,8 @@
 from backend import desk
 
 
-async def run(x: int, y: int, computer: str = "") -> str:
-    return await desk.act("move", {"x": x, "y": y}, computer or None)
+async def run(x: int | None = None, y: int | None = None, element: int | None = None,
+              frame: int | None = None, computer: str = "") -> str:
+    params = {k: v for k, v in {"x": x, "y": y, "element": element, "frame": frame}.items()
+              if v not in (None, "")}
+    return await desk.act("move", params, computer or None)

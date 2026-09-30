@@ -7,6 +7,14 @@ in-guest; keeping the slug task-local is what lets a nested turn use its own."""
 from ... import turnctx
 
 
+class NoProjectError(LookupError):
+    """No project in this guest turn. `for_model`: the message is written for the
+    model, so argcheck.crash_message hands it back as is instead of calling it a
+    harness fault (same class as the host toolctx, which the tool handlers never
+    tell apart)."""
+    for_model = True
+
+
 def set_active(slug: str | None) -> None:
     turnctx.active_slug.set(slug)
 
@@ -14,7 +22,12 @@ def set_active(slug: str | None) -> None:
 async def require_project() -> str:
     slug = turnctx.active_slug.get()
     if not slug:
-        raise LookupError("no project is loaded in the guest for this turn")
+        # load_project mid-turn only takes effect next turn (its result says so),
+        # so with no project at all the file tools have nowhere to work this turn
+        raise NoProjectError(
+            "no project is loaded, so the file tools have no workspace this turn. "
+            "Use run_code for scratch files, or call load_project with a slug (see "
+            "'All projects' in your context) — its files are usable from the next turn")
     return slug
 
 

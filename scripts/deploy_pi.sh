@@ -23,7 +23,12 @@ ssh "$PI" 'cd ~/jarvis && .venv/bin/python - '"${FORCE:-0}"' <<PY
 import sqlite3, sys
 from backend.config import settings
 force = sys.argv[1] == "1"
-n = sqlite3.connect(settings.db_path).execute(
+# read-only: a read-write connect CREATES a 0-byte jarvis.db when the path is
+# wrong, which then looks like state (has_state) to the next start
+if not settings.db_path.is_file():
+    print(f"    no DB at {settings.db_path} — REFUSING (wrong state dir?)")
+    sys.exit(1)
+n = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True).execute(
     "SELECT COUNT(*) FROM tool_calls "
     "WHERE created_at > datetime(\"now\", \"-60 seconds\")").fetchone()[0]
 print(f"    {n} tool call(s) in the last 60s")
@@ -39,6 +44,9 @@ if [ "$BUILD" = 1 ]; then
   echo "==> frontend build"
   ssh "$PI" 'cd ~/jarvis/frontend && npm run build 2>&1 | tail -2'
 fi
+
+echo "==> requirements"
+ssh "$PI" 'cd ~/jarvis && new=$(sha256sum requirements.txt | cut -d" " -f1) && if [ "$new" = "$(cat .venv/.requirements.sha256 2>/dev/null)" ]; then echo "    requirements unchanged: skipped pip install"; else .venv/bin/pip install -q -r requirements.txt && echo "$new" > .venv/.requirements.sha256 && echo "    requirements changed: installed"; fi'
 
 echo "==> restart"
 ssh "$PI" 'systemctl --user restart jarvis'

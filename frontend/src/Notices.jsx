@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { isWatched } from './agentWatch.js'
 import { api, subscribeSse } from './api.js'
 import { useIsPhone } from './breakpoints.js'
+import { countsInBadge, isCrit, wantsPing } from './secPing.js'
 
 // Bottom-right notices — the successor to the nav bell and shield. Anything that
 // needs operator eyes arrives as a desktop-style alert (red = critical
@@ -26,6 +27,13 @@ import { useIsPhone } from './breakpoints.js'
 //
 // Every string shown here (summaries, commit messages, schedule names) is
 // UNTRUSTED model/guest output — rendered as plain text nodes only.
+//
+// What pings is the server's call, not this file's (backend/security.py): each
+// live security event carries `ping`, decided against the operator's level in
+// Settings → Notifications (critical only / needs my approval / everything),
+// with repeats coalesced and non-critical pings rate limited per kind. The
+// poll's approval cards (hosts, commits, shell asks, schedules) follow the same
+// level. A critical card is sticky: no drain, it stays until opened or closed.
 
 let seq = 0
 
@@ -37,6 +45,7 @@ export const PendingCountContext = createContext(0)
 export function useNotices(enabled) {
   const [toasts, setToasts] = useState([])
   const [count, setCount] = useState(0)
+  const [memoryPending, setMemoryPending] = useState(0)  // Memory nav badge, not in `count`
   const prev = useRef(null)      // last /api/notifications snapshot
   const seen = useRef(new Set()) // security event ids already toasted
 
@@ -54,16 +63,28 @@ export function useNotices(enabled) {
       let d
       try { d = await api('/api/notifications') } catch { return }
       setCount(d.count || 0)
+      setMemoryPending(d.memory_pending || 0)
       const p = prev.current
       prev.current = d
       if (!p) {
-        // first snapshot: one quiet summary instead of a card per backlog item
-        if (d.count > 0) push({
-          title: `${d.count} item${d.count === 1 ? '' : 's'} waiting in Security`,
-          body: 'security alerts, approvals and requests', life: 10,
+        // first snapshot: one summary instead of a card per backlog item, and
+        // only of what pings at the operator's level. Unacknowledged critical
+        // alerts get their own red card that stays.
+        const crit = d.critical || 0
+        const rest = (d.ping_count ?? d.count ?? 0) - crit
+        if (crit > 0) push({
+          sev: 'crit', sticky: true,
+          title: `${crit} critical security alert${crit === 1 ? '' : 's'} not yet acknowledged`,
+          body: 'open Security to see what happened',
+        })
+        if (rest > 0) push({
+          title: `${rest} item${rest === 1 ? '' : 's'} waiting in Security`,
+          body: 'approvals and requests', life: 10,
         })
         return
       }
+      // approvals ping unless the operator chose "critical only"
+      if (d.level === 'critical') return
       const newEgress = (d.egress_pending || 0) - (p.egress_pending || 0)
       if (newEgress > 0) push({
         title: `${newEgress} new host approval${newEgress === 1 ? '' : 's'}`,
@@ -88,21 +109,30 @@ export function useNotices(enabled) {
     }
     load()
     const t = setInterval(load, 15000)
-    return () => clearInterval(t)
+    // the Memory page approved or rejected something: the badge should not wait
+    // for the next poll
+    window.addEventListener('jarvis-memory-changed', load)
+    return () => { clearInterval(t); window.removeEventListener('jarvis-memory-changed', load) }
   }, [enabled, push])
 
   useEffect(() => {
     if (!enabled) return
     return subscribeSse('/api/security/stream', (ev) => {
-      if (ev.type !== 'security_event' || seen.current.has(ev.id)) return
+      if (ev.type !== 'security_event') return
+      // a repeat carries its row's id: it pings again only when the server
+      // says so (a critical repeat, once per window)
+      if (seen.current.has(ev.id) && !(ev.repeat && ev.ping)) return
       seen.current.add(ev.id)
-      setCount((c) => c + 1)  // the next poll re-syncs the real total
-      const crit = ['critical', 'crit'].includes(String(ev.severity || '').toLowerCase())
+      if (countsInBadge(ev)) setCount((c) => c + 1)  // the next poll re-syncs the real total
+      if (!wantsPing(ev)) return
+      const crit = isCrit(ev)
+      const n = ev.count > 1 ? ` · ×${ev.count}` : ''
       // eventId deep-links the card to that alert's evidence board, so the one
       // click a draining toast gets lands on the detail rather than the queue
-      push({ sev: crit ? 'crit' : 'warn', eventId: ev.id,
+      push({ sev: crit ? 'crit' : 'warn', sticky: crit, eventId: ev.id,
              title: `security · ${ev.kind || 'alert'}`
-                    + (ev.project_slug || ev.project ? ` · ${ev.project_slug || ev.project}` : ''),
+                    + (ev.project_slug || ev.project ? ` · ${ev.project_slug || ev.project}` : '')
+                    + n,
              body: ev.summary || '' })
     })
   }, [enabled, push])
@@ -120,6 +150,22 @@ export function useNotices(enabled) {
   useEffect(() => {
     if (!enabled) return
     return subscribeSse('/api/agents/notices/stream', (ev) => {
+      // the storage watch (backend/storage_watch.py): at most one a day, and
+      // the card goes to the Logs tab where retention and delete live
+      if (ev.type === 'storage_warning') {
+        push({ sev: 'warn', title: ev.title || 'Storage is filling up',
+               body: ev.summary || '', to: ev.to || '/security/logs', life: 30 })
+        return
+      }
+      // a note (or a change to one) waits for approval: one card, straight to
+      // Memory. Not a security event, so it never joins the Review count.
+      if (ev.type === 'memory_pending') {
+        setMemoryPending((n) => n + 1)   // the next poll re-syncs the real total
+        window.dispatchEvent(new Event('jarvis-memory-arrived'))  // an open Memory page reloads
+        push({ sev: 'warn', title: ev.title || 'A note waits for your approval',
+               body: ev.summary || '', to: ev.to || '/memory', life: 12 })
+        return
+      }
       if (ev.type !== 'agent_run_done') return
       if (isWatched(ev.conversation_id)) return   // they're looking right at it
       push({
@@ -133,7 +179,7 @@ export function useNotices(enabled) {
     })
   }, [enabled, push])
 
-  return { toasts, count, dismiss, clear }
+  return { toasts, count, memoryPending, dismiss, clear }
 }
 
 // A queue card (not the app's own message, not an agent run's result) exists
@@ -261,9 +307,11 @@ export default function Notices({ toasts, dismiss, clear, count = 0 }) {
                     onClick={(e) => { e.stopPropagation(); dismiss(t.id) }}>✕</button>
           </span>
           {t.body && <span className="notice-body">{t.body}</span>}
-          <span className="notice-bar"
-                style={t.life ? { '--n-life': `${t.life}s` } : undefined}
-                onAnimationEnd={() => dismiss(t.id)} />
+          {/* a critical card has no drain: it waits for the operator */}
+          {!t.sticky && (
+            <span className="notice-bar"
+                  style={t.life ? { '--n-life': `${t.life}s` } : undefined}
+                  onAnimationEnd={() => dismiss(t.id)} />)}
         </div>
       )))}
       {extra > 0 && (

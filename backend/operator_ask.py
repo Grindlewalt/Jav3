@@ -136,6 +136,29 @@ async def _ancestors(cid: int) -> list[int]:
         await db.close()
 
 
+async def _label(cid: int) -> str:
+    """What to call the asking conversation in a dialog with several agents
+    behind it: its generated title, else its task, else its preset; "" if none."""
+    from .agenttree import clean_title
+    from .db import get_db
+    try:
+        db = await get_db()
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        async with db.execute("SELECT title, summary, agent_slug FROM conversations "
+                              "WHERE id = ?", (cid,)) as cur:
+            row = await cur.fetchone()
+    except Exception:  # noqa: BLE001
+        return ""
+    finally:
+        await db.close()
+    if row is None:
+        return ""
+    return (clean_title(row["title"]) or clean_title(row["summary"])
+            or (f"@{row['agent_slug']}" if row["agent_slug"] else ""))
+
+
 def _chans(turn_chan: str, cids: list[int]) -> list[str]:
     """Where an ask shows: the turn's own channel, and each conversation's chat
     channel and agent-node channel (vm/turn.py node:<cid>), so a chat view,
@@ -158,7 +181,7 @@ async def ask(questions: list[dict], *, extra: dict | None = None,
     ancestors = await _ancestors(cid)
     ask_id = f"ask_{uuid.uuid4().hex[:16]}"
     event = {"type": "ask_user", "id": ask_id, "conversation_id": cid,
-             "questions": questions, **(extra or {})}
+             "agent": await _label(cid), "questions": questions, **(extra or {})}
     fut = asyncio.get_running_loop().create_future()
     _pending[ask_id] = _Ask(ask_id, cid, frozenset([cid, *ancestors]), event, fut,
                             time.time())
@@ -198,6 +221,29 @@ def cancel_conversation(cid: int) -> int:
     n = 0
     for a in list(_pending.values()):
         if a.conversation_id == cid and not a.fut.done():
+            a.fut.set_exception(AskCancelled())
+            n += 1
+    return n
+
+
+def cancel_tree(cids) -> int:
+    """Cancel every pending ask of these conversations and of the agents beneath
+    them. A stop reaches the turn or run it names, but an agent that is a node in
+    a box has neither of its own: without this its ask waits out the hour and the
+    agents view keeps saying it waits on the operator."""
+    ids = set(cids)
+    n = 0
+    for a in list(_pending.values()):
+        if not a.fut.done() and (a.conversation_id in ids or ids & a.shown_in):
+            a.fut.set_exception(AskCancelled())
+            n += 1
+    return n
+
+
+def cancel_all() -> int:
+    n = 0
+    for a in list(_pending.values()):
+        if not a.fut.done():
             a.fut.set_exception(AskCancelled())
             n += 1
     return n

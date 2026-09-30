@@ -15,6 +15,7 @@ from backend import gui
 from backend.agent.tools import toolctx
 from backend.config import settings
 from backend.fsutil import find_file, safe_join
+from backend.gitgate import flush_guest_writes
 
 # What the Renderer panel can actually show. Kept in step with MEDIA_EXT in
 # frontend/src/pages/Workspace.jsx — this list IS the render menu, so a file the
@@ -43,6 +44,10 @@ async def run(action: str = "", panel: str = "", path: str = "") -> str:
         return "error: no active project — load one first"
     panels = gui.load_panels(slug)
     project = settings.projects_dir / slug
+    if action in ("list", "open_file", "add"):
+        # this turn's write_file/edit_file are still in the VM, and these actions
+        # look for files on the host (fault #7/#10: 'nothing matching README.md')
+        await flush_guest_writes(slug)
 
     if action == "list":
         # The render menu, answered without a guess — the same list the panel's

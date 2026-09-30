@@ -17,9 +17,10 @@ import socket
 
 from ..agent import budget as budget_mod
 from ..agent.budget import BudgetExceeded
-from ..agent.model import ModelError, model
+from ..agent.model import ModelError, call_box_id, model
 from ..config import settings
-from . import boxes, broker
+from .. import runtime
+from . import boxes, broker, gateway_log
 
 # kind -> fn(box) -> tar.gz bytes (WP3 registers "service", WP5 "builder").
 # shared/project get the turn package (guest_pkg). docs/boxes-contract.md D.
@@ -62,9 +63,24 @@ def _op_from_elsewhere(req: dict, box) -> bool:
     return bound is not None and bound != box.id
 
 
+async def _refused(req: dict, box, op_name, reason: str) -> None:
+    """Leave one row in the refusal log (Security > Calls). The box and project
+    are the host's own knowledge of the caller (its listener / CID, the bound
+    turn), never something the guest claimed."""
+    op_id = req.get("op_id")
+    op_id = op_id if isinstance(op_id, str) else ""
+    env = broker.get_turn(op_id) if op_id else None
+    box_id = box.id if box is not None else (boxes.op_box(op_id) if op_id else None)
+    project = (env.active_project if env is not None
+               else (box.project if box is not None else None))
+    await gateway_log.record_refusal(op_name, reason, box_id, project)
+
+
 async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
     op_id = req.get("op_id") or "vm-anon"
-    if not _entitled(req) or _op_from_elsewhere(req, box):
+    entitled = _entitled(req)
+    if not entitled or _op_from_elsewhere(req, box):
+        await _refused(req, box, "model_call", "unknown_op_id" if not entitled else "wrong_box")
         await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
                                  "message": f"op_id {op_id!r} is not this caller's turn"})
         return
@@ -72,6 +88,7 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
     # spend. The gateway never opens a budget itself — a compromised guest can't
     # invent op_ids to escape the per-operation cap by rotating ids.
     if budget_mod.get(op_id) is None:
+        await _refused(req, box, "model_call", "unknown_op_id")
         await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
                                  "message": f"op_id {op_id!r} is not a registered turn"})
         return
@@ -81,6 +98,12 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
     model_name = req.get("model_name")
     base_url = req.get("base_url")
     conversation_id = req.get("conversation_id")
+    # the ledger row for this call names the box that spent the key
+    box_tok = call_box_id.set(box.id if box is not None else boxes.op_box(op_id))
+    # an incognito turn's calls record usage only, never context: the turn's
+    # envelope says so; this handler runs outside the turn's own context
+    env = broker.get_turn(op_id)
+    eph_tok = runtime.ephemeral.set(bool(env is not None and env.ephemeral))
     try:
         async for ev in model.complete(messages, tools=tools,
                                         conversation_id=conversation_id,
@@ -88,6 +111,8 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
                                         model_name=model_name, base_url=base_url):
             await _send(loop, conn, ev)
     except (BudgetExceeded, ModelError) as e:
+        if isinstance(e, BudgetExceeded):
+            await _refused(req, box, "model_call", "budget_exceeded")
         await _send(loop, conn, {"type": "error",
                                  "error": type(e).__name__, "message": str(e)})
     except Exception as e:  # noqa: BLE001 — one bad call must not kill the server
@@ -95,12 +120,19 @@ async def _handle_model_call(loop, conn, req: dict, box=None) -> None:
         # operator as "ModelError: " with no clue (2026-09-27)
         await _send(loop, conn, {"type": "error",
                                  "error": type(e).__name__, "message": str(e) or repr(e)})
+    finally:
+        call_box_id.reset(box_tok)
+        runtime.ephemeral.reset(eph_tok)
 
 
 async def _handle_tool_broker_call(loop, conn, req: dict, box=None) -> None:
     op_id = req.get("op_id") or "vm-anon"
-    if (not _entitled(req) or broker.get_turn(op_id) is None   # same pinning as model_call
+    entitled = _entitled(req)
+    if (not entitled or broker.get_turn(op_id) is None   # same pinning as model_call
             or _op_from_elsewhere(req, box)):
+        await _refused(req, box, "tool_broker_call",
+                       "wrong_box" if entitled and broker.get_turn(op_id) is not None
+                       else "unknown_op_id")
         await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
                                  "message": f"op_id {op_id!r} is not this caller's turn"})
         return
@@ -118,7 +150,10 @@ async def _handle_taint_note(loop, conn, req: dict, box=None) -> None:
     would. Only ever ADDS taint, and only for the caller's own turn."""
     op_id = req.get("op_id") or ""
     env = broker.get_turn(op_id)
-    if not _entitled(req) or env is None or _op_from_elsewhere(req, box):
+    entitled = _entitled(req)
+    if not entitled or env is None or _op_from_elsewhere(req, box):
+        await _refused(req, box, "taint_note",
+                       "wrong_box" if entitled and env is not None else "unknown_op_id")
         await _send(loop, conn, {"type": "error", "error": "unknown_op_id",
                                  "message": f"op_id {op_id!r} is not this caller's turn"})
         return
@@ -198,6 +233,7 @@ async def handle_conn(loop, conn, *, peer_cid=None, box=None) -> None:
             op = req.get("op")
             if gated and op != "ping" and (caller is None or not caller.may(op)):
                 who = caller.kind if caller is not None else f"unknown (cid {peer_cid})"
+                await _refused(req, caller, op, "op_not_allowed")
                 await _send(loop, conn, {"type": "error", "error": "op_not_allowed",
                                          "message": f"{op!r} is not allowed from a {who} box"})
                 continue
@@ -211,6 +247,7 @@ async def handle_conn(loop, conn, *, peer_cid=None, box=None) -> None:
                 import base64
                 pkg = _package_for(caller)
                 if pkg is None:
+                    await _refused(req, caller, op, "no_package")
                     await _send(loop, conn, {"type": "error", "error": "no_package",
                                              "message": f"no package for {caller.kind} boxes"})
                     continue
@@ -221,6 +258,7 @@ async def handle_conn(loop, conn, *, peer_cid=None, box=None) -> None:
             elif op == "ping":
                 await _send(loop, conn, {"type": "pong"})
             else:
+                await _refused(req, caller, op, "unknown_op")
                 await _send(loop, conn, {"type": "error", "error": "unknown_op",
                                          "message": f"op={op!r}"})
     except (ConnectionError, OSError):

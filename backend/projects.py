@@ -405,6 +405,62 @@ async def restore_project(slug: str):
     return {"ok": True}
 
 
+async def _revoke_project_services(db, slug: str) -> None:
+    """Approved or pending services of a project go through the normal revoke
+    (kills the box it runs in, clears its data disk) before their rows are
+    dropped: deleting the row alone would leave the process running with nothing
+    listing it. Best effort: a revoke that fails is logged, the purge goes on."""
+    from .vm import services
+    async with db.execute(
+            "SELECT id FROM services WHERE project_slug = ? "
+            "AND status IN ('pending', 'approved')", (slug,)) as cur:
+        ids = [r["id"] for r in await cur.fetchall()]
+    for sid in ids:
+        try:
+            await services.revoke(sid, delete_data=True, by="project purge")
+        except Exception as e:  # noqa: BLE001
+            print(f"[projects] purge {slug}: revoke service #{sid}: {e}")
+
+
+async def _purge_slug_state(db, slug: str) -> None:
+    """Rows keyed by the project's SLUG (the `projects` row and its id-keyed
+    children go separately). A project created later under the same slug must
+    start with none of this: old approval requests, grants, the egress policy
+    and the placement all bind to the name, not to the project. Not touched on
+    purpose: the audit trail (security_events, egress_events, triage_log,
+    box_events, gateway_refusals, desk/browser action logs, agent_messages)
+    and decided package requests (the image variants are built from them)."""
+    for table in ("git_requests", "permission_rules", "project_secret_grants",
+                  "egress_policy", "egress_pending"):
+        await db.execute(f"DELETE FROM {table} WHERE project_slug = ?", (slug,))
+    # the auto-allow rows double as the daily-cap ledger and audit trail, so a
+    # live one is revoked (never matches again) rather than deleted
+    await db.execute(
+        "UPDATE egress_auto_allow SET revoked_at = datetime('now') "
+        "WHERE project_slug = ? AND revoked_at IS NULL AND promoted_at IS NULL", (slug,))
+    await db.execute("DELETE FROM browser_grants WHERE project = ?", (slug,))
+    # pending package requests would sit in the queue for a project that is
+    # gone; decided ones stay (an approved row is part of an image recipe)
+    await db.execute(
+        "DELETE FROM package_catalogue WHERE project_slug = ? AND status = 'pending'",
+        (slug,))
+    # its own placement row, and any project that joined its box p-<slug>: the
+    # join was approved for the old owner, and a project re-created under this
+    # slug would otherwise own a box someone else silently shares
+    await db.execute("DELETE FROM project_placement WHERE slug = ?", (slug,))
+    await db.execute(
+        "DELETE FROM project_placement WHERE mode = 'join' AND box_id = ?", (f"p-{slug}",))
+    # a schedule pinned to the project goes to the schedules bin (restorable):
+    # left live it would run against a project that no longer exists, or
+    # against whichever project takes the slug next
+    await db.execute(
+        "UPDATE schedules SET deleted_at = datetime('now'), pending_approval = 0 "
+        "WHERE project_slug = ? AND deleted_at IS NULL", (slug,))
+    await db.execute("DELETE FROM service_port_events WHERE service_id IN "
+                     "(SELECT id FROM services WHERE project_slug = ?)", (slug,))
+    await db.execute("DELETE FROM services WHERE project_slug = ?", (slug,))
+
+
 @router.delete("/projects/{slug}/purge")
 async def purge_project(slug: str):
     """Permanent: only allowed from the bin. Removes files and DB rows;
@@ -421,6 +477,7 @@ async def purge_project(slug: str):
             raise HTTPException(status_code=400,
                                 detail="soft-delete first — purge only empties the bin")
         pid = row["id"]
+        await _revoke_project_services(db, slug)
         await db.execute("UPDATE conversations SET project_id = NULL WHERE project_id = ?", (pid,))
         # the legacy `runs` table (older installs only; nothing writes it now)
         # holds a NOT NULL project FK that made purge fail on old projects
@@ -428,6 +485,7 @@ async def purge_project(slug: str):
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'") as cur:
             if await cur.fetchone():
                 await db.execute("DELETE FROM runs WHERE project_id = ?", (pid,))
+        await _purge_slug_state(db, slug)
         await db.execute("DELETE FROM projects WHERE id = ?", (pid,))
         await db.commit()
         await refresh_all_projects(db)
@@ -435,18 +493,22 @@ async def purge_project(slug: str):
         await db.close()
     # its /persist disk goes with it: a purge is permanent, and a leftover
     # disk would reattach to a future project that reuses the slug
-    from .vm import persist
+    from .vm import persist, services
     try:
         persist.delete_disk(slug)
     except persist.PersistError:
         pass
+    import asyncio
+    loop = asyncio.get_running_loop()
+    # the snapshots of its approved services (host side, vm_dir/svc/<slug>)
+    svc_path = services.svc_dir() / slug
+    if svc_path.exists():
+        await loop.run_in_executor(None, shutil.rmtree, svc_path, True)
     project_path = settings.projects_dir / slug
     if project_path.exists():
         # a big project tree on the Pi's SD card takes a while — don't stall
         # every SSE stream and the broker on the shared event loop
-        import asyncio
-        await asyncio.get_running_loop().run_in_executor(
-            None, shutil.rmtree, project_path)
+        await loop.run_in_executor(None, shutil.rmtree, project_path)
     return {"ok": True}
 
 

@@ -1,5 +1,6 @@
 from backend import plan as plan_mod
 from backend import runtime
+from backend.gitgate import flush_guest_writes
 from backend.agent.tools.toolctx import require_project
 from backend.writes import SecretLeakError
 
@@ -11,6 +12,8 @@ async def run(dump: str, files: list[str] | None = None, run: bool = True,
         # an incognito turn promises not to leave behind
         return "error: orchestrate is unavailable in an incognito chat — nothing it does would stay incognito."
     slug = await require_project()
+    if files:
+        await flush_guest_writes(slug)      # the files it reads may be this turn's, still in the VM
     try:
         # validated before the planner runs: a model the operator named that
         # cannot run is theirs to hear about, not the default's to replace

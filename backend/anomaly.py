@@ -11,6 +11,14 @@ picks — new/unapproved hosts deliberately do NOT trip these:
 A trip returns an anomaly dict; the proxy cuts the host (egress.mark_cut + an
 nftables drop) and raises a security_event. Once cut, egress.decide short-
 circuits, so a detector fires at most once per host.
+
+Volume and cadence look at `egress_anomaly_window_seconds` before this host's
+latest allowed hit, never all history. Summed over all time, any host a
+project keeps using eventually looks like a spike (a daily 25 KB pip session
+to files.pythonhosted.org crossed 1 MB after 40 days and was cut, Pi
+2026-09-07), and a daily schedule's requests are a perfectly regular
+86400 s "beacon". Anchoring on the latest hit rather than the wall clock keeps
+the judgement the same whenever it runs.
 """
 import math
 from datetime import datetime
@@ -42,12 +50,28 @@ def _parse(ts: str) -> float | None:
         return None
 
 
-async def _host_volume(db: aiosqlite.Connection, slug: str | None, host: str) -> tuple[int, list[int]]:
-    """(this host's total bytes_out, per-host totals for the project's OTHER hosts)."""
+async def _window_start(db: aiosqlite.Connection, slug: str | None, host: str) -> str | None:
+    """The start of the judged span: the window before this host's latest
+    allowed hit (None = the host has no allowed hits)."""
+    async with db.execute(
+            # datetime() inside: an unparseable stamp reads NULL and is skipped
+            # rather than becoming the anchor (and nulling the whole window)
+            "SELECT datetime(MAX(datetime(created_at)), ?) AS s FROM egress_events "
+            "WHERE verdict='allow' AND host = ? AND (project_slug IS ? OR ? IS NULL)",
+            (f"-{int(settings.egress_anomaly_window_seconds)} seconds",
+             host, slug, slug)) as cur:
+        r = await cur.fetchone()
+    return r["s"] if r else None
+
+
+async def _host_volume(db: aiosqlite.Connection, slug: str | None, host: str,
+                       since: str) -> tuple[int, list[int]]:
+    """(this host's bytes_out in the window, per-host totals in the same
+    window for the project's OTHER hosts)."""
     async with db.execute(
             "SELECT host, SUM(bytes_out) AS b FROM egress_events "
             "WHERE verdict='allow' AND (project_slug IS ? OR ? IS NULL) "
-            "GROUP BY host", (slug, slug)) as cur:
+            "AND created_at >= ? GROUP BY host", (slug, slug, since)) as cur:
         rows = await cur.fetchall()
     this_total, others = 0, []
     for r in rows:
@@ -58,11 +82,13 @@ async def _host_volume(db: aiosqlite.Connection, slug: str | None, host: str) ->
     return this_total, others
 
 
-async def _host_gaps(db: aiosqlite.Connection, slug: str | None, host: str) -> list[float]:
+async def _host_gaps(db: aiosqlite.Connection, slug: str | None, host: str,
+                     since: str) -> list[float]:
     async with db.execute(
             "SELECT created_at FROM egress_events WHERE verdict='allow' AND host = ? "
-            "AND (project_slug IS ? OR ? IS NULL) ORDER BY id DESC LIMIT ?",
-            (host, slug, slug, _WINDOW)) as cur:
+            "AND (project_slug IS ? OR ? IS NULL) AND created_at >= ? "
+            "ORDER BY id DESC LIMIT ?",
+            (host, slug, slug, since, _WINDOW)) as cur:
         times = [_parse(r["created_at"]) for r in await cur.fetchall()]
     times = [t for t in times if t is not None]
     times.reverse()
@@ -79,7 +105,10 @@ async def check_host(db: aiosqlite.Connection, slug: str | None, host: str) -> d
                 "detail": {"host": host, "entropy": round(ent, 2),
                            "threshold": settings.egress_entropy_threshold}}
 
-    this_total, others = await _host_volume(db, slug, host)
+    since = await _window_start(db, slug, host)
+    if since is None:
+        return None
+    this_total, others = await _host_volume(db, slug, host, since)
     if this_total >= settings.egress_volume_min_bytes:
         baseline = (sorted(others)[len(others) // 2] if others else 0)
         if this_total > settings.egress_volume_multiple * max(baseline, 1):
@@ -89,7 +118,7 @@ async def check_host(db: aiosqlite.Connection, slug: str | None, host: str) -> d
                                "baseline": baseline,
                                "multiple": settings.egress_volume_multiple}}
 
-    gaps = await _host_gaps(db, slug, host)
+    gaps = await _host_gaps(db, slug, host, since)
     if len(gaps) >= settings.egress_beacon_min_hits - 1:
         mean = sum(gaps) / len(gaps)
         if mean > 0:

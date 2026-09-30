@@ -1,0 +1,380 @@
+# Live navigation tasks for scripts/nav_compare.py — run on the paired Mac.
+#
+# Every command runs locally with bash; the harness exports SCRATCH
+# (~/jav3-nav-scratch), TASK_DIR ($SCRATCH/<id>, wiped and recreated before
+# each run; cwd for the commands), WEB ($SCRATCH/web, the fixture pages),
+# PORT and BASE_URL (http://127.0.0.1:$PORT, a local http.server over $WEB —
+# desk_open only accepts http(s) URLs, backend/desk.py validate()).
+# `{TASK_DIR}` etc. in a prompt are expanded the same way.
+# check: every command must exit 0 for the run to count as a success.
+# Nothing here may touch mail, messaging, purchases, settings, or anything
+# outside $SCRATCH and the allowed apps (validate_spec enforces the obvious).
+#
+# First live run: macOS will ask once for this terminal to control TextEdit,
+# Finder, Safari, Calculator and System Events (Automation) — allow them.
+
+scratch: ~/jav3-nav-scratch
+fixture_port: 8765
+allowed_apps: [TextEdit, Finder, Calculator, Safari]
+
+# Presets the harness creates/updates via POST/PUT /api/agents. The first
+# --agents entry is the baseline. model "" inherits the server default
+# (DeepSeek V4.1 Flash). Another candidate = another entry, same shape.
+agents:
+  navigator:
+    model: ""
+  navigator-qwen:
+    model: openrouter/qwen/qwen3.8-27b
+
+fixtures:
+  navfx-panel.html: |
+    <!doctype html><title>Control panel</title>
+    <h1>Control panel</h1>
+    <button onclick="document.title='wrong: start'">Start</button>
+    <button onclick="document.title='wrong: stop'">Stop</button>
+    <button onclick="document.title='applied'">Apply</button>
+    <button onclick="document.title='wrong: reset'">Reset</button>
+  navfx-dupes.html: |
+    <!doctype html><title>Items</title>
+    <section aria-label="Drafts"><h2>Drafts</h2><p>Spring plan</p>
+    <button onclick="document.title='archived-draft'">Archive</button></section>
+    <section aria-label="Published"><h2>Published</h2><p>Autumn report</p>
+    <button onclick="document.title='archived-published'">Archive</button></section>
+  navfx-focus.html: |
+    <!doctype html><title>Profile</title>
+    <p>Nothing is saved until the Name field has been focused.</p>
+    <label>Name <input id="n" autocomplete="off"></label>
+    <button id="s">Save</button>
+    <script>
+    let armed = false;
+    n.addEventListener('focus', () => { armed = true; });
+    s.addEventListener('click', () => {
+      if (armed && n.value.trim()) document.title = 'saved: ' + n.value.trim();
+    });
+    window.addEventListener('load', () => document.activeElement.blur());
+    </script>
+  navfx-search.html: |
+    <!doctype html><title>Search</title>
+    <button id="c" onclick="q.value=''">Clear</button>
+    <label>Search <input id="q" autocomplete="off"></label>
+    <script>
+    q.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && q.value.trim()) document.title = 'results: ' + q.value.trim();
+    });
+    window.addEventListener('load', () => c.focus());
+    </script>
+  navfx-long.html: |
+    <!doctype html><title>Fruit rows</title>
+    <div id="rows"></div>
+    <script>
+    const f = ['Apple','Banana','Cherry','Damson','Elder','Fig','Grape','Guava',
+               'Kiwi','Lemon','Lime','Mango','Melon','Nectarine','Olive','Papaya'];
+    for (let i = 1; i <= 60; i++) {
+      const name = i === 47 ? 'Tangerine' : f[i % f.length];
+      const d = document.createElement('div');
+      d.style.cssText = 'height:48px;border-bottom:1px solid #ddd';
+      d.innerHTML = 'Row ' + i + ' — ' + name + ' <button>Pick</button>';
+      d.querySelector('button').onclick = () => { document.title = 'picked-' + i; };
+      rows.appendChild(d);
+    }
+    </script>
+  navfx-icons.html: |
+    <!doctype html><title>Toolbar</title>
+    <style>button{width:14px;height:14px;padding:0;font-size:9px;line-height:9px}</style>
+    <div id="bar"></div><p>Tiny toolbar above.</p>
+    <script>
+    ['Star','Pin','Notes','Share','Print','Notifications','Undo','Redo','Cut',
+     'Copy','Paste','Bold','Italic','Link'].forEach(n => {
+      const b = document.createElement('button');
+      b.setAttribute('aria-label', n); b.title = n; b.textContent = n[0];
+      b.onclick = () => { document.title = 'clicked: ' + n.toLowerCase(); };
+      bar.appendChild(b);
+    });
+    </script>
+  navfx-select.html: |
+    <!doctype html><title>Pick a fruit</title>
+    <label>Fruit <select id="f" onchange="document.title='fruit: '+f.value">
+    <option>Apple</option><option>Banana</option><option>Cherry</option>
+    <option>Kiwi</option><option>Lemon</option><option>Mango</option>
+    <option>Papaya</option></select></label>
+
+tasks:
+  # --- TextEdit -------------------------------------------------------------
+  - id: te-type-save
+    tags: [type-save]
+    prompt: >-
+      In TextEdit, the document hello.txt is open. Type exactly
+      "Hello from the Jav3 navigation test" into it and save it with cmd+s.
+    setup:
+      - ": > hello.txt"
+      - open -a TextEdit "$TASK_DIR/hello.txt" && sleep 2
+    check:
+      - test "$(cat hello.txt)" = "Hello from the Jav3 navigation test"
+    cleanup:
+      - osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: te-save-dialog
+    tags: [type-save, dialog]
+    prompt: >-
+      A new, empty TextEdit document is open. Type "Quarterly numbers: 42", then
+      save it with cmd+s under the name nav-report in the folder {TASK_DIR}
+      (in the save panel, cmd+shift+g lets you type the folder path).
+    setup:
+      - open -a TextEdit && sleep 1
+      - osascript -e 'tell application "TextEdit" to make new document' && sleep 1
+    check:
+      - 'f=$(ls nav-report.* | head -1) && textutil -convert txt -stdout "$f" | grep -qx "Quarterly numbers: 42"'
+    cleanup:
+      - osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: te-append-line
+    tags: [type-save, keyboard]
+    prompt: >-
+      In TextEdit, list.txt is open with three lines (one, two, three). Add a
+      fourth line "four" at the very end, keeping the other lines unchanged,
+      and save with cmd+s.
+    setup:
+      - printf 'one\ntwo\nthree\n' > list.txt
+      - open -a TextEdit "$TASK_DIR/list.txt" && sleep 2
+    check:
+      - test "$(grep -v '^$' list.txt | tr '\n' ',')" = "one,two,three,four,"
+    cleanup:
+      - osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: te-find-replace
+    tags: [menu-keyboard, dialog]
+    prompt: >-
+      In TextEdit, sky.txt is open. Use Find and Replace to change every
+      "colour" to "color" (there are three), then save with cmd+s.
+    setup:
+      - 'printf ''The colour of the sky.\nA colour chart.\nPick a colour.\n'' > sky.txt'
+      - open -a TextEdit "$TASK_DIR/sky.txt" && sleep 2
+    check:
+      - test "$(grep -o 'color' sky.txt | wc -l | tr -d ' ')" = "3"
+      - "! grep -q 'colour' sky.txt"
+    cleanup:
+      - osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: te-plain-text-menu
+    tags: [menu-keyboard, dialog]
+    prompt: >-
+      A new rich-text TextEdit document is open. Convert it to plain text with
+      the Format menu's Make Plain Text command (use the keyboard), type the
+      word "plain", and save it as plain.txt in the folder {TASK_DIR}.
+    setup:
+      - open -a TextEdit && sleep 1
+      - osascript -e 'tell application "TextEdit" to make new document' && sleep 1
+    check:
+      - test -f plain.txt
+      - "! head -c 6 plain.txt | grep -q 'rtf'"
+      - test "$(tr -d '\n' < plain.txt)" = "plain"
+    cleanup:
+      - osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  - id: te-bold-title
+    tags: [menu-keyboard, select]
+    prompt: >-
+      In TextEdit, styled.rtf is open with two lines, Title and Body. Make only
+      the word Title bold, then save with cmd+s.
+    setup:
+      - printf 'Title\nBody\n' > styled.txt
+      - textutil -convert rtf -output "$TASK_DIR/styled.rtf" "$TASK_DIR/styled.txt"
+      - open -a TextEdit "$TASK_DIR/styled.rtf" && sleep 2
+    check:
+      - textutil -convert html -stdout styled.rtf | grep -q '<b>Title</b>'
+      - "! textutil -convert html -stdout styled.rtf | grep -q '<b>Body'"
+    cleanup:
+      - osascript -e 'tell application "TextEdit" to close every document saving no' || true
+
+  # --- Finder (only inside the task's own scratch folder) -------------------
+  - id: finder-rename
+    tags: [finder]
+    prompt: >-
+      A Finder window shows the folder finder-rename. Rename the file draft.txt
+      in it to final.txt.
+    setup:
+      - echo draft > draft.txt
+      - open -a Finder "$TASK_DIR" && sleep 2
+    check:
+      - test -f final.txt && test ! -e draft.txt
+      - test "$(cat final.txt)" = "draft"
+    cleanup:
+      - osascript -e 'tell application "Finder" to close (every window whose name is "finder-rename")' || true
+
+  - id: finder-new-folder
+    tags: [finder, menu-keyboard]
+    prompt: >-
+      A Finder window shows the folder finder-new-folder. Create a new folder
+      inside it named archive-2026.
+    setup:
+      - open -a Finder "$TASK_DIR" && sleep 2
+    check:
+      - test -d archive-2026
+      - test "$(ls | wc -l | tr -d ' ')" = "1"
+    cleanup:
+      - osascript -e 'tell application "Finder" to close (every window whose name is "finder-new-folder")' || true
+
+  - id: finder-drag-into-folder
+    tags: [finder, drag]
+    prompt: >-
+      A Finder window shows the folder finder-drag-into-folder, which contains
+      move-me.txt and a folder named inbox. Move move-me.txt into inbox.
+    setup:
+      - echo payload > move-me.txt && mkdir inbox
+      - open -a Finder "$TASK_DIR" && sleep 2
+    check:
+      - test -f inbox/move-me.txt && test ! -e move-me.txt
+    cleanup:
+      - osascript -e 'tell application "Finder" to close (every window whose name is "finder-drag-into-folder")' || true
+      - osascript -e 'tell application "Finder" to close (every window whose name is "inbox")' || true
+
+  - id: finder-scroll-rename
+    tags: [finder, scroll]
+    prompt: >-
+      A Finder window in list view shows the folder finder-scroll-rename with
+      about eighty files. Find zz-target.txt (it is at the bottom of the list)
+      and rename it to found.txt.
+    setup:
+      - for i in $(seq -w 1 80); do echo "$i" > "item-$i.txt"; done; echo target > zz-target.txt
+      - open -a Finder "$TASK_DIR" && sleep 2
+      - osascript -e 'tell application "Finder" to set current view of front window to list view'
+    check:
+      - test -f found.txt && test ! -e zz-target.txt && test "$(cat found.txt)" = "target"
+      - test "$(ls item-*.txt | wc -l | tr -d ' ')" = "80"
+    cleanup:
+      - osascript -e 'tell application "Finder" to close (every window whose name is "finder-scroll-rename")' || true
+
+  - id: finder-duplicate-name-trap
+    tags: [finder, duplicate-trap]
+    prompt: >-
+      A Finder window shows the folder finder-duplicate-name-trap, which has two
+      subfolders, alpha and beta, each holding a file named notes.txt. Rename
+      ONLY the notes.txt inside beta to beta-notes.txt; leave alpha untouched.
+    setup:
+      - mkdir alpha beta && echo a > alpha/notes.txt && echo b > beta/notes.txt
+      - open -a Finder "$TASK_DIR" && sleep 2
+      - osascript -e 'tell application "Finder" to set current view of front window to list view'
+    check:
+      - test -f beta/beta-notes.txt && test ! -e beta/notes.txt
+      - test -f alpha/notes.txt && test ! -e alpha/beta-notes.txt
+    cleanup:
+      - osascript -e 'tell application "Finder" to close (every window whose name is "finder-duplicate-name-trap")' || true
+      - osascript -e 'tell application "Finder" to close (every window whose name is "beta")' || true
+
+  # --- Calculator -----------------------------------------------------------
+  - id: calc-multiply-copy
+    tags: [calculator, clipboard]
+    prompt: >-
+      Calculator is open. Clear it, compute 1234 x 56, and copy the result to
+      the clipboard (cmd+c).
+    setup:
+      - printf '' | pbcopy
+      - osascript -e 'tell application "Calculator" to quit' || true
+      - sleep 1 && open -a Calculator && sleep 2
+    check:
+      - test "$(pbpaste | tr -d ' ,\n')" = "69104"
+    cleanup:
+      - osascript -e 'tell application "Calculator" to quit' || true
+
+  - id: calc-sum-to-textedit
+    tags: [calculator, type-save, two-apps]
+    prompt: >-
+      Calculator and TextEdit are open; TextEdit shows sum.txt. Use Calculator
+      to add 987 and 654, then type just the result into sum.txt and save it
+      with cmd+s.
+    setup:
+      - ": > sum.txt"
+      - osascript -e 'tell application "Calculator" to quit' || true
+      - sleep 1 && open -a Calculator && sleep 1
+      - open -a TextEdit "$TASK_DIR/sum.txt" && sleep 2
+    check:
+      - test "$(tr -d ' ,\n' < sum.txt)" = "1641"
+    cleanup:
+      - osascript -e 'tell application "TextEdit" to close every document saving no' || true
+      - osascript -e 'tell application "Calculator" to quit' || true
+
+  # --- Safari on the local fixture server -----------------------------------
+  - id: web-click-apply
+    tags: [web]
+    prompt: >-
+      Safari shows a Control panel page. Click its Apply button (only that one).
+    setup:
+      - open -a Safari "$BASE_URL/navfx-panel.html" && sleep 2
+    check:
+      - test "$(osascript -e 'tell application "Safari" to get name of current tab of front window')" = "applied"
+    cleanup:
+      - osascript -e 'tell application "Safari" to close (every tab of every window whose URL contains "/navfx-")' || true
+
+  - id: web-archive-duplicate-trap
+    tags: [web, duplicate-trap]
+    prompt: >-
+      Safari shows an Items page with a Drafts section and a Published section,
+      each with an Archive button. Archive the item in the Published section
+      only.
+    setup:
+      - open -a Safari "$BASE_URL/navfx-dupes.html" && sleep 2
+    check:
+      - test "$(osascript -e 'tell application "Safari" to get name of current tab of front window')" = "archived-published"
+    cleanup:
+      - osascript -e 'tell application "Safari" to close (every tab of every window whose URL contains "/navfx-")' || true
+
+  - id: web-focus-then-save
+    tags: [web, changed]
+    prompt: >-
+      Safari shows a Profile page. Enter the name Ada in its Name field and click
+      Save. The page title becomes "saved: Ada" when it worked.
+    setup:
+      - open -a Safari "$BASE_URL/navfx-focus.html" && sleep 2
+    check:
+      - 'test "$(osascript -e ''tell application "Safari" to get name of current tab of front window'')" = "saved: Ada"'
+    cleanup:
+      - osascript -e 'tell application "Safari" to close (every tab of every window whose URL contains "/navfx-")' || true
+
+  - id: web-search-focus-trap
+    tags: [web, changed]
+    prompt: >-
+      Safari shows a Search page. Search for kiwi by typing it into the Search
+      box and pressing Return. The page title becomes "results: kiwi" when it
+      worked.
+    setup:
+      - open -a Safari "$BASE_URL/navfx-search.html" && sleep 2
+    check:
+      - 'test "$(osascript -e ''tell application "Safari" to get name of current tab of front window'')" = "results: kiwi"'
+    cleanup:
+      - osascript -e 'tell application "Safari" to close (every tab of every window whose URL contains "/navfx-")' || true
+
+  - id: web-scroll-pick-row
+    tags: [web, scroll, duplicate-trap]
+    prompt: >-
+      Safari shows a long list of fruit rows, each with a Pick button. Scroll to
+      the row "Row 47 — Tangerine" and click its Pick button.
+    setup:
+      - open -a Safari "$BASE_URL/navfx-long.html" && sleep 2
+    check:
+      - test "$(osascript -e 'tell application "Safari" to get name of current tab of front window')" = "picked-47"
+    cleanup:
+      - osascript -e 'tell application "Safari" to close (every tab of every window whose URL contains "/navfx-")' || true
+
+  - id: web-tiny-icon-zoom
+    tags: [web, zoom]
+    prompt: >-
+      Safari shows a page with a row of tiny toolbar buttons at the top. Click
+      the Notifications button (not Notes).
+    setup:
+      - open -a Safari "$BASE_URL/navfx-icons.html" && sleep 2
+    check:
+      - 'test "$(osascript -e ''tell application "Safari" to get name of current tab of front window'')" = "clicked: notifications"'
+    cleanup:
+      - osascript -e 'tell application "Safari" to close (every tab of every window whose URL contains "/navfx-")' || true
+
+  - id: web-select-keyboard
+    tags: [web, keyboard, dropdown]
+    prompt: >-
+      Safari shows a "Pick a fruit" page with a Fruit dropdown. Choose Mango in
+      it (the keyboard is the reliable way to work a dropdown).
+    setup:
+      - open -a Safari "$BASE_URL/navfx-select.html" && sleep 2
+    check:
+      - 'test "$(osascript -e ''tell application "Safari" to get name of current tab of front window'')" = "fruit: Mango"'
+    cleanup:
+      - osascript -e 'tell application "Safari" to close (every tab of every window whose URL contains "/navfx-")' || true

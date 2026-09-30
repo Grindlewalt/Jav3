@@ -3,6 +3,7 @@ name: projector_show
 description: Put something on a projected surface — a procedural space scene, the universe simulation, a video or image, a solid colour, a calibration grid, or the live voice display. Also fades and hides surfaces.
 when_to_use: Any time the operator asks for something to go on the wall or ceiling. Name the surface the way they did ("the ceiling", "surface two") and the right one is found — you do not need projector_status first.
 enabled: true
+section: projector
 requires_settings: [mcp_projector_url, mcp_projector_token]
 parameters:
   type: object

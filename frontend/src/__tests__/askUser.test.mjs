@@ -1,7 +1,8 @@
 // node frontend/src/__tests__/askUser.test.mjs
 import assert from 'node:assert/strict'
 import {
-  answerBody, foldAsks, initAsk, keyToAction, nextMode, reduceAsk,
+  answerBody, foldAsks, initAsk, initialMode, keyToAction, MODE_LABEL, nextMode, PERMISSION_MODES,
+  reduceAsk,
 } from '../askUser.js'
 
 let n = 0
@@ -50,5 +51,14 @@ t('answer body, event folding, mode cycle', () => {
   assert.equal(asks.length, 1)
   assert.deepEqual(foldAsks(asks, { type: 'ask_done', id: 'a' }), [])
   assert.deepEqual(['yolo', 'auto', 'ask'].map(nextMode), ['auto', 'ask', 'yolo'])
+})
+t('mode labels say what each mode does; a new chat starts where the last pick was', () => {
+  for (const m of PERMISSION_MODES) {
+    assert.ok(MODE_LABEL[m].startsWith(`${m}:`), m)      // the mode stays the first word
+    assert.ok(MODE_LABEL[m].length > m.length + 10, m)   // and something follows it
+  }
+  assert.equal(initialMode('ask'), 'ask')
+  assert.equal(initialMode('bogus'), 'yolo')
+  assert.equal(initialMode(null), 'yolo')
 })
 console.log(`${n} passed`)

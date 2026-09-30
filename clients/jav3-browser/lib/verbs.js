@@ -1,30 +1,69 @@
 // The closed verb list, extension side. Pure (no chrome.* calls) so node can
 // test it: node --test clients/jav3-browser/test/
 // Mirrors backend/browser.py `validate`; both sides check every request.
+import './dom.js';
+
+const DOM = globalThis.__jav3Dom;
 
 export const VERBS = Object.freeze({
   open_tab: 'read', navigate: 'read', read_page: 'read', scroll: 'read',
   scroll_to_element: 'read', screenshot_tab: 'read', close_tab: 'read',
-  list_tabs: 'read', click: 'act', type: 'act',
+  list_tabs: 'read', back: 'read', forward: 'read',
+  click: 'act', type: 'act', select: 'act', hover: 'act', key: 'act',
 });
 const TAB_VERBS = new Set(Object.keys(VERBS).filter(v => v !== 'open_tab' && v !== 'list_tabs'));
 // Verbs whose `element` id comes from a browser_read_page of that tab: they
 // need a fresh all-frames read (enforced host-side, backend/browser.py).
-export const ELEMENT_VERBS = Object.freeze(['click', 'type', 'scroll_to_element']);
+export const ELEMENT_VERBS = Object.freeze(['click', 'type', 'scroll_to_element', 'select', 'hover']);
 export const TEXT_CAP = 2000;
 export const URL_CAP = 2000;
 export const PAGE_TEXT_CAP = 20000;
 export const WAIT_CAP_MS = 10000;         // bounded retry budget on read_page
 export const MAX_FRAME_INDEX = 999;
 export const MAX_ELEMENT_N = 100000;
+export const OPTION_CAP = 500;
+// read_page: auto = candidates when < 8 interactive elements are in view
+export const READ_MODES = Object.freeze(['auto', 'all', 'interactive']);
 
-export class VerbError extends Error {}
+export class VerbError extends Error {
+  constructor(msg, code) { super(msg); if (code) this.code = code; }
+}
+
+// "Ctrl+Shift+t" -> "ctrl+shift+t"; the desk's grammar (lib/dom.js). Throws VerbError.
+export function normalizeCombo(combo) {
+  try { return DOM.normalizeCombo(combo); } catch (e) { throw new VerbError(e.message); }
+}
 
 function int(params, k, lo, hi, dflt) {
   const v = params[k] === undefined ? dflt : params[k];
   if (typeof v !== 'number' || !Number.isInteger(v)) throw new VerbError(`${k} must be a whole number`);
   if (v < lo || v > hi) throw new VerbError(`${k}=${v} is outside ${lo}..${hi}`);
   return v;
+}
+
+function coord(params, k) {
+  const v = params[k];
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new VerbError(`${k} must be a number`);
+  if (v < 0 || v > 100000) throw new VerbError(`${k}=${v} is outside 0..100000`);
+  return v;
+}
+
+// Screenshot pixels per CSS px: captureVisibleTab returns the viewport at
+// device pixels, so image width / viewport width (devicePixelRatio x zoom);
+// the reported devicePixelRatio when the viewport is unknown. The server
+// divides a screenshot point by this to get the CSS px clickAt wants.
+export function shotScale(imgW, imgH, viewport) {
+  const vw = viewport && Number(viewport.w), vh = viewport && Number(viewport.h);
+  const dpr = viewport && Number(viewport.dpr) > 0 ? Number(viewport.dpr) : 1;
+  const x = imgW > 0 && vw > 0 ? imgW / vw : dpr;
+  const y = imgH > 0 && vh > 0 ? imgH / vh : x;
+  return { x, y };
+}
+
+// A screenshot point -> CSS px of the viewport (what the server does before
+// sending x, y; mirrored here so both sides agree and node can test it).
+export function toCssPoint(x, y, scale) {
+  return { x: Math.round((x / scale.x) * 10) / 10, y: Math.round((y / scale.y) * 10) / 10 };
 }
 
 export function hostOf(url) {
@@ -46,19 +85,86 @@ export function checkUrl(url, denyHosts = []) {
   if (u.username || u.password) throw new VerbError('URLs with a user:password@ part are refused');
   const host = hostOf(url);
   if (!host) throw new VerbError('that URL has no host');
-  if (isDenied(host, denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never opens it');
+  if (isDeniedUrl(url, denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never opens it');
   return url;
 }
 
-export function isDenied(host, denyHosts) {
-  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
-  return (denyHosts || []).some(d => String(d).toLowerCase().replace(/^\[|\]$/g, '') === h);
+// Normalise a host for the deny compare: lowercase, no brackets, no trailing
+// dot, IPv4-mapped IPv6 ("::ffff:127.0.0.1") as the plain IPv4.
+export function normHost(h) {
+  h = String(h || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(h);
+  if (m) return m[1];
+  const w = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (w) {
+    const a = parseInt(w[1], 16), b = parseInt(w[2], 16);
+    return `${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`;
+  }
+  return h;
+}
+
+function isLoopback(h) { return h === '::1' || /^127\.\d+\.\d+\.\d+$/.test(h); }
+
+// "host", "host:port", "[v6]:port" or a bare v6 -> { host, port|null }
+function splitEntry(e) {
+  e = String(e || '').trim().toLowerCase();
+  let m = /^\[([^\]]+)\](?::(\d+))?$/.exec(e);
+  if (m) return { host: normHost(m[1]), port: m[2] ? Number(m[2]) : null };
+  if ((e.match(/:/g) || []).length > 1) return { host: normHost(e), port: null };
+  m = /^(.*?)(?::(\d+))?$/.exec(e);
+  return { host: normHost(m[1]), port: m[2] ? Number(m[2]) : null };
+}
+
+// denyHosts entries: "host" (every port) or "host:port" (that port only), the
+// second form from servers that send ports; 127.0.0.0/8 is one loopback host.
+// port is optional: without it only host-wide entries can match.
+export function isDenied(host, denyHosts, port = null) {
+  const h = normHost(host);
+  return (denyHosts || []).some(d => {
+    const e = splitEntry(d);
+    if (!e.host) return false;
+    const same = e.host === h || (isLoopback(e.host) && isLoopback(h));
+    return same && (e.port === null || e.port === port);
+  });
+}
+
+// "host:port" for a URL (default port from the scheme), or '' -- the paired
+// server's own address as a deny entry.
+export function endpointOf(url) {
+  try {
+    const u = new URL(url);
+    const h = normHost(u.hostname);
+    const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+    return h.includes(':') ? `[${h}]:${port}` : `${h}:${port}`;
+  } catch { return ''; }
+}
+
+// The same check for a full URL (the port defaults from the scheme).
+export function isDeniedUrl(url, denyHosts) {
+  try {
+    const u = new URL(url);
+    const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+    return isDenied(u.hostname, denyHosts, port);
+  } catch { return false; }
 }
 
 // An element id encodes the frame it lives in: "f<frameIndex>:<n>", where the
 // frame index comes from the last read_page of that tab and <n> is the
 // element's number within that frame. A bare integer means the top frame.
 // -> { frame, n, id } (canonical string) or throws VerbError.
+// One change signature for a tab from its frames' signatures ("hex8:count"
+// each, top frame first): a hash of them joined, and the summed count.
+export function combineSigs(sigs) {
+  const ok = (sigs || []).filter(x => typeof x === 'string' && /^[0-9a-f]{8}:\d{1,7}$/.test(x));
+  if (!ok.length) return null;
+  if (ok.length === 1) return ok[0];
+  let h = 0x811c9dc5;
+  const j = ok.join('|');
+  for (let i = 0; i < j.length; i++) { h ^= j.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  const n = ok.reduce((a, x) => a + Number(x.split(':')[1]), 0);
+  return ('0000000' + h.toString(16)).slice(-8) + ':' + Math.min(n, 9999999);
+}
+
 export function parseElementId(v) {
   if (typeof v === 'number' && Number.isInteger(v) && !Number.isNaN(v)) {
     if (v < 1 || v > MAX_ELEMENT_N) throw new VerbError(`element ${v} is out of range`);
@@ -138,6 +244,30 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
       if (params.selector.length > 200) throw new VerbError('selector is too long');
       p.selector = params.selector.trim();
     }
+    if (params.mode !== undefined) {
+      if (!READ_MODES.includes(params.mode)) throw new VerbError(`mode must be one of ${READ_MODES.join(', ')}`);
+      p.mode = params.mode;
+    }
+  } else if (verb === 'click') {
+    // exactly one of element / (x, y); x, y are CSS px of the top frame's
+    // viewport (the server converted them from screenshot pixels)
+    const hasXY = params.x !== undefined || params.y !== undefined;
+    const hasEl = params.element !== undefined && params.element !== null;
+    if (hasXY === hasEl) throw new VerbError('give exactly one of element or x, y');
+    if (hasEl) p.element = parseElementId(params.element).id;
+    else {
+      p.x = coord(params, 'x'); p.y = coord(params, 'y');
+      // what the screenshot showed at that point (top frame only: a subframe's
+      // point is an <iframe>, which clickAt refuses anyway)
+      const ex = params.expect;
+      if (ex && typeof ex === 'object' && typeof ex.id === 'string') {
+        const id = parseElementId(ex.id);
+        if (id.frame === 0) p.expect = { n: id.n, label: typeof ex.label === 'string' ? ex.label.slice(0, 80) : '' };
+      }
+    }
+  } else if (verb === 'type') {
+    // no element: type into whatever has focus
+    if (params.element !== undefined && params.element !== null) p.element = parseElementId(params.element).id;
   } else if (ELEMENT_VERBS.includes(verb)) p.element = parseElementId(params.element).id;
   if (verb === 'type') {
     if (typeof params.text !== 'string' || !params.text) throw new VerbError('text is required');
@@ -146,6 +276,17 @@ export function validate(verb, params, { denyHosts = [] } = {}) {
     const sub = params.submit === undefined ? false : params.submit;
     if (typeof sub !== 'boolean') throw new VerbError('submit must be true or false');
     p.submit = sub;
+  } else if (verb === 'select') {
+    const hasV = params.value !== undefined && params.value !== null;
+    const hasL = params.label !== undefined && params.label !== null;
+    if (hasV === hasL) throw new VerbError('give exactly one of value or label');
+    const k = hasV ? 'value' : 'label';
+    if (typeof params[k] !== 'string') throw new VerbError(`${k} must be a string`);
+    if (params[k].length > OPTION_CAP) throw new VerbError(`${k} is too long`);
+    if (k === 'label' && !params.label.trim()) throw new VerbError('label must not be empty');
+    p[k] = params[k];
+  } else if (verb === 'key') {
+    p.combo = normalizeCombo(params.combo);
   } else if (verb === 'scroll') {
     p.pages = int(params, 'pages', -10, 10, 1);
     if (!p.pages) throw new VerbError('pages must not be 0');
@@ -187,7 +328,8 @@ const DOING = {
   open_tab: 'opening', navigate: 'loading', read_page: 'reading', scroll: 'scrolling',
   scroll_to_element: 'scrolling to an element on', screenshot_tab: 'taking a screenshot of',
   close_tab: 'closing a tab on', list_tabs: 'listing its tabs',
-  click: 'clicking on', type: 'typing on',
+  click: 'clicking on', type: 'typing on', select: 'choosing an option on',
+  hover: 'hovering on', key: 'pressing a key on', back: 'going back on', forward: 'going forward on',
 };
 export function describe(verb, host) {
   const d = DOING[verb] || verb;

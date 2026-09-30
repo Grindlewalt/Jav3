@@ -14,9 +14,10 @@
 // beside the classic one). Voice and Artifacts are deliberately
 // absent — their routes still work, they are just not advertised — and
 // Network and Logs are Review's sub-tabs now, not destinations of their own.
-import { createContext } from 'react'
+import { createContext, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import { badge } from './format.js'
+import { tabTitle } from './securityCopy.js'
 
 // ---- icons ----
 // One glyph per destination — 24x24, 1.7 stroke, round caps, currentColor.
@@ -95,7 +96,7 @@ export const NAV_ITEMS = [
   { to: '/vms', label: 'VMs', icon: 'vms', primary: true, dot: 'vms' },
   { to: '/tools', label: 'Tools', icon: 'tools', primary: true },
   { to: '/settings', label: 'Settings', icon: 'settings', primary: true },
-  { to: '/memory', label: 'Memory', icon: 'memory' },
+  { to: '/memory', label: 'Memory', icon: 'memory', count: 'memory' },
   { to: '/schedules', label: 'Schedules', icon: 'schedules' },
   { to: '/shell', label: 'Shell', icon: 'shell' },
 ]
@@ -147,4 +148,10 @@ export function NavList({
              count={counts[item.count] || 0} dot={dots[item.dot]} role={itemRole}
              onClick={onNavigate} tabIndex={tabIndex} />
   ))
+}
+
+// The browser tab's title follows the route and wears the pending count, so a
+// background tab can say that something is waiting. App calls it once.
+export function useTabTitle(pathname, count) {
+  useEffect(() => { document.title = tabTitle(pathname, count) }, [pathname, count])
 }

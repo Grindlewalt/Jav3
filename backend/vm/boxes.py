@@ -667,7 +667,10 @@ async def _own_box(slug: str, eff: dict) -> Box:
         if (existing.runtime != (eff.get("runtime") or "kvm") and not _bound(existing)
                 and not (ctl is not None and ctl.running())):
             # a stopped, idle box on the old runtime: disposable, re-made below
-            await destroy(existing)
+            from . import boxlog
+            async with boxlog.action(existing, "destroyed", reason=(
+                    f"runtime changed to {eff.get('runtime') or 'kvm'}")):
+                await destroy(existing)
         else:
             follow_profile_image(existing, eff.get("image"))
             return existing
@@ -683,7 +686,10 @@ async def _own_box(slug: str, eff: dict) -> Box:
             victim = idle_project_box(exclude=f"p-{slug}")
             if victim is None:
                 raise
-            await destroy(victim)
+            from . import boxlog
+            async with boxlog.action(victim, "destroyed",
+                                     reason=f"idle, gave way to p-{slug} (box cap)"):
+                await destroy(victim)
     raise BoxCapError("no box could be freed")
 
 
@@ -857,9 +863,11 @@ def controller(box: Box):
 
 async def _emit(event: str, box: Box) -> None:
     from .. import bus
+    from . import boxlog
     for fn in list(_hooks):
         await fn(event, box)
     bus.publish(BUS_CHAN, {"type": event, "box": box.to_json()})
+    await boxlog.on_emit(event, box)       # the box's history (never raises)
 
 
 async def box_up(box: Box) -> None:
@@ -886,18 +894,32 @@ async def stop(box: Box) -> None:
     await ctl.teardown()
 
 
-async def destroy(box: Box, *, delete_data: bool = False) -> None:
+async def destroy(box: Box, *, delete_data: bool = False,
+                  reason: str | None = None) -> None:
     """Stop, release the reservation, delete its directory (and, on request,
-    its data via the WP3 deleters). The shared box can only be stopped."""
+    its data via the WP3 deleters). The shared box can only be stopped.
+    `reason` goes into the box's history (boxlog)."""
     import shutil
-    await stop(box)
+    from . import boxlog
     if box.is_shared:
+        await stop(box)
         return
-    if delete_data:
-        for fn in list(_data_deleters):
-            await fn(box)
-    registry.release(box.id)
-    shutil.rmtree(box.dir, ignore_errors=True)
+    why = " ".join(x for x in (reason, "(data deleted)" if delete_data else None) if x)
+    async with boxlog.action(box, "destroyed", reason=why or None):
+        await stop(box)
+        if delete_data:
+            for fn in list(_data_deleters):
+                await fn(box)
+        registry.release(box.id)
+        shutil.rmtree(box.dir, ignore_errors=True)
+
+
+async def restart(box: Box) -> None:
+    """Stop and boot again: a fresh overlay (KVM) or a fresh container."""
+    from . import boxlog
+    async with boxlog.action(box, "restarted"):
+        await stop(box)
+        await start(box)
 
 
 async def stop_all() -> None:
@@ -914,6 +936,7 @@ async def reap_idle() -> None:
     """Stop + release project boxes idle past vm_box_idle_stop_seconds (the
     same as a scrub: they are disposable). Service/builder boxes are managed
     by their owners (WP3/WP5)."""
+    from . import boxlog
     window = settings.vm_box_idle_stop_seconds
     if not settings.vm_boxes_enabled or not window:
         return
@@ -924,7 +947,48 @@ async def reap_idle() -> None:
         ctl = box.ctl
         idle = getattr(ctl, "idle_since", None)
         if ctl.inflight == 0 and idle is not None and now - idle >= window:
-            await destroy(box)
+            async with boxlog.action(box, "idle_stopped", actor="reaper",
+                                     reason=f"idle {_mins(now - idle)} "
+                                            f"(stops at {_mins(window)})"):
+                await destroy(box)
+
+
+def _mins(s) -> str:
+    """45s, 4m, 1h05m: the /vms screens' idle-timer words. Pure."""
+    s = max(0, int(s or 0))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h{s % 3600 // 60:02d}m"
+
+
+def _wall(mono: float | None) -> float | None:
+    """A time.monotonic() stamp as wall-clock epoch seconds."""
+    return None if mono is None else round(time.time() - (time.monotonic() - mono), 1)
+
+
+def idle_timer(box: Box, ctl, running: bool) -> dict:
+    """When the reaper acts on this box, from the controller's idle clock.
+    project: stopped and released after vm_box_idle_stop_seconds idle (boxes
+    on); shared: scrubbed (rebooted fresh) after vm_idle_scrub_seconds (on
+    when > 0). Services and builders have no idle stop. `idle_s` / `stops_in_s`
+    are server-computed, so a client's clock does not matter."""
+    out = {"idle_since": None, "idle_s": None, "stop_action": None,
+           "stop_after_s": None, "stops_at": None, "stops_in_s": None}
+    if box.kind == "project" and settings.vm_boxes_enabled and settings.vm_box_idle_stop_seconds:
+        out.update(stop_action="stop", stop_after_s=int(settings.vm_box_idle_stop_seconds))
+    elif box.is_shared and settings.vm_idle_scrub_seconds:
+        out.update(stop_action="scrub", stop_after_s=int(settings.vm_idle_scrub_seconds))
+    idle = getattr(ctl, "idle_since", None) if ctl is not None else None
+    if not running or idle is None or getattr(ctl, "inflight", 0):
+        return out
+    now = time.monotonic()
+    out.update(idle_since=_wall(idle), idle_s=int(now - idle))
+    if out["stop_after_s"]:
+        left = max(0, out["stop_after_s"] - out["idle_s"])
+        out.update(stops_in_s=left, stops_at=round(time.time() + left, 1))
+    return out
 
 
 def _proc_stats(pid: int | None) -> dict:
@@ -979,11 +1043,38 @@ def status_json(box: Box) -> dict:
     target = (box.image[0], image_version(box.image[0], box.image[1]))
     now = box.booted_image if running and box.booted_image else target
     row["image"] = {"variant": now[0], "version": now[1]}
+    inflight = getattr(ctl, "inflight", 0) if ctl else 0
     return {**row,
             "restart_needed": bool(running and box.booted_image
                                    and box.booted_image != target),
             "state": "running" if running else "stopped",
             "rss_bytes": st["rss_bytes"], "cpu_pct": cpu_pct,
             "uptime_s": int(time.monotonic() - booted) if running and booted else None,
-            "inflight": getattr(ctl, "inflight", 0) if ctl else 0,
-            "disk": _disk(box)}
+            "inflight": inflight,
+            "disk": _disk(box),
+            # at a glance (the /vms screens): who it serves, what it costs,
+            # what it is doing, when the reaper acts, what last went wrong
+            "projects": ([box.project] if box.project else []) + sorted(
+                box.joined - {box.project}),
+            "ram_cost_mb": ram_cost(box.mem_mb, box.runtime),
+            "started_at": _wall(booted) if running and booted else None,
+            "activity": _activity(ctl, running, inflight),
+            "last_error": _last_error(ctl),
+            **idle_timer(box, ctl, running)}
+
+
+def _activity(ctl, running: bool, inflight: int) -> str:
+    """One word: starting | busy | idle | stopped | failed."""
+    st = getattr(ctl, "state", None)          # the docker controller's state
+    if st == "failed" and not running:
+        return "failed"
+    if not running:
+        return "stopped"
+    if st == "starting" or getattr(ctl, "starting", False):
+        return "starting"
+    return "busy" if inflight else "idle"
+
+
+def _last_error(ctl) -> str | None:
+    err = getattr(ctl, "error", None) if ctl is not None else None
+    return str(err) if err else None

@@ -4,7 +4,7 @@ What the architecture is, what it actually buys, and — the point of this
 document — what it does **not** cover. Written to be read by someone deciding
 whether to trust the agent with a new capability. Last updated 2026-07-19,
 covering the monitored-egress build (Layers 1–6; deploy separation / Layer 7 is
-out of scope), amended 2026-07-20 for the **staging-quarantine removal** (operator decision: writes land live; git is the review/undo surface), and 2026-09-23 for the **removal of Computer Use and Cloudflare Access** (operator decision: LAN-first; see #12). Amended 2026-09-24 for **computer use rebuilt as `jav3-desk`** (see #15). **This supersedes the netless posture** — the guest now has a
+out of scope), amended 2026-07-20 for the **staging-quarantine removal** (operator decision: writes land live; git is the review/undo surface), and 2026-09-23 for the **removal of Computer Use and Cloudflare Access** (operator decision: LAN-first; see #12). Amended 2026-09-24 for **computer use rebuilt as `jav3-desk`** (see #15) and 2026-09-29 for **navigation** (element ids, description-based clicking, grounding; see #15, #18-#21). **This supersedes the netless posture** — the guest now has a
 real, monitored internet path, a deliberate trade of maximal containment for
 watchability and genuine developer autonomy.
 
@@ -25,8 +25,11 @@ quarantine was removed 2026-07-20): every write still crosses one host chokepoin
 a real secret value**, and runs the deterministic **diff gates** as an ADVISORY
 tripwire — flagged writes land but raise deduped security events. Git is the
 review/undo surface (projects are repos from creation with a baseline commit;
-commits/pushes remain operator-approved). Untrusted-derived memory
-carries a **persisted taint** that keeps it out of binding context. A prompt
+commits/pushes remain operator-approved). Notes an agent writes to memory are
+**quarantined until the operator approves them**; the taint stamp on a note
+is a warning shown to the operator at that moment, not the gate (residual
+#23 lists which channels into the prompt are approval-gated, which are
+tagged and withheld, and which are not gated at all). A prompt
 injection that reaches code execution lands in a box with no secrets, no LAN, and
 a watched, policy-gated, cuttable pipe to the internet.
 
@@ -45,8 +48,12 @@ a watched, policy-gated, cuttable pipe to the internet.
 - **Fast exfil / beaconing.** High-entropy hosts, volume spikes and beacon
   cadence auto-cut the destination (nftables drop on both guest-forward and
   host-output) and raise a critical alert.
-- **Laundered memory.** Memory promotions made after untrusted content is
-  consumed are taint-stamped and excluded from binding context. (Canonical-file
+- **Laundered memory notes.** An agent-written note is never binding until the
+  operator approves it, whatever the turn read; a write onto a note that IS
+  binding becomes a proposal and leaves the note as it was; a note written
+  after untrusted content also carries a taint stamp the operator sees, and
+  approval is the only thing that clears it. (This covers memory NOTES only:
+  project files are a different channel, see residual #23. Canonical-file
   protection CHANGED 2026-07-20: guest edits now apply to the real files at turn
   end — see residual #5/#6.)
 - **base_url key-exfil seam.** The model gateway now refuses any guest-supplied
@@ -384,9 +391,37 @@ a watched, policy-gated, cuttable pipe to the internet.
       Wayland client; anything else running as the operator can do the same.
       The client adds no new privilege, but it is a long-lived process holding
       a credential that drives the desktop.
-    - **Not yet built:** GNOME/KDE portals and `/dev/uinput` (M2), and
-      accessibility-tree targeting (M4). macOS relies on Accessibility and
-      Screen Recording grants to the python that runs the client.
+    - **Input reaching Jav3's own approval UI.** The operator is logged in to
+      Jav3 in a browser on that same computer. A screenshot of it shows the
+      approval queues (egress, grants, secrets, packages), and `desk_click`
+      can press their buttons: the agent would approve its own requests.
+      `desk_open` refuses the server's own names (the Host the computer
+      connected by, the LAN names and IPs, `csrf_allowed_hosts`, loopback and
+      its numeric spellings, `user@` and backslash URLs), so it cannot steer a
+      tab there. It cannot stop a click reaching a Jav3 tab that is ALREADY
+      open, or a redirect from another site, or a name that only resolves to
+      the server. On a computer granted Input, keep Jav3 in a browser profile
+      the agent is not shown, or closed.
+    - **Not yet built:** GNOME/KDE portals and `/dev/uinput` (M2). Wayland
+      backends and Windows send no element list (clicks there are by
+      coordinates). macOS relies on Accessibility and Screen Recording grants
+      to the python that runs the client.
+    - **Navigation (2026-09-29).** Every screenshot now carries a numbered
+      element list from the platform accessibility tree, and `desk_click`
+      takes an element id, a description (`target=`, #20) or coordinates;
+      `desk_wait` and `desk_drag` are new verbs (screen and input grants).
+      An id resolves only against the latest frame of this turn and is
+      refused if absent; the point it produces then goes through the same
+      bounds check, rate limit, taint and audit as any coordinate. Labels are
+      other people's words: control and bidi characters are stripped, they are
+      length-capped and JSON-quoted so a label cannot pose as another list
+      line, and the result taints the turn. The window group headers and the
+      role are not quoted (whitespace is collapsed, so they cannot start a
+      new line). A locked screen or sleeping display is refused with one
+      sentence rather than photographed. Input is unchanged in kind: still
+      the operator's trust in the model against whatever is on screen, now
+      with faster, more reliable clicks. `desk_open` offers every installed
+      app (#21); a screenshot can leave the host for grounding (#19).
 
 16. **Persistent packages and image variants (boxes, WP5).** Behind
     `vm_boxes_enabled`. An agent may ask (`package_request`) for an apt, pip
@@ -451,6 +486,211 @@ a watched, policy-gated, cuttable pipe to the internet.
     - **Synthetic input.** Clicks and typing are DOM events (`isTrusted`
       false), not OS input: some sites ignore them, and no debugger
       permission is taken to do better.
+    - **Navigation additions (2026-09-29).** `browser_click` also takes x, y
+      (pixels of a `browser_screenshot_tab` from this turn under 120 s old,
+      refused once the page scrolled or navigated since) and `browser_type`
+      may omit the element to type into whatever has focus (it still needs a
+      read of the tab from this turn). Both run in the extension under the
+      same checks as an id: per-site consent on the tab's current site, the
+      Jav3-host refusal, the password/file refusal, a click that lands in an
+      iframe is refused (go by id), focus inside a cross-origin frame needs
+      that frame's domain allowed; the server still refuses text carrying a
+      stored secret's value. Not covered: a page that moves its own layout
+      after the screenshot (a late banner, an overlay) receives the click at
+      the old coordinates. New verbs: `select`, `hover` and `key` (one key or
+      combo) need Act and a fresh read; `back` and `forward` navigate under
+      Read like `navigate`. `read_page` prints the page text, then the
+      element list (labels JSON-quoted, whitespace collapsed), then, when a
+      page has little button markup, a "candidates" block of likely-clickable
+      text. The page text is free text, so a page can write lines that look
+      like element-list entries into it; the real ids are only what the
+      extension reports and an id that is not on the page is refused as
+      stale. The turn is tainted before any of it is returned.
+
+19. **Screenshots leave the host for a grounding model (2026-09-29).**
+    `desk_click(target=…)` that no element label settles sends the latest
+    desk frame (the whole downscaled screenshot, at most 1280 px on its long
+    edge, plus the description) through the model gateway to the vision model
+    chosen in Settings → Grounding: `JARVIS_GROUNDING_MODEL` if set, else the
+    operator's pin, else the winner of the last model-finder run; with none of
+    those nothing is sent and the click is refused. The gateway routes it to
+    that model's provider with the host-side key and budgets and meters it like
+    any model call; the guest sees no image and no key. What is closed: the
+    request is made only after the grant, the ceiling, the locked-screen and
+    the fresh-frame checks pass, so a refused click sends nothing; the model
+    finder itself uses synthetic screens drawn by the server, not the
+    operator's; the reply is parsed to a point and nothing else of it reaches
+    the agent; the agent supplies only the description (300 characters used)
+    and no tool argument reaches the model choice, the provider or the extra
+    request fields. What deliberately remains:
+    - **Whatever is on screen goes to a third party.** The image is not
+      redacted or masked: an open password manager, a mail, a banking page or
+      a terminal is sent as pixels. The provider is one of the image-capable
+      models the operator switched on, ranked by measured hit rate, then
+      price, then latency, so "automatic" can land on a provider the operator
+      enabled for chat and never thought of as seeing the screen. The desk
+      audit row records the target, model id and confidence of a grounded
+      click; there is no separate record of each image sent. Pin a model you
+      accept seeing your screen, or leave grounding unset and click by id.
+    - **The choice is not re-checked at call time.** The ranking file is read
+      as is, without confirming the model is still one of the enabled
+      candidates.
+
+20. **Description-based clicking is a confused deputy (2026-09-29).**
+    `desk_click(target="the Save button")` is answered first from the element
+    list (a unique exact label, or a unique label that contains the text), else
+    by the grounding model. Either way the agent trusts something that reads
+    attacker-authorable pixels and text to pick the element. What mitigates
+    it: the click still passes every gate a coordinate does (grant, fresh
+    frame from this turn, bounds, rate limit, taint, audit); the result line
+    says how the point was chosen (label, or grounded with model and
+    confidence) and the screenshot after it shows what happened; a miss is
+    "could not find", not a guess; two label matches fall through to the
+    picture. What is not mitigated:
+    - **The confidence is reported, not enforced.** Nothing compares it to a
+      threshold; a low-confidence point is clicked.
+    - **On-screen text can steer the model.** A dialog or page that draws a
+      second, look-alike "Save" (or text saying where the real one is)
+      competes with the real element for the grounding model's answer, and
+      nothing checks the answer against the accessibility tree. The reply
+      parser accepts the first JSON object it finds, so a model that quotes
+      on-screen JSON before answering can be steered by it.
+    - **Label matching is by substring.** A description that is a fragment of
+      exactly one label ("OK" in "Book now", "Delete" in "Delete account")
+      resolves to that element without a look at the picture, including when
+      the control the agent meant is missing from the tree.
+    - **The screen may have moved.** A point is resolved on a frame up to 60 s
+      old (plus grounding's seconds) and clicked on the live screen; the
+      after-shot says what changed, not what was intended.
+    Input on is still trust in the model against whatever it reads; targets
+    make that reading easier to exploit, not a new grant.
+
+21. **`desk_open` offers every installed app (2026-09-29).** On macOS every
+    `.app` in the usual folders is offered, on Linux the browsers/editors on
+    PATH plus visible `.desktop` entries. The client drops a fixed set of
+    terminals and script runners by name (Terminal, iTerm, Warp, Alacritty,
+    kitty, WezTerm, Ghostty, Hyper, Tabby, Script Editor, Automator, Shortcuts,
+    the common Linux terminal emulators), any name containing "terminal", and
+    `.desktop` entries marked `Terminal=true` or in the TerminalEmulator
+    category. The server accepts only names the client sent in its hello,
+    matching a fixed name pattern; a URL must be http(s). What deliberately
+    remains:
+    - **The exclusion is by name, and is friction, not a wall.** Anything
+      else that runs commands is offered: editors and IDEs with an integrated
+      terminal (VS Code, Xcode; `code` is in the Linux default list), IDLE,
+      Emacs, System Settings, Keychain Access. And with Input granted the
+      agent can reach a terminal without `desk_open` at all, by keystroke
+      (Spotlight, a launcher): the client's key deny list is a few
+      compositor-exit combos. This is the "Input is shell by other means"
+      residual of #15, not a new one; the wider list makes it quicker.
+    - **`desk-apps.json` overrides the list as is.** When that file exists in
+      the client's config directory (mode 0700) its entries are taken
+      unfiltered, so an entry named "Terminal" would be offered. Only someone
+      with write access to that directory can add one; the file is read when
+      the client starts.
+    - **Opening an app is not gated per app.** The grant is Input; there is
+      no per-app approval, and the after-screenshot is the only report of what
+      launched.
+
+22. **Captured model context (raw-context capture, on by default,
+    2026-09-29).** Every model call's exact message array is stored in
+    `model_calls.context` (`backend/ctxstore.py`). It has been on by default
+    since the F4 merge: no state row means capturing, and only the switch in
+    Logs > Cost turns it off. It covers every call the host makes to the
+    model, including the ones a box's loop makes through the gateway and the
+    utility calls (chat naming, summaries). What is stored is what was sent:
+    the system prompt (with the memory notes, `project.md` and agent
+    definition assembled into it), the whole history, and every tool result
+    the model read: file contents, shell output, `web_read` text. Images are
+    replaced by a size placeholder. Each call is a zlib frame or a delta
+    against the conversation's previous call (a full frame at least every 24
+    calls). It is compressed, not encrypted, and lives in the same SQLite
+    file as everything else on the host. Blobs are nulled after
+    `context_capture_keep_days` (7; Logs offers 1, 3, 7, 14 or 30). The pass
+    runs at most every ten minutes after a model call and hourly from the
+    storage watch, and a delta chain goes as a unit, when its newest call is
+    past the cutoff. Token counts and costs are kept. What is closed: capture
+    is host-side (a guest has no route to it); the read route
+    (`/api/logs/calls/{id}/context`) and the switch and retention controls are
+    cookie-session only, so a chat or desk device token cannot reach them; a
+    storage notice fires when captured bytes pass a threshold. What
+    deliberately remains:
+    - **A second copy of everything the model saw, for days.** Capture does
+      no scrubbing of its own. Whatever reached the model is kept as it was
+      sent: a secret the operator pasted into a chat, a value sitting in a
+      file the agent read, personal data in a fetched page. Anyone who can
+      read the database file reads it.
+    - **Deleting a chat does not delete it.** Chat delete removes the
+      conversation, its messages and tool calls, not its `model_calls` rows.
+      The context stays until retention nulls it. The shortest retention
+      offered is one day, and turning capture off stops new capture without
+      removing what is stored (the prune control deletes what is older than N
+      days, N at least 1).
+    - **Backups carry it.** The database snapshot goes to the backup remote
+      unencrypted (see the backup row below), so a captured blob lives as long
+      as that backup does, whatever the retention.
+
+23. **Memory and the other channels into the prompt (added 2026-09-29).**
+    Text that rides the system prompt is what an injection wants to reach. The
+    channels differ in how well they are guarded, and this is the honest list:
+    - **Approval-gated (nothing reaches the prompt until the operator acts).**
+      Memory notes: an agent's note is `source: agent, approved: false` and
+      stays out of the standing memory and the rules tail until the operator
+      approves it on the Memory page (approving also clears its taint stamp).
+      A write onto a note that is already binding (operator-written, or
+      approved) is stored as a proposal in `notes/.proposals/`, which prompt
+      assembly never reads; the note stays exactly as it was and the operator
+      approves or rejects the proposal on `/api/memory/proposals` (a diff, bound
+      to the text they read). Frontmatter that cannot be read fails closed
+      (pending and tainted). Schedules an agent proposes are created paused and
+      wait for approval. Git commits and pushes wait for approval.
+    - **Tagged and withheld, live on the operator's say-so.** A journal line
+      written in a turn that had read untrusted content is tagged
+      `[unverified]` in `project.md`: it stays in the file, the operator sees
+      it, and it is left out of the prompt and the all-projects rollup until the
+      operator removes the tag. `create_agent` (which writes a description into
+      the agents index and a prompt that runs unattended) is refused outright
+      in such a turn. A binding note cannot be deleted from such a turn.
+    - **Not gated.** A journal line or an agent definition written from a turn
+      the ledger thinks is clean goes live at once. **Project files an agent
+      writes with `write_file` / `edit_file` / `run_code` are not taint-gated at
+      all:** `project.md` and any file the operator ticked for the context are
+      loaded whole into every prompt of that project, and the diff gates that
+      see the write are advisory. The all-projects rollup (`## Summary` of every
+      project's `project.md`, one line of at most 300 chars) and the agents index
+      (one line of at most 200 chars per agent) are size-capped, not vetted.
+    - **What marks a turn as having read untrusted content.** By tool name:
+      `web_read`, `web_search`, `read_and_summarize`, `research`, `desk_*`,
+      `browser_*`, `local_*`, `service_logs`, `projector_*` (MCP results);
+      also an imported skill's body, a peer's message, a remote screenshot.
+      A child agent's taint passes up to the turn that delegated to it when
+      the child ends, and a child starts as tainted as its parent. Reading a
+      note that carries a taint stamp (or whose frontmatter is unreadable), or
+      a tainted proposal, taints the turn; reading the agent's own clean
+      pending notes does not. The egress proxy taints every live turn of a
+      project when it allows a connection (package registries excepted), which
+      covers a `curl` or `git clone` inside `run_code`. Files a tainted turn
+      wrote are remembered on the host (`backend/taintpaths.py`), and the guest
+      reports a `read_file` / `search_codebase` / `crawl_codebase` result that
+      touches one, or a `run_code` whose code names one, before the text returns.
+    - **What that still misses.** A `run_code` program that opens a tainted file
+      by a name it computes. A guest that lies: the file half is guest-reported
+      (the network half is host-side), and a compromised guest can leave the
+      report out. Package-registry traffic (a hostile package's install output).
+      A tool call issued in the same round as the call that taints the turn (the
+      ledger is read when the call arrives). The taint stamp on a note tells the
+      operator where it came from; it does not stop the model from being
+      steered inside the turn that read the text, and approving a note is a
+      judgement the operator makes on text an injection may have shaped.
+    - **What the operator can see and undo.** Deleting a note (by an agent or
+      the operator) moves it to `notes/.trash/` (500 entries kept, restorable
+      from `/api/memory/trash`; the directory sits inside the memory dir, so the
+      backup sync carries it). Every agent deletion, proposal, refusal and tagged
+      journal line raises a security event (`memory_deleted`, `memory_proposed`,
+      `memory_refused`, `journal_unverified`; `warn` for a proposal, a refusal or
+      a binding note's deletion, `info` audit lines otherwise); approving a
+      proposal raises `memory_approved`. A proposal is rejected with one call; a tagged journal
+      line is approved by editing the tag out, or deleted like any line.
 
 ## Residual-risk register (Certiv artifact)
 
@@ -459,7 +699,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Exfil via allowed host (HTTP/S) | High | **Medium** | Policy + volume/entropy/cadence anomaly + auto-cut cap rate & shape; low-and-slow within limits is the residual. **The primary new risk.** |
 | HTTPS payload exfil / no injection | High | Medium | Host/bytes/cadence still watched + cuttable; payload opaque until MITM lands. Authenticated HTTPS via host tools. |
 | DNS covert channel | Medium | Medium | Forced through logged host resolver + entropy alert; tunnelling physically possible. |
-| Memory poisoning / laundering | Critical | Low–Med | Persisted taint + static approved:false keep it out of binding context; semantic influence on tainted context remains. |
+| Memory poisoning / laundering | Critical | **Medium** | Notes: agent-written = pending until approved, writes onto binding notes are proposals, deletes go to a trash with an audit event, unreadable frontmatter fails closed. Other channels into the prompt are NOT all approval-gated (residual #23: project files written with `write_file` are ungated). Taint is a warning and a partial gate, and its coverage has known gaps. Semantic influence on tainted context remains. |
 | Generated-code backdoor | Critical | **Medium-High** | Advisory gates + git history only — no pre-landing human review since 2026-07-20; execution stays guest-only and commits stay gated. Release gate (planned) is the compensating control. |
 | Secret exposure | Critical | Very Low | No secrets in guest; wire injection AND web_read substitution are grant-scoped per project (profile `secrets` + project grants, a project revoke wins; the web path ignored grants until 2026-09-26); service boxes never get injection; key never crosses to a non-DeepSeek endpoint. |
 | LAN pivot | High | Very Low | nftables drops all RFC1918 + operator servers; guest reaches only host proxy/DNS. Holds for every project without LAN access (the default); the next row covers one that has it on. |
@@ -479,8 +719,12 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Web origin (CSRF / agent HTML) | Critical | Low | One global scheme+host+port same-origin gate for every cookie state change and WebSocket; agent files served sandboxed/inert. Residual = a missing-Origin non-browser client holding the cookie. |
 | Host-side project runner | Critical | Medium | Executes on the host by design; same-origin gated and audited per run. Existence is the operator's decision. |
 | Backup contents and destination | High | Medium | DB snapshot (incl. bcrypt hashes) uploaded unencrypted; secrets only through rclone crypt; destination changes raise a security event; rclone binary constrained; git hooks never restored. |
-| Computer use (`jav3-desk`) | Critical | **Medium** | Desk-scoped token, server-side per-computer grants under a client ceiling (shell off until allowed at the keyboard), screenshot-before-input, rate limits, audit, taint with shell falling back to asking. Residual = on-screen prompt injection steering granted Input, and Input reaching a terminal. |
-| Browser use (`jav3-browser`) | Critical | **Medium** | Browser-scoped token (first-frame, socket only), per-browser per-project Read/Act grants (none by default), own unfocused window and own tabs only, per-site consent in the extension, action notification with Cancel, Pause, closed verb list checked both sides, read-before-act, secret-value and Jav3-host refusals, taint like web_read, audit. Residual = acting with the operator's sessions on allowed sites outside the egress proxy, page prompt injection steering granted Act, host-level (not page-level) consent. |
+| Computer use (`jav3-desk`) | Critical | **Medium** | `desk_open` refuses Jav3's own hosts (Input can still reach an already-open Jav3 tab: keep it out of a granted computer's view). Desk-scoped token, server-side per-computer grants under a client ceiling (shell off until allowed at the keyboard), screenshot-before-input, rate limits, audit, taint with shell falling back to asking; since 2026-09-29 also element ids resolved only against this turn's frame, clicks by description or coordinates through the same gates (#20), locked or asleep screens refused. Residual = on-screen prompt injection steering granted Input, and Input reaching a terminal., a wider `desk_open` app list whose terminal exclusion is by name (#21), and the live screen having moved since the frame a point was resolved on. |
+| Browser use (`jav3-browser`) | Critical | **Medium** | Browser-scoped token (first-frame, socket only), per-browser per-project Read/Act grants (none by default), own unfocused window and own tabs only, per-site consent in the extension, action notification with Cancel, Pause, closed verb list checked both sides, read-before-act, secret-value and Jav3-host refusals (also for clicks by x, y and typing into the focused element, under the same per-site and cross-origin-frame consent), taint like web_read, audit. Residual = acting with the operator's sessions on allowed sites outside the egress proxy, page prompt injection steering granted Act, host-level (not page-level) consent., a page moving its layout after the screenshot a coordinate click uses, and page text that imitates element-list lines in `read_page`. |
+| Screenshots sent to a grounding model provider | High | **Medium** | Only when `desk_click(target=…)` is not settled by an element label, only to a model the operator enabled and pinned or ranked in Settings → Grounding, only after grant / ceiling / fresh-frame / unlocked checks; via the model gateway (host-side key, budgeted, metered); the model finder uses synthetic screens; the agent cannot choose the model, provider or request fields; the desk audit row keeps target, model and confidence. Residual = the whole screenshot, unredacted, reaches a third-party provider (automatic mode picks by hit rate, price and latency, not by trust), no per-image audit row, no re-check that the ranked model is still one the operator wants. |
+| Description-based clicking (`desk_click target=`) | High | **Medium** | Same gates as any coordinate click; label match first, unique only; "could not find" instead of a guess; the result says how the point was chosen and returns the after-screenshot; taint. Residual = on-screen text can steer the grounding model to a look-alike element; confidence is shown, never a threshold; label matching is by unique substring; the grounded point is not cross-checked against the accessibility tree; the screen may change between frame and click. |
+| Wider `desk_open` app list | Medium | Low–Medium | Server accepts only client-reported names and http(s) URLs; client drops terminals and script runners by name and terminal-flagged `.desktop` entries; shell has its own grants. Residual = the exclusion is by name (IDEs with terminals, Emacs, IDLE, System Settings are offered), a keystroke reaches a terminal anyway with Input, and `desk-apps.json` entries are taken unfiltered. |
+| Captured model context (`backend/ctxstore.py`, on by default) | High | **Medium** | Host-side only; read route, switch and retention are cookie-session only; blobs age out after 7 days by default (1-30 chosen in Logs); images redacted. Residual: an unscrubbed, compressed second copy of everything the model saw (system prompt, memory, tool results) that outlives its chat (chat delete leaves it) and rides in the unencrypted DB backup (#22); incognito turns are excluded. |
 | `/local` chats (agent file + shell tools on the `jav3` client's machine) | Critical | **Medium** | Opt-in per chat at the client; the server can only ask over the turn's stream, the client executes. Writes, edits and commands wait for y / a (always, per kind, this session) / n at that keyboard; reads never ask and may reach any path the operator's user can. Only the actor that opened the chat may answer a call; unanswered calls time out (15 min) and die with stop; args carrying a stored secret are refused; results are capped, secret-scrubbed and taint the turn. Residual = a prompt-injected turn reading local files the operator never meant to share (they go to the model provider), and "always" for shell turning every later command in that session into an unattended one. |
 | Permission modes (`yolo` / `auto` / `ask` per chat, permissions.py) and `ask_user` (operator_ask.py) | Low | **Low** | An operator control, not a boundary: the VM, the write chokepoint, diff gates and git/egress approvals hold in every mode, and `yolo` (the default) is today's behaviour. `auto` sends only the tool name and args to a one-shot judge (fixed prompt, args JSON-quoted between per-call random markers, 5 output tokens, only an exact SAFE runs); args that address the reviewer (verdict words, injection phrasing, markers) skip it and ask; any judge error asks. Always-rules are exact tool + normalised prefix per project: a run_code rule never matches a command with shell chaining/substitution, and none is offered for git remotes/commits or broad heads (rm, curl, sh, python…); revocable in Settings and /security. In-guest writes are gated by the guest asking the host first, so a compromised guest can skip the ask (it could already write its own disposable copy; staging still crosses the host gates). Residual = a judge talked into SAFE by args that avoid the filter, and an operator clicking "always" too broadly. |
 | Process telemetry is guest-reported (Security > Persistent, boxes flag) | Medium | **Medium** | The process tree, socket owners and per-socket byte counters come from inside the guest (`procwatch`), so the guest can lie. The host treats every field as untrusted. Replies are capped at 8 MiB with a 3 s timeout. It keeps at most 2048 processes, 4096 sockets and 64 connections per process. Strings are clipped, and control and bidi characters are replaced. ppid cycles cannot hang the tree builder. A box raises at most 10 alerts an hour, and each (exe, unit) alerts once per boot. Host truth comes from the host's own kernel: an established connection from the guest IP that no reported process owns for two polls, or byte counts more than 5% (+64 KiB) apart, raise `proc_report_mismatch`. Proxy `egress_events` (peer_port) give host names, and relay counters give inbound bytes. "Not OS" means not in the image's baseline (exe, unit) set; when no baseline is recorded, a small built-in set is used instead. Residual: a root implant with no network traffic, or one reusing a baseline (exe, unit), can hide from the tree. Short connections that open and close between polls are named but never flagged. Without iproute2 on the host (or on a non-Linux dev machine), the host-truth checks are skipped and connections show as unverified. |

@@ -205,6 +205,34 @@ def _group(e: dict) -> str:
     return "yours" if e.get("kind") == "skill" else "builtin"
 
 
+def _why_not(e: dict) -> str:
+    """Why a built-in tool is not offered to the model right now, as a phrase
+    ('' = it is). The same gates as registry._requirements_met, with words."""
+    if e.get("enabled", True) is False:
+        return "switched off in its tool folder: the model is never offered it"
+    if e.get("clash"):
+        return str(e["clash"])
+    if e.get("requires_desk") in (True, "shell"):
+        from . import desk
+        if not desk.offered():
+            return "needs a computer connected for computer use"
+        if e["requires_desk"] == "shell" and not desk.shell_offered():
+            return "needs shell granted for the connected computer (Settings, Computer use)"
+    if e.get("requires_browser") is True:
+        from . import browser
+        if not browser.offered():
+            return "needs the browser extension connected"
+    if e.get("requires_local") is True:
+        return "only offered in local chats"
+    required = e.get("requires_settings")
+    if isinstance(required, str):
+        required = [required]
+    missing = [str(k) for k in (required or []) if not getattr(settings, str(k), None)]
+    if missing:
+        return f"needs the setting {', '.join(missing)}"
+    return ""
+
+
 @router.get("/tools")
 async def list_tools():
     """Everything in the registry, granted or not — the Tools tab reads this.
@@ -220,6 +248,11 @@ async def list_tools():
             "enabled": e.get("enabled", True) is not False and not e.get("clash"),
             "clash": e.get("clash", ""),
         }
+        if row["group"] == "builtin":
+            # `enabled` is the tool folder's own switch; `offered` is whether
+            # the model is handed it right now, and `reason` is why not
+            row["reason"] = _why_not(e)
+            row["offered"] = not row["reason"]
         if row["group"] == "imported":
             row.update({
                 "slug": e["dir"], "enabled": imported.offerable(e),

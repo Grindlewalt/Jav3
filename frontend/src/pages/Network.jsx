@@ -2,14 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, subscribeSse } from '../api.js'
 import { notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { useEgressDecide } from '../EgressDecide.jsx'
+import {
+  ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, AUTO_ALLOW_LABEL, AUTO_ALLOW_LEDE, DENY_TIP, REFUSED_TAG,
+  WAITING_LEDE,
+} from '../securityCopy.js'
 import { human, tsShort } from '../format.js'
 import { Link } from 'react-router-dom'
 import { Button, EmptyState, Input, Select, Tag, Toggle } from '../components/index.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import RunsIn from '../boxes/RunsIn.jsx'
 import {
-  allowHost, allowlist, approvePending, getLan, getPolicy, promoteAuto, promoteToProfile,
-  putLan, putPolicy, rejectPending, revokeAllow,
+  allowHost, allowlist, getLan, getPolicy, promoteAuto, promoteToProfile,
+  putLan, putPolicy, revokeAllow,
 } from '../boxes/api/policy.js'
 import {
   GENERAL, IMAGE_BUILD, needsProject, newSitesText, parseHosts, POLICY_FROM, projectLabel,
@@ -25,9 +30,6 @@ import {
 // plain text nodes, never markup.
 
 const FEED_CAP = 300
-
-// The operator's wording, verbatim — this is the whole disclaimer.
-const AUTO_LABEL = 'Auto (test only — can make mistakes; you can leave it on)'
 
 // egress_events.verdict -> what the row says, and the Tag that says it. Three
 // words only: allowed, blocked, cut. Auto decisions keep their manual twin's
@@ -60,28 +62,6 @@ function VerdictTag({ verdict }) {
 }
 
 const projLabel = (slug, names) => projectLabel(slug, names)
-
-// An unattributed row (shared box, no turn) goes on a PROJECT's list: the
-// operator names which. Resolves a slug, or null when cancelled.
-function usePickProject() {
-  const ask = useAsk()
-  return useCallback(async (host) => {
-    let slugs = []
-    try { slugs = ((await api('/api/projects')).projects || []).map((p) => p.slug) } catch { /* typed */ }
-    slugs = slugs.filter((x) => !x.startsWith('__'))
-    const got = await ask.prompt(
-      `${host} came from no project. Whose list should it go on?`
-        + (slugs.length ? ` (${slugs.join(', ')})` : ''),
-      slugs.length === 1 ? slugs[0] : '', { confirmLabel: 'Allow' })
-    const slug = (got || '').trim()
-    if (!slug) return null
-    if (slugs.length && !slugs.includes(slug)) {
-      notifyError(new Error(`no project "${slug}"`))
-      return null
-    }
-    return slug
-  }, [ask])
-}
 
 // ---- data hooks -----------------------------------------------------------------
 
@@ -151,8 +131,9 @@ function AutoToggle({ project, onChange }) {
       : 'this project only'
   return (
     <div className="net-auto">
-      <Toggle checked={!!mode?.effective} disabled={!mode} label={AUTO_LABEL}
-              onText={AUTO_LABEL} offText={AUTO_LABEL} onChange={flip} />
+      <Toggle checked={!!mode?.effective} disabled={!mode} label={AUTO_ALLOW_LABEL}
+              onText={AUTO_ALLOW_LABEL} offText={AUTO_ALLOW_LABEL} onChange={flip}
+              title={AUTO_ALLOW_LEDE} />
       <span className="dim small">{scope}</span>
     </div>
   )
@@ -163,10 +144,11 @@ function Counts({ project, tick }) {
   useEffect(() => { reload() }, [tick]) // eslint-disable-line
   const n = (k) => (c ? c[k] : '–')
   return (
-    <div className="net-counts" title="distinct hosts in the last 24 hours; waiting is now">
-      <span><b>{n('allowed')}</b> allowed</span>
-      <span><b>{n('denied')}</b> blocked</span>
-      <span className={c?.waiting ? 'net-count-waiting' : ''}><b>{n('waiting')}</b> waiting</span>
+    <div className="net-counts"
+         title="Sites, not requests. Allowed and blocked cover the last 24 hours; waiting is right now.">
+      <span><b>{n('allowed')}</b> allowed <span className="dim small">24 h</span></span>
+      <span><b>{n('denied')}</b> blocked <span className="dim small">24 h</span></span>
+      <span className={c?.waiting ? 'net-count-waiting' : ''}><b>{n('waiting')}</b> waiting <span className="dim small">now</span></span>
     </div>
   )
 }
@@ -174,38 +156,26 @@ function Counts({ project, tick }) {
 // ---- waiting for you --------------------------------------------------------------
 
 // Hosts the guest's code tried to reach that nobody has decided on. Allow
-// trains the allowlist up (the project's own list, or the shared one for a
-// project without its own); Deny keeps it out.
+// always trains the allowlist up (the project's own list); Allow 1 h lets it
+// through for an hour on no list; Deny keeps it out. WAITING_LEDE says so on
+// the page, and useEgressDecide (shared with the Queue) does the asking.
 function Waiting({ project, names, showProject, lastTry, tick, onDecided }) {
   const [pending, reload] = usePoll(`/api/egress/pending${q(project)}`, (r) => r.pending || [])
   useEffect(() => { reload() }, [tick]) // eslint-disable-line
-  const pick = usePickProject()
-  async function decide(p, verb) {
-    try {
-      if (verb === 'approve') {
-        let proj = null
-        if (needsProject(p)) {
-          proj = project || await pick(p.host)
-          if (!proj) return
-        }
-        await approvePending(p.id, proj)
-      } else {
-        await rejectPending(p.id)
-      }
-      reload(); onDecided?.()
-    } catch (err) { notifyError(err) }
-  }
+  const { decide, picker } = useEgressDecide(() => { reload(); onDecided?.() }, { project, names })
   const rows = pending || []
   return (
     <section className="net-sec">
       <div className="sbx-sec-head"><h3>Waiting for you</h3>
         <span className="sec-count">{rows.length}</span></div>
+      <p className="dim small net-lede">{WAITING_LEDE}</p>
       {rows.length === 0 && <EmptyState>nothing waiting</EmptyState>}
       <ul className="net-list">
         {rows.map((p) => {
           const last = lastTry(p.project_slug, p.host)
           const tried = last?.method
             ? `${last.method}${last.path ? ` ${last.path}` : ''}` : 'connect'
+          const label = needsProject(p) ? '' : projLabel(p.project_slug, names)
           return (
             <li key={p.id} className="net-wait">
               <span className="net-host mono" title={p.host}>{p.host}</span>
@@ -215,6 +185,8 @@ function Waiting({ project, names, showProject, lastTry, tick, onDecided }) {
                 {p.box_id && <Tag title="the box it came from">{p.box_id}</Tag>}
                 <span className="net-tried dim" title={tried}>
                   {p.hit_count}× · {tried}</span>
+                {p.refused && (
+                  <Tag tone="error" title={p.refused}>{REFUSED_TAG}</Tag>)}
                 {p.auto_verdict === 'unsure' && (
                   <Tag tone="pending" className="net-verdict auto"
                        title={p.auto_reason || ''}>auto: unsure</Tag>)}
@@ -222,16 +194,20 @@ function Waiting({ project, names, showProject, lastTry, tick, onDecided }) {
                   <Tag className="triage-flag" title={p.triage_reason || ''}>
                     ⚑ {p.triage_reason}</Tag>)}
               </span>
+              {p.refused && <span className="dim small net-refused">{p.refused}</span>}
               <span className="net-actions">
-                <Button onClick={() => decide(p, 'approve')}
-                        title={needsProject(p) ? 'unattributed: you pick the project whose list it joins' : undefined}>
-                  {needsProject(p) && !project ? 'Allow for…' : 'Allow'}</Button>
-                <Button variant="ghost" onClick={() => decide(p, 'reject')}>Deny</Button>
+                {!p.refused && <>
+                  <Button variant="ghost" onClick={() => decide(p, 'allow')} title={ALLOW_ALWAYS_TIP(label)}>
+                    {needsProject(p) && !project ? 'Allow always…' : 'Allow always'}</Button>
+                  <Button variant="ghost" onClick={() => decide(p, 'once')} title={ALLOW_ONCE_TIP}>
+                    Allow 1 h</Button></>}
+                <Button variant="ghost" onClick={() => decide(p, 'deny')} title={DENY_TIP}>Deny</Button>
               </span>
             </li>
           )
         })}
       </ul>
+      {picker}
     </section>
   )
 }
@@ -295,10 +271,10 @@ function DecisionRow({ d, names, onAllow }) {
 
 function Decisions({ feed, names, onChanged }) {
   const rows = useMemo(() => fold(feed), [feed])
-  const pick = usePickProject()
+  const { choose, picker } = useEgressDecide()
   async function allowAnyway(d) {
     try {
-      const proj = needsProject(d) ? await pick(d.host) : d.project
+      const proj = needsProject(d) ? await choose(d.host) : d.project
       if (!proj) return
       await allowHost(proj, d.host)
       onChanged?.()
@@ -318,6 +294,7 @@ function Decisions({ feed, names, onChanged }) {
                                         onAllow={allowAnyway} />)}
         </ul>
       )}
+      {picker}
     </section>
   )
 }
@@ -399,7 +376,11 @@ function PolicyLists({ project, names, projects, tick, onChanged }) {
   }
 
   const fromTag = (e) => {
-    const f = POLICY_FROM[e.from] || { text: e.from }
+    // an "Allow 1 h" is an auto entry with rule 'once': it says so, and Keep
+    // turns it into a real always-allow entry
+    const f = e.from === 'auto' && e.rule === 'once'
+      ? { text: '1 h', title: 'you allowed it for an hour: it expires on its own unless you keep it' }
+      : POLICY_FROM[e.from] || { text: e.from }
     return (
       <Tag className={e.from === 'auto' ? 'net-verdict auto' : ''}
            tone={e.from === 'auto' ? 'pending' : e.from === 'project' ? 'done' : undefined}
@@ -688,6 +669,7 @@ export function NetworkPanel({ slug }) {
         <AutoToggle project={slug} onChange={bump} />
         <Counts project={slug} tick={tick} />
       </div>
+      <p className="dim small net-lede">{AUTO_ALLOW_LEDE}</p>
       <Waiting project={slug} names={{}} lastTry={lastTry} tick={tick} onDecided={bump} />
       <Decisions feed={feed.slice(0, 60)} names={{}} onChanged={bump} />
       <PolicyLists project={slug} names={{}} projects={[]} tick={tick} onChanged={bump} />
@@ -729,6 +711,7 @@ export default function Network() {
         <AutoToggle project={filter} onChange={bump} />
         <Counts project={filter} tick={tick} />
       </div>
+      <p className="dim small net-lede">{AUTO_ALLOW_LEDE}</p>
 
       <Waiting project={filter} names={names} showProject={!filter}
                lastTry={lastTry} tick={tick} onDecided={bump} />

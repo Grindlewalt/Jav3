@@ -49,7 +49,8 @@ async def desk_ws(ws: WebSocket):
     if not isinstance(hello, dict) or hello.get("type") != "hello":
         await ws.close(code=4400)
         return
-    d = await desk.attach(dev["device_id"], dev["name"], ws, hello)
+    d = await desk.attach(dev["device_id"], dev["name"], ws, hello,
+                          ws.headers.get("host", ""))
     why = "disconnected"
     try:
         while True:

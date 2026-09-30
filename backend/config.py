@@ -2,6 +2,7 @@ import logging
 import os
 import secrets
 import shutil
+import sqlite3
 from pathlib import Path
 
 from pydantic import PrivateAttr, model_validator
@@ -50,9 +51,35 @@ def _has_content(d: Path) -> bool:
         return False
 
 
+def _db_has_tables(p: Path) -> bool:
+    """`p` is a SQLite file with at least one table. Opened read-only
+    (mode=ro): probing must never create the file — a 0-byte jarvis.db left by
+    a read-write connect is exactly what fooled has_state on the Pi."""
+    try:
+        if not p.is_file() or p.stat().st_size == 0:
+            return False
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        try:
+            return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                               "LIMIT 1").fetchone() is not None
+        finally:
+            con.close()
+    except (OSError, sqlite3.Error):
+        return False
+
+
 def has_state(root: Path) -> bool:
-    """True when `root` holds a real Jav3 state layout (a DB, or any memory/
-    project/agent file) rather than empty scaffolding."""
+    """True when `root` holds a real Jav3 install: data/jarvis.db exists AND
+    has at least one table. Empty scaffolding dirs, seeded skills or memory
+    files and a 0-byte or missing DB are not state — pointing the service at
+    such a dir means running on an empty DB (the Pi deploy of 2026-09-28)."""
+    return _db_has_tables(root / "data" / "jarvis.db")
+
+
+def has_any_state(root: Path) -> bool:
+    """The loose probe for "would I overwrite something here": any DB file,
+    or any memory / project / agent file. For refusing to migrate or restore
+    INTO a dir, where a false positive only costs a --force."""
     return ((root / "data" / "jarvis.db").exists()
             or any(_has_content(root / n) for n in _LEGACY_PROBE))
 
@@ -158,6 +185,12 @@ class Settings(BaseSettings):
     # keeps each verdict to a handful of tokens.
     permission_judge_model: str = ""
     permission_judge_max_tokens: int = 5
+    # Grounding (backend/grounding.py): the vision model that turns "the Save
+    # button" into a point on a screenshot. "" = the winner of the last model
+    # finder probe; a "provider/model" pins one. Targets cap the probe's cost.
+    grounding_model: str = ""
+    grounding_probe_targets: int = 60
+    grounding_timeout_s: float = 20.0
     # Flash caps output at 384K (verified accepted by the API on v4, and the
     # v4.1 limit is the same). The old 4096 was a v3-era default: large
     # tool-call payloads (whole-file writes) hit it mid-arguments and
@@ -175,9 +208,28 @@ class Settings(BaseSettings):
     price_cache_hit_per_m: float = 0.003
     price_cache_miss_per_m: float = 0.15
     price_output_per_m: float = 0.60
-    # Raw-context capture (the exact message array sent per model call) is
-    # opt-in and heavy; captured blobs older than this are nulled out.
+    # Raw-context capture (the exact message array sent per model call) is ON
+    # unless the operator switched it off (Logs > Cost); captured blobs older
+    # than this are nulled out. The Logs page can override the days (state key
+    # context_keep_days); this is the default.
     context_capture_keep_days: int = 7
+    # Stored compressed, and as a delta against the conversation's previous
+    # call (each ReAct round re-sends the grown context; on the Pi's real
+    # transcripts that is ~4x for zlib alone and ~100x with the delta). A chain
+    # restarts with a full frame at least every N calls, which bounds a read.
+    # False = every call stored as a full compressed blob.
+    context_capture_delta: bool = True
+    context_delta_chain_max: int = 24
+    # Storage watch (backend/storage_watch.py): one operator notice, at most
+    # once a day, while any of these is over. Captured context, database bytes
+    # in use (the file minus reusable pages), and free space on the disk
+    # holding the database.
+    storage_watch_enabled: bool = True
+    storage_watch_interval_s: int = 3600
+    storage_notify_repeat_s: int = 86400
+    storage_captured_warn_mb: int = 1024
+    storage_db_warn_mb: int = 3072
+    storage_free_warn_pct: float = 10.0
 
     # Remote hosts whose images/video the render surfaces (chat markdown + the
     # dashboard iframe) may auto-load. Everything else is blocked, so a model
@@ -267,10 +319,21 @@ class Settings(BaseSettings):
     read_file_max_chars: int = 48_000
     tool_result_evict_chars: int = 4_000
     tool_result_keep_recent: int = 2
+    # ...but only once the turn's context passes this many chars (~60k tokens):
+    # then the oldest results go, down to 60% of it (a stale read first, a read
+    # of a file being edited last), and a dropped read keeps an outline. Below
+    # it nothing is dropped, because evicting after 2 rounds made coding agents
+    # re-read about half their files (RUNS-03: 216 of 446 read_file calls in 14
+    # days) and broke the provider's prefix cache each time. Replay of 1,608
+    # real tool calls (scripts/replay_evictions.py): age-only 163 re-reads of 431
+    # reads; 250k 5 re-reads and 10% lower cache-aware cost. 0 = the old
+    # age-only rule. The guest copy must match (guest/backend/config.py).
+    tool_result_pressure_chars: int = 250_000
     # How many recent screenshots stay in-context as real image blocks; older
     # ones become a text stub. Each screenshot is ~1k+ tokens and re-sent every
-    # iteration, so a browsing loop only keeps the CURRENT view by default.
-    screenshot_keep_recent: int = 1
+    # iteration. Three frames let the model compare before/after an action
+    # (docs/navigation-contract.md E); the guest copy must match.
+    screenshot_keep_recent: int = 3
 
     # Dead-end circuit-breaker (the convo-12 post-mortem: 173 tool calls of
     # near-duplicate searches and failing installs, never concluding). After
@@ -613,6 +676,23 @@ class Settings(BaseSettings):
     egress_volume_min_bytes: int = 1_000_000  # ignore spikes below this (tiny-baseline noise)
     egress_beacon_min_hits: int = 6           # regular hits to one host before cadence is judged
     egress_beacon_cv_max: float = 0.15        # inter-arrival coefficient-of-variation below this = beacon
+    # Volume and cadence are judged over this span before the host's latest
+    # hit, not all history: summed forever, a daily 25 KB pip session crossed
+    # 1 MB after 40 days and cut files.pythonhosted.org (Pi, 2026-09-07), and
+    # a daily schedule is a perfect 86400 s "beacon". 6 beacon hits inside 6 h
+    # means a period of about an hour or less.
+    egress_anomaly_window_seconds: int = 6 * 3600
+
+    # --- Security notifications (backend/security.py) ---------------------
+    # A repeat of an unacknowledged event (same kind, project, cause and
+    # severity) inside this window bumps the row's count instead of adding a
+    # row and a ping (<= 0 turns coalescing off). Non-critical pings are then
+    # capped per kind: at most `per_kind` in any `window`. Critical events are
+    # never rate limited. The ping level itself (critical | approvals | all)
+    # is the operator's, in Settings -> Notifications (session_state).
+    security_coalesce_seconds: int = 24 * 3600
+    security_ping_per_kind: int = 3
+    security_ping_window_seconds: int = 600
 
     # --- Egress auto mode (backend/egress_auto.py) -------------------------
     # Off unless the operator flips it (globally or per project). A host it

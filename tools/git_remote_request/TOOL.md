@@ -3,6 +3,8 @@ name: git_remote_request
 description: Request connecting a GitHub remote (https://github.com/owner/repo) to the current project. Nothing connects until the operator approves — approval verifies the repo, connects it, and pushes existing commits.
 when_to_use: When the operator gives you a GitHub repo URL to hook up, or asks to get the project onto GitHub. File this INSTEAD of ever running git remote/push yourself — the VM has no credentials and its git state is discarded.
 enabled: true
+section: git
+action: remote
 requires_project: true
 parameters:
   type: object

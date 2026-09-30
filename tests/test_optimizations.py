@@ -97,6 +97,7 @@ async def test_stale_big_tool_results_evicted(tmp_env, monkeypatch):
     await init_db()
     monkeypatch.setattr(settings, "tool_result_keep_recent", 1)
     monkeypatch.setattr(settings, "tool_result_evict_chars", 100)
+    monkeypatch.setattr(settings, "tool_result_pressure_chars", 0)   # age-only rule
     fake = _FakeModel(rounds=3)
     events = await _run_loop(monkeypatch, fake, "y" * 500)
     assert events[-1] == {"type": "final", "content": "done"}

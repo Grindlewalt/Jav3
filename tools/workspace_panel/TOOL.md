@@ -3,6 +3,7 @@ name: workspace_panel
 description: Arrange the active project's workspace board — add/remove panels, open a file in an editor/renderer panel, or tile everything neatly. Changes appear live in any open board and persist for the next visit.
 when_to_use: When the operator asks you to set up, open, show or clean up panels on a project's board ("open the journal next to the chat", "show me sim.py", "tidy this up"), or when you want to surface something you just built (a rendered html file, the run panel) without making them dig for it.
 enabled: true
+section: project
 parameters:
   type: object
   properties:

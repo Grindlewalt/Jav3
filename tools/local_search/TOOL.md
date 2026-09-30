@@ -3,6 +3,7 @@ name: local_search
 description: Search file contents on the operator's computer (a /local chat); returns path:line matches.
 when_to_use: Finding where something is defined or used in the local working directory.
 enabled: true
+section: local
 requires_local: true
 read_only: true
 parameters:

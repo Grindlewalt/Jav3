@@ -12,6 +12,7 @@ helpers) and the clean in-guest tool handlers. The guest's own writes.py shim
 import io
 import tarfile
 
+from ..agent.tools.inguest import BOX_ONLY_TOOLS, IN_GUEST_TOOLS
 from ..config import settings
 
 # host modules copied VERBATIM into the guest backend (pure — operate on the
@@ -22,19 +23,20 @@ _COPY_MODULES = {
     "backend/codeindex.py": "backend/codeindex.py",
     "backend/agent/tools/todostore.py": "backend/agent/tools/todostore.py",
     "backend/agent/tools/argcheck.py": "backend/agent/tools/argcheck.py",
+    # which tools run in the guest: the guest registry routes by it, this file
+    # ships the handlers by it, so both read the one list
+    "backend/agent/tools/inguest.py": "backend/agent/tools/inguest.py",
+    # which file reads count as reading untrusted text (MEM-09): pure, the
+    # guest registry asks it after every in-guest tool call
+    "backend/agent/tools/taintcheck.py": "backend/agent/tools/taintcheck.py",
+    # what the model is shown (tool sections) and the playbooks that ride them:
+    # the loop decides both, so a guest turn must decide them the same way
+    "backend/agent/tools/toolsections.py": "backend/agent/tools/toolsections.py",
+    "backend/navplaybook.py": "backend/navplaybook.py",
 }
 
-# clean tools that run IN the guest (against the pushed workspace); their handler
-# is loaded locally. Everything else brokers to the host. run_code lives here and
-# ONLY here — code execution exists nowhere on the host.
-IN_GUEST_TOOLS = ("read_file", "list_files", "search_codebase", "crawl_codebase",
-                  "write_file", "edit_file", "dashboard", "todo_update",
-                  "run_code", "screenshot")
-
-# in-guest tools that exist only with boxes on (the contract: flag off, the
-# guest package is byte-for-byte today's). `screenshot` needs the desktop
-# image variant and reports "needs the desktop image" on any other.
-BOX_ONLY_TOOLS = frozenset({"screenshot"})
+# IN_GUEST_TOOLS and BOX_ONLY_TOOLS live in backend/agent/tools/inguest.py (imported
+# above, so guest_pkg.IN_GUEST_TOOLS still works), shared verbatim with the guest registry.
 
 # guest/backend modules that ship only with boxes on. procwatch (WP4) is only
 # ever called by the host's process poller, which is off with the flag; the

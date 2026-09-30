@@ -10,12 +10,13 @@ from pathlib import Path
 
 from . import (agents_api, agents_run, artifacts_api, auth, backup, browser_api, chat, desk_api,
                devices_api, egress_api, events_api,
-               git_api, git_serve_api, gitea_api, gui, guest_shell, harness_api, lan, logs_api,
+               git_api, git_serve_api, gitea_api, grounding_api, gui, guest_shell, harness_api, lan, logs_api,
                media_api, memory_api,
                notifications_api, permissions_api, plan_api, projects, providers, reviewer,
                reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
                vm_api, voice_api, workspace, secrets)
 from . import procview_api   # WP4
+from . import storage_watch   # captured-context storage check
 from .agent.tools.registry import compile_registry
 from .auth import require_user
 from .config import settings, ensure_dirs
@@ -88,6 +89,7 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(schedules.scheduler_loop())
     reaper = asyncio.create_task(reaper_loop())   # idle guest scrub (M4c)
     triage = asyncio.create_task(reviewer.sweeper_loop())  # auto queue triage
+    storage = asyncio.create_task(storage_watch.watch_loop())  # captured-context retention + size notice
     await gateway.start()          # host vsock model gateway (no-op if no vsock)
     if settings.vm_egress:
         await vm.net_up()          # tap/nft/dnsmasq/pcap up BEFORE the proxy binds
@@ -113,6 +115,7 @@ async def lifespan(app: FastAPI):
         task.cancel()
         reaper.cancel()
         triage.cancel()
+        storage.cancel()
         mdns.cancel()
         await lan.stop()
         await gateway.stop()
@@ -153,6 +156,7 @@ app.include_router(desk_api.ws_router)
 app.include_router(desk_api.router)
 app.include_router(browser_api.ws_router)
 app.include_router(browser_api.router)
+app.include_router(grounding_api.router)
 app.include_router(projects.router)
 app.include_router(chat.router)
 app.include_router(sidebar_api.router)

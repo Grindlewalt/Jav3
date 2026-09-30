@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
-import { applyTurnEvent, finishTurn } from './ToolActivity.jsx'
+import { makeTurnFolder, newTurn } from './turnEvents.js'
 
 // One chat turn, wherever a chat is rendered: the transcript, the busy flag,
 // and the resume-tail's AbortController.
@@ -19,32 +19,16 @@ export function useChatStream() {
   const [busy, setBusy] = useState(false)
   const tailAbort = useRef(null)   // cancels a resume-tail on switch/unmount
   const openSeq = useRef(0)        // which openThread call is the current one
+  const folder = useRef(null)      // folds events into `messages` (batches tokens)
+  if (!folder.current) folder.current = makeTurnFolder((fn) => setMessages(fn))
 
-  useEffect(() => () => tailAbort.current?.abort(), [])
+  useEffect(() => () => { tailAbort.current?.abort(); folder.current.cancel() }, [])
   const abortTail = useCallback(() => tailAbort.current?.abort(), [])
 
-  // token/tool/tool_result fold into the streaming message's parts; final
-  // swaps in the reply with the activity collapsed above it.
-  const handleTurnEvent = useCallback((ev) => {
-    if (['token', 'tool', 'tool_result', 'job'].includes(ev.type))
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = applyTurnEvent(copy[copy.length - 1], ev)
-        return copy
-      })
-    if (ev.type === 'final')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = finishTurn(copy[copy.length - 1], ev.content)
-        return copy
-      })
-    if (ev.type === 'error')
-      setMessages((m) => {
-        const copy = [...m]
-        copy[copy.length - 1] = { role: 'error', content: ev.message }
-        return copy
-      })
-  }, [])
+  // token/tool/tool_result fold into the streaming message's parts (text
+  // tokens batched); final swaps in the reply with the activity collapsed above
+  // it; an error keeps the run and appends itself (turnEvents.js).
+  const handleTurnEvent = useCallback((ev) => folder.current.handle(ev), [])
 
   // Load a thread's transcript and, if a turn is still executing server-side,
   // re-attach to it and watch it finish — seeding the placeholder with the tool
@@ -57,6 +41,7 @@ export function useChatStream() {
   // call was superseded by a later open.
   const openThread = useCallback(async (id, { onEvent, onTailDone } = {}) => {
     tailAbort.current?.abort()
+    folder.current.cancel()
     // a slow transcript fetch for the chat the operator already left must not
     // land over the one they switched to
     const mine = ++openSeq.current
@@ -69,20 +54,36 @@ export function useChatStream() {
     if (!r.running) return r
     setBusy(true)
     const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
-    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true, parts: seed }])
+    setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true,
+                                parts: seed, t0: Date.now() }])
     const ctl = new AbortController()
     tailAbort.current = ctl
+    let settled = false
     try {
       await tailStream(`/api/chat/${id}/stream`, (ev) => {
         if (ev.type === 'idle') {
           // turn ended between the messages fetch and the tail — reload
-          api(`/api/conversations/${id}/messages`).then((r2) => setMessages(r2.messages))
+          settled = true
+          api(`/api/conversations/${id}/messages`).then((r2) => {
+            if (mine === openSeq.current) setMessages(r2.messages)
+          })
           return
         }
+        if (ev.type === 'final' || ev.type === 'error') settled = true
         emit(ev)
       }, ctl.signal)
-      onTailDone?.()
-    } catch { /* tail aborted or dropped; messages reload on next open */ }
+      if (mine === openSeq.current) onTailDone?.()
+    } catch { /* tail aborted or dropped */ }
+    if (mine !== openSeq.current) return r
+    folder.current.flush()
+    if (!settled) {
+      // ended without an ending (a dropped connection): show what is saved
+      // rather than leave a placeholder spinning
+      try {
+        const r2 = await api(`/api/conversations/${id}/messages`)
+        if (mine === openSeq.current) setMessages(r2.messages)
+      } catch { /* offline */ }
+    }
     if (mine === openSeq.current) setBusy(false)
     return r
   }, [handleTurnEvent])
@@ -109,27 +110,45 @@ export function useChatStream() {
     const gen = openSeq.current
     const here = () => gen === openSeq.current
     const emit = onEvent || handleTurnEvent
+    let liveId = body?.conversation_id ?? null
+    let started = false
+    let settled = false
     setBusy(true)
-    setMessages((m) => [...m, { role: 'user', content: text },
-                        { role: 'assistant', content: '', streaming: true, parts: [] }])
+    setMessages((m) => [...m, ...newTurn(text)])
     try {
-      await chatStream(body, (ev) => { if (here()) emit(ev) }, url)
-      if (here()) onDone?.()
+      await chatStream(body, (ev) => {
+        if (!here()) return
+        if (ev.type === 'start') { started = true; liveId = ev.conversation_id ?? liveId }
+        if (ev.type === 'final' || ev.type === 'error') settled = true
+        emit(ev)
+      }, url)
     } catch (err) {
       if (!here()) return
-      // drop the two optimistic messages
-      setMessages((m) => m.slice(0, -2))
-      if (err.status === 409 && err.detail === 'turn_in_progress') {
+      folder.current.flush()
+      if (started && !err.status) {
+        settled = false   // the connection dropped mid-turn; it goes on server-side
+      } else {
+        // refused before anything streamed: drop the two optimistic messages
+        setMessages((m) => m.slice(0, -2))
         onRestoreDraft?.(text)
         setMessages((m) => [...m, { role: 'error',
-          content: 'a turn is still running in this chat — wait for it to finish' }])
-      } else {
-        onRestoreDraft?.(text)
-        setMessages((m) => [...m, { role: 'error', content: err.detail || String(err) }])
+          content: err.status === 409 && err.detail === 'turn_in_progress'
+            ? 'a turn is still running in this chat — wait for it to finish'
+            : (err.detail || String(err)) }])
+        setBusy(false)
+        return
       }
     }
-    if (here()) setBusy(false)
-  }, [handleTurnEvent])
+    if (!here()) return
+    folder.current.flush()
+    if (!settled && liveId != null) {
+      // no ending arrived: pick the turn back up instead of leaving a spinner
+      openThread(liveId, { onEvent, onTailDone: onDone })
+      return
+    }
+    onDone?.()
+    setBusy(false)
+  }, [handleTurnEvent, openThread])
 
   return {
     messages, setMessages, busy, setBusy,

@@ -16,7 +16,7 @@ test('closed verb list, unknown fields dropped', () => {
   assert.deepEqual(validate('read_page', { tab: 1, wait_ms: 3000, min_elements: 5, selector: '.x' }),
     { tab: 1, max_chars: 8000, wait_ms: 3000, min_elements: 5, selector: '.x' });
   assert.deepEqual(validate('list_tabs', { tab: 4 }), {});
-  assert.equal(Object.keys(VERBS).length, 10);
+  assert.equal(Object.keys(VERBS).length, 15);
 });
 
 test('element id parsing and frame consent', () => {
@@ -43,6 +43,31 @@ test('element id parsing and frame consent', () => {
   assert.equal(frameConsentNeeded('mail.google.com', 'accounts.google.com'), false);
   assert.equal(frameConsentNeeded('app.example.com', 'login.other.com'), true);
   assert.equal(frameConsentNeeded('example.com', ''), false);   // about:blank subframe
+});
+
+test('select / hover / key / back / forward', () => {
+  assert.deepEqual(validate('select', { tab: 2, element: 'f0:7', label: 'UK', x: 1 }), { tab: 2, element: 'f0:7', label: 'UK' });
+  assert.deepEqual(validate('select', { tab: 2, element: 7, value: '' }), { tab: 2, element: 'f0:7', value: '' });
+  assert.deepEqual(validate('hover', { tab: 2, element: 'f1:3' }), { tab: 2, element: 'f1:3' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'Shift+tab' }), { tab: 2, combo: 'shift+Tab' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'cmd+Ctrl+a' }), { tab: 2, combo: 'ctrl+super+a' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'Esc' }), { tab: 2, combo: 'Escape' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'ArrowDown' }), { tab: 2, combo: 'Down' });
+  assert.deepEqual(validate('key', { tab: 2, combo: 'f5' }), { tab: 2, combo: 'F5' });
+  assert.deepEqual(validate('back', { tab: 2, url: 'x' }), { tab: 2 });
+  assert.deepEqual(validate('forward', { tab: 2 }), { tab: 2 });
+  assert.equal(VERBS.select, 'act'); assert.equal(VERBS.key, 'act'); assert.equal(VERBS.back, 'read');
+  for (const [v, p] of [
+    ['select', { tab: 1, element: 'f0:1' }], ['select', { tab: 1, element: 'f0:1', value: 'a', label: 'A' }],
+    ['select', { tab: 1, element: 'f0:1', label: ' ' }], ['select', { tab: 1, element: 'f0:1', value: 3 }],
+    ['select', { tab: 1, element: 'f0:1', label: 'x'.repeat(501) }], ['select', { tab: 1, label: 'UK' }],
+    ['hover', { tab: 1, element: 'nope' }], ['key', { tab: 1, combo: '' }], ['key', { tab: 1 }],
+    ['key', { tab: 1, combo: 'hyper+a' }], ['key', { tab: 1, combo: 'Enterr' }],
+    ['key', { tab: 1, combo: 'ctrl+alt+shift+super+altgr+a' }], ['key', { tab: 1, combo: 'ctrl+ a' }],
+    ['key', { tab: 1, combo: 'F25' }], ['back', {}]]) {
+    assert.throws(() => validate(v, p), VerbError, `${v} ${JSON.stringify(p)}`);
+  }
+  assert.equal(describe('key', 'example.com'), 'Jav3 is pressing a key on example.com');
 });
 
 test('popup adoption decision', () => {
@@ -100,4 +125,60 @@ test('login line and URLs', () => {
   assert.throws(() => baseUrl('ftp://x'), VerbError);
   assert.equal(hostOf('https://[::1]:8/'), '::1');
   assert.equal(describe('click', 'example.com'), 'Jav3 is clicking on example.com');
+});
+
+test('read_page mode: auto / all / interactive, anything else refused', () => {
+  assert.deepEqual(validate('read_page', { tab: 1, mode: 'all' }), { tab: 1, max_chars: 8000, wait_ms: 0, mode: 'all' });
+  assert.equal(validate('read_page', { tab: 1 }).mode, undefined);
+  assert.throws(() => validate('read_page', { tab: 1, mode: 'every' }), /mode must be one of auto, all, interactive/);
+});
+
+test('click: exactly one of element or x, y; type may omit element', () => {
+  assert.deepEqual(validate('click', { tab: 2, x: 10.5, y: 3 }), { tab: 2, x: 10.5, y: 3 });
+  assert.deepEqual(validate('click', { tab: 2, element: 'f0:4' }), { tab: 2, element: 'f0:4' });
+  assert.throws(() => validate('click', { tab: 2, element: 'f0:4', x: 1, y: 1 }), /exactly one of element or x, y/);
+  assert.throws(() => validate('click', { tab: 2 }), /exactly one of element or x, y/);
+  assert.throws(() => validate('click', { tab: 2, x: 1 }), /y must be a number/);
+  assert.throws(() => validate('click', { tab: 2, x: -1, y: 1 }), /outside/);
+  assert.deepEqual(validate('type', { tab: 2, text: 'hi' }), { tab: 2, text: 'hi', submit: false });
+});
+
+test('screenshot scale and the CSS-px conversion', async () => {
+  const { shotScale, toCssPoint } = await import('../lib/verbs.js');
+  // a 2x display: 2560x1600 capture of a 1280x800 viewport
+  const s = shotScale(2560, 1600, { w: 1280, h: 800, dpr: 2 });
+  assert.deepEqual(s, { x: 2, y: 2 });
+  assert.deepEqual(toCssPoint(241, 81, s), { x: 120.5, y: 40.5 });
+  // page zoom 125% on a 1x display: the image is wider than the CSS viewport
+  assert.deepEqual(shotScale(1600, 1000, { w: 1280, h: 800, dpr: 1.25 }), { x: 1.25, y: 1.25 });
+  // no viewport reported: the dpr, else 1
+  assert.deepEqual(shotScale(800, 600, { dpr: 2 }), { x: 2, y: 2 });
+  assert.deepEqual(shotScale(800, 600, null), { x: 1, y: 1 });
+});
+
+test('a coordinate click carries the element the screenshot showed there', () => {
+  assert.deepEqual(validate('click', { tab: 2, x: 5, y: 6, expect: { id: 'f0:4', label: 'Accept' } }),
+    { tab: 2, x: 5, y: 6, expect: { n: 4, label: 'Accept' } });
+  // a subframe's point is an <iframe>: nothing to compare; junk is dropped
+  assert.deepEqual(validate('click', { tab: 2, x: 5, y: 6, expect: { id: 'f2:4', label: 'x' } }), { tab: 2, x: 5, y: 6 });
+  assert.deepEqual(validate('click', { tab: 2, x: 5, y: 6, expect: 'f0:4' }), { tab: 2, x: 5, y: 6 });
+  assert.equal(validate('click', { tab: 2, x: 5, y: 6, expect: { id: 'f0:4', label: 'a'.repeat(200) } }).expect.label.length, 80);
+});
+
+test('deny list: host:port entries, trailing dots, v4-mapped and loopback ranges', async () => {
+  const { isDeniedUrl, endpointOf } = await import('../lib/verbs.js');
+  const deny = ['10.0.0.82:8000', 'jarvis.atomos.network', '[::1]:8000', '127.0.0.1:8000', 'macbook.local:8000'];
+  assert.ok(isDeniedUrl('http://10.0.0.82:8000/x', deny));
+  assert.ok(!isDeniedUrl('http://10.0.0.82:3000/', deny));          // Gitea
+  assert.ok(isDeniedUrl('https://JARVIS.atomos.network./a', deny)); // case + dot, any port
+  assert.ok(isDeniedUrl('http://jarvis.atomos.network:9999/', deny));
+  assert.ok(isDeniedUrl('http://[::1]:8000/', deny));
+  assert.ok(isDeniedUrl('http://localhost.:8000/', ['localhost:8000']));
+  assert.ok(isDeniedUrl('http://[::ffff:127.0.0.1]:8000/', deny));
+  assert.ok(isDeniedUrl('http://127.5.5.5:8000/', deny));
+  assert.ok(isDeniedUrl('http://MacBook.local.:8000/', deny));
+  assert.ok(!isDeniedUrl('https://example.com/', deny));
+  assert.ok(isDeniedUrl('http://jav3.lan:1234/', ['jav3.lan']));   // older host-only entry
+  assert.equal(endpointOf('http://10.0.0.82:8000'), '10.0.0.82:8000');
+  assert.equal(endpointOf('https://a.example'), 'a.example:443');
 });

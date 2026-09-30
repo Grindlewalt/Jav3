@@ -3,6 +3,8 @@ name: write_file
 description: Create or overwrite a file in the active project. The write applies immediately; never paste secret values (use {{secret:NAME}}).
 when_to_use: Creating new files or full rewrites. For small changes prefer edit_file.
 enabled: true
+section: files
+core: true
 requires_project: true
 parameters:
   type: object

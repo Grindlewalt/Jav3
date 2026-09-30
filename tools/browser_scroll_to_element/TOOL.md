@@ -3,6 +3,8 @@ name: browser_scroll_to_element
 description: Scroll a Jav3 browser tab so a given element (by id from browser_read_page) is in view.
 when_to_use: When an element is off-screen (its line said off-screen) and you want it visible before a click, type or screenshot.
 enabled: true
+section: browser
+action: scroll_to
 requires_browser: true
 parameters:
   type: object

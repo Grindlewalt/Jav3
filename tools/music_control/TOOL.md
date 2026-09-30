@@ -3,6 +3,7 @@ name: music_control
 description: Pause, resume, skip, go back, set the volume, or stop the operator's music.
 when_to_use: When they say pause, resume, skip, go back, louder/quieter or stop AND the music is coming from their own library.
 enabled: true
+section: media
 parameters:
   type: object
   properties:

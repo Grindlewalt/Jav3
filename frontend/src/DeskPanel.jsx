@@ -7,7 +7,9 @@
  * not been run there, whatever this switch says. Shell commands a turn is
  * waiting on appear at the top with Allow once / Always / Deny (an in-page
  * ask: iOS standalone suppresses window.confirm). Stop turns every grant off
- * and drops the session. */
+ * and drops the session. A computer whose screen is locked or whose display
+ * is asleep shows a Tag and a hint: the server refuses screen/input verbs
+ * until someone unlocks or wakes it (contract A.5). */
 import { useCallback, useEffect, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { api } from './api.js'
@@ -115,6 +117,8 @@ function DeskRow({ d, minutes, put, stop }) {
               aria-label={d.online ? 'online' : 'offline'} />
         <strong className="ellipsis" title={d.name}>{d.name}</strong>
         {d.backend && <Tag>{d.backend}</Tag>}
+        {d.locked && <Tag tone="pending">locked</Tag>}
+        {d.asleep && <Tag tone="pending">display asleep</Tag>}
         <span className="dim small desk-last">
           {d.last_action_at ? ago(d.last_action_at) : 'no actions'}
         </span>
@@ -122,6 +126,10 @@ function DeskRow({ d, minutes, put, stop }) {
                 disabled={!d.online && !g.screen && !g.input && g.shell === 'off'}>
           Stop</Button>
       </div>
+      {(d.locked || d.asleep) && (
+        <div className="warn small">
+          Computer use is paused until the screen is {d.locked ? 'unlocked' : 'woken'}</div>
+      )}
       <div className="desk-grants">
         <Toggle label={`Screen on ${d.name}`} onText="Screen" offText="Screen"
                 checked={g.screen} onChange={(v) => put({ screen: v })} />

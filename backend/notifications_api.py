@@ -8,8 +8,15 @@ live behind their own page (or, for git, behind no page at all):
 
 Read-only aggregation — it never approves anything, just surfaces a count + list
 so the nav can show a badge. Each source is wrapped so one failing store does not
-blank the whole panel."""
-from fastapi import APIRouter, Depends
+blank the whole panel.
+
+The badge counts what waits on the operator: approvals and every unacknowledged
+security event except info records (an audit line is not a to-do; it stays in
+the Security log). `ping_count` is the subset that would interrupt at the
+operator's level (security.LEVELS), for the "N waiting" card on page load.
+`/settings` reads and sets that level."""
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from . import security
 from .auth import require_user
@@ -59,11 +66,15 @@ async def _schedules_pending() -> list[dict]:
 async def _security_pending() -> dict:
     """Unacknowledged security alerts + open egress host approvals — the
     monitored-egress / diff-gate signals for the bell and Review Center."""
-    out = {"alerts": 0, "egress_pending": 0}
+    out = {"alerts": 0, "egress_pending": 0, "level": security.DEFAULT_LEVEL,
+           "tiers": {"critical": 0, "approval": 0, "alert": 0, "record": 0}}
     try:
         db = await get_db()
         try:
-            out["alerts"] = await security.count_unacknowledged(db)
+            out["level"] = await security.notify_level(db)
+            out["tiers"] = await security.count_by_tier(db)
+            t = out["tiers"]
+            out["alerts"] = t["critical"] + t["approval"] + t["alert"]
             async with db.execute(
                 "SELECT COUNT(*) AS n FROM egress_pending "
                 "WHERE status = 'pending'") as cur:
@@ -99,9 +110,48 @@ async def notifications():
     shell = await _desk_pending()
     from . import operator_ask
     asks = operator_ask.pending_list()      # ask_user / permission asks
+    tiers, level = sec["tiers"], sec["level"]
+    try:                # notes/changes awaiting approval: the Memory nav badge, kept
+        from .memory import pending_counts     # out of `count` (Security's number)
+        memory_pending = pending_counts()["total"]
+    except Exception:                           # noqa: BLE001
+        memory_pending = 0
+    approvals = (len(git) + len(sched) + len(shell) + len(asks)
+                 + sec["egress_pending"] + tiers["approval"])
     return {
-        "count": (len(git) + len(sched) + len(shell) + len(asks)
-                  + sec["alerts"] + sec["egress_pending"]),
+        "count": approvals + tiers["critical"] + tiers["alert"],
         "git": git, "schedules": sched, "desk_shell": shell, "asks": asks,
+        "memory_pending": memory_pending,
         "alerts": sec["alerts"], "egress_pending": sec["egress_pending"],
+        "critical": tiers["critical"], "records": tiers["record"], "level": level,
+        "ping_count": (tiers["critical"]
+                       + (approvals if security.wants("approval", level) else 0)
+                       + (tiers["alert"] if security.wants("alert", level) else 0)),
     }
+
+
+class LevelBody(BaseModel):
+    level: str
+
+
+@router.get("/settings")
+async def get_settings():
+    db = await get_db()
+    try:
+        return {"level": await security.notify_level(db), "levels": list(security.LEVELS)}
+    finally:
+        await db.close()
+
+
+@router.put("/settings")
+async def put_settings(body: LevelBody):
+    db = await get_db()
+    try:
+        try:
+            level = await security.set_notify_level(db, body.level)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        await db.commit()
+        return {"level": level, "levels": list(security.LEVELS)}
+    finally:
+        await db.close()

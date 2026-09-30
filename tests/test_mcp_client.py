@@ -145,10 +145,20 @@ def test_the_manifest_has_no_geometry():
 
 # ---- what comes back -------------------------------------------------------
 
-async def test_results_are_tainted_while_in_flight(projector, monkeypatch):
-    """Anything the projector says is outside-authored text, so it carries the
-    same write taint a fetched web page does — that is what keeps it out of
-    binding memory notes."""
+def test_results_are_tainted_by_the_broker():
+    """Anything the projector says is outside-authored text, so the broker
+    taints the turn exactly as it does for a fetched web page. (A contextvar set
+    around the one call never reached the ledger: A0 hunt MEM-08.) Every
+    projector_* tool the registry ships is covered, by prefix."""
+    from pathlib import Path
+    from backend.vm import broker
+    tools = Path(__file__).resolve().parent.parent / "tools"
+    names = sorted(p.name for p in tools.glob("projector_*"))
+    assert names, "no projector tools found"
+    assert all(broker.classify_taint(n) == "untrusted" for n in names)
+
+
+async def test_projector_call_sets_no_ambient_taint(projector, monkeypatch):
     from backend import runtime
     seen = {}
 
@@ -157,10 +167,8 @@ async def test_results_are_tainted_while_in_flight(projector, monkeypatch):
         return "ok"
 
     monkeypatch.setattr(mcp.McpClient, "call", spy)
-    assert runtime.write_taint.get() is None
     await mcp.projector_call("pmu_status")
-    assert seen["taint"] == "mcp:projector"
-    assert runtime.write_taint.get() is None      # and it is reset after
+    assert seen["taint"] is None
 
 
 async def test_oversized_results_are_capped(projector):

@@ -12,3 +12,4 @@ pyyaml>=6.0
 zeroconf>=0.132        # mDNS: advertise <name>.local on the LAN (backend/lan.py)
 pytest>=8.0
 pytest-asyncio>=0.23
+pillow>=10.0           # grounding fixtures: the model finder renders labelled screens (backend/grounding_fixtures.py)

@@ -28,19 +28,70 @@ def test_front_matter_parses(md):
     assert meta.get("name") and meta.get("description"), md
 
 
+# tools whose TOOL.md marks an argument required although the handler gives it a
+# default, ON PURPOSE: the handler (or the backend it calls) answers a blank
+# with a message specific to the tool, which reads better than argcheck's
+# generic "needs X". Anything else that differs is drift and fails below.
+SCHEMA_REQUIRES_MORE = {
+    "music_control": {"action"},        # '' -> the list of actions
+    "open_website": {"url"},            # '' -> "only http(s) URLs can be opened"
+    "package_request": {"manager", "package", "install_command", "reason"},  # the backend explains each
+    "play_movie": {"source"},           # gui.media_src names the allowed sources
+    "play_music": {"source"},
+    "projector_show": {"surface"},      # '' -> "which surface?"
+    "service_logs": {"name"},           # '' -> "no approved service named ''"
+    "service_request": {"command", "files", "name", "reason"},               # the backend explains each
+    "workspace_panel": {"action"},      # '' -> the actions
+}
+
+
 @pytest.mark.parametrize("md", [m for m in TOOL_MDS if (m.parent / "handler.py").exists()
                                 and m.name == "TOOL.md"], ids=lambda p: p.parent.name)
 def test_schema_matches_handler(md):
-    props = set(((_front(md).get("parameters") or {}).get("properties") or {}))
-    src = (md.parent / "handler.py").read_text()
-    m = re.search(r"async def run\((.*?)\)\s*(->[^:]*)?:", src, re.S)
-    if not m or "**" in m.group(1):
+    """Both ways: the schema offers nothing the handler refuses, the handler
+    takes nothing the schema never offers (the model could never use it), what
+    the handler cannot run without the schema requires, and what the schema
+    requires the handler also requires (or is listed above with its reason)."""
+    tool = md.parent.name
+    schema = _front(md).get("parameters") or {}
+    props = set(schema.get("properties") or {})
+    schema_required = set(schema.get("required") or [])
+    sig = list(inspect.signature(_load_handler(tool)).parameters.values())
+    if any(p.kind is p.VAR_KEYWORD for p in sig):
         return
-    parts = [a.strip() for a in m.group(1).split(",") if a.strip()]
-    names = {a.split(":")[0].split("=")[0].strip() for a in parts}
-    required = {a.split(":")[0].strip() for a in parts if "=" not in a}
+    names = {p.name for p in sig}
+    required = {p.name for p in sig if p.default is p.empty}
     assert props <= names, f"TOOL.md offers {sorted(props - names)} the handler refuses"
-    assert required <= props, f"handler requires {sorted(required - props)} the schema never offers"
+    assert names <= props, f"handler takes {sorted(names - props)} the schema never offers"
+    assert schema_required <= props, f"required {sorted(schema_required - props)} are not properties"
+    assert required <= schema_required, (
+        f"handler requires {sorted(required - schema_required)} the schema does not mark required")
+    assert schema_required - required == SCHEMA_REQUIRES_MORE.get(tool, set()), (
+        f"schema requires {sorted(schema_required - required)} the handler has defaults for; "
+        "give the handler no default, drop it from required, or list it in "
+        "SCHEMA_REQUIRES_MORE with the reason")
+
+
+_JSON_KIND = {"string": str, "integer": int, "number": float, "boolean": bool,
+              "array": list, "object": dict}
+
+
+@pytest.mark.parametrize("md", [m for m in TOOL_MDS if (m.parent / "handler.py").exists()
+                                and m.name == "TOOL.md"], ids=lambda p: p.parent.name)
+def test_schema_types_agree_with_handler_annotations(md):
+    """argcheck coerces and refuses by the handler's annotations, so an
+    annotation that disagrees with the schema would refuse an argument the
+    schema told the model to send."""
+    props = ((_front(md).get("parameters") or {}).get("properties")) or {}
+    for p in inspect.signature(_load_handler(md.parent.name)).parameters.values():
+        parsed = argcheck._kinds(p.annotation)
+        want = _JSON_KIND.get((props.get(p.name) or {}).get("type"))
+        if parsed is None or want is None:
+            continue
+        kinds, _ = parsed
+        ok = want in kinds or (want is float and int in kinds) or (want is int and float in kinds)
+        assert ok, (f"{md.parent.name}.{p.name}: schema says {props[p.name]['type']}, "
+                    f"the handler is annotated {p.annotation}")
 
 
 async def _h(tab: int, max_chars: int | None = None):
@@ -91,3 +142,418 @@ def test_identity_arguments_are_refused_even_read_only():
         return ""
     _, _, err = argcheck.prepare("inbox_fetch", fetch, {"conversation_id": 7}, read_only=True)
     assert err and "has no parameter 'conversation_id'" in err
+
+
+# --- RUNS-16: the misspelled key is named, and an unambiguous one is remapped ---
+
+async def _edit(path: str, find: str, replace: str, all: bool = False):
+    return "ok"
+
+
+def test_missing_argument_error_names_the_misspelled_key():
+    # conversation 553: four edit_file calls passed 'replacement' for 'replace'
+    # two keys claim the same argument, so neither is guessed: both are named
+    _, _, err = argcheck.prepare("edit_file", _edit,
+                                 {"path": "a", "find": "b", "replacemen": "c",
+                                  "replacement": "d"}, read_only=False)
+    assert "needs replace" in err
+    assert "'replacement'" in err and "'replacemen'" in err and "did you mean 'replace'" in err
+
+
+def test_unique_close_key_for_the_missing_required_one_is_remapped():
+    args, note, err = argcheck.prepare("edit_file", _edit,
+                                       {"path": "a", "find": "b", "replacement": "c"},
+                                       read_only=False)
+    assert err is None and args == {"path": "a", "find": "b", "replace": "c"}
+    assert "took 'replacement' as 'replace'" in note
+
+
+def test_a_distant_key_is_named_but_not_remapped():
+    _, _, err = argcheck.prepare("edit_file", _edit, {"path": "a", "find": "b", "txt": "c"},
+                                 read_only=False)
+    assert err and "'txt'" in err and "needs replace" in err
+
+
+def test_remap_never_overwrites_a_key_the_model_did_send():
+    args, _, err = argcheck.prepare("edit_file", _edit,
+                                    {"path": "a", "find": "b", "replace": "c", "replacement": "d"},
+                                    read_only=False)
+    assert err and "'replacement'" in err     # ambiguous: refuse instead of picking one
+
+
+# --- argument TYPES (TOOLS-03/04/10): checked from the handler's annotations ---
+
+async def _typed(text: str, n: int = 3, flag: bool = False, rate: float | None = None,
+                 items: list | None = None, opts: dict | None = None,
+                 either: str | list | None = None, free=None):
+    return "ok"
+
+
+def _prep(**args):
+    return argcheck.prepare("t", _typed, {"text": "x", **args}, read_only=False)
+
+
+@pytest.mark.parametrize("given,want", [("0", 0), (" 12 ", 12), (7, 7), (4.0, 4), ("-2", -2)])
+def test_whole_numbers_come_from_digit_strings_and_whole_floats(given, want):
+    args, _, err = _prep(n=given)
+    assert err is None and args["n"] == want and type(args["n"]) is int
+
+
+@pytest.mark.parametrize("given,want", [("true", True), ("False", False), ("yes", True),
+                                        ("no", False), ("1", True), (0, False), (True, True)])
+def test_booleans_come_from_plain_words(given, want):
+    args, _, err = _prep(flag=given)
+    assert err is None and args["flag"] is want
+
+
+def test_other_shapes_are_coerced_only_when_the_meaning_is_plain():
+    args, _, err = _prep(rate="0.5", items='["a", "b"]', opts='{"k": 1}', text=12)
+    assert err is None
+    assert args["rate"] == 0.5 and args["items"] == ["a", "b"] and args["opts"] == {"k": 1}
+    assert args["text"] == "12"
+    assert _prep(either=["a"])[2] is None and _prep(either="a")[2] is None
+
+
+@pytest.mark.parametrize("bad,phrase", [
+    ({"n": "four"}, "n must be a whole number (got 'four')"),
+    ({"n": 1.5}, "n must be a whole number (got 1.5)"),
+    ({"n": True}, "n must be a whole number (got true)"),
+    ({"n": ["1"]}, "n must be a whole number (got a list)"),
+    ({"flag": "maybe"}, "flag must be true or false (got 'maybe')"),
+    ({"flag": 2}, "flag must be true or false (got 2)"),
+    ({"text": {"k": 1}}, "text must be text (got an object)"),
+    ({"text": True}, "text must be text (got true)"),
+    ({"text": None}, "text is required (got null)"),
+    ({"items": "a.py"}, "items must be a list (got 'a.py')"),
+    ({"opts": [1]}, "opts must be an object (got a list)"),
+    ({"rate": "fast"}, "rate must be a number (got 'fast')"),
+    ({"either": {"k": 1}}, "either must be text or a list (got an object)"),
+])
+def test_uncoercible_types_are_one_plain_error_that_is_not_a_harness_fault(bad, phrase):
+    _, _, err = _prep(**bad)
+    assert err and phrase in err and "Nothing ran" in err
+    assert "harness fault" not in err and "report_harness_fault" not in err
+
+
+def test_null_for_an_optional_argument_means_not_given():
+    args, _, err = _prep(n=None, flag=None, rate=None, items=None)
+    assert err is None
+    assert "n" not in args and "flag" not in args      # the defaults apply
+    assert args["rate"] is None and args["items"] is None   # None was allowed anyway
+
+
+def test_every_bad_argument_is_reported_at_once():
+    _, _, err = _prep(n="x", flag="y")
+    assert "n must be" in err and "flag must be" in err
+
+
+def test_unannotated_parameters_are_left_to_the_handler():
+    args, _, err = _prep(free={"anything": [1]})
+    assert err is None and args["free"] == {"anything": [1]}
+
+
+def _load_handler(tool: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"contract_{tool}",
+                                                  ROOT / "tools" / tool / "handler.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.run
+
+
+HANDLERS = sorted(p.parent.name for p in (ROOT / "tools").glob("*/handler.py"))
+
+
+@pytest.mark.parametrize("tool", HANDLERS)
+def test_a_wrong_typed_argument_never_reaches_any_handler(tool):
+    """Every annotated parameter of every tool refuses an object for a scalar
+    (and a scalar for an object) before the handler runs, so none can crash on it."""
+    run = _load_handler(tool)
+    for p in inspect.signature(run).parameters.values():
+        parsed = argcheck._kinds(p.annotation)
+        if parsed is None:
+            continue
+        kinds, _ = parsed
+        bad = [{"k": 1}] if dict not in kinds else [3.5j]      # 3.5j: nothing coerces a complex
+        for value in bad:
+            _, _, err = argcheck.prepare(tool, run, {p.name: value}, read_only=False)
+            missing_first = err and err.startswith(f"error: {tool} needs")
+            assert err and (missing_first or f"{p.name} must be" in err), (tool, p.name, err)
+
+
+@pytest.fixture
+def proj(tmp_env):
+    d = tmp_env / "projects" / "p"
+    d.mkdir(parents=True)
+    (d / "project.md").write_text("# p\n")
+    (d / "README.md").write_text("hello\nworld\na(b\n")
+    return d
+
+
+async def _tool(name: str, **args) -> str:
+    from backend import runtime
+    from backend.agent.tools import registry
+    runtime.active_project.set("p")
+    return await registry.dispatch(name, args)
+
+
+async def test_write_file_with_structured_content_is_a_fixable_error(proj):
+    for bad in ({"k": 1}, ["a"], None, True):
+        out = await _tool("write_file", path="x.json", content=bad)
+        assert out.startswith("error: write_file: content ") and "harness fault" not in out, out
+    assert not (proj / "x.json").exists()
+    assert (await _tool("write_file", path="n.txt", content=42)).startswith("wrote n.txt")
+    assert (proj / "n.txt").read_text() == "42"
+
+
+async def test_dashboard_with_bad_types_is_a_fixable_error(proj):
+    for kw in ({"path": "d.html", "html": None}, {"path": 5, "html": "<p>"},
+               {"path": None, "html": "<p>"}):
+        out = await _tool("dashboard", **kw)
+        assert out.startswith("error:") and "harness fault" not in out, out
+
+
+async def test_todo_update_takes_the_index_as_a_digit_string(proj):
+    await _tool("todo_update", action="add", text="first")
+    out = await _tool("todo_update", action="check", index="0")
+    assert "0. [x] first" in out, out
+    out = await _tool("todo_update", action="check", index="two")
+    assert out.startswith("error: todo_update: index must be a whole number (got 'two')"), out
+
+
+async def test_research_angles_as_words_is_a_fixable_error(proj):
+    out = await _tool("research", topic="tides", angles="four")
+    assert out.startswith("error: research: angles must be a whole number (got 'four')"), out
+
+
+async def test_search_codebase_none_query_and_bool_flag(proj):
+    out = await _tool("search_codebase", query=None)
+    assert out.startswith("error: search_codebase: query is required"), out
+    # regex='false' used to mean regex ON (a non-empty string is truthy): 'a(' is not a pattern
+    out = await _tool("search_codebase", query="a(", regex="false")
+    assert "a(b" in out and not out.startswith("error"), out
+    assert (await _tool("search_codebase", query="a(", regex="yes")).startswith("error: bad regex")
+
+
+# --- TOOLS-05: empty and impossible paths are the model's mistake, said plainly ---
+
+@pytest.mark.parametrize("path", ["", "  ", ".", "./", "sub/.."])
+async def test_write_file_with_no_real_path_says_path_is_required(proj, path):
+    out = await _tool("write_file", path=path, content="x")
+    assert out.startswith("error: path is required"), out
+    assert "harness fault" not in out
+
+
+async def test_write_file_under_an_existing_file_is_a_path_error(proj):
+    (proj / "notes.txt").write_text("a")
+    out = await _tool("write_file", path="notes.txt/inner.txt", content="x")
+    assert out.startswith("error: write_file:") and "really a file" in out, out
+    assert "harness fault" not in out
+
+
+@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../b"])
+async def test_paths_that_leave_the_project_read_as_the_models_path(proj, path):
+    for tool, args in (("write_file", {"content": "x"}), ("read_file", {}),
+                       ("edit_file", {"find": "a", "replace": "b"})):
+        out = await _tool(tool, path=path, **args)
+        assert out.startswith(f"error: {tool}:") and "outside the project" in out, out
+        assert "harness fault" not in out
+
+
+async def test_a_path_too_long_for_the_filesystem_is_a_path_error(proj):
+    for tool, args in (("read_file", {}), ("write_file", {"content": "x"}),
+                       ("search_codebase", {"query": "a"})):
+        key = "subdir" if tool == "search_codebase" else "path"
+        out = await _tool(tool, **{key: "x" * 400}, **args)
+        assert out.startswith(f"error: {tool}:") and "too long" in out, out
+
+
+async def test_a_nul_in_a_path_is_a_path_error(proj):
+    out = await _tool("read_file", path="a\x00b")
+    assert out.startswith("error: read_file:") and "NUL" in out, out
+
+
+async def test_protected_paths_are_refused_plainly(proj):
+    out = await _tool("write_file", path=".git/config", content="x")
+    assert out.startswith("error: write refused — cannot write into .git"), out
+    (proj / ".git").mkdir()
+    (proj / ".git" / "config").write_text("[core]\n")
+    out = await _tool("edit_file", path=".git/config", find="core", replace="x")
+    assert out.startswith("error: edit refused — cannot write into .git"), out
+
+
+async def test_edit_file_with_an_empty_find_changes_nothing(proj):
+    before = (proj / "README.md").read_text()
+    for kw in ({}, {"all": True}):
+        out = await _tool("edit_file", path="README.md", find="", replace="X", **kw)
+        assert out.startswith("error: 'find' is empty"), out
+    assert (proj / "README.md").read_text() == before
+
+
+async def test_edit_file_on_a_binary_file_is_a_plain_error(proj):
+    (proj / "b.bin").write_bytes(b"\xff\xfe\x00\x80")
+    out = await _tool("edit_file", path="b.bin", find="a", replace="b")
+    assert out.startswith("error: b.bin is binary"), out
+
+
+# --- TOOLS-06: a TOOL.md body reaches the model whole, or visibly cut ---
+
+def _entry(md: Path) -> dict:
+    """The registry entry for a TOOL.md, with the gates (desk connected, a
+    browser attached, settings) removed so the spec is built."""
+    from backend.agent.tools import registry
+    e = registry._parse_md(md)
+    for k in [k for k in e if k.startswith("requires_")]:
+        del e[k]
+    e["enabled"] = True
+    return e
+
+
+TOOL_ONLY = [m for m in TOOL_MDS if m.name == "TOOL.md"]
+
+
+@pytest.mark.parametrize("md", TOOL_ONLY, ids=lambda p: p.parent.name)
+def test_tool_body_fits_the_spec_cap(md):
+    """The tail of a long body is where the failure-recovery guidance lives; past
+    the cap it was cut mid-sentence and the model never saw it. Shorten the body
+    (lead with what matters) or raise SPEC_NOTES_MAX deliberately."""
+    from backend.agent.tools.registry import SPEC_NOTES_MAX
+    body = _entry(md)["body"]
+    assert len(body) <= SPEC_NOTES_MAX, (
+        f"{md.parent.name}: body is {len(body)} chars, the spec carries {SPEC_NOTES_MAX}")
+
+
+@pytest.mark.parametrize("md", TOOL_ONLY, ids=lambda p: p.parent.name)
+def test_the_spec_carries_the_whole_body(md):
+    from backend.agent.tools import registry
+    e = _entry(md)
+    if not e["body"]:
+        return
+    (spec,) = registry.openai_tool_specs([e])
+    assert spec["function"]["description"].endswith(e["body"])
+
+
+def test_a_body_over_the_cap_is_cut_with_a_marker():
+    from backend.agent.tools import registry
+    e = {"name": "t", "kind": "tool", "description": "d", "parameters": {},
+         "body": "x" * (registry.SPEC_NOTES_MAX + 500)}
+    (spec,) = registry.openai_tool_specs([e])
+    notes = spec["function"]["description"].partition("\nNotes: ")[2]
+    assert notes == "x" * registry.SPEC_NOTES_MAX + "…"
+    (spec,) = registry.openai_tool_specs([e], notes_max=50)      # the local voice tier
+    assert spec["function"]["description"].endswith("x" * 50 + "…")
+
+
+# --- TOOLS-08: one list of in-guest tools, read by the host and the guest ---
+
+def test_the_guest_registry_reads_the_shared_in_guest_list():
+    """guest_pkg ships handlers by the list and the guest routes calls by it. Two
+    literals meant a tool in one but not the other was shipped and never routed
+    to, or routed to a host with no handler for it (run_code lives only in the guest)."""
+    src = (ROOT / "guest/backend/agent/tools/registry.py").read_text()
+    assert "from .inguest import" in src
+    assert not re.search(r"^(IN_GUEST_TOOLS|GATED_IN_GUEST)\s*=", src, re.M), (
+        "the guest registry defines its own tool list again")
+    from backend.vm import guest_pkg
+    assert "backend/agent/tools/inguest.py" in guest_pkg._COPY_MODULES
+
+
+def test_shipped_handlers_are_exactly_the_in_guest_tools(monkeypatch):
+    import io
+    import tarfile
+
+    from backend.agent.tools import inguest
+    from backend.config import settings
+    from backend.vm import guest_pkg
+    assert guest_pkg.IN_GUEST_TOOLS is inguest.IN_GUEST_TOOLS
+    for boxes, want in ((True, set(inguest.IN_GUEST_TOOLS)),
+                        (False, set(inguest.IN_GUEST_TOOLS) - inguest.BOX_ONLY_TOOLS)):
+        monkeypatch.setattr(settings, "vm_boxes_enabled", boxes)
+        with tarfile.open(fileobj=io.BytesIO(guest_pkg.build_package_tar()), mode="r:gz") as t:
+            names = t.getnames()
+        shipped = {n.split("/")[1] for n in names
+                   if n.startswith("tools/") and n.endswith("/handler.py")}
+        assert shipped == want
+        assert "backend/agent/tools/inguest.py" in names        # the guest registry imports it
+
+
+def test_the_extracted_guest_registry_routes_by_the_shared_list(tmp_path, monkeypatch):
+    """The real package, imported the way the guest does (the vsock constant is
+    Linux-only, so it is faked to let this run on a Mac)."""
+    import subprocess
+    import sys
+
+    from backend.config import settings
+    from backend.vm import guest_pkg
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    pkg = tmp_path / "pkg.tgz"
+    pkg.write_bytes(guest_pkg.build_package_tar())
+    code = ("import socket, sys, tarfile\n"
+            "socket.VMADDR_CID_HOST = 2\n"
+            "tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')\n"
+            "sys.path.insert(0, sys.argv[2])\n"
+            "import backend.agent.tools.registry as r\n"
+            "from backend.agent.tools import inguest\n"
+            "assert inguest.__file__.startswith(sys.argv[2])\n"
+            "assert r.IN_GUEST_TOOLS is inguest.IN_GUEST_TOOLS\n"
+            "assert r.GATED_IN_GUEST is inguest.GATED_IN_GUEST\n"
+            "assert 'run_code' in r.IN_GUEST_TOOLS\n")
+    out = subprocess.run([sys.executable, "-S", "-c", code, str(pkg), str(tmp_path / "x")],
+                         cwd=tmp_path, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr[-600:]
+
+
+FILE_TOOLS = {"write_file": {"path": "a.txt", "content": "x"}, "read_file": {"path": "a.txt"},
+              "edit_file": {"path": "a.txt", "find": "a", "replace": "b"}, "list_files": {},
+              "dashboard": {"path": "d.html", "html": "<p>"}, "search_codebase": {"query": "a"},
+              "crawl_codebase": {}}
+
+
+@pytest.mark.parametrize("tool", sorted(FILE_TOOLS))
+async def test_a_file_tool_with_no_project_says_so_plainly(tmp_env, tool):
+    """Fault #8: 'LookupError: no project is loaded in the guest for this turn (at
+    tools/toolctx.py:17) ... this is a harness fault: report it'."""
+    from backend import runtime
+    from backend.agent.tools import registry
+    runtime.active_project.set(None)
+    out = await registry.dispatch(tool, FILE_TOOLS[tool])
+    assert out.startswith(f"error: {tool}: no project is loaded"), out
+    assert "call load_project" in out and "harness fault" not in out and "LookupError" not in out
+
+
+def test_the_guest_says_what_to_do_when_no_project_is_loaded(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from backend.config import settings
+    from backend.vm import guest_pkg
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    pkg = tmp_path / "pkg.tgz"
+    pkg.write_bytes(guest_pkg.build_package_tar())
+    code = ("import asyncio, socket, sys, tarfile\n"
+            "socket.VMADDR_CID_HOST = 2\n"
+            "tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')\n"
+            "sys.path.insert(0, sys.argv[2])\n"
+            "from backend.agent.tools import argcheck, toolctx\n"
+            "async def go():\n"
+            "    try:\n"
+            "        await toolctx.require_project()\n"
+            "    except LookupError as e:\n"
+            "        return argcheck.crash_message('write_file', e)\n"
+            "print(asyncio.run(go()))\n")
+    out = subprocess.run([sys.executable, "-S", "-c", code, str(pkg), str(tmp_path / "x")],
+                         cwd=tmp_path, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr[-600:]
+    msg = out.stdout.strip()
+    assert msg.startswith("error: write_file: no project is loaded"), msg
+    assert "run_code" in msg and "load_project" in msg
+    assert "harness fault" not in msg and "LookupError" not in msg
+
+
+def test_every_in_guest_tool_has_a_host_folder_and_the_gate_list_agrees():
+    from backend import permissions
+    from backend.agent.tools import inguest
+    for name in inguest.IN_GUEST_TOOLS:
+        assert (ROOT / "tools" / name / "handler.py").is_file(), name
+    assert inguest.GATED_IN_GUEST <= set(inguest.IN_GUEST_TOOLS)
+    assert inguest.GATED_IN_GUEST == permissions.IN_GUEST_GATED

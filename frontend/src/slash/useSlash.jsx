@@ -1,9 +1,11 @@
-import { useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
+import { AuthContext } from '../auth.jsx'
 import { WorkContext } from '../work/context.js'
 import { COMMANDS } from './commands.js'
 import { completion, filterOptions, findCommand, matchCommands, parseInput } from './parse.js'
+import { terminalAnswer } from './terminal.js'
 import './slash.css'
 
 // Slash commands and mid-turn messages for the Chat composer.
@@ -33,10 +35,13 @@ export function useSlash(host) {
   hostRef.current = host
   const workRef = useRef(work)
   workRef.current = work
+  const auth = useContext(AuthContext)
+  const authRef = useRef(auth)
+  authRef.current = auth
 
   const [sel, setSel] = useState(0)
   const [dismissed, setDismissed] = useState(null)   // the input Esc closed the popup at
-  const [note, setNote] = useState(null)             // {text, kind, at}
+  const [note, setNote] = useState(null)             // {text, kind, at, card?: {card, rows}}
   const [opts, setOpts] = useState({})               // command name -> options | 'loading' | Error
   const [nextChat, setNextChat] = useState(null)     // {agent?, mode?, label} for the next NEW chat
   const [later, setLater] = useState([])             // texts to send once no turn runs
@@ -62,7 +67,8 @@ export function useSlash(host) {
   const open = cmdMode && dismissed !== input
   const cur = rows.length ? Math.min(sel, rows.length - 1) : -1
 
-  const say = useCallback((text, kind = 'info', at = '') => setNote({ text, kind, at }), [])
+  const say = useCallback((text, kind = 'info', at = '', card = null) =>
+    setNote({ text, kind, at, card }), [])
   const queueLater = useCallback((t) => setLater((l) => [...l, t]), [])
 
   // --- effects -----------------------------------------------------------------
@@ -114,6 +120,7 @@ export function useSlash(host) {
   envRef.current = {
     get host() { return hostRef.current },
     get work() { return workRef.current },
+    get auth() { return authRef.current },
     navigate,
     say,
     later: queueLater,
@@ -135,7 +142,8 @@ export function useSlash(host) {
     try {
       const msg = await cmd.run(arg || '', envRef.current)
       // /help re-opens the list, so its note belongs to the "/" it leaves
-      if (msg) say(msg, 'info', cmd.name === 'help' ? '/' : '')
+      if (msg && typeof msg === 'object') say('', 'info', '', msg)     // {card, rows}
+      else if (msg) say(msg, 'info', cmd.name === 'help' ? '/' : '')
     } catch (err) {
       say(err.detail || err.message || String(err), 'error')
     }
@@ -238,6 +246,9 @@ export function useSlash(host) {
     if (q) {
       const cmd = findCommand(COMMANDS, q.name)
       if (!cmd) {
+        // a terminal-client command with nothing to run here answers in a line
+        const line = terminalAnswer(q.name)
+        if (line) { h.setInput(''); say(line); return true }
         say(q.name
           ? `unknown command /${q.name} — / lists them; //${q.name} sends it as a message`
           : 'type a command — / lists them', 'warn', text)
@@ -370,12 +381,23 @@ export function useSlash(host) {
           </div>
         ) : argState === 'loading' ? <div className="slash-empty">loading…</div>
           : argState instanceof Error ? <div className="slash-empty">couldn’t load: {argState.message}</div>
-          : !p.spaced ? <div className="slash-empty">no command starts with /{p.name} — Enter
-              says so, //{p.name} sends it as a message</div>
-          : !argCmd ? <div className="slash-empty">unknown command /{p.name}</div>
+          : !p.spaced ? <div className="slash-empty">{terminalAnswer(p.name)
+              || <>no command starts with /{p.name} — Enter says so, //{p.name} sends it as
+                a message</>}</div>
+          : !argCmd ? <div className="slash-empty">{terminalAnswer(p.name)
+              || `unknown command /${p.name}`}</div>
           : argCmd.args ? <div className="slash-empty">no match — Enter uses “{p.arg}”</div>
           : <div className="slash-empty">Enter runs /{argCmd.name}{p.arg ? ` ${p.arg}` : ''}</div>)}
-        {showNote && <div className={`slash-note ${note.kind}`}>{note.text}</div>}
+        {showNote && (note.card ? (
+          <div className="slash-note slash-card">
+            <div className="slash-card-title">{note.card.card}</div>
+            <dl>
+              {note.card.rows.map(([k, v]) => (
+                <Fragment key={k}><dt>{k}</dt><dd>{v}</dd></Fragment>
+              ))}
+            </dl>
+          </div>
+        ) : <div className={`slash-note ${note.kind}`}>{note.text}</div>)}
         {open && (
           <div className="slash-keys">↑↓ move · Tab complete · Enter run · Esc close
             {' · '}//text sends a slash</div>

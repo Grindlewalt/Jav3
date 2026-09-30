@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Button, EmptyState, Modal, Tag, Toggle } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { ago } from '../format.js'
+import AllowedProcesses from '../AllowedProcesses.jsx'
+import {
+  PERSISTENT_EMPTY_ALL, PERSISTENT_EMPTY_ODD, PERSISTENT_LEGEND, REPORTED_NEVER, plural,
+} from '../securityCopy.js'
 import { followProcs, listProcesses } from '../boxes/api/procs.js'
 import {
   SERVICES_POLL_MS, followServices, listServices, revokeService, serviceLogs, startService, stopService,
@@ -75,6 +79,7 @@ export default function Persistent() {
 
   if (unavailable) return <div className="bx-page"><Unavailable what="The process view" /></div>
   const boxes = data?.boxes || []
+  const shown = boxes.filter((b) => !onlyOdd || boxIsOdd(b))
   const all = boxes.reduce((t, b) => {
     const x = boxTotals(b)
     return { procs: t.procs + x.procs, unexpected: t.unexpected + x.unexpected,
@@ -90,27 +95,40 @@ export default function Persistent() {
       )}
       <div className="net-top">
         <div className="net-counts">
-          <span><b>{boxes.length}</b> boxes</span>
-          <span><b>{all.procs}</b> processes</span>
+          <span><b>{boxes.length}</b> {boxes.length === 1 ? 'box' : 'boxes'}</span>
+          <span><b>{all.procs}</b> {all.procs === 1 ? 'process' : 'processes'}</span>
           <span className={all.unexpected ? 'bx-red' : ''}><b>{all.unexpected}</b> unexpected</span>
-          <span className={all.mism ? 'bx-red' : ''}><b>{all.mism}</b> byte mismatches</span>
+          <span className={all.mism ? 'bx-red' : ''}>
+            <b>{all.mism}</b> byte {all.mism === 1 ? 'mismatch' : 'mismatches'}</span>
           {all.orphans > 0 && (
             <span className="bx-red"><b>{all.orphans}</b> unowned connection{all.orphans === 1 ? '' : 's'}</span>)}
         </div>
         <span className="grow" />
-        <Toggle checked={onlyOdd} onChange={setOnlyOdd} label="only boxes with something unexpected"
-                onText="only unexpected" offText="every box" />
+        {/* one fixed label: the switch is the state, so the words never read
+            as the next action ("every box" while it is off) */}
+        <Toggle checked={onlyOdd} onChange={setOnlyOdd} label="Only boxes with something unexpected"
+                onText="Only unexpected" offText="Only unexpected" />
       </div>
+      <details className="bx-legend-fold">
+        <summary className="small dim">What do these tags mean?</summary>
+        <dl className="bx-legend-list small">
+          {PERSISTENT_LEGEND.map(([term, means]) => (
+            <div key={term}><dt className="mono">{term}</dt><dd>{means}</dd></div>
+          ))}
+        </dl>
+      </details>
+      <AllowedProcesses />
       <ServiceList services={svc.data?.services} relays={svc.data?.relays} onStop={stop}
                    onStart={start} onRevoke={(x) => setDlg(x)} onLogs={setLogs} />
       <ServiceLogs s={logs} onClose={() => setLogs(null)} />
       {!data && !error && <div className="dim">…</div>}
-      {data && data.enabled && boxes.length === 0 && <EmptyState pad>no box is reporting</EmptyState>}
-      {boxes.filter((b) => !onlyOdd || boxIsOdd(b))
-        .map((b) => (
+      {data && data.enabled && boxes.length === 0 && <EmptyState pad>{PERSISTENT_EMPTY_ALL}</EmptyState>}
+      {data && boxes.length > 0 && shown.length === 0 && (
+        <EmptyState pad>{PERSISTENT_EMPTY_ODD}</EmptyState>)}
+      {shown.map((b) => (
           <BoxTree key={b.box_id} b={b} services={services}
                    onStop={stop} onRevoke={(s) => setDlg(s)} />
-        ))}
+      ))}
       <Confirm open={!!dlg} title={`Revoke service ${dlg?.name}?`} confirmLabel="Revoke" danger
                onClose={() => setDlg(null)} onConfirm={(del) => revoke(dlg, del)}
                check="Also delete its /srv data — this cannot be undone">
@@ -154,7 +172,7 @@ function ServiceList({ services, relays, onStop, onStart, onRevoke, onLogs }) {
                 const bad = r && (r.error || !r.listening)
                 return (
                   <Tag key={p.port} tone={bad ? 'error' : undefined}
-                       title={r ? `${r.address || ''} · ${r.conns} conn(s) · ${bytes(r.bytes_out)}↑ ${bytes(r.bytes_in)}↓${r.error ? ` · ${r.error}` : ''}`
+                       title={r ? `${r.address || ''} · ${plural(r.conns, 'connection')} · ${bytes(r.bytes_out)}↑ ${bytes(r.bytes_in)}↓${r.error ? ` · ${r.error}` : ''}`
                          : 'no relay open'}>
                     {p.port} → {p.bind === 'lan' ? 'LAN' : 'loopback'}</Tag>
                 )
@@ -209,11 +227,11 @@ function BoxTree({ b, services, onStop, onRevoke }) {
       <summary className="bx-tree-head">
         <b className="mono">{b.box_id}</b>
         <span className="dim small">{b.kind}{b.project ? ` · ${b.project}` : ''}</span>
-        {b.stale && <Tag tone="pending" title="the box has not reported recently">stale</Tag>}
+        {b.stale && <Tag tone="pending" title="the box has not reported lately, so this list may be out of date">stale</Tag>}
         {b.truncated && <Tag tone="pending" title="the box reported more than fits; totals count everything">truncated</Tag>}
         {b.baseline === 'builtin' && (
           <Tag title="no image baseline yet: 'unexpected' is judged against the built-in set">built-in baseline</Tag>)}
-        <span className="dim small">reported {ago(b.reported_at) || 'never'}</span>
+        <span className="dim small">{b.reported_at ? `reported ${ago(b.reported_at)}` : REPORTED_NEVER}</span>
         <span className="grow" />
         <span className="small bx-totals">
           {t.procs} proc{t.procs === 1 ? '' : 's'}

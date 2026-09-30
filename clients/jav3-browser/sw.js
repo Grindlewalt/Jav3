@@ -4,14 +4,18 @@
 // unfocused window. The operator's hand on it: per-site consent, a
 // notification with Cancel on every action, Pause, Disconnect.
 import {
-  VerbError, validate, hostOf, isDenied, siteDecision, describe,
-  parseLoginLine, baseUrl, wsUrl, parseElementId, frameConsentNeeded, shouldAdopt,
+  VerbError, validate, hostOf, isDeniedUrl, endpointOf, siteDecision, describe,
+  parseLoginLine, baseUrl, wsUrl, parseElementId, combineSigs, frameConsentNeeded, shouldAdopt, shotScale,
 } from './lib/verbs.js';
-import { readPage, clickEl, typeEl, scrollToEl, scrollPage } from './lib/page.js';
+import {
+  readPage, pageSig, domQuiet, clickEl, clickAt, typeActive, viewportInfo, typeEl, selectEl, hoverEl, keyPress, scrollToEl, scrollPage,
+} from './lib/page.js';
 
 const ASK_TIMEOUT_MS = 60000;
 const LOAD_TIMEOUT_MS = 20000;
 const PING_MS = 20000;
+const SETTLE_MS = 1500;        // after an input: wait up to this long for the DOM to go quiet
+const QUIET_MS = 300;
 const ICON = 'icon.png';
 
 const S = {
@@ -32,7 +36,17 @@ async function loadFrames(tabId) {
   return (await chrome.storage.session.get({ [k]: [] }))[k] || [];
 }
 async function dropFrames(tabId) {
-  await chrome.storage.session.remove(FRAMES_KEY(tabId));
+  await chrome.storage.session.remove([FRAMES_KEY(tabId), FOCUS_KEY(tabId)]);
+}
+// The frame the last click/type/select went into, so `key` reaches a field
+// focused inside an iframe (the top document only sees the <iframe> focused).
+const FOCUS_KEY = tabId => 'focus:' + tabId;
+async function saveFocusFrame(tabId, frameId) {
+  await chrome.storage.session.set({ [FOCUS_KEY(tabId)]: frameId });
+}
+async function loadFocusFrame(tabId) {
+  const k = FOCUS_KEY(tabId);
+  return (await chrome.storage.session.get({ [k]: null }))[k];
 }
 
 const cfg = () => chrome.storage.local.get({
@@ -52,7 +66,7 @@ async function connect() {
   S.ws = ws;
   await setStatus('connecting');
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'hello', token: c.token, v: 1,
+    ws.send(JSON.stringify({ type: 'hello', token: c.token, v: chrome.runtime.getManifest().version,
       ua: navigator.userAgent.slice(0, 120), paused: c.paused }));
     clearInterval(S.pinger);
     S.pinger = setInterval(() => send({ type: 'ping' }), PING_MS);
@@ -81,7 +95,7 @@ async function onFrame(m) {
   if (m.type === 'welcome') {
     S.backoff = 1000;
     const c = await cfg();
-    S.denyHosts = [...(Array.isArray(m.deny_hosts) ? m.deny_hosts : []), hostOf(c.address)].filter(Boolean);
+    S.denyHosts = [...(Array.isArray(m.deny_hosts) ? m.deny_hosts : []), endpointOf(c.address)].filter(Boolean);
     await chrome.storage.local.set({ name: typeof m.name === 'string' ? m.name : c.name });
     await setStatus('connected');
   } else if (m.type === 'req' && typeof m.id === 'string') {
@@ -111,7 +125,7 @@ async function handleReq(m) {
     reply(m.id, true, out);
   } catch (e) {
     reply(m.id, false, { err: String(e.message || e).slice(0, 500),
-      code: e.cancelled ? 'cancelled' : 'failed' });
+      code: e.cancelled ? 'cancelled' : (typeof e.code === 'string' ? e.code : 'failed') });
   } finally {
     S.current = null;
     setTimeout(() => { if (!S.current) chrome.notifications.clear('jav3-act'); }, 4000);
@@ -136,7 +150,7 @@ async function ownTab(tabId) {
 async function allowed(url, c) {
   const host = hostOf(url);
   if (!host) throw new VerbError('that tab is not showing a web page');
-  if (isDenied(host, S.denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never uses it');
+  if (isDeniedUrl(url, S.denyHosts)) throw new VerbError('that is the Jav3 server itself; Jav3 never uses it');
   const d = siteDecision(host, c.sites);
   if (d === 'allow') return host;
   if (d === 'deny') throw new VerbError(`the operator blocked Jav3 on ${host}`);
@@ -233,7 +247,10 @@ function waitLoad(tabId) {
   });
 }
 
+// Every page function leans on lib/dom.js (globalThis.__jav3Dom); inject it
+// into the same frame and isolated world first (a no-op when already there).
 async function inject(tabId, func, args, frameId = 0) {
+  await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ['lib/dom.js'] });
   const [r] = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [frameId] }, func, args,
   });
@@ -254,14 +271,14 @@ async function tabFrames(tabId) {
   catch { frames = []; }
   return frames
     .filter(f => !f.errorOccurred)
-    .filter(f => f.frameId === 0 || (hostOf(f.url) && !isDenied(hostOf(f.url), S.denyHosts)))
+    .filter(f => f.frameId === 0 || (hostOf(f.url) && !isDeniedUrl(f.url, S.denyHosts)))
     .sort((a, b) => a.frameId - b.frameId);
 }
 
 // Read every frame of the tab and stitch the results. Element numbers are local
 // to each frame; here they gain a frame index ("f2:5"). The frame map is kept
 // so a later click/type/scroll_to_element can resolve an id to its frameId.
-async function readAllFrames(tabId, maxChars, selector) {
+async function readAllFrames(tabId, maxChars, selector, mode) {
   const frames = await tabFrames(tabId);
   const map = [];
   const elements = [];
@@ -270,27 +287,62 @@ async function readAllFrames(tabId, maxChars, selector) {
   let title = '';
   let topText = '';
   let selectorFound = false;
+  let sig = null, viewport = null, iframes = [];
+  const frameSigs = [];
   // Share the text budget: the main frame gets it; subframes add elements only.
   for (const f of frames) {
     let r;
-    try { r = await inject(tabId, readPage, [f.frameId === 0 ? maxChars : 0, selector || ''], f.frameId); }
+    try { r = await inject(tabId, readPage, [f.frameId === 0 ? maxChars : 0, selector || '', mode || 'auto'], f.frameId); }
     catch { r = null; }
     if (!r) continue;
     const host = hostOf(r.url) || hostOf(f.url) || '';
-    if (index === 0) { title = r.title || ''; topText = r.text || ''; }
+    if (index === 0) {
+      title = r.title || ''; topText = r.text || '';
+      sig = r.sig || null; viewport = r.viewport || null; iframes = r.iframes || [];
+    }
+    if (r.sig) frameSigs.push(r.sig);
     if (r.probed) selectorFound = true;
     map.push({ index, frameId: f.frameId, url: r.url || f.url || '', host });
-    frameOut.push({ index, host, url: r.url || f.url || '' });
+    frameOut.push({ index, host, url: r.url || f.url || '',
+                    offset: index === 0 ? { x: 0, y: 0 } : frameOffset(f, iframes) });
     for (const e of (r.elements || [])) {
-      elements.push({ id: `f${index}:${e.n}`, tag: e.tag, type: e.type, role: e.role,
-                      name: e.name, text: e.text, box: e.box, inView: e.inView, frame: index });
+      const { n, ...rest } = e;
+      elements.push({ ...rest, id: `f${index}:${n}`, frame: index });
     }
     index += 1;
   }
   await saveFrames(tabId, map);
   const i = await info(tabId);
   return { data: { tab: tabId, url: i.url, title: title || i.title, text: topText,
-                   elements, frames: frameOut }, selectorFound, count: elements.length };
+                   elements, frames: frameOut, sig: combineSigs(frameSigs) || sig, viewport },
+           selectorFound, count: elements.filter(e => e.kind !== 'candidate').length };
+}
+
+// Where a direct child frame of the top page sits in the top viewport: the
+// top read listed its <iframe> boxes with their src; a unique src match places
+// it. Nested or ambiguous frames -> null (their elements are not placed on a
+// screenshot; the server says so).
+function frameOffset(f, iframes) {
+  if (f.parentFrameId !== 0) return null;
+  const hits = iframes.filter(x => x.src && x.src === f.url);
+  return hits.length === 1 ? { x: hits[0].x, y: hits[0].y } : null;
+}
+
+// The top frame's signature (text hash + element count), after the DOM goes
+// quiet; null when the page cannot be scripted right now (mid-navigation).
+async function settleSig(tabId, settleMs) {
+  try { if (settleMs) await inject(tabId, domQuiet, [settleMs, QUIET_MS], 0); } catch { /* navigating */ }
+  // every frame the extension may read, so a change inside an iframe counts
+  const sigs = [];
+  for (const f of (await tabFrames(tabId)).slice(0, 20)) {
+    try { sigs.push(await inject(tabId, pageSig, [], f.frameId)); } catch { /* frame gone */ }
+  }
+  return combineSigs(sigs);
+}
+
+function pageErr(r, verb) {
+  if (r && r.code === 'stale') return new VerbError('element is no longer on the page', 'stale');
+  return new VerbError((r && r.err) || `${verb} failed`, r && r.code);
 }
 
 // Resolve an element id ("f2:5") to the frame the last read of this tab put it
@@ -299,7 +351,7 @@ async function resolveElement(tabId, elementId) {
   const { frame, n } = parseElementId(elementId);
   const map = await loadFrames(tabId);
   const f = map.find(m => m.index === frame);
-  if (!f) throw new VerbError(`element ${elementId}: read tab ${tabId} again (its frames changed)`);
+  if (!f) throw new VerbError(`element ${elementId}: read tab ${tabId} again (its frames changed)`, 'stale');
   return { frameId: f.frameId, n, host: f.host, url: f.url };
 }
 
@@ -349,25 +401,45 @@ async function run(verb, p, c) {
     await waitLoad(p.tab);
     await giveFocusBack(prev, tab.windowId);
     await dropFrames(p.tab);   // the old element ids are gone
-    return { data: { ...(await afterLoad(p.tab, c)), opened: openedSince(since, p.tab) } };
+    return { data: { ...(await afterLoad(p.tab, c)), opened: openedSince(since, p.tab),
+                     sig: await settleSig(p.tab, 0) } };
   }
   const host = await allowed(tab.url, c);       // per-site consent on the CURRENT top site
   notifyAct(verb, host, c);
+  if (verb === 'back' || verb === 'forward') {
+    const since = Date.now();
+    const prev = await focusedWindow();
+    try {
+      await (verb === 'back' ? chrome.tabs.goBack(p.tab) : chrome.tabs.goForward(p.tab));
+    } catch {
+      throw new VerbError(`tab ${p.tab} has no ${verb === 'back' ? 'previous' : 'next'} page`);
+    }
+    await new Promise(r => setTimeout(r, 200));
+    await waitLoad(p.tab);
+    await giveFocusBack(prev, tab.windowId);
+    await dropFrames(p.tab);   // the old element ids are gone
+    // a new site here is asked about by the next action on it, like a redirect
+    return { data: { ...(await afterLoad(p.tab, c)), opened: openedSince(since, p.tab),
+                     sig: await settleSig(p.tab, 0) } };
+  }
   if (verb === 'read_page') {
-    // An all-frames read, optionally retried until a selector or an element
-    // count appears (bounded by wait_ms <= 10 s). read is fine across every
-    // frame of an already-consented top-level site.
+    // wait_ms: first let the top document go quiet (no mutations for 300 ms,
+    // or the budget runs out), then read every frame; with min_elements /
+    // selector keep re-reading until they appear, inside the same budget.
+    // Reading is fine across every frame of an already-consented top site.
     const started = Date.now();
-    let out = await readAllFrames(p.tab, p.max_chars, p.selector);
+    let quiet = null;
+    if (p.wait_ms) { try { quiet = await inject(p.tab, domQuiet, [p.wait_ms, QUIET_MS], 0); } catch { quiet = null; } }
+    let out = await readAllFrames(p.tab, p.max_chars, p.selector, p.mode);
     while (p.wait_ms && Date.now() - started < p.wait_ms) {
       const enough = (p.min_elements ? out.count >= p.min_elements : false) ||
         (p.selector ? out.selectorFound : false) ||
         (!p.min_elements && !p.selector);
       if (enough) break;
       await new Promise(r => setTimeout(r, 350));
-      out = await readAllFrames(p.tab, p.max_chars, p.selector);
+      out = await readAllFrames(p.tab, p.max_chars, p.selector, p.mode);
     }
-    return { data: out.data };
+    return { data: { ...out.data, ...(quiet ? { quiet: !!quiet.quiet } : {}) } };
   }
   if (verb === 'screenshot_tab') {
     const prev = await focusedWindow();
@@ -378,17 +450,74 @@ async function run(verb, p, c) {
     const bmp = await createImageBitmap(blob);
     const img = { mime: 'image/jpeg', w: bmp.width, h: bmp.height, b64: url.split(',', 2)[1] };
     bmp.close();
-    return { data: await info(p.tab), image: img };
+    // the viewport and scale, so the server can turn a point on this picture
+    // into CSS px for browser_click(tab, x, y)
+    let viewport = null;
+    try { viewport = await inject(p.tab, viewportInfo, [], 0); } catch { viewport = null; }
+    const scale = shotScale(img.w, img.h, viewport);
+    return { data: { ...(await info(p.tab)), viewport, scale }, image: img };
   }
   if (verb === 'scroll') {
     const r = await inject(p.tab, scrollPage, [p.pages]);
     if (!r || !r.ok) throw new VerbError((r && r.err) || 'scroll failed');
-    return { data: await info(p.tab), text: `scrolled to ${r.y} of ${r.max}` };
+    return { data: { ...(await info(p.tab)), sig: await settleSig(p.tab, 0) },
+             text: `scrolled to ${r.y} of ${r.max}` };
   }
-  // element-bound verbs: click, type, scroll_to_element. Resolve the id to its
-  // frame from the last read of this tab.
+  if (verb === 'key') {
+    // To the focused element of the top page, or of the frame the last
+    // click/type/select went into when the top page's focus is an <iframe>.
+    const since = Date.now();
+    const prev = await focusedWindow();
+    let r = await inject(p.tab, keyPress, [p.combo], 0);
+    let index = 0;
+    if (r && r.inFrame) {
+      const fid = await loadFocusFrame(p.tab);
+      const f = (await loadFrames(p.tab)).find(m => m.frameId === fid);
+      if (fid == null || !f) throw new VerbError('the focus is inside a frame Jav3 has not clicked into; click the field first');
+      if (frameConsentNeeded(host, f.host)) await allowed(f.url, c);
+      r = await inject(p.tab, keyPress, [p.combo], fid);
+      index = f.index;
+    }
+    if (!r || !r.ok || r.inFrame) throw pageErr(r, verb);
+    // "[#5]" (the element's number in its frame) -> the id the model uses
+    r.text = String(r.text || '').replace(/\[#(\d+)\]/g, (_, n) => `[f${index}:${n}]`);
+    await new Promise(res => setTimeout(res, 150));
+    await waitLoad(p.tab);
+    await giveFocusBack(prev, tab.windowId);
+    return { data: { ...(await info(p.tab)), opened: openedSince(since, p.tab), text: r.text || '',
+                     sig: await settleSig(p.tab, SETTLE_MS) } };
+  }
+  if ((verb === 'click' && p.element === undefined) || (verb === 'type' && p.element === undefined)) {
+    // a coordinate click (top frame, CSS px) or typing into the focused
+    // element (the frame the last click/type went into when focus is an
+    // <iframe>), like key
+    const since = Date.now();
+    const prev = await focusedWindow();
+    let r;
+    if (verb === 'click') {
+      r = await inject(p.tab, clickAt, [p.x, p.y, p.expect || null], 0);
+      if (r && r.ok) await saveFocusFrame(p.tab, 0);
+    } else {
+      r = await inject(p.tab, typeActive, [p.text, p.submit], 0);
+      if (r && r.inFrame) {
+        const fid = await loadFocusFrame(p.tab);
+        const f = (await loadFrames(p.tab)).find(m => m.frameId === fid);
+        if (fid == null || !f) throw new VerbError('the focus is inside a frame Jav3 has not clicked into; click the field first');
+        if (frameConsentNeeded(host, f.host)) await allowed(f.url, c);
+        r = await inject(p.tab, typeActive, [p.text, p.submit], fid);
+      }
+    }
+    if (!r || !r.ok || r.inFrame) throw pageErr(r, verb);
+    await new Promise(res => setTimeout(res, 300));
+    await waitLoad(p.tab);
+    await giveFocusBack(prev, tab.windowId);
+    return { data: { ...(await info(p.tab)), opened: openedSince(since, p.tab), text: r.text || '',
+                     sig: await settleSig(p.tab, SETTLE_MS) } };
+  }
+  // element-bound verbs: click, type, select, hover, scroll_to_element. Resolve
+  // the id to its frame from the last read of this tab.
   const el = await resolveElement(p.tab, p.element);
-  if ((verb === 'click' || verb === 'type') && frameConsentNeeded(host, el.host)) {
+  if (verb !== 'scroll_to_element' && frameConsentNeeded(host, el.host)) {
     // A cross-origin frame from a DIFFERENT registrable domain must be allowed
     // too before we act inside it — the same per-site consent as a tab.
     await allowed(el.url, c);
@@ -398,13 +527,22 @@ async function run(verb, p, c) {
   let r;
   if (verb === 'click') r = await inject(p.tab, clickEl, [el.n], el.frameId);
   else if (verb === 'type') r = await inject(p.tab, typeEl, [el.n, p.text, p.submit], el.frameId);
+  else if (verb === 'select') r = await inject(p.tab, selectEl, [el.n, p.value ?? null, p.label ?? null], el.frameId);
+  else if (verb === 'hover') r = await inject(p.tab, hoverEl, [el.n], el.frameId);
   else r = await inject(p.tab, scrollToEl, [el.n], el.frameId);
-  if (!r || !r.ok) throw new VerbError((r && r.err) || `${verb} failed`);
-  if (verb !== 'scroll_to_element') { await new Promise(res => setTimeout(res, 500)); await waitLoad(p.tab); }
+  if (r && r.code === 'covered') {
+    const cid = `f${parseElementId(p.element).frame}:${r.cover}`;
+    throw new VerbError(`element ${p.element} is covered by another element (${JSON.stringify(String(r.coverName || 'element'))}) — dismiss it first or click the covering element ${cid}`, 'covered');
+  }
+  if (!r || !r.ok) throw pageErr(r, verb);
+  if (verb === 'click' || verb === 'type' || verb === 'select') await saveFocusFrame(p.tab, el.frameId);
+  if (verb !== 'scroll_to_element' && verb !== 'hover') { await new Promise(res => setTimeout(res, 300)); await waitLoad(p.tab); }
   await giveFocusBack(prev, tab.windowId);   // a click may have opened a popup that grabbed focus
   const out = await info(p.tab);
-  return { data: { ...out, opened: openedSince(since, p.tab),
-                   ...(verb === 'scroll_to_element' ? { text: r.inView ? 'in view' : 'scrolled' } : {}) } };
+  const text = verb === 'scroll_to_element' ? (r.inView ? 'in view' : 'scrolled') : (r.text || '');
+  const settle = verb === 'scroll_to_element' ? 0 : verb === 'hover' ? 800 : SETTLE_MS;
+  return { data: { ...out, opened: openedSince(since, p.tab), ...(text ? { text } : {}),
+                   sig: await settleSig(p.tab, settle) } };
 }
 
 // Popups a Jav3 tab spawned during an action, so it can report their tab ids.
@@ -438,7 +576,7 @@ async function giveFocusBack(prevId, jav3WinId) {
 async function afterLoad(tabId, c) {
   const i = await info(tabId);
   const host = hostOf(i.url);
-  if (host && isDenied(host, S.denyHosts)) {
+  if (host && isDeniedUrl(i.url, S.denyHosts)) {
     await chrome.tabs.remove(tabId);
     throw new VerbError('the page redirected to the Jav3 server; tab closed');
   }

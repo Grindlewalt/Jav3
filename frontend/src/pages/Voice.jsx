@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { TAB_ID } from '../tab.js'
 import { VoiceAudio } from '../voiceAudio.js'
+import { micEnv, micErrorText, micProblem } from '../micCheck.js'
 
 // Desktop voice mode: fully hands-free. The page is a status surface — the
 // conversation happens out loud. Mic PCM streams up the WS, TTS PCM streams
@@ -19,7 +20,7 @@ const STATE_LABEL = {
   confirm_escalate: 'send it up?',
   asleep: 'say “hey Jav3”',
   offline: 'voicebox offline',
-  mic_denied: 'microphone blocked',
+  mic_denied: 'microphone unavailable',
 }
 
 export default function Voice() {
@@ -32,6 +33,10 @@ export default function Voice() {
   const [muted, setMuted] = useState(false)
   const [level, setLevel] = useState(0)
   const [err, setErr] = useState('')
+  // Why the mic cannot work here (plain-http address, blocked, none found). Kept
+  // apart from `err` on purpose: the server's `ready` message clears `err`, and
+  // used to erase this with it (WEB-10).
+  const [micErr, setMicErr] = useState(() => micProblem(micEnv()))
   const [cid, setCid] = useState(null)
   const wsRef = useRef(null)
   const audioRef = useRef(null)
@@ -70,10 +75,11 @@ export default function Voice() {
 
     ws.onopen = async () => {
       ws.send(JSON.stringify({ type: 'hello', tab: TAB_ID }))
+      if (micProblem(micEnv())) return    // no getUserMedia here: nothing to start
       try {
         await audio.start()
       } catch (e) {
-        if (!dead) { setState('mic_denied'); setErr(String(e?.message || e)) }
+        if (!dead) setMicErr(micErrorText(e))
       }
     }
     ws.onclose = (ev) => {
@@ -172,15 +178,17 @@ export default function Voice() {
              style={{ '--mic-glow': state === 'listening' ? glow : 0 }}>
           <div className="voice-orb-core" />
         </div>
-        <div className="voice-state">{STATE_LABEL[state] || state}
+        <div className="voice-state">{micErr ? STATE_LABEL.mic_denied : (STATE_LABEL[state] || state)}
           {tier === 'smart' && <span className="voice-tier-tag">smart model</span>}
           {working && <span className="voice-working-tag">background work running</span>}
         </div>
+        {micErr && <div className="voice-err voice-mic-err" role="alert">{micErr}</div>}
         {err && <div className="voice-err">{err}</div>}
         <div className="voice-controls">
-          <button className={muted ? '' : 'ghost'} onClick={toggleMute}>
-            {muted ? 'Unmute mic' : 'Mute mic'}
-          </button>
+          {!micErr && (
+            <button className={muted ? '' : 'ghost'} onClick={toggleMute}>
+              {muted ? 'Unmute mic' : 'Mute mic'}
+            </button>)}
           {cid && <a className="ghost-link" href={`/?c=${cid}`}>open transcript</a>}
         </div>
       </div>
@@ -200,7 +208,9 @@ export default function Voice() {
       <div className="voice-feed" ref={feedRef}>
         {feed.length === 0 && (
           <div className="voice-hint">
-            Just start talking. Interrupt any time — he’ll stop.
+            {micErr
+              ? 'Voice listens through the microphone, so it has nothing to hear yet.'
+              : 'Just start talking. Interrupt any time — he’ll stop.'}
           </div>
         )}
         {feed.map((m) => (

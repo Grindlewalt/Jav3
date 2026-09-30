@@ -104,3 +104,73 @@ async def test_release_clears_taint(tmp_env, monkeypatch):
     assert broker.op_tainted("op-t") is True
     broker.release_turn("op-t")
     assert broker.op_tainted("op-t") is False      # a reused op_id starts clean
+
+
+async def test_quarantine_note_names_what_tainted_the_turn(tmp_env, monkeypatch):
+    """The trial's note: a turn tainted only by desk tools was labelled
+    "(web/research)". The label now follows the recorded source kind; the
+    quarantine itself is unchanged."""
+    _reg()
+    try:
+        res = await _dispatch(monkeypatch, [
+            ("desk_screenshot", {"computer": "grant-mac-desk"}),
+            ("memory_write", {"name": "state", "content": "TextEdit works"})])
+        note = res[1]["result"]
+        assert 'already read the screen of "grant-mac-desk" (desk). It is quarantined' \
+            in note
+        assert "web" not in note
+        assert broker.taint_sources("op-t") == [("desk", "grant-mac-desk")]
+    finally:
+        broker.release_turn("op-t")
+    assert broker.taint_sources("op-t") == []
+    _reg()
+    try:
+        res = await _dispatch(monkeypatch, [
+            ("web_read", {"url": "http://x"}),
+            ("local_read_file", {"path": "README"}),
+            ("desk_click", {}),                      # one desk: no name in the args
+            ("memory_write", {"name": "n", "content": "c"})])
+        assert ("already read a web page, read files or command output from the "
+                "operator's machine (local) and read a computer's screen (desk). "
+                "It is quarantined") in res[3]["result"]
+    finally:
+        broker.release_turn("op-t")
+
+
+async def test_desk_act_names_the_desk_before_the_broker_does(tmp_env, monkeypatch):
+    """desk.act marks the turn with the desk's real name (the model may omit
+    `computer`); the broker's name-less mark afterwards does not erase it."""
+    _reg()
+    try:
+        broker.mark_tainted("op-t", "desk", "grant-mac-desk")
+        broker._note_source("op-t", "desk", None)
+        broker.mark_tainted("op-t", "browser")
+        broker.mark_tainted("op-t", "desk", 'x"\n' * 40)      # junk detail ignored
+        assert broker.taint_sources("op-t") == [("desk", "grant-mac-desk"),
+                                                ("browser", None)]
+        broker.mark_tainted("op-t", "nonsense")               # unknown kind: no label
+        assert len(broker.taint_sources("op-t")) == 2
+    finally:
+        broker.release_turn("op-t")
+
+
+async def test_unlabelled_taint_keeps_the_generic_note(tmp_env, monkeypatch):
+    """A taint with no recorded kind (the guest's taint_note) still quarantines."""
+    _reg()
+    try:
+        broker.mark_tainted("op-t")
+        res = await _dispatch(monkeypatch, [("memory_write", {"name": "n", "content": "c"})])
+        assert "already consumed untrusted external content. It is quarantined" \
+            in res[0]["result"]
+    finally:
+        broker.release_turn("op-t")
+
+
+async def test_shell_taint_is_recorded_as_its_own_source(tmp_env):
+    _reg()
+    try:
+        broker.mark_tainted("op-sh", "desk_shell", "grant-mac-desk")
+        assert broker.taint_sources("op-sh") == [("desk_shell", "grant-mac-desk")]
+        assert broker.op_tainted("op-sh")
+    finally:
+        broker.release_turn("op-sh")

@@ -27,6 +27,7 @@ class VMError(Exception):
 
 
 _VERSION_RE = re.compile(r"base-v(\d+)\.qcow2$")
+REBUILD_LOG_LINES = 400           # the base rebuild's log kept for the Images tab
 
 
 def _base_image() -> Path:
@@ -135,6 +136,18 @@ class GuestVM:
         self._idle_since: float | None = None
         self._booted_at: float | None = None
         self._rebuilding = False
+        # the /vms rows: booting but not yet serving, and the last boot error
+        # (cleared by the next good start)
+        self.starting = False
+        self.error: str | None = None
+        # the base image's last rebuild (build_base.sh): its log survives in
+        # memory for the Images tab; {version, running, ok, returncode, lines}
+        self.rebuild_log: dict = {}
+
+    def _record_box(self):
+        """The Box this controller runs, for the history (the shared box has
+        none of its own: boxes.shared())."""
+        return self.box if self.box is not None else _boxes_mod.shared()
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
@@ -307,8 +320,13 @@ class GuestVM:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         self._booted_at = time.monotonic()
         self._idle_since = time.monotonic()
+        if self.box is None:
+            # a non-shared box's boot is recorded at box_up (boxes._emit)
+            from . import boxlog
+            await boxlog.happened(self._record_box(), "started")
 
     async def teardown(self) -> None:
+        was_running = self.running()
         if self._proc is not None and self._proc.returncode is None:
             try:
                 os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
@@ -329,6 +347,9 @@ class GuestVM:
             (self._dir / name).unlink(missing_ok=True)
         if self.box is not None:
             await self._box_net_down()
+        elif was_running:
+            from . import boxlog
+            await boxlog.happened(self._record_box(), "stopped")
 
     async def _box_net_up(self) -> None:
         """A non-shared box's network (tap + nft pins) and the box_up hooks
@@ -351,9 +372,12 @@ class GuestVM:
         await boxes.box_down(self.box)
 
     async def nuke(self) -> None:
-        async with self._lock:
-            await self.teardown()
-            await self.boot()
+        from . import boxlog
+        async with boxlog.action(self._record_box(), "nuked",
+                                 reason="overlay discarded, rebooted from the golden image"):
+            async with self._lock:
+                await self.teardown()
+                await self.boot()
 
     async def rebuild_image(self) -> dict:
         """Build the NEXT golden-image version in the background (vm/build_base.sh,
@@ -373,21 +397,30 @@ class GuestVM:
         env = {**os.environ, "JARVIS_VM_IMAGE_VERSION": version,
                "VM_DIR": str(settings.vm_dir)}
         bus.publish(chan, {"type": "rebuild", "phase": "start", "version": version})
+        lines: list[str] = []
+        self.rebuild_log = {"version": version, "running": True, "ok": None,
+                            "returncode": None, "error": None, "lines": lines,
+                            "started_at": time.time(), "finished_at": None}
         try:
             proc = await asyncio.create_subprocess_exec(
                 "bash", str(script), env=env, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT)
             if proc.stdout is not None:
                 async for line in proc.stdout:
-                    bus.publish(chan, {"type": "rebuild", "phase": "log",
-                                       "line": line.decode(errors="replace").rstrip()})
+                    text = line.decode(errors="replace").rstrip()
+                    lines.append(text[:400])
+                    del lines[:-REBUILD_LOG_LINES]
+                    bus.publish(chan, {"type": "rebuild", "phase": "log", "line": text})
             rc = await proc.wait()
             ok = rc == 0 and (settings.vm_dir / f"base-{version}.qcow2").exists()
+            self.rebuild_log.update(ok=ok, returncode=rc)
             bus.publish(chan, {"type": "rebuild", "phase": "done",
                                "version": version, "ok": ok, "returncode": rc})
         except (FileNotFoundError, OSError) as e:
+            self.rebuild_log.update(ok=False, error=str(e))
             bus.publish(chan, {"type": "rebuild", "phase": "error", "error": str(e)})
         finally:
+            self.rebuild_log.update(running=False, finished_at=time.time())
             self._rebuilding = False
 
     # --- refcount + idle scrub -------------------------------------------------
@@ -396,7 +429,17 @@ class GuestVM:
         """Ensure the guest is up and pin it for one turn. Serialized so the reaper
         can't tear down between the readiness check and the pin."""
         async with self._lock:
-            await self._ensure_ready_locked()
+            self.starting = not self.running()
+            try:
+                await self._ensure_ready_locked()
+            except VMError as e:
+                self.error = str(e)
+                from . import boxlog
+                await boxlog.happened(self._record_box(), "error", reason=str(e))
+                raise
+            finally:
+                self.starting = False
+            self.error = None
             self._inflight += 1
 
     def release(self) -> None:
@@ -414,11 +457,14 @@ class GuestVM:
             return
         if self._idle_since is None or time.monotonic() - self._idle_since < window:
             return
+        from . import boxlog
         async with self._lock:
             if self._inflight > 0:          # a turn arrived while we waited
                 return
-            await self.teardown()
-            await self.boot()
+            async with boxlog.action(self._record_box(), "wiped", actor="reaper",
+                                     reason=f"idle scrub after {_boxes_mod._mins(window)}"):
+                await self.teardown()
+                await self.boot()
 
     async def _ensure_ready_locked(self) -> None:
         """Boot the guest if it isn't running and wait until its run-turn server
@@ -499,13 +545,27 @@ _boxes_mod.register_runtime("kvm", GuestVM)
 
 async def reaper_loop() -> None:
     """Background: scrub the guest once it has gone idle (M4c). Cheap and inert
-    while vm_idle_scrub_seconds is 0. Started from the app lifespan."""
+    while vm_idle_scrub_seconds is 0. Started from the app lifespan.
+
+    Its first pass also lists leftovers (leftovers.py), read only, and logs
+    the count: after one interval, so the service boxes startup re-creates
+    are registered by then and not miscounted."""
+    first = True
     while True:
         try:
             await asyncio.sleep(settings.vm_reaper_interval_seconds)
+            if first:
+                first = False
+                from . import leftovers
+                try:
+                    print(leftovers.summary_line(await leftovers.scan()))
+                except Exception as e:  # noqa: BLE001 — advice only
+                    print(f"[boxes] leftover scan skipped: {e}")
             await vm.reap_if_idle()
             if settings.vm_boxes_enabled:
                 await _boxes_mod.reap_idle()
+            from . import boxlog
+            await boxlog.watch_all()      # crashes and failed boots nobody reported
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a reaper hiccup must never kill the loop

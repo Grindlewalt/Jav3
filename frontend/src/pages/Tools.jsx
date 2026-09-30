@@ -7,6 +7,7 @@ import Input from '../components/Input.jsx'
 import Tag, { Badge } from '../components/Tag.jsx'
 import Toggle from '../components/Toggle.jsx'
 import EmptyState from '../components/EmptyState.jsx'
+import { IMPORT_TIP, TOOLS_LEDE, builtinState } from '../securityCopy.js'
 
 // Three groups (GET /api/tools `group`): the operator's own skills, open;
 // imported OpenClaw skills, each a card with its requirements and a grant
@@ -147,9 +148,10 @@ export default function Tools() {
   const builtin = list.filter((t) => t.group === 'builtin')
 
   return (
-    <Page title="Tools"
+    <Page title="Tools" lede={TOOLS_LEDE}
           actions={!importing && (
-            <Button variant="ghost" onClick={() => setImporting(true)}>Import</Button>
+            <Button variant="ghost" title={IMPORT_TIP} onClick={() => setImporting(true)}>
+              Import a skill</Button>
           )}>
       {importing && (
         <ImportBar onClose={() => setImporting(false)}
@@ -191,12 +193,19 @@ export default function Tools() {
             <span className="chev" aria-hidden="true">›</span>
           </summary>
           <ul className="builtin-list">
-            {builtin.map((t) => (
-              <li key={t.name} title={t.description}>
-                <code>{t.name}</code>
-                {t.enabled ? <Tag tone="done">on</Tag> : <Tag>off</Tag>}
-              </li>
-            ))}
+            {builtin.map((t) => {
+              const st = builtinState(t)
+              return (
+                <li key={t.name}>
+                  <div className="builtin-head">
+                    <code>{t.name}</code>
+                    <Tag tone={st.tone || undefined}>{st.word}</Tag>
+                  </div>
+                  {t.description && <div className="dim small builtin-desc">{t.description}</div>}
+                  {t.reason && <div className="small builtin-why">{t.reason}</div>}
+                </li>
+              )
+            })}
           </ul>
         </details>
       )}
