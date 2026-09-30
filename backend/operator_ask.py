@@ -57,6 +57,7 @@ class _Ask:
     created: float
     detached: bool = False           # nobody waits on fut: the answer is sent as a message
     chan: str = ""                   # the turn's channel (to close every view later)
+    closed: bool = False             # ask_done already sent
 
 
 _pending: dict[str, _Ask] = {}
@@ -201,7 +202,10 @@ async def _supervising_a_run(cid: int) -> bool:
 def _settled(a: _Ask) -> None:
     """Tell every view that showed an ask that it is over (answered here or
     elsewhere, timed out, cancelled, or detached and then answered), so a second
-    copy closes."""
+    copy closes. Idempotent."""
+    if a.closed:
+        return
+    a.closed = True
     _pending.pop(a.id, None)
     done = {"type": "ask_done", "id": a.id, "conversation_id": a.conversation_id}
     for c in _chans(a.chan, sorted(a.shown_in)):
@@ -288,7 +292,10 @@ def _cancel(a: _Ask) -> None:
         a.fut.cancel()          # nothing waits on it: just close it everywhere
         _settled(a)
     else:
+        # released at once, not when the asking coroutine next runs: a stop that
+        # returns must leave nothing pending (and the agents view nothing waiting)
         a.fut.set_exception(AskCancelled())
+        _settled(a)
 
 
 def cancel_conversation(cid: int) -> int:
