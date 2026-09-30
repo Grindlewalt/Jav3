@@ -200,6 +200,41 @@ async def test_hidden_rows_wait_for_a_filter_and_a_line_says_how_many():
         assert ids[:2] == ["lm/a", "lm/b"]
 
 
+# security rows and the agents screen at 80 columns / 256 colours
+
+def _plain(markup: str) -> str:
+    import re
+    return re.sub(r"\[[^\]]*\]", "", markup)
+
+
+def test_calls_row_has_a_compact_form_that_keeps_cache_and_cost():
+    e = {"type": "call", "ts": "2026-09-27 14:03:11", "raw": {
+        "op_id": "7f3a9c2e51b64d08aa", "project_slug": "benchmark-game",
+        "conversation_id": 4242, "model": "deepseek/deepseek-flash",
+        "input_tokens": 12400, "output_tokens": 812, "cache_hit": 9100, "cost_usd": 0.0021}}
+    full = _plain(jav3.calls_row(e))
+    compact = _plain(jav3.calls_row(e, compact=True))
+    assert "op 7f3a" in full and "⌂ benchmark-game" in full and len(full) > 76
+    assert "op " not in compact and "⌂" not in compact and "#4242" in compact
+    assert len(compact) <= 76 and compact.endswith("cache 9.1k $0.0021")
+    assert jav3.calls_row(e) == jav3.calls_row(e, compact=False)      # the spec'd string
+
+
+def test_network_verdicts_are_whole_words():
+    assert jav3.verdict_label("pending") == "PENDING"
+    assert jav3.verdict_label("allow") == "ALLOW" and jav3.verdict_label("cut") == "CUT"
+    assert jav3.verdict_label("auto_allow") == "A·ALLOW"
+    assert jav3.verdict_label("auto_deny") == "A·DENY"
+    assert jav3.verdict_label(None) == "?"
+
+
+def test_current_agent_row_uses_solid_colours_for_256_colour_terminals():
+    from cli_fake import CLI
+    src = CLI.read_text()
+    rule = next(ln for ln in src.splitlines() if "AgentRow.current {" in ln)
+    assert "%" not in rule and "$success" in rule
+
+
 # TUI-21
 
 async def test_home_names_the_keys_a_new_user_needs_and_where_chats_go():

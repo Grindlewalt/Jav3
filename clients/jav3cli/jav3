@@ -771,6 +771,12 @@ def fit_parts(parts: list[tuple[str, str, int]], width: int, sep: str = " · ",
     return (sep if markup_sep is None else markup_sep).join(parts[j][1] for j in keep)
 
 
+def verdict_label(v: str) -> str:
+    """A network verdict as its row label, whole words in seven columns: `pending`
+    was cut to PENDI and `auto_allow` to A·ALL."""
+    return str(v or "?").replace("auto_", "a·").upper()[:7]
+
+
 def fit_row(left: list[tuple[str, str, int]], right: list[tuple[str, str, int]],
             total: int, sep: str = " · ", markup_sep: str | None = None) -> tuple[str, str]:
     """A status row's two sides, (plain, markup, rank) parts each, joined so the
@@ -1908,22 +1914,25 @@ def calls_model(m) -> str:
     return m[len("deepseek/"):] if m.startswith("deepseek/") else m
 
 
-def calls_row(e: dict) -> str:
-    """One Calls list row (spec: BACKLOG.md 'TUI: make the security story visible')."""
+def calls_row(e: dict, compact: bool = False) -> str:
+    """One Calls list row (spec: BACKLOG.md 'TUI: make the security story visible').
+    Compact (a terminal under 100 columns) leaves out the op and the project, which
+    the pane under the list has, so the tokens, cache and cost are not cut off."""
     r, ts = e["raw"], (e.get("ts") or "")[5:16]
     if e["type"] == "refusal":
         return (f"[$error]●[/] [$text-muted]{ts}[/] [$error b]REFU[/] "
                 f"{_esc(r.get('op_name') or '?')} {_esc(r.get('reason') or '?')} "
                 f"[$text-muted]from box {_esc(r.get('box_id') or '-')}[/]")
     meta = []
-    if r.get("op_id"):
+    if r.get("op_id") and not compact:
         meta.append(f"op {_esc(_short(r['op_id'], 16))}")
-    if r.get("project_slug"):
+    if r.get("project_slug") and not compact:
         meta.append(f"⌂ {_esc(r['project_slug'])}")
     if r.get("conversation_id") is not None:
         meta.append(f"#{r['conversation_id']}")
+    model = calls_model(r.get("model"))
     return (f"[$primary]●[/] [$text-muted]{ts}[/] [$primary b]CALL[/] "
-            f"{_esc(calls_model(r.get('model')))}"
+            f"{_esc(_short(model, 22) if compact else model)}"
             + (f" [$text-muted]{' '.join(meta)}[/]" if meta else "")
             + f" ↑{calls_tok(r.get('input_tokens'))} ↓{calls_tok(r.get('output_tokens'))} "
               f"[$text-muted]cache {calls_tok(r.get('cache_hit'))}[/] "
@@ -3570,7 +3579,8 @@ def build_tui(base: str, token: str, **kw):
         AgentRow.child { color: $text; }
         AgentRow.-sel { background: $primary; color: auto 95%; text-style: bold;
                         border-left: thick $accent; }
-        AgentRow.current { background: $success 18%; color: $success; }
+        /* solid colours only: a blended tint rounds to grey in 256 colours */
+        AgentRow.current { background: $panel; color: $success; border-left: thick $success; }
         AgentRow.current.-sel { background: $success; color: auto 95%;
                                 border-left: thick $accent; }
         """
@@ -4733,9 +4743,11 @@ def build_tui(base: str, token: str, **kw):
                     "secrets": len(self.entries["secrets"]) if self.loaded["secrets"] else None}
 
         @staticmethod
-        def row_markup(e: dict, all_projects: bool = True) -> str:
+        def row_markup(e: dict, all_projects: bool = True, compact: bool = False) -> str:
             r, ts = e["raw"], (e.get("ts") or "")[5:16]
             t = e["type"]
+            if t == "call":
+                return calls_row(e, compact)
             if t == "rule":
                 return (f"[$accent b]RULE[/] [$text-muted]{ts}[/] "
                         f"[b]{_esc(str(r.get('tool')))}[/] {_esc(str(r.get('prefix')))} "
@@ -4776,7 +4788,7 @@ def build_tui(base: str, token: str, **kw):
                 meter = (f" [$text-muted]↑{_bytes(r.get('bytes_out'))} "
                          f"↓{_bytes(r.get('bytes_in'))}[/]")
                 return (f"[{col}]●[/] [$text-muted]{ts}[/] "
-                        f"[{col} b]{v.replace('auto_', 'a·')[:5].upper():<5}[/] "
+                        f"[{col} b]{verdict_label(v):<7}[/] "
                         f"{_esc(_short(what.strip(), 70))}{proj}{meter}")
             if t in _ROWS:
                 return _ROWS[t](e)
@@ -5182,6 +5194,15 @@ def build_tui(base: str, token: str, **kw):
                          "waiting[/] [$text-muted](distinct hosts; verdicts in Queue)[/]")
             return line
 
+        def on_resize(self, event) -> None:
+            """Calls rows have a compact form under 100 columns: draw them again
+            when a resize crosses that width."""
+            narrow = self.size.width < 100
+            if narrow != getattr(self, "_narrow", narrow) and self.tab == "calls" \
+                    and type(self) is SecurityScreen:
+                self.run_worker(self.rebuild(), group="rebuild", exclusive=True)
+            self._narrow = narrow
+
         async def rebuild(self) -> None:
             async with self._lock:
                 shown = [] if self.locked else self.shown()
@@ -5189,7 +5210,7 @@ def build_tui(base: str, token: str, **kw):
                 if self.sel[self.tab] not in keys:
                     self.sel[self.tab] = keys[0] if keys else None
                 allp = self.project is None
-                marks = [self.row_markup(e, allp) for e in shown]
+                marks = [self.row_markup(e, allp, self.size.width < 100) for e in shown]
                 sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys), tuple(marks))
                 if sig != self._sig:
                     self._sig = sig
