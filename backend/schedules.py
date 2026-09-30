@@ -134,8 +134,12 @@ async def list_schedules():
             deleted = await cur.fetchall()
     finally:
         await db.close()
+    # next_run / last_run are naive server-local text: name the zone they are in
+    tz = _now().astimezone()
     return {"schedules": [dict(r) for r in rows],
-            "deleted": [dict(r) for r in deleted]}
+            "deleted": [dict(r) for r in deleted],
+            "server_tz": {"name": tz.tzname(),
+                          "utc_offset_min": int(tz.utcoffset().total_seconds() // 60)}}
 
 
 @router.post("")
