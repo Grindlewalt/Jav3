@@ -387,6 +387,8 @@ async def test_leftovers_scan_and_clean_only_ours(env, tmp_path, monkeypatch):
     (vm_dir / "boxes" / "p-ghost" / "overlay.qcow2").write_bytes(b"x" * 4096)
     (vm_dir / "boxes" / "p-alpha").mkdir(parents=True)        # registered below
     (vm_dir / "sock" / "12").mkdir(parents=True)
+    (vm_dir / "sock" / "12" / "gateway.sock").write_bytes(b"")     # a stale socket left in it
+    (vm_dir / "sock" / "14").mkdir(parents=True)                   # empty: not a leftover
     (vm_dir / "overlay.qcow2").write_bytes(b"y")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -476,3 +478,245 @@ async def test_clean_skips_what_is_no_longer_a_leftover(env, monkeypatch, tmp_pa
     out = await leftovers.clean(["box_dir:p-beta", "tap:jvtap9"])
     assert out["removed"] == [] and out["skipped"] == ["box_dir:p-beta", "tap:jvtap9"]
     assert (settings.vm_dir / "boxes" / "p-beta").exists()
+
+
+# --- second box hunt -----------------------------------------------------------------
+
+async def test_a_box_that_never_booted_is_released_after_the_window(env):
+    """A start for a project that failed before the guest ever booted left a
+    box that never idle-stopped (idle_since stayed None)."""
+    b = boxes.allocate("project", project="typo")
+    b.allocated_at = time.time() - 30
+    await boxes.reap_idle()
+    assert boxes.get("p-typo") is b                       # window is 10 minutes
+    b.allocated_at = time.time() - 700
+    await boxes.reap_idle()
+    assert boxes.get("p-typo") is None
+    assert boxes.budget()["project_boxes"] == 0
+
+
+def _fake_stat(root, pid, ppid, utime=0, stime=0, cutime=0, cstime=0, pages=0):
+    """/proc/<pid>/stat and statm as the kernel writes them (fields 3.. after
+    the comm; a comm with a space and a paren, as real ones can have)."""
+    d = root / str(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    rest = ["S", str(ppid)] + ["0"] * 9 + [str(utime), str(stime), str(cutime),
+                                           str(cstime)] + ["0"] * 5
+    (d / "stat").write_text(f"{pid} (py (x)) " + " ".join(rest) + "\n")
+    (d / "statm").write_text(f"999 {pages} 10 0 0 0 0\n")
+
+
+async def test_docker_box_rss_and_cpu_are_the_whole_container(env, monkeypatch, tmp_path):
+    """The row measured tini (PID 1): 1.1 MB for a box that uses about 36."""
+    root = tmp_path / "proc"
+    tck, page = os.sysconf("SC_CLK_TCK"), os.sysconf("SC_PAGE_SIZE")
+    _fake_stat(root, 1092, 1, utime=tck, pages=10)                          # tini
+    _fake_stat(root, 1200, 1092, utime=2 * tck, stime=tck, pages=100)       # server
+    _fake_stat(root, 1300, 1200, utime=tck, pages=50)                       # its child
+    _fake_stat(root, 1400, 1092, cutime=4 * tck, pages=5)                   # reaped work
+    _fake_stat(root, 2000, 1, utime=99 * tck, pages=9999)                   # not ours
+    monkeypatch.setattr(boxes, "_PROC", str(root))
+    st = boxes._proc_stats(1092, tree=True)
+    assert st == {"rss_bytes": 165 * page, "cpu_s": 9.0}
+    assert boxes._proc_stats(1092) == {"rss_bytes": 10 * page, "cpu_s": 1.0}   # a QEMU: one pid
+    assert boxes._proc_stats(31337, tree=True) == {"rss_bytes": None, "cpu_s": None}
+    b = boxes.allocate("project", project="alpha")
+    b.runtime = "docker"
+    b.ctl = FakeCtl(b, running=True)
+    b.ctl.pid = 1092
+    assert boxes.status_json(b)["rss_bytes"] == 165 * page
+
+
+async def test_cpu_pct_is_never_negative_after_a_restart(env, monkeypatch, tmp_path):
+    root = tmp_path / "proc"
+    _fake_stat(root, 500, 1, utime=100000)
+    monkeypatch.setattr(boxes, "_PROC", str(root))
+    boxes._cpu_prev.clear()
+    b = boxes.allocate("project", project="alpha")
+    b.ctl = FakeCtl(b, running=True)
+    b.ctl.pid = 500
+    assert boxes.status_json(b)["cpu_pct"] is None            # first sample
+    b.ctl.pid = 501                                           # restarted: fewer ticks
+    _fake_stat(root, 501, 1, utime=5)
+    assert boxes.status_json(b)["cpu_pct"] is None            # new guest, new count
+    _fake_stat(root, 501, 1, utime=205)
+    assert boxes.status_json(b)["cpu_pct"] > 0
+    b.ctl._run = False
+    assert boxes.status_json(b)["cpu_pct"] is None and b.id not in boxes._cpu_prev
+
+
+async def test_an_idle_shared_vm_is_scrubbed_once_not_every_window(env, monkeypatch):
+    """Every window of idleness rebooted the guest again (boot restarted the
+    idle clock) and wrote a 'wiped' row each time."""
+    g = lifecycle.GuestVM()
+    boots = []
+
+    async def fake_boot():
+        boots.append(1)
+        g._proc = type("P", (), {"returncode": None, "pid": 1})()
+        g._idle_since = time.monotonic()
+        g._fresh = True                          # what the real boot() ends with
+
+    async def fake_teardown():
+        g._proc = None
+    monkeypatch.setattr(g, "boot", fake_boot)
+    monkeypatch.setattr(g, "teardown", fake_teardown)
+    await fake_boot()
+    g._fresh = False                             # a turn used it
+    g._idle_since = time.monotonic() - 1000
+    await g.reap_if_idle()
+    assert len(boots) == 2                       # scrubbed: rebooted fresh
+    for _ in range(3):
+        g._idle_since = time.monotonic() - 1000  # the next windows pass, nobody came
+        await g.reap_if_idle()
+    assert len(boots) == 2
+    assert [e[0] for e in await _events("shared")] == ["wiped"]
+    g._proc = type("P", (), {"returncode": None, "pid": 1})()
+    g.starting = False
+
+    async def ready():
+        return None
+    monkeypatch.setattr(g, "_ensure_ready_locked", ready)
+    await g.acquire()                            # someone used it: the next idle scrubs again
+    g.release()
+    g._idle_since = time.monotonic() - 1000
+    await g.reap_if_idle()
+    assert len(boots) == 3
+
+
+async def test_history_is_pruned_per_box(env, monkeypatch):
+    monkeypatch.setattr(boxlog, "KEEP_PER_BOX", 4)
+    s = boxes.shared()
+    p = boxes.allocate("project", project="alpha")
+    await boxlog.record(p, "started")
+    for _ in range(9):
+        await boxlog.record(s, "wiped")
+    assert len(await boxlog.events("shared")) == 4
+    assert [e["event"] for e in await boxlog.events("p-alpha")] == ["started"]
+
+
+async def test_a_stopped_project_box_says_when_it_will_be_removed(env):
+    """A stopped project box vanished from /vms with no warning (idle stop and
+    the operator's stop both end in a release)."""
+    b = boxes.allocate("project", project="alpha")
+    await boxes.start(b)
+    await boxes.stop(b)
+    b.ctl.idle_since = time.monotonic() - 240
+    row = boxes.status_json(b)
+    assert row["state"] == "stopped" and row["stops_in_s"] is None
+    assert 358 <= row["removed_in_s"] <= 362                 # 600 - 240
+    b.ctl.idle_since = time.monotonic() - 900
+    assert boxes.status_json(b)["removed_in_s"] == 0
+    await boxes.start(b)
+    assert boxes.status_json(b)["removed_in_s"] is None      # running: the idle timer instead
+    assert boxes.status_json(boxes.shared())["removed_in_s"] is None
+
+
+async def test_start_for_a_project_that_does_not_exist_is_a_404(client, env):
+    """A typo'd start reserved RAM and booted a box for nothing."""
+    r = await client.post("/api/vm/boxes/p-no-such-project/start")
+    assert r.status_code == 404 and "no project" in r.json()["detail"]
+    assert boxes.get("p-no-such-project") is None and boxes.budget()["project_boxes"] == 0
+    db = await get_db()
+    try:
+        await db.execute("INSERT INTO projects (slug, name, path) VALUES ('real', 'real', '/x')")
+        await db.commit()
+    finally:
+        await db.close()
+    r = await client.post("/api/vm/boxes/p-real/start")
+    assert r.status_code == 200 and r.json()["state"] == "running"
+
+
+async def test_events_of_an_unknown_box_is_a_404_and_a_gone_boxs_history_reads(client, env):
+    assert (await client.get("/api/vm/boxes/nope/events")).status_code == 404
+    b = boxes.allocate("project", project="alpha")
+    assert (await client.get("/api/vm/boxes/p-alpha/events")).json()["events"] == []
+    await client.post("/api/vm/boxes/p-alpha/start")
+    await client.post("/api/vm/boxes/p-alpha/destroy", json={"confirm": True})
+    assert boxes.get("p-alpha") is None
+    evs = (await client.get("/api/vm/boxes/p-alpha/events")).json()["events"]
+    assert evs[0]["event"] == "destroyed"
+    assert b.id == "p-alpha"
+
+
+async def test_operator_stop_says_when_it_cut_off_turns(client, env):
+    b = boxes.allocate("project", project="alpha")
+    await client.post("/api/vm/boxes/p-alpha/start")
+    b.ctl.inflight = 2
+    await client.post("/api/vm/boxes/p-alpha/stop")
+    ev = (await client.get("/api/vm/boxes/p-alpha/events")).json()["events"][0]
+    assert ev["event"] == "stopped"
+    assert ev["reason"] == "operator stop, cutting off 2 running turns"
+    r = await client.post("/api/vm/boxes/shared/destroy", json={"confirm": True})
+    assert r.json() == {"ok": True, "removed": False}          # only stopped
+    r = await client.post("/api/vm/boxes/p-alpha/destroy", json={"confirm": True})
+    assert r.json() == {"ok": True, "removed": True}
+
+
+async def test_a_dead_docker_daemon_is_not_no_leftovers(env, monkeypatch, tmp_path):
+    monkeypatch.setattr(leftovers, "PROC", tmp_path / "noproc")
+    monkeypatch.setattr(leftovers, "SYS_NET", tmp_path / "nonet")
+    monkeypatch.setattr(settings, "docker_enabled", True)
+    from backend.vm import docker_runtime as dr
+
+    class Dead:
+        rc = 1
+
+        async def run(self, *a, **k):
+            return self.rc, "", "Cannot connect to the Docker daemon at unix:///nonexistent.sock"
+    dead = Dead()
+    monkeypatch.setattr(dr, "cli", dead)
+    for rc in (1, 124):                     # refused, and timed out
+        dead.rc = rc
+        leftovers.reset()
+        res = await leftovers.scan()
+        assert res["docker"].startswith("unavailable") and "Cannot connect" in res["docker"]
+        assert res["items"] == []
+        assert "docker could not be asked" in leftovers.summary_line(res)
+    with pytest.raises(dr.DockerError):     # startup's orphan reap says it skipped
+        await dr.reap_orphans()
+
+
+async def test_a_raising_reaper_duty_is_recorded_and_skips_nothing(env, monkeypatch):
+    """`except Exception: pass` around the whole tick: one failing duty hid
+    itself and skipped project-box reaping and crash detection too."""
+    import asyncio
+    reaped = []
+
+    class BadVM(FakeCtl):
+        async def reap_if_idle(self):
+            raise RuntimeError("scrub blew up")
+
+    async def reap_idle():
+        reaped.append(1)
+
+    async def scan():
+        return {"items": [], "docker": "off"}
+    monkeypatch.setattr(lifecycle, "vm", BadVM(None, running=True))
+    monkeypatch.setattr(boxes, "reap_idle", reap_idle)
+    monkeypatch.setattr(leftovers, "scan", scan)
+    monkeypatch.setattr(settings, "vm_reaper_interval_seconds", 0.01)
+    lifecycle._reaper_noted.clear()
+    task = asyncio.create_task(lifecycle.reaper_loop())
+    await asyncio.sleep(0.25)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(reaped) >= 3                                  # the other duties kept running
+    evs = await boxlog.events("shared")
+    assert [e["event"] for e in evs] == ["error"]            # once, not every tick
+    assert "reaper scrub: RuntimeError: scrub blew up" == evs[0]["reason"]
+
+
+async def test_reaper_leaves_a_box_that_is_booting_again(env):
+    """A retry after a failed boot: the stale idle stamp from the failure must
+    not get the guest torn down mid-boot."""
+    b = boxes.allocate("project", project="alpha")
+    b.ctl = FakeCtl(b)
+    b.ctl.idle_since = time.monotonic() - 5000
+    b.ctl.starting = True
+    await boxes.reap_idle()
+    assert boxes.get("p-alpha") is b
+    b.ctl.starting = False
+    await boxes.reap_idle()
+    assert boxes.get("p-alpha") is None
