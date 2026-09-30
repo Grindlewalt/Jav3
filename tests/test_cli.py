@@ -1413,11 +1413,15 @@ async def test_tui_security_network_and_logs(cfg):
         assert "gate_flag" in rows[0] and "host_cut" in rows[1]
         assert "CRIT" in rows[0] and "✓" in rows[1]
         assert ("GET", "/api/security/events", {"limit": "200"}, None) in seen
-        await pilot.press("f")                                  # all -> gate_flag
-        assert scr.log_filter == "gate_flag"
+        await pilot.press("f")                                  # a list of kinds
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("down", "enter")                      # all -> gate_flag
+        assert await _until(pilot, lambda: scr.log_filter == "gate_flag")
         assert await _until(pilot, lambda: len(_rows(scr)) == 1)
-        await pilot.press("f")                                  # -> host_cut
-        assert await _until(pilot, lambda: "host_cut" in _rows(scr)[0])
+        await pilot.press("f")
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("down", "enter")                      # -> host_cut
+        assert await _until(pilot, lambda: "host_cut" in " ".join(_rows(scr)))
         assert "acknowledged" in _text(scr.query_one("#sec-detail"))
         await pilot.press("a")                                  # already acked: nothing
         await pilot.pause(0.2)

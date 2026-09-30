@@ -791,9 +791,9 @@ def fit_parts(parts: list[tuple[str, str, int]], width: int, sep: str = " · ",
 
 
 def verdict_label(v: str) -> str:
-    """A network verdict as its row label, whole words in seven columns: `pending`
-    was cut to PENDI and `auto_allow` to A·ALL."""
-    return str(v or "?").replace("auto_", "a·").upper()[:7]
+    """A network verdict as its row label, whole words in eight columns: `pending`
+    was cut to PENDI, `auto_allow` to A·ALL and `reviewed` to REVIEWE."""
+    return str(v or "?").replace("auto_", "a·").upper()[:8]
 
 
 def fit_row(left: list[tuple[str, str, int]], right: list[tuple[str, str, int]],
@@ -4055,7 +4055,7 @@ def build_tui(base: str, token: str, **kw):
 
     # -- the security screen -------------------------------------------------------------
     #
-    # /security (alias /review): the web app's Security area in six tabs. The
+    # /security (alias /review): the web app's Security area in eight tabs. The
     # queue is Review.jsx's (egress hosts waiting, git commit/remote requests
     # pending in every project, service and package requests, unacknowledged
     # alerts, which carry the diff-gate flags); Network is each project's allow
@@ -4348,7 +4348,8 @@ def build_tui(base: str, token: str, **kw):
         t = r.get("totals") or {}
         n = t.get("procs") if isinstance(t.get("procs"), int) else e.get("count", 0)
         orph = len(_jlist(r.get("orphan_conns")))
-        flags = (f" {AMBER} stale [/]" if r.get("stale") else "")
+        first = not r.get("reported_at")             # booted, not yet heard from: not stale
+        flags = (f" {AMBER} stale [/]" if r.get("stale") and not first else "")
         if orph:
             flags += f" {RED} {orph} possibly hidden process{'es' * (orph != 1)} [/]"
         if r.get("error"):
@@ -4362,7 +4363,9 @@ def build_tui(base: str, token: str, **kw):
                 f"{' ⌂ ' + _esc(r['project']) if r.get('project') else ''} · "
                 f"{n} process{'es' * (n != 1)}"
                 + (f" · {t['unexpected']} unexpected" if t.get("unexpected") else "")
-                + f" · reported {_esc(local_ts(r.get('reported_at')) or str(r.get('reported_at') or 'never'))}[/]{flags}")
+                + (" · not reported yet" if first else
+                   f" · reported {_esc(local_ts(r.get('reported_at')) or str(r['reported_at']))}")
+                + f"[/]{flags}")
 
     def _row_orphan(e) -> str:
         c = e["raw"]
@@ -4429,7 +4432,7 @@ def build_tui(base: str, token: str, **kw):
 
     class SecurityScreen(Screen):
         """Tabs: Queue · Network · Logs · Secrets · Persistent · Profiles. tab / →
-        next, ← previous, 1-6 jump, ↑↓ select (detail below), esc back. Plain
+        next, ← previous, 1-8 jump, ↑↓ select (detail below), esc back. Plain
         keys only (Terminal.app: no shift+arrows)."""
 
         TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules",
@@ -4766,6 +4769,10 @@ def build_tui(base: str, token: str, **kw):
             if e is None or e["type"] != "rule":
                 return
             r = e["raw"]
+            if not await self._confirm(
+                    f"Revoke: {r.get('tool')} {r.get('prefix')}?",
+                    "Calls like it will ask you again."):
+                return
             await self._send("DELETE", f"/api/permissions/rules/{r.get('id')}",
                              f"revoked {r.get('tool')}: {r.get('prefix')}")
 
@@ -4969,7 +4976,7 @@ def build_tui(base: str, token: str, **kw):
                 meter = (f" [$text-muted]↑{_bytes(r.get('bytes_out'))} "
                          f"↓{_bytes(r.get('bytes_in'))}[/]")
                 return (f"[{col}]●[/] [$text-muted]{ts}[/] "
-                        f"[{col} b]{verdict_label(v):<7}[/] "
+                        f"[{col} b]{verdict_label(v):<8}[/] "
                         f"{_esc(_short(what.strip(), 70))}{proj}{meter}")
             if t in _ROWS:
                 return _ROWS[t](e)
@@ -5138,9 +5145,11 @@ def build_tui(base: str, token: str, **kw):
             lines = [
                 f"[b]{_esc(r.get('box_id') or '?')}[/] {_esc(r.get('kind') or '')} "
                 f"{_esc(r.get('project') or '')}",
-                f"reported {_esc(full_ts(r.get('reported_at')) or 'never')}"
-                + (f"  {AMBER} stale: the guest stopped reporting [/]"
-                   if r.get("stale") else "")]
+                ("not reported yet: a box takes a minute after it boots"
+                 if not r.get("reported_at") else
+                 f"reported {_esc(full_ts(r.get('reported_at')))}"
+                 + (f"  {AMBER} stale: the guest stopped reporting [/]"
+                    if r.get("stale") else ""))]
             if r.get("error"):
                 lines.append(f"[$error b]report failed:[/] {_esc(str(r['error']))}")
             if orph:
@@ -5250,20 +5259,43 @@ def build_tui(base: str, token: str, **kw):
 
         # -- drawing ----------------------------------------------------------------------
 
+        # short tab names for a window under 80 columns: eight tabs must fit, and the
+        # active one must be on screen
+        SHORT = {"network": "Net", "secrets": "Sec", "persistent": "Proc", "profiles": "Prof"}
+
         def render_chrome(self) -> None:
             n = self.counts()
+            narrow = self.size.width < 80
             for t in self.TABS:
-                lab = self.LABELS[t]
+                lab = (self.SHORT.get(t) if narrow else None) or self.LABELS[t]
                 if not self.locked and n.get(t) is not None:
                     lab += f" {n[t]}"
                 w = self.query_one(f"#sec-tab-{t}", SecTab)
                 w.update(lab)
                 w.set_class(t == self.tab, "-on")
+            self.query_one("#sec-tabs").scroll_to_widget(
+                self.query_one(f"#sec-tab-{self.tab}", SecTab), animate=False)
             self.query_one("#sec-sub", Static).update(self.sub_markup())
-            foot = self.FOOT[self.tab]
-            common = self.common_foot()
+            self.render_foot()
+
+        def foot_keys(self) -> str:
+            """This tab's keys. On the Queue they follow the selected row: an approval
+            takes y / n, an alert only a (there is nothing to approve in an alert)."""
+            if self.tab == "queue" and not self.locked:
+                e = self.selected()
+                if e is not None and e["type"] == "alert":
+                    return "[$primary]a[/] acknowledge"
+                if e is not None:
+                    return "[$primary]y[/] approve  [$primary]n[/] deny"
+            return self.FOOT[self.tab]
+
+        def _live(self) -> bool:
+            return False
+
+        def render_foot(self) -> None:
+            common = self.common_foot(live=self._live())
             self.query_one("#sec-foot", Static).update(
-                common if self.locked else f"{foot}   {common}")
+                common if self.locked else f"{self.foot_keys()}   {common}")
 
         TIMED = ("queue", "network", "logs", "persistent", "rules", "calls")
 
@@ -5322,7 +5354,9 @@ def build_tui(base: str, token: str, **kw):
                             + "  [$text-muted]· newest first[/]")
             elif self.tab == "persistent":
                 es = self.entries["persistent"]
-                nb = sum(e["type"] == "pbox" for e in es)
+                boxes = [e for e in es if e["type"] == "pbox"]
+                nb = sum(1 for e in boxes if e["raw"].get("reported_at"))
+                waiting = len(boxes) - nb
                 bad = _tree_bad_count([n for b in self._last_boxes for n in b.get("tree") or []])
                 orph = sum(e["type"] == "orphan" for e in es)
                 if self.procs_enabled is False:
@@ -5330,8 +5364,10 @@ def build_tui(base: str, token: str, **kw):
                                 "there is no process view; approved services are listed "
                                 "below[/]")
                 else:
-                    bits.append(f"[$text-muted]{nb} box{'es' * (nb != 1)} reporting · non-OS "
-                                "processes only · guest-reported vs host-verified bytes[/]"
+                    bits.append(f"[$text-muted]{nb} box{'es' * (nb != 1)} reporting"
+                                + (f" · {waiting} waiting for a first report" if waiting else "")
+                                + " · non-OS processes only · guest-reported vs "
+                                  "host-verified bytes[/]"
                                 + (f"  {RED} {bad} need a look [/]" if bad else "")
                                 + (f"  {RED} {orph} possibly hidden process"
                                    f"{'es' * (orph != 1)} [/]" if orph else ""))
@@ -5416,9 +5452,9 @@ def build_tui(base: str, token: str, **kw):
                 self.run_worker(self.rebuild(), group="rebuild", exclusive=True)
             self._narrow = narrow
             tight = self._tight()
-            if tight != getattr(self, "_was_tight", tight):     # the head has a short form
-                self.render_chrome()
-            self._was_tight = tight
+            if (tight, self.size.width < 80) != getattr(self, "_was_tight", (tight, self.size.width < 80)):
+                self.render_chrome()                       # the head and tab names have short forms
+            self._was_tight = (tight, self.size.width < 80)
             self.call_after_refresh(self._foot_again)
 
         async def rebuild(self) -> None:
@@ -5466,6 +5502,7 @@ def build_tui(base: str, token: str, **kw):
                 target.scroll_visible(animate=False)
             self.query_one("#sec-detail", Static).update(
                 "" if self.locked else self.detail_markup(self.selected()))
+            self.render_foot()
             here = (self.tab, self.sel[self.tab])
             if here != getattr(self, "_detail_for", None):
                 self._detail_for = here
@@ -5614,13 +5651,24 @@ def build_tui(base: str, token: str, **kw):
             return self.persistent_entries(self._last_boxes, self._last_services,
                                            self.open_nodes)
 
-        async def action_filter(self) -> None:
-            if self.tab != "logs" or self.locked:
-                return
-            kinds = self.log_kinds()
-            i = kinds.index(self.log_filter) if self.log_filter in kinds else 0
-            self.log_filter = kinds[(i + 1) % len(kinds)]
-            await self.rebuild()
+        def action_filter(self) -> None:
+            if self.tab == "logs" and not self.locked:
+                self._act(self._pick_kind())
+
+        async def _pick_kind(self) -> None:
+            """f opens the kinds as a list (there are a dozen and more): type to find
+            one, enter keeps it. The chips above the log show which is on."""
+            n: dict[str, int] = {}
+            for e in self.entries["logs"]:
+                k = str(e["raw"].get("kind") or "")
+                if k:
+                    n[k] = n.get(k, 0) + 1
+            rows = [("all", "all kinds", f"{len(self.entries['logs'])}")]
+            rows += [(k, k, str(n[k])) for k in sorted(n)]
+            v = await self.app.pick("Show one kind of event", rows, self.log_filter)
+            if v and v != self.log_filter:
+                self.log_filter = v
+                await self.rebuild()
 
         def action_hosts(self) -> None:
             if self.tab == "secrets":
@@ -5678,6 +5726,11 @@ def build_tui(base: str, token: str, **kw):
             if e is not None and e["type"] == "package":
                 await (self._approve_package(e["raw"]) if yes
                        else self._reject("package", e["raw"]))
+                return
+            if e is not None and e["type"] == "alert":
+                self.status = ("[$warning]an alert is not an approval: a acknowledges it, "
+                               "the detail below says what happened[/]")
+                self.render_chrome()
                 return
             if e is None or e["type"] not in ("egress", "git"):
                 return
@@ -6329,7 +6382,8 @@ def build_tui(base: str, token: str, **kw):
                 f"{_esc(r.get('from') or 'base')}{' · builtin' if r.get('builtin') else ''}"
                 f" · min {r.get('min_mem_mb') or '?'}MB · used by "
                 f"{_esc(', '.join(users)) if users else 'no project'}[/]"
-                + (" [$warning b]needs a build[/]" if r.get("needs_build") else ""))
+                + (" [$text-muted]·[/] [$warning b]needs a build[/]" if r.get("needs_build")
+                   else ""))
 
     def _row_version(e) -> str:
         r = e["raw"]
@@ -6469,12 +6523,8 @@ def build_tui(base: str, token: str, **kw):
                 self.refresh_sel()
                 self.render_chrome()
 
-        def render_chrome(self) -> None:
-            super().render_chrome()
-            if self.tab == "boxes" and not self.locked:
-                # r restarts here; the list refreshes itself
-                self.query_one("#sec-foot", Static).update(
-                    f"{self.FOOT['boxes']}   {self.common_foot(live=True)}")
+        def _live(self) -> bool:
+            return self.tab == "boxes" and not self.locked    # r restarts here; rows refresh
 
         def vms_sub(self) -> str:
             if self.tab == "boxes":
@@ -9114,9 +9164,9 @@ def build_tui(base: str, token: str, **kw):
                 "agents-view": Command(self.c_agents_view, "every agent and chat that is "
                                        "working, across projects (← on an empty prompt)",
                                        busy_ok=True, leader="g"),
-                "security": Command(self.c_security, "the Security area: queue, network, "
-                                    "logs, secrets, persistent, profiles (full access)",
-                                    "[queue|network|logs|secrets|persistent|profiles]",
+                "security": Command(self.c_security, "the Security area: "
+                                    + ", ".join(SecurityScreen.TABS) + " (full access)",
+                                    "[" + "|".join(SecurityScreen.TABS) + "]",
                                     takes_arg=True, busy_ok=True, leader="v"),
                 "vms": Command(self.c_vms, "boxes, images and the package catalogue "
                                "(full access)", "[boxes|images|catalogue]", takes_arg=True,
@@ -9212,9 +9262,11 @@ def build_tui(base: str, token: str, **kw):
                                        "without asking) → auto → ask; /permissions picks"),
                          ("← (empty prompt)", "agents screen: everything working, "
                                               "across projects"),
-                         ("/security (ctrl+x v)", "queue · network · logs · secrets · "
-                                                  "persistent · profiles: tab → ← or 1-6 "
-                                                  "switch, esc back"),
+                         ("/security (ctrl+x v)",
+                          " · ".join(SecurityScreen.TABS)
+                          + f": tab → ← or 1-{len(SecurityScreen.TABS)} switch, esc back. "
+                            "Rules are the always-allow answers; Calls is how the model "
+                            "key is used"),
                          ("in /security", "y approve · n reject (services: 1 2 3 placement, "
                                           "↑↓ port, space expose) · a acknowledge / add · "
                                           "e edit · p project · enter open · s stop · "

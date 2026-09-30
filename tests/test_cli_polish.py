@@ -245,6 +245,7 @@ def test_network_verdicts_are_whole_words():
     assert jav3.verdict_label("auto_allow") == "A·ALLOW"
     assert jav3.verdict_label("auto_deny") == "A·DENY"
     assert jav3.verdict_label(None) == "?"
+    assert jav3.verdict_label("reviewed") == "REVIEWED"          # TUIB-18: not REVIEWE
 
 
 def test_current_agent_row_uses_solid_colours_for_256_colour_terminals():

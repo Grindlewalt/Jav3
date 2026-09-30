@@ -468,6 +468,138 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
         assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
 
 
+# --- the small ones -----------------------------------------------------------------------------------
+
+async def test_a_box_that_has_not_reported_is_not_stale_TUIB17():
+    pytest.importorskip("textual")
+    fresh = {"box_id": "shared", "kind": "shared", "reported_at": None, "stale": True,
+             "tree": [], "totals": {}}
+    old = {"box_id": "p-alpha", "kind": "project", "project": "alpha", "stale": True,
+           "reported_at": "2026-09-30 04:00:00", "tree": [], "totals": {}}
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/vm/processes": {"enabled": True, "boxes": [fresh, old]}}))
+    async with app.run_test(size=(150, 40)) as pilot:
+        scr = await _security(pilot, app, "persistent")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        first, second = _rows(scr)[0], _rows(scr)[1]
+        assert "not reported yet" in first and "stale" not in first and "never" not in first
+        assert "stale" in second and "reported 09-30 04:00" in second
+        detail = str(scr.query_one("#sec-detail").render())
+        assert "not reported yet" in detail and "stale" not in detail
+        sub = _plain(scr.sub_markup())
+        assert "1 box reporting" in sub and "1 waiting for a first report" in sub
+
+
+async def test_y_and_n_on_an_alert_say_why_nothing_happens_TUIB20():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": [_long_alert()]}}))
+    async with app.run_test(size=(120, 35)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        foot = str(scr.query_one("#sec-foot").render())
+        assert "acknowledge" in foot and "approve" not in foot       # an alert has no y / n
+        await pilot.press("y")
+        await pilot.pause(0.2)
+        assert "not an approval" in _plain(scr.sub_markup())
+        assert _top(app) == "SecurityScreen"
+
+
+async def test_a_pending_host_shows_y_and_n_in_the_footer_TUIB20():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        scr.select_key(next(e["key"] for e in scr.entries["queue"] if e["type"] == "egress"))
+        foot = str(scr.query_one("#sec-foot").render())
+        assert "approve" in foot and "deny" in foot
+
+
+async def test_the_logs_filter_is_a_list_you_can_type_into_TUIB19():
+    pytest.importorskip("textual")
+    kinds = [f"kind_{i:02d}" for i in range(17)]
+    events = [{"id": i + 1, "kind": k, "severity": "warn", "summary": k, "acknowledged": 1,
+               "created_at": "2026-09-30 04:00:00"} for i, k in enumerate(kinds)]
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/security/events": {"events": events}}))
+    async with app.run_test(size=(100, 30)) as pilot:
+        scr = await _security(pilot, app, "logs")
+        assert await _until(pilot, lambda: len(_rows(scr)) == 17)
+        await pilot.press("f")
+        assert await _until(pilot, lambda: _top(app) == "Picker")
+        await pilot.press(*"kind_16", "enter")                # the last of 17: one step, not 16
+        assert await _until(pilot, lambda: scr.log_filter == "kind_16")
+        assert await _until(pilot, lambda: len(_rows(scr)) == 1)
+
+
+async def test_the_needs_a_build_badge_has_a_separator_TUIB23():
+    pytest.importorskip("textual")
+    from test_cli_vms import _server as vms_server
+    tr, state = vms_server([])
+    app = jav3.build_tui("http://h:1", SESSION, transport=tr)
+    async with app.run_test(size=(150, 40)) as pilot:
+        scr = await _security(pilot, app, "images", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+    row = scr.row_markup({"type": "variant", "key": "Idev", "raw": {
+        "name": "dev", "from": "main", "min_mem_mb": 768, "used_by": [], "needs_build": True}})
+    assert "used by no project" in _plain(row) and "no project · needs a build" in _plain(row)
+
+
+async def test_revoking_an_always_allow_rule_asks_first_TUIB24():
+    pytest.importorskip("textual")
+    seen: list = []
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv({
+        "/api/permissions/rules": {"rules": [{"id": 3, "tool": "run_code", "prefix": "npm",
+                                              "project_slug": None,
+                                              "created_at": "2026-09-30 04:00:00"}]}}, seen))
+    async with app.run_test(size=(120, 35)) as pilot:
+        scr = await _security(pilot, app, "rules")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        assert "run_code" in app.screen.question and "npm" in app.screen.question
+        await pilot.press("n")
+        await pilot.pause(0.3)
+        assert not [c for c in seen if c[0] == "DELETE"]
+        await pilot.press("d")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")
+        await pilot.press("y")
+        assert await _until(pilot, lambda: any(
+            c[0] == "DELETE" and c[1] == "/api/permissions/rules/3" for c in seen))
+
+
+async def test_the_help_and_palette_list_every_security_tab_TUIB21():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        cmd = app.commands["security"]
+        for tab in ("rules", "calls", "profiles"):
+            assert tab in cmd.help and tab in cmd.usage
+        app.dispatch("/help")
+        assert await _until(pilot, lambda: _top(app) == "Help")
+        text = app.screen.text                                # the plain form of the list
+        assert "1-8" in text and "1-6" not in text
+
+
+async def test_the_security_tabs_fit_60_columns_and_the_active_one_shows_TUIB22():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(60, 24)) as pilot:
+        scr = await _security(pilot, app, "queue")
+        await pilot.pause(0.2)
+        bar = scr.query_one("#sec-tabs")
+        for tab in scr.TABS:
+            w = scr.query_one(f"#sec-tab-{tab}")
+            assert w.region.right <= bar.region.right, (tab, w.region, bar.region)
+        await pilot.press("8")                                 # Calls, the last tab
+        await pilot.pause(0.3)
+        active = scr.query_one("#sec-tab-calls")
+        assert active.has_class("-on") and active.region.right <= bar.region.right
+        assert str(active.render()).startswith("Calls")
+
+
 # --- TUIB-11: the sidebar never squeezes the chat to 38 columns ---------------------------------------
 
 async def test_the_sidebar_waits_for_room():
