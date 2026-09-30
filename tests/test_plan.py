@@ -757,3 +757,44 @@ async def test_token_checkpoint_pauses_after_turns_finish(client, tmp_env, monke
     await _wait_run()
     p = plan_mod.load(SLUG)
     assert _by_id(p)["i2"]["status"] == "done" and p["pause_at"] == 11_100
+
+
+async def test_a_plans_writes_are_pulled_home_as_items_settle(client, monkeypatch):
+    """PLANS-02: an item's writes sat in the guest's shared buffer until the
+    orchestrator's turn ended, so the host (git tools, panels, the operator)
+    saw an empty project all run and a guest crash lost the lot. The runner now
+    pulls the buffer home after each settle, attributed to the item that just
+    finished, and on a timer while items run."""
+    from backend.vm import guest_turn
+    await _put(client, [{"title": "one", "brief": "a"},
+                        {"title": "two", "brief": "b", "depends_on": ["i1"]}])
+    pulled = []
+
+    async def fake_pull(slug):
+        pulled.append((slug, runtime.conversation_id.get()))
+    monkeypatch.setattr(guest_turn, "pull_writes", fake_pull)
+    monkeypatch.setitem(guest_turn._ws_holds, SLUG, 1)      # a guest workspace is held
+
+    async def done(cid, attempt, text):
+        await _report(cid, "done", "ok")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn",
+                        _scripted({"i1": done, "i2": done}, {}))
+
+    async def fake_synth(system, user, temperature=0.3):
+        return "ROLLUP"
+    monkeypatch.setattr(plan_mod, "complete_text", fake_synth)
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    items = _by_id(plan_mod.load(SLUG))
+    assert all(it["status"] == "done" for it in items.values())
+    cids = [c for _, c in pulled]
+    # one pull per settle, each attributed to the item that had just finished
+    assert items["i1"]["conversation_id"] in cids
+    assert items["i2"]["conversation_id"] in cids
+    # ...and none when no guest workspace is held (tests, or a guest that never came up)
+    guest_turn._ws_holds.pop(SLUG, None)
+    pulled.clear()
+    await orchestrator.flush_workspace(SLUG, 5)
+    assert pulled == []

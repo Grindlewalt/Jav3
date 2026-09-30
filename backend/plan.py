@@ -901,6 +901,10 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
     meta: dict[str, dict] = {}
     spawned = 0
     pausing = False
+    # PLANS-02: the guest's shared write buffer comes home after every settle
+    # and every plan_flush_seconds (orchestrator.flush_workspace), and once more
+    # on the way out; `flush_cid` is the item whose flags the pull should name
+    need_flush, flush_cid, last_flush = False, None, time.monotonic()
     async with edit(slug) as plan:
         base_tokens = plan.get("tokens_used", 0)     # earlier runs of this plan
         _driving.add(slug)
@@ -925,7 +929,9 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                 for iid, t in list(tasks.items()):
                     if t.done():
                         tasks.pop(iid)
-                        if await _settle(plan, idx[iid], t, meta.pop(iid), job_id) and not pausing:
+                        m_done = meta.pop(iid)
+                        need_flush, flush_cid = True, m_done.get("cid")
+                        if await _settle(plan, idx[iid], t, m_done, job_id) and not pausing:
                             pausing = True
                             plan["paused_reason"] = ("the token budget ran out mid-item "
                                                      f"({iid} is back to todo, no attempt spent)")
@@ -951,6 +957,7 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                     tasks.pop(iid)
                     meta.pop(iid)
                     _live_items.pop(m.get("cid"), None)
+                    need_flush, flush_cid = True, m.get("cid")
                     it["stalls"] += 1
                     it["last_error"] = "stalled: no tool call or message for too long"
                     it.setdefault("history", []).append(
@@ -1001,6 +1008,12 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                             _emit_item(job_id, it)
                     return ("done" if all(it["status"] in SETTLED for it in plan["items"])
                             else "failed")
+            if tasks and time.monotonic() - last_flush >= settings.plan_flush_seconds:
+                need_flush = True
+            if need_flush:
+                need_flush, last_flush = False, time.monotonic()
+                await orchestrator.flush_workspace(slug, flush_cid)
+                flush_cid = None
             if tasks:
                 await asyncio.wait(list(tasks.values()), timeout=settings.plan_tick_seconds,
                                    return_when=asyncio.FIRST_COMPLETED)
@@ -1014,6 +1027,8 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
             _live_items.pop(m.get("cid"), None)
         if tasks:
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+        if need_flush:              # the last settle before a return / a stop
+            await orchestrator.flush_workspace(slug, flush_cid)
 
 
 async def _notify_paused(slug: str, plan: dict) -> None:

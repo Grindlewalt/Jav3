@@ -279,6 +279,10 @@ class Settings(BaseSettings):
     plan_attempts_max: int = 2
     plan_stall_seconds: int = 300
     plan_tick_seconds: float = 5.0
+    # While items run, the runner pulls their guest writes home this often (and
+    # after every settle), so the host sees the files and a guest crash loses
+    # at most this much (orchestrator.flush_workspace).
+    plan_flush_seconds: float = 60.0
     # An orchestrator conversation (POST /api/chat mode=orchestrate) spends
     # most of its rounds waiting in plan_status, one round per wait — the chat
     # cap would end a long plan's supervision halfway. The wait itself is
