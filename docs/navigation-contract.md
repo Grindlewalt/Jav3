@@ -363,74 +363,51 @@ build` in `frontend/` green if any .jsx changed; small tool outputs (the
 600 s stream watchdog); one commit per WP with a message that says what a
 user can now do.
 
-## H. Backlog: desktop + web navigation (cleaned 2026-09-29)
+## H. Backlog: desktop + web navigation (2026-09-29, after the live checks)
 
-State: branch tip 803a8af, tree clean, unpushed; full suite at the 19-failure
-macOS baseline (2521 passed). The Pi runs 803a8af (health ok, grounding =
-deepseek-flash 0.95 / p95 1.4 s). The Mac is paired as desk device 6 (screen +
-input, shell off), client not running. Finished work is in git history, not
-here.
+State: branch `worktree-navigation`, open as PR #5 against main. Full suite at
+the 19-failure macOS baseline; extension node tests 36/36; frontend builds.
+The Pi runs `overnight`, which merges this branch; the session that owns
+`overnight` owns Pi deploys (give it a sha, never deploy this branch alone).
+Finished work is in git history, not here.
 
-Rules for whoever picks this up: **agents are Sonnet only, the orchestrator is
-Opus** (operator, 2026-09-29). **Ask the operator before anything that moves
-their mouse or keyboard**; never start a desk trial unprompted. Agents stall on
-600 s silent streams: small tool outputs, commit per step.
+Rules for whoever picks this up: agents are Sonnet only. Ask the operator
+before anything that moves their mouse or keyboard. Agents stall on 600 s
+silent streams: small tool outputs, one commit per step.
 
-### In progress (started, not finished)
+Verified live on the operator's Mac (2026-09-29): screenshot with
+accessibility elements; open TextEdit, click by element id, type, zoom with
+`region`, close unsaved. 0.5–1.3 s per action (was 9–10 s).
 
-P1. **Live desk trial, last turn.** Turns (a) screenshot + AX elements and (b)
-    open TextEdit → click "New Document" by id → type, both passed on the real
-    Mac. Still to run, one turn: open TextEdit, type, zoom into the toolbar
-    with `region`, read element ids, close without saving. Also the first live
-    measurement of the latency fix (9a21a16; expect ~1 s per action, was
-    9–10 s). Needs the Mac to itself for ~2 min. Driver: `<scratch>/turn.py`
-    (raise its 3500-char log cap). 1 agent, no code.
-P2. **DeltaMath on the real site.** Code is done and deployed (version gate,
-    candidates fallback, pointer-event clicks, `browser_click(tab, x, y)`,
-    extension 0.4.0), verified only on a look-alike page in headless Chrome.
-    Operator first: reload the unpacked extension in chrome://extensions.
-    Then one real attempt on an assignment; fix whatever it shows. 1 agent.
+### Open
 
-### To do (not started)
-
-T1. **Settings UI.** DeskPanel: show `locked` / `asleep` per computer.
-    BrowserPanel: show the extension version and the "outdated" flag.
-    `npm run build` is the gate. 1 agent.
-T2. **Trial leftovers, small.** Walk/thumbnail reuse window 2 s → 3 s (the
-    trial's gaps were 2.1–2.5 s, so reuse never hit); desk_shell output is
-    labelled "read the screen of…" (should say shell output); unit tests for
-    the in-process macOS capture path; Linux lock detection beyond logind's
-    LockedHint; old-client fallback text for a locked screen. 1 agent.
-T3. **Ops + notes.** `.claude/ops/deploy_test.sh` must
-    `pip install -r requirements.txt` (setup-must-be-code; pillow had to be
-    installed by hand); CLAUDE.md still describes the deleted
-    computeruse/pairing module — rewrite that section from this file. Both
-    live in the MAIN checkout, untracked: needs a session that is not isolated
-    in a worktree. 1 agent, or the orchestrator by hand.
-
-### Operator decisions (no agent)
-
-D1. Push `worktree-navigation` / open a PR (against main; #3 and #4 merged).
-D2. Approve or reject the quarantined memory note `mac-desk-computer-state`
-    on the Pi (its first version says TextEdit is not offered — now false).
-D3. The stray `~/.local/share/jarvis.stray-scaffold-2026-09-28` on the Pi:
-    delete once confirmed unneeded.
+O1. **DeltaMath assignment page.** On deltamath.com `read_page` now lists 34
+    interactive elements and 52 candidates (it listed none), but the site
+    redirected to its sign-in page and the agent cannot sign in. The operator
+    signs in inside the Jav3 browser window; then rerun a read-only check:
+    open an assignment, list controls, read the first problem, submit nothing.
+    This is the real test of the candidates fallback (Angular `div` buttons).
+O2. **The browser loads the extension from a standalone copy**
+    (`~/Downloads/jav3-browser` on the operator's Mac), which was at 0.1.0 and
+    is why DeltaMath failed. After ANY extension change: copy
+    `clients/jav3-browser` over that folder and ask the operator to reload it.
+    Worth replacing with an installer step or a served download
+    (setup-must-be-code).
+O3. The model took a detour in the live trial (app switcher, Escape, Cancel,
+    then cmd+n) before recovering. Not a tool fault; watch for it.
+O4. `walk="all"` on a desk screenshot does no occlusion filtering (it is the
+    explicit "everything" mode). Browser-side stripping of bidi and control
+    characters in labels, as the desk does in `_clean_str`, is not done.
+O5. The zoom-refine second pass in grounding still clamps its answer instead
+    of rejecting it. Off by default.
 
 ### Parked (operator: skip for now)
 
-K1. **Flash vs Qwen3.8-27B.** Harness ready (`scripts/nav_compare.py`, 20
-    tasks in `scripts/nav_tasks.yaml`, navigator presets created through the
-    API). Needs an OpenRouter key on the Pi. Gate: fixture probe ≥ 0.953 and
-    p95 ≤ 2.5 s; then 20 tasks × 3 runs, switch only at +15 pts success, 3:1
-    wins, ≤ 2× $/success. Next candidates: Holo4-27B, MiMo-V2.6-Flash. Large:
-    its own day. 1 agent.
+K1. **Flash vs Qwen3.8-27B.** Harness ready (`scripts/nav_compare.py`,
+    `scripts/nav_tasks.yaml`). Needs an OpenRouter key on the Pi. Gate:
+    fixture probe ≥ 0.953 and p95 ≤ 2.5 s; then 20 tasks × 3 runs, switch only
+    at +15 pts success, 3:1 wins, ≤ 2× $/success. Next candidates: Holo4-27B,
+    MiMo-V2.6-Flash. Large: its own day.
 K2. Deferred browser: `chrome.debugger` trusted input (sites that check
     isTrusted), file upload, dialogs, coordinate clicks inside iframes.
 K3. Deferred desk: Windows UIA, wlroots element coordinates, uinput backend.
-
-### Agent count
-
-To finish everything active: **5 Sonnet agents** (P1, P2, T1, T2, T3). T1 and
-T2 can run in parallel with no operator; P1 and P2 each need the operator for
-a few minutes; T3 needs a non-worktree session. K1 adds one more when
-unparked.
