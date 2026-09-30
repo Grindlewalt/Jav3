@@ -4,6 +4,7 @@ description: Search the operator's self-hosted music library (TARMAC) by title, 
 when_to_use: When they name music to put on and you need its id, or when they ask what's in the library. Use the `tag` filter if they ask for one of their two genres — "drive" or "fast".
 enabled: true
 section: media
+action: search
 read_only: true
 parameters:
   type: object

@@ -4,6 +4,7 @@ description: The operator's music — library size, and what each of the two pla
 when_to_use: When they ask what's playing. You rarely need it before music_play, which picks a working player by itself.
 enabled: true
 section: media
+action: status
 read_only: true
 parameters:
   type: object

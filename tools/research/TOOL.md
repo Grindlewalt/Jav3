@@ -5,6 +5,7 @@ when_to_use: When the operator asks you to research, investigate, or write up a 
 enabled: true
 section: web
 core: true
+action: research
 requires_project: true
 parameters:
   type: object

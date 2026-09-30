@@ -4,6 +4,7 @@ description: Create an interactive HTML dashboard in the active project. Writes 
 when_to_use: When the operator asks for a dashboard, chart, visualization, or any interactive HTML view of project data.
 enabled: true
 section: project
+action: dashboard
 requires_project: true
 parameters:
   type: object

@@ -4,6 +4,7 @@ description: Index the project's codebase into searchable notes under notes/code
 when_to_use: After a repo has been uploaded into the project (usually under code/), or when notes/codebase/ is missing or stale. Run it once, then navigate with search_codebase + read_file.
 enabled: true
 section: project
+action: crawl
 requires_project: true
 parameters:
   type: object

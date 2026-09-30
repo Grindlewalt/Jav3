@@ -5,6 +5,7 @@ when_to_use: Reading several pages, or any page you don't need verbatim. Pass a 
 enabled: true
 section: web
 core: true
+action: summarize
 read_only: true
 parameters:
   type: object

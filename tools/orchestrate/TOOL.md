@@ -4,6 +4,7 @@ description: Turn a big ask — a dump of requirements, notes or a spec — into
 when_to_use: When the operator hands over a large multi-part task (a spec, "build X with A, B and C", a long list) that is too big for one turn and has parts that can proceed in parallel. For one focused sub-task use spawn_agent; for web research use research.
 enabled: true
 section: agents
+action: orchestrate
 requires_project: true
 parameters:
   type: object

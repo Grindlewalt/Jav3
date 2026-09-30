@@ -4,6 +4,7 @@ description: Switch the active project — loads its project.md into your contex
 when_to_use: When the operator asks you to work on a different project, or a task belongs to another project.
 enabled: true
 section: project
+action: load
 parameters:
   type: object
   properties:

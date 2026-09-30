@@ -4,6 +4,7 @@ description: Play an audio file that is INSIDE A JAV3 PROJECT in a small floatin
 when_to_use: "Only for an audio file that lives in the active project's files, or a direct http(s) audio URL on the media allowlist — a recording you produced or were given. When the operator asks for music, use music_play instead — it searches their library."
 enabled: false
 section: media
+action: audio
 parameters:
   type: object
   properties:

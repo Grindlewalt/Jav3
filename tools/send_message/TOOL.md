@@ -4,7 +4,7 @@ description: Send a message to another agent that is working right now, and to a
 when_to_use: When another running agent needs to know something you just learned, when you are about to touch a file or area another agent is working in, when you need an answer only another agent has, or to hand a peer a correction. Not for reporting to the operator — that is your final reply.
 enabled: true
 section: agents
-core: true
+action: send
 parameters:
   type: object
   properties:
