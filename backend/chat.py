@@ -199,6 +199,13 @@ async def delete_conversation(conversation_id: int):
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="no such conversation")
         await _drop_references(db, conversation_id)
+        # usage outlives the chat but must not follow its id: conversation ids
+        # are reused, and a new chat inherited a deleted one's calls and cost
+        for table in ("model_calls", "turn_stats"):
+            await db.execute(f"UPDATE {table} SET conversation_id = NULL "
+                             "WHERE conversation_id = ?", (conversation_id,))
+        from . import ctxstore
+        ctxstore.forget_conversation(conversation_id)
         await db.execute("DELETE FROM tool_calls WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))

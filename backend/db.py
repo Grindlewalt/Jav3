@@ -785,6 +785,7 @@ async def init_db() -> None:
         await _migrate_logging(db)
         await _migrate_secnotify(db)
         await _migrate_boxlog(db)
+        await _detach_orphan_usage(db)
         await db.commit()
     finally:
         await db.close()
@@ -860,6 +861,20 @@ async def _migrate_logging(db: aiosqlite.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_model_calls_ctx "
         "ON model_calls(created_at) WHERE context IS NOT NULL")
 
+
+
+async def _detach_orphan_usage(db: aiosqlite.Connection) -> None:
+    """Usage rows of chats deleted before delete detached them: conversation
+    ids are reused, so a new chat showed an old one's calls and cost."""
+    for table in ("model_calls", "turn_stats"):
+        async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)) as cur:
+            if not await cur.fetchone():
+                continue
+        await db.execute(
+            f"UPDATE {table} SET conversation_id = NULL WHERE conversation_id IS NOT NULL "
+            "AND conversation_id NOT IN (SELECT id FROM conversations)")
 
 async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     """Columns the boxes design adds to existing tables (DESIGN-BOXES.md, the

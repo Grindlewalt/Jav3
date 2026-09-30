@@ -177,6 +177,12 @@ def forget_heads() -> None:
     _heads.clear()
 
 
+def forget_conversation(conversation_id: int) -> None:
+    """A deleted chat's id can be reused: its next owner must never be stored
+    as a delta of the old chat's calls."""
+    _heads.pop(_hkey(conversation_id), None)
+
+
 # --- reading ---------------------------------------------------------------
 
 def is_frame(v) -> bool:
