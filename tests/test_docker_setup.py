@@ -74,3 +74,18 @@ def test_dockerfile_builds_under_the_classic_builder():
     lines = [ln for ln in (docker_setup.SRC / "Dockerfile").read_text().splitlines()
              if ln.split("#")[0].strip().startswith("COPY")]
     assert lines and not any("--chmod" in ln for ln in lines)
+
+
+def test_done_line_names_this_instances_unit(monkeypatch, capsys):
+    """A named instance (--name test) runs as jarvis-test, not jarvis."""
+    from backend import doctor
+    monkeypatch.setattr(doctor, "unit_name", lambda: "jarvis-test.service")
+    monkeypatch.setattr(docker_setup, "check_docker", lambda: None)
+    monkeypatch.setattr(docker_setup, "_docker",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "true\n", ""))
+    monkeypatch.setattr(docker_setup.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(docker_setup, "ensure_image", lambda plan, rebuild: True)
+    monkeypatch.setattr(docker_setup, "smoke", lambda plan: True)
+    monkeypatch.setattr(docker_setup, "set_env", lambda *a, **k: None)
+    assert docker_setup.run([]) == 0
+    assert "systemctl --user restart jarvis-test)" in capsys.readouterr().out

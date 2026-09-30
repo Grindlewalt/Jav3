@@ -163,9 +163,10 @@ def run(args: list[str]) -> int:
         return 1
     set_env(plan, {"JARVIS_DOCKER_ENABLED": "true", "JARVIS_VM_BOXES_ENABLED": "true"},
             what="Docker")
+    from .doctor import unit_name       # jarvis-<name> for a named instance
     print("done. Docker boxes are available (restart Jav3 to pick it up: "
-          "systemctl --user restart jarvis). A profile set to 'Runs in: own container' "
-          "uses them.")
+          f"systemctl --user restart {unit_name().removesuffix('.service')}). "
+          "A profile set to 'Runs in: own container' uses them.")
     return 0
 
 
