@@ -4333,3 +4333,8 @@ a:has(> .nav-dot) { position: relative; }
 .app:has(form.composer) .notices {
   bottom: max(calc(var(--sab) + 104px), calc(var(--dock-h-root, 0px) + 6px));
 }
+
+/* web fixes (WEBA-10): a window's header sheds its extra buttons as it narrows
+   (Work.jsx sets data-narrow from the header's width); Close stays reachable */
+.work-wh[data-narrow] .work-wh-btn.opt1,
+.work-wh[data-narrow='tiny'] .work-wh-btn.opt2 { display: none; }

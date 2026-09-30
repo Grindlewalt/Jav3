@@ -13,7 +13,7 @@ import Chat from '../pages/Chat.jsx'
 import { WorkContext } from './context.js'
 import {
   MAX_PANELS, addCard, canAdd, closeCard, cycleFocus, findLeaf, findSplit, focusToward,
-  fromSaved, geometry, leaves, minimizeCard, moveCard, patchCardState, resize, restoreCard,
+  fitDir, fromSaved, geometry, leaves, minimizeCard, moveCard, patchCardState, resize, restoreCard,
   switchCard, toSaved,
 } from './layout.js'
 import { ALIASES, WINDOW_TYPES, isWindowType } from './types.js'
@@ -82,6 +82,9 @@ export default function Work({ openProjects = false }) {
   const skipSave = useRef(true)
   const saveTimer = useRef(null)
   const layoutRef = useRef(null)                     // .chat-layout's main + windows
+  const stageRef = useRef(null)                      // where the windows are placed
+  // a new window goes beside its target only while each half stays readable
+  const dirFor = (b, target, dir) => fitDir(b, target, stageRef.current?.clientWidth, dir)
 
   // ---- a /projects/:slug link: into Work, with that project on the chat ----
   useEffect(() => {
@@ -211,7 +214,7 @@ export default function Work({ openProjects = false }) {
     const next = update((b) => {
       let n = hit
         ? { ...restoreCard(b, hit.id), maximized: b.maximized && b.maximized !== hit.id ? null : b.maximized }
-        : addCard(b, type, b.focus, 'row')
+        : addCard(b, type, b.focus, dirFor(b, b.focus, 'row'))
       if (Object.keys(patch).length) n = patchCardState(n, n.focus, patch)
       return n
     })
@@ -237,7 +240,8 @@ export default function Work({ openProjects = false }) {
     if (!p || !boardRef.current) return
     const next = p.mode === 'switch'
       ? update((b) => switchCard(b, p.target, type, extra))
-      : update((b) => addCard(b, type, p.target || b.focus, p.dir, extra))
+      : update((b) => addCard(b, type, p.target || b.focus,
+                              dirFor(b, p.target || b.focus, p.dir), extra))
     if (next && phone) setTab(next.focus)
   }
 
@@ -338,7 +342,6 @@ export default function Work({ openProjects = false }) {
   const minimized = board?.minimized || EMPTY_LIST
   const geo = useMemo(() => geometry(board?.root, minimized), [board?.root, minimized])
   const minLeaves = phone ? [] : all.filter((l) => minimized.includes(l.id))
-  const stageRef = useRef(null)
   const phoneWin = phone && tab !== 'chat' && all.some((l) => l.id === tab)
   const showWindows = phone ? phoneWin : all.length > 0
   // maximized: that window has the whole Work area, chat included (.work-max
@@ -479,6 +482,22 @@ const WindowFrame = memo(function WindowFrame({
     return () => { live = false }
   }, [other, slug, otherGen])
   const foreign = !!other && other !== slug
+  // A window can be dragged (or an old layout can hold it) narrower than its
+  // five header buttons: the far ones ran off the screen and Close with them.
+  // Narrow drops the split and minimize buttons, tiny drops maximize too;
+  // Close is always there. (WEBA-10)
+  const headRef = useRef(null)
+  const [narrow, setNarrow] = useState('')
+  useEffect(() => {
+    const el = headRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver(() => {
+      const w = el.offsetWidth
+      setNarrow(!w ? '' : w < 200 ? 'tiny' : w < 300 ? 'small' : '')
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   const refreshOther = useCallback(() => { setOtherGen((g) => g + 1); return Promise.resolve() }, [])
   const setState = useCallback((patch) => onSetState(id, patch), [id, onSetState])
   const toggle = useCallback(() => { if (!phone) onToggleMax(id) }, [id, phone, onToggleMax])
@@ -489,7 +508,8 @@ const WindowFrame = memo(function WindowFrame({
                         + (hidden && keep ? ' behind' : '')} aria-hidden={hidden || undefined}
              style={style} aria-label={def?.title || leaf.type}
              onPointerDownCapture={() => onFocus(id)} onFocusCapture={() => onFocus(id)}>
-      <header className="work-wh" onDoubleClick={(e) => {
+      <header className="work-wh" ref={headRef} data-narrow={narrow || undefined}
+              onDoubleClick={(e) => {
         if (!e.target.closest('button')) toggle()
       }}>
         <button type="button" className="work-wh-type" aria-haspopup="dialog"
@@ -501,16 +521,16 @@ const WindowFrame = memo(function WindowFrame({
         </button>
         <span className="grow" />
         {!phone && <>
-          <button type="button" className="work-wh-btn" title="split right (ctrl+\)"
+          <button type="button" className="work-wh-btn opt1" title="split right (ctrl+\)"
                   aria-label="split right" onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => onPicker(e, 'split', id, 'row')}>⫶</button>
-          <button type="button" className="work-wh-btn" title="split down"
+          <button type="button" className="work-wh-btn opt1" title="split down"
                   aria-label="split down" onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => onPicker(e, 'split', id, 'col')}>⊟</button>
-          <button type="button" className="work-wh-btn" title="minimize"
+          <button type="button" className="work-wh-btn opt1" title="minimize"
                   aria-label="minimize" onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => onMinimize(id)}>–</button>
-          <button type="button" className="work-wh-btn"
+          <button type="button" className="work-wh-btn opt2"
                   aria-label={maximized ? 'restore' : 'maximize'}
                   title={maximized ? 'restore (double-click the header)' : 'maximize (double-click the header)'}
                   onClick={() => onToggleMax(id)}>{maximized ? '▣' : '□'}</button>
