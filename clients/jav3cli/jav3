@@ -3490,7 +3490,7 @@ def build_tui(base: str, token: str, **kw):
                 with Horizontal(id="dialog-head"):
                     yield Static(f"[b]{_esc(what)}[/]", id="dialog-title")
                     yield Static("[$text-muted]esc[/]", id="dialog-esc")
-                with VerticalScroll(id="view-body"):
+                with VerticalScroll(id="view-body", can_focus=False):   # ↑↓ move the cursor
                     yield Static(id="pf-body")
                 yield Static(id="pf-hint")
 
@@ -3531,11 +3531,19 @@ def build_tui(base: str, token: str, **kw):
             if self.error:
                 lines.append(f"\n[$error b]{_esc(self.error)}[/]")
             self.query_one("#pf-body", Static).update("\n".join(lines))
+            # one line that fits 80 columns; the body scrolls, the hint never does
             self.query_one("#pf-hint", Static).update(
-                "[$primary]↑↓[/] field  [$primary]enter[/] edit / toggle / pick  "
-                "[$primary]ctrl+s[/] or the Save row saves  [$text-muted]esc[/] cancel"
+                "[$primary]↑↓[/] field  [$primary]enter[/] edit  [$primary]ctrl+s[/] save  "
+                "[$text-muted]esc[/] cancel"
                 + ("\n[$text-muted]secrets are names only: "
-                   + _esc(", ".join(self.secret_names)) + "[/]" if self.secret_names else ""))
+                   + _esc(_short(", ".join(self.secret_names), 50)) + "[/]"
+                   if self.secret_names else ""))
+            # keep the field under the cursor on screen (the Save row is the 16th line)
+            from textual.geometry import Region
+            row = self.cur if self.cur < len(self.FIELDS) else len(self.FIELDS) + 1
+            body = self.query_one("#view-body", VerticalScroll)
+            self.call_after_refresh(
+                lambda: body.scroll_to_region(Region(0, row, 1, 1), animate=False))
 
         def action_move(self, d: int) -> None:
             self.cur = max(0, min(len(self.FIELDS), self.cur + d))
@@ -6991,6 +6999,7 @@ def build_tui(base: str, token: str, **kw):
         Picker, Confirm, Ask, Help, LocalApprove, View, ServiceApprove, ProfileForm {
             align: center middle; background: $background 60%; }
         #view-body, #sa-body { height: auto; max-height: 20; }
+        ProfileForm #view-body { height: 1fr; max-height: 100%; }
         #sa-choice, #pf-hint, #sa-hint { margin-top: 1; }
         #approve-body { height: auto; max-height: 24; margin-top: 1; }
         #dialog { width: 72; max-width: 90%; height: auto; max-height: 80%;

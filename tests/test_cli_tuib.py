@@ -468,6 +468,39 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
         assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
 
 
+# --- TUIB-10: the profile form keeps its Save row and its hint on a 24-row terminal --------------
+
+async def test_the_profile_form_fits_80x24_and_follows_the_cursor():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION,
+                         transport=_srv({"/api/profiles": {"profiles": [PROFILE]}}))
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "profiles")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
+        await pilot.press("a")
+        assert await _until(pilot, lambda: _top(app) == "ProfileForm")
+        form = app.screen
+        await pilot.pause(0.3)
+        dlg, hint = form.query_one("#dialog"), form.query_one("#pf-hint")
+        body = form.query_one("#view-body")
+        assert hint.region.height >= 1 and hint.region.bottom <= dlg.region.bottom
+        assert "ctrl+s" in str(hint.render())
+        assert body.region.bottom <= hint.region.y                  # the body never covers it
+        n = len(form.FIELDS)
+        for _ in range(n):                                          # down to the Save row
+            await pilot.press("down")
+        await pilot.pause(0.3)
+        assert form.cur == n
+        save_line = n + 1
+        assert body.scroll_y <= save_line < body.scroll_y + body.size.height, (
+            body.scroll_y, body.size.height)
+        for _ in range(n):                                          # and back up to the top
+            await pilot.press("up")
+        await pilot.pause(0.3)
+        assert body.scroll_y == 0
+        await pilot.press("escape")
+
+
 # --- TUIB-09: logged out and chat-only read differently, once ----------------------------------------
 
 async def test_logged_out_says_not_logged_in_once_and_enter_offers_the_login():
