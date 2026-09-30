@@ -150,7 +150,8 @@ function ProjectPicker({ projects, mode, value, global: loaded, onPick }) {
           <button type="button" role="menuitemradio" aria-checked={mode === 'follow'}
                   onClick={() => pick('follow')}>
             <span className="m-name">Follow loaded project
-              <span className="m-sub">{loaded ? name(loaded) : 'nothing loaded'}</span></span>
+              <span className="m-sub">{loaded ? `${name(loaded)} · one setting for the whole server`
+                : 'nothing loaded'}</span></span>
             {mode === 'follow' && <span className="m-check" aria-hidden="true">●</span>}
           </button>
           <button type="button" role="menuitemradio" aria-checked={mode === 'none'}

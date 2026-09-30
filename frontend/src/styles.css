@@ -4338,3 +4338,24 @@ a:has(> .nav-dot) { position: relative; }
    (Work.jsx sets data-narrow from the header's width); Close stays reachable */
 .work-wh[data-narrow] .work-wh-btn.opt1,
 .work-wh[data-narrow='tiny'] .work-wh-btn.opt2 { display: none; }
+
+/* web fixes (WEBA-25): the provider row head is one target */
+.prov-head { cursor: pointer; }
+
+.sched-form.collapsed { display: none; }
+.sched-new { align-self: flex-start; }
+
+/* web fixes (WEBA-24): the Grounding table is one card per model on a phone,
+   not a five-letter-wide table that scrolls sideways */
+@media (max-width: 768px) {
+  .sbd-table.stack, .sbd-table.stack tbody { display: block; }
+  .sbd-table.stack thead { display: none; }
+  .sbd-table.stack tr { display: block; padding: 6px 0; }
+  .sbd-table.stack td { display: flex; justify-content: space-between; gap: 12px;
+    padding: 2px 10px; }
+  .sbd-table.stack td[data-label]::before { content: attr(data-label);
+    color: var(--dim); font-family: inherit; flex-shrink: 0; }
+  .sbd-table.stack td.stack-head { font-weight: 600; }
+  .sbd-table.stack td.stack-note { white-space: normal; flex-wrap: wrap; }
+  .sbd-table.stack td.stack-note:empty { display: none; }
+}

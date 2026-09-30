@@ -109,7 +109,7 @@ export default function GroundingPanel() {
             )}
             {(data.ranking || []).length > 0 && (
               <div className="sbd-tablewrap">
-                <table className="sbd-table">
+                <table className="sbd-table stack">
                   <thead>
                     <tr><th>Model</th><th>Hits</th><th>Median px</th><th>p95 ms</th>
                       <th>$/1k</th><th>Coords</th><th>Measured</th><th /></tr>
@@ -117,18 +117,18 @@ export default function GroundingPanel() {
                   <tbody>
                     {data.ranking.map((r) => (
                       <tr key={r.model}>
-                        <td title={r.model}>
+                        <td title={r.model} className="stack-head">
                           {labels[r.model] || r.model}
                           {r.model === data.model && <> <Tag tone="done">in use</Tag></>}
                         </td>
-                        <td>{pct(r.hit_rate)} <span className="dim">of {r.n}</span></td>
-                        <td>{num(r.median_px, 1)}</td>
-                        <td>{num(r.p95_ms)}</td>
-                        <td>{money(r.cost_per_1k)}</td>
-                        <td>{CONV[r.convention] || r.convention}</td>
-                        <td className="dim small" title={r.probed_at || ''}>
+                        <td data-label="Hits"><span>{pct(r.hit_rate)} <span className="dim">of {r.n}</span></span></td>
+                        <td data-label="Median px">{num(r.median_px, 1)}</td>
+                        <td data-label="p95 ms">{num(r.p95_ms)}</td>
+                        <td data-label="$/1k">{money(r.cost_per_1k)}</td>
+                        <td data-label="Coords">{CONV[r.convention] || r.convention}</td>
+                        <td className="dim small" title={r.probed_at || ''} data-label="Measured">
                           {r.probed_at ? ago(r.probed_at) : ''}</td>
-                        <td>
+                        <td className="stack-note">
                           {r.stale && <Tag tone="error">stale</Tag>}
                           {(r.conf_hit != null || r.conf_miss != null) && (
                             <span className="dim small"

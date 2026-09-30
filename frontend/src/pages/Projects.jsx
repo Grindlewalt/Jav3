@@ -50,8 +50,9 @@ export default function Projects() {
   async function create(e) {
     e.preventDefault()
     setError(null)
-    setCreating(true)
     const url = repoUrl.trim()
+    if (!url && !name.trim()) { setError('give the project a name'); return }
+    setCreating(true)
     try {
       if (url) {
         await api('/api/projects/import', {
@@ -114,7 +115,7 @@ export default function Projects() {
   const cloning = !!repoUrl.trim()
   return (
     <Page title="Projects">
-      <Card as="form" className="create-project" onSubmit={create}>
+      <Card as="form" className="create-project" onSubmit={create} noValidate>
         <Input placeholder={cloning ? 'project name (optional)' : 'project name'}
                value={name} onChange={(e) => setName(e.target.value)}
                required={!cloning} />
@@ -184,7 +185,11 @@ function ProjectCard({
         {/* the name is the way in — the Workspace is the project */}
         <Link to={`/projects/${p.slug}`} className="project-name"
               title={`open ${p.name}`}>{p.name}</Link>
-        {inContext && <Tag tone="running">in context</Tag>}
+        {/* one word for one thing: "loaded" (the chat chip and its menu say the same) */}
+        {inContext && (
+          <Tag tone="running"
+               title="New chats follow this project. It is one setting for the whole server.">
+            loaded</Tag>)}
         <Menu floating open={menuOpen} onClose={close} label={`${p.name} actions`} width={210}
               trigger={(
                 <Button variant="icon" aria-haspopup="menu" aria-expanded={menuOpen}
@@ -193,7 +198,7 @@ function ProjectCard({
               )}>
           <MenuItem onClick={pick(onRename)}>Rename</MenuItem>
           <MenuItem onClick={pick(onToggleContext)}>
-            {inContext ? 'Unload from context' : 'Load into context'}</MenuItem>
+            {inContext ? 'Unload project' : 'Load project'}</MenuItem>
           <MenuSep />
           <MenuItem danger onClick={pick(onDelete)}>Delete</MenuItem>
         </Menu>

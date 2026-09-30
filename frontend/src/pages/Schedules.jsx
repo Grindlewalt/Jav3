@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { useIsPhone } from '../breakpoints.js'
 import Page from '../components/Page.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import Md from '../Md.jsx'
@@ -23,7 +24,9 @@ export default function Schedules() {
   const [form, setForm] = useState(BLANK)
   const [busy, setBusy] = useState(null)
   const [editing, setEditing] = useState(null)   // schedule id being edited
-  const [tz, setTz] = useState(null)             // the server's zone: next/last are its wall clock
+  const phone = useIsPhone()
+  const [formOpen, setFormOpen] = useState(false)   // phone: the New schedule form is folded away
+  const [tz, setTz] = useState(null)            // the server's zone: next/last are its wall clock
   const ask = useAsk()
 
   const refresh = () => api('/api/schedules').then((r) => {
@@ -69,6 +72,7 @@ export default function Schedules() {
 
   function cancelEdit() {
     setEditing(null)
+    setFormOpen(false)
     setForm(BLANK)
   }
 
@@ -110,8 +114,17 @@ export default function Schedules() {
   return (
     <Page variant="split" title="Schedules" className="sched-page">
       <aside>
-        <div className="side-title">{editing ? `Edit schedule #${editing}` : 'New schedule'}</div>
-        <form className="sched-form" onSubmit={save}>
+        {/* on a phone the form filled the first screen and pushed the schedules
+            below the fold: it opens from a button instead (WEBA-24) */}
+        {phone && !editing ? (
+          <button type="button" className="ghost sched-new" aria-expanded={formOpen}
+                  onClick={() => setFormOpen((o) => !o)}>
+            {formOpen ? 'Hide the form' : '+ New schedule'}</button>
+        ) : (
+          <div className="side-title">{editing ? `Edit schedule #${editing}` : 'New schedule'}</div>
+        )}
+        <form className={`sched-form${phone && !formOpen && !editing ? ' collapsed' : ''}`}
+              onSubmit={save}>
           <input placeholder="schedule name" aria-label="schedule name" value={form.name}
                  onChange={(e) => set({ name: e.target.value })} />
           <label className="mini">what runs
