@@ -382,14 +382,20 @@ def _capture_spec(monkeypatch, *, approved=True):
 
 
 async def _drain(**kw):
-    async for _ in gt.guest_turn(1, "sys", [], **kw):
+    # the stub guest closes at once, with no `final`: that is now an error (a
+    # stream that ends early is not a normal end), and these tests are about the
+    # spec the host sent and the attach/release around it, not about the stream
+    try:
+        async for _ in gt.guest_turn(1, "sys", [], **kw):
+            pass
+    except gt.GuestStreamError:
         pass
 
 
 async def test_spec_key_only_for_approved_top_level_turn(monkeypatch):
     sent, log = _capture_spec(monkeypatch)
     await _drain(active_slug="demo", push_workspace=True, persist=True)
-    assert sent[-1]["persist"] == {"path": "/persist", "read_only": False}
+    assert sent[0]["persist"] == {"path": "/persist", "read_only": False}
     assert log == [("attach", "demo"), ("release", "demo")]
 
 
@@ -402,13 +408,13 @@ async def test_spec_key_only_for_approved_top_level_turn(monkeypatch):
 async def test_no_spec_key_otherwise(monkeypatch, kw):
     sent, log = _capture_spec(monkeypatch)
     await _drain(active_slug="demo", **kw)
-    assert "persist" not in sent[-1] and log == []
+    assert "persist" not in sent[0] and log == []
 
 
 async def test_no_spec_key_when_not_approved(monkeypatch):
     sent, log = _capture_spec(monkeypatch, approved=False)
     await _drain(active_slug="demo", push_workspace=True, persist=True)
-    assert "persist" not in sent[-1] and log == []
+    assert "persist" not in sent[0] and log == []
 
 
 async def test_callers_never_ask_for_incognito():
