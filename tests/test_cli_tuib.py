@@ -10,11 +10,25 @@ from pathlib import Path
 import httpx
 import pytest
 
-from cli_fake import load_client, wait_for
+from cli_fake import load_client, pin_zone, wait_for
 
 jav3 = load_client("jav3cli_tuib")
 
 SESSION = "session:sess"
+
+
+@pytest.fixture(autouse=True)
+def _env(tmp_path, monkeypatch):
+    """A throwaway config dir (the client saves tui.json, credentials) and UTC unless
+    a test picks another zone."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    yield from pin_zone(monkeypatch)
+
+
+def _zone(monkeypatch, name: str) -> None:
+    import time
+    monkeypatch.setenv("TZ", name)
+    time.tzset()
 
 
 def _srv(routes=None, seen=None):
@@ -231,3 +245,38 @@ async def test_enter_on_the_first_row_of_every_tab_never_crashes(cmd, tabs):
             assert app.screen is scr, f"{tab}: stuck on {_top(app)}"
             await pilot.press("escape")
             await pilot.pause(0.1)
+
+
+# --- TUIB-03: every time on /security is this machine's, in one format ------------------------
+
+def test_times_are_shown_in_the_local_zone(monkeypatch):
+    _zone(monkeypatch, "America/Los_Angeles")
+    assert jav3.local_ts("2026-09-30 04:56:59") == "09-29 21:56"
+    assert jav3.local_ts("2026-09-30T04:56:59Z") == "09-29 21:56"
+    assert jav3.local_ts(1_790_000_000) == jav3.local_ts(1_790_000_000.0) != ""
+    assert jav3.full_ts("2026-09-30 04:56:59") == "2026-09-29 21:56:59"
+    assert jav3.tz_label() == "PDT"
+    assert jav3.row_ts("2026-09-30 04:56:59") == "09-29 21:56"
+    assert jav3.row_ts("") == "" and jav3.full_ts(None) == "" and jav3.local_ts("soon") == ""
+    assert jav3.full_ts("2026-09-20") == "2026-09-20"          # a date alone stays as sent
+    _zone(monkeypatch, "UTC")
+    assert jav3.tz_label() == "UTC"
+
+
+async def test_security_rows_details_and_footer_use_local_time(monkeypatch):
+    pytest.importorskip("textual")
+    _zone(monkeypatch, "America/Los_Angeles")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(150, 45)) as pilot:
+        scr = await _security(pilot, app, "logs")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        # test_cli's alert #7 is 2026-09-25 10:05:00 UTC = 03:05 PDT
+        row = next(r for r in _rows(scr) if "gate_flag" in r)
+        assert "09-25 03:05" in row and "10:05" not in row
+        scr.select_key("s7")
+        detail = str(scr.query_one("#sec-detail").render())
+        assert "2026-09-25 03:05:00" in detail
+        assert "times PDT" in str(scr.query_one("#sec-foot").render())
+        await pilot.press("4")                                   # Secrets: no times, no label
+        await pilot.pause(0.2)
+        assert "times PDT" not in str(scr.query_one("#sec-foot").render())

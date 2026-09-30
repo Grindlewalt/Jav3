@@ -27,6 +27,12 @@ def _load():
 jav3 = _load()
 
 
+@pytest.fixture(autouse=True)
+def _utc(monkeypatch):
+    from cli_fake import pin_zone      # times on the rows are the machine's zone
+    yield from pin_zone(monkeypatch)
+
+
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))

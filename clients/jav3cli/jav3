@@ -1932,6 +1932,39 @@ _REFUSED_WHY = {
 }
 
 
+def local_ts(v, full: bool = False) -> str:
+    """The server's UTC times ('YYYY-MM-DD HH:MM:SS', ISO with a T, or epoch
+    seconds) in THIS machine's time zone: 'MM-DD HH:MM', or the whole
+    'YYYY-MM-DD HH:MM:SS' when `full`. '' when unreadable."""
+    try:
+        if isinstance(v, (int, float)):
+            t = float(v)
+        else:
+            import calendar
+            s = str(v).strip().replace("T", " ")[:19]
+            t = calendar.timegm(time.strptime(s, "%Y-%m-%d %H:%M:%S"))
+        return time.strftime("%Y-%m-%d %H:%M:%S" if full else "%m-%d %H:%M",
+                             time.localtime(t))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def row_ts(v) -> str:
+    """A row's short local time; a text that is not a time is cut the old way."""
+    return local_ts(v) or str(v or "")[5:16]
+
+
+def full_ts(v) -> str:
+    """A detail line's whole local time ('' stays '', an unreadable text is kept)."""
+    return local_ts(v, True) or str(v or "")
+
+
+def tz_label() -> str:
+    """This machine's zone name for a footer ('PDT', or 'UTC' at offset 0)."""
+    off = time.localtime().tm_gmtoff or 0
+    return "UTC" if off == 0 else (time.strftime("%Z") or f"UTC{off // 3600:+d}")
+
+
 def calls_tok(n) -> str:
     """Token counts in the row's short form: 812, 12.4k, 1.2M."""
     try:
@@ -1965,7 +1998,7 @@ def calls_row(e: dict, compact: bool = False) -> str:
     """One Calls list row (spec: BACKLOG.md 'TUI: make the security story visible').
     Compact (a terminal under 100 columns) leaves out the op and the project, which
     the pane under the list has, so the tokens, cache and cost are not cut off."""
-    r, ts = e["raw"], (e.get("ts") or "")[5:16]
+    r, ts = e["raw"], row_ts(e.get("ts"))
     if e["type"] == "refusal":
         return (f"[$error]●[/] [$text-muted]{ts}[/] [$error b]REFU[/] "
                 f"{_esc(r.get('op_name') or '?')} {_esc(r.get('reason') or '?')} "
@@ -1996,7 +2029,7 @@ def calls_detail(e: dict) -> str:
             f"{_esc(r.get('reason') or '?')}",
             f"[$text-muted]from box {_esc(r.get('box_id') or 'unknown')}"
             + (f" · ⌂ {_esc(r['project_slug'])}" if r.get("project_slug") else "")
-            + f" · {_esc(r.get('ts') or '')}[/]",
+            + f" · {_esc(full_ts(r.get('ts')))}[/]",
             *([_esc(why)] if why else [])])
     who = [f"op {_esc(r.get('op_id') or '-')}"]
     who.append(f"conversation #{r['conversation_id']}" if r.get("conversation_id") is not None
@@ -2010,7 +2043,7 @@ def calls_detail(e: dict) -> str:
             else "[$text-muted]enter: no context stored for this call[/]")
     return "\n".join([
         " · ".join(who), numbers,
-        f"[$text-muted]{_esc(r.get('ts') or '')}"
+        f"[$text-muted]{_esc(full_ts(r.get('ts')))}"
         + (f" · ⌂ {_esc(r['project_slug'])}" if r.get("project_slug") else "") + "[/]",
         f"{keys}   [$primary]c[/] this conversation only"])
 
@@ -4170,7 +4203,7 @@ def build_tui(base: str, token: str, **kw):
         ]
 
     def _row_service(e) -> str:
-        r, ts = e["raw"], (e.get("ts") or "")[5:16]
+        r, ts = e["raw"], row_ts(e.get("ts"))
         return (f"[$warning b]SVC [/] [$text-muted]{ts}[/] [b]{_esc(r.get('name') or '?')}[/] "
                 f"[$text-muted]{_esc(_short(_argv(r.get('command')), 40))} · in "
                 f"{_esc(r.get('project_slug') or '?')} · ports "
@@ -4179,7 +4212,7 @@ def build_tui(base: str, token: str, **kw):
                 + (" [$warning]changed[/]" if r.get("supersedes_id") else ""))
 
     def _row_package(e) -> str:
-        r, ts = e["raw"], (e.get("ts") or "")[5:16]
+        r, ts = e["raw"], row_ts(e.get("ts"))
         ver = r.get("resolved_version") or r.get("version_req") or ""
         st = r.get("status") or "pending"
         col = ("$error" if st in ("failed", "rejected") else
@@ -4256,7 +4289,7 @@ def build_tui(base: str, token: str, **kw):
                 f"{' ⌂ ' + _esc(r['project']) if r.get('project') else ''} · "
                 f"{n} process{'es' * (n != 1)}"
                 + (f" · {t['unexpected']} unexpected" if t.get("unexpected") else "")
-                + f" · reported {_esc(str(r.get('reported_at') or 'never'))}[/]{flags}")
+                + f" · reported {_esc(local_ts(r.get('reported_at')) or str(r.get('reported_at') or 'never'))}[/]{flags}")
 
     def _row_orphan(e) -> str:
         c = e["raw"]
@@ -4801,7 +4834,7 @@ def build_tui(base: str, token: str, **kw):
 
         @staticmethod
         def row_markup(e: dict, all_projects: bool = True, compact: bool = False) -> str:
-            r, ts = e["raw"], (e.get("ts") or "")[5:16]
+            r, ts = e["raw"], row_ts(e.get("ts"))
             t = e["type"]
             if t == "call":
                 return calls_row(e, compact)
@@ -4866,8 +4899,8 @@ def build_tui(base: str, token: str, **kw):
                          f"[b]{_esc(r.get('host') or '?')}[/]  asked by "
                          f"{_esc(r.get('project_slug') or 'general')}",
                          f"[$text-muted]{r.get('hit_count') or 0}× · first "
-                         f"{_esc(r.get('first_seen') or '?')} · last "
-                         f"{_esc(r.get('last_seen') or '?')}[/]"]
+                         f"{_esc(full_ts(r.get('first_seen')) or '?')} · last "
+                         f"{_esc(full_ts(r.get('last_seen')) or '?')}[/]"]
                 if r.get("triage_verdict"):
                     lines.append(f"reviewer: [b]{_esc(r['triage_verdict'])}[/] "
                                  f"{_esc(r.get('triage_reason') or '')}")
@@ -4880,7 +4913,7 @@ def build_tui(base: str, token: str, **kw):
                 lines = ["[$primary]y[/] approve   [$primary]n[/] reject", "",
                          f"[b]{'remote connect' if remote else 'commit'} request "
                          f"#{r.get('id')}[/] in {_esc(r.get('project_slug') or '?')}  "
-                         f"[$text-muted]{_esc(r.get('created_at') or '')}[/]"]
+                         f"[$text-muted]{_esc(full_ts(r.get('created_at')))}[/]"]
                 if remote:
                     lines.append(f"remote: {_esc(r.get('message') or '')}")
                 else:
@@ -4895,16 +4928,16 @@ def build_tui(base: str, token: str, **kw):
                 col = _SEV_COL.get(sev, "$text-muted")
                 head = ("" if r.get("acknowledged") else
                         "[$primary]a[/] acknowledge\n\n")
-                ack = (f"  [$text-muted]acknowledged {_esc(r.get('acknowledged_at') or '')}[/]"
+                ack = (f"  [$text-muted]acknowledged {_esc(full_ts(r.get('acknowledged_at')))}[/]"
                        if r.get("acknowledged") else "")
                 body = _detail_markup(r.get("detail"))
                 n = r.get("count") or 1
-                again = (f"\n[$text-muted]seen {n}× · last {_esc(r.get('last_seen') or '?')} "
+                again = (f"\n[$text-muted]seen {n}× · last {_esc(full_ts(r.get('last_seen')) or '?')} "
                          "· the evidence below is the first[/]"
                          if isinstance(n, int) and n > 1 else "")
                 return (f"{head}[{col} b]{_esc(sev.upper())}[/] "
                         f"[$secondary]{_esc(r.get('kind') or '?')}[/] "
-                        f"[$text-muted]#{r.get('id')} · {_esc(r.get('created_at') or '')}"
+                        f"[$text-muted]#{r.get('id')} · {_esc(full_ts(r.get('created_at')))}"
                         f" · {_esc(r.get('project_slug') or 'no project')}[/]{ack}\n"
                         f"[b]{_esc(r.get('summary') or '')}[/]{again}"
                         + (f"\n\n{body}" if body else ""))
@@ -4927,7 +4960,7 @@ def build_tui(base: str, token: str, **kw):
                 "[$primary]n[/] reject", "",
                 f"[b]service request #{r.get('id')}: {_esc(r.get('name') or '?')}[/] in "
                 f"{_esc(r.get('project_slug') or '?')}  [$text-muted]"
-                f"{_esc(r.get('created_at') or '')}[/]",
+                f"{_esc(full_ts(r.get('created_at')))}[/]",
                 _esc(r.get("description") or ""),
                 f"placement (from the profile, changeable when approving): "
                 f"[b]{_esc(r.get('placement') or 'not set')}[/]",
@@ -4945,7 +4978,7 @@ def build_tui(base: str, token: str, **kw):
                   f"[$text-muted]{_esc(r.get('status') or 'pending')} · from "
                   f"{_esc(r.get('source') or 'agent')} · "
                   f"{_esc(r.get('project_slug') or 'operator')} · "
-                  f"{_esc(r.get('created_at') or '')}[/]",
+                  f"{_esc(full_ts(r.get('created_at')))}[/]",
                 f"{_esc(r.get('manager') or '?')} [b]{_esc(r.get('package') or '?')}[/]  "
                 f"asked version: {_esc(r.get('version_req') or 'any')}  resolved: "
                 f"[b]{_esc(r.get('resolved_version') or 'not yet resolved')}[/]",
@@ -4958,7 +4991,7 @@ def build_tui(base: str, token: str, **kw):
                 (f"built into {_esc(r.get('target_variant') or '?')} "
                  f"v{_esc(str(r['built_version']))}" if r.get("built_version") else ""),
                 (f"[$text-muted]decided by {_esc(r.get('decided_by') or '?')} "
-                 f"{_esc(r.get('decided_at') or '')}[/]" if r.get("decided_at") else "")])
+                 f"{_esc(full_ts(r.get('decided_at')))}[/]" if r.get("decided_at") else "")])
 
         def _detail_policy(self, e) -> str:
             slug, p = e["raw"]["slug"], e["raw"].get("policy") or {}
@@ -5014,7 +5047,7 @@ def build_tui(base: str, token: str, **kw):
             lines = [
                 f"[b]{_esc(r.get('box_id') or '?')}[/] {_esc(r.get('kind') or '')} "
                 f"{_esc(r.get('project') or '')}",
-                f"reported {_esc(str(r.get('reported_at') or 'never'))}"
+                f"reported {_esc(full_ts(r.get('reported_at')) or 'never')}"
                 + (f"  {AMBER} stale: the guest stopped reporting [/]"
                    if r.get("stale") else "")]
             if r.get("error"):
@@ -5097,9 +5130,9 @@ def build_tui(base: str, token: str, **kw):
                 (f"[$error b]error:[/] {_esc(str(r['error']))}" if r.get("error") else ""),
                 ("[$warning]unreported: its box has not answered for it; the state is "
                  "unknown[/]" if st == "unreported" else ""),
-                f"[$text-muted]last reported {_esc(str(r.get('last_reported_at') or 'never'))}"
+                f"[$text-muted]last reported {_esc(full_ts(r.get('last_reported_at')) or 'never')}"
                 f" · {_esc(r.get('status') or '?')} by {_esc(r.get('decided_by') or '?')} "
-                f"{_esc(r.get('decided_at') or '')}[/]",
+                f"{_esc(full_ts(r.get('decided_at')))}[/]",
                 f"placement: [b]{_esc(r.get('placement') or '?')}[/]  exposed: "
                 + _esc(", ".join(f"{x.get('port')}→{x.get('bind')}"
                                  for x in _jlist(r.get("expose_ports"))) or "nothing"),
@@ -5137,10 +5170,22 @@ def build_tui(base: str, token: str, **kw):
                 w.set_class(t == self.tab, "-on")
             self.query_one("#sec-sub", Static).update(self.sub_markup())
             foot = self.FOOT[self.tab]
-            common = (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
-                      "[$primary]↑↓[/] select  [$primary]r[/] refresh  [$primary]esc[/] back")
+            common = self.common_foot()
             self.query_one("#sec-foot", Static).update(
                 common if self.locked else f"{foot}   {common}")
+
+        TIMED = ("queue", "network", "logs", "persistent", "rules", "calls")
+
+        def common_foot(self, live: bool = False) -> str:
+            """The keys every tab has; the times on the rows are this machine's, and
+            the footer says which zone once (the server keeps UTC)."""
+            return (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
+                    "[$primary]↑↓[/] select  "
+                    + ("" if live else "[$primary]r[/] refresh  ")
+                    + "[$primary]esc[/] back"
+                    + ("  [$text-muted](live)[/]" if live else "")
+                    + (f"  [$text-muted]times {_esc(tz_label())}[/]"
+                       if self.tab in self.TIMED and not self.locked else ""))
 
         def sub_markup(self) -> str:
             if self.locked:
@@ -5500,8 +5545,8 @@ def build_tui(base: str, token: str, **kw):
                     if slug is None:
                         return
                     body, proj = {"project": slug}, slug
-                seen = (f"Asked {r.get('hit_count') or 0}× (first {r.get('first_seen') or '?'},"
-                        f" last {r.get('last_seen') or '?'}).")
+                seen = (f"Asked {r.get('hit_count') or 0}× (first {full_ts(r.get('first_seen')) or '?'},"
+                        f" last {full_ts(r.get('last_seen')) or '?'}).")
                 review = (f" Reviewer: {r.get('triage_verdict')}"
                           f"{' — ' + r['triage_reason'] if r.get('triage_reason') else ''}."
                           if r.get("triage_verdict") else "")
@@ -6024,18 +6069,8 @@ def build_tui(base: str, token: str, **kw):
         return (f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600
                 else f"{s // 3600}h{s % 3600 // 60:02d}m")
 
-    def _local_ts(v) -> str:
-        """MM-DD HH:MM in local time, from epoch seconds or a UTC
-        'YYYY-MM-DD HH:MM:SS' (SQLite datetime('now')); '' when unreadable."""
-        try:
-            if isinstance(v, (int, float)):
-                t = float(v)
-            else:
-                import calendar
-                t = calendar.timegm(time.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S"))
-            return time.strftime("%m-%d %H:%M", time.localtime(t))
-        except (TypeError, ValueError, OverflowError):
-            return ""
+    _local_ts = local_ts
+
 
     def _box_timer(r) -> str:
         """BACKLOG "Idle timers on /vms box rows": a project box says
@@ -6156,7 +6191,7 @@ def build_tui(base: str, token: str, **kw):
         inuse = _jlist(r.get("in_use_by"))
         return (f"  [$text-muted]v[/]{_esc(str(r.get('version') or '?'))}{active} "
                 f"[{col}]{_esc(st)}[/] [$text-muted]{_bytes(r.get('size_bytes'))}B · built "
-                f"{_esc(str(r.get('built_at') or '-'))} · in use by "
+                f"{_esc(full_ts(r.get('built_at')) or '-')} · in use by "
                 f"{_esc(', '.join(map(str, inuse))) if inuse else 'no box'}"
                 f"{' · older recipe' if r.get('stale_recipe') else ''}[/]")
 
@@ -6175,7 +6210,8 @@ def build_tui(base: str, token: str, **kw):
         EMPTY = {"boxes": "no boxes", "images": "no image variants",
                  "catalogue": "no package requests"}
         COUNTED = ("catalogue",)
-        FOOT = {"boxes": "[$primary]enter[/] history  [$primary]s[/] start / stop  "
+        TIMED = ("boxes", "images", "catalogue")
+        FOOT = {"boxes": "[$primary]enter[/] history [$primary]s[/] start / stop  "
                          "[$primary]r[/] restart  [$primary]x[/] nuke shared  "
                          "[$primary]d[/] destroy  [$primary]c[/] clean leftovers",
                 "images": "[$primary]b[/] build a new version  [$primary]l[/] build log",
@@ -6288,10 +6324,8 @@ def build_tui(base: str, token: str, **kw):
             super().render_chrome()
             if self.tab == "boxes" and not self.locked:
                 # r restarts here; the list refreshes itself
-                common = (f"[$primary]tab → ←[/] tabs  [$primary]1-{len(self.TABS)}[/] jump  "
-                          "[$primary]↑↓[/] select  [$primary]esc[/] back  "
-                          "[$text-muted](live)[/]")
-                self.query_one("#sec-foot", Static).update(f"{self.FOOT['boxes']}   {common}")
+                self.query_one("#sec-foot", Static).update(
+                    f"{self.FOOT['boxes']}   {self.common_foot(live=True)}")
 
         def vms_sub(self) -> str:
             if self.tab == "boxes":
@@ -6468,7 +6502,7 @@ def build_tui(base: str, token: str, **kw):
                 (f"last build: v{_esc(str(lb.get('version')))} "
                  + ("[$success]built[/]" if lb.get("ok") else
                     f"[$error]failed[/] {_esc(str(lb.get('error') or ''))}")
-                 + f" [$text-muted]{_esc(str(lb.get('finished_at') or ''))}[/]"
+                 + f" [$text-muted]{_esc(full_ts(lb.get('finished_at')))}[/]"
                  if lb else "last build: none"),
                 f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}",
                 "", _esc(str(r.get("recipe") or ""))] + self._build_log(r.get("name")))
@@ -6482,7 +6516,7 @@ def build_tui(base: str, token: str, **kw):
                 f"{_esc(str(r.get('base_version') or '?'))}"
                 + ("  [$primary b]active[/]" if r.get("active") else ""),
                 f"status {_esc(r.get('status') or '?')} · {_bytes(r.get('size_bytes'))}B · "
-                f"built {_esc(str(r.get('built_at') or '-'))}",
+                f"built {_esc(full_ts(r.get('built_at')) or '-')}",
                 "in use by: " + (_esc(", ".join(map(str, _jlist(r.get("in_use_by")))))
                                  or "no box"),
                 (f"recipe sha256: {_esc(r.get('recipe_sha256') or '?')}"
