@@ -1,7 +1,6 @@
 """The terminal client when the connection drops mid-turn (clients/jav3cli/jav3): it
 keeps retrying quietly, re-attaches to a turn that is still running, and draws what
 a finished turn did while it was away, each row once. And /logout in two steps."""
-import httpx
 import pytest
 
 from cli_fake import FakeServer, call, finish, load_client, open_chat, send, wait_for
@@ -208,3 +207,33 @@ async def test_a_dropped_watch_of_a_running_chat_does_not_draw_its_seeded_rows_a
         assert await wait_for(lambda: not app.busy)
         assert rows(app) == [("read_file", True), ("bash", True)]
         assert replies(app) == ["Done."]
+
+
+async def test_text_streaming_at_the_drop_is_replaced_by_the_saved_reply_in_place():
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put({"type": "token", "text": "Lighthouses are t"})
+        await pilot.pause(0.3)
+        srv.drop()
+        assert await wait_for(lambda: app.reconnecting)
+        srv.back(4, "go", reply="Lighthouses are tall.")
+        assert await wait_for(lambda: not app.busy)
+        assert replies(app) == ["Lighthouses are tall."]          # no fragment left beside it
+        assert footers(app) and "stream lost" not in footers(app)[0]
+
+
+async def test_calls_missed_after_streamed_text_close_that_text_with_a_gap_mark():
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_chat(pilot, app, srv)
+        srv.feed.put({"type": "token", "text": "Let me chec"})
+        await pilot.pause(0.3)
+        srv.drop()
+        assert await wait_for(lambda: app.reconnecting)
+        srv.back(4, "go", reply="All good.", activity=[READ])
+        assert await wait_for(lambda: not app.busy)
+        assert replies(app) == ["Let me chec …", "All good."]
+        assert rows(app) == [("read_file", True)]
