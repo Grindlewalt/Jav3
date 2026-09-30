@@ -190,3 +190,39 @@ async def test_timeout_kill_reaches_a_reaped_shell_group(tmp_env, monkeypatch, t
         "timeout_seconds": 1}), 12)
     assert time.monotonic() - t0 < 8
     assert "shell-done" in out and "late" not in out
+
+
+async def test_pkill_f_of_the_commands_own_text_does_not_kill_the_shell(
+        tmp_env, monkeypatch, tmp_path):
+    """PLANS-10: with `sh -c <command>` the whole command sits in the shell's
+    cmdline, so `pkill -f <text from it>` killed the shell itself (exit -15, ten
+    times across three plan runs). The command now runs from a script file."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        "command": "sleep 31.7 > /dev/null 2>&1 & pkill -f 'sleep 31.7'; echo survived"}), 12)
+    assert "exit 0" in out and "survived" in out
+    # procps' pkill -f (Linux) matches the shell's own cmdline; BSD's spares its
+    # parent, so also check directly that the command text is not in it
+    out = await registry.dispatch("run_code", {
+        "command": "echo cmdline-is: $(ps -o args= -p $$) MARKER-4471"})
+    assert "cmdline-is:" in out and out.count("MARKER-4471") == 1
+
+
+async def test_network_hint_does_not_need_a_failing_exit_code(tmp_env, monkeypatch, tmp_path):
+    """PLANS-06 / BUILD-05: `pip install ... | tail`, `cmd; echo done` and a
+    curl that only prints its tunnel error exit 0, and the model got no hint."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    monkeypatch.setenv("JARVIS_EGRESS_PROXY", "http://10.201.0.1:3128")
+    _guest(monkeypatch, tmp_path)
+    out = await registry.dispatch("run_code", {"command": (
+        "echo 'curl: (56) CONNECT tunnel failed, response 403 for https://pypi.org/x'; true")})
+    assert "exit 0" in out and "[network blocked: pypi.org" in out
+    # an exit-0 run that merely mentions a weak marker is left alone
+    out = await registry.dispatch("run_code", {"command": "echo 'connection refused test passed'"})
+    assert "network blocked" not in out
+    # and a failing run keeps the wider set
+    out = await registry.dispatch("run_code", {"command": "echo 'connection refused' >&2; exit 1"})
+    assert "network blocked" in out

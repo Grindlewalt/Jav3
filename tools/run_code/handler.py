@@ -18,6 +18,7 @@ import os
 import re
 import resource
 import signal
+import tempfile
 import time
 
 from backend import writes
@@ -241,6 +242,20 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         before = None               # no project: nothing to stage artifacts into
 
     argv = (["python3", "-c", code] if code else ["/bin/sh", "-c", command])
+    script = None
+    if command:
+        # Run the command from a script file, not `sh -c <command>`: with -c the
+        # whole text sits in the shell's own cmdline, so `pkill -f <text from
+        # it>` matched and killed the shell itself (exit -15, ten times across
+        # three plan runs; PLANS-10). The shell reads it as it runs, so it is
+        # removed as soon as the shell has exited.
+        try:
+            fd, script = tempfile.mkstemp(prefix="rc-", suffix=".sh", dir="/tmp")
+            with os.fdopen(fd, "w") as f:
+                f.write(command + "\n")
+            argv = ["/bin/sh", script]
+        except OSError:
+            script = None               # fall back to -c
     path = "/usr/local/bin:/usr/bin:/bin"
     if os.path.isdir(PIP_VENV_BIN):
         # an image variant with approved pip packages: its venv comes first
@@ -264,7 +279,10 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         _local = "localhost,127.0.0.1,::1"
         env.update(HTTP_PROXY=_proxy, HTTPS_PROXY=_proxy,
                    http_proxy=_proxy, https_proxy=_proxy,
-                   NO_PROXY=_local, no_proxy=_local)
+                   NO_PROXY=_local, no_proxy=_local,
+                   # a refused host answers 403 every time: pip's default five
+                   # retries only cost 10-18 s per attempt (BUILD-05)
+                   PIP_RETRIES="1")
     # CPU-seconds backstop = a few cores busy for the whole wall window, plus
     # headroom; the wall-clock SIGKILL below is the real deadline.
     cpu_cap = timeout * 4 + 30
@@ -276,6 +294,11 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL)
     except OSError as e:
+        if script:
+            try:
+                os.unlink(script)
+            except OSError:
+                pass
         return f"error: could not start the process: {e}"
 
     # Drain the pipes into buffers with our OWN tasks and watch for the SHELL's
@@ -312,6 +335,11 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
             break
         await asyncio.sleep(delay)
         delay = min(delay * 2, 0.1)
+    if script:
+        try:
+            os.unlink(script)
+        except OSError:
+            pass
     _done, pending = await asyncio.wait(tasks, timeout=PIPE_GRACE)
     detached = ""
     if pending:
@@ -346,9 +374,17 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
                    "name or service not known", "network is unreachable",
                    "connection refused", "failed to establish a new connection",
                    "no route to host", "proxyerror", "connection timed out",
-                   "could not resolve proxy")
+                   "could not resolve proxy", "tunnel connection failed",
+                   "connect tunnel failed", "no matching distribution found",
+                   "could not find a version that satisfies")
+    # `pip install ... | tail`, `cmd; echo done` and a curl that prints only its
+    # tunnel error all exit 0 and got no hint (PLANS-06 / BUILD-05). A clean exit
+    # gets it only for the markers that name the proxy or a package that could
+    # not be fetched; a mere "connection refused" in a passing test's output does not.
+    strong = ("proxyerror", "tunnel connection failed", "connect tunnel failed",
+              "no matching distribution found", "could not find a version that satisfies")
     proxy_on = bool(os.environ.get("JARVIS_EGRESS_PROXY"))
-    if proc.returncode != 0 and any(m in combined for m in net_markers):
+    if any(m in combined for m in (net_markers if proc.returncode != 0 else strong)):
         if proxy_on:
             lines.append(_egress_note(code or command, out + "\n" + err))
         else:
