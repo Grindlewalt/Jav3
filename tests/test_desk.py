@@ -740,7 +740,7 @@ async def test_frame_renders_the_element_registry(env):
             "screenshot ok",
             'screen 1280x800 of "DP-1" (monitor 1 of 2; others: "HDMI-A-1") — frame 1',
             "cursor at 612,388",
-            "elements (click by id; coordinates are pixels of this image):",
+            "elements (click by id; @ is the centre, in pixels of this image):",
             '  [1] button "Save" @ 640,410 80x28']
         assert '  [2] textfield "Search" @ 200,60 300x24 value="foo" focused' in text
         assert "changed:" not in text                    # a plain screenshot has no before
@@ -1041,7 +1041,7 @@ async def test_elements_are_rendered_in_window_groups(env):
     fd = await _nav(env, elements=els)
     try:
         text = await _tool("desk_screenshot")()
-        body = text.split("elements (click by id; coordinates are pixels of this image):\n")[1]
+        body = text.split("elements (click by id; @ is the centre, in pixels of this image):\n")[1]
         assert body.splitlines()[:8] == [
             "  — menu bar —",
             '  [1] menuitem "Apple" @ 39,10 30x21',

@@ -307,7 +307,7 @@ async def test_per_project_grants_and_routing(env, monkeypatch):
             r = await _tool("browser_click")(tab=7, element="f0:1")
             assert "read the tab first" in r
             page = await _tool("browser_read_page")(tab=7)
-            assert "UNTRUSTED" in page and '[f0:2] input:text "q" @ 0,20 100x20' in page
+            assert "UNTRUSTED" in page and '[f0:2] input:text "q" @ 50,30 100x20' in page
             assert "f1=accounts.other.com" in page and "[f1:1]" in page
             assert "off-screen" in page                        # the f1:1 button
             assert "tab 7" in await _tool("browser_click")(tab=7, element="f0:1")
@@ -536,10 +536,16 @@ def test_element_lines_select_options_icons_values():
             {"id": "f0:10", "tag": "input", "type": "checkbox", "name": "Remember me",
              "checked": True, "box": {"x": 0, "y": 0, "w": 9, "h": 9}, "inView": True}]},
         {"tab": 3}, changed=None, first=True)
-    assert '[f0:7] select "Country" options: US*, UK, DE … (+4 more) @ 10,40 120x24' in page
+    assert '[f0:7] select "Country" options: US*, UK, DE … (+4 more) @ 70,52 120x24' in page
     assert '[f0:8] input:email "Email" value="a@b.c"' in page
     assert '[f0:10] input:checkbox "Remember me" checked' in page
-    assert "[f0:9] button (icon, no label) @ 1,2 3x4 off-screen" in page
+    assert "[f0:9] button (icon, no label) @ 2,4 3x4 off-screen" in page
+    # NAV-22: an unlabeled text field is "(no label)", never an icon; @ is the centre
+    fld = browser.render("read_page", _page([
+        {"id": "f0:1", "tag": "textarea", "name": "", "text": "", "icon": True,
+         "box": {"x": 289, "y": 234, "w": 135, "h": 34}, "inView": True}]), {"tab": 7})
+    assert "[f0:1] textarea (no label) @ 356,251 135x34" in fld
+    assert "@ is the centre of the box" in fld
     # in view first, whatever order the frames sent
     assert page.index("[f0:7]") < page.index("[f0:9]")
     assert page.rstrip().endswith("changed: unknown (first read of this tab)")
@@ -562,8 +568,8 @@ def test_screenshot_element_listing_scales_and_places_frames():
             {"id": "f2:1", "tag": "button", "name": "Nested", "frame": 2,
              "box": {"x": 0, "y": 0, "w": 5, "h": 5}, "inView": True}]})
     out = browser.screenshot_elements(b.views[5], 800, 600)
-    assert '[f0:12] button "Sign in" @ 80,30 120x36' in out
-    assert '[f1:1] input "User" @ 220,120 100x40' in out
+    assert '[f0:12] button "Sign in" @ 140,48 120x36' in out
+    assert '[f1:1] input "User" @ 270,140 100x40' in out
     assert "f0:13" not in out and "Nested" not in out and "1 element(s) in nested" in out
     browser._note_view(b, "click", 5, {})
     assert "shifted after the last click" in browser.screenshot_elements(b.views[5], 800, 600)
@@ -613,7 +619,7 @@ async def test_stale_changed_key_and_screenshot_through_the_tools(env, monkeypat
             r = await _tool("browser_select")(tab=7, element="f0:1", label="UK")
             assert fe.reqs[-1]["params"] == {"tab": 7, "element": "f0:1", "label": "UK"}
             shot = await _tool("browser_screenshot_tab")(tab=7)
-            assert '[f0:1] link "More" @ 0,0 20x20' in shot    # 800 px image / 400 px viewport
+            assert '[f0:1] link "More" @ 10,10 20x20' in shot    # 800 px image / 400 px viewport
             assert "[f1:1]" not in shot                        # off-screen in the read
             await _tool("browser_back")(tab=7)
             assert fe.reqs[-1]["verb"] == "back"
@@ -719,11 +725,11 @@ def test_candidates_block_when_there_is_no_button_markup():
     assert first == "no button/link markup on this page — using candidates"
     assert "elements (pass the id" in rest and "\n(none)\n" in rest
     assert ("candidates (no button markup — probably clickable, judge by the text):\n"
-            '[f0:1] "Start assignment" @ 120,40 180x36\n'
-            '[f0:2] "Later" @ 10,10 180x36 off-screen') in out
+            '[f0:1] "Start assignment" @ 210,58 180x36\n'
+            '[f0:2] "Later" @ 100,28 180x36 off-screen') in out
     # an icon-only candidate names its tag
     out = browser.render("read_page", _page([{**_cand(3, ""), "icon": True}]), {"tab": 7})
-    assert "[f0:3] div (icon, no label) @ 10,10 180x36" in out
+    assert "[f0:3] div (icon, no label) @ 100,28 180x36" in out
 
 
 def test_candidates_mode_auto_all_interactive():
@@ -785,8 +791,15 @@ def test_click_needs_exactly_one_of_element_or_xy():
     for verb in ("read_page", "list_tabs", "screenshot_tab", "scroll", "navigate", "open_tab"):
         assert browser.needs_version(verb, {"tab": 7}) is None, verb
     assert browser.needs_version("back", {"tab": 7}) == "0.3.0"
-    assert browser.CURRENT_EXT_VERSION == "0.5.0"
-    assert browser.ext_outdated("0.4.0") and not browser.ext_outdated("0.5.0")
+    # the current version is whatever the shipped manifest says, so a version
+    # bump never needs this test edited
+    import json
+    import pathlib
+    manifest = json.loads((pathlib.Path(__file__).resolve().parents[1]
+                           / "clients/jav3-browser/manifest.json").read_text())
+    assert browser.CURRENT_EXT_VERSION == manifest["version"]
+    assert browser.ext_outdated("0.4.0")
+    assert not browser.ext_outdated(browser.CURRENT_EXT_VERSION)
 
 
 def test_shot_to_css_freshness_bounds_and_scale(monkeypatch):
@@ -1109,3 +1122,22 @@ def test_proxy_host_header_without_a_port(monkeypatch):
     with pytest.raises(browser.BrowserError, match="Jav3 server"):
         browser.check_url("https://tunnel.example.org:1234/", deny)
     assert browser.check_url("http://10.0.0.82:3000/", deny)
+
+
+def test_read_page_worst_case_keeps_the_more_line_and_changed_under_the_cap():
+    """300+ elements, 150+ candidates and a maximal page text: the tool-result cap
+    cuts the END, so the page text gives way, never '+N more' or 'changed:'."""
+    from backend.config import settings
+    long_name = "N" * 100
+    els = [{**_link(i), "name": long_name, "text": long_name, "value": "v" * 80}
+           for i in range(1, 401)]
+    els += [_cand(500 + i, "C" * 80) for i in range(200)]
+    page = _page(els)
+    page["text"] = "\n".join(f"line {i} " + "x" * 90 for i in range(200))   # > 8000 chars
+    out = browser.render("read_page", page, {"tab": 7, "mode": "all", "max_chars": 8000},
+                         changed=True)
+    assert len(out) <= settings.tool_result_max_chars
+    assert re.search(r"\n\+\d+ more not listed", out)
+    assert out.endswith("changed: yes")
+    assert re.search(r"… \(text cut, [\d,]+ more characters\)", out)
+    assert out.index("[f0:1]") < out.index("page text (written by the site")

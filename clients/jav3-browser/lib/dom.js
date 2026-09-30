@@ -338,7 +338,7 @@
   // around the insertion so framework listeners see typing. Inputs/textareas:
   // insert at the caret via the prototype value setter + an input event;
   // contenteditable: execCommand('insertText').
-  function typeInto(win, doc, el, text, submit) {
+  async function typeInto(win, doc, el, text, submit) {
     const tag = el.tagName;
     if (tag === 'INPUT' && (el.type === 'password' || el.type === 'file')) {
       return { ok: false, err: 'Jav3 does not type into password or file fields' };
@@ -365,15 +365,42 @@
     }
     el.dispatchEvent(new win.KeyboardEvent('keyup', init));
     if (field) el.dispatchEvent(new win.Event('change', { bubbles: true }));
-    if (submit) {
-      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
-      el.dispatchEvent(new win.KeyboardEvent('keydown', opts));
+    if (submit) await submitOnce(win, doc, el);
+    return { ok: true, text: `typed ${text.length} character(s) into ${describeEl(el)}` };
+  }
+
+  // Submit exactly once. Enter goes to the page first; the page may handle it
+  // itself (its own keydown handler sends the message). Only when the keydown
+  // was not default-prevented, no `submit` event fired and the page did not start
+  // to navigate within `waitMs` do we submit the owning form ourselves.
+  async function submitOnce(win, doc, el, waitMs = 150) {
+    let submitted = false, leaving = false;
+    const onSubmit = () => { submitted = true; };
+    const onLeave = () => { leaving = true; };
+    const href0 = win.location && win.location.href;
+    doc.addEventListener('submit', onSubmit, true);
+    win.addEventListener('beforeunload', onLeave);
+    win.addEventListener('pagehide', onLeave);
+    try {
+      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+                     composed: true, view: win };
+      const notPrevented = el.dispatchEvent(new win.KeyboardEvent('keydown', opts));
+      if (notPrevented) el.dispatchEvent(new win.KeyboardEvent('keypress', { ...opts, charCode: 13 }));
       el.dispatchEvent(new win.KeyboardEvent('keyup', opts));
+      if (!notPrevented) return { by: 'page' };
+      await new Promise(r => setTimeout(r, waitMs));
+      const moved = win.location && win.location.href !== href0;
+      if (submitted || leaving || moved) return { by: 'page' };
       if (el.form) {
         if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
+        return { by: 'form' };
       }
+      return { by: 'none' };
+    } finally {
+      doc.removeEventListener('submit', onSubmit, true);
+      win.removeEventListener('beforeunload', onLeave);
+      win.removeEventListener('pagehide', onLeave);
     }
-    return { ok: true, text: `typed ${text.length} character(s) into ${describeEl(el)}` };
   }
 
   // --- accessible names -------------------------------------------------------------
@@ -655,6 +682,6 @@
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
     CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
-    collectCandidates, formState, implicitSubmit, clickSequence, deepPoint, realClick, isCovered, pointMoved, typeInto, describeEl,
+    collectCandidates, formState, implicitSubmit, clickSequence, deepPoint, realClick, isCovered, pointMoved, typeInto, submitOnce, describeEl,
   };
 })();

@@ -1152,7 +1152,7 @@ def render_frame(d: Desk, f: dict, *, same: bool = False, changed: bool | None =
         inview = [e for e in els if _visible_centre(e, w, h)]
         rest = [e for e in els if not _visible_centre(e, w, h)]
         shown = (inview + rest)[:ELEMENTS_SHOWN]
-        lines.append("elements (click by id; coordinates are pixels of this image):")
+        lines.append("elements (click by id; @ is the centre, in pixels of this image):")
         if any(e.get("window") for e in shown):
             # grouped by window, as the client numbered them: a header per group
             group = None

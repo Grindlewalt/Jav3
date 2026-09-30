@@ -159,7 +159,7 @@ export function typeActive(text, submit) {
   return D.typeInto(window, document, el, text, submit);
 }
 
-export function typeEl(id, text, submit) {
+export async function typeEl(id, text, submit) {
   const el = globalThis.__jav3Dom.findJav3(document, id);
   if (!el) return { ok: false, code: 'stale' };
   el.scrollIntoView({ block: 'center' });
@@ -183,15 +183,7 @@ export function typeEl(id, text, submit) {
   } else {
     return { ok: false, err: 'that element is not a text field' };
   }
-  if (submit) {
-    const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
-    el.dispatchEvent(new KeyboardEvent('keydown', opts));
-    el.dispatchEvent(new KeyboardEvent('keyup', opts));
-    if (el.form) {
-      if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit();
-      else el.form.submit();
-    }
-  }
+  if (submit) await globalThis.__jav3Dom.submitOnce(window, document, el);
   return { ok: true };
 }
 
