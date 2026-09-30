@@ -8676,7 +8676,8 @@ def build_tui(base: str, token: str, **kw):
                                busy_ok=True, leader="c"),
                 "login": Command(self.c_login, "log in: the line from Settings (chat only) "
                                  "or your password (full access)", "[line|password]"),
-                "logout": Command(self.c_logout, "log out (a device token is revoked)"),
+                "logout": Command(self.c_logout, "log out: /logout says who, /logout yes does it "
+                                 "(a device token is revoked)", "[yes]", takes_arg=True),
                 "exit": Command(self.c_exit, "quit (a running turn keeps going)",
                                 busy_ok=True, leader="q"),
             }
@@ -8707,6 +8708,8 @@ def build_tui(base: str, token: str, **kw):
                 return [(m["id"], m.get("label", "") + ("  (default)" if m["id"] == o.get("default")
                                                         else ""))
                         for m in o.get("models", [])]
+            if fn == self.c_logout:
+                return [("yes", "sign out (a device token is revoked)")]
             if fn == self.c_agent:
                 return [("none", "plain Jav3")] + [(a["slug"], a.get("name", ""))
                                                   for a in o.get("agents", [])]
@@ -9338,12 +9341,16 @@ def build_tui(base: str, token: str, **kw):
             self.notify(msg)
 
         async def c_logout(self, arg: str) -> None:
+            """/logout says who is signed in and what signing out does; /logout yes
+            does it (the web app's two steps: one slip of a finger costs a login)."""
             if not self.token:
                 self.notify("not logged in")
                 return
-            detail = ("Forgets this password session." if is_session(self.token)
-                      else "Revokes this computer's token.")
-            if not await self.push_screen_wait(Confirm("Log out?", detail)):
+            what = ("forgets this password session" if is_session(self.token)
+                    else "revokes this computer's token and forgets it")
+            if arg.strip().lower() != "yes":
+                await self.note(f"signed in as {self.whoami} on {self.base} "
+                                f"({self._access_label()}) — /logout yes {what}")
                 return
             ns = argparse.Namespace(server=self.server_override)
             await asyncio.to_thread(cmd_logout, ns, io.StringIO())
