@@ -4321,3 +4321,15 @@ a:has(> .nav-dot) { position: relative; }
   background: var(--panel);
   backdrop-filter: none; -webkit-backdrop-filter: none;
 }
+
+/* web fixes (WEBA-03): a tall question scrolled its Skip / Answer row out of
+   the card's box, where the composer sat on top of it. The card is a column
+   now: the detail and the options shrink and scroll, the answer row stays put.
+   Toasts ride above the whole dock (--dock-h-root, useFollow.js), not across it. */
+.composer .ask-card { display: flex; flex-direction: column; }
+.composer .ask-card > * { flex-shrink: 0; }
+.composer .ask-card > .ask-detail,
+.composer .ask-card > .ask-opts { flex-shrink: 1; min-height: 2.6em; overflow-y: auto; }
+.app:has(form.composer) .notices {
+  bottom: max(calc(var(--sab) + 104px), calc(var(--dock-h-root, 0px) + 6px));
+}
