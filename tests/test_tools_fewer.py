@@ -196,6 +196,14 @@ def test_delegation_journal_and_project_words_load_their_sections(monkeypatch):
     assert "git" in View(toolsections.mark_load(specs, {"git"}), _hist("hi")).loaded
 
 
+def test_asking_the_meta_tool_for_a_core_section_is_not_an_error(monkeypatch):
+    v = View(_specs(monkeypatch), _hist("hi"))
+    out = v.meta_call({"section": "web"})
+    assert not out.startswith("error:") and "core tools" in out
+    assert v.meta_call({"section": "web,media"}).count("\n") >= 1
+    assert "media" in v.loaded
+
+
 def test_an_unloaded_merged_tool_called_by_name_loads_and_runs(monkeypatch):
     v = View(_specs(monkeypatch), _hist("hi"))
     assert "media" not in _names(v.wire())

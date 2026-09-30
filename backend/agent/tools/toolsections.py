@@ -190,11 +190,12 @@ def _takes(params: dict) -> str:
     req = set((params or {}).get("required") or [])
     out = []
     for k, v in props.items():
-        name = k
+        opt = "" if k in req else "?"
         if k == "action":
             enum = (v or {}).get("enum")
-            name = SUB + ("=" + "|".join(map(str, enum)) if enum else "")
-        out.append(name + ("" if k in req else "?"))
+            out.append(SUB + opt + ("=" + "|".join(map(str, enum)) if enum else ""))
+        else:
+            out.append(k + opt)
     return ", ".join(out) or "nothing"
 
 
@@ -377,7 +378,7 @@ class View:
             line = f"- {act}({_takes(params)}): {head}"
             if notes:
                 line += f" {_clip(notes, notes_max)}"
-            if own and own.get("description"):
+            if own and len(own.get("description") or "") > 70:   # more than a restatement
                 line += f" do: {_clip(own['description'], MERGED_NOTES_MAX)}"
             lines.append(line)
         if SUB in props:
@@ -454,7 +455,11 @@ class View:
         if not names:
             return "Sections [their tools]:\n" + self._listing()
         out, guides = [], []
+        core_secs = {self.section_of(u) for u in self.core_units()}
         for n in names:
+            if n not in secs and n in core_secs:
+                out.append(f"Section '{n}' is part of your core tools: call them directly.")
+                continue
             if n not in secs:
                 close = difflib.get_close_matches(n, list(secs), n=1, cutoff=0.5)
                 hint = f" (did you mean '{close[0]}'?)" if close else ""
