@@ -17,11 +17,13 @@ The guest edits a COPY of the project, never the canonical files directly. So:
   last shipped it (see _shipped): an untrusted guest cannot delete a file it was
   not shown, or one that changed under it.
 """
+import asyncio
 import hashlib
 import io
 import json
 import logging
 import tarfile
+import zlib
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -53,6 +55,15 @@ PROTECTED_OUT = {".git", ".staging", ".workspace.json", ".context.json"}
 # agent writes can collide with it; a hand-made one is checked like a real one.
 DELETED_MEMBER = ".staging/deleted.json"
 MAX_DELETIONS = 5000
+MAX_LIST_BYTES = 4 * 1024 * 1024
+
+# What one buffer from the guest may unpack to (the guest is the hostile side: a
+# 0.9 MB gzip once became a 200 MB file and 730 MB of host memory). run_code
+# keeps a file to 2 MB and a run to 8 MB, so these leave headroom for a long turn.
+MAX_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_BUFFER_BYTES = 128 * 1024 * 1024
+MAX_STREAM_BYTES = 256 * 1024 * 1024
+MAX_MEMBERS = 20000
 
 # What the host last shipped or applied, per project: {rel: sha256}. A deletion
 # the guest reports is honoured only for a file listed here whose bytes on the
@@ -121,6 +132,52 @@ def build_merged_tar(slug: str) -> bytes:
     return buf.getvalue()
 
 
+def _mb(n: int) -> str:
+    return f"{n / (1 << 20):.3g} MB"
+
+
+def _read_buffer(tar_bytes: bytes) -> tuple[list[tuple[str, bytes]], dict[str, str], str | None]:
+    """The regular files of the guest's buffer as (name, bytes), read within
+    bounds: a file over MAX_MEMBER_BYTES or past MAX_BUFFER_BYTES in all is left
+    out with its reason, and reading stops at MAX_MEMBERS files or once the tar
+    has declared MAX_STREAM_BYTES (a bomb is refused by its headers, before it is
+    unpacked). Returns (files, left_out {name: why}, why reading stopped or None).
+    A buffer that is not a tar at all raises; one that breaks partway returns
+    what was read before it."""
+    items: list[tuple[str, bytes]] = []
+    left_out: dict[str, str] = {}
+    declared = kept = 0
+    stopped = None
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+        try:
+            for m in tar:
+                if not m.isfile():
+                    continue
+                declared += m.size
+                if len(items) + len(left_out) >= MAX_MEMBERS:
+                    stopped = f"more than {MAX_MEMBERS:,} files"
+                    break
+                if declared > MAX_STREAM_BYTES:
+                    stopped = f"more than {_mb(MAX_STREAM_BYTES)} in all"
+                    break
+                limit = MAX_LIST_BYTES if m.name == DELETED_MEMBER else MAX_MEMBER_BYTES
+                if m.size > limit:
+                    left_out[m.name] = f"larger than {_mb(limit)}"
+                    continue
+                if kept + m.size > MAX_BUFFER_BYTES:
+                    left_out[m.name] = f"the buffer is over {_mb(MAX_BUFFER_BYTES)}"
+                    continue
+                f = tar.extractfile(m)
+                if f is None:
+                    continue
+                data = f.read(m.size)
+                kept += len(data)
+                items.append((m.name, data))
+        except (tarfile.TarError, EOFError, OSError, zlib.error) as e:
+            stopped = f"the buffer is damaged ({type(e).__name__})"
+    return items, left_out, stopped
+
+
 def _keep_harness_ignores(data: bytes) -> bytes:
     """The project's root .gitignore always keeps the harness's own lines
     (.staging/, .workspace.json, .context.json, data/). An agent that rewrites the
@@ -170,55 +227,58 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = No
     known = _shipped.setdefault(slug, {})
     applied_sha: dict[str, str] = {}
     wanted_deleted: list = []
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
-        for m in tar.getmembers():
-            if not m.isfile():
-                continue
-            rel = m.name
-            if rel == DELETED_MEMBER:
-                try:
-                    listed = json.loads(tar.extractfile(m).read())
-                except (ValueError, AttributeError):
-                    listed = None
-                if isinstance(listed, list):
-                    wanted_deleted = listed[:MAX_DELETIONS]
-                else:
-                    log.warning("the guest's deletion list for %s is not a JSON list", slug)
-                continue
-            if set(Path(rel).parts) & PROTECTED_OUT:
-                refused[rel] = "a protected path"
-                continue
-            if _skip(rel, SKIP_OUT):
-                continue                   # generated junk, dropped quietly as ever
-            f = tar.extractfile(m)
-            if f is None:
-                continue
-            data = f.read()
-            if rel == ".gitignore":
-                data = _keep_harness_ignores(data)
+    # the buffer is the guest's: read it with bounds, off the loop (a gzip bomb
+    # used to unpack to hundreds of MB in one go)
+    items, too_big, stopped = await asyncio.to_thread(_read_buffer, tar_bytes)
+    refused.update(too_big)
+    if stopped:
+        refused["(the rest of the buffer)"] = stopped
+    if too_big or stopped:
+        log.warning("guest buffer for %s over the limits: %s",
+                    slug, stopped or f"{len(too_big)} file(s)")
+        await writes._raise_flag(slug, next(iter(too_big), "(guest write buffer)"), "oversize",
+                                 {"files": list(too_big)[:20], "stopped": stopped})
+    for rel, data in items:
+        if rel == DELETED_MEMBER:
             try:
-                triggers, was_held = await writes.apply_write_gated(
-                    slug, rel, data, tainted=tainted)
-            except writes.SecretLeakError as e:
-                leaks[rel] = e.names       # refused — never lands canonical
-                continue
-            except (ValueError, HTTPException) as e:
-                # a protected path, a path that escapes the project, or a change
-                # too large to hold for approval: the write's own refusal
-                refused[rel] = str(getattr(e, "detail", None) or e) or type(e).__name__
-                continue
-            except Exception as e:  # noqa: BLE001 — one bad path must not drop the rest
-                failed[rel] = f"{type(e).__name__}: {e}"[:200]
-                log.warning("guest write to %s/%s failed: %s", slug, rel, failed[rel])
-                await writes._raise_flag(slug, rel, "write_failed", {"error": failed[rel]})
-                continue
-            if was_held:
-                held.append(rel)           # not on disk: not in the tainted-paths ledger either
-                continue
-            if triggers:
-                flagged[rel] = triggers
-            applied.append(rel)
-            applied_sha[rel] = known[rel] = _sha(data)
+                listed = json.loads(data)
+            except ValueError:
+                listed = None
+            if isinstance(listed, list):
+                wanted_deleted = listed[:MAX_DELETIONS]
+            else:
+                log.warning("the guest's deletion list for %s is not a JSON list", slug)
+            continue
+        if set(Path(rel).parts) & PROTECTED_OUT:
+            refused[rel] = "a protected path"
+            continue
+        if _skip(rel, SKIP_OUT):
+            continue                       # generated junk, dropped quietly as ever
+        if rel == ".gitignore":
+            data = _keep_harness_ignores(data)
+        try:
+            triggers, was_held = await writes.apply_write_gated(
+                slug, rel, data, tainted=tainted)
+        except writes.SecretLeakError as e:
+            leaks[rel] = e.names           # refused — never lands canonical
+            continue
+        except (ValueError, HTTPException) as e:
+            # a protected path, a path that escapes the project, or a change
+            # too large to hold for approval: the write's own refusal
+            refused[rel] = str(getattr(e, "detail", None) or e) or type(e).__name__
+            continue
+        except Exception as e:  # noqa: BLE001 — one bad path must not drop the rest
+            failed[rel] = f"{type(e).__name__}: {e}"[:200]
+            log.warning("guest write to %s/%s failed: %s", slug, rel, failed[rel])
+            await writes._raise_flag(slug, rel, "write_failed", {"error": failed[rel]})
+            continue
+        if was_held:
+            held.append(rel)               # not on disk: not in the tainted-paths ledger either
+            continue
+        if triggers:
+            flagged[rel] = triggers
+        applied.append(rel)
+        applied_sha[rel] = known[rel] = _sha(data)
     old_sha: dict[str, str] = {}
     if wanted_deleted:
         if leaks or failed or refused:
@@ -299,6 +359,12 @@ LOST_NOTE = ("\n\n[This turn's file changes could not be brought back from the g
 _NOTE_MAX = 8
 
 
+def _short(rel: str) -> str:
+    """A path as the guest named it, bounded: it lands in a message the model reads."""
+    rel = str(rel)
+    return rel if len(rel) <= 120 else rel[:117] + "..."
+
+
 def describe_unapplied(res: dict | None) -> str:
     """'' when everything landed, else bracketed notes naming each file that did
     not (and why), for the end of the turn's answer."""
@@ -307,18 +373,18 @@ def describe_unapplied(res: dict | None) -> str:
     bits: list[str] = []
     for rel, names in (res.get("secret_files") or {}).items():
         hint = ", ".join("{{secret:%s}}" % n for n in names)
-        bits.append(f"{rel} (refused: it contains the value of the stored secret "
+        bits.append(f"{_short(rel)} (refused: it contains the value of the stored secret "
                     f"{', '.join(names)}; write {hint} instead)")
     for rel, why in (res.get("refused") or {}).items():
-        bits.append(f"{rel} (refused: {why})")
+        bits.append(f"{_short(rel)} (refused: {why})")
     for rel, why in (res.get("failed") or {}).items():
-        bits.append(f"{rel} (write failed: {why})")
+        bits.append(f"{_short(rel)} (write failed: {why})")
     out = ""
     if bits:
         more = f"; and {len(bits) - _NOTE_MAX} more" if len(bits) > _NOTE_MAX else ""
         out += ("\n\n[Not saved to the project, although the guest reported them written: "
                 + "; ".join(bits[:_NOTE_MAX]) + more + ".]")
-    kept = [f"{rel} ({why})" for rel, why in (res.get("not_deleted") or {}).items()]
+    kept = [f"{_short(rel)} ({why})" for rel, why in (res.get("not_deleted") or {}).items()]
     if kept:
         more = f"; and {len(kept) - _NOTE_MAX} more" if len(kept) > _NOTE_MAX else ""
         out += ("\n\n[Not deleted, still in the project although the guest removed them: "
@@ -326,6 +392,7 @@ def describe_unapplied(res: dict | None) -> str:
     held = res.get("held") or []
     if held:
         out += ("\n\n[Held for the operator's approval (this turn had read untrusted "
-                "content): " + ", ".join(held[:_NOTE_MAX]) + ". The project still has "
+                "content): " + ", ".join(_short(r) for r in held[:_NOTE_MAX])
+                + ". The project still has "
                 "the previous text.]")
     return out

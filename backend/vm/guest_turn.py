@@ -36,6 +36,11 @@ GUEST_RUNTURN_PORT = 5556                   # must match jarvis_guest.server.POR
 RPC_TIMEOUT = 120.0
 RESCUE_TIMEOUT = 20.0
 
+# The guest is the hostile side: one line it sends (an event, or the write buffer
+# as base64) is read into host memory, so it is bounded. The biggest honest line
+# is the turn-end buffer; workspace_xfer caps what that may unpack to.
+MAX_LINE = 192 * 1024 * 1024
+
 
 class GuestStreamError(ConnectionError):
     """The guest's stream ended before the turn did: the socket closed with no
@@ -208,9 +213,11 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             owns_ws = acquire_workspace(active_slug)
         if owns_ws:
             # ship the workspace so the in-guest file tools work on a copy; the
-            # guest's write buffer comes back after the turn. Built off the loop:
-            # a big project froze every stream and request for seconds.
-            spec["workspace_tar_b64"] = await asyncio.to_thread(_workspace_b64, active_slug)
+            # guest's write buffer comes back after the turn. Built inline, not in a
+            # thread: a joiner that takes its hold while this awaited would reach
+            # the guest before the copy does (a stalled loop for a big project is
+            # the smaller harm; a joiner needs the shipped-ack a thread would add).
+            spec["workspace_tar_b64"] = _workspace_b64(active_slug)
         if want_persist:
             # attach + mount BEFORE the turn starts (the guest is pinned, so the
             # reaper can't scrub between here and the release in finally). The
@@ -225,26 +232,14 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         # socket. Either way a connected non-blocking socket.
         s = await box.transport.connect(GUEST_RUNTURN_PORT)
         await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
-        buf = b""
-        eof = False
-        while not eof:
-            while b"\n" not in buf:
-                # once the answer is held the write buffer is due within seconds:
-                # a guest that stalls there must not hold the answer forever
-                try:
-                    if held_final is None:
-                        chunk = await loop.sock_recv(s, 65536)
-                    else:
-                        chunk = await asyncio.wait_for(loop.sock_recv(s, 65536), RPC_TIMEOUT)
-                except asyncio.TimeoutError:
-                    chunk = b""
-                if not chunk:
-                    eof = True
-                    break
-                buf += chunk
-            if eof:
-                break
-            line, buf = buf.split(b"\n", 1)
+        buf = bytearray()
+        while True:
+            # once the answer is held the write buffer is due within seconds: a
+            # guest that stalls there must not hold the answer forever
+            line = await _recv_line(loop, s, buf, MAX_LINE,
+                                    RPC_TIMEOUT if held_final is not None else None)
+            if line is None:
+                break                     # the guest closed the connection
             if not line.strip():
                 continue
             ev = json.loads(line)
@@ -366,6 +361,34 @@ async def _rescue(slug: str, op_id: str | None) -> dict | None:
         return None
 
 
+async def _recv_line(loop, sock, buf: bytearray, limit: int, timeout=None) -> bytes | None:
+    """The next newline-terminated line from `sock` (leftover bytes stay in
+    `buf`), or None when the peer closed (or, with a `timeout`, went quiet).
+    Linear in the line's size, and a line over `limit` bytes is an error: the
+    old `buf += chunk; while b"\\n" not in buf` copied the whole line on every
+    chunk and had no bound, so 16 MB with no newline cost 550 MB and seconds."""
+    start = 0
+    while True:
+        i = buf.find(b"\n", start)
+        if i >= 0:
+            line = bytes(buf[:i])
+            del buf[:i + 1]
+            return line
+        start = len(buf)
+        if start > limit:
+            raise GuestStreamError(f"guest sent a line of over {limit:,} bytes")
+        try:
+            if timeout is None:
+                chunk = await loop.sock_recv(sock, 65536)
+            else:
+                chunk = await asyncio.wait_for(loop.sock_recv(sock, 65536), timeout)
+        except asyncio.TimeoutError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
+
+
 async def _guest_rpc(spec: dict, box=None) -> dict | None:
     """One short request/response to a box's run-turn server (prime / pull /
     ps). `box` None = the shared box."""
@@ -373,13 +396,8 @@ async def _guest_rpc(spec: dict, box=None) -> dict | None:
     s = await (box or boxes.shared()).transport.connect(GUEST_RUNTURN_PORT)
     try:
         await loop.sock_sendall(s, (json.dumps(spec) + "\n").encode())
-        buf = b""
-        while b"\n" not in buf:
-            chunk = await loop.sock_recv(s, 65536)
-            if not chunk:
-                return None
-            buf += chunk
-        return json.loads(buf.split(b"\n", 1)[0])
+        line = await _recv_line(loop, s, bytearray(), MAX_LINE)
+        return json.loads(line) if line is not None else None
     finally:
         s.close()
 
@@ -404,7 +422,7 @@ async def prime_workspace(slug: str) -> None:
     (orchestrator leaves fan out concurrently on one project — priming once up
     front avoids each leaf racing a fresh unpack of the shared guest dir).
     Callers hold the slug via acquire_workspace and prime only when first in."""
-    tar_b64 = await asyncio.to_thread(_workspace_b64, slug)
+    tar_b64 = _workspace_b64(slug)
     await _pinned_rpc({"mode": "prime", "active_slug": slug,
                        "workspace_tar_b64": tar_b64}, await boxes.for_project(slug))
 
