@@ -18,14 +18,23 @@ parameters:
       type: integer
       description: Kill the run after this many seconds (default 60, max 300).
 ---
-The sandbox has NO network and no secrets — pip/npm installs and web fetches
-will fail by design; use web tools for anything remote, then process it here.
-`node` and `npm` ARE installed, so JS projects run and test in place (e.g.
-`node --test`, or your package.json's own `npm test`/`npm run …` scripts).
+The sandbox has no direct network and no secrets. With monitored egress on,
+pip/npm/curl/git go through the host's proxy and only reach hosts the project's
+Network policy allows (an undecided host is queued for the operator; a proxy
+403 means refused or queued: report the exact hosts, do not probe the sandbox).
+With egress off they fail by design; use web tools for anything remote, then
+process it here. `node` and `npm` ARE installed (and `pytest`, in images built from the current
+recipe), so JS and Python projects run and test in place (e.g. `node --test`,
+`npm test`, `pytest`).
+
+Servers and other background jobs: redirect their output (`cmd > /tmp/x.log
+2>&1 &`) and kill them when you are done. A backgrounded process that keeps the
+call's output open is detached after a couple of seconds and the call returns,
+but it keeps running and holds its port for everyone on the shared box.
 
 Your working directory is the project copy: read its files directly, and write
 results as files — they sync back to the project at turn end. That sync keeps
 EVERYTHING the run created under the project, so put throwaway scratch (probe
 scripts, scratch logs, one-off experiments) under /tmp instead, where it is NOT
-kept; node_modules and package caches are never kept. stdout/stderr are
+kept; node_modules, __pycache__, .pytest_cache and package caches are never kept. stdout/stderr are
 truncated past ~6k chars — print what matters, write the rest to a file.

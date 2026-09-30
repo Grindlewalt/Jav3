@@ -2,6 +2,7 @@
 guest; here we simulate guest conditions (in_guest flag + task-local slug) and
 verify execution, capture, caps, and the host-side guards."""
 import asyncio
+import time
 
 from backend.agent.tools import registry, toolctx
 from backend.config import settings
@@ -145,3 +146,47 @@ async def test_sees_this_turns_pending_writes(tmp_env, monkeypatch, tmp_path):
     out = await registry.dispatch("run_code", {"command": "cat tests/new.txt old.txt"})
     assert "freshedited" in out
     assert "kept" not in out          # synced files are not the run's artifacts
+
+
+async def test_cache_trees_are_not_reported_as_kept(tmp_env, monkeypatch, tmp_path):
+    """BUILD-04: the host drops __pycache__/.pytest_cache at turn end, so run_code
+    must not say it kept them (agents burned calls cleaning up); no .pyc at all."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    out = await registry.dispatch("run_code", {"command": (
+        "mkdir -p pkg/__pycache__ .pytest_cache && echo x > pkg/__pycache__/a.pyc "
+        "&& echo x > .pytest_cache/CACHEDIR.TAG && echo real > real.txt "
+        "&& echo import-dont-write-bytecode: $PYTHONDONTWRITEBYTECODE")})
+    assert "kept 1 changed file(s): real.txt" in out
+    assert "import-dont-write-bytecode: 1" in out
+
+
+async def test_background_process_holding_pipes_does_not_hang(tmp_env, monkeypatch, tmp_path):
+    """PLANS-01: `cmd &` with the output not redirected leaves the background
+    process holding the pipes. The shell has exited, so the call must return
+    within seconds (not when the server dies) and say what is still running."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    t0 = time.monotonic()
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        "command": "sleep 6 & echo started", "timeout_seconds": 3}), 12)
+    assert time.monotonic() - t0 < 8
+    assert "exit 0" in out and "started" in out
+    assert "still running" in out and "Redirect" in out
+
+
+async def test_timeout_kill_reaches_a_reaped_shell_group(tmp_env, monkeypatch, tmp_path):
+    """The timeout kill must not need the shell's pid to still be alive
+    (os.getpgid on a reaped pid raised ProcessLookupError and skipped the
+    kill): a shell that exits while its child keeps running is still killed."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    t0 = time.monotonic()
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        "command": "(sleep 6; echo late) & sleep 0.2; echo shell-done; exit 0",
+        "timeout_seconds": 1}), 12)
+    assert time.monotonic() - t0 < 8
+    assert "shell-done" in out and "late" not in out
