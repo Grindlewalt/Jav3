@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, providers, runtime
 from .agent import budget
 from .agent.model import model
+from . import narration
 from .agent.loop import db_tool_sink
 from .agent.tools import toolsections
 from .agent.tools.registry import load_registry, openai_tool_specs, read_only_names
@@ -206,6 +207,7 @@ async def delete_conversation(conversation_id: int):
                              "WHERE conversation_id = ?", (conversation_id,))
         from . import ctxstore
         ctxstore.forget_conversation(conversation_id)
+        await db.execute("DELETE FROM turn_narration WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM tool_calls WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
         await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
@@ -482,10 +484,13 @@ async def get_messages(conversation_id: int):
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
         async with db.execute(
-            "SELECT tool, args, result, created_at FROM tool_calls "
+            "SELECT id, tool, args, result, created_at FROM tool_calls "
             "WHERE conversation_id = ? ORDER BY id", (conversation_id,)
         ) as cur:
             calls = [dict(r) for r in await cur.fetchall()]
+        # the text the agent wrote between its calls (narration.py); none for
+        # a chat from before it was kept, or an incognito one
+        narr = await narration.load(db, conversation_id)
         # the funnel/research jobs this conversation launched. The bus's `job`
         # announcement is live-only; the head's parent link is the durable
         # copy, so a reloaded chat can re-mount its JobTrees (created_at places
@@ -517,24 +522,42 @@ async def get_messages(conversation_id: int):
                 "ok": not result.startswith(("error:", "duplicate call:")),
                 "done": True}
 
+    by_msg: dict[int, list[dict]] = {}
+    for n in narr:
+        if n["message_id"] is not None:
+            by_msg.setdefault(n["message_id"], []).append(n)
     ci = 0
     for m in rows:
         if m["role"] != "assistant":
             continue
-        acts = []
+        acts, ids = [], []
         while ci < len(calls) and calls[ci]["created_at"] <= m["created_at"]:
             acts.append(_act(calls[ci]))
+            ids.append(calls[ci]["id"])
             ci += 1
         if acts:
             m["activity"] = acts
+        # `narration`: [{before, text}], `before` = how many of `activity`'s
+        # entries come first (0 opens the turn). activity stays tool-only, so
+        # a client that reads only that is untouched
+        if m["id"] in by_msg:
+            m["narration"] = narration.for_message(ids, by_msg[m["id"]])
     # `running` lets the GUI re-attach to an in-flight turn after a reload;
     # calls past the last assistant message belong to that in-flight turn —
     # without them a reopened chat shows the current turn as a bare spinner
     # even though half its work is already persisted
     running = conversation_id in _active_turns
     pending = [_act(c) for c in calls[ci:]] if running else []
+    # ...and the narration the running turn has written so far (rows not yet
+    # bound to a reply, after the last call the finished turns account for)
+    seen_id = calls[ci - 1]["id"] if ci else 0
+    pending_narr = narration.for_message(
+        [c["id"] for c in calls[ci:]],
+        [n for n in narr if n["message_id"] is None
+         and n["after_call_id"] >= seen_id]) if running else []
     return {"messages": rows, "running": running, "pending_activity": pending,
-            "agent_slug": agent_slug, "jobs": jobs}
+            "pending_narration": pending_narr, "agent_slug": agent_slug,
+            "jobs": jobs}
 
 
 # In-flight turns, keyed by conversation. The dict entry is both the "is a
@@ -704,6 +727,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     db = None
     tools_before = None      # set once the turn's tool_calls high-water mark is known
     late: list[str] = []     # operator messages the turn closed on without reading
+    rec = None               # the turn's narration recorder (narration.py)
     try:
         # inside the try: if the connect fails, the finally must still evict
         # _active_turns and close the bus channel or the conversation bricks
@@ -933,8 +957,12 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
 
         sink = db_tool_sink(db, conversation_id)
         pending_tool: dict = {}
+        # the text between the tool calls is kept after the turn (an incognito
+        # turn keeps nothing: it is wiped, and these rows would outlive it)
+        rec = narration.Recorder(db, conversation_id, enabled=not ephemeral)
         try:
             async for event in source:
+                await rec.feed(event)
                 if event["type"] == "final":
                     final_content = event["content"]
                     continue
@@ -975,6 +1003,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         )
         await _link_tool_calls(db, conversation_id, tools_before, cur.lastrowid)
         await db.commit()
+        await rec.link(cur.lastrowid)
         if not ephemeral:
             async with db.execute(
                 "SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?",
@@ -1011,6 +1040,8 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 await _link_tool_calls(db, conversation_id, tools_before,
                                        cur.lastrowid)
                 await db.commit()
+                if rec is not None:
+                    await rec.link(cur.lastrowid)
             except Exception:  # noqa: BLE001 — the marker is best-effort
                 pass
         # `late +`: the normal path may have closed already and then failed
@@ -1055,7 +1086,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             # error inside this finally, skipping the contextvar resets, the
             # _active_turns eviction and bus.close_job — bricking the chat
             await _drop_references(db, conversation_id)
-            for tbl in ("tool_calls", "messages", "conversations"):
+            for tbl in ("turn_narration", "tool_calls", "messages", "conversations"):
                 col = "id" if tbl == "conversations" else "conversation_id"
                 await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
             await db.commit()

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_user
-from . import ctxstore, providers, storage_watch, turnstats
+from . import ctxstore, narration, providers, storage_watch, turnstats
 from .config import settings
 from .ctxstore import CAPTURE_STATE_KEY
 from .db import get_db, set_state
@@ -301,6 +301,9 @@ async def transcript(cid: int):
                 return 1
             return 0 if x["role"] == "user" else 2
         items.sort(key=lambda x: (x["ts"] or "", _rank(x), x["id"]))
+        # the agent's own text between its calls, placed by the call it
+        # follows (not by clock: it shares a second with the calls around it)
+        narration.merge_timeline(items, await narration.load(db, cid))
         return {
             "id": cid, "kind": conv["kind"], "summary": conv["summary"],
             "timeline": items,

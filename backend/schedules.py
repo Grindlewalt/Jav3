@@ -10,6 +10,7 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import narration
 from .agent.loop import db_tool_sink
 from .vm.turn import run_agent_turn
 from . import providers
@@ -324,22 +325,25 @@ async def _run_jarvis_headless(task: str, project_slug: str | None,
         ptoken = runtime.active_project.set(active)
         cidtoken = runtime.conversation_id.set(conversation_id)
         final = ""
+        rec = narration.Recorder(db, conversation_id)
         try:
             async for ev in run_agent_turn(conversation_id, system_prompt,
                                            [{"role": "user", "content": task}],
                                            active_project=active, model_name=model,
                                            on_tool_call=db_tool_sink(db, conversation_id)):
+                await rec.feed(ev)
                 if ev["type"] == "final":
                     final = ev["content"]
         finally:
             runtime.conversation_id.reset(cidtoken)
             runtime.active_project.reset(ptoken)
             runtime.web_session.reset(wtoken)
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, model) "
             "VALUES (?, 'assistant', ?, ?)",
             (conversation_id, final, providers.turn_model_id(model)))
         await db.commit()
+        await rec.link(cur.lastrowid)
         return final
     finally:
         await db.close()

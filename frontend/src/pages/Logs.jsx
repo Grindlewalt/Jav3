@@ -5,12 +5,15 @@ import { ago, human, ts } from '../format.js'
 import { notify, notifyError } from '../notify.js'
 import { Button, EmptyState, Select, Tabs, Toggle } from '../components/index.js'
 import { mergeConvos } from '../logsList.js'
+import { proseLabel, timelineHeader } from '../logsTimeline.js'
 
 // Logs: full transcript viewer for any conversation — every user/assistant
 // message and every tool call with its args and result — plus the numbers that
 // explain a token blow-up (tool-call counts, result bytes, real token usage).
 // A debugging / observability tool. Tool args and results are UNTRUSTED: they
-// are always rendered as plain text in <pre>, never markdown / HTML.
+// are always rendered as plain text in <pre>, never markdown / HTML. The text
+// the agent wrote between its calls (`narration` items) is the agent's own
+// prose, drawn like a message but marked as what it is.
 
 const RESULT_HOT = 4000       // a single result this big is re-sent every iteration
 const HEAVY_TOKENS = 500000   // runaway-conversation flags in the left rail
@@ -293,6 +296,22 @@ function CostView() {
   )
 }
 
+// The agent's own text between two tool calls (backend/narration.py): not a
+// reply, not a result. Marked as such so it is never read as either.
+function NarrationItem({ item }) {
+  return (
+    <div className="log-msg narration">
+      <div className="log-msg-head">
+        <span className="log-role">{proseLabel(item)}</span>
+        <span className="dim small">between tool calls</span>
+        <span className="grow" />
+        {item.ts && <span className="dim small">{ts(item.ts)}</span>}
+      </div>
+      <div className="log-msg-body"><Md text={item.text} /></div>
+    </div>
+  )
+}
+
 function ToolItem({ item }) {
   const [open, setOpen] = useState(false)
   const hot = (item.result_bytes || 0) > RESULT_HOT
@@ -497,12 +516,14 @@ export default function Logs() {
                 <section className="sbx-sec">
                   <div className="sbx-sec-head">
                     <h3>Transcript</h3>
-                    <span className="dim small">{(detail.timeline || []).length} items · in order</span>
+                    <span className="dim small">{timelineHeader(detail.timeline || [])}</span>
                   </div>
                   <div className="log-timeline">
                     {(detail.timeline || []).map((item, i) => (
                       item.kind === 'tool' ? (
                         <ToolItem key={i} item={item} />
+                      ) : item.kind === 'narration' ? (
+                        <NarrationItem key={i} item={item} />
                       ) : (
                         <div key={i} className={`log-msg ${item.role}`}>
                           <div className="log-msg-head">

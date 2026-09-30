@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
 import { MessageBody } from './ToolActivity.jsx'
-import { activityMark, makeTurnFolder, newTurn } from './turnEvents.js'
+import { activityMark, makeTurnFolder, newTurn, seedParts } from './turnEvents.js'
 import { useFollow } from './useFollow.js'
 import TurnStatus from './TurnStatus.jsx'
 import { useAsk } from './ask.jsx'
@@ -130,7 +130,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     // a turn is still executing server-side — re-attach and watch it finish,
     // seeding the placeholder with the tool calls it already made
     setBusy(true)
-    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
+    const seed = seedParts(r)
     setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true,
                                 parts: seed, t0: Date.now() }])
     const ctl = new AbortController()
