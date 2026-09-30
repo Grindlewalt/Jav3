@@ -771,6 +771,34 @@ def fit_parts(parts: list[tuple[str, str, int]], width: int, sep: str = " · ",
     return (sep if markup_sep is None else markup_sep).join(parts[j][1] for j in keep)
 
 
+def verdict_label(v: str) -> str:
+    """A network verdict as its row label, whole words in seven columns: `pending`
+    was cut to PENDI and `auto_allow` to A·ALL."""
+    return str(v or "?").replace("auto_", "a·").upper()[:7]
+
+
+def fit_row(left: list[tuple[str, str, int]], right: list[tuple[str, str, int]],
+            total: int, sep: str = " · ", markup_sep: str | None = None) -> tuple[str, str]:
+    """A status row's two sides, (plain, markup, rank) parts each, joined so the
+    row fits `total` columns with a gap between them: the highest ranks go first,
+    a right-hand part before a left-hand one of the same rank, so whole hints go
+    and none is cut mid-word. Each side keeps its first part."""
+    ls, rs = list(range(len(left))), list(range(len(right)))
+
+    def plain() -> int:
+        return (len(sep.join(left[i][0] for i in ls)) + len(sep.join(right[i][0] for i in rs)))
+
+    order = sorted([(left[i][2], 0, i) for i in range(1, len(left))]
+                   + [(right[i][2], 1, i) for i in range(1, len(right))],
+                   key=lambda k: (-k[0], -k[1], -k[2]))
+    for _, side, i in order:
+        if plain() + 2 <= total:
+            break
+        (rs if side else ls).remove(i)
+    msep = sep if markup_sep is None else markup_sep
+    return (msep.join(left[i][1] for i in ls), msep.join(right[i][1] for i in rs))
+
+
 _CD = re.compile(r"""^cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)(?:\s+2>\s*/dev/null)?"""
                  r"""\s*(?:;|&&|\|\||$)\s*""")
 
@@ -1148,6 +1176,24 @@ def _age(ts, now: float | None = None) -> str:
     return f"{s}s"
 
 
+def session_when(ts, now: float | None = None) -> str:
+    """When a chat started, in local time: 'today 04:19', 'yesterday 21:03', else
+    '09-27 14:02'. The server's started_at is UTC; '' when it is unreadable."""
+    import calendar
+    try:
+        t = calendar.timegm(time.strptime(str(ts).replace("T", " ")[:16], "%Y-%m-%d %H:%M"))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    now = time.time() if now is None else now
+    day = lambda x: time.strftime("%Y-%m-%d", time.localtime(x))  # noqa: E731
+    clock = time.strftime("%H:%M", time.localtime(t))
+    if day(t) == day(now):
+        return f"today {clock}"
+    if day(t) == day(now - 86400):
+        return f"yesterday {clock}"
+    return time.strftime("%m-%d ", time.localtime(t)) + clock
+
+
 def _esc(s: str) -> str:
     """Text made safe to splice into Textual markup. textual.markup.escape only
     escapes a `[` that already looks like a whole tag, so an unbalanced one
@@ -1357,6 +1403,34 @@ class Command:
                  takes_arg: bool = False, leader: str = ""):
         self.fn, self.help, self.usage = fn, help, usage
         self.busy_ok, self.takes_arg, self.leader = busy_ok, takes_arg, leader
+
+
+def help_view(keys: list[tuple[str, str]], cmds: list[tuple[str, str, str]]):
+    """/help as (a Rich renderable, its plain text). The keys come first, they are
+    what a new user needs; each command is two lines, its usage with the leader key
+    at the right edge and its description under it, so nothing is squeezed into a
+    narrow column and a `<path>` in a usage is only text."""
+    from rich.console import Group
+    from rich.table import Table
+    from rich.text import Text
+
+    kt = Table.grid(padding=(0, 2), expand=True)
+    kt.add_column(no_wrap=True, max_width=24, style="bold")
+    kt.add_column(ratio=1)
+    for k, v in keys:
+        kt.add_row(Text(k), Text(v))
+    ct = Table.grid(expand=True)
+    ct.add_column(ratio=1)
+    ct.add_column(justify="right", no_wrap=True, style="dim")
+    for usage, help_, lead in cmds:
+        ct.add_row(Text(usage, style="bold"), Text(lead))
+        ct.add_row(Text("  " + help_, style="dim"), "")
+    view = Group(Text("Keys", style="bold underline"), Text(""), kt, Text(""),
+                 Text("Commands", style="bold underline"), Text(""), ct)
+    plain = ["Keys", ""] + [f"{k}  {v}" for k, v in keys] + ["", "Commands", ""]
+    for usage, help_, lead in cmds:
+        plain += [f"{usage}  {lead}".rstrip(), f"  {help_}"]
+    return view, "\n".join(plain)
 
 
 def ask_view(ev: dict, question: str) -> tuple[str, str]:
@@ -1840,22 +1914,25 @@ def calls_model(m) -> str:
     return m[len("deepseek/"):] if m.startswith("deepseek/") else m
 
 
-def calls_row(e: dict) -> str:
-    """One Calls list row (spec: BACKLOG.md 'TUI: make the security story visible')."""
+def calls_row(e: dict, compact: bool = False) -> str:
+    """One Calls list row (spec: BACKLOG.md 'TUI: make the security story visible').
+    Compact (a terminal under 100 columns) leaves out the op and the project, which
+    the pane under the list has, so the tokens, cache and cost are not cut off."""
     r, ts = e["raw"], (e.get("ts") or "")[5:16]
     if e["type"] == "refusal":
         return (f"[$error]●[/] [$text-muted]{ts}[/] [$error b]REFU[/] "
                 f"{_esc(r.get('op_name') or '?')} {_esc(r.get('reason') or '?')} "
                 f"[$text-muted]from box {_esc(r.get('box_id') or '-')}[/]")
     meta = []
-    if r.get("op_id"):
+    if r.get("op_id") and not compact:
         meta.append(f"op {_esc(_short(r['op_id'], 16))}")
-    if r.get("project_slug"):
+    if r.get("project_slug") and not compact:
         meta.append(f"⌂ {_esc(r['project_slug'])}")
     if r.get("conversation_id") is not None:
         meta.append(f"#{r['conversation_id']}")
+    model = calls_model(r.get("model"))
     return (f"[$primary]●[/] [$text-muted]{ts}[/] [$primary b]CALL[/] "
-            f"{_esc(calls_model(r.get('model')))}"
+            f"{_esc(_short(model, 22) if compact else model)}"
             + (f" [$text-muted]{' '.join(meta)}[/]" if meta else "")
             + f" ↑{calls_tok(r.get('input_tokens'))} ↓{calls_tok(r.get('output_tokens'))} "
               f"[$text-muted]cache {calls_tok(r.get('cache_hit'))}[/] "
@@ -1954,6 +2031,7 @@ def build_tui(base: str, token: str, **kw):
     from textual.screen import ModalScreen, Screen
     from textual.theme import Theme
     from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
+    from textual.widgets._markdown import MarkdownFence
     from textual.widgets.option_list import Option
 
     # Boxes (docs/boxes-contract.md). Emphasis is a solid theme colour behind
@@ -2000,8 +2078,17 @@ def build_tui(base: str, token: str, **kw):
             self.add_class("failed")
             self.update(self._markup(self.text, why, "$error"))
 
+    class WrapFence(MarkdownFence):
+        """Textual's code fence scrolls sideways with its scrollbars hidden, so
+        the rest of a long line was out of reach (TUI-17): this one wraps."""
+
+        DEFAULT_CSS = """
+        WrapFence { overflow-x: hidden; }
+        WrapFence > #code-content { width: 1fr; }
+        """
+
     class Reply(Markdown):
-        pass
+        BLOCKS = {**Markdown.BLOCKS, "fence": WrapFence, "code_block": WrapFence}
 
     class Footer(Static):
         pass
@@ -2323,17 +2410,22 @@ def build_tui(base: str, token: str, **kw):
         list). With `custom`, enter on text that matches nothing returns the
         text itself. Rows are (value, label, meta); a None value is a heading.
         `actions` maps a key, live in list mode only, to (label, async
-        fn(value) -> new rows or None) — space toggling a model, say."""
+        fn(value) -> new rows or None) — space toggling a model, say. `hidden`
+        is a set of values that stay off the list until a filter is typed (a
+        line at the end says how many); `wide` lets the dialog use up to 90% of
+        the terminal for rows that carry a lot of meta."""
 
         BINDINGS = [Binding("escape", "cancel", show=False)]
 
         def __init__(self, title: str, rows: list[tuple[str, str, str]],
                      current: str | None = None, custom: bool = False,
-                     hint: str = "", actions: dict | None = None) -> None:
+                     hint: str = "", actions: dict | None = None,
+                     hidden=(), wide: bool = False) -> None:
             super().__init__()
             self.title_text, self.rows, self.current = title, rows, current
             self.custom, self.hint = custom, hint
             self.actions = actions or {}
+            self.hidden, self.wide = set(hidden), wide
             self.typing = False
 
         def compose(self) -> ComposeResult:
@@ -2348,9 +2440,25 @@ def build_tui(base: str, token: str, **kw):
 
         def on_mount(self) -> None:
             self.query_one("#filter", Input).display = False
+            if self.wide:
+                dlg = self.query_one("#dialog")
+                dlg.styles.width, dlg.styles.max_width = "90%", 110
             self.fill("")
             self.query_one("#choices", OptionList).focus()
             self._show_hint()
+
+        def on_resize(self, event) -> None:
+            self._fit()
+
+        def _fit(self) -> None:
+            """The list gives up rows so the hint under it stays on a short terminal:
+            the dialog is at most 80% of the screen, less its padding, title, the
+            filter box while typing and the hint's own lines."""
+            text = getattr(self, "hint_text", "")
+            inner = max(20, (self.app.size.width * 9 // 10 if self.wide else 72) - 4)
+            lines = sum(max(1, -(-len(ln) // inner)) for ln in (text.split("\n") or [""]))
+            room = self.app.size.height * 8 // 10 - 2 - 2 - (4 if self.typing else 0) - 1 - lines
+            self.query_one("#choices", OptionList).styles.max_height = max(3, min(20, room))
 
         def _show_hint(self) -> None:
             keys = ["↑↓ move", "enter pick"]
@@ -2359,7 +2467,9 @@ def build_tui(base: str, token: str, **kw):
                 keys += [f"{'␣' if k == 'space' else k} {label}"
                          for k, (label, _) in self.actions.items()]
             text = "  ".join(keys) + (f"\n{self.hint}" if self.hint else "")
+            self.hint_text = text
             self.query_one("#dialog-hint", Static).update(f"[$text-muted]{_esc(text)}[/]")
+            self._fit()
 
         def fill(self, q: str, keep: str | None = None) -> None:
             ol = self.query_one("#choices", OptionList)
@@ -2370,6 +2480,20 @@ def build_tui(base: str, token: str, **kw):
                           for i, (v, lb, m) in enumerate(rows) if v is not None]
                 rows = [r for sc, _, r in sorted((x for x in scored if x[0] > 0),
                                                  key=lambda x: (-x[0], x[1]))]
+            elif self.hidden:
+                shown, head, n = [], None, 0
+                for r in rows:
+                    if r[0] is None:
+                        head = r               # only kept with a row under it
+                    elif r[0] in self.hidden:
+                        n += 1
+                    else:
+                        if head is not None:
+                            shown.append(head)
+                            head = None
+                        shown.append(r)
+                rows = shown + ([(None, f"{n} more hidden (off or deprecated): type to find "
+                                        "them", "")] if n else [])
             hit = None
             for value, label, meta in rows:
                 if value is None:
@@ -2886,15 +3010,24 @@ def build_tui(base: str, token: str, **kw):
             self.dismiss(None)
 
     class Help(ModalScreen):
+        """Markdown text in a dialog, or (with `view`) a Rich renderable: /help
+        is a list built by help_view, `text` then only says what it holds."""
+
         BINDINGS = [Binding("escape,q,enter", "close", show=False)]
 
-        def __init__(self, text: str) -> None:
+        def __init__(self, text: str, view=None) -> None:
             super().__init__()
-            self.text = text
+            self.text, self.view = text, view
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="dialog", classes="wide"):
-                yield Markdown(self.text)
+                yield Static(self.view) if self.view is not None else Markdown(self.text)
+
+        def on_mount(self) -> None:
+            if self.view is not None:
+                # a list wants the width: the shared #dialog.wide rule is 90 cells
+                dlg = self.query_one("#dialog")
+                dlg.styles.width, dlg.styles.max_width = "90%", 110
 
         def action_close(self) -> None:
             self.dismiss(None)
@@ -3388,7 +3521,7 @@ def build_tui(base: str, token: str, **kw):
                        "looks like. The orchestrator splits it into tasks, sends an agent "
                        "to each and messages them as they work.\n\nEvery agent uses the "
                        "default model unless you name one for a task — \"use "
-                       "deepseek-pro for the migration\" pins that model to that task.")
+                       "deepseek-flash for the migration\" pins that model to that task.")
 
         def __init__(self, project: str) -> None:
             super().__init__()
@@ -3456,7 +3589,8 @@ def build_tui(base: str, token: str, **kw):
         AgentRow.child { color: $text; }
         AgentRow.-sel { background: $primary; color: auto 95%; text-style: bold;
                         border-left: thick $accent; }
-        AgentRow.current { background: $success 18%; color: $success; }
+        /* solid colours only: a blended tint rounds to grey in 256 colours */
+        AgentRow.current { background: $panel; color: $success; border-left: thick $success; }
         AgentRow.current.-sel { background: $success; color: auto 95%;
                                 border-left: thick $accent; }
         """
@@ -4619,9 +4753,11 @@ def build_tui(base: str, token: str, **kw):
                     "secrets": len(self.entries["secrets"]) if self.loaded["secrets"] else None}
 
         @staticmethod
-        def row_markup(e: dict, all_projects: bool = True) -> str:
+        def row_markup(e: dict, all_projects: bool = True, compact: bool = False) -> str:
             r, ts = e["raw"], (e.get("ts") or "")[5:16]
             t = e["type"]
+            if t == "call":
+                return calls_row(e, compact)
             if t == "rule":
                 return (f"[$accent b]RULE[/] [$text-muted]{ts}[/] "
                         f"[b]{_esc(str(r.get('tool')))}[/] {_esc(str(r.get('prefix')))} "
@@ -4662,7 +4798,7 @@ def build_tui(base: str, token: str, **kw):
                 meter = (f" [$text-muted]↑{_bytes(r.get('bytes_out'))} "
                          f"↓{_bytes(r.get('bytes_in'))}[/]")
                 return (f"[{col}]●[/] [$text-muted]{ts}[/] "
-                        f"[{col} b]{v.replace('auto_', 'a·')[:5].upper():<5}[/] "
+                        f"[{col} b]{verdict_label(v):<7}[/] "
                         f"{_esc(_short(what.strip(), 70))}{proj}{meter}")
             if t in _ROWS:
                 return _ROWS[t](e)
@@ -5068,6 +5204,15 @@ def build_tui(base: str, token: str, **kw):
                          "waiting[/] [$text-muted](distinct hosts; verdicts in Queue)[/]")
             return line
 
+        def on_resize(self, event) -> None:
+            """Calls rows have a compact form under 100 columns: draw them again
+            when a resize crosses that width."""
+            narrow = self.size.width < 100
+            if narrow != getattr(self, "_narrow", narrow) and self.tab == "calls" \
+                    and type(self) is SecurityScreen:
+                self.run_worker(self.rebuild(), group="rebuild", exclusive=True)
+            self._narrow = narrow
+
         async def rebuild(self) -> None:
             async with self._lock:
                 shown = [] if self.locked else self.shown()
@@ -5075,7 +5220,7 @@ def build_tui(base: str, token: str, **kw):
                 if self.sel[self.tab] not in keys:
                     self.sel[self.tab] = keys[0] if keys else None
                 allp = self.project is None
-                marks = [self.row_markup(e, allp) for e in shown]
+                marks = [self.row_markup(e, allp, self.size.width < 100) for e in shown]
                 sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys), tuple(marks))
                 if sig != self._sig:
                     self._sig = sig
@@ -6562,7 +6707,7 @@ def build_tui(base: str, token: str, **kw):
         #sb-notes { margin-top: 1; }
         Home { height: 1fr; align: center middle; }
         #logo { width: auto; }
-        #home-hints { width: auto; margin-top: 2; color: $text-muted; }
+        #home-hints { width: auto; margin-top: 1; color: $text-muted; }
         UserMsg { border-left: thick $primary; background: $surface; padding: 1 2; margin-top: 1; }
         Reply { margin: 1 0 0 0; padding: 0 1 0 2; background: transparent; }
         Footer { color: $text-muted; padding-left: 2; margin-top: 1; }
@@ -6674,6 +6819,7 @@ def build_tui(base: str, token: str, **kw):
             self.leader = False
             self._leader_timer = None
             self._status_tall = False        # the status row grown for the leader keys
+            self._status_text: dict[str, str] = {}   # what the status row shows now
             self.esc_armed = 0.0
             self.ctrl_c_at = 0.0
             self.sidebar_pref: bool | None = None     # None = follow the width
@@ -7193,12 +7339,19 @@ def build_tui(base: str, token: str, **kw):
                        f"{self._access_label()}[/]" if self.logged_in else
                        "[$warning]not logged in[/] [$text-muted]— /login[/]"
                        if self.logged_in is False else f"[$text-muted]{_esc(self.base)}[/]")
+                proj = self._project_label()
+                where = (f"\n[$text-muted]files and chats go to ⌂ {_esc(proj)}[/]"
+                         if proj and not self._here() else "")
                 home_hints.update(
-                    f"{who}\n\n"
+                    f"{who}{where}\n\n"
                     "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
-                    "[$text]ctrl+x l[/]    [$text-muted]sessions[/]\n"
-                    "[$text]ctrl+x m[/]    [$text-muted]models[/]\n"
-                    "[$text]ctrl+x u[/]    [$text-muted]permissions: make agents ask first[/]\n"
+                    "[$text]←[/]           [$text-muted]agents: what is running, on an empty "
+                    "prompt[/]\n"
+                    "[$text]ctrl+j[/]      [$text-muted]new line (enter sends)[/]\n"
+                    "[$text]shift+tab[/]   [$text-muted]permissions: yolo → auto → ask · "
+                    "ctrl+x u picks[/]\n"
+                    "[$text]ctrl+x l[/]    [$text-muted]sessions · [/][$text]ctrl+x m[/] "
+                    "[$text-muted]models[/]\n"
                     "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
             show = self.sidebar_shown()        # hidden unless the operator opened it
             self.query_one("#sidebar").display = show
@@ -7208,13 +7361,14 @@ def build_tui(base: str, token: str, **kw):
                           + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
                           + "  [$text-muted]ctrl+b notifications[/]")
 
-        def _running_status(self) -> str:
-            """The status row while a turn runs — one steady line, `working 2m
-            13s · 14 tools · 2 agents · $0.02`, that the ▣ footer repeats when
-            it ends — or, while tool rows are being picked, their keys."""
+        def _status_parts(self) -> list[tuple[str, str, int]]:
+            """The status row's left side as (plain, markup, rank) parts — while a
+            turn runs one steady line, `working 2m 13s · 14 tools · 2 agents · $0.02`,
+            that the ▣ footer repeats when it ends; while tool rows are being
+            picked, their keys; otherwise the prompt's keys. A narrow terminal drops
+            the higher ranks first, so the row never wraps or gets cut mid-word."""
             t = self.turn if self.busy else None
             spin = f"[$accent]{SPINNER[self.frame % len(SPINNER)]}[/] " if t else ""
-            width = self.query_one("#status-left", Static).size.width or 200
             if self.log_view.picking:
                 parts = [("↑↓ pick", "[$primary]↑↓[/] pick", 0),
                          ("enter open/close", "[$primary]enter[/] open/close", 1),
@@ -7222,13 +7376,20 @@ def build_tui(base: str, token: str, **kw):
                          ("esc back", "[$primary]esc[/] back", 1)]
                 if t:
                     parts.append((f"x {t.stats()[0]}", f"{spin}[$text-muted]{t.stats()[0]}[/]", 3))
-                return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
+                return parts
+            if not (self.busy and self.turn is not None):
+                if self.logged_in is False:
+                    return [("not logged in — /login · / commands",
+                             "[$warning]not logged in[/] [$text-muted]— /login · / commands[/]", 0)]
+                return [("enter send", "[$text-muted]enter send[/]", 0),
+                        ("ctrl+j newline", "[$text-muted]ctrl+j newline[/]", 1),
+                        ("/ commands", "[$text-muted]/ commands[/]", 2),
+                        ("@ file", "[$text-muted]@ file[/]", 3),
+                        ("! shell", "[$text-muted]! shell[/]", 4)]
             verb = "interrupting" if self.stop_requested else "working"
             stats = t.stats()
             armed = time.monotonic() - self.esc_armed < 2
             nq = len(self.queue) + len(self.pending)
-            # (plain, markup, rank): a narrow terminal drops the higher ranks
-            # first, so the line never wraps or gets cut mid-word
             parts = [(f"x {verb} {stats[0]}", f"{spin}{verb} [$text-muted]{stats[0]}[/]", 0)]
             for s in stats[1:]:
                 rank = 2 if s.startswith("$") else 1 if s.endswith(("tool", "tools")) else 3
@@ -7237,7 +7398,28 @@ def build_tui(base: str, token: str, **kw):
                 parts.append((f"{nq} queued", f"[$accent]{nq} queued[/]", 1))
             parts.append(("esc again to interrupt", "[$warning]esc again to interrupt[/]", 0)
                          if armed else ("esc interrupt", "[$text-muted]esc interrupt[/]", 4))
-            return fit_parts(parts, width - 1, markup_sep=" [$text-muted]·[/] ")
+            return parts
+
+        def _status_right(self) -> list[tuple[str, str, int]]:
+            """The right side: unread counts (critical security alerts not yet seen get
+            their own red one), then the leader and palette keys."""
+            parts = []
+            if self.crit_unread:
+                parts.append((f"✗ {self.crit_unread}", f"[$error b]✗ {self.crit_unread}[/]", 0))
+            if self.unread:
+                parts.append((f"● {self.unread} ctrl+b",
+                              f"[$warning b]● {self.unread}[/] [$text-muted]ctrl+b[/]", 0))
+            parts.append(("ctrl+x leader", "[$text-muted]ctrl+x leader[/]", 2))
+            parts.append(("ctrl+p commands", "[$text-muted]ctrl+p commands[/]", 3))
+            return parts
+
+        def _set_status(self, widget, text: str, **kw) -> None:
+            """Update a status Static only when its text changed: the row is rebuilt
+            ten times a second, and a repaint each time keeps an idle terminal busy
+            (TUI-20)."""
+            if self._status_text.get(widget.id) != text:
+                self._status_text[widget.id] = text
+                widget.update(text, **kw)
 
         def _refresh_status(self) -> None:
             left = self.query_one("#status-left", Static)
@@ -7250,22 +7432,17 @@ def build_tui(base: str, token: str, **kw):
             if self.leader:
                 keys = "  ".join(f"[$primary]{c.leader}[/] {name}"
                                  for name, c in self.unique_commands() if c.leader)
-                left.update(f"[$warning b]ctrl+x[/]  {keys}  [$primary]b[/] notifications")
-                right.update("")
+                self._set_status(left, f"[$warning b]ctrl+x[/]  {keys}  "
+                                       "[$primary]b[/] notifications")
+                self._set_status(right, "")
                 return
-            if self.log_view.picking or (self.busy and self.turn is not None):
-                left.update(self._running_status(), layout=False)
-            elif self.logged_in is False:
-                left.update("[$warning]not logged in[/] [$text-muted]— /login · "
-                            "/ commands[/]")
-            else:
-                left.update("[$text-muted]enter send · ctrl+j newline · / commands · "
-                            "@ file · ! shell[/]")
-            # critical security alerts not yet seen get their own red count
-            crit = f"[$error b]✗ {self.crit_unread}[/] " if self.crit_unread else ""
-            badge = (f"{crit}[$warning b]● {self.unread}[/] [$text-muted]ctrl+b[/]  "
-                     if self.unread else "")
-            right.update(f"{badge}[$text-muted]ctrl+x leader · ctrl+p commands[/]")
+            # both sides share one row: the width is the row's, not the left
+            # side's (which changes when the right one does)
+            total = self.query_one("#status").size.width or max(20, self.size.width - 6)
+            lm, rm = fit_row(self._status_parts(), self._status_right(), total,
+                             markup_sep=" [$text-muted]·[/] ")
+            self._set_status(left, lm, layout=False)
+            self._set_status(right, rm)
 
         def _refresh_sidebar(self) -> None:
             info = self.info or {}
@@ -7942,10 +8119,17 @@ def build_tui(base: str, token: str, **kw):
             self.last_reply = final or "".join(turn.printed)
             await self._turn_footer(turn)
 
+        def _watching(self, cid: int) -> bool:
+            """This chat is the one on screen and the terminal has the focus (a
+            reply that lands in front of you needs no toast and no unread count).
+            A terminal that reports no focus changes always has it."""
+            elsewhere = len(self.screen_stack) > 1 and not isinstance(self.screen, ModalScreen)
+            return cid == self.cid and self.app_focus and not elsewhere
+
         async def _end_turn(self) -> None:
             t = self.turn
             if t is not None and t.done and not t.interrupted and t.cid is not None \
-                    and not self.ephemeral and (t.cid != self.cid or not self.sidebar_shown()):
+                    and not self.ephemeral and not self._watching(t.cid):
                 name = (self.title_text if t.cid == self.cid and self.title_text
                         else f"#{t.cid}")
                 self.push_notice(f"reply ready in {_short(name, 60)} · "
@@ -8563,17 +8747,15 @@ def build_tui(base: str, token: str, **kw):
             return []
 
         async def pick(self, title: str, rows, current=None, custom=False, hint="",
-                       actions=None):
+                       actions=None, hidden=(), wide=False):
             return await self.push_screen_wait(Picker(title, rows, current, custom, hint,
-                                                      actions))
+                                                      actions, hidden, wide))
 
         async def c_help(self, arg: str) -> None:
-            lines = ["# Jav3", "", "## Commands", "", "| command | | leader |", "|---|---|---|"]
-            for name, cmd in self.unique_commands():
-                lead = f"ctrl+x {cmd.leader}" if cmd.leader else ""
-                usage = f"/{name} {cmd.usage}".rstrip().replace("|", "\\|")
-                lines.append(f"| {usage} | {cmd.help} | {lead} |")
-            lines += ["", "## Keys", "", "| key | |", "|---|---|"]
+            cmds = [(f"/{name} {cmd.usage}".rstrip(), cmd.help,
+                     f"ctrl+x {cmd.leader}" if cmd.leader else "")
+                    for name, cmd in self.unique_commands()]
+            keys = []
             for k, v in [("enter", "send (while a turn runs: the agent gets it at its "
                                    "next step)"),
                          ("shift+tab", "permissions: yolo (the default: agents run in the VM "
@@ -8620,8 +8802,9 @@ def build_tui(base: str, token: str, **kw):
                          ("@path", "attach a local file"),
                          ("//text", "send text that starts with a slash"),
                          ("ctrl+d", "quit on an empty prompt")]:
-                lines.append(f"| `{k}` | {v} |")
-            await self.push_screen_wait(Help("\n".join(lines)))
+                keys.append((k, v))
+            view, plain = help_view(keys, cmds)
+            await self.push_screen_wait(Help(plain, view))
 
         async def c_new(self, arg: str = "") -> None:
             self.cid, self.title_text, self.last_reply = None, None, ""
@@ -8634,21 +8817,26 @@ def build_tui(base: str, token: str, **kw):
             convs = await self.refresh_convs()
             if not arg:
                 rows = []
+                # the dialog is 90% of the terminal, 110 at most, less its padding (4),
+                # the list's (2 and a scrollbar's 1) and the mark (2); a row is the
+                # title, two spaces and the meta, and the title gives way so the
+                # meta stays on the same line
+                width = min(self.size.width * 9 // 10, 110) - 4 - 3 - 2
                 for cv in convs[:100]:
-                    meta = (cv.get("started_at") or "")[:16]
+                    meta = session_when(cv.get("started_at"))
                     if cv.get("project_slug"):
-                        meta += f"  ⌂ {cv['project_slug']}"
+                        meta += f"  ⌂ {_short(cv['project_slug'], 18)}"
                     if cv.get("running"):
                         meta += "  ● running"
                     if cv.get("starred"):
                         meta = "★ " + meta
                     # one row per chat: a summary that is still the first
                     # message can carry newlines
-                    rows.append((str(cv["id"]),
-                                 " ".join(str(cv.get("summary") or "").split()) or "(untitled)",
+                    title = " ".join(str(cv.get("summary") or "").split()) or "(untitled)"
+                    rows.append((str(cv["id"]), _short(title, max(16, width - len(meta) - 2)),
                                  meta))
                 arg = await self.pick("Sessions", rows, str(self.cid) if self.cid else None,
-                                      hint="type to filter · enter opens") or ""
+                                      wide=True) or ""
                 if not arg:
                     return
             if not arg.isdigit():
@@ -9228,10 +9416,16 @@ def build_tui(base: str, token: str, **kw):
                 return rows()
 
             cur = self.model or self.shown_model or (self.options or {}).get("default")
-            v = await self.pick("Models", rows(), cur,
+            first = rows()
+            # off providers and deprecated models stay off the list until a filter is
+            # typed: a switched-off provider used to add a heading and all its models
+            hidden = {v for v, (pv, m) in state.items()
+                      if not pv.get("enabled") or m.get("deprecated")
+                      or "deprecated" in f"{m.get('label')} {m['id']}".lower()} - {cur}
+            v = await self.pick("Models", first, cur,
                                 actions={"space": ("on/off", toggle),
                                          "d": ("make default", make_default)},
-                                hint="enter pins the model to this chat")
+                                hint="enter pins the model to this chat", hidden=hidden)
             if not v:
                 return
             if v == "default":
