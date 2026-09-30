@@ -37,3 +37,40 @@ def test_current_image_is_not_rebuilt(monkeypatch, capsys):
     assert docker_setup.ensure_image(docker_setup.Plan(False), rebuild=False)
     assert "is current" in capsys.readouterr().out
     assert not any(c[0] == "build" for c in calls)
+
+
+def _build_env(monkeypatch, buildx: bool):
+    """Run ensure_image against a fake docker; return the env `docker build` got."""
+    seen = {}
+
+    def fake_docker(*args, **kw):
+        if args[:2] == ("buildx", "version"):
+            return subprocess.CompletedProcess(args, 0 if buildx else 1, "", "")
+        if args[:2] == ("image", "inspect"):
+            return subprocess.CompletedProcess(args, 1, "", "no such image")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    def fake_run(argv, **kw):
+        seen["argv"], seen["env"] = argv, kw.get("env") or {}
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(docker_setup, "_docker", fake_docker)
+    monkeypatch.setattr(docker_setup.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_setup, "_image_sha", lambda ref: None if ref == docker_setup.settings.docker_image_turn
+                        else docker_setup.src_sha())
+    assert docker_setup.ensure_image(docker_setup.Plan(False), rebuild=False)
+    return seen["env"]
+
+
+def test_build_uses_buildkit_only_with_buildx(monkeypatch, capsys):
+    assert _build_env(monkeypatch, buildx=True)["DOCKER_BUILDKIT"] == "1"
+    assert "classic builder" not in capsys.readouterr().out
+    # Arch ships buildx as its own package: forcing BuildKit there aborted the build
+    assert _build_env(monkeypatch, buildx=False)["DOCKER_BUILDKIT"] == "0"
+    assert "classic builder" in capsys.readouterr().out
+
+
+def test_dockerfile_builds_under_the_classic_builder():
+    # the classic builder rejects `COPY --chmod` (BuildKit only)
+    lines = [ln for ln in (docker_setup.SRC / "Dockerfile").read_text().splitlines()
+             if ln.split("#")[0].strip().startswith("COPY")]
+    assert lines and not any("--chmod" in ln for ln in lines)
