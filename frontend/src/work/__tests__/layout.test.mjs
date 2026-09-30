@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   addCard, close, closeCard, classicBoard, fromSaved, geometry, leaves, makeLeaf,
   neighbor, patchCardState, reconcile, resize, split, switchCard, toSaved, treeFromLegacy,
-  MAX_PANELS, canAdd, cycleFocus, focusToward, minimizeCard, moveCard, restoreCard, visibleIds,
+  MAX_PANELS, canAdd, cycleFocus, fitDir, focusToward, minimizeCard, moveCard, restoreCard, visibleIds,
 } from '../layout.js'
 
 let n = 0
@@ -236,5 +236,19 @@ t('minimized round-trips through the saved file; close drops it', () => {
   assert.deepEqual(closeCard(board, 'p3').minimized, [])
 })
 
+t('fitDir: a new window goes below when the two halves would be under 320 px', () => {
+  const one = { ...classicBoard(), root: makeLeaf('chat', 'p1'),
+                panels: [{ id: 'p1', type: 'chat', state: {} }], focus: 'p1', minimized: [] }
+  assert.equal(fitDir(one, 'p1', 1200), 'row')        // 600 each
+  assert.equal(fitDir(one, 'p1', 450), 'col')         // 225 each: stack instead
+  assert.equal(fitDir(one, 'p1', 450, 'col'), 'col')  // below is never changed
+  assert.equal(fitDir(one, 'p1', 0), 'row')           // stage not measured yet
+  assert.equal(fitDir(null, 'p1', 450), 'row')
+  // the target's own width counts, not the stage's: p3 is a fraction of it
+  const b = classicBoard()
+  const w = geometry(b.root).leaves.p3.w
+  assert.equal(fitDir(b, 'p3', 640 / w), 'row')       // 320 each: fits
+  assert.equal(fitDir(b, 'p3', 630 / w), 'col')
+})
 console.log(`${n} passed`)
 

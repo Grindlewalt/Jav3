@@ -228,7 +228,10 @@ function ProviderRow({
   const on = enabledCount(p, models, catalogue)
   return (
     <li className={open ? 'prov-row open' : 'prov-row'}>
-      <div className="prov-head">
+      {/* the whole head opens the row, not just the name button (WEBA-25);
+          the switch, the docs link and the button itself keep their own clicks */}
+      <div className="prov-head"
+           onClick={(e) => { if (!e.target.closest('button, a, input, label, .toggle')) onOpen() }}>
         <button type="button" className="prov-toggle" aria-expanded={open}
                 aria-controls={`prov-${p.id}`} onClick={onOpen}>
           <span className={open ? 'chev open' : 'chev'} aria-hidden="true">›</span>

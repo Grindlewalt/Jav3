@@ -406,6 +406,20 @@ export function addCard(board, type, target = board.focus, dir = 'row', extra = 
   }
 }
 
+// The direction a new card really splits `target` in. Asked for 'row' (beside
+// it), it still goes below when the two halves would each be under `min` px on
+// a stage `stageW` px wide: the second and third window used to squeeze to
+// 90-190 px, a word per line with the header buttons clipped. Below is always
+// allowed; 'col' comes back unchanged.
+export const MIN_WIN_W = 320
+export function fitDir(board, target, stageW, dir = 'row', min = MIN_WIN_W) {
+  if (dir !== 'row' || !board?.root || !(stageW > 0)) return dir
+  const at = mins(board).includes(target) ? visibleIds(board).at(-1) : target
+  const id = findLeaf(board.root, at) ? at : leaves(board.root).at(-1)?.id
+  const mine = id && geometry(board.root, mins(board)).leaves[id]
+  return mine && (mine.w * stageW) / 2 < min ? 'col' : dir
+}
+
 // Turn the card `id` into a `type` card in the same place. It is a new card
 // (new id, empty state): the old card's state belonged to the old type.
 export function switchCard(board, id, type, extra = {}) {

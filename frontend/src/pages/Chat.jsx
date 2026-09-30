@@ -4,6 +4,7 @@ import {
 import { api, chatStream, tailStream } from '../api.js'
 import { NavSlotContext } from '../nav.jsx'
 import { useDismiss } from '../useDismiss.js'
+import { onProjectsChanged } from '../projectsChanged.js'
 import { isPhone, useIsPhone } from '../breakpoints.js'
 import { MessageBody } from '../ToolActivity.jsx'
 import { activityMark, makeTurnFolder, newTurn, seedParts } from '../turnEvents.js'
@@ -149,7 +150,8 @@ function ProjectPicker({ projects, mode, value, global: loaded, onPick }) {
           <button type="button" role="menuitemradio" aria-checked={mode === 'follow'}
                   onClick={() => pick('follow')}>
             <span className="m-name">Follow loaded project
-              <span className="m-sub">{loaded ? name(loaded) : 'nothing loaded'}</span></span>
+              <span className="m-sub">{loaded ? `${name(loaded)} · one setting for the whole server`
+                : 'nothing loaded'}</span></span>
             {mode === 'follow' && <span className="m-check" aria-hidden="true">●</span>}
           </button>
           <button type="button" role="menuitemradio" aria-checked={mode === 'none'}
@@ -209,7 +211,7 @@ export default function Chat({
   const [runsView, setRunsView] = useState(false)
   // bumped when something may have joined the approval queue (see below)
   const [needsPoke, setNeedsPoke] = useState(0)
-  const asks = useOperatorAsks(conversationId)   // ask_user / permission asks
+  const asks = useOperatorAsks(conversationId, busy)   // ask_user / permission asks
   const [permMode, setPermMode] = usePermissionMode(conversationId)
   // on a phone the list is an overlay, so it starts closed unless the operator
   // has explicitly opened it before; on desktop it stays open by default
@@ -269,7 +271,12 @@ export default function Chat({
       else localStorage.removeItem('jarvis.chat.last')
     }).catch(() => {})
     api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
-    return () => tailAbort.current?.abort()
+    // the Projects sheet made a change: the sidebar's Projects list is this copy
+    const offProjects = onProjectsChanged(() => {
+      api('/api/projects').then((r) => { setActive(r.active); setProjects(r.projects) })
+        .catch(() => {})
+    })
+    return () => { offProjects(); tailAbort.current?.abort() }
   }, [])
 
   // "Chat" in the nav is a destination, not a reset. It used to mount a blank
@@ -485,8 +492,10 @@ export default function Chat({
   }
 
   async function deleteConversation(id) {
-    if (!await ask.confirm(`Delete chat #${id}?`,
-                           { confirmLabel: 'Delete', danger: true })) return
+    // unlike projects, agents and schedules, a chat has no bin: it is gone
+    if (!await ask.confirm(`Permanently delete chat #${id}?`,
+                           { body: 'Its messages and tool history are removed. This cannot be undone.',
+                             confirmLabel: 'Delete forever', danger: true })) return
     await api(`/api/conversations/${id}`, { method: 'DELETE' })
     if (id === conversationId) newConversation()
     refreshConvos()
@@ -541,6 +550,7 @@ export default function Chat({
     const id = conversationId ?? liveId.current
     if (!id) return
     try { await api(`/api/chat/${id}/stop`, { method: 'POST' }) } catch { /* already done */ }
+    asks.settle()   // the turn's open question is void now; do not leave a dead card
   }
 
   async function send(resend = null) {

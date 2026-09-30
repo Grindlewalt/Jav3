@@ -49,6 +49,9 @@ export default function SkillsPanel() {
   async function create(e) {
     e.preventDefault()
     setError(null)
+    // said on the page: the browser's own "required" bubble does not show in
+    // every window, and Create then looked dead (WEBA-15)
+    if (!name.trim()) { setError('give the skill a name'); return }
     try {
       const r = await api('/api/skills', {
         method: 'POST',
@@ -78,8 +81,8 @@ export default function SkillsPanel() {
   return (
     <>
       <aside>
-        <form className="stack" onSubmit={create}>
-          <Input placeholder="new skill name" value={name} required
+        <form className="stack" onSubmit={create} noValidate>
+          <Input placeholder="new skill name" value={name}
                  aria-label="new skill name" onChange={(e) => setName(e.target.value)} />
           <Input placeholder="what does it do?" value={desc}
                  aria-label="what the skill does" onChange={(e) => setDesc(e.target.value)} />

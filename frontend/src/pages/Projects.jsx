@@ -10,6 +10,7 @@ import Tag from '../components/Tag.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import Menu, { MenuItem, MenuSep } from '../components/Menu.jsx'
 import { ts } from '../format.js'
+import { projectsChanged } from '../projectsChanged.js'
 
 // A project is a card: its name is the way in (the Workspace), the slug and
 // the remote say what it is, and everything rarer — rename, load/unload,
@@ -29,6 +30,7 @@ export default function Projects() {
   const [repoUrl, setRepoUrl] = useState('')
   const [creating, setCreating] = useState(false)
   const [menuFor, setMenuFor] = useState(null)   // slug whose ⋯ menu is open
+  const [binOpen, setBinOpen] = useState(false)    // Recently deleted, expanded
   const ask = useAsk()
 
   async function refresh() {
@@ -38,6 +40,9 @@ export default function Projects() {
     setActive(r.active)
   }
   useEffect(() => { refresh() }, [])
+  // every change also tells the sidebar and the chip menu (they keep their own
+  // copy of the list), which a plain refresh() here never reached
+  const changed = () => refresh().then(projectsChanged).catch(() => {})
 
   // One form, both paths: a GitHub URL turns the create into a clone-import,
   // and name/description ride along either way (the import derives a name
@@ -45,8 +50,9 @@ export default function Projects() {
   async function create(e) {
     e.preventDefault()
     setError(null)
-    setCreating(true)
     const url = repoUrl.trim()
+    if (!url && !name.trim()) { setError('give the project a name'); return }
+    setCreating(true)
     try {
       if (url) {
         await api('/api/projects/import', {
@@ -61,8 +67,17 @@ export default function Projects() {
         })
       }
       setName(''); setSummary(''); setRepoUrl('')
-      refresh()
-    } catch (err) { setError(err.detail) }
+      changed()
+    } catch (err) {
+      // the slug is taken by a project in the bin: say so and open the bin
+      const taken = /'([^']+)'/.exec(err.detail || '')?.[1]
+      if (taken && /already exists/.test(err.detail || '')
+          && deleted.some((d) => d.slug === taken)) {
+        setError(`"${taken}" is in Recently deleted. Restore it or delete it forever, `
+          + 'or pick another name.')
+        setBinOpen(true)
+      } else setError(err.detail || String(err))
+    }
     setCreating(false)
   }
 
@@ -72,39 +87,35 @@ export default function Projects() {
     try {
       await api(`/api/projects/${p.slug}/name`, {
         method: 'PUT', body: JSON.stringify({ name: next.trim() }) })
-      refresh()
+      changed()
     } catch (err) { setError(err.detail || String(err)) }
   }
-  async function load(slug) {
-    await api(`/api/projects/${slug}/load`, { method: 'POST' })
-    refresh()
+  // load / unload / delete / restore used to let a failed call surface as an
+  // unhandled rejection; the reason lands in the form's error line instead
+  async function act(fn) {
+    setError(null)
+    try { await fn(); changed() } catch (err) { setError(err.detail || String(err)) }
   }
-  async function unload() {
-    await api('/api/projects/unload', { method: 'POST' })
-    refresh()
-  }
+  const load = (slug) => act(() => api(`/api/projects/${slug}/load`, { method: 'POST' }))
+  const unload = () => act(() => api('/api/projects/unload', { method: 'POST' }))
   async function softDelete(slug) {
     if (!await ask.confirm(`Move "${slug}" to recently deleted?`,
                            { confirmLabel: 'Move to bin' })) return
-    await api(`/api/projects/${slug}`, { method: 'DELETE' })
-    refresh()
+    act(() => api(`/api/projects/${slug}`, { method: 'DELETE' }))
   }
-  async function restore(slug) {
-    await api(`/api/projects/${slug}/restore`, { method: 'POST' })
-    refresh()
-  }
+  const restore = (slug) =>
+    act(() => api(`/api/projects/${slug}/restore`, { method: 'POST' }))
   async function purge(slug) {
     if (!await ask.confirm(`Permanently delete "${slug}" and all its files?`,
                            { body: 'This cannot be undone.',
                              confirmLabel: 'Delete forever', danger: true })) return
-    await api(`/api/projects/${slug}/purge`, { method: 'DELETE' })
-    refresh()
+    act(() => api(`/api/projects/${slug}/purge`, { method: 'DELETE' }))
   }
 
   const cloning = !!repoUrl.trim()
   return (
     <Page title="Projects">
-      <Card as="form" className="create-project" onSubmit={create}>
+      <Card as="form" className="create-project" onSubmit={create} noValidate>
         <Input placeholder={cloning ? 'project name (optional)' : 'project name'}
                value={name} onChange={(e) => setName(e.target.value)}
                required={!cloning} />
@@ -134,7 +145,8 @@ export default function Projects() {
       </div>
 
       {deleted.length > 0 && (
-        <details className="deleted-fold">
+        <details className="deleted-fold" open={binOpen}
+                 onToggle={(e) => setBinOpen(e.currentTarget.open)}>
           <summary>
             Recently deleted ({deleted.length})
             <span className="chev" aria-hidden="true">›</span>
@@ -173,7 +185,11 @@ function ProjectCard({
         {/* the name is the way in — the Workspace is the project */}
         <Link to={`/projects/${p.slug}`} className="project-name"
               title={`open ${p.name}`}>{p.name}</Link>
-        {inContext && <Tag tone="running">in context</Tag>}
+        {/* one word for one thing: "loaded" (the chat chip and its menu say the same) */}
+        {inContext && (
+          <Tag tone="running"
+               title="New chats follow this project. It is one setting for the whole server.">
+            loaded</Tag>)}
         <Menu floating open={menuOpen} onClose={close} label={`${p.name} actions`} width={210}
               trigger={(
                 <Button variant="icon" aria-haspopup="menu" aria-expanded={menuOpen}
@@ -182,7 +198,7 @@ function ProjectCard({
               )}>
           <MenuItem onClick={pick(onRename)}>Rename</MenuItem>
           <MenuItem onClick={pick(onToggleContext)}>
-            {inContext ? 'Unload from context' : 'Load into context'}</MenuItem>
+            {inContext ? 'Unload project' : 'Load project'}</MenuItem>
           <MenuSep />
           <MenuItem danger onClick={pick(onDelete)}>Delete</MenuItem>
         </Menu>
