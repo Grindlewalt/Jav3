@@ -1949,6 +1949,21 @@ def local_ts(v, full: bool = False) -> str:
         return ""
 
 
+def collapse_errors(errs: list[str]) -> list[str]:
+    """Per-endpoint load errors ('projects: could not reach ...', 'egress: could not
+    reach ...') as one line per distinct cause, naming the endpoints that shared it."""
+    causes: dict[str, list[str]] = {}
+    for e in errs:
+        what, sep, why = e.partition(": ")
+        causes.setdefault(why if sep else e, []).append(what if sep else "")
+    out = []
+    for why, whats in causes.items():
+        whats = [w for w in whats if w]
+        out.append(why + (f" ({', '.join(whats)})" if len(whats) > 1 else "")
+                   if len(whats) != 1 else f"{whats[0]}: {why}")
+    return out
+
+
 def row_ts(v) -> str:
     """A row's short local time; a text that is not a time is cut the old way."""
     return local_ts(v) or str(v or "")[5:16]
@@ -4436,8 +4451,6 @@ def build_tui(base: str, token: str, **kw):
         POLL_SECONDS = 4.0
         LIMIT = 200
         GENERAL = "__general__"          # egress.py's shared baseline policy row
-        LOCKED = ("needs full access — /login with your password "
-                  "(a device token is chat only)")
         DEFAULT_CSS = """
         SecurityScreen { background: $background; }
         #sec-tabs { height: 1; padding: 0 2; margin: 1 0 0 0; }
@@ -4521,6 +4534,18 @@ def build_tui(base: str, token: str, **kw):
         @property
         def locked(self) -> bool:
             return not self.app.full_access
+
+        def locked_text(self) -> str:
+            """Said once, in the head: who is asking, and the one key that fixes it."""
+            if not self.app.token or self.app.logged_in is False:
+                return "not logged in — press enter to log in"
+            return ("this login is chat only — press enter to log in with your password "
+                    "for full access")
+
+        async def _login_from_here(self) -> None:
+            await self.app.run_command("/login password")
+            if not self.locked:                  # the poll would notice in a few seconds
+                await self._first_load()
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="sec-tabs"):
@@ -4877,10 +4902,16 @@ def build_tui(base: str, token: str, **kw):
             return ["all"] + sorted({str(e["raw"].get("kind")) for e in self.entries["logs"]
                                      if e["raw"].get("kind")})
 
+        def _count(self, tab: str, n: int | None = None):
+            """A tab's count for the tab bar: None before it loads, and a '?' when a
+            load failed, so an unreachable server never reads as 'nothing waits'."""
+            if not self.loaded[tab]:
+                return None
+            n = len(self.entries[tab]) if n is None else n
+            return (f"{n}?" if n else "?") if self.errors[tab] else n
+
         def counts(self) -> dict:
-            q = self.entries["queue"]
-            return {"queue": len(q) if self.loaded["queue"] else None,
-                    "secrets": len(self.entries["secrets"]) if self.loaded["secrets"] else None}
+            return {"queue": self._count("queue"), "secrets": self._count("secrets")}
 
         @staticmethod
         def row_markup(e: dict, all_projects: bool = True, compact: bool = False) -> str:
@@ -5249,7 +5280,14 @@ def build_tui(base: str, token: str, **kw):
 
         def sub_markup(self) -> str:
             if self.locked:
-                return f"[$warning b]{_esc(self.LOCKED)}[/]"
+                return f"[$warning b]{_esc(self.locked_text())}[/]"
+            if self.errors[self.tab] and not self.entries[self.tab]:
+                # nothing came back: no '0 hosts waiting' over a queue that never loaded
+                return "\n".join(
+                    [f"[$error b]could not load the {self.LABELS[self.tab].lower()} tab — "
+                     "r retries[/]"]
+                    + [f"[$error]{_esc(x)}[/]" for x in collapse_errors(self.errors[self.tab])]
+                    + ([self.status] if self.status else []))
             bits = []
             if self.tab == "queue":
                 es = self.entries["queue"]
@@ -5303,7 +5341,7 @@ def build_tui(base: str, token: str, **kw):
                             "never read back[/]")
             if self.status:
                 bits.append(self.status)
-            bits += [f"[$error]{_esc(x)}[/]" for x in self.errors[self.tab]]
+            bits += [f"[$error]{_esc(x)}[/]" for x in collapse_errors(self.errors[self.tab])]
             return "\n".join(bits)
 
         def net_markup(self) -> str:
@@ -5381,11 +5419,15 @@ def build_tui(base: str, token: str, **kw):
                     self.sel[self.tab] = keys[0] if keys else None
                 allp = self.project is None
                 marks = [self.row_markup(e, allp, self.size.width < 100) for e in shown]
-                sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys), tuple(marks))
+                sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys), tuple(marks),
+                       bool(self.errors[self.tab]))
                 if sig != self._sig:
                     self._sig = sig
                     if self.locked:
-                        rows = [SecRow(f"[$warning]{_esc(self.LOCKED)}[/]", None)]
+                        rows = [SecRow("[$text-muted]nothing to show until you are logged in "
+                                       "with a password[/]", None)]
+                    elif not shown and self.loaded[self.tab] and self.errors[self.tab]:
+                        rows = [SecRow("[$error]could not load — r retries[/]", None)]
                     elif not shown:
                         msg = self.empty_text() if self.loaded[self.tab] else "loading…"
                         rows = [SecRow(f"[$text-muted]{msg}[/]", None)]
@@ -5538,8 +5580,11 @@ def build_tui(base: str, token: str, **kw):
             pass
 
         async def action_enter(self) -> None:
+            if self.locked:
+                self.run_worker(self._login_from_here(), group="sec-act", exclusive=True)
+                return
             e = self.selected()
-            if self.locked or e is None:
+            if e is None:
                 return
             if e["type"] == "proc" and e["raw"].get("children"):
                 self.open_nodes ^= {e["key"]}
@@ -6329,7 +6374,7 @@ def build_tui(base: str, token: str, **kw):
         def counts(self) -> dict:
             pend = sum((e["raw"].get("status") or "pending") == "pending"
                        for e in self.entries["catalogue"])
-            return {"catalogue": pend if self.loaded["catalogue"] else None}
+            return {"catalogue": self._count("catalogue", pend)}
 
         async def _load_boxes(self):
             hist = self.hist_box
@@ -6410,7 +6455,7 @@ def build_tui(base: str, token: str, **kw):
                     if i >= len(prev) or prev[i] != m:
                         w.show(m)
                 self._sig = (self.tab, self.locked, self.loaded[self.tab], tuple(keys),
-                             tuple(marks))
+                             tuple(marks), bool(self.errors[self.tab]))
                 self.refresh_sel()
                 self.render_chrome()
 
@@ -6683,7 +6728,10 @@ def build_tui(base: str, token: str, **kw):
                 self._act(self._image_log())
 
         async def action_enter(self) -> None:
-            if self.tab != "boxes" or self.locked:
+            if self.locked:
+                self.run_worker(self._login_from_here(), group="sec-act", exclusive=True)
+                return
+            if self.tab != "boxes":
                 return
             b = self._box()
             if b is None:

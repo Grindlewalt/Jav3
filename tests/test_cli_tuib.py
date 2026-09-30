@@ -41,7 +41,8 @@ def _srv(routes=None, seen=None):
         if seen is not None:
             seen.append((method, path, dict(request.url.params),
                          request.content.decode() if request.content else ""))
-        if "jarvis_token=sess" not in request.headers.get("cookie", ""):
+        if ("jarvis_token=sess" not in request.headers.get("cookie", "")
+                and request.headers.get("authorization") != "Bearer jvd_x"):
             return httpx.Response(401, json={"detail": "not authenticated"})
         hit = routes.get((method, path)) or routes.get(path)
         if hit is not None:
@@ -465,6 +466,84 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
         text = _plain(scr.sub_markup())
         assert "last 24h" in text, text
         assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
+
+
+# --- TUIB-09: logged out and chat-only read differently, once ----------------------------------------
+
+async def test_logged_out_says_not_logged_in_once_and_enter_offers_the_login():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", None, transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/security")
+        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+        scr = app.screen
+        await pilot.pause(0.2)
+        sub = str(scr.query_one("#sec-sub").render())
+        assert "not logged in" in sub and "device token" not in sub
+        assert sub.count("logged in") == 1
+        assert not any("logged in" in r and "not logged in" in r for r in _rows(scr))
+        assert "device token" not in " ".join(_rows(scr))
+        await pilot.press("enter")                    # offers the password login
+        assert await _until(pilot, lambda: _top(app) == "Ask")
+        assert "Server address" in str(app.screen.query_one("Static").render())
+        await pilot.press("escape")
+        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+
+
+async def test_a_chat_only_token_is_told_so():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=_srv())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/vms")
+        assert await _until(pilot, lambda: _top(app) == "VmsScreen")
+        await pilot.pause(0.2)
+        sub = str(app.screen.query_one("#sec-sub").render())
+        assert "chat only" in sub and "full access" in sub and "not logged in" not in sub
+
+
+# --- TUIB-12: a server that cannot be reached never reads as an all-clear -----------------------
+
+def _down_transport():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ("/api/devices/whoami", "/api/chat/options", "/api/conversations"):
+            return httpx.Response(200, json={"username": "op", "default": "x", "models": [],
+                                             "projects": [], "agents": [], "conversations": []})
+        raise httpx.ConnectError("All connection attempts failed")
+    return httpx.MockTransport(handler)
+
+
+async def test_an_unreachable_server_is_not_an_all_clear():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_down_transport())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/security")
+        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+        scr = app.screen
+        assert await _until(pilot, lambda: scr.loaded["queue"] and scr.loaded["secrets"])
+        await pilot.pause(0.2)
+        sub = _plain(scr.sub_markup())
+        assert "could not load" in sub and "r retries" in sub
+        assert "0 hosts waiting" not in sub
+        assert sub.count("could not reach") == 1, sub          # one line for the shared cause
+        assert "projects" in sub and "egress" in sub           # naming the calls that failed
+        assert "nothing waits on you" not in " ".join(_rows(scr))
+        assert any("could not load" in r for r in _rows(scr))
+        tabs = str(scr.query_one("#sec-tab-queue").render())
+        assert "?" in tabs and "Queue 0" not in tabs
+        assert "?" in str(scr.query_one("#sec-tab-secrets").render())
+        assert _wrapped(sub, 76) <= scr.query_one("#sec-sub").size.height
+
+
+def test_collapse_errors_names_the_calls_that_share_a_cause():
+    out = jav3.collapse_errors(["projects: could not reach http://h:1: nothing answers there",
+                                "egress: could not reach http://h:1: nothing answers there",
+                                "alerts: the server said 500"])
+    assert out == ["could not reach http://h:1: nothing answers there (projects, egress)",
+                   "alerts: the server said 500"]
+    assert jav3.collapse_errors([]) == []
 
 
 # --- TUIB-06: a name typed into a picker keeps its first letter, t included ------------------------

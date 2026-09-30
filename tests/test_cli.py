@@ -1480,8 +1480,8 @@ async def test_tui_security_locked_for_a_chat_only_login(cfg):
         assert not app.full_access
         scr = await _open_security(pilot, app)
         await pilot.pause(0.2)
-        assert "needs full access" in _text(scr.query_one("#sec-sub"))
-        assert "needs full access" in " ".join(_rows(scr))
+        assert "chat only" in _text(scr.query_one("#sec-sub"))
+        assert "logged in" in " ".join(_rows(scr))
         for key in ("2", "3", "4", "y", "a", "p", "r"):
             await pilot.press(key)
         await pilot.pause(0.3)
@@ -2510,18 +2510,18 @@ async def test_tui_boxes_surfaces_locked_for_a_chat_only_login(cfg):
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
         scr = await _screen(pilot, app, "/security", "SecurityScreen")
-        for key in ("5", "enter", "s", "d", "6", "a", "e", "p", "y"):
+        for key in ("5", "s", "d", "6", "a", "e", "p", "y"):
             await pilot.press(key)
         await pilot.pause(0.3)
         assert type(app.screen).__name__ == "SecurityScreen"
-        assert "needs full access" in _text(scr.query_one("#sec-sub"))
+        assert "chat only" in _text(scr.query_one("#sec-sub"))
         await pilot.press("escape")
         scr = await _screen(pilot, app, "/vms", "VmsScreen")
         for key in ("s", "d", "2", "b", "3", "y", "n"):
             await pilot.press(key)
         await pilot.pause(0.3)
         assert type(app.screen).__name__ == "VmsScreen"
-        assert "needs full access" in " ".join(_rows(scr))
+        assert "logged in" in " ".join(_rows(scr))
         guarded = ("/api/services", "/api/packages", "/api/vm", "/api/profiles",
                    "/api/egress", "/api/projects", "/api/security", "/api/secrets")
         assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
