@@ -373,6 +373,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         cap = agent.get("max_iterations") or settings.subagent_max_iterations
         history = [{"role": "user", "content": task}]
         final_content = ""
+        stop = None      # why the loop ended other than an answer (loop.py "stop")
         try:
             async for event in run_agent_turn(conversation_id, system_prompt, history,
                                               tools=tools, model_name=mdl,
@@ -384,6 +385,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
                     on_event(event)
                 if event["type"] == "final":
                     final_content = event["content"]
+                    stop = event.get("stop")
         finally:
             runtime.conversation_id.reset(cidtoken)
             runtime.active_project.reset(ptoken)
@@ -393,7 +395,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
             "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
         await db.commit()
         return {"conversation_id": conversation_id, "agent": agent["name"],
-                "final": final_content}
+                "final": final_content, "stop": stop}
     finally:
         await db.close()
 

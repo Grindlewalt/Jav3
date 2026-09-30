@@ -19,6 +19,7 @@ import socket  # noqa: F401 -- tests patch gt.socket.socket
 from ..agent import budget as budget_mod
 from ..agent.budget import Budget
 from .. import taintpaths
+from .. import turnstats
 from ..config import settings
 from . import boxes, broker, workspace_xfer
 from . import persist as persist_mod
@@ -53,7 +54,7 @@ _CONFIG_KNOBS = (
     "max_react_iterations", "subagent_max_iterations", "dead_end_force_answer",
     "dead_end_error_streak", "delegate_nudge_round", "tool_result_max_chars",
     "read_file_max_chars",
-    "tool_result_keep_recent", "tool_result_evict_chars",
+    "tool_result_keep_recent", "tool_result_evict_chars", "tool_result_pressure_chars",
     "plan_recheck_every", "web_handroll_nudge",
 )
 
@@ -204,6 +205,13 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                 if owns_ws:
                     await workspace_xfer.apply_guest_writes(
                         active_slug, base64.b64decode(ev.get("tar_b64") or ""))
+                continue
+            if ev.get("type") == "turn_stats":
+                # the loop's per-turn counters (RUNS-08): recorded here, never
+                # surfaced. An incognito turn leaves no row.
+                if not (envelope is not None and envelope.ephemeral):
+                    await turnstats.record(conversation_id, op_id, ev,
+                                           box_id=getattr(box, "id", None))
                 continue
             yield ev
     finally:

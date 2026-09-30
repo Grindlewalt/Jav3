@@ -345,6 +345,7 @@ async def test_write_results_pinned_from_eviction(tmp_env, monkeypatch):
     await init_db()
     monkeypatch.setattr(settings, "tool_result_keep_recent", 1)
     monkeypatch.setattr(settings, "tool_result_evict_chars", 100)
+    monkeypatch.setattr(settings, "tool_result_pressure_chars", 0)   # age-only rule
     from backend.agent import loop as loop_mod
 
     async def dispatch(name, args):

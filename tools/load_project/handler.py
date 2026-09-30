@@ -32,18 +32,30 @@ async def run(slug: str) -> str:
     # the rest of THIS turn resolves the new project too (host loop path — the
     # contextvar set sticks for the remainder of the turn task)
     runtime.active_project.set(slug)
-    in_guest_turn = False
+    in_guest_turn, previous = False, None
     try:
         from backend.agent import budget as budget_mod
         from backend.vm import broker
         env = broker.get_turn(budget_mod.active_op_id.get() or "")
         if env is not None:
-            env.active_project = slug   # brokered children resolve the new pin
+            previous = env.active_project   # what the guest was given at turn start
+            env.active_project = slug       # brokered children resolve the new pin
             in_guest_turn = True
     except Exception:  # noqa: BLE001 — envelope update is best-effort
         pass
     md = read_project_md(slug)
-    note = ("\n(note: file tools finish this turn on the previous project's "
-            "sandbox workspace; the switch is fully live next turn)"
-            if in_guest_turn else "")
+    note = ""
+    if in_guest_turn and previous != slug:
+        # the guest unpacked (at most) the turn's first project, and the host
+        # cannot reach into a running guest: say which case this is, or the
+        # model trusts a workspace that is not there (conv 574: 'previous
+        # project' with none, then list_files failed)
+        note = ("\n(note: file tools finish this turn on the previous project's "
+                "sandbox workspace; the switch is fully live next turn)"
+                if previous else
+                "\n(note: this turn started with no project, so the file tools "
+                "(read_file, write_file, edit_file, list_files, search_codebase) "
+                "have no workspace until the next turn. Use run_code for scratch "
+                "work, or tell the operator to send another message to continue "
+                "in this project)")
     return f"loaded project '{slug}'.{note} Its project.md:\n\n{md[:4000]}"

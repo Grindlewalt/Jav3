@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_user
-from . import ctxstore, providers, storage_watch
+from . import ctxstore, providers, storage_watch, turnstats
 from .config import settings
 from .ctxstore import CAPTURE_STATE_KEY
 from .db import get_db, set_state
@@ -383,6 +383,7 @@ async def calls_log(hours: int = 24, conversation_id: int | None = None,
                 "ORDER BY id DESC LIMIT ?", (since, limit))
             refusals = [dict(r) for r in await cur.fetchall()]
         capture = await ctxstore.capture_enabled(db)
+        turns = await turnstats.summary(db, since, conversation_id)
     finally:
         await db.close()
     for r in calls:
@@ -401,4 +402,8 @@ async def calls_log(hours: int = 24, conversation_id: int | None = None,
             "totals": {"calls": n_calls, "cost_usd": round(cost, 4),
                        "refused": n_refused},
             "rows": rows, "truncated": n_calls + n_refused > len(rows),
-            "capture_context": capture}
+            "capture_context": capture,
+            # the loop's own counters over the window (backend/turnstats.py):
+            # turns, rounds, DSML recoveries, markup retries, forced
+            # conclusions, round-cap hits, evictions, re-reads, turns by stop
+            "turns": turns}

@@ -925,7 +925,12 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                 for iid, t in list(tasks.items()):
                     if t.done():
                         tasks.pop(iid)
-                        await _settle(plan, idx[iid], t, meta.pop(iid), job_id)
+                        if await _settle(plan, idx[iid], t, meta.pop(iid), job_id) and not pausing:
+                            pausing = True
+                            plan["paused_reason"] = ("the token budget ran out mid-item "
+                                                     f"({iid} is back to todo, no attempt spent)")
+                            bus.publish(job_id, {"type": "node_status", "node_id": root_id,
+                                                 "status": "pausing"})
                 # after settling, so a dependency that just failed for the last
                 # time blocks its dependants in the same tick the run may end on
                 for it in propagate_blocked(plan):
@@ -1020,7 +1025,8 @@ async def _notify_paused(slug: str, plan: dict) -> None:
             await security.raise_event(
                 db, kind="plan_paused", severity="warn", project=slug,
                 summary=(f"Plan '{plan['title'][:60]}' paused at "
-                         f"{plan['tokens_used']:,} tokens for your review"),
+                         f"{plan['tokens_used']:,} tokens for your review "
+                         f"({plan.get('paused_reason') or 'token checkpoint'})"),
                 detail={"tokens_used": plan["tokens_used"], "pause_at": plan["pause_at"],
                         "root_id": plan.get("root_id")})
         finally:
@@ -1063,18 +1069,39 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
         _live_items.pop(m.get("cid"), None)
 
 
-async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -> None:
-    """Check a finished attempt off — or schedule its retry."""
+def _budget_stop(it: dict, plan: dict, final: str, cid, job_id: str) -> None:
+    """An attempt the token budget stopped is neither a failure nor a spent
+    attempt: nothing was wrong with the item, the run ran out of room. The
+    item goes back to todo with the attempt handed back, and _drive pauses the
+    run for the operator (the same wait as the token checkpoint) instead of
+    re-spawning it into the same spent budget: five items burned nine attempts
+    in eight seconds that way (2026-09-27)."""
+    it["attempts"] = max(0, it.get("attempts", 1) - 1)
+    it["status"], it["report"] = "todo", None
+    it["last_error"] = "token budget spent before the item could finish"
+    it.setdefault("history", []).append(
+        {"attempt": it["attempts"] + 1, "outcome": "budget", "error": it["last_error"],
+         "progress": " ".join(final.split())[-SUMMARY_CHARS // 2:],
+         "conversation_id": cid, "at": _now()})
+    it["history"] = it["history"][-HISTORY_KEEP:]
+    _emit_item(job_id, it)
+
+
+async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -> bool:
+    """Check a finished attempt off — or schedule its retry. Returns True when
+    the attempt was stopped by the token budget: the caller pauses the run."""
     cid = m.get("cid")
     if t.cancelled():
-        return                              # whoever cancelled it already set the status
+        return False                        # whoever cancelled it already set the status
     exc = t.exception()
-    if isinstance(exc, BudgetExceeded):
-        raise exc                           # the run is over, not just this item
+    result = (t.result() or {}) if exc is None else {}
+    if isinstance(exc, BudgetExceeded) or result.get("stop") == "budget":
+        _budget_stop(it, plan, result.get("final") or "", cid, job_id)
+        return True
     rep = it.get("report") or {}
     final = ""
     if exc is None:
-        final = (t.result() or {}).get("final") or ""
+        final = result.get("final") or ""
     if exc is not None:
         status, err, summary = "failed", f"{type(exc).__name__}: {exc}", None
     elif rep.get("status"):
@@ -1108,6 +1135,7 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
                                  "rollup": it["result_summary"] or ""})
         else:
             bus.publish(job_id, {"type": "error", "node_id": cid, "message": err or status})
+    return False
 
 
 async def _nudge(root_id: int, it: dict, m: dict) -> None:
@@ -1184,7 +1212,9 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
 2. Monitor: call plan_status with wait_seconds (e.g. 300). It returns when an
    item changes state, a message arrives for you, or the wait runs out, and
    shows every item's status, its agent's conversation id, and its result or
-   error. Keep calling it until the run is finished.
+   error. Keep calling it until the run is finished. This is the only way to
+   wait: run_code with a sleep is refused (it blocks, dies at 300 s and cannot
+   see the plan).
 3. Steer running items: send_message to item:<id> (or its conversation id) to
    correct, unblock or inform it the moment you see it drift.
 4. Fix every failed or blocked item, right away, with plan_fix:
@@ -1193,6 +1223,10 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
    - retry with guidance that removes that cause: the concrete fix, the file
      to create, the assumption to make, the approach to switch to. A bare
      retry with no new information fails the same way.
+   - accept when the work is already in place and only the report is missing
+     (or the agent reported failed but you checked and it holds): run the
+     proof yourself, then plan_fix accept with a summary of what you
+     verified. Never re-dispatch an agent just to have it file a report.
    - edit the brief when the brief was wrong, add an item for missing
      groundwork, split an item that was too big, or skip one that is moot.
    - Items blocked only because a dependency failed restart by themselves
@@ -1224,19 +1258,22 @@ def orchestrator_prompt(project: str | None) -> str:
 
 
 
-FIX_ACTIONS = ("retry", "edit", "add", "skip")
+FIX_ACTIONS = ("retry", "edit", "add", "skip", "accept")
 FIX_TEARDOWN_WAIT = 300.0     # seconds a plan_fix waits for a closing run to end
 
 
 async def fix(slug: str, *, action: str, item: str | None = None,
               guidance: str = "", title: str = "", brief: str = "",
-              depends_on=None, run: bool = True) -> str:
+              depends_on=None, run: bool = True, summary: str = "") -> str:
     """The plan_fix tool: an orchestrator repairs its own plan instead of
     handing failures to the operator. retry = back to todo with guidance the
     next attempt reads (and its earlier attempts' history); edit = new
-    title/brief/dependencies; add = a new item; skip = settle a moot item.
-    Items the runner blocked behind a fixed dependency are released, and a
-    stopped run is relaunched when there is work to do."""
+    title/brief/dependencies; add = a new item; skip = settle a moot item;
+    accept = mark an item done on the orchestrator's own verification, with
+    no agent run (RUNS-07: two 'your work is done, just report it' retries
+    cost 130-240k input tokens each). Items the runner blocked behind a fixed
+    dependency are released, and a stopped run is relaunched when there is
+    work to do."""
     if action not in FIX_ACTIONS:
         return f"error: action must be one of {', '.join(FIX_ACTIONS)}"
     guidance = " ".join((guidance or "").split())[:SUMMARY_CHARS]
@@ -1292,6 +1329,26 @@ async def fix(slug: str, *, action: str, item: str | None = None,
                     if guidance:
                         it["guidance"] = (it.get("guidance", []) + [guidance])[-GUIDANCE_KEEP:]
                     what = f"{it['id']} edited"
+                elif action == "accept":
+                    if it["status"] == "done":
+                        return f"error: {it['id']} is already done"
+                    proof = " ".join((summary or guidance or "").split())[:SUMMARY_CHARS]
+                    if not proof:
+                        return ("error: accept needs a summary — what you verified "
+                                "(the command that passed, the files that exist). "
+                                "It becomes the item's result")
+                    now = _now()
+                    it["status"], it["last_error"] = "done", None
+                    it["report"] = {"status": "done", "summary": proof, "at": now,
+                                    "by": "orchestrator"}
+                    it["result_summary"] = proof
+                    it.setdefault("history", []).append(
+                        {"attempt": it.get("attempts", 0), "outcome": "accepted",
+                         "error": "accepted by the orchestrator without a re-run",
+                         "progress": proof[:SUMMARY_CHARS // 2],
+                         "conversation_id": it.get("conversation_id"), "at": now})
+                    it["history"] = it["history"][-HISTORY_KEEP:]
+                    what = f"{it['id']} accepted as done"
                 else:                                   # skip
                     it["status"], it["last_error"] = "skipped", guidance or "skipped by the orchestrator"
                     what = f"{it['id']} skipped"
@@ -1300,6 +1357,10 @@ async def fix(slug: str, *, action: str, item: str | None = None,
             live = slug in _driving                     # its next tick reads this edit
             job_id = plan.get("job_id") if live else None
             has_work = any(i["status"] == "todo" for i in plan["items"])
+            if (action == "accept" and not live and not has_work
+                    and plan.get("status") == "failed"
+                    and all(i["status"] in SETTLED for i in plan["items"])):
+                plan["status"] = "done"     # the last failure was accepted: nothing to run
     except LookupError:
         return "error: this project has no plan — call orchestrate first"
     if job_id:
@@ -1413,6 +1474,9 @@ def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str
             lines.append(f"    result: {_clip(it['result_summary'])}")
         if it.get("last_error") and it["status"] != "done":
             lines.append(f"    error: {_clip(it['last_error'])}")
+    if any(it["status"] == "failed" for it in plan["items"]):
+        lines.append("\nA failed item whose work is in place and checked by you only needs "
+                     "plan_fix accept (with a summary); retry re-runs a whole agent.")
     if not running and rollup:
         lines.append(f"\n# Closing rollup\n{_clip(rollup, 3000)}")
     elif running:
