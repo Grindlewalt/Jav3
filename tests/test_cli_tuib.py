@@ -470,6 +470,28 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
 
 # --- the small ones -----------------------------------------------------------------------------------
 
+async def test_one_shift_tab_too_many_does_not_land_on_yolo_TUIB14():
+    pytest.importorskip("textual")
+    from cli_fake import FakeServer
+    srv = FakeServer()
+    app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        told: list = []
+        app.notify = lambda msg, **kw: told.append(msg)
+        await pilot.press("shift+tab", "shift+tab")
+        assert app.perm_mode == "ask"
+        await pilot.press("shift+tab")                   # one too many: it asks first
+        assert app.perm_mode == "ask" and any("again for yolo" in t for t in told)
+        await pilot.press("shift+tab")                   # meant it
+        assert app.perm_mode == "yolo"
+        await pilot.press("shift+tab", "shift+tab")      # ask again; the arming timed out
+        app._yolo_armed = -100.0
+        await pilot.press("shift+tab")
+        assert app.perm_mode == "ask"
+
+
+
 async def test_a_box_that_has_not_reported_is_not_stale_TUIB17():
     pytest.importorskip("textual")
     fresh = {"box_id": "shared", "kind": "shared", "reported_at": None, "stale": True,

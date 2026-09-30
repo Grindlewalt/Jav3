@@ -7135,6 +7135,7 @@ def build_tui(base: str, token: str, **kw):
             self.esc_armed = 0.0
             self.ctrl_c_at = 0.0
             self.sidebar_pref: bool | None = None     # None = follow the width
+            self._yolo_armed = -100.0                 # when shift+tab last stopped short of yolo
             self.tools_expanded = False
             self.history: list[str] = []
             self.hist_pos: int | None = None
@@ -8398,8 +8399,19 @@ def build_tui(base: str, token: str, **kw):
             return f"[{col}]⏵ {self.perm_mode}[/]"
 
         def cycle_permission(self) -> None:
+            """yolo → auto → ask, and back to yolo only on a second press within four
+            seconds: one press too many from ask must not drop every guardrail."""
             modes = self.PERM_MODES
-            self.set_permission(modes[(modes.index(self.perm_mode) + 1) % len(modes)])
+            nxt = modes[(modes.index(self.perm_mode) + 1) % len(modes)]
+            if nxt == "yolo" and self.perm_mode != "yolo":
+                now = time.monotonic()
+                if now - self._yolo_armed > 4.0:
+                    self._yolo_armed = now
+                    self.notify("shift+tab again for yolo: everything runs in the VM without "
+                                "asking (/permissions picks a mode too)", severity="warning")
+                    return
+            self._yolo_armed = -100.0
+            self.set_permission(nxt)
 
         def set_permission(self, mode: str) -> None:
             self.perm_mode = mode
