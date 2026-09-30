@@ -605,9 +605,14 @@ async def test_tui_password_login_stores_a_session_and_sends_the_cookie(cfg, mon
         await pilot.press("enter")
         await _until(pilot, lambda: type(app.screen).__name__ == "Ask")
         await pilot.press(*"h:1", "enter")                         # address
-        await pilot.pause(0.1)
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert "plain http" in app.screen.question                 # said before the password
+        await pilot.press("y")
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
+                            and app.screen.question == "Username")
         await pilot.press(*"operator", "enter")                    # username
-        await pilot.pause(0.1)
+        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
+                            and app.screen.question == "Password")
         assert app.screen.query_one("#answer").password is True     # hidden
         await pilot.press("p", "w", "enter")
         assert await _until(pilot, lambda: app.logged_in is True)

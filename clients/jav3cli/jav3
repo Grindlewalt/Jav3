@@ -5,8 +5,9 @@
     jav3 fix the flaky test    the TUI, starting with that message
     jav3 -c | -r ID            resume the latest chat | chat ID
     jav3 -p "message"          one turn, plain output (also: cmd | jav3 -p)
-    jav3 login                 paste the line from Settings -> Add computer
-                               (or /login inside the TUI: that line, or a password)
+    jav3 login                 paste the line from Settings -> Add computer (chat only)
+    jav3 login --password      server address, username, password (full access)
+                               (or /login inside the TUI: either of the two)
     jav3 chat [message]        one turn, or the TUI with no message
     jav3 whoami
     jav3 logout
@@ -43,7 +44,15 @@ except ImportError:  # pragma: no cover — the installer provides it
     sys.exit("jav3 needs httpx: pip install httpx (or install your distro's python3-httpx)")
 
 PROMPT = "Paste the line from Settings → Add computer: "
-RELOGIN = "not logged in (token missing, revoked or expired) — run: jav3 login"
+RELOGIN = ("not logged in (token missing, revoked or expired) — run: jav3 login --password "
+           "(full access) or jav3 login (chat only)")
+RELOGIN_SESSION = "your login expired or was revoked — run: jav3 login --password"
+
+
+def relogin() -> str:
+    """What to run next: a password session that lapsed is renewed with the password."""
+    creds = load_credentials()
+    return RELOGIN_SESSION if creds and creds.get("session") else RELOGIN
 COOKIE_NAME = "jarvis_token"       # backend/auth.py: the operator session cookie
 SESSION_PREFIX = "session:"        # a credential string that is a session, not a token
 
@@ -284,7 +293,7 @@ def _check(r: httpx.Response) -> httpx.Response:
         raise CliError(redirect_hint(f"{u.scheme}://{u.netloc.decode()}",
                                      r.headers.get("location", "")))
     if r.status_code == 401:
-        raise CliError(RELOGIN)
+        raise CliError(relogin())
     if r.status_code >= 400:
         raise CliError(f"server said {r.status_code}: {_detail(r)}")
     return r
@@ -336,7 +345,32 @@ def upgrade_to_https(base: str) -> str:
     return base
 
 
+def cmd_login_password(args, out=sys.stdout, ask=input, secret=getpass.getpass) -> int:
+    """`jav3 login --password`: the web app's own login, from the terminal (full
+    access). Address, username, then the password without echo."""
+    creds = load_credentials() or {}
+    default = args.server or creds.get("address") or ""
+    addr = (ask(f"Server address [{default}]: " if default else
+                "Server address (host:port or URL, like 10.0.0.82:8000): ")
+            or default).strip()
+    if not addr:
+        raise CliError("no server address")
+    user = (ask(f"Username [{creds['username']}]: " if creds.get("username") else
+                "Username: ") or creds.get("username") or "").strip()
+    if not user:
+        raise CliError("no username")
+    password = secret("Password: ")
+    if not password:
+        raise CliError("no password")
+    base, _, who = login_with_password(addr, user, password)
+    print(f"logged in to {base} — credentials in {cred_path()}", file=out)
+    print(f"you are {who} (full access)", file=out)
+    return 0
+
+
 def cmd_login(args, out=sys.stdout, read=_read_login_line) -> int:
+    if getattr(args, "password", False):
+        return cmd_login_password(args, out)
     line = read()
     address, code = parse_login_line(line)
     if args.server:
@@ -461,7 +495,7 @@ def _session_cookie(r: httpx.Response) -> str | None:
 
 
 def login_with_password(address: str, username: str, password: str,
-                        server: str | None = None) -> tuple[str, str, str]:
+                        server: str | None = None, warn: bool = True) -> tuple[str, str, str]:
     """POST /api/auth/login, the web app's own login — the operator session
     cookie, full rights. Saved to the credentials file; (base, cred, username)."""
     if server:
@@ -469,7 +503,7 @@ def login_with_password(address: str, username: str, password: str,
     base = upgrade_to_https(base_url(address))
     if base.startswith("https://") and not address.startswith("https://"):
         address = base
-    if base.startswith("http://") and not _loopback_base(base):
+    if warn and base.startswith("http://") and not _loopback_base(base):
         print(PLAIN_HTTP_PASSWORD.format(base=base), file=sys.stderr)
     # the server slows repeated failures down (up to 8s each): leave room for it
     with _client(base, timeout=40) as c:
@@ -3128,14 +3162,17 @@ def build_tui(base: str, token: str, **kw):
 
         BINDINGS = [Binding("escape", "cancel", show=False)]
 
-        def __init__(self, question: str, secret: bool = False, value: str = "") -> None:
+        def __init__(self, question: str, secret: bool = False, value: str = "",
+                     placeholder: str = "") -> None:
             super().__init__()
             self.question, self.secret, self.value = question, secret, value
+            self.placeholder = placeholder
 
         def compose(self) -> ComposeResult:
             with Vertical(id="dialog", classes="small"):
                 yield Static(f"[b]{_esc(self.question)}[/]")
-                yield Input(value=self.value, password=self.secret, id="answer")
+                yield Input(value=self.value, password=self.secret, id="answer",
+                            placeholder=self.placeholder)
                 yield Static("[$text-muted]enter to confirm · esc to cancel[/]")
 
         def on_mount(self) -> None:
@@ -9850,9 +9887,21 @@ def build_tui(base: str, token: str, **kw):
                 saved = load_credentials() or {}
                 addr = await self.push_screen_wait(Ask(
                     "Server address (host:port or URL)",
-                    value=self.server_override or saved.get("address") or self.base))
+                    value=self.server_override or saved.get("address") or self.base,
+                    placeholder="like 10.0.0.82:8000"))
                 if not (addr or "").strip():
                     return
+                # the plain-http warning comes before the password is typed, not after
+                # it was sent: find out where this address really goes first
+                self.notify(f"checking {addr.strip()}…")
+                target = await asyncio.to_thread(
+                    lambda: upgrade_to_https(base_url(addr.strip())))
+                if target.startswith("http://") and not _loopback_base(target):
+                    if not await self.push_screen_wait(Confirm(
+                            f"{target.split('://', 1)[1]} is plain http. Send your password anyway?",
+                            "It and the session it is traded for cross the network "
+                            "unencrypted. Only say yes on a network you trust.", strict=True)):
+                        return
                 user = await self.push_screen_wait(Ask(
                     "Username", value=saved.get("username") or ""))
                 if not (user or "").strip():
@@ -9863,7 +9912,9 @@ def build_tui(base: str, token: str, **kw):
 
                 def go():
                     with contextlib.redirect_stderr(err):
-                        return login_with_password(addr.strip(), user.strip(), password)
+                        return login_with_password(addr.strip(), user.strip(), password,
+                                                   warn=False)
+            self.notify(f"logging in to {how == 'line' and 'the server' or addr.strip()}…")
             try:
                 base, cred, who = await asyncio.to_thread(go)
             finally:
@@ -10853,7 +10904,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
     # the line is read from the terminal (or a pipe), never argv: argv lands in
     # shell history and is visible to every user via ps
-    sub.add_parser("login", help="log in with the line from Settings → Add computer")
+    lg = sub.add_parser("login", help="log in with the line from Settings → Add computer "
+                                      "(chat only), or --password for full access")
+    lg.add_argument("--password", action="store_true",
+                    help="ask for the server address, username and password instead "
+                         "(full access: /security, /vms, providers)")
     ch = sub.add_parser("chat", help="send a message, or start the TUI with none")
     ch.add_argument("message", nargs="*")
     ch.add_argument("--project", help="pin a new conversation to this project slug")

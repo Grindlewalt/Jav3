@@ -468,6 +468,79 @@ async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
         assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
 
 
+# --- TUIB-15 / TUIB-16: the login flows ----------------------------------------------------------------
+
+async def test_the_tui_login_warns_about_plain_http_before_the_password_is_asked_TUIB15(
+        monkeypatch):
+    pytest.importorskip("textual")
+    sent: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        if request.url.path == "/api/auth/login":
+            return httpx.Response(401, json={"detail": "no"})
+        return httpx.Response(404, json={"detail": "nope"})
+    real = httpx.Client
+    monkeypatch.setattr(jav3.httpx, "Client",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    app = jav3.build_tui("", None, transport=httpx.MockTransport(handler))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/login password")
+        assert await _until(pilot, lambda: _top(app) == "Ask")
+        ask = app.screen
+        assert "10.0.0.82:8000" in ask.query_one("#answer").placeholder    # an example
+        await pilot.press(*"203.0.113.1:8000", "enter")
+        assert await _until(pilot, lambda: _top(app) == "Confirm")         # before the password
+        assert "plain http" in app.screen.question and "/api/auth/login" not in sent
+        await pilot.press("n")                                             # declined: stops here
+        await pilot.pause(0.3)
+        assert _top(app) not in ("Ask", "Confirm") and "/api/auth/login" not in sent
+
+
+async def test_a_loopback_address_needs_no_plain_http_confirm_TUIB15(monkeypatch):
+    pytest.importorskip("textual")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "no"})
+    real = httpx.Client
+    monkeypatch.setattr(jav3.httpx, "Client",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    app = jav3.build_tui("", None, transport=httpx.MockTransport(handler))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.3)
+        app.dispatch("/login password")
+        assert await _until(pilot, lambda: _top(app) == "Ask")
+        await pilot.press(*"127.0.0.1:8000", "enter")
+        assert await _until(pilot, lambda: _top(app) == "Ask"
+                            and app.screen.question == "Username")
+        await pilot.press("escape")
+
+
+def test_jav3_login_password_asks_for_address_user_and_password_TUIB16(monkeypatch, capsys):
+    monkeypatch.setattr(jav3, "login_with_password", lambda addr, user, pw, **kw: (
+        f"http://{addr}", "session:x", user))
+    answers = iter(["127.0.0.1:8000", "bob"])
+    out = io.StringIO()
+    ns = jav3.build_parser().parse_args(["login", "--password"])
+    assert ns.password is True
+    rc = jav3.cmd_login_password(ns, out, ask=lambda prompt: next(answers),
+                                 secret=lambda prompt: "hunter2")
+    assert rc == 0
+    assert "you are bob (full access)" in out.getvalue()
+    with pytest.raises(jav3.CliError):                                  # an empty password
+        jav3.cmd_login_password(ns, out, ask=lambda p: "x", secret=lambda p: "")
+
+
+def test_the_not_logged_in_hint_names_both_logins_and_a_lapsed_session_the_password_TUIB16(
+        monkeypatch):
+    assert "jav3 login --password" in jav3.RELOGIN and "chat only" in jav3.RELOGIN
+    monkeypatch.setattr(jav3, "load_credentials", lambda: {"address": "h", "session": "x"})
+    assert jav3.relogin() == jav3.RELOGIN_SESSION and "--password" in jav3.relogin()
+    monkeypatch.setattr(jav3, "load_credentials", lambda: {"address": "h", "token": "jvd_x"})
+    assert jav3.relogin() == jav3.RELOGIN
+
+
 # --- TUIB-13: a permission ask has a numbered No, and esc says what it drops --------------------------
 
 def _perm(aid="perm_1"):
