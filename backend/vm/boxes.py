@@ -967,8 +967,9 @@ async def reap_idle() -> None:
         if box.kind != "project":
             continue
         ctl = box.ctl
-        if ctl is not None and ctl.inflight:
-            continue
+        if ctl is not None and (ctl.inflight or getattr(ctl, "starting", False)
+                                or getattr(ctl, "state", None) == "starting"):
+            continue           # a turn on it, or a boot in progress (a retry after a failure)
         idle = _idle_ref(box, ctl, now)
         if idle is None or now - idle < window or _bound(box):
             continue

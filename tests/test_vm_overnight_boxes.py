@@ -706,3 +706,17 @@ async def test_a_raising_reaper_duty_is_recorded_and_skips_nothing(env, monkeypa
     evs = await boxlog.events("shared")
     assert [e["event"] for e in evs] == ["error"]            # once, not every tick
     assert "reaper scrub: RuntimeError: scrub blew up" == evs[0]["reason"]
+
+
+async def test_reaper_leaves_a_box_that_is_booting_again(env):
+    """A retry after a failed boot: the stale idle stamp from the failure must
+    not get the guest torn down mid-boot."""
+    b = boxes.allocate("project", project="alpha")
+    b.ctl = FakeCtl(b)
+    b.ctl.idle_since = time.monotonic() - 5000
+    b.ctl.starting = True
+    await boxes.reap_idle()
+    assert boxes.get("p-alpha") is b
+    b.ctl.starting = False
+    await boxes.reap_idle()
+    assert boxes.get("p-alpha") is None
