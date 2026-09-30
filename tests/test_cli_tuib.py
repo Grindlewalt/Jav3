@@ -409,6 +409,64 @@ async def test_a_short_detail_does_not_advertise_scrolling():
         assert "scroll the details" not in str(scr.query_one("#sec-foot").render())
 
 
+# --- TUIB-08: the /vms and Network heads fit 80x24 ---------------------------------------------------
+
+def _plain(markup: str) -> str:
+    from textual.content import Content
+    return Content.from_markup(markup).plain
+
+
+def _wrapped(text: str, width: int) -> int:
+    """Rows a text takes when each logical line wraps at `width`."""
+    return sum(max(1, -(-len(ln) // width)) for ln in text.splitlines())
+
+
+async def test_the_vms_head_fits_80x24_with_the_weak_isolation_badge_whole():
+    pytest.importorskip("textual")
+    from test_cli_vms import _server as vms_server
+    tr, state = vms_server([])
+
+    def weak(request):
+        r = tr.handle_request(request)
+        if request.url.path == "/api/vm/boxes" and r.status_code == 200:
+            d = json.loads(r.content)
+            d["runtimes"]["docker"] = {"available": True, "weak": True,
+                                       "warnings": ["no gVisor: the container shares the host "
+                                                    "kernel's full syscall surface",
+                                                    "docker is neither rootless nor "
+                                                    "userns-remapped: container uid 10001 is host "
+                                                    "uid 10001"]}
+            return httpx.Response(200, json=d)
+        return r
+    app = jav3.build_tui("http://h:1", SESSION, transport=httpx.MockTransport(weak))
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "boxes", cmd="/vms")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        sub = scr.query_one("#sec-sub")
+        text = _plain(scr.sub_markup())
+        assert "WEAK ISOLATION" in text and "docker" in text
+        lines = text.splitlines()
+        assert all(len(ln) <= 76 for ln in lines), lines        # no line wraps
+        assert sub.size.height >= len(lines)                    # nothing cut off
+        assert len(list(scr.query("SecRow"))) >= 2
+        assert sum(1 for r in scr.query("SecRow") if r.region.height and
+                   r.region.bottom <= scr.query_one("#sec-list").region.bottom) >= 3
+        await pilot.resize_terminal(160, 48)                    # wide: the whole warnings return
+        await pilot.pause(0.4)
+        assert "neither rootless" in _plain(scr.sub_markup())
+
+
+async def test_the_network_head_keeps_its_last_24h_line_at_80x24():
+    pytest.importorskip("textual")
+    app = jav3.build_tui("http://h:1", SESSION, transport=_everything())
+    async with app.run_test(size=(80, 24)) as pilot:
+        scr = await _security(pilot, app, "network")
+        assert await _until(pilot, lambda: len(_rows(scr)) >= 2)
+        text = _plain(scr.sub_markup())
+        assert "last 24h" in text, text
+        assert scr.query_one("#sec-sub").size.height >= _wrapped(text, 76), text
+
+
 # --- TUIB-06: a name typed into a picker keeps its first letter, t included ------------------------
 
 async def test_a_picker_keeps_the_first_letter_when_it_is_t():

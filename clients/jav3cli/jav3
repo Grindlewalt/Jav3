@@ -5226,6 +5226,11 @@ def build_tui(base: str, token: str, **kw):
 
         TIMED = ("queue", "network", "logs", "persistent", "rules", "calls")
 
+        def _tight(self) -> bool:
+            """A small terminal (under 100 columns or 30 rows): heads use their short
+            form, so the list keeps some rows."""
+            return self.size.width < 100 or self.size.height < 30
+
         def _more_hint(self) -> str:
             self._more = False if self.locked else self._detail_more()
             return (f"  [$primary]{_esc('[ ]')}[/] scroll the details" if self._more else "")
@@ -5307,7 +5312,10 @@ def build_tui(base: str, token: str, **kw):
             where = (f"[b]⌂ {_esc(self.project)}[/]" if self.project
                      else "[b]all projects[/]")
             line = where
-            if not self.project and pol and "profile" in pol:
+            if not self.project and pol and "profile" in pol and self._tight():
+                line += "  [$text-muted]grouped by project; the rest follows the profile[/] " \
+                        f"[b]{_esc((pol.get('profile') or {}).get('name') or '?')}[/]"
+            elif not self.project and pol and "profile" in pol:
                 prof = pol.get("profile") or {}
                 line += ("  [$text-muted]grouped by project: each project's own allow and "
                          "deny lists over its profile's baseline[/]\n[$text-muted]traffic "
@@ -5359,6 +5367,11 @@ def build_tui(base: str, token: str, **kw):
                     and type(self) is SecurityScreen:
                 self.run_worker(self.rebuild(), group="rebuild", exclusive=True)
             self._narrow = narrow
+            tight = self._tight()
+            if tight != getattr(self, "_was_tight", tight):     # the head has a short form
+                self.render_chrome()
+            self._was_tight = tight
+            self.call_after_refresh(self._foot_again)
 
         async def rebuild(self) -> None:
             async with self._lock:
@@ -6415,12 +6428,14 @@ def build_tui(base: str, token: str, **kw):
                     return "[$text-muted]…[/]"
                 off = ("" if self.vm.get("enabled") else
                        "[$warning]boxes are off: the one shared box only[/] · ")
+                tight = self._tight()
                 return (f"{off}[$text-muted]RAM {b.get('ram_mb_used', '?')}/"
                         f"{b.get('ram_mb_cap', '?')} MB · boxes {b.get('boxes', '?')}/"
                         f"{b.get('boxes_cap', '?')} · project boxes "
-                        f"{b.get('project_boxes', '?')}/{b.get('project_boxes_cap', '?')} "
-                        "(reservations count, running or not)[/]\n"
-                        + self.idle_markup() + self.runtimes_markup())
+                        f"{b.get('project_boxes', '?')}/{b.get('project_boxes_cap', '?')}"
+                        + ("" if tight else " (reservations count, running or not)")
+                        + "[/]\n"
+                        + self.idle_markup(tight) + self.runtimes_markup(tight))
             if self.tab == "images":
                 bd = self.vm.get("build") or {}
                 tail = [str(x) for x in _jlist(bd.get("log_tail"))]
@@ -6435,29 +6450,51 @@ def build_tui(base: str, token: str, **kw):
             return ("[$text-muted]packages the agents asked for and the operator added; "
                     "an approved one goes into its variant's next version[/]")
 
-        def idle_markup(self) -> str:
-            """When the reaper acts, and what was left behind (one line)."""
+        def idle_markup(self, tight: bool = False) -> str:
+            """When the reaper acts, and what was left behind (one line; shorter when
+            the terminal is small, so the head leaves the list its rows)."""
             idle = self.vm.get("idle") or {}
             bits = []
             if idle.get("project_stop_s") and self.vm.get("enabled"):
                 bits.append(f"project boxes stop after {_mins(idle['project_stop_s'])} idle")
             if idle.get("shared_scrub_s"):
-                bits.append(f"the shared box is scrubbed after {_mins(idle['shared_scrub_s'])} idle")
+                bits.append((f"shared box scrubbed after {_mins(idle['shared_scrub_s'])}" if tight
+                             else f"the shared box is scrubbed after "
+                                  f"{_mins(idle['shared_scrub_s'])} idle"))
             elif idle:
-                bits.append("the shared box is never scrubbed (vm_idle_scrub_seconds 0)")
+                bits.append("shared box never scrubbed" if tight else
+                            "the shared box is never scrubbed (vm_idle_scrub_seconds 0)")
             line = f"[$text-muted]{' · '.join(bits)}[/]" if bits else ""
             lo = _jlist(self.leftovers.get("items"))
             n = sum(1 for i in lo if isinstance(i, dict) and i.get("cleanable"))
             if lo:
-                line += (("   " if line else "") + f"[$warning]{len(lo)} leftover"
+                line += (("\n" if tight else "   ") if line else "") + (
+                         f"[$warning]{len(lo)} leftover"
                          f"{'s' * (len(lo) != 1)} no box owns[/]"
                          + (" [$text-muted]— c cleans[/]" if n else ""))
             return line + "\n" if line else ""
 
-        def runtimes_markup(self) -> str:
+        def runtimes_markup(self, tight: bool = False) -> str:
             rt = self.runtimes or {}
             if not rt:
                 return ""
+            if tight:
+                # one line that always fits: the full warnings are in the detail of a
+                # docker box and of a docker profile
+                docker = rt.get("docker") if isinstance(rt.get("docker"), dict) else {}
+                bits = []
+                for name in ("kvm", "docker"):
+                    info = rt.get(name)
+                    if not isinstance(info, dict):
+                        continue
+                    if info.get("available") is False:
+                        bits.append(f"[$text-muted]{name} unavailable[/]")
+                    elif name == "docker":
+                        bits.append("docker " + (f"{RED} WEAK ISOLATION [/]" if docker.get("weak")
+                                                 else f"{AMBER} less isolated [/]"))
+                    else:
+                        bits.append(f"[$success]{name}[/]")
+                return "[$text-muted]runtimes:[/] " + "  ".join(bits)
             bits = []
             for name in ("kvm", "docker"):
                 info = rt.get(name)
