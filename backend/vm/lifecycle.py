@@ -557,6 +557,30 @@ vm = GuestVM()
 _boxes_mod.register_runtime("kvm", GuestVM)
 
 
+_reaper_noted: dict[str, float] = {}
+REAPER_NOTE_EVERY = 600.0          # one print + history row per distinct failure per 10 minutes
+
+
+async def _reaper_step(name: str, fn) -> None:
+    """One reaper duty. A failure never stops the others (a raising scrub used
+    to skip that tick's project-box reaping and crash watch as well) and is no
+    longer silent: printed and recorded as an `error` event on the shared box's
+    history, at most once per distinct message per REAPER_NOTE_EVERY (the loop
+    ticks every 30 s)."""
+    try:
+        await fn()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — a reaper hiccup must never kill the loop
+        msg = f"reaper {name}: {type(e).__name__}: {e}"
+        now = time.monotonic()
+        if now - _reaper_noted.get(msg, -REAPER_NOTE_EVERY) >= REAPER_NOTE_EVERY:
+            _reaper_noted[msg] = now
+            print(f"[boxes] {msg}")
+            from . import boxlog
+            await boxlog.record(_boxes_mod.shared(), "error", actor="app", reason=msg)
+
+
 async def reaper_loop() -> None:
     """Background: scrub the guest once it has gone idle (M4c). Cheap and inert
     while vm_idle_scrub_seconds is 0. Started from the app lifespan.
@@ -575,11 +599,12 @@ async def reaper_loop() -> None:
                     print(leftovers.summary_line(await leftovers.scan()))
                 except Exception as e:  # noqa: BLE001 — advice only
                     print(f"[boxes] leftover scan skipped: {e}")
-            await vm.reap_if_idle()
+            await _reaper_step("scrub", lambda: vm.reap_if_idle())
             if settings.vm_boxes_enabled:
-                await _boxes_mod.reap_idle()
+                await _reaper_step("idle boxes", _boxes_mod.reap_idle)
             from . import boxlog
-            await boxlog.watch_all()      # crashes and failed boots nobody reported
+            # crashes and failed boots nobody reported
+            await _reaper_step("crash watch", boxlog.watch_all)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a reaper hiccup must never kill the loop

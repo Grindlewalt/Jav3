@@ -675,3 +675,34 @@ async def test_a_dead_docker_daemon_is_not_no_leftovers(env, monkeypatch, tmp_pa
         assert "docker could not be asked" in leftovers.summary_line(res)
     with pytest.raises(dr.DockerError):     # startup's orphan reap says it skipped
         await dr.reap_orphans()
+
+
+async def test_a_raising_reaper_duty_is_recorded_and_skips_nothing(env, monkeypatch):
+    """`except Exception: pass` around the whole tick: one failing duty hid
+    itself and skipped project-box reaping and crash detection too."""
+    import asyncio
+    reaped = []
+
+    class BadVM(FakeCtl):
+        async def reap_if_idle(self):
+            raise RuntimeError("scrub blew up")
+
+    async def reap_idle():
+        reaped.append(1)
+
+    async def scan():
+        return {"items": [], "docker": "off"}
+    monkeypatch.setattr(lifecycle, "vm", BadVM(None, running=True))
+    monkeypatch.setattr(boxes, "reap_idle", reap_idle)
+    monkeypatch.setattr(leftovers, "scan", scan)
+    monkeypatch.setattr(settings, "vm_reaper_interval_seconds", 0.01)
+    lifecycle._reaper_noted.clear()
+    task = asyncio.create_task(lifecycle.reaper_loop())
+    await asyncio.sleep(0.25)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(reaped) >= 3                                  # the other duties kept running
+    evs = await boxlog.events("shared")
+    assert [e["event"] for e in evs] == ["error"]            # once, not every tick
+    assert "reaper scrub: RuntimeError: scrub blew up" == evs[0]["reason"]
