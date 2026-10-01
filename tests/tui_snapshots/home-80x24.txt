@@ -10,7 +10,7 @@
           operator @ http://127.0.0.1:NNNNN · full access
 
           /help       commands and keys
-          ←           agents: what is running, on an empty prompt
+          ← →         agents · sessions, on an empty prompt
           ctrl+j      new line (enter sends)
           shift+tab   permissions: yolo → auto → ask · ctrl+x u picks
           ctrl+x l    sessions · ctrl+x m models
@@ -35,7 +35,7 @@
 07 0-9=-/233 10-56=246/233 57-79=-/233
 08 *=-/233
 09 0-9=-/233 10-14=231/233 15-38=246/233 39-79=-/233
-10 0-9=-/233 10-10=231/233 11-64=246/233 65-79=-/233
+10 0-9=-/233 10-12=231/233 13-58=246/233 59-79=-/233
 11 0-9=-/233 10-15=231/233 16-43=246/233 44-79=-/233
 12 0-9=-/233 10-18=231/233 19-68=246/233 69-79=-/233
 13 0-9=-/233 10-17=231/233 18-32=246/233 33-40=231/233 41-47=246/233 48-79=-/233

@@ -1274,6 +1274,63 @@ def agent_sections(tr: AgentTree, mode: str = "active",
     return [(f"⌂ {p or 'no project'}", rs) for p, rs in tr.groups]
 
 
+# --- the drawers: what ← (agents) and → (sessions) list --------------------------------------
+#
+# jav3.2 P2. Two drawers slide over the panels from the edges of the screen: ← from an
+# empty prompt lists the agents (what runs and what waits on the operator on top, a few
+# finished ones under), → lists the chats (active and needs-input on top). They read the
+# same data the /agents page and the /sessions picker read; these are the pure parts.
+
+DRAWER_RECENT = 6           # finished agents under RUNNING
+DRAWER_SESSIONS = 14        # idle chats under ACTIVE / NEEDS INPUT
+
+
+def drawer_width(total: int) -> int:
+    """Columns of a drawer in an area `total` wide: 40, less in a narrow terminal so a
+    panel stays visible beside it (36 of 80)."""
+    return max(24, min(40, total * 45 // 100))
+
+
+DRAWER_PICKABLE = ("root", "kid", "chat", "link")      # the rows a drawer's bar can stand on
+
+
+def agent_drawer_rows(active: AgentTree, finished: AgentTree,
+                      recent: int = DRAWER_RECENT) -> tuple[list[dict], list[dict]]:
+    """(RUNNING roots, RECENT roots): every root with something running or waiting on the
+    operator (the /agents page's Active, then Needs you; a needs-input root is marked
+    by its row), then the `recent` roots that finished last, newest first."""
+    when = lambda r: str(r.get("ended_at") or r.get("started_at") or "")  # noqa: E731
+    run = [r for _, rs in agent_sections(active, "active") for r in rs]
+    run.sort(key=lambda r: str(r.get("started_at") or ""), reverse=True)   # not by project
+    run.sort(key=lambda r: active.root_status(r["id"]) != "running")       # needs-you after
+    done = [r for r in sorted(finished.roots, key=when, reverse=True)
+            if r["id"] not in active.by_id][:recent]
+    return run, done
+
+
+def session_sections(convs: list[dict], tr: AgentTree, asks=(),
+                     limit: int = DRAWER_SESSIONS) -> list[tuple[str, list[tuple]]]:
+    """The → drawer: [(name, [(conversation, state, why)])]. ACTIVE: a chat whose turn
+    runs; NEEDS INPUT: one waiting on the operator (the server's agents tree says so, or
+    a panel here holds an ask: `asks` is those chat ids); then the rest, newest first.
+    `tr` is the active agents tree, `convs` /api/conversations (newest first)."""
+    active, needs, rest = [], [], []
+    for cv in convs:
+        cid = cv.get("id")
+        nd = tr.by_id.get(cid)
+        why = tr.needs(cid) if nd else None
+        if not why and cid in asks:
+            why = "waiting on your answer"
+        if why:
+            needs.append((cv, "needs", why))
+        elif cv.get("running") or (nd and tr.root_status(cid) == "running"):
+            active.append((cv, "running", None))
+        else:
+            rest.append((cv, "idle", None))
+    out = [("ACTIVE", active), ("NEEDS INPUT", needs), ("RECENT", rest[:limit])]
+    return [(name, rows) for name, rows in out if rows]
+
+
 class AgentsFeed:
     """Everything running on the server, whoever started it: the data behind the
     ← screen (and whatever else lists agents, e.g. a drawer), with no widgets.
@@ -1338,10 +1395,12 @@ class AgentsFeed:
             extra, _ = running_chat_nodes(nodes, running, self.convs)
         return extra
 
-    async def refresh(self, full_finished: bool = False) -> None:
+    async def refresh(self, full_finished: bool = False, recent: int | None = None) -> None:
         """Reload the active view. The finished side is fetched in full when
         `full_finished` (the Finished view is open) or on the first load; a root
-        leaving the active set only re-counts it, so the Finished row stays right."""
+        leaving the active set only re-counts it, so the Finished row stays right.
+        `recent` (a drawer): instead, the newest `recent` finished roots on every
+        reload (0: none, only the active side), never the whole page."""
         try:
             (nodes, _), running = await asyncio.gather(self._nodes("active"), self._running())
             if nodes and not any("status" in n for n in nodes):
@@ -1359,7 +1418,14 @@ class AgentsFeed:
                 nodes = nodes + await self._name_chats(nodes, running)
                 self.trees["active"] = AgentTree(nodes)
                 left = before - {r["id"] for r in self.trees["active"].roots}
-                if full_finished or self.total_finished is None:
+                if recent is not None:
+                    if recent:
+                        fnodes, total = await self._nodes("finished", limit=recent)
+                        self.trees["finished"] = AgentTree(fnodes)
+                        self.total_finished = (total if isinstance(total, int)
+                                               else len(self.trees["finished"].roots))
+                        self.finished_full = False
+                elif full_finished or self.total_finished is None:
                     fnodes, total = await self._nodes("finished")
                     self.trees["finished"] = AgentTree(fnodes)
                     self.total_finished = (total if isinstance(total, int)
@@ -1786,8 +1852,9 @@ class PageSpec:
 PAGE_SPECS = (
     PageSpec("work", "the chat itself: where esc on a page ends up", kind="chat",
              aliases=("chat",)),
-    PageSpec("agents", "every agent and chat that is running, across projects (← on an "
-             "empty prompt); /persona starts one", "[finished]", aliases=("agents-view",),
+    PageSpec("agents", "every agent and chat that is running, across projects (the ← "
+             "drawer is its short form); /persona starts one", "[finished]",
+             aliases=("agents-view",),
              leader="g", options=AGENTS_VIEW_BLURB),
     PageSpec("security", "the Security area: " + ", ".join(SECURITY_TABS) + " (full access)",
              "[" + "|".join(SECURITY_TABS) + "]", aliases=("review",), leader="v",
@@ -3027,10 +3094,18 @@ def build_tui(base: str, token: str, **kw):
                 event.prevent_default()
                 app.chat.log.focus()
                 return
-            if key == "left" and not self.text:
+            if app.drawer is not None:
+                # the prompt has the keyboard (a click on it): the drawer is done; ← → esc
+                # only put it away, any other key goes on to be typed
+                app.close_drawer()
+                if key in ("left", "right", "escape"):
+                    event.stop()
+                    event.prevent_default()
+                    return
+            if key in ("left", "right") and not self.text:
                 event.stop()
                 event.prevent_default()
-                app.action_agents_view()
+                app.action_agents_view() if key == "left" else app.action_sessions_view()
                 return
             if key == "enter":
                 event.stop()
@@ -4675,6 +4750,8 @@ def build_tui(base: str, token: str, **kw):
                     panel.styles.width = ww
                     panel.styles.height = hh
                 panel.refresh_title()
+            if app.drawer is not None:
+                app.drawer.place(w)
 
     class AgentRow(Static):
         """One row of the agents screen: a project header, a root, or a descendant."""
@@ -4700,7 +4777,7 @@ def build_tui(base: str, token: str, **kw):
                 Page.of(self).click_row(self)
 
     class AgentsPage(Page):
-        """/agents (← from an empty prompt). The active view: what is running and what
+        """/agents (the ← drawer is its short form). The active view: what is running and what
         needs the operator, then a Finished row; the finished view: everything else,
         grouped by project or by time (tab). ↑↓ move between entries, the
         highlighted one unfolds its agents, → steps into them and ← back out,
@@ -5082,6 +5159,472 @@ def build_tui(base: str, token: str, **kw):
             else:
                 self.sel, self.in_kids = row.nid, True
             self.run_worker(self.action_open(), group="ag-open")
+
+    # -- the drawers --------------------------------------------------------------------------
+    #
+    # ← on an empty prompt slides the AGENTS drawer over the panels from the left, → the
+    # SESSIONS drawer from the right (the panels stay visible beside it). Up and down
+    # move, enter opens the entry in the focused panel, p in a new one, esc closes; in
+    # the agents drawer → steps into the highlighted entry's sub-agents and ← back out
+    # (and ← at the top closes it, as → does the sessions drawer). The keyboard goes to
+    # the drawer, the focused PANEL does not change until enter or p. The data is the
+    # app's AgentsFeed, polled while the drawer is open and reloaded at once when the
+    # shared stream says a run ended. The full /agents page and the /sessions picker stay.
+
+    class DrawerRow(Static):
+        """One row of a drawer: a section head, a note, an entry, a sub-agent or a link.
+        `build(frame)` is its markup (the spinner moves with the frame); the selected row
+        is drawn on the bar (see on_the_bar)."""
+
+        def __init__(self, kind: str, key, build, node=None, spins: bool = False) -> None:
+            super().__init__(build(0), classes=kind)
+            self.kind, self.key, self.build, self.node, self.spins = kind, key, build, node, spins
+            self.picked, self.frame = False, 0
+
+        def draw(self, frame: int | None = None) -> None:
+            if frame is not None:
+                self.frame = frame
+            markup = self.build(self.frame)
+            self.update(on_the_bar(markup) if self.picked else markup)
+
+        def pick(self, on: bool) -> None:
+            if on != self.picked:
+                self.picked = on
+                self.set_class(on, "-sel")
+                self.draw()
+
+        def on_click(self) -> None:
+            if self.kind in DRAWER_PICKABLE:
+                self.app.drawer.click_row(self)
+
+    class Drawer(Vertical, can_focus=True):
+        """See the comment above. `kind` is "agents" or "sessions"."""
+
+        DEFAULT_CSS = """
+        Drawer { position: absolute; width: 40; height: 100%; background: $background;
+                 border: solid $primary; border-title-color: $primary;
+                 border-title-style: bold; border-subtitle-color: $text-muted; }
+        Drawer:focus { border: solid $primary; }
+        Drawer #dr-list { height: 1fr; scrollbar-size-vertical: 1; }
+        Drawer #dr-msg { height: auto; color: $warning; padding: 0 1; }
+        DrawerRow { height: 1; padding: 0 0 0 1; border-left: blank;
+                    text-wrap: nowrap; text-overflow: ellipsis; }
+        DrawerRow.section { color: $text-muted; text-style: bold; }
+        DrawerRow.note, DrawerRow.link { color: $text-muted; }
+        DrawerRow.kid { color: $text; }
+        DrawerRow.-sel { background: $primary; color: auto 95%; text-style: bold;
+                         border-left: thick $accent; }
+        /* the chat in the focused panel; solid colours only (a blend rounds to grey in 256) */
+        DrawerRow.current { background: $panel; color: $success; border-left: thick $success; }
+        DrawerRow.current.-sel { background: $success; color: auto 95%;
+                                 border-left: thick $accent; }
+        """
+        BINDINGS = [
+            Binding("escape", "close", show=False),
+            Binding("up,k", "move(-1)", show=False),
+            Binding("down,j", "move(1)", show=False),
+            Binding("left", "left", show=False),
+            Binding("right", "right", show=False),
+            Binding("enter", "open", show=False),
+            Binding("p", "open_panel", show=False),
+            Binding("r", "reload", show=False),
+            Binding("slash", "command_line", show=False),
+        ]
+
+        RELOAD_S = 1.5          # the agents page's rate: a chat started in the web shows in ~2 s
+        SESSIONS_S = 3.0        # the chat list is the longer fetch
+        NOTE_S = 4.0            # how long a refusal stays under the list
+
+        def __init__(self, kind: str) -> None:
+            super().__init__()               # no id: one may still be leaving while the next arrives
+            self.kind = kind
+            self.feed = None
+            self.specs: list[tuple] = []          # (kind, key, build, node, spins) in order
+            self.rows: list = []                  # their DrawerRow widgets
+            self.sel = None                       # the selected row's key
+            self.in_kids = False                  # up and down walk the open entry's sub-agents
+            self.open_root = None                 # the entry whose sub-agents are unfolded
+            self.fetched = False                  # a fetch has answered
+            self.closing = False
+            self._idx = 0                         # where the bar was, for when its row leaves
+            self._struct = None
+            self.frame = 0
+            self._lock = asyncio.Lock()
+            self._reloading = False
+            self._note_timer = None
+
+        # -- life -------------------------------------------------------------------------
+
+        def compose(self) -> ComposeResult:
+            yield VerticalScroll(id="dr-list", can_focus=False)
+            yield Static(id="dr-msg")
+
+        def on_mount(self) -> None:
+            app = self.app
+            self.feed = app.drawer_feed()
+            self.place()
+            self.app.set_focus(self)
+            self.render_chrome()
+            self.run_worker(self._first_paint(), group="dr-draw")
+            self.reload_now()
+            self.set_interval(self.RELOAD_S if self.kind == "agents" else self.SESSIONS_S,
+                              self._auto_reload)
+            self.set_interval(0.15, self.spin)
+
+        async def _first_paint(self) -> None:
+            # what the feed held from the last time it was open, until the reload lands
+            await self.draw_rows()
+
+        def place(self, total: int | None = None) -> None:
+            """The edge it slides from, and its width: in whole cells of the panel area."""
+            total = total or self.app.panel_area.size.width
+            if not total:
+                return
+            width = drawer_width(total)
+            self.styles.width = width
+            self.styles.height = "100%"
+            self.styles.offset = (0 if self.kind == "agents" else total - width, 0)
+            self._struct = None
+            self.render_chrome()
+
+        def on_resize(self, event) -> None:
+            if self.is_attached and self.rows:
+                self.run_worker(self.draw_rows(), group="dr-draw")
+
+        @property
+        def row_width(self) -> int:
+            """Columns a row's text has: the width inside the frame, less the row's own bar and
+            padding (2) and a column the scrollbar may take."""
+            inside = self.size.width or drawer_width(self.app.panel_area.size.width) - 2
+            return max(12, inside - 4)
+
+        def render_chrome(self) -> None:
+            err = self.feed.error if self.feed is not None else None
+            self.border_title = f"{self.kind} · " + ("live" if not err else "not updating")
+            narrow = (self.size.width or 38) < 36
+            self.border_subtitle = ("enter · p panel · esc" if narrow
+                                    else "enter open · p panel · esc close")
+
+        def note(self, text: str) -> None:
+            """A line under the list (a refusal), gone after a few seconds."""
+            self.query_one("#dr-msg", Static).update(_esc(text))
+            if self._note_timer is not None:
+                self._note_timer.stop()
+            self._note_timer = self.set_timer(self.NOTE_S, lambda: self.query_one(
+                "#dr-msg", Static).update(""))
+
+        # -- the data ---------------------------------------------------------------------
+
+        def reload_now(self) -> None:
+            """A fetch now, whatever one is already going (a run just ended: what that fetch
+            started before may still say it runs)."""
+            self.run_worker(self._reload_safe(), group="dr-reload", exclusive=True)
+
+        def run_ended(self) -> None:
+            self.reload_now()
+            self.set_timer(1.0, self.reload_now)       # the server may still be settling
+
+        def _auto_reload(self) -> None:
+            if not self._reloading and not isinstance(self.app.screen, ModalScreen):
+                self.reload_now()
+
+        async def _reload_safe(self) -> None:
+            from textual.css.query import NoMatches
+            try:
+                await self.reload()
+            except NoMatches:
+                if self.is_attached:
+                    raise
+
+        async def reload(self) -> None:
+            app, feed = self.app, self.feed
+            self._reloading = True
+            try:
+                if self.kind == "agents":
+                    await feed.refresh(recent=DRAWER_RECENT)
+                else:
+                    await app.refresh_convs()
+                    feed.add_convs(app.convs)
+                    await feed.refresh(recent=0)
+            finally:
+                self._reloading = False
+            if self.closing or app.drawer is not self:
+                return
+            self.fetched = True
+            self.render_chrome()
+            await self.draw_rows()
+
+        def action_reload(self) -> None:
+            self.reload_now()
+
+        # -- the rows, in order -------------------------------------------------------------
+
+        def tree_of(self, nid) -> AgentTree:
+            act = self.feed.trees["active"]
+            return act if nid in act.by_id else self.feed.trees["finished"]
+
+        def head_tail(self, markup_head: str, head_n: int, title: str, bold: bool,
+                      tail: str, tail_n: int) -> str:
+            """head + the title (cut to what is left) + padding + tail, `row_width` wide."""
+            room = max(3, self.row_width - head_n - tail_n - 1)
+            text = _esc(_short(title, room))
+            gap = max(1, self.row_width - head_n - len(_short(title, room)) - tail_n)
+            return f"{markup_head}{'[b]' + text + '[/]' if bold else text}{' ' * gap}{tail}"
+
+        def agent_markup(self, nd: dict, depth: int, root: bool, frame: int) -> str:
+            tr = self.tree_of(nd["id"])
+            icon = AGENT_ICONS.get(nd.get("kind"), "·")
+            if root:
+                nk = len(tr.descendants(nd["id"]))
+                fold = ("▾" if nd["id"] == self.open_root else "▸") if nk else " "
+                head, head_n = f"{fold} [$secondary]{icon}[/] ", 4
+            else:
+                head = "  " * depth + f"└ [$secondary]{icon}[/] "
+                head_n = 2 * depth + 4
+            st = tr.root_status(nd["id"]) if root else node_status(nd)
+            glyph = (f"[$accent]{SPINNER[frame % len(SPINNER)]}[/]" if st == "running"
+                     else STATUS_GLYPH.get(st, " ") or " ")
+            why = tr.needs(nd["id"]) if root else (nd.get("needs") if st == "needs_you" else None)
+            extra = " [$warning b]![/]" if why and st == "running" else ""   # a child waits on you
+            age = _age(nd.get("ended_at") or nd.get("started_at"))
+            tail = f"{glyph}{extra} [$text-muted]{age}[/]"
+            tail_n = 1 + (2 if extra else 0) + 1 + len(age)
+            title = clean_title(nd.get("title")) or f"#{nd['id']}"
+            return self.head_tail(head, head_n, title, root, tail, tail_n)
+
+        def session_markup(self, cv: dict, state: str, frame: int) -> str:
+            glyph = (f"[$accent]{SPINNER[frame % len(SPINNER)]}[/]" if state == "running"
+                     else "[$warning b]![/]" if state == "needs" else " ")
+            age = _age(cv.get("started_at"))
+            return self.head_tail(f"{glyph} ", 2, _conv_title(cv) or "(untitled)", False,
+                                  f"[$text-muted]{age}[/]", len(age))
+
+        def empty_note(self, none: str = "nothing is running") -> str:
+            if self.feed.error and not self.fetched:
+                return "  " + _short(self.feed.error, self.row_width - 2)
+            return "  " + (none if self.fetched else "loading…")
+
+        def compute(self) -> list[tuple]:
+            """The rows from the data in hand: (kind, key, build(frame) -> markup, node, spins).
+            Kinds: section / note (not selectable), root, kid, chat, link."""
+            feed, specs = self.feed, []
+
+            def add(kind, key, build, node=None, spins=False):
+                specs.append((kind, key, build, node, spins))
+
+            if self.kind == "agents":
+                act, fin = feed.trees["active"], feed.trees["finished"]
+                running, recent = agent_drawer_rows(act, fin)
+                add("section", None, lambda f, n=len(running): f"RUNNING  {n}")
+                if not running:
+                    add("note", None, lambda f, t=self.empty_note(): t)
+                for name, roots in ((None, running), ("RECENT", recent)):
+                    if name:
+                        if not roots:
+                            continue
+                        add("section", None, lambda f, name=name: name)
+                    for r in roots:
+                        add("root", r["id"], lambda f, nd=r: self.agent_markup(nd, 0, True, f),
+                            r, spins=self.tree_of(r["id"]).root_status(r["id"]) == "running")
+                        if r["id"] == self.open_root:
+                            tr = self.tree_of(r["id"])
+                            for k, d in tr.descendants(r["id"]):
+                                add("kid", k["id"], lambda f, nd=k, d=d: self.agent_markup(
+                                    nd, d, False, f), k, spins=node_status(k) == "running")
+                n = feed.total_finished
+                if n and n > len(recent):
+                    add("link", "finished", lambda f, n=n: f"  all {n} finished  →")
+            else:
+                asks = {c.cid for c in self.app.chats.values() if c.asks and c.cid}
+                secs = session_sections(self.app.convs, feed.trees["active"], asks)
+                if not secs:
+                    add("note", None, lambda f, t=self.empty_note("no chats yet"): t)
+                for name, rows in secs:
+                    add("section", None, lambda f, name=name, n=len(rows): f"{name}  {n}")
+                    for cv, state, why in rows:
+                        node = {"id": cv["id"], "parent_id": None, "kind": "chat",
+                                "title": _conv_title(cv), "running": state != "idle"}
+                        add("chat", cv["id"], lambda f, cv=cv, st=state: self.session_markup(
+                            cv, st, f), node, spins=state == "running")
+                if self.app.convs:
+                    add("link", "all", lambda f: "  every chat: /sessions  →")
+            return specs
+
+        def selectable(self) -> list[tuple]:
+            return [s for s in self.specs if s[0] in DRAWER_PICKABLE]
+
+        def origin(self):
+            """The chat in the focused panel, as the key of a row (an agent's root)."""
+            cid = self.app.focused_chat.cid
+            if cid is None:
+                return None
+            return self.tree_of(cid).root_of(cid) if self.kind == "agents" else cid
+
+        def _keep_selection(self) -> None:
+            keys = [s[1] for s in self.selectable() if s[0] != "kid"]
+            if self.in_kids:
+                kids = [s[1] for s in self.specs if s[0] == "kid"]
+                if self.sel in kids:
+                    return
+                self.in_kids, self.sel = False, self.open_root
+            if self.sel not in keys:
+                if self.sel is None:                      # the first time: where you came from
+                    if not self.fetched:
+                        return              # (not before the data is in: it moves rows)
+                    want = self.origin()
+                    self.sel = want if want in keys else (keys[0] if keys else None)
+                elif keys:                                # it left the list: the row now there
+                    self.sel = keys[min(self._idx, len(keys) - 1)]
+                else:
+                    self.sel = None
+            self._idx = keys.index(self.sel) if self.sel in keys else 0
+            self._unfold()
+
+        def _unfold(self) -> None:
+            roots = [s[1] for s in self.specs if s[0] == "root"]
+            self.open_root = self.sel if self.kind == "agents" and self.sel in roots else None
+
+        def _is_picked(self, kind, key) -> bool:
+            return kind in DRAWER_PICKABLE and key == self.sel and (kind == "kid") == self.in_kids
+
+        async def draw_rows(self) -> None:
+            """Rows from the data in hand. The same rows as last time only move the bar; any
+            other change mounts them again (the list is a dozen rows)."""
+            if not self.is_attached or self.closing:
+                return
+            from textual.css.query import NoMatches
+            async with self._lock:
+                before = self.open_root
+                self.specs = self.compute()
+                self._keep_selection()
+                if self.open_root != before:           # its sub-agents are rows
+                    self.specs = self.compute()
+                struct = (self.row_width, self.app.focused_chat.cid,
+                          [(s[0], s[1], s[2](0)) for s in self.specs])
+                if struct == self._struct:
+                    for row in self.rows:
+                        row.pick(self._is_picked(row.kind, row.key))
+                    self._scroll_to_bar()
+                    return
+                try:
+                    lst = self.query_one("#dr-list", VerticalScroll)
+                except NoMatches:
+                    return
+                origin = self.app.focused_chat.cid
+                rows = []
+                for kind, key, build, node, spins in self.specs:
+                    row = DrawerRow(kind, key, build, node, spins)
+                    row.frame = self.frame
+                    if self._is_picked(kind, key):
+                        row.picked = True
+                        row.add_class("-sel")
+                        row.draw()
+                    if node is not None and node.get("id") == origin and kind != "kid":
+                        row.add_class("current")
+                    rows.append(row)
+                with self.app.batch_update():
+                    await lst.remove_children()
+                    await lst.mount_all(rows)
+                self.rows, self._struct = rows, struct
+                self.render_chrome()
+                self._scroll_to_bar()
+
+        def _scroll_to_bar(self) -> None:
+            target = next((r for r in self.rows if r.picked), None)
+            if target is not None and target.is_attached:
+                target.scroll_visible(animate=False)
+
+        def spin(self) -> None:
+            self.frame += 1
+            for row in self.rows:
+                if row.spins:
+                    row.draw(self.frame)
+
+        # -- keys ---------------------------------------------------------------------------
+
+        async def action_move(self, d: int) -> None:
+            if self.in_kids:
+                kids = [s[1] for s in self.specs if s[0] == "kid"]
+                i = kids.index(self.sel) + d if self.sel in kids else 0
+                if 0 <= i < len(kids):
+                    self.sel = kids[i]
+                    return await self.draw_rows()
+                self.in_kids, self.sel = False, self.open_root     # off either end: its entry
+                if d < 0:
+                    return await self.draw_rows()
+            keys = [s[1] for s in self.selectable() if s[0] != "kid"]
+            if not keys:
+                return
+            i = keys.index(self.sel) if self.sel in keys else -1
+            self.sel = keys[max(0, min(len(keys) - 1, i + d))]
+            self._unfold()
+            await self.draw_rows()
+
+        async def action_right(self) -> None:
+            if self.kind != "agents":
+                return self.app.close_drawer()          # → again puts it back
+            if self.sel == "finished":
+                return await self.action_open()
+            if not self.in_kids and self.open_root is not None:
+                tr = self.tree_of(self.open_root)
+                kids = tr.descendants(self.open_root)
+                if kids:
+                    self.in_kids, self.sel = True, kids[0][0]["id"]
+                    await self.draw_rows()
+
+        async def action_left(self) -> None:
+            if self.kind != "agents":
+                return
+            if self.in_kids:
+                self.in_kids, self.sel = False, self.open_root
+                await self.draw_rows()
+            else:
+                self.app.close_drawer()
+
+        def action_close(self) -> None:
+            self.app.close_drawer()
+
+        def action_command_line(self) -> None:
+            self.app.close_drawer()
+            self.app.command_line("/")
+
+        def _selected(self):
+            return next((s for s in self.specs if s[0] in DRAWER_PICKABLE
+                         and s[1] == self.sel and (s[0] == "kid") == self.in_kids), None)
+
+        def click_row(self, row) -> None:
+            if row.kind == "kid":
+                self.sel, self.in_kids = row.key, True
+            else:
+                self.sel, self.in_kids = row.key, False
+                self._unfold()
+            self.run_worker(self.action_open(), group="dr-open")
+
+        async def action_open(self) -> None:
+            """enter: the entry in the focused panel."""
+            await self._go(new_panel=False)
+
+        async def action_open_panel(self) -> None:
+            """p: the entry in a new panel beside the focused one."""
+            await self._go(new_panel=True)
+
+        async def _go(self, new_panel: bool) -> None:
+            app, spec = self.app, self._selected()
+            if spec is None:
+                return
+            if new_panel:
+                why = app.panel_refusal()
+                if why:                                  # the drawer stays: say why under it
+                    self.note(why)
+                    app.notify(why, severity="warning")
+                    return
+            kind, key, _, node, _ = spec
+            app.close_drawer()
+            if kind == "link":
+                page, arg = ("agents", "finished") if self.kind == "agents" else ("sessions", "")
+                app.run_worker(app.open_page(page, arg, panel=new_panel), group="agents")
+            else:
+                app.run_worker(app.open_node(node, new_panel=new_panel), group="agents")
 
     # -- the security screen -------------------------------------------------------------
     #
@@ -8611,6 +9154,8 @@ def build_tui(base: str, token: str, **kw):
                 1: ChatState(1, project, "pin" if project else None, agent, model)}
             self.panel_tree = 1                       # the split tree (PanelSplit | a panel number)
             self.focus_no = 1                   # the focused panel
+            self.drawer = None                  # the ← / → drawer showing, if any
+            self._drawer_feed = None
             self.zoomed = False                 # the focused panel fills the area
             self.cramped = False                # the window is too small for the tiles
             self.local_execs: dict[int, LocalExecutor] = {}
@@ -8861,10 +9406,13 @@ def build_tui(base: str, token: str, **kw):
             """The server's one multiplexed stream, topics `notices` (agent runs
             the operator started finishing elsewhere) and `security` (alerts,
             of which only those the server marks `ping` notify) ->
-            notifications. Operator session only. A server without /api/events
-            answers 404 and the loop falls back to the notices stream alone."""
+            notifications, and `runs` (only its `run_end`: a chat turn or agent run
+            ended, so an open drawer reloads at once). Operator session only. A
+            server without /api/events answers 404 and the loop falls back to the
+            notices stream alone; one without the `runs` topic answers 400 and
+            the loop drops it."""
             backoff = 2.0
-            path = "/api/events?topics=notices,security"
+            path = "/api/events?topics=notices,security,runs"
             while is_session(self.token) and self.client is not None:
                 try:
                     async with self.client.stream("GET", path) as r:
@@ -8872,6 +9420,9 @@ def build_tui(base: str, token: str, **kw):
                             return
                         if r.status_code == 404 and path.startswith("/api/events"):
                             path = "/api/agents/notices/stream"
+                            continue
+                        if r.status_code == 400 and path.endswith(",runs"):
+                            path = path[:-len(",runs")]
                             continue
                         if r.status_code < 400:
                             backoff = 2.0
@@ -8881,6 +9432,8 @@ def build_tui(base: str, token: str, **kw):
                                     ev = ev.get("event") or {}
                                 if ev.get("type") == "agent_run_done":
                                     self._agent_notice(ev)
+                                elif ev.get("type") == "run_end":
+                                    self.run_ended()
                                 elif ev.get("type") == "storage_warning":
                                     self.push_notice("◆ " + _short(ev.get("summary") or "storage is filling up", 300), "warn")
                                 elif ev.get("type") == "security_event":
@@ -9384,7 +9937,7 @@ def build_tui(base: str, token: str, **kw):
             home_hints.update(
                 f"{who}{where}\n\n"
                 "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
-                "[$text]←[/]           [$text-muted]agents: what is running, on an empty "
+                "[$text]← →[/]         [$text-muted]agents · sessions, on an empty "
                 "prompt[/]\n"
                 "[$text]ctrl+j[/]      [$text-muted]new line (enter sends)[/]\n"
                 "[$text]shift+tab[/]   [$text-muted]permissions: yolo → auto → ask · "
@@ -10855,6 +11408,8 @@ def build_tui(base: str, token: str, **kw):
         def action_escape(self) -> None:
             if self.leader:
                 self._leader_off()
+            elif self.drawer is not None:
+                self.close_drawer()
             elif self.popup_open():
                 self.hide_popup()
             elif self.paged:
@@ -10881,10 +11436,50 @@ def build_tui(base: str, token: str, **kw):
         def action_new(self) -> None:
             self.dispatch("/new")
 
+        # -- the drawers: ← agents, → sessions (the Drawer widget has the rest) ---------------
+
+        def drawer_feed(self) -> AgentsFeed:
+            """The data both drawers read, kept between opens (the second one paints at once)."""
+            if self._drawer_feed is None:
+                self._drawer_feed = AgentsFeed(self.api, self.convs)
+            return self._drawer_feed
+
         def action_agents_view(self) -> None:
-            """← on an empty prompt (a drawer in the next step): /agents, in the focused
-            panel."""
-            self.run_worker(self.open_page("agents"), group="nav")
+            """← on an empty prompt: the agents drawer."""
+            self.open_drawer("agents")
+
+        def action_sessions_view(self) -> None:
+            """→ on an empty prompt: the sessions drawer."""
+            self.open_drawer("sessions")
+
+        def open_drawer(self, kind: str) -> None:
+            """Slide the drawer in over the panels (the one open gives way); the keyboard is
+            its, the focused panel and what it runs are not touched."""
+            if isinstance(self.screen, ModalScreen):
+                return
+            if self.drawer is not None and self.drawer.kind == kind:
+                return
+            self.close_drawer()
+            self.drawer = drawer = Drawer(kind)
+            self.panel_area.mount(drawer)
+
+        def close_drawer(self) -> None:
+            drawer, self.drawer = self.drawer, None
+            if drawer is None:
+                return
+            drawer.closing = True
+            if not isinstance(self.screen, ModalScreen):
+                # the keyboard goes back to the focused panel BEFORE the removal: a removed
+                # focused widget has Textual pick the next one, which can be another panel's
+                host = self.focused_panel.host
+                host._focus(host.current)
+            drawer.remove()
+
+        def run_ended(self) -> None:
+            """A chat turn or agent run ended somewhere (the shared stream's run_end): an
+            open drawer reloads now, so the run leaves RUNNING at once."""
+            if self.drawer is not None:
+                self.drawer.run_ended()
 
         async def open_node(self, node: dict, panel=None, new_panel: bool = False) -> None:
             """Open an agents-page node here: its transcript, and if it is
@@ -11162,8 +11757,9 @@ def build_tui(base: str, token: str, **kw):
                                    "next step)"),
                          ("shift+tab", "permissions: yolo (the default: agents run in the VM "
                                        "without asking) → auto → ask; /permissions picks"),
-                         ("← (empty prompt)", "agents page: everything working, "
-                                              "across projects"),
+                         ("← → (empty prompt)", "drawers: ← agents, → sessions (running and "
+                                                "needs-you first); ↑↓ enter · p new panel · "
+                                                "esc"),
                          ("/ (on a page)", "type a /page command on the prompt line: "
                                            "/vms images, /security calls; esc goes back, "
                                            "/work or ctrl+c to the chat"),
@@ -12129,14 +12725,25 @@ def build_tui(base: str, token: str, **kw):
             self.panel_area.relayout()
             self.refresh_chrome()
 
+        def panel_refusal(self) -> str | None:
+            """Why a new panel can't open now (four already, or no room at this size), or None."""
+            if len(self.chats) >= MAX_PANELS:
+                return f"{MAX_PANELS} panels is the most — ctrl+x 0 closes the focused one"
+            w, h = self.panel_area.size
+            rect = tree_rects(self.panel_tree, w, h).get(self.focus_no, (0, 0, w, h))
+            if panel_split_dir(rect[2], rect[3]) is None:
+                return (f"no room for another panel at this size ({rect[2]}x{rect[3]}): "
+                        "enlarge the window, or ctrl+x z zooms the one you are in")
+            return None
+
         async def new_panel(self, name: str | None = None, arg: str = ""):
             """Split the focused panel along its longer side: a new panel with a NEW chat (in
             the same project, as the same agent, on the same model), taking the focus, with
             the page `name` over the chat when given. Returns its ChatState, or None when
             refused (four panels already, or no room at this size; a one-line note says so)."""
-            if len(self.chats) >= MAX_PANELS:
-                await self.say(f"{MAX_PANELS} panels is the most — ctrl+x 0 closes the focused one",
-                               "warn")
+            why = self.panel_refusal()
+            if why:
+                await self.say(why, "warn")
                 return None
             area = self.panel_area
             here = self.focus_no
@@ -12144,11 +12751,6 @@ def build_tui(base: str, token: str, **kw):
             w, h = area.size
             rect = tree_rects(self.panel_tree, w, h).get(here, (0, 0, w, h))
             cut = panel_split_dir(rect[2], rect[3])
-            if cut is None:
-                await self.say(f"no room for another panel at this size ({rect[2]}x{rect[3]}): "
-                               "enlarge the window, or ctrl+x z zooms the one you are in",
-                               "warn")
-                return None
             number = next(n for n in range(1, MAX_PANELS + 1) if n not in self.chats)
             chat = self.focused_chat.settings_for_new(number)
             self.chats[number] = chat
@@ -12264,6 +12866,7 @@ def build_tui(base: str, token: str, **kw):
     # for the next steps (drawers, the panels' pages) and for tests
     Jav3App.Page, Jav3App.PageHost, Jav3App.ChatPage = Page, PageHost, ChatPage
     Jav3App.Panel, Jav3App.PanelArea = Panel, PanelArea
+    Jav3App.Drawer, Jav3App.DrawerRow = Drawer, DrawerRow
     return Jav3App(base, token, **kw)
 
 

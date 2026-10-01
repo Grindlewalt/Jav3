@@ -50,7 +50,7 @@ PAGES = {
     "vms": ([], "type:/vms|key:enter|waitfor:RAM 1280|waitfor:shared kvm"),
     "security": ([], "type:/security|key:enter|waitfor:Secrets 2|waitfor:registry.npmjs.org"),
     "help": ([], "type:/help|key:enter|waitfor:Keys"),
-    # the left-arrow screen: the first root selected (and unfolded), then an agent inside
+    # the /agents page: the first root selected (and unfolded), then an agent inside
     # a plan (its failed item), then the Finished view
     # pages by slash command with an argument (jav3.2 P0): the page, its tab, its chrome
     "security-calls": ([], "type:/security calls|wait:0.4|key:enter|waitfor:CALL@10|wait:0.5"),
@@ -67,18 +67,34 @@ PAGES = {
                      "|type:/new-panel|wait:0.4|key:enter|waitfor:3 chat (new)@10|wait:0.5"),
     "panels-page": ([], "type:/vms panel|wait:0.4|key:enter|waitfor:RAM 1280@10"
                         "|waitfor:shared kvm|wait:0.5"),
-    "agents": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|wait:0.3"),
-    "agents-in": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|key:right|key:down*2"
-                      "|wait:0.3"),
-    "agents-finished": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|key:down*3"
-                            "|key:enter|waitfor:homelab|wait:0.3"),
+    "agents": ([], "type:/agents|key:enter|waitfor:Agents@10|waitfor:morning quotes|wait:0.3"),
+    "agents-in": ([], "type:/agents|key:enter|waitfor:Agents@10|waitfor:morning quotes|key:right"
+                      "|key:down*2|wait:0.3"),
+    "agents-finished": ([], "type:/agents|key:enter|waitfor:Agents@10|waitfor:morning quotes"
+                            "|key:down*3|key:enter|waitfor:homelab|wait:0.3"),
+    # the drawers (jav3.2 P2): ← agents, → sessions, over a chat (#4, the green row) and
+    # over two panels; the agents drawer once more with the bar on a plan's failed item
+    "drawer-agents": (["-r", "4"], "waitfor:Not checked|key:left|waitfor:RUNNING@10"
+                                   "|waitfor:Fetch the|wait:0.4"),
+    "drawer-agents-in": (["-r", "4"], "waitfor:Not checked|key:left|waitfor:RUNNING@10"
+                                      "|waitfor:Fetch the|key:up*2|key:right|key:down*2"
+                                      "|wait:0.4"),
+    "drawer-sessions": (["-r", "4"], "waitfor:Not checked|key:right|waitfor:RECENT@10"
+                                     "|waitfor:Draft the release|wait:0.4"),
+    "drawer-agents-2": (["-r", "4"], "waitfor:Not checked|type:/new-panel|wait:0.4|key:enter"
+                                     "|waitfor:2 chat (new)@10|wait:0.3|key:left"
+                                     "|waitfor:RUNNING@10|waitfor:Fetch the|wait:0.4"),
+    "drawer-sessions-2": (["-r", "4"], "waitfor:Not checked|type:/new-panel|wait:0.4|key:enter"
+                                       "|waitfor:2 chat (new)@10|wait:0.3|key:right"
+                                       "|waitfor:RECENT@10|waitfor:Draft the release|wait:0.4"),
 }
 
 
 def normalise(text: str) -> str:
     """What differs per run, at the same width: the fake's free port (the home page shows
     it), the throw-away config dir (/help shows where themes go) and the spinner frame."""
-    text = re.sub(r"127\.0\.0\.1:\d{5}", "127.0.0.1:NNNNN", text)
+    # (a drawer or a panel's edge can cut the port short: as many Ns as digits are shown)
+    text = re.sub(r"(127\.0\.0\.1:)(\d{1,5})", lambda m: m.group(1) + "N" * len(m.group(2)), text)
     # a spinner frame depends on when the screen was read: every frame reads as the first
     text = re.sub("[\u2800-\u28ff]", "\u280b", text)
     return re.sub(r"/tmp/tui-\w{8}/", "/tmp/tui-XXXXXXXX/", text)
@@ -88,7 +104,8 @@ def normalise(text: str) -> str:
 # was). /help is left out: its backdrop is the page behind it, dimmed on purpose.
 CONTRAST_PAGES = ("home", "chat", "vms", "security", "agents", "agents-in", "agents-finished",
                   "security-calls", "vms-images", "agents-cmd-finished", "stub", "panels-2",
-                  "panels-3", "panels-page")
+                  "panels-3", "panels-page", "drawer-agents", "drawer-agents-in", "drawer-sessions",
+                  "drawer-agents-2", "drawer-sessions-2")
 
 
 def capture(page: str, cols: int, rows: int) -> tuple[str, list[str]]:

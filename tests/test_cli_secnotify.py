@@ -123,7 +123,7 @@ async def test_only_what_the_server_pings_reaches_the_sidebar(cfg):
         assert await _until(pilot, lambda: any("egress_anomaly" in t for _, _, t in app.notices))
         await _until(pilot, lambda: any("Coder" in t for _, _, t in app.notices))
         # one stream for both topics
-        assert ("GET", "/api/events", "topics=notices,security") in seen
+        assert ("GET", "/api/events", "topics=notices,security,runs") in seen
         assert not any(p == "/api/agents/notices/stream" for _, p, _ in seen)
         kinds = {t.split(" ")[0]: k for _, k, t in app.notices if "Coder" not in t}
         assert kinds == {"egress_anomaly": "error", "package_requested": "warn"}

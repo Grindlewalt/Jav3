@@ -1070,7 +1070,7 @@ async def test_tui_agents_screen(cfg):
     app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport(), resume=20)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _until(pilot, lambda: app.cid == 20)
-        await pilot.press("left")                        # empty prompt: open the screen
+        app.dispatch("/agents")                          # the full page (← is the drawer)
         assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
         scr = app.top
         assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 1)
@@ -1114,7 +1114,7 @@ async def test_tui_agents_screen(cfg):
         names = [tv.tname for tv in app.query("ToolView")]
         assert names == ["run_code", "read_file"]
         # back in: now 11 is the green one, inside its orchestrator; ← twice leaves
-        await pilot.press("left")
+        app.dispatch("/agents")
         assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
         scr = app.top
         assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 1)
@@ -1160,7 +1160,7 @@ async def test_tui_agents_screen_needs_you_and_finished_grouping(cfg):
     app = jav3.build_tui("http://h:1", "jvd_x", transport=httpx.MockTransport(handler))
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
-        await pilot.press("left")
+        app.dispatch("/agents")
         assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
         scr = app.top
         assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 3)
@@ -1659,7 +1659,7 @@ async def test_tui_finished_by_time_is_newest_first_and_footer_without_model(cfg
         await app.open_conversation(7)
         await pilot.pause(0.1)
         assert _text(app.query("Footer").last()).rstrip() == "▣ Jav3"   # no dangling ·
-        app.action_agents_view()
+        app.dispatch("/agents")
         assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
         scr = app.top
         from datetime import datetime, timedelta, timezone
@@ -2893,7 +2893,8 @@ async def test_agents_reload_after_close_does_not_crash():
     srv = _LiveServer(nodes=nodes, messages={})
     app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
     async with app.run_test(size=(140, 40)) as pilot:
-        await pilot.press("left")
+        await pilot.pause(0.3)
+        app.dispatch("/agents")
         assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
         scr = app.top
         await pilot.press("escape")

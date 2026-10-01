@@ -30,15 +30,19 @@ colours) and **no shift+arrows** (every key route needs a plain key).
   everything with the panel number in its title. At 80x24 three panels fit (two side by side, one
   split across); a split that would leave a tile under 28x8 says so and refuses.
 - What to try, per page (a build is fine if each of these does what it says):
-  - Home: `/help` lists the keys; `←` on the empty prompt opens agents; `ctrl+p` palette.
+  - Home: `/help` lists the keys; `ctrl+p` palette. `←` / `→` on the empty prompt open the agents /
+    sessions DRAWER over the panels (with text in the prompt they move the cursor): up/down move,
+    `enter` opens the entry in the focused panel, `p` in a new panel (not at four), `esc` closes;
+    in the agents drawer `→` / `←` go into / out of an entry's sub-agents (`←` at the top, `→` in
+    the sessions drawer, closes). Each lists what runs or needs you first, then a few recent.
   - Chat: send a message; tool rows show on one line, enter on a picked row opens it; `ctrl+c`
     stops the turn; `shift+tab` cycles permissions; `ctrl+x l` lists chats, `jav3 -c` resumes.
   - `/vms`: tabs Boxes, Images, Catalogue (`tab`, `1`-`3`); up/down picks a box, `enter` shows its
     history, `s` `r` `x` `d` `c` ask before they act; the rows refresh by themselves.
   - `/security`: Queue first (y approve, n deny, a acknowledge); `1`-`8` jump to Network, Logs,
     Secrets, Persistent, Profiles, Rules, Calls. `esc` goes back.
-  - `/agents` (or `←` on the empty prompt): up/down, `→` into an entry's agents, `←` out, `enter`
-    opens its chat; `/agents finished` opens the second view.
+  - `/agents` (the full page; `←` is its drawer): up/down, `→` into an entry's agents, `←` out,
+    `enter` opens its chat; `/agents finished` opens the second view.
 - Look for: text you cannot read (grey on grey), a line cut mid-word at 80 columns, a key that
   needs shift, and a page that shows "no ..." when the server has data.
 
@@ -48,9 +52,9 @@ Drive the real client in ONE command (pexpect pty + pyte screen, TERM=xterm-256c
 COLORTERM). Steps are joined with `|` (`\|` is a literal pipe):
 
     scripts/tui_drive.py --fake "type:/vms|key:enter|waitfor:RAM@10|show"
-    scripts/tui_drive.py --fake --size 80x24 "key:left|waitfor:Agents|show|bg:"
+    scripts/tui_drive.py --fake --size 80x24 "key:left|waitfor:RUNNING|show|bg:"   # the agents drawer
     scripts/tui_drive.py --fake --args "-r 4" "waitfor:Not checked|fg:|snap:/tmp/chat.txt"
-    scripts/tui_drive.py --server pi "key:left|wait:2|show"     # the Pi, your saved login
+    scripts/tui_drive.py --server pi "key:right|wait:2|show"    # the Pi: the sessions drawer
 
 Use `<venv>/bin/python scripts/tui_drive.py` (needs pexpect, pyte, textual, httpx). Steps: `type:`
 `paste:` `key:` (`enter escape tab shift+tab up down left right home end pageup pagedown backspace
@@ -75,7 +79,8 @@ Against the Pi: read-only. Open pages; do not send chat messages or press approv
 ### Snapshots
 
 `tests/test_tui_snapshots.py` opens home, a finished chat, /vms, /security, /help, the agents page
-(by `←` and by `/agents finished`), `/security calls`, `/vms images`, a web-only page (`/memory`), two and three
+(`/agents`, `/agents finished`), the two drawers (`drawer-agents`, `drawer-sessions`, and `-2` with two
+panels behind), `/security calls`, `/vms images`, a web-only page (`/memory`), two and three
 chat panels and a page in a new panel (`panels-2`, `panels-3`, `panels-page`)
 at 80x24 and 160x48 and compares `tests/tui_snapshots/<page>-<cols>x<rows>.txt` (the text, then fg/bg runs per
 row as xterm-256 indexes). It also fails on any truecolor code. ~25 s alone, ~8 s under `-n 6`.
