@@ -66,10 +66,41 @@ async def adopt_artifact_store(slug: str) -> bool:
     return True
 
 
+async def trashed_pin() -> tuple[str, str] | None:
+    """(slug, name) of the project this chat is pinned to when that project is in
+    Recently deleted, else None. The turn setup drops a trashed pin, so the chat
+    would look project-less to its tools; this is how they tell the difference."""
+    from ... import runtime
+    cid = runtime.conversation_id.get()
+    if not cid:
+        return None
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT p.slug, p.name FROM conversations c "
+                "JOIN projects p ON p.id = c.project_id "
+                "WHERE c.id = ? AND p.deleted_at IS NOT NULL", (cid,)) as cur:
+            r = await cur.fetchone()
+    finally:
+        await db.close()
+    return (r["slug"], r["name"]) if r else None
+
+
+def trashed_pin_message(slug: str, name: str) -> str:
+    return (f"this chat's project '{slug}' ({name}) is in the trash (Recently deleted), "
+            "so it has no workspace. Do not switch to another project on your own. "
+            "Tell the operator the project was deleted and offer to restore it "
+            "(Projects > Recently deleted > Restore) or to move this chat to another "
+            "project.")
+
+
 async def require_project() -> str:
     from ... import runtime
     slug = await active_slug()
     if not slug:
+        trashed = await trashed_pin()
+        if trashed:
+            raise NoProjectError(trashed_pin_message(*trashed))
         # project-less chat: file tools land in the conversation's hidden
         # artifact store instead of erroring
         artifact = runtime.artifact_slug.get()

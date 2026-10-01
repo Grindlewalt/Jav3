@@ -1,3 +1,4 @@
+from backend.agent.tools.toolctx import trashed_pin, trashed_pin_message
 from backend.db import get_db, set_state
 from backend.memory import read_project_md
 
@@ -13,8 +14,20 @@ async def run(slug: str) -> str:
             rows = await cur.fetchall()
         valid = {r["slug"]: r["name"] for r in rows}
         if slug not in valid:
+            async with db.execute(
+                    "SELECT 1 FROM projects WHERE slug = ? AND deleted_at IS NOT NULL",
+                    (slug,)) as cur:
+                if await cur.fetchone():
+                    return (f"error: project '{slug}' is in the trash (Recently deleted). Tell the "
+                            "operator and offer to restore it (Projects > Recently "
+                            "deleted > Restore); it cannot be loaded until then.")
             options = ", ".join(valid) or "(none exist)"
             return f"error: no project '{slug}'. Available: {options}"
+        # a chat pinned to a project that was trashed: the model picking another
+        # project to carry on in is not its call (WEBA-06: it chose a look-alike)
+        trashed = await trashed_pin()
+        if trashed:
+            return "error: " + trashed_pin_message(*trashed) + " Nothing was changed."
         cid = runtime.conversation_id.get()
         if cid:
             async with db.execute(
