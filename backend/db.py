@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_peer_trust(db)
         await _migrate_narration(db)
         await _migrate_turnstats(db)
         await _migrate_calls(db)
@@ -819,6 +820,17 @@ async def _migrate_narration(db: aiosqlite.Connection) -> None:
         " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_turn_narration_conv "
                      "ON turn_narration(conversation_id, id)")
+
+
+async def _migrate_peer_trust(db: aiosqlite.Connection) -> None:
+    """agent_messages.trusted_peer: 1 = sent by a clean item of the same plan run
+    (or its head), so delivering it does not taint the receiver (agentmsg.send).
+    Rows from before, and every other kind of peer, are 0: they taint."""
+    async with db.execute("PRAGMA table_info(agent_messages)") as cur:
+        cols = [r["name"] for r in await cur.fetchall()]
+    if "trusted_peer" not in cols:
+        await db.execute("ALTER TABLE agent_messages ADD COLUMN "
+                         "trusted_peer INTEGER NOT NULL DEFAULT 0")
 
 
 async def _migrate_turnstats(db: aiosqlite.Connection) -> None:

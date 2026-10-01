@@ -1,5 +1,6 @@
 """Deleting a schedule is a soft delete: it stops running now, comes back on
 request, and the bin empties itself past its window."""
+import asyncio
 import datetime as dt
 
 import httpx
@@ -96,6 +97,7 @@ async def test_deleted_schedule_stops_running(client, monkeypatch):
     await _make_due(doomed)
     await client.delete(f"/api/schedules/{doomed}")
     await schedules._tick()
+    await asyncio.gather(*schedules._running.values())     # runs are tasks of their own
     assert ran == [live]
 
 

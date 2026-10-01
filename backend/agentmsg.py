@@ -81,6 +81,12 @@ def _agent_exists(slug: str) -> bool:
     return (settings.agents_dir / slug / "AGENT.md").is_file()
 
 
+# A message that arrived with to="?" (a roster lookup), by sender conversation:
+# the follow-up send takes it from here. In-process and small on purpose.
+_held: dict[int, str] = {}
+_HELD_MAX = 256
+
+
 def _norm(to: str) -> str:
     """`#42`, `@builder`, `Builder` and `builder` are all the same address —
     the model writes what it sees in the roster or in a message header."""
@@ -300,8 +306,8 @@ def format_plan_siblings(items: list[dict]) -> str:
     if not items:
         return ""
     lines = ["\nItems in this plan — address any by item:<id> (a running item "
-             "gets it now; a todo item that has not started keeps it as a note "
-             "it reads when it begins, so do not wait for a reply):"]
+             "gets it now; a todo, blocked or failed item keeps it as a note "
+             "it reads when it next runs, so do not wait for a reply):"]
     for it in items:
         lines.append(f"  item:{it['item_id']} [{it['status']}] {it['title']}")
     return "\n".join(lines)
@@ -324,14 +330,37 @@ async def _sender(db, cid: int) -> dict:
     return {"conversation_id": cid, "label": label, "project": r.get("project")}
 
 
-async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
+async def _plan_run_peers(sender_cid: int, to_cid: int | None) -> bool:
+    """Is this a message inside one plan run: from a live item of a plan, or the
+    plan's own head (a stall nudge), to a live item of the same plan?"""
+    if to_cid is None:
+        return False
+    from . import plan as plan_mod
+    to_item = plan_mod.live_item(to_cid)
+    if to_item is None:
+        return False
+    from_item = plan_mod.live_item(sender_cid)
+    if from_item is not None:
+        return from_item["project"] == to_item["project"]
+    plan = plan_mod.load(to_item["project"])
+    return bool(plan) and plan.get("root_id") == sender_cid
+
+
+async def send(db, *, sender_cid: int, to: str, body: str,
+               sender_tainted: bool = True) -> dict:
     """Persist one addressed message. Returns a dict the tool renders.
+
+    `sender_tainted` is whether the sending turn has read untrusted content (the
+    broker's ledger; send_tool passes it). It defaults to True: a caller that
+    does not know is a plain peer and the receiver is tainted on delivery.
 
     Never blocks on the recipient: one INSERT and we are done, whether or not
     anybody is listening. `sender_cid` comes from the caller's turn envelope —
     this function must never be handed an identity from tool arguments."""
     addr = _norm(to)
     body = (body or "").strip()
+    if not body:
+        body = _held.get(sender_cid, "")        # the follow-up to a `?` that carried one
     if not body:
         return {"error": "send_message needs a message body."}
     if len(body) > MAX_BODY:
@@ -347,6 +376,16 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
                 + format_plan_siblings(await _plan_siblings(db, sender_cid)))
 
     if not addr or addr in ("?", "list", "who"):
+        if body:
+            # a message that came with a lookup was dropped (PLANS-12): keep it, so
+            # the follow-up needs only the address
+            if len(_held) >= _HELD_MAX:
+                _held.pop(next(iter(_held)))
+            _held[sender_cid] = body
+            return {"error": "Your message was not sent: an address of \"?\" only lists "
+                             "who you can reach. It is kept: call send_message again with "
+                             "the address in `to` and an empty message (or the same "
+                             "message). " + await roster()}
         return {"error": "send_message needs an address. " + await roster()}
 
     to_cid, to_slug = None, None
@@ -358,12 +397,13 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
         me = await _sender(db, sender_cid)
         to_cid = plan_mod.resolve_item(me["project"], item_id)
         if to_cid is None:
-            why = await plan_mod.leave_note(me["project"], item_id, sender=me["label"],
-                                            body=body)
+            why, status = await plan_mod.leave_note(me["project"], item_id,
+                                                    sender=me["label"], body=body)
             if why:
                 return {"error": f"cannot reach item {item_id!r}: {why}. " + await roster()}
+            _held.pop(sender_cid, None)
             return {"id": None, "to_cid": None, "to_slug": None, "running": [],
-                    "note_for": item_id}
+                    "note_for": item_id, "note_status": status}
         if to_cid == sender_cid:
             return {"error": "that item is this turn — you cannot message yourself."}
         addr = str(to_cid)
@@ -388,11 +428,24 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
                              f"no running turn answers to it. " + await roster()}
 
     me = await _sender(db, sender_cid)
+    _held.pop(sender_cid, None)
+    # PLANS-11: a peer's words taint the receiver on delivery (fetch_tool), because
+    # the peer may have relayed web text. Between the items of ONE plan run that
+    # was too blunt: three of seven item journal entries in one run came out
+    # [unverified], and results already reach dependants through plan_report
+    # summaries untainted. What taints is untrusted INPUT, so the message carries
+    # the sender's own state: a sender whose turn has read nothing untrusted (and
+    # the plan head's fixed-text nudge) passes no taint; a sender that has read
+    # the web still does, so taint cannot be laundered through a sibling. Only a
+    # live item of the same plan, from a live item or its head, qualifies: a chat,
+    # an agent of another project, or a slug-addressed message is a plain peer,
+    # and an unknown sender state (the default) fails closed.
+    trusted = int(not sender_tainted and await _plan_run_peers(sender_cid, to_cid))
     cur = await db.execute(
         "INSERT INTO agent_messages (from_conversation_id, from_label, "
-        "to_conversation_id, to_agent_slug, project_slug, body) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (sender_cid, me["label"], to_cid, to_slug, me["project"], body))
+        "to_conversation_id, to_agent_slug, project_slug, body, trusted_peer) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sender_cid, me["label"], to_cid, to_slug, me["project"], body, trusted))
     await db.commit()
 
     if to_cid is not None:
@@ -459,7 +512,7 @@ async def claim(db, *, cid: int, agent_slug: str | None,
         "  AND (from_operator = 1 OR ? = 0) "
         "  ORDER BY id LIMIT ?) "
         "RETURNING id, from_conversation_id, from_label, project_slug, body, "
-        "          created_at, from_operator",
+        "          created_at, from_operator, trusted_peer",
         (cid, cid, agent_slug, 1 if operator_only else 0, limit)) as cur:
         # RETURNING order is unspecified; delivery order is send order
         rows = sorted((dict(r) for r in await cur.fetchall()), key=lambda r: r["id"])
@@ -555,15 +608,21 @@ async def send_tool(to: str, message: str) -> str:
                 "promises not to do. Say what you need to say in your reply "
                 "instead, or start a normal chat to coordinate.")
     db = await get_db()
+    from .agent import budget as budget_mod
+    from .vm import broker
     try:
-        out = await send(db, sender_cid=cid, to=to, body=message)
+        out = await send(db, sender_cid=cid, to=to, body=message,
+                         sender_tainted=broker.op_tainted(budget_mod.active_op_id.get()))
     finally:
         await db.close()
     if out.get("error"):
         return "error: " + out["error"]
     if out.get("note_for"):
-        return (f"kept as a note for item {out['note_for']} — it has not started yet, "
-                "so it will read this in its brief when it does. Do not wait for a "
+        st = out.get("note_status")
+        when = ("it has not started yet, so it will read this in its brief when it does"
+                if st in (None, "todo") else
+                f"it is {st} now, so it will read this in its brief if it is run again")
+        return (f"kept as a note for item {out['note_for']} — {when}. Do not wait for a "
                 "reply this turn.")
     if out["to_cid"] is not None:
         target = f"conversation {out['to_cid']}"
@@ -612,13 +671,14 @@ async def fetch_tool() -> str:
     ops = [r for r in rows if r.get("from_operator")]
     if ops:
         _announce_operator(cid, ops)
-    if len(ops) < len(rows):
+    if any(not r.get("from_operator") and not r.get("trusted_peer") for r in rows):
         # a peer's words are peer-authored content, and a peer may itself have
         # been reading the web. Stamping the turn untrusted keeps a memory_write
         # made after this from being promoted as established fact — the same
         # laundering guard web_read already gets, applied only when a PEER's
         # message actually arrived (see broker.mark_tainted). The operator's
-        # own words are not untrusted input.
+        # own words are not untrusted input, and neither is a message from a
+        # clean item of the same plan run (`trusted_peer`, set in send).
         from .agent import budget as budget_mod
         from .vm import broker
         broker.mark_tainted(budget_mod.active_op_id.get(), "peer")

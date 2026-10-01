@@ -10,7 +10,7 @@ parameters:
   properties:
     to:
       type: string
-      description: An agent slug (e.g. "builder"), a conversation id (e.g. "42"), or a plan item (e.g. "item:i3"). Pass "?" to list the turns running right now.
+      description: An agent slug (e.g. "builder"), a conversation id (e.g. "42"), or a plan item (e.g. "item:i3"). Pass "?" to list the turns running right now (a message sent with "?" is not sent but kept, so call again with the address and an empty message).
     message:
       type: string
       description: What to say. Self-contained — the recipient has NOT seen your conversation.
@@ -23,8 +23,8 @@ above". State plainly whether you need an answer or are just informing.
 Addressing: a slug reaches whichever turn is running as that agent; a
 conversation id reaches one exact thread, and every message you receive carries
 its sender's id, so that is how you reply; item:<id> reaches the agent working
-that checklist item of the current plan (if it has not started, the message is
-kept as a note in its brief). Send to "?" to see who is live.
+that checklist item of the current plan (if it has not started, or is blocked or
+failed, the message is kept as a note in its brief for its next run). Send to "?" to see who is live.
 
 This does not block and there is no way to wait for a reply inside this turn.
 If the recipient is idle the message waits in its inbox and is delivered when

@@ -278,6 +278,23 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
                              "usage": b.summary()})
         return {"topic": topic, "job_id": job_id, "root_id": head,
                 "doc_path": doc_path, "doc_status": doc_status}
+    except asyncio.CancelledError:
+        # a stop: the head still ends with a rollup, or the chat reload shows
+        # the job running for good (ROBUST-22)
+        if head is not None:
+            try:
+                db = await get_db()
+                try:
+                    await db.execute("UPDATE conversations SET rollup = ? WHERE id = ? "
+                                     "AND rollup IS NULL", ("stopped", head))
+                    await db.commit()
+                finally:
+                    await db.close()
+            except Exception:  # noqa: BLE001 — best-effort at teardown
+                pass
+        bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
+                             "doc_path": None, "rollup": "stopped", "usage": b.summary()})
+        raise
     except Exception as e:
         # without a terminal event every SSE tail on this job hangs forever and
         # the Runs list shows it "running" until restart — fail LOUDLY

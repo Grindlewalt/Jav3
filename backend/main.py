@@ -16,6 +16,7 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, browser_api,
                reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
                vm_api, voice_api, workspace, secrets)
 from . import procview_api   # WP4
+from . import orchestrator   # settle_lost_heads at boot
 from . import storage_watch   # captured-context storage check
 from .agent.tools.registry import compile_registry
 from .auth import require_user
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI):
     ensure_memory_seeds()
     await providers.migrate_legacy_override()   # the old nav switch slot -> default
     await schedules.ensure_default_schedules()
+    await orchestrator.settle_lost_heads()      # heads a restart cut off
     compile_registry()
     _warn_missing_guest_devices()
     await _announce_setup_link()
