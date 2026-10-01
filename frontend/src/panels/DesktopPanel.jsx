@@ -4,7 +4,7 @@ import { subscribe } from '../events.js'
 import { listBoxes } from '../boxes/api/vms.js'
 import EmptyState from '../components/EmptyState.jsx'
 import {
-  SANDBOX_WARNING, WATCH_LABEL, candidateBoxes, displayWsUrl, eventTouches, panelMode,
+  SANDBOX_WARNING, WATCH_LABEL, boxOptionLabel, candidateBoxes, displayWsUrl, eventTouches, panelMode,
   pickBox, startBlocked, startLabel, viewersText,
 } from '../desktop/logic.js'
 
@@ -132,7 +132,7 @@ export default function DesktopPanel({ slug, state, setState }) {
         {options.length > 1 && (
           <select value={boxId || ''} onChange={(e) => choose(e.target.value)}
                   aria-label="box to watch">
-            {options.map((b) => <option key={b.id} value={b.id}>{b.id}</option>)}
+            {options.map((b) => <option key={b.id} value={b.id}>{boxOptionLabel(b)}</option>)}
           </select>
         )}
         {mode === 'ended' && <button className="ghost" onClick={() => { setConn('idle'); refresh() }}>reconnect</button>}

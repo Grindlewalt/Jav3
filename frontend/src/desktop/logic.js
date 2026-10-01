@@ -10,12 +10,14 @@ export const WATCH_LABEL = 'watching · view only'
 export const SANDBOX_WARNING =
   'this is the sandbox, not your computer: don’t sign in to anything here, the agent can read this screen'
 
-// the boxes a desktop can be on: KVM project boxes and the shared box
-// (Docker has no desktop image; the server says so for a box picked by id)
+// the boxes a window can look at: project boxes and the shared box. A Docker
+// one is listed too, so that picking it says plainly that Docker has no desktop
+// (the server's words) instead of looking like the project has no box.
 export function candidateBoxes(rows) {
-  return (rows || []).filter((b) => b && b.runtime !== 'docker'
-    && (b.kind === 'project' || b.kind === 'shared'))
+  return (rows || []).filter((b) => b && (b.kind === 'project' || b.kind === 'shared'))
 }
+
+export const boxOptionLabel = (b) => (b.runtime === 'docker' ? `${b.id} (docker)` : b.id)
 
 // Which box the window watches: the one the operator chose (kept in the
 // window's state), else the project's own p-<slug>, else a box that serves the

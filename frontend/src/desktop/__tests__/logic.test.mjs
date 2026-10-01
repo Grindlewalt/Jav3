@@ -1,7 +1,7 @@
 // node frontend/src/desktop/__tests__/logic.test.mjs
 import assert from 'node:assert/strict'
 import {
-  SANDBOX_WARNING, WATCH_LABEL, candidateBoxes, displayWsUrl, eventTouches, needLine,
+  SANDBOX_WARNING, WATCH_LABEL, boxOptionLabel, candidateBoxes, displayWsUrl, eventTouches, needLine,
   panelMode, pickBox, startBlocked, startLabel, viewersText,
 } from '../logic.js'
 
@@ -13,8 +13,10 @@ const rows = [
   { id: 's-svc', kind: 'service', runtime: 'kvm', projects: [] },
 ]
 
-// docker, service and builder boxes are not offered
-assert.deepEqual(candidateBoxes(rows).map((b) => b.id), ['shared', 'p-game', 'p-both'])
+// service and builder boxes are not offered; a Docker project box is, so it can say why not
+assert.deepEqual(candidateBoxes(rows).map((b) => b.id), ['shared', 'p-game', 'p-web', 'p-both'])
+assert.equal(boxOptionLabel(rows[2]), 'p-web (docker)')
+assert.equal(boxOptionLabel(rows[1]), 'p-game')
 assert.deepEqual(candidateBoxes(null), [])
 
 // the operator's choice wins, then the project's own box, then one that serves it
@@ -22,7 +24,7 @@ assert.equal(pickBox(rows, 'game', null).id, 'p-game')
 assert.equal(pickBox(rows, 'game', 'shared').id, 'shared')
 assert.equal(pickBox(rows, 'game', 'p-gone').id, 'p-game')      // a stale choice falls back
 assert.equal(pickBox(rows, 'game2', null).id, 'p-both')
-assert.equal(pickBox(rows, 'web', null), null)                  // docker only: nothing to watch
+assert.equal(pickBox(rows, 'web', null).id, 'p-web')            // docker: picked, and refused by name
 assert.equal(pickBox(rows, 'nobody', null), null)
 assert.equal(pickBox(rows, null, null), null)
 
