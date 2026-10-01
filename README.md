@@ -95,6 +95,16 @@ prints it again.
 `scripts/install.sh` is re-runnable, so it is the upgrade path too. It works on
 Debian/Ubuntu, Arch and Fedora, on arm64 and x86_64.
 
+**The terminal client** (`jav3`), on any computer that can reach the server:
+`curl -fsSL http://<host>:<port>/cli/install.sh | sh`, then `jav3` (it asks for
+the line from Settings → Add computer). It updates itself from that server: at
+start, at most once an hour, it compares its file with `GET /cli/version` and
+says "a newer jav3 is on the server: /update"; `/update` in the TUI, or
+`jav3 update` in a shell, replaces just the client file (the old one stays as
+`jav3.bak-<date>`), then restart it. It leaves its launcher and venv alone,
+refuses when run from a git checkout (`git pull` there), and if the new client
+needs newer libraries it prints the installer line instead.
+
 **A second instance beside another** (a test install, or a box where port 8000
 or `~/.config/jarvis` is already taken):
 `bash scripts/install.sh --name test --port 8780 --state-dir ~/jav3-test-state`
@@ -164,7 +174,8 @@ JARVIS_CSRF_ALLOWED_HOSTS='["<public-host>"]'
 
 Update loop: `git pull -q && (cd frontend && npm run build) && systemctl --user
 restart jarvis` — check for in-flight agent work first, or use
-`scripts/deploy_pi.sh`, which does that guarding for you.
+`scripts/deploy_pi.sh`, which does that guarding for you. Terminal clients pick
+up a new `clients/jav3cli/jav3` from `/cli/jav3` on their own (see Install).
 
 ## Dev
 
