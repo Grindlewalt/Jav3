@@ -1274,6 +1274,61 @@ def agent_sections(tr: AgentTree, mode: str = "active",
     return [(f"⌂ {p or 'no project'}", rs) for p, rs in tr.groups]
 
 
+# --- the drawers: what ← (agents) and → (sessions) list --------------------------------------
+#
+# jav3.2 P2. Two drawers slide over the panels from the edges of the screen: ← from an
+# empty prompt lists the agents (what runs and what waits on the operator on top, a few
+# finished ones under), → lists the chats (active and needs-input on top). They read the
+# same data the /agents page and the /sessions picker read; these are the pure parts.
+
+DRAWER_RECENT = 6           # finished agents under RUNNING
+DRAWER_SESSIONS = 14        # idle chats under ACTIVE / NEEDS INPUT
+
+
+def drawer_width(total: int) -> int:
+    """Columns of a drawer in an area `total` wide: 40, less in a narrow terminal so a
+    panel stays visible beside it (36 of 80)."""
+    return max(24, min(40, total * 45 // 100))
+
+
+DRAWER_PICKABLE = ("root", "kid", "chat", "link")      # the rows a drawer's bar can stand on
+
+
+def agent_drawer_rows(active: AgentTree, finished: AgentTree,
+                      recent: int = DRAWER_RECENT) -> tuple[list[dict], list[dict]]:
+    """(RUNNING roots, RECENT roots): every root with something running or waiting on the
+    operator (the /agents page's Active, then Needs you; a needs-input root is marked
+    by its row), then the `recent` roots that finished last, newest first."""
+    run = [r for _, rs in agent_sections(active, "active") for r in rs]
+    when = lambda r: str(r.get("ended_at") or r.get("started_at") or "")  # noqa: E731
+    done = [r for r in sorted(finished.roots, key=when, reverse=True)
+            if r["id"] not in active.by_id][:recent]
+    return run, done
+
+
+def session_sections(convs: list[dict], tr: AgentTree, asks=(),
+                     limit: int = DRAWER_SESSIONS) -> list[tuple[str, list[tuple]]]:
+    """The → drawer: [(name, [(conversation, state, why)])]. ACTIVE: a chat whose turn
+    runs; NEEDS INPUT: one waiting on the operator (the server's agents tree says so, or
+    a panel here holds an ask: `asks` is those chat ids); then the rest, newest first.
+    `tr` is the active agents tree, `convs` /api/conversations (newest first)."""
+    active, needs, rest = [], [], []
+    for cv in convs:
+        cid = cv.get("id")
+        nd = tr.by_id.get(cid)
+        why = tr.needs(cid) if nd else None
+        if not why and cid in asks:
+            why = "waiting on your answer"
+        if why:
+            needs.append((cv, "needs", why))
+        elif cv.get("running") or (nd and tr.root_status(cid) == "running"):
+            active.append((cv, "running", None))
+        else:
+            rest.append((cv, "idle", None))
+    out = [("ACTIVE", active), ("NEEDS INPUT", needs), ("RECENT", rest[:limit])]
+    return [(name, rows) for name, rows in out if rows]
+
+
 class AgentsFeed:
     """Everything running on the server, whoever started it: the data behind the
     ← screen (and whatever else lists agents, e.g. a drawer), with no widgets.
@@ -1338,10 +1393,12 @@ class AgentsFeed:
             extra, _ = running_chat_nodes(nodes, running, self.convs)
         return extra
 
-    async def refresh(self, full_finished: bool = False) -> None:
+    async def refresh(self, full_finished: bool = False, recent: int | None = None) -> None:
         """Reload the active view. The finished side is fetched in full when
         `full_finished` (the Finished view is open) or on the first load; a root
-        leaving the active set only re-counts it, so the Finished row stays right."""
+        leaving the active set only re-counts it, so the Finished row stays right.
+        `recent` (a drawer): instead, the newest `recent` finished roots on every
+        reload (0: none, only the active side), never the whole page."""
         try:
             (nodes, _), running = await asyncio.gather(self._nodes("active"), self._running())
             if nodes and not any("status" in n for n in nodes):
@@ -1359,7 +1416,14 @@ class AgentsFeed:
                 nodes = nodes + await self._name_chats(nodes, running)
                 self.trees["active"] = AgentTree(nodes)
                 left = before - {r["id"] for r in self.trees["active"].roots}
-                if full_finished or self.total_finished is None:
+                if recent is not None:
+                    if recent:
+                        fnodes, total = await self._nodes("finished", limit=recent)
+                        self.trees["finished"] = AgentTree(fnodes)
+                        self.total_finished = (total if isinstance(total, int)
+                                               else len(self.trees["finished"].roots))
+                        self.finished_full = False
+                elif full_finished or self.total_finished is None:
                     fnodes, total = await self._nodes("finished")
                     self.trees["finished"] = AgentTree(fnodes)
                     self.total_finished = (total if isinstance(total, int)
