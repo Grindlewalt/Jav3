@@ -23,6 +23,10 @@ CGROUP_ROOT = "/sys/fs/cgroup"
 WORK = "jav3-work"
 RESERVE_MB = 192          # what the kernel, the run-turn server and vsock keep, at least
 RESERVE_PCT = 20          # ...or this share of the guest's RAM, whichever is more
+# Why the reserve is not smaller (measured 2026-10-01, 1280 MB desktop box, guest 1218 MB,
+# cap 975): an idle guest uses 148 MB (kernel, run-turn and shell servers), and with the
+# cgroup at its cap MemAvailable bottomed out at 69-85 MB. The 243 MB reserve is that 148
+# plus about 95 of slack; there is nothing to hand back to the cap.
 MIN_LIMIT_MB = 128
 OOM_ADJ = b"1000"         # /proc/<pid>/oom_score_adj: raising it never needs a privilege
 
