@@ -1141,3 +1141,170 @@ def test_read_page_worst_case_keeps_the_more_line_and_changed_under_the_cap():
     assert out.endswith("changed: yes")
     assert re.search(r"… \(text cut, [\d,]+ more characters\)", out)
     assert out.index("[f0:1]") < out.index("page text (written by the site")
+
+
+# --- trusted clicks (extension 0.6.0): how the result says it went -------------------------
+
+def test_trusted_click_version_matches_the_shipped_extension():
+    assert browser.TRUSTED_CLICK_VERSION == "0.6.0"
+    assert browser.CURRENT_EXT_VERSION == browser.TRUSTED_CLICK_VERSION
+    assert not browser.ext_outdated("0.6.0", browser.TRUSTED_CLICK_VERSION)
+    assert browser.ext_outdated("0.5.1", browser.TRUSTED_CLICK_VERSION)
+    assert browser.ext_outdated(None, browser.TRUSTED_CLICK_VERSION)
+    # an older build still clicks (with script events): the floor for a click stays 0.5.0
+    assert browser.needs_version("click", {"tab": 7, "element": "f1:1"}) == "0.5.0"
+    assert browser.needs_version("click", {"tab": 7, "x": 1, "y": 1}) == "0.5.0"
+
+
+def test_via_line_names_the_path_and_the_reason():
+    def line(**kw):
+        return browser._via_line(kw)
+    assert line(via="trusted", debug_ms=412) == (
+        "\ninput: real mouse input through chrome.debugger; Chrome's debugging bar showed for 0.4 s")
+    assert line(via="trusted") == "\ninput: real mouse input through chrome.debugger"
+    assert line() == "" and line(via="mystery") == ""            # an old build says nothing: nothing claimed
+    s = line(via="synthetic", via_why="no_permission")
+    assert s.startswith("\ninput: script events, not real mouse input (the extension has no debugger "
+                        "permission; reload it in chrome://extensions")
+    assert "ignores them" in s
+    assert "switched off in the extension's Options" in line(via="synthetic", via_why="disabled")
+    assert "(Another debugger is attached)" in line(
+        via="synthetic", via_why="attach_failed", via_detail="Another debugger is attached")
+    assert "(no detail)" in line(via="synthetic", via_why="input_failed")
+    assert "(something new)" in line(via="synthetic", via_why="something new")   # unknown codes pass through, bounded
+    assert len(line(via="synthetic", via_why="x" * 500)) < 400
+
+
+def test_popup_line_lists_the_new_tab_and_a_popup_that_closed_again():
+    out = browser._opened_line({"opened": [{"tab": 12, "url": "https://accounts.google.com/o/oauth2/auth"},
+                                           {"tab": 13, "url": "https://x.example/", "closed": True}]})
+    assert "tab 12 https://accounts.google.com/o/oauth2/auth" in out
+    assert "tab 13 https://x.example/ (closed again)" in out
+    assert "browser_list_tabs" in out and "UNTRUSTED" in out
+    assert browser._opened_line({"opened": []}) == ""
+
+
+async def _click_with(env, monkeypatch, ext_v, answer_data, **args):
+    """One browser_click through the tool with a fake extension at `ext_v` that
+    answers the click with `answer_data` (merged into the default reply)."""
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"], v=ext_v).start()
+
+    async def answer(m):
+        res = await FakeExt.default_answer(m)
+        if m["verb"] == "screenshot_tab":
+            res["data"]["scale"] = {"x": 2, "y": 2}      # 800x600 image of a 400x300 page
+        else:
+            res["data"]["sig"] = "0000aaaa:3"            # the page never changes
+        if m["verb"] == "click":
+            if isinstance(answer_data, dict) and answer_data.get("__reply__"):
+                return answer_data["__reply__"]
+            res["data"].update(answer_data)
+        return res
+    fe.answer = answer
+    try:
+        await _grant(env, act=True)
+        tok = budget_mod.active_op_id.set("op-tc")
+        try:
+            await _tool("browser_read_page")(tab=7)
+            if "x" in args:
+                await _tool("browser_screenshot_tab")(tab=7)
+            return await _tool("browser_click")(tab=7, **args), fe
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-tc")
+    finally:
+        await fe.stop()
+
+
+async def test_click_result_says_real_input_was_used(env, monkeypatch):
+    r, fe = await _click_with(env, monkeypatch, "0.6.0", {
+        "text": 'clicked div "Sign in with Google"', "via": "trusted", "debug_ms": 530,
+        "opened": [{"tab": 12, "url": "https://accounts.google.com/o/oauth2/auth"}]}, element="f1:1")
+    lines = r.splitlines()
+    assert lines[0].startswith("tab 7:")
+    assert 'clicked div "Sign in with Google"' in r
+    assert "input: real mouse input through chrome.debugger; Chrome's debugging bar showed for 0.5 s" in r
+    assert "tab 12 https://accounts.google.com/o/oauth2/auth" in r
+    assert r.rstrip().endswith("changed: no")                     # honest: this tab did not change
+    assert "note:" not in r                                       # a current extension needs no reload note
+    assert fe.reqs[-1]["params"] == {"tab": 7, "element": "f1:1"}
+
+
+async def test_click_result_says_script_events_and_why(env, monkeypatch):
+    r, _ = await _click_with(env, monkeypatch, "0.6.0", {
+        "text": "clicked div", "via": "synthetic", "via_why": "attach_failed",
+        "via_detail": "Another debugger is already attached to the tab with id: 7."}, element="f1:1")
+    assert "input: script events, not real mouse input (Chrome would not let the extension attach its " \
+           "debugger to the tab (Another debugger is already attached" in r
+    assert r.rstrip().endswith("changed: no")
+    assert "note:" not in r        # 0.6.0 is the current build: the fix is not a reload
+
+
+async def test_an_older_extension_that_changed_nothing_gets_the_reload_note(env, monkeypatch):
+    r, _ = await _click_with(env, monkeypatch, "0.5.1", {"text": 'clicked div "Sign in"'}, element="f1:1")
+    assert "\ninput:" not in r                                     # it reports no path: nothing is claimed
+    lines = r.rstrip().splitlines()
+    assert lines[-1] == "changed: no"
+    assert lines[-2].startswith("note: the jav3-browser extension in that browser is 0.5.1, so this "
+                                "click was a script event")
+    assert "0.6.0 sends real mouse input" in lines[-2] and "chrome://extensions" in lines[-2]
+
+
+async def test_the_reload_note_is_left_out_when_the_click_changed_the_page(env, monkeypatch):
+    monkeypatch.setattr(browser, "ACTIONS_PER_S", 100)
+    fe = await FakeExt(env["btok"], v="0.5.1").start()
+    state = {"sig": "1111aaaa:3"}
+
+    async def answer(m):
+        res = await FakeExt.default_answer(m)
+        if m["verb"] != "screenshot_tab":
+            res["data"]["sig"] = state["sig"]
+        return res
+    fe.answer = answer
+    try:
+        tok = budget_mod.active_op_id.set("op-tc2")
+        try:
+            await _grant(env, act=True)
+            await _tool("browser_read_page")(tab=7)
+            state["sig"] = "2222bbbb:3"
+            r = await _tool("browser_click")(tab=7, element="f0:1")
+            assert r.rstrip().endswith("changed: yes") and "note:" not in r
+            r = await _tool("browser_click")(tab=7, element="f0:1")      # same signature again: nothing changed
+            assert r.rstrip().endswith("changed: no") and "note:" in r
+        finally:
+            budget_mod.active_op_id.reset(tok)
+            broker._tainted.discard("op-tc2")
+    finally:
+        await fe.stop()
+
+
+async def test_coordinate_click_into_an_iframe_with_an_old_extension_says_to_reload(env, monkeypatch):
+    refusal = {"ok": False, "code": "frame", "err": "that point is inside an iframe; browser_read_page and "
+                                                      "click its element by id (f1:…)"}
+    r, _ = await _click_with(env, monkeypatch, "0.5.1", {"__reply__": refusal}, x=100, y=50)
+    assert r.startswith("error: that point is inside an iframe, and the jav3-browser extension in that "
+                        "browser is 0.5.1; 0.6.0 clicks there with real mouse input — reload it in "
+                        "chrome://extensions")
+    assert 'element="f1:…"' in r
+
+
+async def test_coordinate_click_into_an_iframe_without_real_input_names_the_reason(env, monkeypatch):
+    refusal = {"ok": False, "code": "frame", "via": "synthetic", "via_why": "no_permission",
+               "err": "that point is inside an iframe, which a script-made click cannot reach"}
+    r, _ = await _click_with(env, monkeypatch, "0.6.0", {"__reply__": refusal}, x=100, y=50)
+    assert r.startswith("error: that point is inside an iframe, and a script click cannot go in by "
+                        "coordinates; real mouse input is not available now: the extension has no "
+                        "debugger permission")
+    assert "chrome://extensions" in r and 'element="f1:…"' in r
+    assert "0.5" not in r
+
+
+async def test_coordinate_click_in_an_iframe_reaches_the_extension_with_the_converted_point(env, monkeypatch):
+    r, fe = await _click_with(env, monkeypatch, "0.6.0", {
+        "text": 'clicked div "Sign in with Google" (inside the iframe from accounts.google.com)',
+        "via": "trusted", "debug_ms": 400}, x=100, y=50)
+    assert not r.startswith("error"), r
+    assert fe.reqs[-1]["params"]["x"] == 50.0 and fe.reqs[-1]["params"]["y"] == 25.0   # 800x600 shot of a 400x300 page
+    assert "inside the iframe from accounts.google.com" in r
+    assert "input: real mouse input through chrome.debugger" in r
