@@ -593,6 +593,8 @@ class SeededServer(FakeServer):
             feed.put({"topic": "security", "event": {"type": "stream_open"}}
                      if path == "/api/events" else {"type": "stream_open"})
             return logged(self._sse(feed))          # stays open, says nothing more
+        if path == "/api/notifications/dnd" and method == "GET":    # off: the status row stays plain
+            return logged(J({"on": False, "since": None, "until": None, "break_critical": True}))
         # -- /security
         if path == "/api/egress/pending":
             return logged(J({"pending": [
