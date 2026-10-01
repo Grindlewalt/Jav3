@@ -69,7 +69,7 @@ async def boot(srv, **kw):
 
 async def open_agents(pilot, app):
     await pilot.pause(0.3)
-    await pilot.press("left")
+    app.dispatch("/agents")        # (← is the drawer now: tests/test_cli_drawers.py)
     assert await wait_for(lambda: type(app.top).__name__ == "AgentsPage")
     scr = app.top
     assert await wait_for(lambda: scr.loaded)
@@ -255,7 +255,7 @@ async def test_the_chat_you_came_from_is_selected_and_marked():
     async with app.run_test(size=(140, 40)) as pilot:
         assert await wait_for(lambda: app.cid == 41)
         await pilot.pause(0.3)
-        app.action_agents_view()
+        app.dispatch("/agents")
         assert await wait_for(lambda: type(app.top).__name__ == "AgentsPage")
         scr = app.top
         assert await wait_for(lambda: scr.loaded and titles(scr, "refactor billing"))

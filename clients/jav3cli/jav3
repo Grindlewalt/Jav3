@@ -1299,8 +1299,10 @@ def agent_drawer_rows(active: AgentTree, finished: AgentTree,
     """(RUNNING roots, RECENT roots): every root with something running or waiting on the
     operator (the /agents page's Active, then Needs you; a needs-input root is marked
     by its row), then the `recent` roots that finished last, newest first."""
-    run = [r for _, rs in agent_sections(active, "active") for r in rs]
     when = lambda r: str(r.get("ended_at") or r.get("started_at") or "")  # noqa: E731
+    run = [r for _, rs in agent_sections(active, "active") for r in rs]
+    run.sort(key=lambda r: str(r.get("started_at") or ""), reverse=True)   # not by project
+    run.sort(key=lambda r: active.root_status(r["id"]) != "running")       # needs-you after
     done = [r for r in sorted(finished.roots, key=when, reverse=True)
             if r["id"] not in active.by_id][:recent]
     return run, done
@@ -8984,10 +8986,13 @@ def build_tui(base: str, token: str, **kw):
             """The server's one multiplexed stream, topics `notices` (agent runs
             the operator started finishing elsewhere) and `security` (alerts,
             of which only those the server marks `ping` notify) ->
-            notifications. Operator session only. A server without /api/events
-            answers 404 and the loop falls back to the notices stream alone."""
+            notifications, and `runs` (only its `run_end`: a chat turn or agent run
+            ended, so an open drawer reloads at once). Operator session only. A
+            server without /api/events answers 404 and the loop falls back to the
+            notices stream alone; one without the `runs` topic answers 400 and
+            the loop drops it."""
             backoff = 2.0
-            path = "/api/events?topics=notices,security"
+            path = "/api/events?topics=notices,security,runs"
             while is_session(self.token) and self.client is not None:
                 try:
                     async with self.client.stream("GET", path) as r:
@@ -8995,6 +9000,9 @@ def build_tui(base: str, token: str, **kw):
                             return
                         if r.status_code == 404 and path.startswith("/api/events"):
                             path = "/api/agents/notices/stream"
+                            continue
+                        if r.status_code == 400 and path.endswith(",runs"):
+                            path = path[:-len(",runs")]
                             continue
                         if r.status_code < 400:
                             backoff = 2.0
@@ -9004,6 +9012,8 @@ def build_tui(base: str, token: str, **kw):
                                     ev = ev.get("event") or {}
                                 if ev.get("type") == "agent_run_done":
                                     self._agent_notice(ev)
+                                elif ev.get("type") == "run_end":
+                                    self.run_ended()
                                 elif ev.get("type") == "storage_warning":
                                     self.push_notice("◆ " + _short(ev.get("summary") or "storage is filling up", 300), "warn")
                                 elif ev.get("type") == "security_event":
@@ -11038,10 +11048,10 @@ def build_tui(base: str, token: str, **kw):
             if drawer is None:
                 return
             drawer.closing = True
-            drawer.remove()
             if refocus and not isinstance(self.screen, ModalScreen):
                 host = self.focused_panel.host
-                host._focus(host.current)
+                host._focus(host.current)      # before the removal: it would pick a new focus itself
+            drawer.remove()
 
         def run_ended(self) -> None:
             """A chat turn or agent run ended somewhere (the shared stream's run_end): an

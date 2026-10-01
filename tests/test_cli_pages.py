@@ -205,12 +205,12 @@ async def test_opening_a_page_that_is_showing_gives_it_the_new_args_in_place():
         assert await _until(pilot, lambda: ag.mode == "active")
 
 
-async def test_work_is_the_chat_and_left_on_an_empty_prompt_opens_the_agents_page():
+async def test_work_is_the_chat_and_the_agents_command_opens_the_page():
     pytest.importorskip("textual")
     app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause(0.3)
-        await pilot.press("left")
+        app.dispatch("/agents")                    # (← on an empty prompt is the drawer now)
         assert await _until(pilot, lambda: _name(app) == "AgentsPage")
         await _go(pilot, app, "/vms", "VmsPage")
         app.dispatch("/work")
