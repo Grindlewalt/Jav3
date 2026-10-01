@@ -3094,12 +3094,14 @@ def build_tui(base: str, token: str, **kw):
                 event.prevent_default()
                 app.chat.log.focus()
                 return
-            if app.drawer is not None and key in ("left", "right", "escape"):
-                # the prompt has the keyboard (a click): ← → esc put the drawer away
-                event.stop()
-                event.prevent_default()
-                app.close_drawer(refocus=False)
-                return
+            if app.drawer is not None:
+                # the prompt has the keyboard (a click on it): the drawer is done; ← → esc
+                # only put it away, any other key goes on to be typed
+                app.close_drawer()
+                if key in ("left", "right", "escape"):
+                    event.stop()
+                    event.prevent_default()
+                    return
             if key in ("left", "right") and not self.text:
                 event.stop()
                 event.prevent_default()
@@ -5234,7 +5236,7 @@ def build_tui(base: str, token: str, **kw):
         NOTE_S = 4.0            # how long a refusal stays under the list
 
         def __init__(self, kind: str) -> None:
-            super().__init__(id="drawer")
+            super().__init__()               # no id: one may still be leaving while the next arrives
             self.kind = kind
             self.feed = None
             self.specs: list[tuple] = []          # (kind, key, build, node, spins) in order
@@ -5583,7 +5585,7 @@ def build_tui(base: str, token: str, **kw):
             self.app.close_drawer()
 
         def action_command_line(self) -> None:
-            self.app.close_drawer(refocus=False)
+            self.app.close_drawer()
             self.app.command_line("/")
 
         def _selected(self):
@@ -11040,18 +11042,20 @@ def build_tui(base: str, token: str, **kw):
                 return
             if self.drawer is not None and self.drawer.kind == kind:
                 return
-            self.close_drawer(refocus=False)
+            self.close_drawer()
             self.drawer = drawer = Drawer(kind)
             self.panel_area.mount(drawer)
 
-        def close_drawer(self, refocus: bool = True) -> None:
+        def close_drawer(self) -> None:
             drawer, self.drawer = self.drawer, None
             if drawer is None:
                 return
             drawer.closing = True
-            if refocus and not isinstance(self.screen, ModalScreen):
+            if not isinstance(self.screen, ModalScreen):
+                # the keyboard goes back to the focused panel BEFORE the removal: a removed
+                # focused widget has Textual pick the next one, which can be another panel's
                 host = self.focused_panel.host
-                host._focus(host.current)      # before the removal: it would pick a new focus itself
+                host._focus(host.current)
             drawer.remove()
 
         def run_ended(self) -> None:

@@ -72,17 +72,21 @@ PAGES = {
                       "|key:down*2|wait:0.3"),
     "agents-finished": ([], "type:/agents|key:enter|waitfor:Agents@10|waitfor:morning quotes"
                             "|key:down*3|key:enter|waitfor:homelab|wait:0.3"),
-    # the drawers (jav3.2 P2): ← agents, → sessions, over one panel and over two; the agents
-    # drawer once more with the selection on a sub-agent that waits on the operator
-    "drawer-agents": ([], "key:left|waitfor:RUNNING@10|waitfor:Fetch the|wait:0.4"),
-    "drawer-agents-in": ([], "key:left|waitfor:RUNNING@10|waitfor:Fetch the|key:right"
-                             "|key:down|wait:0.4"),
-    "drawer-sessions": ([], "key:right|waitfor:RECENT@10|waitfor:Draft the release|wait:0.4"),
-    "drawer-agents-2": ([], "type:/new-panel|wait:0.4|key:enter|waitfor:2 chat (new)@10|wait:0.3"
-                            "|key:left|waitfor:RUNNING@10|waitfor:Fetch the|wait:0.4"),
-    "drawer-sessions-2": ([], "type:/new-panel|wait:0.4|key:enter|waitfor:2 chat (new)@10"
-                              "|wait:0.3|key:right|waitfor:RECENT@10|waitfor:Draft the release"
-                              "|wait:0.4"),
+    # the drawers (jav3.2 P2): ← agents, → sessions, over a chat (#4, the green row) and
+    # over two panels; the agents drawer once more with the bar on a plan's failed item
+    "drawer-agents": (["-r", "4"], "waitfor:Not checked|key:left|waitfor:RUNNING@10"
+                                   "|waitfor:Fetch the|wait:0.4"),
+    "drawer-agents-in": (["-r", "4"], "waitfor:Not checked|key:left|waitfor:RUNNING@10"
+                                      "|waitfor:Fetch the|key:up*2|key:right|key:down*2"
+                                      "|wait:0.4"),
+    "drawer-sessions": (["-r", "4"], "waitfor:Not checked|key:right|waitfor:RECENT@10"
+                                     "|waitfor:Draft the release|wait:0.4"),
+    "drawer-agents-2": (["-r", "4"], "waitfor:Not checked|type:/new-panel|wait:0.4|key:enter"
+                                     "|waitfor:2 chat (new)@10|wait:0.3|key:left"
+                                     "|waitfor:RUNNING@10|waitfor:Fetch the|wait:0.4"),
+    "drawer-sessions-2": (["-r", "4"], "waitfor:Not checked|type:/new-panel|wait:0.4|key:enter"
+                                       "|waitfor:2 chat (new)@10|wait:0.3|key:right"
+                                       "|waitfor:RECENT@10|waitfor:Draft the release|wait:0.4"),
 }
 
 

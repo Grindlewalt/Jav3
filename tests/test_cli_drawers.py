@@ -487,3 +487,27 @@ async def test_the_sessions_drawer_orders_active_and_needs_input_before_the_rest
         text = {key: t for k, key, t in drawer_rows(app) if k == "chat"}
         assert "!" in text[11] and "!" not in text[9] and "web turn" in text[41]
         assert sel(app) == 41                                       # the first one to look at
+
+
+async def test_switching_drawers_and_slash_leave_the_focused_panel_alone():
+    srv, app = make(seeded())
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await split(pilot, app, 2)
+        app.focus_panel(1)
+        await ready(pilot, app, "agents")
+        app.action_sessions_view()                 # one drawer at a time: this one gives way
+        assert await wait_for(lambda: app.drawer is not None and app.drawer.kind == "sessions"
+                              and app.drawer.rows and app.focused is app.drawer)
+        assert app.focus_no == 1 and len(app.query("Drawer")) == 1
+        await pilot.press("slash")                 # on to a command: the prompt, "/" typed
+        assert await wait_for(lambda: app.drawer is None and app.editor.text == "/")
+        assert app.focused is app.editor and app.focus_no == 1
+        app.editor.text = ""
+        # a click on the prompt (the editor has the keyboard again): a key closes the drawer
+        await ready(pilot, app, "agents")
+        app.editor.focus()
+        await pilot.pause(0.1)
+        await pilot.press("x")
+        assert await wait_for(lambda: app.drawer is None and app.editor.text == "x")
+        assert app.focus_no == 1
