@@ -174,3 +174,101 @@ async def test_incognito_failure_leaves_nothing(client, monkeypatch):
             assert (await cur.fetchone())["n"] == 0
     finally:
         await db.close()
+
+
+# --- PLANS-14: a 402 is one plain message, one critical bell, a "paused" flag
+
+
+BODY_402 = '{"error":{"message":"Insufficient Balance","type":"unknown_error"}}'
+
+
+@pytest.fixture
+def broke(monkeypatch):
+    """A DeepSeek that answers 402, counting the calls it saw."""
+    from backend import provider_balance
+    from backend.agent import adapters
+    provider_balance.reset()
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(402, text=BODY_402)
+    monkeypatch.setattr(adapters, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    yield calls
+    provider_balance.reset()
+
+
+async def _complete(gateway):
+    async for _ in gateway.complete([{"role": "user", "content": "hi"}]):
+        pass
+
+
+async def _bells():
+    db = await get_db()
+    try:
+        async with db.execute("SELECT kind, severity, summary, count FROM security_events "
+                              "WHERE kind = 'provider_balance'") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def test_402_becomes_one_plain_error_and_one_bell(client, broke):
+    from backend import provider_balance
+    from backend.agent.adapters import ModelError
+    from backend.agent.model import ModelGateway
+    gw = ModelGateway(api_key="sk-test-0123456789")
+    for _ in range(3):                           # three refused calls, one outage
+        with pytest.raises(ModelError) as e:
+            await _complete(gw)
+        assert e.value.status == 402
+        assert "DeepSeek balance is empty" in str(e.value)
+        assert "platform.deepseek.com" in str(e.value)
+        assert "unknown_error" not in str(e.value)         # the raw JSON does not leak through
+    await asyncio.sleep(0.1)
+    bells = await _bells()
+    assert len(bells) == 1 and bells[0]["severity"] == "critical"
+    assert bells[0]["summary"] == str(e.value)
+    assert provider_balance.is_empty() and provider_balance.reason() == str(e.value)
+
+
+async def test_balance_comes_back_when_a_call_succeeds(client, broke, monkeypatch):
+    from backend import provider_balance
+    from backend.agent import adapters
+    from backend.agent.adapters import ModelError
+    from backend.agent.model import ModelGateway
+    gw = ModelGateway(api_key="sk-test-0123456789")
+    with pytest.raises(ModelError):
+        await _complete(gw)
+    assert provider_balance.is_empty("deepseek")
+    sse_ok = ('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+              'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+              "data: [DONE]\n\n")
+    monkeypatch.setattr(adapters, "HTTP_TRANSPORT", httpx.MockTransport(
+        lambda r: httpx.Response(200, text=sse_ok,
+                                 headers={"content-type": "text/event-stream"})))
+    await _complete(gw)
+    assert not provider_balance.is_empty()
+
+
+async def test_chat_final_is_the_plain_message(client, broke, monkeypatch):
+    from backend import provider_balance
+    from backend.agent.adapters import ModelError
+    from backend.agent.model import ModelGateway
+    with pytest.raises(ModelError) as e:
+        await _complete(ModelGateway(api_key="sk-test-0123456789"))
+    wrapped = f"(guest loop error: ModelError: ModelError: {e.value})"
+
+    async def turn(cid, system_prompt, history, tools=None, **kw):
+        yield {"type": "final", "content": wrapped}
+    monkeypatch.setattr(chat_mod, "guest_turn", turn)
+    r = await client.post("/api/chat", json={"message": "hello"})
+    assert r.status_code == 200
+    for _ in range(100):
+        if not chat_mod._active_turns:
+            break
+        await asyncio.sleep(0.05)
+    rows = await _roles(client, 1)
+    assert rows[-1][1] == str(e.value)
+    assert "guest loop error" not in rows[-1][1]
+    assert provider_balance.tidy("something else") == "something else"

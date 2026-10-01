@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, providers, runtime
+from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, provider_balance, providers, runtime
 from .agent import budget
 from .agent.model import model
 from . import narration
@@ -971,7 +971,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             async for event in source:
                 await rec.feed(event)
                 if event["type"] == "final":
-                    final_content = event["content"]
+                    # a 402 reaches here as the guest loop's wrapped error text;
+                    # the operator reads the plain "balance is empty" line
+                    final_content = provider_balance.tidy(event["content"])
                     continue
                 # the guest loop runs with on_tool_call=None, so persist tool_calls
                 # here by pairing each tool (args) event with its tool_result.
