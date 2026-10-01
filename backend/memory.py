@@ -690,7 +690,7 @@ call simply had a bad argument, fix the call instead.
   and lists its parameters, with the closest name to what you typed. Identity
   is never an argument (from / sender / conversation_id are always refused).
 - todo_update works without a loaded project: the list then lasts for this
-  turn only (the result says so). With a project it is the project's todo.md.
+  turn only (the result says so). With a project it lives in the project's .todo.md (a todo.md you write stays yours).
 - After a screenshot, the image arrives as its own message after the tool
   result; system notes are attached to the tool result, not the image.
 - send_message addressing: a plan-item sibling is `item:<id>` (e.g.

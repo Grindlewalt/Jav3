@@ -533,7 +533,7 @@ async def _run_interactive(conversation_id: int, agent: dict, task: str,
         bus.publish(chan, {"type": "final", "content": INTERRUPTED_MARKER})
         raise
     except Exception as e:  # noqa: BLE001 — surface to the GUI, don't 500 mid-stream
-        error = str(e)
+        error = str(e) or repr(e)              # a timeout's str() is "" (ROBUST-09)
         bus.publish(chan, {"type": "error", "message": error})
     finally:
         # the notice fires however the run ended — an agent that died after the
@@ -567,7 +567,10 @@ def _tail(conversation_id: int, q) -> StreamingResponse:
     async def event_stream():
         try:
             while True:
-                ev = await q.get()
+                ev = await feeds.next_or_none(q)
+                if ev is None:                 # quiet: keep proxies from cutting it
+                    yield feeds.KEEPALIVE_FRAME
+                    continue
                 if ev.get("type") == "job_end":
                     break
                 yield sse(ev)
