@@ -38,6 +38,7 @@ import tui_drive as td  # noqa: E402
 SNAPS = HERE / "tui_snapshots"
 UPDATE = bool(os.environ.get("TUI_SNAPSHOT_UPDATE"))
 SIZES = [(80, 24), (160, 48)]
+CLI = os.environ.get("JAV3_CLIENT") or str(td.CLI)     # same switch as cli_fake.load_client
 
 # page -> (client args, steps). Each waits for what proves the page loaded.
 PAGES = {
@@ -58,9 +59,15 @@ def normalise(text: str) -> str:
     return re.sub(r"/tmp/tui-\w{8}/", "/tmp/tui-XXXXXXXX/", text)
 
 
-def capture(page: str, cols: int, rows: int) -> str:
+# Text under 3:1 contrast in the 256-colour palette is a bug (grey on the teal selection once
+# was). /help is left out: its backdrop is the page behind it, dimmed on purpose.
+CONTRAST_PAGES = ("home", "chat", "vms", "security")
+
+
+def capture(page: str, cols: int, rows: int) -> tuple[str, list[str]]:
+    """(the snapshot text, the unreadable runs)"""
     args, steps = PAGES[page]
-    with td.driven(fake=True, size=(cols, rows), client_args=args, timeout=15) as d:
+    with td.driven(fake=True, size=(cols, rows), client_args=args, timeout=15, cli=CLI) as d:
         assert d.sess.alive, "the client exited at startup"
         d.run.run(td.split_steps(steps))
         assert not d.run.failed, d.run.screen_dump("a wait timed out")
@@ -69,7 +76,9 @@ def capture(page: str, cols: int, rows: int) -> str:
         tc = td.truecolor_cells(d.screen)
         assert not tc, f"truecolor reached a 256-colour terminal: {tc[:5]}"
         assert not d.fake.misses, f"the client asked for routes the fake lacks: {d.fake.misses}"
-    return normalise(shot)
+        low = [f"row {y} cols {x0}-{x1} {td.style_str(st)} ({td.style_contrast(st):.1f}:1) {txt.strip()[:40]!r}"
+               for y, x0, x1, txt, st in td.text_runs(d.screen) if td.style_contrast(st) < td.LOW]
+    return normalise(shot), low
 
 
 pytestmark = pytest.mark.filterwarnings("ignore:This process .* is multi-threaded")
@@ -78,27 +87,29 @@ pytestmark = pytest.mark.filterwarnings("ignore:This process .* is multi-threade
 @pytest.mark.parametrize("cols,rows", SIZES, ids=[f"{c}x{r}" for c, r in SIZES])
 @pytest.mark.parametrize("page", list(PAGES))
 def test_page_snapshot(page, cols, rows):
-    shot = capture(page, cols, rows)
+    shot, low = capture(page, cols, rows)
     path = SNAPS / f"{page}-{cols}x{rows}.txt"
     if UPDATE:
         SNAPS.mkdir(exist_ok=True)
         path.write_text(shot)
-        return
-    if not path.exists():
+    elif not path.exists():
         pytest.fail(f"no snapshot {path.name}: run with TUI_SNAPSHOT_UPDATE=1 to create it")
-    want = path.read_text()
+    want = path.read_text() if not UPDATE else shot
     if shot != want:
         diff = "\n".join(difflib.unified_diff(
             want.splitlines(), shot.splitlines(), f"{path.name} (committed)", "now",
             lineterm="", n=2))
         pytest.fail(f"{page} at {cols}x{rows} changed; TUI_SNAPSHOT_UPDATE=1 accepts it:\n"
                     + diff[:6000])
+    if page in CONTRAST_PAGES and low:
+        pytest.fail(f"{page} at {cols}x{rows}: text under 3:1 contrast in 256 colours:\n"
+                    + "\n".join(low[:12]))
 
 
 def test_a_live_turn_streams_to_the_end():
     """Not a snapshot: typing a message runs the fake's scripted turn through the real
     stream reader, and the tool rows and the reply land on screen."""
-    with td.driven(fake=True, size=(100, 30), timeout=15) as d:
+    with td.driven(fake=True, size=(100, 30), timeout=15, cli=CLI) as d:
         d.run.run(td.split_steps("type:hello|key:enter|waitfor:Not checked@15|wait:0.3"))
         assert not d.run.failed, d.run.screen_dump("stuck")
         text = d.sess.text()

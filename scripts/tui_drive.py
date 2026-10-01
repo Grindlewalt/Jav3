@@ -615,6 +615,19 @@ def secrets_in(config_home: str | None) -> list[str]:
     return [str(d[k]) for k in ("token", "session") if isinstance(d.get(k), str) and len(d[k]) > 8]
 
 
+def saved_address(config_home: str | None) -> str:
+    base = config_home or os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    try:
+        return str(json.loads((Path(base) / "jav3" / "credentials.json").read_text()).get("address") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def same_server(a: str, b: str) -> bool:
+    norm = lambda x: re.sub(r"^https?://", "", x.strip().lower()).rstrip("/")  # noqa: E731
+    return bool(a and b) and norm(a) == norm(b)
+
+
 def child_main(argv: list[str]) -> None:
     """`tui_drive.py --_client CLI ARGS...`: run the client as a script with time.time()
     pinned (TUI_DRIVE_CLOCK), so ages, dates and the home page's rotating example do not
@@ -693,8 +706,15 @@ def driven(*, fake: bool = False, server: str | None = None, size=(120, 40),
                 {"address": http.address, "session": "fake-session", "username": tf.USERNAME}))
             clock_default, tz = tf.CLOCK, tz or tf.ZONE
         elif server:
-            args = ["--server", PI if server == "pi" else server] + args
-            print(f"-- {server}: using your saved login", file=sys.stderr)
+            target = PI if server == "pi" else server
+            if not same_server(target, saved_address(config)):
+                # the client sends the saved login wherever --server points: only to its own server
+                print(f"tui_drive: your saved login is for {saved_address(config) or 'nobody'}, "
+                      f"not {target}; use --config DIR for a login saved for that server",
+                      file=sys.stderr)
+                raise SystemExit(2)
+            args = ["--server", target] + args
+            print(f"-- {target}: using your saved login", file=sys.stderr)
         pinned = parse_clock(clock, clock_default) if clock else clock_default
         cwd = str(Path(tmp) / "work")
         os.mkdir(cwd)
