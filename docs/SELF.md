@@ -114,7 +114,9 @@ panels sit beside the chat) · **Agents** (definitions, runs, skills) ·
 approvals, per-project policy; logs; secrets) · **VMs** · **Tools** ·
 **Settings**; behind the ⋯ menu: **Memory** (memory files, the notes and
 proposed changes waiting for approval, the trash, assembled-context debug) ·
-**Schedules** (your proposals start paused until approved) · **Shell**. The
+**Schedules** (your proposals start paused until approved) · **Git** (a project's
+repo on the host's Gitea: the pull requests you file with git_push_request, with
+a diff and Approve / Reject; branches, history, who can open the repo) · **Shell**. The
 count on Security = pending approvals and alerts; the badge on Memory = notes
 and changes waiting for approval.
 
