@@ -9,7 +9,7 @@ import re
 from typing import AsyncIterator
 
 from ..config import settings
-from .. import providers
+from .. import provider_balance, providers
 from ..providers import base_url_allowed, endpoint as _endpoint  # noqa: F401 (re-export)
 from . import adapters, budget as budget_mod
 from .adapters import ModelError, retrying
@@ -532,12 +532,19 @@ class ModelGateway:
                     yield ev
                 else:
                     final = ev
+                    provider_balance.ok(route)     # it answered: credit is back
         except ModelError as e:
             # an error body that echoes the request must not carry the key
             # into the transcript, the logs or the guest
-            if route.key and len(route.key) >= 6 and route.key in str(e):
-                raise ModelError(str(e).replace(route.key, "***"),
-                                 status=e.status) from None
+            text = str(e)
+            if route.key and len(route.key) >= 6 and route.key in text:
+                text = text.replace(route.key, "***")
+            if e.status == 402:
+                # out of credit: one plain message, one bell, plans can pause
+                # (provider_balance.py) instead of the provider's raw body
+                raise provider_balance.refused(route, text) from None
+            if text != str(e):
+                raise ModelError(text, status=e.status) from None
             raise
         except (GeneratorExit, asyncio.CancelledError):
             abandoned = True

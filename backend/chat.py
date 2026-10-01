@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import json
+import logging
 import shutil
 import uuid
 from typing import Literal
@@ -8,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, providers, runtime
+from . import agentmsg, agenttree, autonomy, bus, compaction, gui, localexec, operator_ask, permissions, provider_balance, providers, runtime
 from .agent import budget
 from .agent.model import model
 from . import narration
@@ -20,6 +22,7 @@ from .config import settings
 from .db import get_db, open_conversation
 from .memory import (assemble_system_prompt, estimate_tokens,
                      get_active_project, standing_rules_tail)
+from .sse import KEEPALIVE_FRAME, next_or_none
 # module level, not function level: it is the turn's single loop entry now, and
 # the offline tests substitute it here to run a turn without a model
 from .vm import broker as vm_broker
@@ -29,6 +32,7 @@ from .vm.guest_turn import guest_turn
 # require_actor: the operator's cookie OR an enrolled device's Bearer token, so
 # a paired CLI can drive chat. Sensitive control-plane routers stay require_user.
 router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_actor)])
+log = logging.getLogger("jav3.chat")
 
 
 class ChatRequest(BaseModel):
@@ -132,10 +136,12 @@ async def list_conversations(project: str | None = None, folder: str | None = No
     db = await get_db()
     try:
         # only real chats in the sidebar — head/leader/subagent job nodes live
-        # on the Runs page, not here
+        # on the Runs page, not here. An incognito chat is not listed (nor
+        # readable) while its turn runs either: its rows exist only until the
+        # turn's wipe, and the one reader is the turn's own SSE (ROBUST-19)
         q = ("SELECT c.*, p.slug AS project_slug, p.name AS project_name "
              "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id "
-             "WHERE (c.kind = 'chat' OR c.kind IS NULL) ")
+             "WHERE (c.kind = 'chat' OR c.kind IS NULL) AND c.ephemeral = 0 ")
         params: list = []
         if project:
             q += "AND p.slug = ? "
@@ -193,6 +199,36 @@ async def _drop_references(db, conversation_id: int) -> None:
 
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: int):
+    """Delete a chat. A turn still running on it is stopped first and given a
+    moment to settle: deleting the rows under it let it carry on in the guest
+    until its next INSERT died on a FOREIGN KEY error (ROBUST-24)."""
+    if conversation_id in _posting:
+        raise HTTPException(status_code=409, detail="turn_in_progress")
+    # hold the claim so a POST cannot start a turn on it while it goes
+    _posting.add(conversation_id)
+    try:
+        task = _active_turns.get(conversation_id)
+        if task is not None and not task.done():
+            _stop(conversation_id)
+            await asyncio.wait({task}, timeout=DELETE_STOP_WAIT_S)
+            if not task.done():
+                raise HTTPException(
+                    status_code=409,
+                    detail="turn_in_progress: stop the running turn first, it did not stop in time")
+        elif conversation_id in _running_loops():
+            # an agent run or job node: its own stop belongs to the Runs page
+            raise HTTPException(
+                status_code=409,
+                detail="turn_in_progress: stop the running agent first")
+        return await _delete_conversation(conversation_id)
+    finally:
+        _posting.discard(conversation_id)
+
+
+DELETE_STOP_WAIT_S = 15
+
+
+async def _delete_conversation(conversation_id: int) -> dict:
     db = await get_db()
     try:
         async with db.execute(
@@ -351,7 +387,7 @@ async def conversation_info(conversation_id: int):
             "SELECT c.summary, c.model, c.agent_slug, c.local, "
             "p.slug AS project_slug "
             "FROM conversations c LEFT JOIN projects p ON p.id = c.project_id "
-            "WHERE c.id = ?", (conversation_id,)) as cur:
+            "WHERE c.id = ? AND c.ephemeral = 0", (conversation_id,)) as cur:
             row = await cur.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="no such conversation")
@@ -480,6 +516,12 @@ async def get_messages(conversation_id: int):
     db = await get_db()
     try:
         async with db.execute(
+            "SELECT 1 FROM conversations WHERE id = ? AND ephemeral = 1",
+            (conversation_id,)) as cur:
+            if await cur.fetchone():
+                # incognito: nothing reads it back (ROBUST-19)
+                raise HTTPException(status_code=404, detail="no such conversation")
+        async with db.execute(
             "SELECT id, role, content, model, created_at FROM messages "
             "WHERE conversation_id = ? ORDER BY id", (conversation_id,)
         ) as cur:
@@ -580,6 +622,29 @@ def set_interrupt_note(conversation_id: int, note: str) -> None:
 # final event — the GUI shows it verbatim
 INTERRUPTED_MARKER = "[Request interrupted by operator]"
 
+# What the model reads in place of an interrupted request's marker. The marker
+# row is dropped from the model-facing history (compaction._is_empty_interrupt),
+# which left the stopped request as an unanswered user message directly above
+# the operator's NEXT one, and the model resumed it instead of answering the new
+# message (WEBA-14: "ok3" was never answered, the cancelled append was retried).
+INTERRUPT_NOTE = ("[The operator stopped the previous request before it finished, "
+                  "so it may be only partly done. Do not resume or finish it unless "
+                  "this message asks you to; answer this message on its own.]")
+
+
+async def _note_interruption(db, conversation_id: int, history: list[dict]) -> list[dict]:
+    """When the turn before this message was stopped, say so in the context:
+    a user-side note ahead of the new message, so the new message wins."""
+    async with db.execute(
+        "SELECT role, content FROM messages WHERE conversation_id = ? "
+        "ORDER BY id DESC LIMIT 2", (conversation_id,)) as cur:
+        last = await cur.fetchall()
+    if (len(last) < 2 or last[0]["role"] != "user" or last[1]["role"] != "assistant"
+            or (last[1]["content"] or "").strip() != INTERRUPTED_MARKER
+            or not history or history[-1]["role"] != "user"):
+        return history
+    return [*history[:-1], {"role": "user", "content": INTERRUPT_NOTE}, history[-1]]
+
 
 def _chan(conversation_id: int) -> str:
     return f"chat:{conversation_id}"
@@ -679,6 +744,41 @@ async def _auto_journal(db, conversation_id: int, user_msg: str, final: str,
         await registry.dispatch("journal_update", {"entry": f"(auto) {line[:200]}"})
 
 
+# what a finished turn leaves to do (the journal line, the chat's title) runs
+# after its `final`, as these tracked tasks: strong references so they are not
+# collected mid-call, and a place for a test or a shutdown to wait on them
+_background: set[asyncio.Task] = set()
+BACKGROUND_TIMEOUT_S = 120
+
+
+def _spawn_background(coro, timeout: float | None = None) -> asyncio.Task:
+    """Run best-effort post-turn work detached, bounded by a timeout. Created
+    inside the turn's task, so it carries the turn's contextvars (the pinned
+    project the journal tool resolves) even after the turn has reset them."""
+    async def run():
+        try:
+            await asyncio.wait_for(coro, timeout or BACKGROUND_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — bookkeeping never reaches the operator
+            log.debug("background chat work failed", exc_info=True)
+    task = asyncio.create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return task
+
+
+async def _journal_later(conversation_id: int, user_msg: str, final: str,
+                         before_id: int, active: str | None) -> None:
+    """_auto_journal on a connection of its own: the turn's is closed by the
+    time a slow provider answers."""
+    db = await get_db()
+    try:
+        await _auto_journal(db, conversation_id, user_msg, final, before_id, active)
+    finally:
+        await db.close()
+
+
 def _agent_def(slug: str | None) -> dict | None:
     """The AGENT.md behind a conversation's identity, or None for Jav3.
 
@@ -729,6 +829,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
     tools_before = None      # set once the turn's tool_calls high-water mark is known
     late: list[str] = []     # operator messages the turn closed on without reading
     rec = None               # the turn's narration recorder (narration.py)
+    final_content = ""
+    answer_saved = False     # the assistant row is committed
+    answer_published = False  # ...and `final` has gone to the tails
     try:
         # inside the try: if the connect fails, the finally must still evict
         # _active_turns and close the bus channel or the conversation bricks
@@ -901,13 +1004,14 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                     - settings.voice_local_max_tokens
                     - estimate_tokens(json.dumps(tools))
                     - 512) if tools_only else None)
+        if not voice:
+            history = await _note_interruption(db, conversation_id, history)
 
         async with db.execute(
             "SELECT COALESCE(MAX(id), 0) AS m FROM tool_calls "
             "WHERE conversation_id = ?", (conversation_id,)) as cur:
             tools_before = (await cur.fetchone())["m"]
 
-        final_content = ""
         # the ReAct loop runs INSIDE the guest; host tools brokered over vsock.
         # This is the only path — the host-side fallback went with M4e.
         envelope = TurnEnvelope(
@@ -969,7 +1073,9 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
             async for event in source:
                 await rec.feed(event)
                 if event["type"] == "final":
-                    final_content = event["content"]
+                    # a 402 reaches here as the guest loop's wrapped error text;
+                    # the operator reads the plain "balance is empty" line
+                    final_content = provider_balance.tidy(event["content"])
                     continue
                 # the guest loop runs with on_tool_call=None, so persist tool_calls
                 # here by pairing each tool (args) event with its tool_result.
@@ -1008,22 +1114,27 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         )
         await _link_tool_calls(db, conversation_id, tools_before, cur.lastrowid)
         await db.commit()
+        answer_saved = True
         await rec.link(cur.lastrowid)
+        count = 0
         if not ephemeral:
             async with db.execute(
                 "SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?",
                 (conversation_id,),
             ) as cur:
                 count = (await cur.fetchone())["c"]
-            if count == 2:  # first exchange done — try to give it a real name
-                asyncio.create_task(
-                    _name_conversation(conversation_id, user_msg, final_content))
-            try:
-                await _auto_journal(db, conversation_id, user_msg,
-                                    final_content, tools_before, active)
-            except Exception:  # noqa: BLE001 — journaling never breaks a turn
-                pass
+        # the answer is complete: tell every tail and drop the spinner BEFORE
+        # the bookkeeping that follows. The journal line is a model call; it
+        # used to run first, so the turn hung on it, and a stop during it
+        # appended an "interrupted" row to a finished answer (ROBUST-10)
         bus.publish(chan, _final_event(conversation_id, final_content, late))
+        answer_published = True
+        if not ephemeral:
+            if count == 2:  # first exchange done — try to give it a real name
+                _spawn_background(
+                    _name_conversation(conversation_id, user_msg, final_content))
+            _spawn_background(_journal_later(
+                conversation_id, user_msg, final_content, tools_before, active))
     except asyncio.CancelledError:
         # the operator hit stop. Leave the interruption in the transcript
         # (persistent chats — the ephemeral wipe in finally covers incognito)
@@ -1033,7 +1144,11 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # without one this is the plain GUI stop marker.
         note = _interrupt_notes.pop(conversation_id, None)
         content = note if note is not None else INTERRUPTED_MARKER
-        if not ephemeral:
+        if answer_saved:
+            # the answer is already committed (a stop between the commit and
+            # the final event): it stands, and no marker follows it
+            content = final_content
+        if not ephemeral and not answer_saved:
             try:
                 cur = await db.execute(
                     "INSERT INTO messages (conversation_id, role, content, model) "
@@ -1051,90 +1166,183 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                 pass
         # `late +`: the normal path may have closed already and then failed
         late = late + await agentmsg.close_operator_inbox(conversation_id)
-        bus.publish(chan, _final_event(conversation_id, content, late))
+        if not answer_published:
+            bus.publish(chan, _final_event(conversation_id, content, late))
         raise
     except Exception as exc:  # surfaced to any tail rather than lost
-        err = {"type": "error", "message": str(exc)}
+        msg = _error_text(exc)
+        # a turn is a detached task: with nobody watching, this line is the
+        # only trace of why it ended (str(exc) is blank for a timeout)
+        log.exception("chat turn %s failed: %s", conversation_id, msg)
+        err = {"type": "error", "message": msg}
         late = late + await agentmsg.close_operator_inbox(conversation_id)
         if late:
             err["undelivered"] = late
+        if db is not None and not ephemeral and not answer_saved:
+            await _persist_failure(db, conversation_id, msg, model_name,
+                                   tools_before, rec)
         bus.publish(chan, err)
     finally:
-        # normally already closed above; this covers a path that raised
-        # before reaching the close (the rows then wait for the next turn)
-        agentmsg.forget_operator_inbox(conversation_id)
-        if db is not None and ephemeral:
-            # incognito: no trace in the DB or GUI — but the operator asked
-            # for an SSH-only recovery hatch, so the turn's transcript is
-            # appended to a date-stamped file under data/ (gitignored, never
-            # served) before the wipe. Best-effort: a dump failure must not
-            # keep the rows alive.
-            try:
-                async with db.execute(
-                    "SELECT role, content, created_at FROM messages "
-                    "WHERE conversation_id = ? ORDER BY id",
-                    (conversation_id,)) as cur:
-                    msgs = await cur.fetchall()
-                if msgs:
-                    dump_dir = settings.data_dir / "incognito"
-                    dump_dir.mkdir(parents=True, exist_ok=True)
-                    path = dump_dir / f"{msgs[0]['created_at'][:10]}.md"
-                    with path.open("a", encoding="utf-8") as fh:
-                        fh.write(f"\n---\n\n## chat {conversation_id} · "
-                                 f"{msgs[-1]['created_at']} UTC\n\n")
-                        for m in msgs:
-                            fh.write(f"**{m['role']}**:\n\n{m['content']}\n\n")
-            except Exception:  # noqa: BLE001 — recovery dump is best-effort
-                pass
-            # an incognito turn can still spawn an agent or launch a job, whose
-            # row points back here; without this the DELETE below raises a FK
-            # error inside this finally, skipping the contextvar resets, the
-            # _active_turns eviction and bus.close_job — bricking the chat
-            await _drop_references(db, conversation_id)
-            for tbl in ("turn_narration", "tool_calls", "messages", "conversations"):
-                col = "id" if tbl == "conversations" else "conversation_id"
-                await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
-            await db.commit()
-            shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
-        elif db is not None:
-            try:
-                await db.execute(
-                    "INSERT INTO usage_log (conversation_id, input_tokens, "
-                    "output_tokens, cache_hit, cache_miss) VALUES (?,?,?,?,?)",
-                    (conversation_id, the_budget.input_tokens,
-                     the_budget.output_tokens, the_budget.cache_hit,
-                     the_budget.cache_miss))
-                await db.commit()
-            except Exception:
-                pass
-        if atoken is not None:
-            try:
-                await toolctx.adopt_artifact_store(f"chat-{conversation_id}")
-            except Exception:  # noqa: BLE001 — bookkeeping only
-                pass
-            runtime.artifact_slug.reset(atoken)
-        if ptoken is not None:
-            runtime.active_project.reset(ptoken)
-        runtime.gui_tab.reset(tabtoken)
-        runtime.conversation_id.reset(cidtoken)
-        runtime.web_session.reset(wtoken)
-        runtime.event_chan.reset(ctoken)
-        runtime.ephemeral.reset(token)
-        budget.active_op_id.reset(optoken)
-        budget.release(op_id)
-        if db is not None:
-            await db.close()
-        # order matters for the reconnect race: drop the running flag, THEN
-        # signal end — a subscriber that still sees the flag is guaranteed
-        # the job_end is ahead of it in the queue (both happen in this tick)
-        _active_turns.pop(conversation_id, None)
-        _turn_actors.pop(conversation_id, None)
-        _interrupt_notes.pop(conversation_id, None)   # stale note must not leak
-        # a /local call still waiting on the client dies with its turn (stop,
-        # revoke, barge-in all end here) instead of holding the guest's round
-        localexec.cancel_conversation(conversation_id)
-        operator_ask.cancel_conversation(conversation_id)
-        bus.close_job(chan)
+        # Two stages. The first awaits (the incognito wipe, the usage row) and
+        # each step swallows its own failure; the second is the bookkeeping
+        # that must happen whatever the first did, a second stop cancelling it
+        # included — a wipe that raised used to skip all of it, leaving the chat
+        # "running" for good (every POST a 409) and the wiped rows in place
+        # (ROBUST-11).
+        try:
+            # normally already closed above; this covers a path that raised
+            # before reaching the close (the rows then wait for the next turn)
+            agentmsg.forget_operator_inbox(conversation_id)
+            if db is not None and ephemeral:
+                await _wipe_ephemeral(db, conversation_id)
+            elif db is not None:
+                try:
+                    await db.execute(
+                        "INSERT INTO usage_log (conversation_id, input_tokens, "
+                        "output_tokens, cache_hit, cache_miss) VALUES (?,?,?,?,?)",
+                        (conversation_id, the_budget.input_tokens,
+                         the_budget.output_tokens, the_budget.cache_hit,
+                         the_budget.cache_miss))
+                    await db.commit()
+                except Exception:  # noqa: BLE001 — a missing usage row is not worth a turn
+                    pass
+            if atoken is not None:
+                try:
+                    await toolctx.adopt_artifact_store(f"chat-{conversation_id}")
+                except Exception:  # noqa: BLE001 — bookkeeping only
+                    pass
+        finally:
+            if atoken is not None:
+                runtime.artifact_slug.reset(atoken)
+            if ptoken is not None:
+                runtime.active_project.reset(ptoken)
+            runtime.gui_tab.reset(tabtoken)
+            runtime.conversation_id.reset(cidtoken)
+            runtime.web_session.reset(wtoken)
+            runtime.event_chan.reset(ctoken)
+            runtime.ephemeral.reset(token)
+            budget.active_op_id.reset(optoken)
+            budget.release(op_id)
+            # order matters for the reconnect race: drop the running flag, THEN
+            # signal end — a subscriber that still sees the flag is guaranteed
+            # the job_end is ahead of it in the queue (both happen in this tick)
+            _active_turns.pop(conversation_id, None)
+            _turn_actors.pop(conversation_id, None)
+            _interrupt_notes.pop(conversation_id, None)   # stale note must not leak
+            # a /local call still waiting on the client dies with its turn (stop,
+            # revoke, barge-in all end here) instead of holding the guest's round
+            localexec.cancel_conversation(conversation_id)
+            operator_ask.cancel_conversation(conversation_id)
+            bus.close_job(chan)
+            if db is not None:
+                try:
+                    await db.close()
+                except Exception:  # noqa: BLE001 — nothing left to undo
+                    pass
+
+
+def _dump_incognito(msgs: list) -> None:
+    """The SSH-only recovery hatch: the turn's transcript appended to a
+    date-stamped file under data/ (gitignored, never served)."""
+    dump_dir = settings.data_dir / "incognito"
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    path = dump_dir / f"{msgs[0]['created_at'][:10]}.md"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n---\n\n## chat {msgs[0]['conversation_id']} · "
+                 f"{msgs[-1]['created_at']} UTC\n\n")
+        for m in msgs:
+            fh.write(f"**{m['role']}**:\n\n{m['content']}\n\n")
+
+
+async def _wipe_ephemeral(db, conversation_id: int) -> bool:
+    """Incognito: no trace in the DB or GUI — but the operator asked for an
+    SSH-only recovery hatch, so the turn's transcript is appended to a file
+    before the rows go (best-effort: a dump failure must not keep them alive).
+    An incognito turn can still spawn an agent or launch a job whose row points
+    back here, hence _drop_references (a FK error here once bricked chats).
+    Never raises: a wipe that fails is logged and the rows stay flagged
+    `ephemeral`, hidden from every listing, for sweep_ephemeral at the next
+    start. Returns whether the rows are gone."""
+    try:
+        async with db.execute(
+            "SELECT conversation_id, role, content, created_at FROM messages "
+            "WHERE conversation_id = ? ORDER BY id", (conversation_id,)) as cur:
+            msgs = await cur.fetchall()
+        if msgs:
+            _dump_incognito(msgs)
+    except Exception:  # noqa: BLE001 — recovery dump is best-effort
+        pass
+    gone = False
+    for attempt in (0, 1):
+        try:
+            await _delete_rows(db, conversation_id)
+            gone = True
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.warning("could not wipe incognito chat %s (attempt %s)",
+                        conversation_id, attempt + 1, exc_info=True)
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            if attempt == 0:
+                await asyncio.sleep(0.5)        # a locked database often clears
+    try:
+        shutil.rmtree(settings.memory_dir / ".ephemeral-notes", ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return gone
+
+
+async def _delete_rows(db, conversation_id: int) -> None:
+    await _drop_references(db, conversation_id)
+    for tbl in ("turn_narration", "tool_calls", "messages", "conversations"):
+        col = "id" if tbl == "conversations" else "conversation_id"
+        await db.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (conversation_id,))
+    await db.commit()
+
+
+async def sweep_ephemeral() -> int:
+    """Wipe incognito conversations a crash, a SIGKILL or a failed wipe left
+    behind (called at startup, when no turn can be running). Their transcript
+    goes to the recovery hatch first, as the turn's own wipe would have done."""
+    db = await get_db()
+    try:
+        async with db.execute("SELECT id FROM conversations WHERE ephemeral = 1") as cur:
+            ids = [r["id"] for r in await cur.fetchall()]
+        for cid in ids:
+            if cid not in _active_turns:
+                await _wipe_ephemeral(db, cid)
+        return len(ids)
+    finally:
+        await db.close()
+
+
+def _error_text(exc: BaseException) -> str:
+    """What the operator reads when a turn fails. str() of a timeout, an
+    assert or a dropped stream is "" (the TUI then shows just "error"), so fall
+    back to the repr, which names the type."""
+    return str(exc).strip() or repr(exc)
+
+
+async def _persist_failure(db, conversation_id: int, msg: str, model_name,
+                           tools_before: int | None, rec) -> None:
+    """Leave the failure in the transcript, the way a stop leaves its marker:
+    a turn that dies while nobody watches would otherwise reload as a user
+    message with no reply, and the tool calls it already ran would attach to
+    the NEXT reply's activity. Best-effort — the error event still goes out."""
+    try:
+        cur = await db.execute(
+            "INSERT INTO messages (conversation_id, role, content, model) "
+            "VALUES (?, 'assistant', ?, ?)",
+            (conversation_id, f"(turn failed: {msg[:500]})", model_name))
+        await _link_tool_calls(db, conversation_id, tools_before, cur.lastrowid)
+        await db.commit()
+        if rec is not None:
+            await rec.link(cur.lastrowid)
+    except Exception:  # noqa: BLE001 — the transcript row is best-effort
+        log.warning("could not record the failure of chat turn %s", conversation_id,
+                    exc_info=True)
 
 
 def _final_event(conversation_id: int, content: str, late: list[str]) -> dict:
@@ -1155,7 +1363,10 @@ def _tail(conversation_id: int, q, chan: str | None = None) -> "StreamingRespons
     async def event_stream():
         try:
             while True:
-                ev = await q.get()
+                ev = await next_or_none(q)
+                if ev is None:
+                    yield KEEPALIVE_FRAME
+                    continue
                 if ev.get("type") == "job_end":
                     break
                 yield sse(ev)
@@ -1250,7 +1461,10 @@ def _tail_head(cid: int, job_id: str) -> StreamingResponse:
     async def event_stream():
         try:
             while True:
-                ev = await q.get()
+                ev = await next_or_none(q)
+                if ev is None:
+                    yield KEEPALIVE_FRAME
+                    continue
                 t = ev.get("type")
                 if t == "job_end":
                     break
@@ -1689,8 +1903,33 @@ async def stop_project_turns(body: ProjectStop, actor: dict = Depends(require_ac
                       tree=None if actor.get("is_device") else ids)
 
 
+# Conversations a POST /api/chat has claimed and not yet started a turn on.
+# The 409 check used to sit ahead of several awaits (db open, conversation
+# lookup, the user-message insert) and `_active_turns` is only set at the end,
+# so a double submit (Enter twice, two tabs) passed both checks and started two
+# turns that shared one op_id and invalidated each other (ROBUST-07). The claim
+# is taken and checked in one synchronous step.
+_posting: set[int] = set()
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
+    claimed = body.conversation_id
+    if claimed is not None:
+        # _running_loops, not just _active_turns: an agent run or plan item
+        # whose own loop is live must not take a chat turn on top of it
+        if claimed in _posting or claimed in _running_loops():
+            raise HTTPException(status_code=409, detail="turn_in_progress")
+        _posting.add(claimed)
+    try:
+        return await _post_chat(body, actor)
+    finally:
+        # start_turn registers the turn in _active_turns before this returns
+        if claimed is not None:
+            _posting.discard(claimed)
+
+
+async def _post_chat(body: ChatRequest, actor: dict):
     # the router already depends on require_actor; FastAPI caches it per
     # request, so this is the same resolved actor, not a second token lookup
     device_id = actor.get("device_id") if actor.get("is_device") else None
@@ -1708,9 +1947,7 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             raise HTTPException(status_code=400, detail=str(e)) from None
     db = await get_db()
     try:
-        conversation_id = body.conversation_id
-        if conversation_id is not None and conversation_id in _active_turns:
-            raise HTTPException(status_code=409, detail="turn_in_progress")
+        conversation_id = body.conversation_id     # busy ones were refused in chat()
         if conversation_id is None:
             # identity is validated here, not in the detached turn: a typo'd
             # slug is a 404 on the POST the operator can see, not an error
@@ -1764,6 +2001,8 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             # provisional title: first bit of the opening message; an LLM
             # naming pass upgrades it after the first exchange (best effort)
             title = " ".join(body.message.split())[:48] or "(empty)"
+            if body.ephemeral:
+                title = "(temporary chat)"     # the words are not kept anywhere
             conversation_id = await open_conversation(
                 db, project=active, title=title, locked=mode != "follow",
                 agent=body.agent or None,
