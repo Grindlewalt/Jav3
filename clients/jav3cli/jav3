@@ -4242,8 +4242,8 @@ def build_tui(base: str, token: str, **kw):
                 Page.of(self).click_row(self)
 
     class AgentsPage(Page):
-        """/agents, and ← from an empty prompt. The active view: what is running and what needs
-        the operator, then a Finished row; the finished view: everything else,
+        """/agents (← from an empty prompt). The active view: what is running and what
+        needs the operator, then a Finished row; the finished view: everything else,
         grouped by project or by time (tab). ↑↓ move between entries, the
         highlighted one unfolds its agents, → steps into them and ← back out,
         enter opens. Plain arrows only: Terminal.app keeps shift+↑↓ for itself."""
