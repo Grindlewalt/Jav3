@@ -3,8 +3,6 @@ pushed Screen) with a back stack, a registry names it (`/security calls`, `/vms 
 `/agents finished`, `/work`), one place parses `[args] [panel]`, and the pages the web
 has but the terminal does not answer where they live. The prompt stays under every page
 as one line. The client file is loaded from tests/cli_fake.py."""
-import json
-
 import httpx
 import pytest
 
@@ -456,7 +454,7 @@ async def test_a_page_sizes_itself_from_its_host_and_leaves_through_it_not_the_a
         await app.screen.mount(box)
         await box.mount(host)
         await pilot.pause(0.2)
-        sec = jav3.PAGES["security"] and app.page_classes["security"](["calls"])
+        sec = app.page_classes["security"](["calls"])
         await host.push(sec)
         await pilot.pause(0.3)
         assert sec.size.width <= 50 and sec.size.height <= 18 and sec.size.width > 20
