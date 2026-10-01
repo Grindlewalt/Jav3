@@ -821,3 +821,28 @@ async def test_a_plans_writes_are_pulled_home_as_items_settle(client, monkeypatc
     pulled.clear()
     await orchestrator.flush_workspace(SLUG, 5)
     assert pulled == []
+
+
+async def test_two_simultaneous_starts_run_one_runner(client, monkeypatch):
+    """ROBUST-08: start_run checked is_running, then awaited (the head
+    conversation), and only then registered the task: two starts both passed the
+    check and ran two runners for one plan, of which stop_run could end one."""
+    await _put(client, [{"title": "a", "brief": "a"}])
+    started: list[int] = []
+
+    async def hold(cid, attempt, text):
+        started.append(cid)
+        await asyncio.sleep(0.2)
+        await _report(cid, "done", "ok")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted({"i1": hold}, {}))
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    res = await asyncio.gather(plan_mod.start_run(SLUG), plan_mod.start_run(SLUG),
+                               return_exceptions=True)
+    ok = [r for r in res if isinstance(r, dict)]
+    bad = [r for r in res if isinstance(r, RuntimeError)]
+    assert len(ok) == 1 and len(bad) == 1, res
+    assert "already in progress" in str(bad[0])
+    await _wait_run()
+    assert len(started) == 1
+    assert SLUG not in plan_mod._starting

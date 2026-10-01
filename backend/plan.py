@@ -77,6 +77,7 @@ MAX_FIXES = 4             # orchestrator re-dispatches per item (plan_fix retry)
 
 _locks: dict[str, asyncio.Lock] = {}
 _runs: dict[str, asyncio.Task] = {}          # project slug -> the detached runner
+_starting: set[str] = set()                  # slugs inside start_run, before _runs has the task
 # slugs whose _drive loop is live and will read the file again on its next tick
 # (changed only under the plan lock), and slugs whose _drive has STARTED this
 # run — the pair tells a plan_fix whether a run is starting, live or winding
@@ -779,8 +780,18 @@ async def _open_head(slug: str, plan: dict, job_id: str) -> tuple[int, str | Non
 async def start_run(slug: str, *, resume: bool = False) -> dict:
     """Launch the runner as a detached task. Returns {job_id, root_id}. Raises
     RuntimeError when a run is already live or there is nothing to run."""
-    if is_running(slug):
+    # check and reserve with no await between them (ROBUST-08): the awaits below
+    # (the resume edit, the head conversation) let a second start in
+    if is_running(slug) or slug in _starting:
         raise RuntimeError("a plan run is already in progress")
+    _starting.add(slug)
+    try:
+        return await _start_run(slug, resume=resume)
+    finally:
+        _starting.discard(slug)
+
+
+async def _start_run(slug: str, *, resume: bool) -> dict:
     plan = load(slug)
     if plan is None:
         raise RuntimeError("this project has no plan yet")
@@ -1431,7 +1442,7 @@ async def fix(slug: str, *, action: str, item: str | None = None,
     try:
         started = await start_run(slug)
     except RuntimeError as e:
-        if is_running(slug):                        # a sibling plan_fix relaunched it
+        if is_running(slug) or slug in _starting:   # a sibling plan_fix relaunched it
             return f"{what}.{note} The run that is starting picks it up."
         return f"{what}.{note} Could not relaunch: {e}"
     return (f"{what}.{note} Relaunched the run (head conversation {started['root_id']}); "
