@@ -1,37 +1,47 @@
-/* Settings > Gitea: is the host git server up, which repos it holds, and the
- * account basics (create, reset a password, disable). Everything goes through
- * /api/gitea, operator-only; the admin token never reaches the browser. */
+/* The Gitea account list (create, reset a password, disable or enable) and the
+ * status card that used to sit in Settings. The accounts now live on the Git page
+ * (pages/Git.jsx imports GiteaAccounts); the card is kept whole, so a page that
+ * still mounts it keeps working. Everything goes through /api/gitea, operator-only;
+ * the admin token never reaches the browser. */
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { useAsk } from './ask.jsx'
-import { notifyError } from './notify.js'
+import { notify, notifyError } from './notify.js'
 import { Button, Card, EmptyState, Input, Tag } from './components/index.js'
 
-export default function GiteaPanel() {
+// What a new or re-enabled account was given, in a sentence (the backend reads
+// every repo to it; a failure to do that comes back as share_error).
+function sharedNote(login, r, verb) {
+  if (r?.share_error) {
+    notify(`${verb} ${login}, but sharing the repos failed: ${r.share_error}. `
+      + 'Run gitea-setup --access on the host.', { sev: 'warn', life: 12 })
+  } else if (r?.shared != null) {
+    notify(`${verb} ${login}. They can read ${r.shared} ${r.shared === 1 ? 'repo' : 'repos'}.`)
+  }
+}
+
+// The accounts: a list with Reset password and Disable/Enable per person, and an
+// Add user form. `st` is /api/gitea/status (it names the owner); `onChange` runs
+// after an account is added or enabled, since either changes who can open a repo.
+export function GiteaAccounts({ st, onChange }) {
   const ask = useAsk()
-  const [st, setSt] = useState(null)
-  const [repos, setRepos] = useState(null)
   const [users, setUsers] = useState(null)
   const [form, setForm] = useState({ login: '', email: '', password: '' })
   const [reset, setReset] = useState({ login: '', password: '' })
 
   const load = useCallback(() => {
-    api('/api/gitea/status').then((s) => {
-      setSt(s)
-      if (!s.configured) return
-      if (!s.running) { setRepos([]); setUsers([]); return }   // nothing to ask
-      api('/api/gitea/repos').then((r) => setRepos(r.repos || [])).catch(() => setRepos([]))
-      api('/api/gitea/users').then((r) => setUsers(r.users || [])).catch(() => setUsers([]))
-    }).catch(() => setSt({ configured: false, unknown: true }))
+    api('/api/gitea/users').then((r) => setUsers(r.users || [])).catch(() => setUsers([]))
   }, [])
   useEffect(() => { load() }, [load])
 
   async function create(e) {
     e.preventDefault()
     try {
-      await api('/api/gitea/users', { method: 'POST', body: JSON.stringify(form) })
+      const r = await api('/api/gitea/users', { method: 'POST', body: JSON.stringify(form) })
+      sharedNote(form.login, r, 'Added')
       setForm({ login: '', email: '', password: '' })
       load()
+      onChange?.()
     } catch (err) { notifyError(err) }
   }
   async function savePassword(e) {
@@ -47,11 +57,85 @@ export default function GiteaPanel() {
     if (disabled && !await ask.confirm(`Disable ${u.login}? They can no longer sign in.`,
                                        { confirmLabel: 'Disable', danger: true })) return
     try {
-      await api(`/api/gitea/users/${encodeURIComponent(u.login)}/disable`, {
+      const r = await api(`/api/gitea/users/${encodeURIComponent(u.login)}/disable`, {
         method: 'POST', body: JSON.stringify({ disabled }) })
+      if (!disabled) sharedNote(u.login, r, 'Enabled')
       load()
+      onChange?.()
     } catch (err) { notifyError(err) }
   }
+
+  return (
+    <>
+      {users === null ? <EmptyState>loading…</EmptyState> : (
+        <ul className="device-list">
+          {users.map((u) => (
+            <li key={u.login} className="device-row">
+              <div className="device-main">
+                <div className="device-name">
+                  <strong className="ellipsis">{u.login}</strong>
+                  {u.is_admin && <Tag>admin</Tag>}
+                  {u.bot && <Tag>agent bot</Tag>}
+                  {u.prohibit_login && <Tag>disabled</Tag>}
+                </div>
+              </div>
+              {!u.bot && u.login !== st.owner && (
+                <>
+                  <Button variant="ghost"
+                          onClick={() => setReset({ login: u.login, password: '' })}>
+                    Reset password</Button>
+                  <Button variant="ghost" danger={!u.prohibit_login}
+                          onClick={() => toggle(u)}>
+                    {u.prohibit_login ? 'Enable' : 'Disable'}</Button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {reset.login && (
+        <form className="settings-inline" onSubmit={savePassword}>
+          <Input type="password" aria-label={`New password for ${reset.login}`}
+                 placeholder={`new password for ${reset.login}`} autoComplete="new-password"
+                 value={reset.password}
+                 onChange={(e) => setReset({ ...reset, password: e.target.value })} />
+          <div className="settings-inline-actions">
+            <Button type="submit" disabled={reset.password.length < 8}>Set</Button>
+            <Button variant="ghost" onClick={() => setReset({ login: '', password: '' })}>
+              Cancel</Button>
+          </div>
+        </form>
+      )}
+      <form className="settings-inline" onSubmit={create}>
+        <Input aria-label="New Gitea username" placeholder="username" value={form.login}
+               onChange={(e) => setForm({ ...form, login: e.target.value })} />
+        <Input aria-label="Email" placeholder="email (optional)" value={form.email}
+               onChange={(e) => setForm({ ...form, email: e.target.value })} />
+        <Input type="password" aria-label="Password" placeholder="password (8+)"
+               autoComplete="new-password" value={form.password}
+               onChange={(e) => setForm({ ...form, password: e.target.value })} />
+        <div className="settings-inline-actions">
+          <Button type="submit" disabled={!form.login || form.password.length < 8}>
+            Add user</Button>
+        </div>
+      </form>
+    </>
+  )
+}
+
+export default function GiteaPanel() {
+  const [st, setSt] = useState(null)
+  const [repos, setRepos] = useState(null)
+
+  const load = useCallback(() => {
+    api('/api/gitea/status').then((s) => {
+      setSt(s)
+      if (!s.configured) return
+      if (!s.running) { setRepos([]); return }   // nothing to ask
+      api('/api/gitea/repos').then((r) => setRepos(r.repos || [])).catch(() => setRepos([]))
+    }).catch(() => setSt({ configured: false, unknown: true }))
+  }, [])
+  useEffect(() => { load() }, [load])
 
   if (!st) return null
   return (
@@ -101,58 +185,7 @@ export default function GiteaPanel() {
               </ul>
             )}
           <h3 className="small">Accounts</h3>
-          {users === null ? <EmptyState>loading…</EmptyState> : (
-            <ul className="device-list">
-              {users.map((u) => (
-                <li key={u.login} className="device-row">
-                  <div className="device-main">
-                    <div className="device-name">
-                      <strong className="ellipsis">{u.login}</strong>
-                      {u.is_admin && <Tag>admin</Tag>}
-                      {u.bot && <Tag>agent bot</Tag>}
-                      {u.prohibit_login && <Tag>disabled</Tag>}
-                    </div>
-                  </div>
-                  {!u.bot && u.login !== st.owner && (
-                    <>
-                      <Button variant="ghost"
-                              onClick={() => setReset({ login: u.login, password: '' })}>
-                        Reset password</Button>
-                      <Button variant="ghost" danger={!u.prohibit_login}
-                              onClick={() => toggle(u)}>
-                        {u.prohibit_login ? 'Enable' : 'Disable'}</Button>
-                    </>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-          {reset.login && (
-            <form className="settings-inline" onSubmit={savePassword}>
-              <Input type="password" aria-label={`New password for ${reset.login}`}
-                     placeholder={`new password for ${reset.login}`} autoComplete="new-password"
-                     value={reset.password}
-                     onChange={(e) => setReset({ ...reset, password: e.target.value })} />
-              <div className="settings-inline-actions">
-                <Button type="submit" disabled={reset.password.length < 8}>Set</Button>
-                <Button variant="ghost" onClick={() => setReset({ login: '', password: '' })}>
-                  Cancel</Button>
-              </div>
-            </form>
-          )}
-          <form className="settings-inline" onSubmit={create}>
-            <Input aria-label="New Gitea username" placeholder="username" value={form.login}
-                   onChange={(e) => setForm({ ...form, login: e.target.value })} />
-            <Input aria-label="Email" placeholder="email (optional)" value={form.email}
-                   onChange={(e) => setForm({ ...form, email: e.target.value })} />
-            <Input type="password" aria-label="Password" placeholder="password (8+)"
-                   autoComplete="new-password" value={form.password}
-                   onChange={(e) => setForm({ ...form, password: e.target.value })} />
-            <div className="settings-inline-actions">
-              <Button type="submit" disabled={!form.login || form.password.length < 8}>
-                Add user</Button>
-            </div>
-          </form>
+          {st.running && <GiteaAccounts st={st} />}
         </>
       )}
     </Card>

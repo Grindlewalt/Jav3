@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node src/work/__tests__/layout.test.mjs && node src/boxes/__tests__/logic.test.mjs && node src/boxes/__tests__/placement.test.mjs && node src/__tests__/askUser.test.mjs && node src/__tests__/chatActive.test.mjs && node src/__tests__/runSnapshot.test.mjs && node src/__tests__/secPing.test.mjs && node src/__tests__/turnEvents.test.mjs && node src/boxes/__tests__/glance.test.mjs && node src/slash/__tests__/parse.test.mjs && node src/slash/__tests__/status.test.mjs && node src/slash/__tests__/terminal.test.mjs && node src/__tests__/securityCopy.test.mjs && node src/__tests__/micCheck.test.mjs && node src/__tests__/logsList.test.mjs && node src/__tests__/schedTime.test.mjs && node src/__tests__/dnd.test.mjs"
+    "test": "node src/work/__tests__/layout.test.mjs && node src/boxes/__tests__/logic.test.mjs && node src/boxes/__tests__/placement.test.mjs && node src/__tests__/askUser.test.mjs && node src/__tests__/chatActive.test.mjs && node src/__tests__/runSnapshot.test.mjs && node src/__tests__/secPing.test.mjs && node src/__tests__/turnEvents.test.mjs && node src/boxes/__tests__/glance.test.mjs && node src/slash/__tests__/parse.test.mjs && node src/slash/__tests__/status.test.mjs && node src/slash/__tests__/terminal.test.mjs && node src/__tests__/securityCopy.test.mjs && node src/__tests__/micCheck.test.mjs && node src/__tests__/logsList.test.mjs && node src/__tests__/schedTime.test.mjs && node src/__tests__/dnd.test.mjs && node src/__tests__/gitPage.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

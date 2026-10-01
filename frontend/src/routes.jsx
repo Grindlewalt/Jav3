@@ -64,6 +64,7 @@ const Memory = lazy(() => import('./pages/Memory.jsx'))
 // so moving between them never remounts it mid-stream
 const Shell = lazy(() => import('./shell/Shell.jsx'))
 const Schedules = lazy(() => import('./pages/Schedules.jsx'))
+const Git = lazy(() => import('./pages/Git.jsx'))
 
 // reachable, not advertised
 const Voice = lazy(() => import('./pages/Voice.jsx'))
@@ -80,6 +81,7 @@ const PREFETCH = [
   () => import('./pages/Voice.jsx'), () => import('./pages/Artifacts.jsx'),
   () => import('./pages/Vms.jsx'), () => import('./pages/Catalogue.jsx'),
   () => import('./pages/Persistent.jsx'), () => import('./pages/Profiles.jsx'),
+  () => import('./pages/Git.jsx'),
 ]
 
 function usePrefetchRoutes(enabled) {
@@ -147,6 +149,8 @@ export default function AppRoutes({ onLogin, onSetup, authed }) {
         {/* the ⋯ menu */}
         <Route path="/memory" element={<Memory />} />
         <Route path="/schedules" element={<Schedules />} />
+        <Route path="/git" element={<Git />} />
+        <Route path="/git/:slug" element={<Git />} />
         <Route path="/shell/*" element={<Shell />} />
 
         {/* the old addresses keep working: bookmarks, toasts, muscle memory */}

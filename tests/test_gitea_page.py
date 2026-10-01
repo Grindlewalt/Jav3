@@ -13,7 +13,7 @@ import pytest
 
 from backend import devicetokens, doctor, gitea, gitea_setup, secrets
 from backend.main import app
-from tests.test_gitea import (ADMIN_TOK, BOT_TOK, _file, _git, _head, _no_tokens,  # noqa: F401
+from tests.test_gitea import (ADMIN_TOK, _file, _git, _head, _no_tokens,  # noqa: F401
                               _pdir, client, fake)  # the fixtures ride in on this import
 
 
