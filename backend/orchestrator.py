@@ -201,9 +201,44 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
         await apply_write(project, f"runs/{job_id}/{cid}-{kind}.md", rollup.encode())
         bus.publish(job_id, {"type": "node_done", "node_id": cid, "rollup": rollup})
         return {"cid": cid, "kind": kind, "output": output, "rollup": rollup}
+    except asyncio.CancelledError:
+        await _settle_rollup(cid, "stopped")        # a stop must not leave it "running"
+        raise
     except Exception as e:  # noqa: BLE001 — a node failure must not kill siblings
         bus.publish(job_id, {"type": "error", "node_id": cid, "message": str(e)})
+        await _settle_rollup(cid, f"error: {e}")
         return {"cid": cid, "kind": kind, "output": "", "rollup": f"error: {e}"}
+
+
+async def settle_lost_heads() -> int:
+    """At boot: no job can be live yet, so a head still without a rollup lost its
+    run to the restart (ROBUST-22). Say so, instead of leaving a Runs row and a
+    chat JobTree "running" for good. Returns how many it settled."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "UPDATE conversations SET rollup = ? WHERE kind = 'head' AND rollup IS NULL",
+            ("interrupted by a restart before it finished",))
+        await db.commit()
+        return cur.rowcount
+    finally:
+        await db.close()
+
+
+async def _settle_rollup(cid: int, rollup: str) -> None:
+    """A node that did not finish still ends with a rollup (ROBUST-22): the chat
+    reload marks a head `running` while its rollup is NULL. Best-effort, and
+    never over a rollup the node already wrote."""
+    try:
+        db = await get_db()
+        try:
+            await db.execute("UPDATE conversations SET rollup = ? WHERE id = ? "
+                             "AND rollup IS NULL", (rollup, cid))
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — teardown persistence is best-effort
+        pass
 
 
 @contextlib.asynccontextmanager
