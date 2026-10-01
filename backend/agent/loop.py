@@ -153,11 +153,16 @@ def db_tool_sink(db, conversation_id: int):
     This is the host sink; a guest loop passes on_tool_call=None and its host-side
     guest_turn reconstructs the same record from the streamed tool events, so the
     guest never carries a db handle (the VM-inversion seam)."""
-    async def sink(name: str, args: dict, result: str) -> None:
+    async def sink(name: str, args: dict, result: str, call_id: str | None = None) -> None:
+        # the model's id for the call rides along (the loop sets it around this
+        # sink; the guest path passes it): a security event names its step by it
+        cv = getattr(registry, "call_id", None)
+        cid = call_id or (cv.get() if cv is not None else None)
         await db.execute(
-            "INSERT INTO tool_calls (conversation_id, tool, args, result) "
-            "VALUES (?, ?, ?, ?)",
-            (conversation_id, name, json.dumps(args), result[:10000]))
+            "INSERT INTO tool_calls (conversation_id, tool, args, result, call_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, name, json.dumps(args), result[:10000],
+             str(cid)[:80] if cid else None))
         await db.commit()
     return sink
 
@@ -658,7 +663,14 @@ async def _run_turn(
             # following user message instead)
             result, img = imageresult.split(result)
             if on_tool_call is not None:
-                await on_tool_call(name, args, result)
+                # the tool_calls sink stores the model's id with the row
+                cv = getattr(registry, "call_id", None)
+                ctok = cv.set(tc.get("id")) if cv is not None else None
+                try:
+                    await on_tool_call(name, args, result)
+                finally:
+                    if ctok is not None:
+                        cv.reset(ctok)
             failed = (not result.strip() or result.startswith(
                 ("error:", "no matches", "note:", "duplicate call:")))
             content = _cap_result(name, result)

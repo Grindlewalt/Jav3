@@ -233,26 +233,32 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
             a = await anomaly.check_host(db, slug, host)
             if a:
                 egress.mark_cut(slug, host)
-                await _nft_drop(host)
+                ips = await _nft_drop(host)
+                # the run the traffic belongs to comes from the connection's own
+                # attribution (None when the shared box was ambiguous: never a guess)
                 await security.raise_event(db, kind="egress_anomaly", severity="critical",
                                            project=slug, summary=a["summary"],
-                                           detail=a["detail"])
+                                           detail={**a["detail"], "dropped_ips": ips or []},
+                                           conversation_id=att["conversation_id"],
+                                           box_id=att["box_id"])
                 await egress.record_event(db, slug=slug, host=host, verdict="cut",
                                           reason=f"auto-cut: {a['kind']}", op_id=att["op_id"],
+                                          conversation_id=att["conversation_id"],
                                           peer_ip=att["peer_ip"], peer_port=att["peer_port"],
                                           box_id=att["box_id"], service_id=service_id)
     finally:
         await db.close()
 
 
-async def _nft_drop(host: str) -> None:
+async def _nft_drop(host: str) -> list[str]:
     """Best-effort hard cut: drop the host's resolved IPs at nftables (Pi-side).
-    A no-op where nft/sudo isn't available (dev laptop)."""
+    A no-op where nft/sudo isn't available (dev laptop). Returns the IPs it
+    resolved: the event keeps them, and Un-cut host takes exactly those back."""
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)
-        ips = {i[4][0] for i in infos}
+        ips = sorted({i[4][0] for i in infos})
     except OSError:
-        return
+        return []
     for ip in ips:
         try:
             p = await asyncio.create_subprocess_exec(
@@ -261,7 +267,36 @@ async def _nft_drop(host: str) -> None:
                 stderr=asyncio.subprocess.DEVNULL)
             await p.wait()
         except (FileNotFoundError, OSError):
-            return
+            return ips
+    return ips
+
+
+async def nft_undrop(host: str, ips: list | None = None) -> list[str]:
+    """The undo of _nft_drop: take the cut host's IPs (the ones the cut recorded,
+    plus whatever the name resolves to now) out of the drop set. Best effort, a
+    no-op without nft/sudo. Returns the IPs it tried."""
+    import ipaddress
+    want: set[str] = set()
+    for ip in ips or ():
+        try:
+            want.add(str(ipaddress.ip_address(str(ip))))
+        except ValueError:
+            continue
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+        want |= {i[4][0] for i in infos}
+    except OSError:
+        pass
+    for ip in sorted(want):
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "-n", "nft", "delete", "element", "inet", boxnet.nft_table(),
+                "cut_hosts", "{", ip, "}", stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            await p.wait()
+        except (FileNotFoundError, OSError):
+            break
+    return sorted(want)
 
 
 async def _authorize(host: str, port: str | None = None,

@@ -733,7 +733,9 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
                        f"{(p['exe'] or p['comm'] or '?')[:120]}",
             "detail": {"box_id": box.id, "pid": pid, "exe": p["exe"], "cmd": p["cmd"],
                        "unit": p["unit"], "user": p["user"],
-                       "baseline": baseline.source}})
+                       "baseline": baseline.source,
+                       # what Kill process checks the pid against, and the box's boot
+                       "start_ticks": p["start_ticks"], "boot_id": snap["boot_id"]}})
 
     # what the agent's own run_code left running (the orphan rule): recorded,
     # once per (boot, exe, script), and filed quietly: not an alert. Kept apart
@@ -757,7 +759,8 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
             "rule": "started by the agent's run_code and left running",
             "detail": {"box_id": box.id, "pid": pid, "exe": p["exe"], "cmd": p["cmd"],
                        "unit": p["unit"], "user": p["user"], "ppid": p["ppid"],
-                       "baseline": baseline.source}})
+                       "baseline": baseline.source, "start_ticks": p["start_ticks"],
+                       "boot_id": snap["boot_id"]}})
 
     # host-held connections from this guest that no reported process owns
     if host_socks is not None:
@@ -776,7 +779,8 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
                     "kind": "proc_report_mismatch", "severity": "warn",
                     "summary": f"Box {box.id}: host sees a connection from guest port "
                                f"{t[1]} that no reported process owns",
-                    "detail": {"box_id": box.id, "reason": "unreported_connection",
+                    "detail": {"box_id": box.id, "boot_id": snap["boot_id"],
+                               "reason": "unreported_connection",
                                "guest": f"{t[0]}:{t[1]}", "peer": f"{t[2]}:{t[3]}",
                                "host": hostnames.get(t[1]),
                                "host_bytes_out": hs.get("bytes_received"),
@@ -796,7 +800,8 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
                         "kind": "proc_report_mismatch", "severity": "warn",
                         "summary": f"Box {box.id}: pid {pid} reports different byte "
                                    f"counts than the host saw on port {r['lport']}",
-                        "detail": {"box_id": box.id, "reason": "byte_mismatch", "pid": pid,
+                        "detail": {"box_id": box.id, "boot_id": snap["boot_id"],
+                                   "reason": "byte_mismatch", "pid": pid,
                                    "exe": snap["procs"][pid]["exe"],
                                    "guest": f"{t[0]}:{t[1]}", "peer": f"{t[2]}:{t[3]}",
                                    "guest_bytes_out": r["guest_bytes_out"],
@@ -1023,6 +1028,20 @@ def is_stale(st: BoxState, now: float) -> bool:
     return st.reported_at is None or now - st.reported_at > 3 * period or st.error is not None
 
 
+def _bound_conversation(box) -> int | None:
+    """The conversation whose turn is bound to this box right now: the proxy's
+    own rule (egress_proxy.attribute) for a project box, a joined one, or the
+    shared box with turns of ONE project. Two projects on the shared box, no
+    live turn, or a service box: None (ambiguous or nobody: the alert groups by
+    the box and its boot instead). Attribution only."""
+    try:
+        from . import egress_proxy
+        cid = egress_proxy.attribute(box).get("conversation_id")
+        return int(cid) if cid is not None else None
+    except Exception:  # noqa: BLE001 — an alert never waits on its attribution
+        return None
+
+
 async def poll_once(now: float | None = None) -> list[dict]:
     """One cycle over every running box. Returns the rows it produced."""
     from ..db import get_db
@@ -1054,12 +1073,13 @@ async def poll_once(now: float | None = None) -> list[dict]:
                 continue
             st.snap, st.reported_at, st.error, st.row = res, now, None, row
             rows.append(row)
+            cid = _bound_conversation(box) if alerts else None
             for a in alerts:
                 try:
                     await security.raise_event(db, kind=a["kind"], severity=a["severity"],
                                                project=box.project, summary=a["summary"],
                                                detail=a["detail"], cause=a.get("cause"),
-                                               rule=a.get("rule"))
+                                               rule=a.get("rule"), conversation_id=cid)
                 except Exception:  # noqa: BLE001
                     log.exception("procview: raising %s", a["kind"])
     finally:

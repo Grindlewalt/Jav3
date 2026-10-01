@@ -54,6 +54,15 @@ History under "filtered as normal work". Nothing is dropped. A critical row
 ignores a rule (an anomaly cut is never routine). `_judge` holds the rules that
 need the log itself (sessions per device per day, a standing fact once per box
 allocation); the rest are judged where the event is raised.
+
+Which run. Every event may name the conversation it happened in (`conversation_id`),
+the top of that conversation's tree (`run_root`: the chat, or the plan/funnel job
+head), the model's id of the tool call (`call_id`) and, for a process event no turn
+is bound to, the box and its boot. raise_event stamps them from the turn's runtime
+context, or from what the raise site passes (host-side raisers know better than the
+context: procview, the egress proxy). ATTRIBUTION ONLY: the actor decision above
+never reads them (a turn inherits the operator's request context). backend/secruns.py
+groups the Queue by them: one card per run.
 """
 import asyncio
 import json
@@ -129,7 +138,8 @@ ALWAYS_KINDS = frozenset({"egress_anomaly", "host_cut", "secret_leak",
 
 _COLUMNS = ("id, kind, severity, project_slug, summary, detail, acknowledged, "
             "created_at, acknowledged_at, triage_verdict, triage_reason, "
-            "count, last_seen, cause, actor, quiet, rule")
+            "count, last_seen, cause, actor, quiet, rule, conversation_id, run_root, "
+            "call_id, box_id, boot_id")
 
 
 def tier(kind: str | None, severity: str | None) -> str:
@@ -451,19 +461,24 @@ def _rate_ok(key: str, limit: int) -> bool:
 
 async def _coalesce_target(db: aiosqlite.Connection, kind: str, severity: str,
                            project: str | None, cause: str, *,
-                           actor: str | None = None, quiet: str | None = None) -> dict | None:
-    """The row a repeat counts onto: the same event, from the same actor, in the
-    same state (waiting in the queue, or filed quietly for a Record-only kind)."""
+                           actor: str | None = None, quiet: str | None = None,
+                           run_root: int | None = None) -> dict | None:
+    """The row a repeat counts onto: the same event, from the same actor and the
+    same run, in the same state (waiting in the queue, or filed quietly for a
+    Record-only kind). A repeat from another run is its own row: a card per run
+    must not show one run's event under another's name."""
     if settings.security_coalesce_seconds <= 0:
         return None
     async with db.execute(
             "SELECT id, count, summary FROM security_events WHERE kind = ? AND severity = ? "
             "AND project_slug IS ? AND cause = ? AND acknowledged = ? "
             "AND COALESCE(quiet, '') = ? AND COALESCE(actor, '') = ? "
+            "AND COALESCE(run_root, 0) = ? "
             "AND COALESCE(last_seen, created_at) >= datetime(?, ?) "
             "ORDER BY id DESC LIMIT 1",
             (kind, severity, project, cause, 1 if quiet else 0, quiet or "", actor or "",
-             _utcnow(), f"-{int(settings.security_coalesce_seconds)} seconds")) as cur:
+             run_root or 0, _utcnow(),
+             f"-{int(settings.security_coalesce_seconds)} seconds")) as cur:
         r = await cur.fetchone()
     return dict(r) if r else None
 
@@ -588,6 +603,15 @@ async def _count_repeat(db: aiosqlite.Connection, twin: dict, *, kind: str, seve
     state, `d` the decision for the repeat (its tier and mode ride the event)."""
     await db.execute("UPDATE security_events SET count = count + 1, "
                      "last_seen = ? WHERE id = ?", (_utcnow(), twin["id"]))
+    if isinstance(detail, dict) and detail.get("sha"):
+        # a write flag repeated: the file's fingerprint is the LATEST write's,
+        # so Revert file can tell "unchanged since the alert" from "edited since"
+        try:
+            await db.execute("UPDATE security_events SET detail = json_set(detail, '$.sha', ?, "
+                             "'$.bytes', ?) WHERE id = ? AND json_valid(detail)",
+                             (detail["sha"], detail.get("bytes"), twin["id"]))
+        except Exception:                       # noqa: BLE001 — no JSON1: the row stays as it was
+            pass
     await db.commit()
     bus.publish(SECURITY_CHAN, {"type": "security_event", "id": twin["id"],
                                 "kind": kind, "severity": severity, "project": project,
@@ -598,10 +622,88 @@ async def _count_repeat(db: aiosqlite.Connection, twin: dict, *, kind: str, seve
     return twin["id"]
 
 
+# --- which run an event belongs to (attribution only) --------------------------
+# The Queue shows one card per run (backend/secruns.py). These helpers only say
+# WHICH run: they never feed the actor decision above (that stays explicit).
+
+RUN_DEPTH = 32                   # a malformed parent cycle ends here
+
+
+async def run_root_of(db: aiosqlite.Connection, cid) -> int | None:
+    """The top of a conversation's tree: follow parent_conversation_id up (a
+    subagent -> the chat that spawned it; a plan or funnel job head -> its
+    launcher). None for an unknown conversation."""
+    try:
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return None
+    seen = {cid}
+    for _ in range(RUN_DEPTH):
+        async with db.execute("SELECT parent_conversation_id AS p FROM conversations "
+                              "WHERE id = ?", (cid,)) as cur:
+            r = await cur.fetchone()
+        if r is None:
+            return None if len(seen) == 1 else cid
+        if not r["p"] or r["p"] in seen:
+            return cid
+        cid = r["p"]
+        seen.add(cid)
+    return cid
+
+
+def _ambient() -> tuple[int | None, str | None]:
+    """(conversation id, model call id) of the turn this code runs inside, or
+    (None, None). Read for attribution ONLY: a chat turn inherits the operator's
+    request context, so nothing here may say who the actor was."""
+    try:
+        from . import runtime
+        cid, call = runtime.conversation_id.get(), runtime.tool_call_id.get()
+    except Exception:                           # noqa: BLE001
+        return None, None
+    if call is None:
+        try:                                    # a host loop sets the registry's copy
+            from .agent.tools import registry
+            call = registry.call_id.get()
+        except Exception:                       # noqa: BLE001
+            pass
+    return cid, call
+
+
+async def _attribution(db: aiosqlite.Connection, conversation_id, call_id, box_id,
+                       boot_id, detail: dict | None) -> dict:
+    """The columns that name an event's run. An explicit value from the raise site
+    wins; otherwise the turn's own context; the box and its boot fall back to the
+    detail the host-side raisers already write."""
+    amb_cid, amb_call = _ambient()
+    if conversation_id is None:
+        conversation_id, call_id = amb_cid, call_id or amb_call
+    elif call_id is None and conversation_id == amb_cid:
+        call_id = amb_call
+    d = detail if isinstance(detail, dict) else {}
+    box_id = box_id or d.get("box_id") or d.get("box")
+    boot_id = boot_id or d.get("boot_id")
+    try:
+        conversation_id = int(conversation_id) if conversation_id is not None else None
+    except (TypeError, ValueError):
+        conversation_id = None
+    root = None
+    if conversation_id is not None:
+        try:
+            root = await run_root_of(db, conversation_id)
+        except Exception:                       # noqa: BLE001 — never fail an alert over this
+            root = None
+    return {"conversation_id": conversation_id, "run_root": root,
+            "call_id": (str(call_id)[:80] if call_id else None),
+            "box_id": (str(box_id)[:80] if box_id else None),
+            "boot_id": (str(boot_id)[:80] if boot_id else None)}
+
+
 async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
                       severity: str = "warn", project: str | None = None,
                       detail: dict | None = None, cause: str | None = None,
-                      actor: str | None = None, rule: str | None = None) -> int:
+                      actor: str | None = None, rule: str | None = None,
+                      conversation_id: int | None = None, call_id: str | None = None,
+                      box_id: str | None = None, boot_id: str | None = None) -> int:
     """Record one event (or count a repeat onto its twin) and publish it with
     the ping decision. `cause` is the coalescing key; the summary unless the
     raise site names something steadier. Returns the row id: a repeat returns
@@ -617,6 +719,7 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
     cause = (cause or summary)[:500]
     actor = OPERATOR if actor == OPERATOR else None
     rule = (rule or "").strip()[:200] or None
+    att = await _attribution(db, conversation_id, call_id, box_id, boot_id, detail)
     j = await _judge(db, kind, detail)
     if j and j.get("standing"):
         cause = j["standing"][:500]
@@ -637,7 +740,8 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
     # onto one quiet row; everything else onto its waiting twin
     twin = (None if quiet == "operator"
             else await _coalesce_target(db, kind, severity, project, cause,
-                                        actor=actor, quiet=quiet))
+                                        actor=actor, quiet=quiet,
+                                        run_root=att["run_root"]))
     if twin is not None:
         # already in the queue: only a critical repeat interrupts again, and
         # at most once per ping window
@@ -649,12 +753,15 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
     ping = d["ping"] and (t == "critical" or _rate_ok(kind, settings.security_ping_per_kind))
     cur = await db.execute(
         "INSERT INTO security_events(kind, severity, project_slug, summary, detail, "
-        "cause, last_seen, actor, quiet, rule, acknowledged, acknowledged_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "cause, last_seen, actor, quiet, rule, acknowledged, acknowledged_at, "
+        "conversation_id, run_root, call_id, box_id, boot_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (kind, severity, project, summary,
          json.dumps(detail) if detail is not None else None, cause, _utcnow(),
          actor, quiet, rule if quiet == "rule" else None,
-         1 if quiet else 0, _utcnow() if quiet else None))
+         1 if quiet else 0, _utcnow() if quiet else None,
+         att["conversation_id"], att["run_root"], att["call_id"], att["box_id"],
+         att["boot_id"]))
     await db.commit()
     if t == "critical":
         _rate_ok(f"#{cur.lastrowid}", 1)        # its repeats stay quiet for a window
@@ -666,7 +773,9 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
                                 "count": 1, "repeat": False, "tier": t, "ping": ping,
                                 "acknowledged": bool(quiet), "actor": actor,
                                 "quiet": quiet, "rule": rule if quiet == "rule" else None,
-                                "mode": d["mode"]})
+                                "mode": d["mode"], "conversation_id": att["conversation_id"],
+                                "run_root": att["run_root"], "box_id": att["box_id"],
+                                "boot_id": att["boot_id"]})
     return cur.lastrowid
 
 
@@ -848,6 +957,7 @@ async def record_harness_fault(db: aiosqlite.Connection, *, tried: str,
     await raise_event(
         db, kind="harness_fault", severity="info",
         project=project, summary=f"Harness fault reported: {head}",
+        conversation_id=conversation_id,
         detail={"fault_id": fault_id, "conversation_id": conversation_id,
                 "tool": tool, "tried": tried, "went_wrong": went_wrong,
                 "expected": expected, "severity": severity})

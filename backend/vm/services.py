@@ -472,7 +472,7 @@ async def list_services(project: str | None = None, *,
 
 async def _event(kind: str, summary: str, *, severity: str = "warn",
                  project: str | None = None, detail: dict | None = None,
-                 by_operator: bool = False) -> None:
+                 by_operator: bool = False, conversation_id: int | None = None) -> None:
     """`by_operator` is the operator-facing route saying the change is the
     operator's own click: recorded quietly ("by you"), never an alert. Marked
     explicitly by the caller, not inferred: an agent's turn inherits the
@@ -483,7 +483,8 @@ async def _event(kind: str, summary: str, *, severity: str = "warn",
     try:
         await security.raise_event(db, kind=kind, severity=severity,
                                    project=project, summary=summary, detail=detail,
-                                   actor=security.OPERATOR if by_operator else None)
+                                   actor=security.OPERATOR if by_operator else None,
+                                   conversation_id=conversation_id)
     finally:
         await db.close()
 
@@ -559,7 +560,8 @@ async def file_request(slug: str, args: dict, *, conversation_id: int | None = N
                  detail={"service_id": sid, "name": canon["name"],
                          "artifact_sha256": sha, "files": len(manifest),
                          "ports": canon["ports"], "egress_hosts": canon["egress_hosts"],
-                         "placement": placement, "supersedes_id": supersedes})
+                         "placement": placement, "supersedes_id": supersedes},
+                 conversation_id=conversation_id)
     _changed(row)
     return row
 
