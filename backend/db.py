@@ -781,6 +781,7 @@ async def init_db() -> None:
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
         await _migrate_secsettings(db)
+        await _migrate_secrules(db)
         await _migrate_peer_trust(db)
         await _migrate_narration(db)
         await _migrate_turnstats(db)
@@ -1005,6 +1006,26 @@ async def _migrate_secsettings(db: aiosqlite.Connection) -> None:
         ("actor", "TEXT"),
         ("quiet", "TEXT"),
     ))
+
+
+async def _migrate_secrules(db: aiosqlite.Connection) -> None:
+    """Why a rule judged a security event normal work (backend/security.py):
+    `rule` is the short reason ("file never committed", "imported elsewhere in
+    the project"), set only on rows filed already acknowledged with
+    quiet='rule'. NULL on every other row. Idempotent."""
+    await _add_columns(db, "security_events", (
+        ("rule", "TEXT"),
+    ))
+    # the files each conversation created (backend/writes.py): removing one of
+    # those is the run clearing its own scratch work. Notes older than a month go.
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS write_created ("
+        " project_slug TEXT NOT NULL,"
+        " conversation_id INTEGER NOT NULL,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+        " PRIMARY KEY (project_slug, conversation_id, path))")
+    await db.execute("DELETE FROM write_created WHERE created_at < datetime('now', '-30 days')")
 
 
 async def _migrate_boxlog(db: aiosqlite.Connection) -> None:

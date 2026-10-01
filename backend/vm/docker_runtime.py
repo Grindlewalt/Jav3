@@ -650,7 +650,9 @@ class DockerBox:
                     f"docker box {self.box.id}: " + "; ".join(iso.warnings),
                     "warn" if iso.weak else "info", self.box,
                     {"box": self.box.id, "userns": iso.userns,
-                     "oci_runtime": iso.oci_runtime or "runc"})
+                     "oci_runtime": iso.oci_runtime or "runc",
+                     # security.py states the fact once per allocation, not per start
+                     "allocation": int(self.box.allocated_at)})
             self.guest_uid = guest_host_uid(iso)
             argv = run_spec(self.box, iso)
             validate_spec(argv, self.box)

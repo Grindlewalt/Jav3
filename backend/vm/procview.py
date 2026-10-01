@@ -17,6 +17,19 @@ Everything else is shown, with all of its descendants under it. Tags:
               nohup'd or not) but not the server itself
   unexpected  anything else, and raises `unexpected_process` (warn; critical
               in a service box), once per (box boot, exe, unit)
+A run_code process that outlived its command (a server the agent started, a
+Chromium it launched and its crashpad handler) is re-parented to init. In a VM
+it keeps the guest server's cgroup, so it is `run_code` already; a Docker box
+has no units, so it would read as unexpected. A turn box's process outside any
+unit whose only ancestor is init is also `run_code`: it is RECORDED, once per
+(boot, exe, script), as an unexpected_process that the rule files quietly
+("started by the agent"), never alerted.
+
+Vendor units. An image's baseline also holds every .service the distribution
+ships (`units_vendor`, recorded at image build): timer-started units such as
+apt-listchanges, fstrim and man-db are never "enabled", and each new stock unit
+was one more false alarm. A unit that is not in the image (one the agent or an
+attacker added to a running box) still alerts.
 
 Host truth. Once per cycle the host samples ITS OWN kernel (`ss -tinH`) for
 TCP sockets whose peer is a box's guest IP: the proxy's accepted sockets and
@@ -64,6 +77,7 @@ MAX_CONNS_PER_PROC = 64
 MAX_TREE_DEPTH = 64
 MAX_EVENT_BYTES = 256 * 1024        # a bigger box row is announced, not pushed
 MAX_ALERTS_PER_BOX_HOUR = 10
+MAX_AGENT_RECORDS_PER_BOOT = 50     # quiet "started by the agent" rows, per box boot
 _MAX_INT = 2 ** 53
 _MAX_PID = 4194304                  # PID_MAX_LIMIT
 _STR = {"exe": 256, "cmd": 512, "comm": 64, "user": 32, "unit": 128,
@@ -233,14 +247,18 @@ def entries_from_image_baseline(data: dict) -> list[dict]:
     (truncated, no path, no unit) and are NOT turned into entries: a bare name
     would whitelist that name in every cgroup (the capture itself runs
     python3/ps/sh), so it would hide exactly the implant this view exists to
-    show. The built-in systemd/getty/dbus patterns are kept alongside."""
+    show. The built-in systemd/getty/dbus patterns are kept alongside.
+    `units_vendor` (every .service the distribution ships) is trusted the same
+    way as the enabled ones."""
     out = [{"exe": e, "unit": u} for e, u in BUILTIN_BASELINE]
     seen = set()
-    for u in data.get("units_enabled") or []:
-        if (isinstance(u, str) and _UNIT_NAME.match(u)
-                and not _NEVER_BASELINE_UNITS.match(u) and u not in seen):
-            seen.add(u)
-            out.append({"exe": "*", "unit": u})
+    for key in ("units_enabled", "units_vendor"):
+        for u in data.get(key) or []:
+            if (isinstance(u, str) and _UNIT_NAME.match(u)
+                    and not _NEVER_BASELINE_UNITS.match(u) and u not in seen):
+                seen.add(u)
+                # a template (getty@.service) runs as getty@tty1.service
+                out.append({"exe": "*", "unit": u.replace("@.", "@*.")})
     return out
 
 
@@ -250,7 +268,7 @@ def parse_baseline(data: Any, source: str = "image") -> Baseline:
     WP5's image baseline shape (units_enabled, processes, ...) is converted
     by entries_from_image_baseline."""
     if (isinstance(data, dict) and "entries" not in data
-            and ("units_enabled" in data or "processes" in data)):
+            and ("units_enabled" in data or "units_vendor" in data or "processes" in data)):
         data = {"v": 1, "entries": entries_from_image_baseline(data)}
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
@@ -442,15 +460,44 @@ def _descendants(root: int, kids: dict[int, list[int]], limit: int = MAX_PROCS) 
     return seen
 
 
+def _orphans_of_run_code(procs: dict[int, dict], self_pid: int | None, self_unit: str,
+                         kids: dict[int, list[int]]) -> set[int]:
+    """Processes a turn box's run_code started that no unit and no ancestor
+    says so: outside every systemd unit, re-parented to init (ppid 0 or 1, or a
+    parent the snapshot does not hold), with everything under them. Only where
+    the guest server itself has no unit (Docker: the cgroup namespace hides
+    them); in a VM such a process keeps the server's unit and is run_code
+    already, and a process outside any unit there stays unexpected."""
+    if not self_pid or self_unit:
+        return set()
+    out: set[int] = set()
+    for pid, p in procs.items():
+        if (p["unit"] == "" and not p["kthread"] and pid not in (1, self_pid)
+                and pid not in out and (p["ppid"] <= 1 or p["ppid"] not in procs)):
+            out.add(pid)
+            out |= _descendants(pid, kids)
+    return out
+
+
 def classify(snap: dict, box, baseline: Baseline,
              approved: set[int] | None) -> dict[int, str]:
     """pid -> tag for every process that is NOT OS (before descendants)."""
+    return _classify(snap, box, baseline, approved)[0]
+
+
+def _classify(snap: dict, box, baseline: Baseline,
+              approved: set[int] | None) -> tuple[dict[int, str], set[int]]:
+    """(tags, the pids tagged run_code by the orphan rule: see
+    _orphans_of_run_code, which evaluate records quietly)."""
     procs = snap["procs"]
     self_pid = snap["self_pid"] if snap["self_pid"] in procs else None
     self_unit = procs[self_pid]["unit"] if self_pid else ""
     kids = _children_map(procs)
     self_desc = _descendants(self_pid, kids) if self_pid else set()
     turn_box = box.kind in ("shared", "project")
+    orphans = (_orphans_of_run_code(procs, self_pid, self_unit, kids)
+               if turn_box else set())
+    agent: set[int] = set()
     tags: dict[int, str] = {}
     for pid, p in procs.items():
         # PID 1 is the box's own init: systemd in a VM (init.scope, already
@@ -472,8 +519,12 @@ def classify(snap: dict, box, baseline: Baseline,
             continue
         if baseline.matches(p["exe"], p["unit"]):
             continue
+        if pid in orphans:
+            tags[pid] = "run_code"
+            agent.add(pid)
+            continue
         tags[pid] = "unexpected"
-    return tags
+    return tags, agent
 
 
 def shown_tags(snap: dict, tags: dict[int, str]) -> dict[int, str]:
@@ -659,7 +710,7 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
         st.miss.clear()
         st.alerted.clear()
     st.baseline_source = baseline.source
-    own = classify(snap, box, baseline, approved)
+    own, agent = _classify(snap, box, baseline, approved)
     tags = shown_tags(snap, own)
     by_pid, orphans, owned = build_conns(snap, box, host_socks or {}, hostnames, inbound)
     tree = render_tree(snap, tags, by_pid, box, st, now)
@@ -682,6 +733,30 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
                        f"{(p['exe'] or p['comm'] or '?')[:120]}",
             "detail": {"box_id": box.id, "pid": pid, "exe": p["exe"], "cmd": p["cmd"],
                        "unit": p["unit"], "user": p["user"],
+                       "baseline": baseline.source}})
+
+    # what the agent's own run_code left running (the orphan rule): recorded,
+    # once per (boot, exe, script), and filed quietly: not an alert. Kept apart
+    # from the alerts so the per-hour rate cap below never lets them crowd one out.
+    quiet: list[dict] = []
+    for pid in sorted(agent):
+        p = snap["procs"][pid]
+        exe = p["exe"] or p["comm"] or "?"
+        argv = (p["cmd"] or "").split()
+        script = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else ""
+        key = ("agent", exe, script)
+        if key in st.alerted:
+            continue
+        if sum(1 for k in st.alerted if k[0] == "agent") >= MAX_AGENT_RECORDS_PER_BOOT:
+            break                              # a guest cannot fill the log with names
+        st.alerted.add(key)
+        quiet.append({
+            "kind": "unexpected_process", "severity": "warn",
+            "summary": f"Process started by the agent in box {box.id}: {exe[:120]}",
+            "cause": f"agent-process:{box.id}:{exe}:{script}"[:300],
+            "rule": "started by the agent's run_code and left running",
+            "detail": {"box_id": box.id, "pid": pid, "exe": p["exe"], "cmd": p["cmd"],
+                       "unit": p["unit"], "user": p["user"], "ppid": p["ppid"],
                        "baseline": baseline.source}})
 
     # host-held connections from this guest that no reported process owns
@@ -756,7 +831,7 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
            "baseline": baseline.source, "truncated": snap["truncated"],
            "totals": totals, "orphan_conns": orphans[:MAX_CONNS_PER_PROC],
            "tree": tree}
-    return row, kept
+    return row, kept + quiet
 
 
 # --- I/O: fetch from a guest, sample the host, read the DB ---------------------------
@@ -983,7 +1058,8 @@ async def poll_once(now: float | None = None) -> list[dict]:
                 try:
                     await security.raise_event(db, kind=a["kind"], severity=a["severity"],
                                                project=box.project, summary=a["summary"],
-                                               detail=a["detail"])
+                                               detail=a["detail"], cause=a.get("cause"),
+                                               rule=a.get("rule"))
                 except Exception:  # noqa: BLE001
                     log.exception("procview: raising %s", a["kind"])
     finally:

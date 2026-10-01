@@ -237,12 +237,19 @@ def baseline(venv: str) -> dict:
         pass
     units = [ln.split()[0] for ln in out(["systemctl", "list-unit-files", "--state=enabled",
                                           "--no-legend"]).splitlines() if ln.strip()]
+    vendor: set[str] = set()                # every .service the distribution ships
+    for d in ("/usr/lib/systemd/system", "/lib/systemd/system"):
+        try:
+            vendor.update(n for n in os.listdir(d) if n.endswith(".service"))
+        except OSError:
+            pass
     setuid = out(["find", "/", "-xdev", "-perm", "-4000", "-type", "f"]).split()
     listening = [ln.strip() for ln in out(["ss", "-ltnupH"]).splitlines() if ln.strip()]
     procs = sorted({ln.strip() for ln in out(["ps", "-eo", "comm="]).splitlines() if ln.strip()})
     return {"v": 1, "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="seconds"), "dpkg": dpkg, "pip": pip, "npm": npm,
-        "units_enabled": units, "setuid": setuid, "listening": listening,
+        "units_enabled": units, "units_vendor": sorted(vendor),
+        "setuid": setuid, "listening": listening,
         "processes": procs}
 
 

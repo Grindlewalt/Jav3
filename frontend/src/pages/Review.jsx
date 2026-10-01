@@ -11,6 +11,7 @@ import { PendingCountContext } from '../Notices.jsx'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { sevClass, ts } from '../format.js'
+import { liveInQueue } from '../securityQueue.js'
 import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, ASKS_LEDE, DENY_TIP, FAULTS_LEDE, REFUSED_TAG, askAge,
   askKindText, faultText, ledeFor, SECURITY_LEDES,
@@ -99,7 +100,8 @@ export function ReviewQueue({ slug }) {
     api('/api/notifications').then((r) => setAsks(r.asks || [])).catch(() => {})
   }
   function loadAlerts() {
-    api('/api/security/events?unacknowledged=true').then((r) => {
+    // the Queue: waiting rows without the record tier (audit lines stay in the History)
+    api('/api/security/events?unacknowledged=true&queue=true').then((r) => {
       let evs = r.events || []
       if (slug) evs = evs.filter((e) => (e.project_slug || e.project) === slug)
       setAlerts(evs)
@@ -158,9 +160,9 @@ export function ReviewQueue({ slug }) {
   useEffect(() => {
     return subscribeSse('/api/security/stream', (ev) => {
       if (ev.type !== 'security_event') return
-      // filed already acknowledged (their own action, or a Record-only kind):
-      // it is history, not a queue item
-      if (ev.acknowledged) return
+      // filed already acknowledged (their own action, a rule's "normal work", or
+      // a Record-only kind) or an audit line: it is history, not a queue item
+      if (!liveInQueue(ev)) return
       const proj = ev.project_slug || ev.project
       if (slug && proj !== slug) return
       setAlerts((a) => a.some((x) => x.id === ev.id)

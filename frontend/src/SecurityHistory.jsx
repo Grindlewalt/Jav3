@@ -12,12 +12,17 @@ const FILTERS = [
   ['all', 'Everything'],
   ['you', 'By you'],
   ['recorded', 'Recorded only'],
+  ['rule', 'Filtered as normal work'],
 ]
 
+// "Filtered as normal work": a rule judged the event routine (a scratch file the
+// run made and threw away, a known device reconnecting, a process the agent's own
+// run_code started). Recorded, acknowledged, never in the Queue; `rule` says why.
 const keep = (filter) => (e) => (
   filter === 'you' ? e.actor === 'operator'
     : filter === 'recorded' ? e.quiet === 'kind'
-      : true)
+      : filter === 'rule' ? e.quiet === 'rule'
+        : true)
 
 export default function SecurityHistory() {
   const [open, setOpen] = useState(false)
@@ -59,6 +64,7 @@ export default function SecurityHistory() {
                   {e.count > 1 && <span className="tag">×{e.count}</span>}
                   {e.actor === 'operator' && <span className="tag by-you">by you</span>}
                   {e.quiet === 'kind' && <span className="tag">recorded only</span>}
+                  {e.quiet === 'rule' && <span className="tag" title={e.rule || ''}>normal work</span>}
                   {!e.acknowledged && <span className="tag">waiting</span>}
                   <span className="dim small">{ts(e.count > 1 && e.last_seen ? e.last_seen : e.created_at)}</span>
                 </div>
@@ -66,6 +72,7 @@ export default function SecurityHistory() {
                         title="open the evidence board">
                   <span className="rev-alert-summary">{e.summary}</span>
                 </button>
+                {e.quiet === 'rule' && e.rule && <div className="dim small">{e.rule}</div>}
               </div>
             </div>
           ))}

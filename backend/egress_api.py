@@ -377,11 +377,14 @@ async def set_grant(slug: str, body: GrantBody):
 # --- security alerts ---------------------------------------------------------
 
 @security_router.get("/events")
-async def security_events(unacknowledged: bool = False, limit: int = 100):
+async def security_events(unacknowledged: bool = False, limit: int = 100,
+                          queue: bool = False):
+    """`queue` is what the Review Queue shows: waiting rows without the record
+    tier (those stay in the history, which lists everything)."""
     db = await get_db()
     try:
         return {"events": await security.list_events(
-            db, unacknowledged_only=unacknowledged, limit=limit)}
+            db, unacknowledged_only=unacknowledged, limit=limit, queue_only=queue)}
     finally:
         await db.close()
 
