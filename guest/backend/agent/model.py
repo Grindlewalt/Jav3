@@ -46,14 +46,15 @@ class VsockModelClient:
                 while b"\n" not in buf:
                     chunk = await loop.sock_recv(s, 65536)
                     if not chunk:
-                        return
+                        raise ModelError("the model gateway closed the connection "
+                                         "before the reply was complete")
                     buf += chunk
                 line, buf = buf.split(b"\n", 1)
                 if not line.strip():
                     continue
                 ev = json.loads(line)
                 kind = ev.get("type")
-                if kind == "token":
+                if kind in ("token", "retry"):     # retry: the stream dropped, text so far is void
                     yield ev
                 elif kind == "message":
                     yield ev

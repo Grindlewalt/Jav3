@@ -2,6 +2,7 @@
 and the gateway (key policy, budget, ledger) lives in front of it. `providers.resolve` routes each
 call — `provider/model` -> endpoint, key, wire kind — and the non-OpenAI
 wire formats live in adapters.py."""
+import asyncio
 import contextvars
 import json
 import re
@@ -409,6 +410,17 @@ def _normalise_usage(usage: dict | None) -> dict | None:
             "prompt_cache_miss_tokens": max(prompt - cached, 0)}
 
 
+def _estimate_usage(messages: list[dict], tools: list[dict] | None, out_chars: int) -> dict:
+    """Token usage for a call that never reported any: about four characters to
+    a token, no cache credit (the Budget then charges the whole prompt, which
+    errs towards caution)."""
+    prompt = len(json.dumps(_redact_images(messages), default=str, ensure_ascii=False))
+    prompt += len(json.dumps(tools, default=str)) if tools else 0
+    p = max(prompt // 4, 1)
+    return {"prompt_tokens": p, "completion_tokens": out_chars // 4,
+            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": p}
+
+
 def _cache_weight(route) -> float | None:
     """What a cached input token costs relative to a fresh one, for this
     model — the Budget's spend proxy. None = the Budget's default."""
@@ -491,10 +503,30 @@ class ModelGateway:
                 **({"max_tokens": max_tokens} if max_tokens else {}),
                 **({"extra": extra} if extra else {}))
 
+        async def account(usage: dict | None) -> None:
+            if budget is not None:
+                budget.add(usage or {}, cache_weight=_cache_weight(route))
+            try:
+                await record_model_call(conversation_id, route.model_id, usage,
+                                        messages, tools,
+                                        op_id=op_id or budget_mod.active_op_id.get(),
+                                        box_id=call_box_id.get())
+            except Exception:  # noqa: BLE001 — the ledger must never fail a call
+                pass
+
         final: dict | None = None
+        streamed = 0          # chars of this attempt's reply the provider has sent us
+        abandoned = False     # the caller stopped reading (or was cancelled) mid-call
         try:
             async for ev in stream:
                 if ev["type"] == "token":
+                    streamed += len(ev["text"])
+                    yield ev
+                elif ev["type"] == "retry":
+                    # the dropped attempt was billed for its prompt and what it
+                    # sent, and the retry will be billed again
+                    await account(_estimate_usage(messages, tools, streamed))
+                    streamed = 0
                     yield ev
                 else:
                     final = ev
@@ -505,19 +537,22 @@ class ModelGateway:
                 raise ModelError(str(e).replace(route.key, "***"),
                                  status=e.status) from None
             raise
+        except (GeneratorExit, asyncio.CancelledError):
+            abandoned = True
+            raise
+        finally:
+            # A call that ended without its final event still ran at the
+            # provider: a stop closes the stream mid-reply, a drop that was not
+            # retried away ends it. Its usage never arrived, so it is estimated
+            # from what was sent and received; a call that failed before the
+            # first token was refused or never started, and costs nothing.
+            if final is None and (streamed or abandoned):
+                await account(_estimate_usage(messages, tools, streamed))
 
         assert final is not None
         usage = _normalise_usage(final["usage"])
         final = {**final, "usage": usage}
-        if budget is not None:
-            budget.add(usage or {}, cache_weight=_cache_weight(route))
-        try:
-            await record_model_call(conversation_id, route.model_id, usage,
-                                    messages, tools,
-                                    op_id=op_id or budget_mod.active_op_id.get(),
-                                    box_id=call_box_id.get())
-        except Exception:  # noqa: BLE001 — the ledger must never fail a call
-            pass
+        await account(usage)
         yield final
 
 
