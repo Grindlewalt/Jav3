@@ -143,9 +143,121 @@ export async function clickAt(x, y, expect) {
   }
   if (!hit) return { ok: false, err: 'nothing on the page at that point' };
   if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
-    return { ok: false, code: 'frame', err: 'that point is inside an iframe; browser_read_page and click its element by id (f1:…)' };
+    return { ok: false, code: 'frame', err: 'that point is inside an iframe, which a script-made click cannot reach by coordinates; browser_read_page and click its element by id (f1:…)' };
   }
   return D.realClick(window, document, hit, x, y, null);
+}
+
+// --- trusted clicks -------------------------------------------------------------------
+// The page half of lib/trusted.js: real mouse input is sent by the service worker
+// through chrome.debugger; these functions find where to aim, check what is on
+// top there, and see whether the click arrived.
+
+// Where the element is now: scrolled to the middle, the point a real click
+// would hit (CSS px of THIS frame's viewport), and whether something else is
+// on top of it there (a banner, a transparent iframe).
+export function measureEl(id) {
+  const D = globalThis.__jav3Dom;
+  const el = D.findJav3(document, id);
+  if (!el) return { ok: false, code: 'stale' };
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  const vp = { w: window.innerWidth, h: window.innerHeight };
+  const pt = D.clickPoint(el.getBoundingClientRect(), vp.w, vp.h);
+  if (!pt) return { ok: false, code: 'offscreen', err: 'the element has no visible area to click' };
+  const out = { ok: true, pt, vp, label: D.describeEl(el) };
+  const hit = D.deepPoint(document, pt.x, pt.y);
+  if (hit && D.isCovered(el, hit)) {
+    const c = D.tagCover(document, hit);
+    out.covered = { n: c.n, name: D.clean(D.accessibleName(c.el), 40) || c.el.tagName.toLowerCase() };
+  }
+  return out;
+}
+
+// What the service worker needs to place this frame in its parent: the frame's
+// viewport, its own <iframe> box in the parent's viewport when the parent is
+// same-origin (window.frameElement), and the boxes of the <iframe>s inside it
+// (content boxes, CSS px of this frame's viewport) with their src.
+export function frameInfo() {
+  const D = globalThis.__jav3Dom;
+  let self = null;
+  try {
+    const fe = window.frameElement;
+    if (fe) {
+      const r = fe.getBoundingClientRect();
+      self = { x: r.left + fe.clientLeft, y: r.top + fe.clientTop, w: fe.clientWidth, h: fe.clientHeight };
+    }
+  } catch { self = null; }
+  const iframes = [];
+  D.deepEach(document, el => {
+    if (el.tagName !== 'IFRAME' && el.tagName !== 'FRAME') return;
+    const r = el.getBoundingClientRect();
+    iframes.push({ src: el.src || '', x: r.left + el.clientLeft, y: r.top + el.clientTop, w: el.clientWidth, h: el.clientHeight });
+  });
+  return { vp: { w: window.innerWidth, h: window.innerHeight }, self, iframes: iframes.slice(0, 60) };
+}
+
+// What is on top at (x, y) of this frame, for a click by coordinates: refuses a
+// point outside the page, or one where the page is not what the screenshot
+// showed (`expect`, a top-frame element); an <iframe> is reported with its box so
+// the worker can look inside.
+export function probeAt(x, y, expect) {
+  const D = globalThis.__jav3Dom;
+  if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) {
+    return { ok: false, code: 'outside', err: `${x},${y} is outside the page (${window.innerWidth}x${window.innerHeight} CSS px); take a new browser_screenshot_tab` };
+  }
+  const hit = D.deepPoint(document, x, y);
+  if (expect && D.pointMoved(D.findJav3(document, expect.n), hit)) {
+    return { ok: false, code: 'moved', err: 'the page moved since the screenshot — ' + JSON.stringify(expect.label || 'the element') + ' is no longer at that point; browser_screenshot_tab again' };
+  }
+  if (!hit) return { ok: false, err: 'nothing on the page at that point' };
+  if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
+    const r = hit.getBoundingClientRect();
+    return { ok: true, iframe: { src: hit.src || '', x: r.left + hit.clientLeft, y: r.top + hit.clientTop, w: hit.clientWidth, h: hit.clientHeight } };
+  }
+  return { ok: true, hit: D.describeEl(hit) };
+}
+
+// In a frame that holds the one we are clicking in: is the <iframe> still the
+// topmost thing at (x, y), or has something been put over it?
+export function hitIframe(x, y, src) {
+  const D = globalThis.__jav3Dom;
+  const inside = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
+  const hit = inside ? D.deepPoint(document, x, y) : null;
+  if (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && (!src || hit.src === src)) return { ok: true };
+  return { ok: false, what: hit ? D.describeEl(hit) : 'nothing' };
+}
+
+// Listen (capture phase, so the page cannot hide it) for the mouse events of the
+// click that is about to arrive in this frame; takeClick reads what they hit.
+// `id` is the element a click by id aimed at (null for a click by coordinates).
+export function armClick(id) {
+  const D = globalThis.__jav3Dom;
+  if (globalThis.__jav3Click) globalThis.__jav3Click.stop();
+  const el = id ? D.findJav3(document, id) : null;
+  const st = { down: null, click: null };
+  const rec = e => {
+    const t = (e.composedPath && e.composedPath()[0]) || e.target;
+    const o = { x: e.clientX, y: e.clientY, trusted: e.isTrusted, hit: D.describeEl(t),
+                onEl: el ? !D.pointMoved(el, t) : null };
+    if (e.type === 'mousedown') { if (!st.down) st.down = o; } else if (!st.click) st.click = o;
+  };
+  window.addEventListener('mousedown', rec, true);
+  window.addEventListener('click', rec, true);
+  st.stop = () => {
+    window.removeEventListener('mousedown', rec, true);
+    window.removeEventListener('click', rec, true);
+  };
+  globalThis.__jav3Click = st;
+  return { ok: true };
+}
+
+// lost: the listener is gone, i.e. the frame navigated (the click did something).
+export function takeClick() {
+  const st = globalThis.__jav3Click;
+  if (!st) return { ok: true, lost: true };
+  st.stop();
+  globalThis.__jav3Click = null;
+  return { ok: true, lost: false, down: st.down, click: st.click };
 }
 
 // browser_type with no element: into whatever has focus.

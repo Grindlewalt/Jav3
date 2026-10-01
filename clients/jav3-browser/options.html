@@ -20,6 +20,11 @@
   <label class="row"><input type="checkbox" id="notify"> Show a notification (with Cancel) every time Jav3 acts</label>
   <p class="mute">Site questions ("Allow Jav3 on example.com?") are always shown.</p>
 
+  <h2>Clicks</h2>
+  <label class="row"><input type="checkbox" id="trusted"> Click with real mouse input (needed for sign-in popups and some buttons in iframes)</label>
+  <p class="mute">Chrome shows "Jav3 Browser started debugging this browser" above Jav3's tab for the moment each click takes,
+    under a second. Switched off, Jav3 clicks with script events, which many third-party sign-in buttons ignore.</p>
+
   <h2>Pre-allowed sites</h2>
   <p class="mute">One per line: <code>example.com</code> or <code>*.example.com</code>. Prefix with <code>!</code> to block a site.
     Anything not listed is asked about on first use.</p>

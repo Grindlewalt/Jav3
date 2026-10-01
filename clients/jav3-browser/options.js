@@ -3,12 +3,13 @@ import { siteKey } from './lib/verbs.js';
 const $ = id => document.getElementById(id);
 
 async function render() {
-  const l = await chrome.storage.local.get({ token: '', address: '', name: '', notify: true, sites: {} });
+  const l = await chrome.storage.local.get({ token: '', address: '', name: '', notify: true, trusted: true, sites: {} });
   const s = await chrome.storage.session.get({ status: 'offline' });
   $('pairState').textContent = l.token
     ? `Paired with ${l.address} as “${l.name}” (${s.status}). Pairing again replaces it.`
     : 'Not paired.';
   $('notify').checked = l.notify;
+  $('trusted').checked = l.trusted;
   if (document.activeElement !== $('sites')) {
     $('sites').value = Object.entries(l.sites)
       .map(([k, v]) => (v === 'deny' ? '!' : '') + k).join('\n');
@@ -26,6 +27,7 @@ $('pair').onclick = async () => {
 };
 
 $('notify').onchange = () => chrome.storage.local.set({ notify: $('notify').checked });
+$('trusted').onchange = () => chrome.storage.local.set({ trusted: $('trusted').checked });
 
 $('saveSites').onclick = async () => {
   const sites = {};
