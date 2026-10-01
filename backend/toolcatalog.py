@@ -138,8 +138,11 @@ def markdown(cat: dict | None = None) -> str:
         f"The model can be offered **{tools} tools with {actions} actions**"
         + (f" ({off} of the actions is switched off in its folder)." if off == 1 else
            f" ({off} of the actions are switched off in their folders)." if off else "."),
-        f"{itools - tools} more tools with {iactions - actions} more actions are internal: the "
-        "harness grants or calls them, and the model is not offered them on a normal turn.",
+        f"{itools - tools} more tools with {iactions - actions} more actions are internal "
+        f"({', '.join(f'`{n}`' for n in cat['order'] if cat['rows'][n]['internal'])}): the "
+        "harness grants or calls them, and the model is not offered them on a normal turn. "
+        "A TOOL.md marks one with `internal: true`; nothing else reads the key, so it changes "
+        "what the Tools page lists and nothing about what is granted.",
         "",
         f"A turn lists only the core tools (at most {toolsections.CORE_MAX} names, with `tools`) "
         "until the model loads a section with `tools(section=...)`. Every old name still "
