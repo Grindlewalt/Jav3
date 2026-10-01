@@ -14,6 +14,8 @@ export const isCrit = (ev) =>
 export const wantsPing = (ev) => (ev.ping !== undefined ? !!ev.ping : isCrit(ev))
 
 // info events are records: in the Security log, not in the badge. A repeat is
-// already counted (it bumped a row that is in the badge).
-export const countsInBadge = (ev) => !ev.repeat
+// already counted (it bumped a row that is in the badge). One filed already
+// acknowledged (the operator's own action, or a kind set to Record only) never
+// waits, so it is never counted.
+export const countsInBadge = (ev) => !ev.repeat && !ev.acknowledged
   && (ev.tier ? ev.tier !== 'record' : String(ev.severity || '').toLowerCase() !== 'info')
