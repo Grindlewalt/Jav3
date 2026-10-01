@@ -87,6 +87,9 @@ def make_backend(jd, apps: dict[str, list[str]] | None = None):
         def screen_state(self) -> dict:
             return {"locked": False, "asleep": False}
 
+        def elements_source(self):
+            return jd.ElementSource("the box's desktop has no accessibility tree")
+
         def open_url(self, url: str) -> None:
             if not browser:
                 raise jd.DeskError("this desktop has no browser to open a URL in")

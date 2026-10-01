@@ -548,6 +548,7 @@ async def main():
                                             "params": {}}) + "\n").encode())
     res = await frames(loop, a, buf, lambda m: m.get("type") == "res")
     assert res["id"] == "r1" and res["ok"] is True and res["image"]["w"] == 1280, res.get("err")
+    assert "no accessibility tree" in res["elements_note"], brief(res)
     assert display.session._holds == 1                      # held while the agent works
     await loop.sock_sendall(a, (json.dumps({"type": "req", "id": "r2", "verb": "click",
                                             "params": {"x": 40, "y": 50}}) + "\n").encode())

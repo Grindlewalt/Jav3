@@ -1,9 +1,9 @@
 # The live desktop of a box
 
 A box on the `desktop` image can show its screen in the web app: a Work window
-(`+` menu, `/desktop`, or `/window desktop`) that watches it live. Step P1 of
-three: **watch only**. P2 lets the agent drive it with the desk tool, P3 lets the
-operator click in to take over and hand back.
+(`+` menu, `/desktop`, or `/window desktop`) that watches it live. Three steps:
+P1 **watch only** (the window), P2 **the agent drives it** with the desk tool
+(below), P3 lets the operator click in to take over and hand back (not built yet).
 
 KVM only. The desktop is an image layer (`vm/images/desktop.recipe`); there is no
 Docker image of it, and a Docker box says so.
@@ -16,6 +16,11 @@ Docker image of it, and a Docker box says so.
       -- vsock :5559 (box.json listen.display; boxes.PORT_DISPLAY)
     guest  guest/backend/display.py    Xvnc :100 1280x800 + openbox + an xterm on tmux `desk`
       -- unix socket /run/jav3-display.sock (never TCP)
+
+    agent  desk(action=..., computer="sandbox")  -> backend/desk.py act()
+      -- backend/vm/boxdesk.py   a shim `ws`: JSON lines over vsock :5559 {"mode":"desk"}
+      -- guest/backend/display.py  -> child: guest/backend/deskbox.py  (jav3-desk's Session)
+      -- xdotool / maim on DISPLAY :100
 
 - **Start is explicit.** `GET /api/vm/boxes/{id}/display` only reads (supported?,
   session state, `need_mb` / `free_mb`). `POST` is the operator's button: it boots
@@ -40,30 +45,114 @@ Docker image of it, and a Docker box says so.
 
 One JSON line in, one JSON line out, then (for `rfb`) raw RFB bytes:
 `{"mode":"rfb"}` starts the screen if needed, answers `{"ok":true}`, splices;
-`start`, `status`, `stop` answer the status. Errors are `{"ok":false,"error":...}`.
+`start`, `status`, `stop` answer the status; `desk` (P2, below) answers `{"ok":true}`
+and then speaks JSON lines. Errors are `{"ok":false,"error":...}`.
 When the display starts it writes `/run/jav3-desk-apps.json` (`display.apps()`):
 `terminal` (xterm on tmux `desk`) and `browser` (chromium with
 `--disable-background-networking --disable-sync --no-first-run
 --proxy-server=<the box's proxy> --no-sandbox`, a throwaway profile). The terminal
 is opened with the screen so there is something to watch.
 
-## For P2 and P3
+## The agent drives it (P2)
 
-- P2: add `{"mode":"desk"}` in `display._handle`; call `display.session.hold()` /
-  `release()` while the agent works so the idle timer does not stop the screen under
-  it. Launch apps from `display.apps()`, with `DISPLAY=:100`.
-- P3: `RfbInputFilter(allow)` takes a callback per message kind (`key`, `pointer`,
+The agent uses the SAME `desk` tool it uses on the operator's computer (no new tool
+name): `desk(action="screenshot" | "click" | "type" | "key" | "scroll" | "drag" |
+"open" | "wait", computer="sandbox")`. The model calls a box's desktop `sandbox`.
+`backend/vm/boxdesk.py` makes the box look to `backend/desk.py` like a computer that
+connected, so everything the desk path already does applies unchanged: grants, the
+fresh-screenshot-before-input rule, frame serials and stale ids, rate limits, the
+stuck-click note, the `desk_actions` audit (typed text as length + sha256), security
+events, and the taint (a screen is untrusted text).
+
+    desk(action="screenshot", computer="sandbox")
+      -> screenshot 1280x800 attached, frame 1,
+         "(no elements: the box's desktop has no accessibility tree — click by coordinates)"
+    desk(action="open", app="terminal", computer="sandbox")   # an xterm on tmux `desk`
+    desk(action="click", x=400, y=300, computer="sandbox")    # coordinates of the latest frame
+    desk(action="type", text="jav3 --server 127.0.0.1:8099", computer="sandbox")
+    desk(action="key", combo="Return", computer="sandbox")
+      -> "key done", changed: yes, the new screenshot
+
+- **Registration.** `boxdesk.ensure(box)` dials the guest (`{"mode":"desk"}`), waits for
+  its hello and calls `desk.attach(box_id=...)`. It runs when the operator starts the
+  desktop (`POST .../display`) and whenever a status read finds the screen up with no
+  desk registered (`boxdesk.sync`), so a host restart heals on the next look. The
+  connection lives exactly as long as the screen: when the display stops (idle, Stop,
+  box down) the guest ends it, the desk detaches and the tools disappear. The agent
+  never starts the screen: that is the operator's RAM decision.
+- **Identity and grants.** A box desk has a `device_tokens` row: scope `desk`, name
+  `box:<box id>`, `paired_by = 'box'`, its secret thrown away at creation (nothing can
+  connect with it), no expiry. So it appears in Settings -> Access -> Computer use with
+  the Stop button and the audit tail. Defaults on first registration: **screen on,
+  input on, shell off** (`run_code` is the box's shell). Later registrations never
+  touch the row's grants: a Stop (everything off) sticks until the operator turns them
+  back on.
+- **Scope.** `Desk.box_id`. `desk.resolve()` / `offered()` / `shell_offered()` go through
+  `desk._pool(box)`: a turn running in a box with a registered desktop sees ONLY that
+  desktop (never the operator's Mac), and a turn anywhere else never sees a box
+  desktop. The box of a turn is the host's own binding (`boxes.op_box(op_id)`, set by
+  `guest_turn`), never the guest's claim; while the tools are being listed, before the
+  turn is bound, its project's own box (`p-<slug>`) stands in. A box that had a desktop
+  this run keeps hiding the Mac after its screen stops (the turn is told the desktop is
+  not running).
+- **Guest.** `display._handle` mode `desk` needs the screen up (it never starts it),
+  spawns `python3 -m backend.deskbox` as a child under `memguard.confine` with
+  `DISPLAY=:100`, and pipes the host's connection to its stdin/stdout. The child is
+  the operator's `clients/jav3-desk/jav3-desk` (shipped as `backend/jav3_desk.py`) running
+  its own `Session.pump` over those pipes on an X11 backend (xdotool for input, maim
+  for screenshots, Pillow for the settle check). Its apps are the ones in
+  `/run/jav3-desk-apps.json` (`terminal`, `browser`); `open url=` goes to the box's
+  browser. There is no accessibility tree in the box, so a screenshot has no element
+  list: the agent clicks by coordinates (or `target=` when a grounding model is set).
+- **Hold.** The display stays up while the agent works: the first request takes
+  `Session.hold()`, every request pushes the release back `HOLD_GRACE_S` (60 s), and the
+  hold is dropped at once when the connection ends. After that the 5 minute idle clock
+  runs as before (it does not run while someone watches).
+- **Exact terminal text.** The xterm is attached to tmux session `desk`, so through
+  `run_code` the agent can type with `tmux send-keys -t desk '...' Enter` and read the
+  screen exactly with `tmux capture-pane -p -t desk` (no OCR). The desk playbook says so.
+
+### Trying the jav3 terminal client inside the box
+
+The box cannot reach the real Jav3 server, on purpose and for good. The agent runs the
+client against the test server in the pushed project workspace (the Jav3 repo as the
+project), both baked into the desktop image's `/opt/jav3/py` venv (`httpx`, `textual`):
+
+    # run_code, from the workspace root; in the background, output redirected
+    python tests/tui_fake_http.py 8099 > /tmp/fake.log 2>&1 &
+    cat /tmp/fake.log     # prints  XDG_CONFIG_HOME=/tmp/tui-fake-... python clients/jav3cli/jav3
+    # then, in the desktop terminal (desk type + key Return, or tmux send-keys -t desk):
+    XDG_CONFIG_HOME=/tmp/tui-fake-... python clients/jav3cli/jav3
+
+The fake serves seeded chats, a running turn, boxes and security rows; `jav3 --server
+127.0.0.1:8099` names it too. The screenshot shows the TUI; `tmux capture-pane` reads it.
+
+### For P3
+
+- Control must pause the agent: the agent's input and the operator's must not interleave.
+  The lever that exists is `desk.set_grants(device_id, input=False)` (pushed live to the
+  seat, and `desk.act` refuses at once with "input is off for 'sandbox'"); the
+  device id is `boxdesk.state(box_id)["device_id"]` (also in the display status as
+  `desk`). Turn it back on at hand-back. `desk.stop(device_id)` is the Settings Stop
+  (all grants off, seat dropped, in-flight turns stopped).
+- `RfbInputFilter(allow)` takes a callback per message kind (`key`, `pointer`,
   `cut_text`); `display_api.splice(ws, box, allow)` passes it through. Give it one
   that answers for whoever holds control. `resize` and `xvp` are never allowed.
   Xvnc's own `-AcceptKeyEvents` / `-AcceptPointerEvents` are on, so nothing in the
   guest changes.
+- The guest status now carries `desks` (agent connections) and `status()["desk"]` is
+  `{connected, device_id, error}`; a watching operator holds the display through
+  `viewer_up`, so P3 needs no new hold.
+- The agent's `desk_actions` rows are per device, so the take-over's own input can be
+  audited as one more actor without a new table.
 
 ## Agents can already use it
 
 Anything run with `DISPLAY=:100` shows up in the window, for example
 `DISPLAY=:100 chromium --no-sandbox ... > /dev/null 2>&1 &` through `run_code` (a
 background process the command leaves behind keeps running; redirect its output).
-The `screenshot` tool is separate: it uses its own Xvfb on `:99`.
+The `screenshot` tool is separate: it uses its own Xvfb on `:99`; to look at the
+live desktop use `desk(action="screenshot", computer="sandbox")`.
 
 ## Building the image
 
