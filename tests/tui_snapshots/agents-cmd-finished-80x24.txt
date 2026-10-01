@@ -1,4 +1,4 @@
-# agents-finished  80x24 TERM=xterm-256color
+# agents-cmd-finished  80x24 TERM=xterm-256color
 ## text
 
   Finished   3 · grouped by project

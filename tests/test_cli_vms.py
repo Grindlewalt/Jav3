@@ -36,7 +36,7 @@ def _closure(fn, name):
 def vms():
     pytest.importorskip("textual")
     app = jav3.build_tui("http://h:1", "session:sess")
-    return _closure(type(app).c_vms, "VmsScreen")
+    return app.page_classes["vms"]
 
 
 SHARED = {"id": "shared", "kind": "shared", "project": None, "projects": [], "cid": 3,
@@ -210,8 +210,8 @@ async def test_tui_vms_rows_keys_and_live_refresh(tmp_path, monkeypatch):
     async with app.run_test(size=(170, 50)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/vms")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "VmsScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: type(app.top).__name__ == "VmsPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded["boxes"] and len(_rows(scr)) == 5)
         rows = _rows(scr)
         assert "scrub after 11m" in rows[0] and "idle 4m (stops at 10m)" in rows[1]
@@ -224,9 +224,9 @@ async def test_tui_vms_rows_keys_and_live_refresh(tmp_path, monkeypatch):
         # x on the shared box: the BACKLOG's Confirm, then POST /api/vm/nuke
         scr.select_key("Xshared")
         await pilot.press("x")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
-        assert app.screen.question == "Nuke the shared box?"
-        assert app.screen.detail == ("Its overlay disk is discarded and it reboots fresh "
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
+        assert app.top.question == "Nuke the shared box?"
+        assert app.top.detail == ("Its overlay disk is discarded and it reboots fresh "
                                      "from the golden image.")
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/vm/nuke", {"confirm": True})
@@ -238,16 +238,16 @@ async def test_tui_vms_rows_keys_and_live_refresh(tmp_path, monkeypatch):
         scr.select_key("Xp-alpha")
         await pilot.press("x")
         await pilot.pause(0.2)
-        assert app.screen is scr and "x nukes the shared box" in _text(scr.query_one("#sec-sub"))
+        assert app.top is scr and "x nukes the shared box" in _text(scr.query_one("#sec-sub"))
 
         # r restarts after a Confirm
         await pilot.press("r")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
-        assert app.screen.question == "Restart box p-alpha?" and "container" in app.screen.detail
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
+        assert app.top.question == "Restart box p-alpha?" and "container" in app.top.detail
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/vm/boxes/p-alpha/restart", None)
                             in _posts(seen))
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
 
         # enter: the history in the detail pane; enter again hides it
         scr.select_key("Xp-alpha")
@@ -268,9 +268,9 @@ async def test_tui_vms_rows_keys_and_live_refresh(tmp_path, monkeypatch):
 
         # c cleans the leftovers after a Confirm naming them
         await pilot.press("c")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
-        assert app.screen.question == "Clean 2 leftovers?"
-        assert "jav3-p-ghost" in app.screen.detail and "never removed" in app.screen.detail
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
+        assert app.top.question == "Clean 2 leftovers?"
+        assert "jav3-p-ghost" in app.top.detail and "never removed" in app.top.detail
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/vm/leftovers/clean",
                                             {"confirm": True}) in _posts(seen))
@@ -282,13 +282,13 @@ async def test_tui_vms_rows_keys_and_live_refresh(tmp_path, monkeypatch):
         assert await _until(pilot, lambda: scr.loaded["images"] and len(_rows(scr)) == 2)
         assert "failed" in _text(scr.query_one("#sec-detail"))      # last build
         await pilot.press("l")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "View")
-        assert "[b]not markup[/b]" in app.screen.markup.replace("\\[", "[")
-        assert "disk full" in app.screen.markup and "untrusted" in app.screen.markup
+        assert await _until(pilot, lambda: type(app.top).__name__ == "View")
+        assert "[b]not markup[/b]" in app.top.markup.replace("\\[", "[")
+        assert "disk full" in app.top.markup and "untrusted" in app.top.markup
         await pilot.press("escape")
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("down", "l")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "View")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "View")
         assert any(p == "/api/vm/images/dev/log" and q == {"version": "2"}
                    for _, p, q, _ in seen)
         await pilot.press("escape")

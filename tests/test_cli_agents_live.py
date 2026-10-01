@@ -70,8 +70,8 @@ async def boot(srv, **kw):
 async def open_agents(pilot, app):
     await pilot.pause(0.3)
     await pilot.press("left")
-    assert await wait_for(lambda: type(app.screen).__name__ == "AgentsScreen")
-    scr = app.screen
+    assert await wait_for(lambda: type(app.top).__name__ == "AgentsPage")
+    scr = app.top
     assert await wait_for(lambda: scr.loaded)
     await pilot.pause(0.1)
     return scr
@@ -234,7 +234,7 @@ async def test_enter_opens_a_running_web_chat_and_follows_its_stream():
         assert await wait_for(lambda: titles(scr, "fix the invoice export"))
         assert scr.sel == 41
         await pilot.press("enter")
-        assert await wait_for(lambda: type(app.screen).__name__ != "AgentsScreen")
+        assert await wait_for(lambda: type(app.top).__name__ != "AgentsPage")
         assert await wait_for(lambda: app.cid == 41)
         assert await wait_for(lambda: srv.streams.get(41))      # attached to the live turn
         srv.streams[41][-1].put({"type": "final", "content": "done", "conversation_id": 41})
@@ -256,8 +256,8 @@ async def test_the_chat_you_came_from_is_selected_and_marked():
         assert await wait_for(lambda: app.cid == 41)
         await pilot.pause(0.3)
         app.action_agents_view()
-        assert await wait_for(lambda: type(app.screen).__name__ == "AgentsScreen")
-        scr = app.screen
+        assert await wait_for(lambda: type(app.top).__name__ == "AgentsPage")
+        scr = app.top
         assert await wait_for(lambda: scr.loaded and titles(scr, "refactor billing"))
         assert scr.sel == 41
         assert [r.nid for r in scr.query("AgentRow") if r.has_class("current")] == [41]
@@ -265,7 +265,7 @@ async def test_the_chat_you_came_from_is_selected_and_marked():
         order = [nid for k, nid, _ in rows(scr) if k == "root"]
         assert order == [20, 41]
         await pilot.press("escape")
-        assert await wait_for(lambda: type(app.screen).__name__ != "AgentsScreen")
+        assert await wait_for(lambda: type(app.top).__name__ != "AgentsPage")
         # the resumed chat is attached to its live turn: end it so the app can close
         assert await wait_for(lambda: srv.streams.get(41))
         srv.streams[41][-1].put({"type": "final", "content": "ok", "conversation_id": 41})

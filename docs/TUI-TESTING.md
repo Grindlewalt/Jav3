@@ -11,6 +11,13 @@ colours) and **no shift+arrows** (every key route needs a plain key).
   /security). `jav3 --server 10.0.0.82:8000` points one run at another server with the saved login.
   An installed copy updates itself: `/update` (or `jav3 update`) after the notice
   "a newer jav3 is on the server"; a checkout says `git pull` instead.
+- Pages (jav3.2): `/agents [finished]`, `/security [tab]`, `/vms [tab]` open over the chat with the
+  prompt left as one line under them. On a page `/` jumps to that line (type `/vms images`, enter),
+  `esc` goes back to the page before (the chat first), `ctrl+c` or `/work` straight to the chat,
+  and `ctrl+x` plus a letter works there as everywhere. A trailing `panel` (`/vms images panel`) is
+  understood but panels come in the next step: for now it opens in place and says so. Pages the web
+  has and the terminal does not (`/memory /settings /logs /schedules /tools /artifacts`) answer
+  "not in the terminal yet"; `/web memory` opens that page in the browser.
 - What to try, per page (a build is fine if each of these does what it says):
   - Home: `/help` lists the keys; `←` on the empty prompt opens agents; `ctrl+p` palette.
   - Chat: send a message; tool rows show on one line, enter on a picked row opens it; `ctrl+c`
@@ -19,7 +26,8 @@ colours) and **no shift+arrows** (every key route needs a plain key).
     history, `s` `r` `x` `d` `c` ask before they act; the rows refresh by themselves.
   - `/security`: Queue first (y approve, n deny, a acknowledge); `1`-`8` jump to Network, Logs,
     Secrets, Persistent, Profiles, Rules, Calls. `esc` goes back.
-  - Agents (`←`): up/down, `→` into an entry's agents, `←` out, `enter` opens its chat.
+  - `/agents` (or `←` on the empty prompt): up/down, `→` into an entry's agents, `←` out, `enter`
+    opens its chat; `/agents finished` opens the second view.
 - Look for: text you cannot read (grey on grey), a line cut mid-word at 80 columns, a key that
   needs shift, and a page that shows "no ..." when the server has data.
 
@@ -55,8 +63,9 @@ Against the Pi: read-only. Open pages; do not send chat messages or press approv
 
 ### Snapshots
 
-`tests/test_tui_snapshots.py` opens home, a finished chat, /vms, /security and /help at 80x24 and
-160x48 and compares `tests/tui_snapshots/<page>-<cols>x<rows>.txt` (the text, then fg/bg runs per
+`tests/test_tui_snapshots.py` opens home, a finished chat, /vms, /security, /help, the agents page
+(by `←` and by `/agents finished`), `/security calls`, `/vms images` and a web-only page (`/memory`)
+at 80x24 and 160x48 and compares `tests/tui_snapshots/<page>-<cols>x<rows>.txt` (the text, then fg/bg runs per
 row as xterm-256 indexes). It also fails on any truecolor code. ~25 s alone, ~8 s under `-n 6`.
 It skips without pexpect, pyte or textual. After an intended UI change:
 
@@ -66,5 +75,10 @@ It skips without pexpect, pyte or textual. After an intended UI change:
 Why pexpect+pyte, not Textual's `run_test(size=...)`: the client picks its colours from TERM, so
 only a real pty shows what Terminal.app gets (256-colour rounding, no truecolor). The driver
 pins the client's `time.time()` and stops the cursor blinking (`TUI_DRIVE_STEADY`) without
-touching the client. Not covered yet: the agents screen (a TODO in the test; it animates and was
-being reworked), and live spinners and durations (the live-turn test asserts text only).
+touching the client. Not covered: live spinners and durations (the live-turn test asserts text only).
+
+Pages are widgets in a `PageHost` (see the comment above `class Page` in the client): a page's keys
+work while it has focus, so a driven page needs no extra step after its command. The prompt under a
+page is a command line: `/` on a page moves the focus to it at once, so `type:/vms images|key:enter`
+works from a page too. `tests/test_cli_pages.py` is the pilot-level
+test of the router and the back stack; `app.top` is the dialog over everything, else the page.

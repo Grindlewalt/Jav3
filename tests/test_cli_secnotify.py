@@ -198,8 +198,8 @@ async def test_security_log_rows_show_coalesced_counts(cfg):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/security logs")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: type(app.top).__name__ == "SecurityPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.entries["logs"])
         row = scr.row_markup(scr.entries["logs"][0])
         assert "[b]×3[/]" in row
