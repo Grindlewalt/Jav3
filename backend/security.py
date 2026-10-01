@@ -139,17 +139,6 @@ def wants(t: str, level: str) -> bool:
     return t == "alert" and level == "all"
 
 
-def _sql_list(xs) -> str:
-    return ",".join("'" + x + "'" for x in sorted(xs))
-
-
-# tier() as SQL, for counting straight off the table (rows written by the
-# direct INSERTs in profiles.py / imported.py included)
-TIER_SQL = (f"CASE WHEN severity = 'critical' OR kind IN ({_sql_list(ALWAYS_KINDS)}) "
-            f"THEN 'critical' WHEN kind IN ({_sql_list(APPROVAL_KINDS)}) THEN 'approval' "
-            "WHEN severity = 'info' THEN 'record' ELSE 'alert' END")
-
-
 def _row(r) -> dict:
     """A row with its detail decoded. Undecodable JSON is handed back as text
     rather than raised: one malformed blob must not take down the whole queue."""
@@ -223,8 +212,8 @@ async def known_kinds(db: aiosqlite.Connection) -> dict[str, str]:
     so a kind this file does not list yet can still be set."""
     out = dict(KNOWN_KINDS)
     try:
-        async with db.execute("SELECT kind, MIN(severity) AS severity "
-                              "FROM security_events GROUP BY kind") as cur:
+        async with db.execute("SELECT kind, severity FROM security_events WHERE id IN "
+                              "(SELECT MAX(id) FROM security_events GROUP BY kind)") as cur:
             for r in await cur.fetchall():
                 out.setdefault(r["kind"], r["severity"] or "warn")
     except Exception:                           # noqa: BLE001

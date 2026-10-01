@@ -156,7 +156,7 @@ async def test_it_starts_marked_when_the_server_is_already_in_dnd(cfg):
     srv = DndServer({"on": True, "since": "2026-10-01T03:00:00Z", "until": until,
                      "break_critical": True})
     app = _app(srv)
-    async with app.run_test(size=(140, 40)) as pilot:
+    async with app.run_test(size=(140, 40)):
         assert await wait_for(lambda: "DND" in _status(app))
         assert "DND 47m" in _status(app) or "DND 46m" in _status(app)
 
