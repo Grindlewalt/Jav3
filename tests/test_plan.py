@@ -363,6 +363,7 @@ async def test_a_stall_names_the_hung_tool_and_respects_attempts_max(client, mon
     """PLANS-08: the call a stalled attempt was stuck in was never recorded (the
     retry started blind), and the stall respawn ran past attempts_max."""
     monkeypatch.setattr(settings, "plan_stall_seconds", 0.05)
+    monkeypatch.setattr(settings, "plan_stall_call_seconds", 0.05)    # a call is hung past this
     await _put(client, [{"title": "hangs", "brief": "h"}], attempts_max=1)
 
     async def turn(cid, system_prompt, history, **kw):
@@ -846,3 +847,33 @@ async def test_two_simultaneous_starts_run_one_runner(client, monkeypatch):
     await _wait_run()
     assert len(started) == 1
     assert SLUG not in plan_mod._starting
+
+
+async def test_an_item_inside_one_long_tool_call_is_not_stalled(client, monkeypatch):
+    """ROBUST-17: the stall clock counted silence, and a brokered call (a
+    research run, spawn_agent children, run_code) emits nothing between its
+    `tool` and `tool_result`: the item was nudged, cancelled and failed while
+    working. An outstanding call is activity; only a call past
+    plan_stall_call_seconds counts as hung, and a call that has returned puts
+    the ordinary window back."""
+    monkeypatch.setattr(settings, "plan_stall_seconds", 0.1)
+    monkeypatch.setattr(settings, "plan_stall_call_seconds", 5)
+    await _put(client, [{"title": "long", "brief": "l"}])
+    cids: list[int] = []
+
+    async def turn(cid, system_prompt, history, **kw):
+        cids.append(cid)
+        yield {"type": "tool", "id": "c1", "name": "research", "args": {}}
+        await asyncio.sleep(0.5)                     # 5 stall windows, one call
+        yield {"type": "tool_result", "id": "c1", "name": "research", "content": "ok"}
+        await _report(cid, "done", "finished")
+        yield {"type": "final", "content": "ok"}
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", turn)
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    it = _by_id(plan_mod.load(SLUG))["i1"]
+    assert it["status"] == "done" and it["stalls"] == 0 and it["attempts"] == 1, it
+    assert len(cids) == 1

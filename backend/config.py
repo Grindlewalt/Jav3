@@ -278,6 +278,11 @@ class Settings(BaseSettings):
     plan_max_concurrent: int = 3
     plan_attempts_max: int = 2
     plan_stall_seconds: int = 300
+    # While a tool call is outstanding the item is working, not silent (a
+    # research run, spawn_agent children, run_code emit nothing until they
+    # return): the stall clock waits this long for the call instead. Past it the
+    # call counts as hung.
+    plan_stall_call_seconds: int = 1800
     plan_tick_seconds: float = 5.0
     # While items run, the runner pulls their guest writes home this often (and
     # after every settle), so the host sees the files and a guest crash loses

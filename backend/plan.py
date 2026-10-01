@@ -965,7 +965,13 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                 now = time.monotonic()
                 for iid, t in list(tasks.items()):
                     m, it = meta[iid], idx[iid]
-                    if now - m["last_activity"] < settings.plan_stall_seconds:
+                    # an outstanding tool call is work, not silence (ROBUST-17):
+                    # a brokered call emits nothing until it returns, and a
+                    # nudge cannot reach an item blocked inside one. The long
+                    # window only catches a call that is really hung.
+                    window = (settings.plan_stall_call_seconds if m.get("calls")
+                              else settings.plan_stall_seconds)
+                    if now - m["last_activity"] < max(window, settings.plan_stall_seconds):
                         continue
                     if not m["nudged"]:
                         m["nudged"] = True
@@ -1101,10 +1107,15 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
 
     def on_event(ev: dict) -> None:
         m["last_activity"] = time.monotonic()
+        # the calls still outstanding, by id: a model may issue several at once,
+        # and one result must not clear the others (ROBUST-17)
+        calls = m.setdefault("calls", {})
         if ev.get("type") == "tool":
+            calls[ev.get("id") or ev.get("name")] = ev.get("name")
             m["in_flight"], m["in_flight_at"] = ev.get("name"), m["last_activity"]
         elif ev.get("type") == "tool_result":
-            m["in_flight"] = None
+            calls.pop(ev.get("id") or ev.get("name"), None)
+            m["in_flight"] = next(reversed(calls.values()), None)
         if ev.get("type") == "tool" and m["cid"] is not None:
             bus.publish(job_id, {"type": "tool", "name": ev.get("name"), "node_id": m["cid"]})
 
