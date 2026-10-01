@@ -85,7 +85,7 @@ async def test_reply_ready_when_the_window_is_elsewhere():
         assert app.unread == 1
 
 
-async def test_watching_means_this_chat_on_the_main_screen():
+async def test_watching_means_this_chat_on_the_chat_page():
     srv, app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await open_chat(pilot, app, srv)
@@ -93,10 +93,9 @@ async def test_watching_means_this_chat_on_the_main_screen():
         assert app._watching(4)
         assert not app._watching(99)               # a reply in another chat
         await finish(srv, app)
-        from textual.screen import Screen
-        await app.push_screen(Screen())            # like the agents screen
+        await app.open_page("agents")              # a page over the chat
         assert not app._watching(4)
-        await app.pop_screen()
+        await app.host.home()
         assert app._watching(4)
 
 

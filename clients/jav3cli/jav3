@@ -1651,9 +1651,90 @@ def picker_score(query: str, value, label: str = "", meta: str = "") -> int:
 
 class Command:
     def __init__(self, fn, help: str, usage: str = "", busy_ok: bool = False,
-                 takes_arg: bool = False, leader: str = ""):
+                 takes_arg: bool = False, leader: str = "", page: str = ""):
         self.fn, self.help, self.usage = fn, help, usage
         self.busy_ok, self.takes_arg, self.leader = busy_ok, takes_arg, leader
+        self.page = page              # the registry name when this command opens a page
+
+
+# --- pages: the registry behind `/page [args] [panel]` ---------------------------------------
+#
+# jav3.2 turns the terminal client into the web app, keyboard-first: a slash command
+# that names a PAGE opens it in the area above the one prompt line (a widget mounted
+# in a PageHost, with a back stack: esc returns to the page before, the chat by
+# default). A page is a registry entry (below) and, for the ones the terminal has, a
+# `Page` widget class inside build_tui. The line is parsed once, in
+# `Jav3App.run_command`: the arguments the page gets, and a trailing `panel` that asks
+# for a new panel instead of replacing the view (panels arrive in the next step; for
+# now it opens in place and says so).
+
+SECURITY_TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules",
+                 "calls")
+VMS_TABS = ("boxes", "images", "catalogue")
+# what the argument menu offers after /security, /vms and /agents
+SECURITY_TAB_BLURB = {"queue": "waiting on you", "network": "egress policy and feed",
+                      "logs": "security events", "secrets": "names and hosts",
+                      "persistent": "processes and services in every box",
+                      "profiles": "security profiles and their projects",
+                      "rules": "the always-allow answers",
+                      "calls": "how the model key is used"}
+VMS_TAB_BLURB = {"boxes": "running and reserved boxes", "images": "variants and versions",
+                 "catalogue": "package requests"}
+AGENTS_VIEW_BLURB = {"finished": "everything that has ended, by project or time"}
+
+
+class PageSpec:
+    """One page in the registry. `kind` is "view" (a Page widget the terminal has),
+    "chat" (the chat itself, or a way into one: the router shows the chat page and
+    the command does the rest) or "web" (the web app has it, the terminal does not
+    yet: the command says so)."""
+
+    def __init__(self, name: str, help: str, hint: str = "", *, kind: str = "view",
+                 aliases: tuple = (), leader: str = "", options: dict | None = None):
+        self.name, self.help, self.hint, self.kind = name, help, hint, kind
+        self.aliases, self.leader = tuple(aliases), leader
+        self.options = options or {}
+
+
+PAGE_SPECS = (
+    PageSpec("work", "the chat itself: where esc on a page ends up", kind="chat",
+             aliases=("chat",)),
+    PageSpec("agents", "every agent and chat that is running, across projects (← on an "
+             "empty prompt); /persona starts one", "[finished]", aliases=("agents-view",),
+             leader="g", options=AGENTS_VIEW_BLURB),
+    PageSpec("security", "the Security area: " + ", ".join(SECURITY_TABS) + " (full access)",
+             "[" + "|".join(SECURITY_TABS) + "]", aliases=("review",), leader="v",
+             options=SECURITY_TAB_BLURB),
+    PageSpec("vms", "boxes, images and the package catalogue (full access)",
+             "[" + "|".join(VMS_TABS) + "]", leader="c", options=VMS_TAB_BLURB),
+    PageSpec("sessions", "switch to another chat", "[id]", kind="chat", aliases=("history",),
+             leader="l"),
+    # the web app has these; the terminal answers where to find them (the next steps fill them)
+    PageSpec("memory", "in the web app only for now (/web memory opens it)", kind="web"),
+    PageSpec("settings", "in the web app only for now (/web settings opens it)", kind="web"),
+    PageSpec("logs", "in the web app only for now (/web logs opens it; /security logs is "
+             "the security events)", kind="web"),
+    PageSpec("schedules", "in the web app only for now (/web schedules opens it)", kind="web"),
+    PageSpec("tools", "in the web app only for now (/web tools opens it; /details opens and "
+             "closes the tool rows in a chat)", kind="web"),
+    PageSpec("artifacts", "in the web app only for now (/web artifacts opens it)", kind="web"),
+)
+PAGES = {s.name: s for s in PAGE_SPECS}
+WEB_PAGES = tuple(s.name for s in PAGE_SPECS if s.kind == "web")
+
+
+def parse_page_args(arg: str) -> tuple[list[str], bool]:
+    """`[args] [panel]`: the words after a page's name, and whether the last one is the
+    word `panel` (open in a new panel rather than replacing the view). Split on
+    whitespace; a page that takes free text reads its own words."""
+    toks = (arg or "").split()
+    panel = bool(toks) and toks[-1].lower() == "panel"
+    return (toks[:-1] if panel else toks), panel
+
+
+def not_in_terminal(name: str) -> str:
+    return (f"/{name} is not in the terminal yet — /web {name} opens it in the browser"
+            + (" (/details opens and closes the tool rows here)" if name == "tools" else ""))
 
 
 def help_view(keys: list[tuple[str, str]], cmds: list[tuple[str, str, str]]):
@@ -2327,7 +2408,7 @@ def build_tui(base: str, token: str, **kw):
     from textual.command import DiscoveryHit, Hit, Provider
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.message import Message
-    from textual.screen import ModalScreen, Screen
+    from textual.screen import ModalScreen
     from textual.theme import Theme
     from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
     from textual.widgets._markdown import MarkdownFence
@@ -3910,6 +3991,225 @@ def build_tui(base: str, token: str, **kw):
         def action_cancel(self) -> None:
             self.dismiss(None)
 
+    # -- pages ----------------------------------------------------------------------------
+    #
+    # A page is a WIDGET that a PageHost mounts, not a pushed Screen: it has its own key
+    # bindings (live while it has focus), the `args` it was opened with, and hooks for
+    # when it is shown or hidden (its polling stops while it is hidden). Nothing in a
+    # page may assume it owns the terminal: it sizes itself from its container, has no
+    # bindings of the app's, and leaves by asking its host (`leave()`, `go_home()`,
+    # `open_page()` post a message the host handles) rather than calling the app. A
+    # host keeps a back stack of its pages; the chat is the page at the bottom of it.
+    # Modal dialogs stay ModalScreens: they sit over whatever page is showing.
+
+    class Page(Vertical, can_focus=True):
+        """Subclass it, name it (`NAME` is the slash name in PAGE_SPECS), and set `BINDINGS`
+        and `DEFAULT_CSS` as for any widget. Override `build` (how the app makes one),
+        `set_args` (it was opened again with other args), `focus_target`, `page_title`
+        and the `page_shown` / `page_hidden` hooks; start timers with `poll`, which the
+        host pauses while the page is hidden."""
+
+        NAME = ""
+        SLASH_TO_PROMPT = True    # `/` on the page jumps to the prompt (a page that wants the key sets False)
+        DEFAULT_CSS = """
+        Page { width: 1fr; height: 1fr; background: $background; }
+        """
+        BINDINGS = [Binding("escape", "leave", show=False)]
+
+        class Leave(Message):
+            """esc: show the page before this one."""
+            def __init__(self, page) -> None:
+                super().__init__()
+                self.page = page
+
+        class GoHome(Message):
+            """Back to the chat, dropping the pages between."""
+            def __init__(self, page) -> None:
+                super().__init__()
+                self.page = page
+
+        class OpenPage(Message):
+            """Ask the host's app to open another page (`/name args`)."""
+            def __init__(self, page, name: str, args: tuple) -> None:
+                super().__init__()
+                self.page, self.name, self.args = page, name, args
+
+        def __init__(self, args=(), **kw) -> None:
+            super().__init__(**kw)
+            self.args = [str(a) for a in args]
+            self.page_visible = False        # set by the host
+            self.shown_count = 0             # times it was shown (1 = the first)
+            self._polls: list = []
+
+        @classmethod
+        def build(cls, app, args) -> "Page":
+            """How the app makes one (a page that needs the chat it came from overrides)."""
+            return cls(args)
+
+        @property
+        def page_title(self) -> str:
+            return self.NAME.title()
+
+        def set_args(self, args) -> None:
+            """The page is already showing and was opened again with other args."""
+            self.args = [str(a) for a in args]
+
+        def focus_target(self):
+            """What takes the keyboard when the page is shown: the page itself, so its
+            bindings work; the chat page hands it to the prompt."""
+            return self
+
+        def page_shown(self) -> None:
+            """Shown (the first time too, once it is mounted): load, or load again."""
+
+        def page_hidden(self) -> None:
+            """Hidden under another page, or about to be removed."""
+
+        def poll(self, seconds: float, callback):
+            """A repeating timer that runs only while the page is shown."""
+            timer = self.set_interval(seconds, callback, pause=not self.page_visible)
+            self._polls.append(timer)
+            return timer
+
+        def set_visible(self, on: bool) -> None:
+            if on == self.page_visible:
+                return
+            self.page_visible = on
+            self.display = on
+            for timer in self._polls:
+                timer.resume() if on else timer.pause()
+            if on:
+                self.shown_count += 1
+                self.page_shown()
+            else:
+                self.page_hidden()
+
+        @property
+        def active(self) -> bool:
+            """Shown, and no dialog over it: the time to refresh what is on screen."""
+            return self.page_visible and not isinstance(self.app.screen, ModalScreen)
+
+        def leave(self) -> None:
+            self.post_message(self.Leave(self))
+
+        def go_home(self) -> None:
+            self.post_message(self.GoHome(self))
+
+        def open_page(self, name: str, *args: str) -> None:
+            self.post_message(self.OpenPage(self, name, args))
+
+        def action_leave(self) -> None:
+            self.leave()
+
+        @staticmethod
+        def of(widget) -> "Page | None":
+            """The page a widget inside it belongs to."""
+            return next((a for a in widget.ancestors_with_self if isinstance(a, Page)), None)
+
+    class ChatPage(Page, can_focus=False):
+        """The chat itself: the page at the bottom of every host's stack. The prompt
+        under the host types into it; focus belongs to the prompt, never to the page."""
+
+        NAME = "work"
+        FOCUS_ON_CLICK = False
+
+        @property
+        def page_title(self) -> str:
+            return "Chat"
+
+        def focus_target(self):
+            return self.app.editor
+
+        def leave(self) -> None:
+            pass                # nothing is under the chat
+
+    class PageHost(Vertical):
+        """The area above the prompt: the page showing, and under it (hidden, their
+        polling paused) the pages esc returns to. The first Page child is the base."""
+
+        DEFAULT_CSS = "PageHost { width: 1fr; height: 1fr; }"
+        MAX_DEPTH = 8             # pages kept under the one showing
+
+        class Changed(Message):
+            def __init__(self, page) -> None:
+                super().__init__()
+                self.page = page
+
+        def __init__(self, *children, **kw) -> None:
+            super().__init__(*children, **kw)
+            self.stack: list[Page] = []
+
+        @property
+        def current(self) -> Page:
+            if not self.stack:           # the app asks before this widget has mounted
+                base = next(iter(self.query(Page)))
+                self.stack = [base]
+                base.set_visible(True)
+            return self.stack[-1]
+
+        async def push(self, page: Page) -> None:
+            """Show `page` over the one showing. An older page of the same kind lower
+            in the stack gives way (opening it again starts it fresh)."""
+            cur = self.current
+            stale = [p for p in self.stack[1:] if p.NAME == page.NAME]
+            cur.set_visible(False)
+            for old in stale:
+                self.stack.remove(old)
+                old.set_visible(False)
+                await old.remove()
+            self.stack.append(page)
+            await self.mount(page)
+            page.set_visible(True)
+            while len(self.stack) > self.MAX_DEPTH + 1:
+                gone = self.stack.pop(1)
+                await gone.remove()
+            self._shown(page)
+
+        async def back(self) -> bool:
+            """esc: the page before this one. False at the chat."""
+            if len(self.stack) < 2:
+                return False
+            old = self.stack.pop()
+            old.set_visible(False)
+            await old.remove()
+            self._shown(self.current)
+            return True
+
+        async def home(self) -> None:
+            """Back to the chat, the pages between dropped."""
+            if len(self.stack) < 2:
+                return
+            while len(self.stack) > 1:
+                old = self.stack.pop()
+                old.set_visible(False)
+                await old.remove()
+            self._shown(self.current)
+
+        def _shown(self, page: Page) -> None:
+            page.set_visible(True)
+            self.call_after_refresh(self._focus, page)
+            self.post_message(self.Changed(page))
+
+        def _focus(self, page: Page) -> None:
+            if page is self.current and page.is_attached:
+                target = page.focus_target()
+                if target is not None and target.is_attached:
+                    target.focus()
+
+        def on_page_leave(self, message) -> None:
+            message.stop()
+            if message.page is self.current:
+                self.run_worker(self.back(), group="nav")
+
+        def on_page_go_home(self, message) -> None:
+            message.stop()
+            self.run_worker(self.home(), group="nav")
+
+        def on_page_open_page(self, message) -> None:
+            message.stop()
+            self.run_worker(self.app.open_page(message.name, " ".join(message.args)),
+                            group="nav")
+
     class AgentRow(Static):
         """One row of the agents screen: a project header, a root, or a descendant."""
 
@@ -3931,17 +4231,16 @@ def build_tui(base: str, token: str, **kw):
 
         def on_click(self) -> None:
             if self.nid is not None:
-                self.screen.click_row(self)
+                Page.of(self).click_row(self)
 
-    class AgentsScreen(Screen):
-        """← from an empty prompt. The active view: what is running and what needs
+    class AgentsPage(Page):
+        """/agents, and ← from an empty prompt. The active view: what is running and what needs
         the operator, then a Finished row; the finished view: everything else,
         grouped by project or by time (tab). ↑↓ move between entries, the
         highlighted one unfolds its agents, → steps into them and ← back out,
         enter opens. Plain arrows only: Terminal.app keeps shift+↑↓ for itself."""
 
         DEFAULT_CSS = """
-        AgentsScreen { background: $background; }
         #ag-head { height: 1; padding: 0 2; margin: 1 0; }
         #ag-list { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
         #ag-foot { height: auto; padding: 0 2; color: $text-muted; }  /* wraps when narrow */
@@ -3975,10 +4274,15 @@ def build_tui(base: str, token: str, **kw):
 
         RELOAD_S = 1.5          # a chat started in the web app shows within about 2 s
 
-        def __init__(self, origin=None) -> None:
-            super().__init__()
+        NAME = "agents"
+
+        def __init__(self, args=(), origin=None) -> None:
+            super().__init__(args)
             self.origin = origin              # the conversation the operator came from
-            self.mode = "active"              # or "finished"
+            # `/agents finished` opens the second view; otherwise the view the
+            # conversation we came from is in (see _select_origin)
+            self.mode = "finished" if self.args[:1] == ["finished"] else "active"
+            self.explicit = self.mode == "finished"
             self.group_by = "project"         # finished view: or "time"
             # the data (what runs server-wide, merged and sorted) lives in the feed
             self.feed = AgentsFeed(self._api)
@@ -3990,6 +4294,27 @@ def build_tui(base: str, token: str, **kw):
             self._lock = asyncio.Lock()
             self._reloading = False
             self.frame = 0
+
+        @classmethod
+        def build(cls, app, args) -> "AgentsPage":
+            return cls(args, origin=app.cid)
+
+        @property
+        def page_title(self) -> str:
+            return "Agents · finished" if self.mode == "finished" else "Agents"
+
+        def set_args(self, args) -> None:
+            super().set_args(args)
+            want = "finished" if self.args[:1] == ["finished"] else "active"
+            if want != self.mode:
+                self.run_worker(self._enter_view(want), group="ag-open")
+
+        async def _enter_view(self, want: str) -> None:
+            if want == "finished":
+                self.in_kids, self.sel = False, "finished"
+                await self.action_open()
+            else:
+                await self.action_back()
 
         async def _api(self, method: str, path: str, **kw):
             return await self.app.api(method, path, **kw)
@@ -4011,8 +4336,12 @@ def build_tui(base: str, token: str, **kw):
             self.feed.add_convs(self.app.convs)      # names for chats the app already listed
             self.render_chrome()
             self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
-            self.set_interval(self.RELOAD_S, self._auto_reload)
-            self.set_interval(0.15, self.spin)
+            self.poll(self.RELOAD_S, self._auto_reload)
+            self.poll(0.15, self.spin)
+
+        def page_shown(self) -> None:
+            if self.shown_count > 1:          # back from another page: what ran meanwhile
+                self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
 
         def _auto_reload(self) -> None:
             # a fetch still going is left alone: a slow server would otherwise be
@@ -4043,7 +4372,8 @@ def build_tui(base: str, token: str, **kw):
                 self._reloading = False
             if not self.loaded:
                 self.loaded = True
-                self._select_origin()
+                if not self.explicit:
+                    self._select_origin()
             self._keep_selection()
             await self.rebuild()
 
@@ -4251,7 +4581,7 @@ def build_tui(base: str, token: str, **kw):
                 self.open_root = None
                 await self.rebuild()
             else:
-                self.app.pop_screen()
+                self.leave()
 
         async def action_open(self) -> None:
             if self.sel == "finished":
@@ -4266,7 +4596,6 @@ def build_tui(base: str, token: str, **kw):
             node = self.tree.by_id.get(self.sel)
             if node is None:
                 return
-            self.app.pop_screen()
             self.app.run_worker(self.app.open_node(node), group="agents")
 
         def click_row(self, row) -> None:
@@ -4336,7 +4665,7 @@ def build_tui(base: str, token: str, **kw):
 
         def on_click(self) -> None:
             if self.key is not None:
-                self.screen.select_key(self.key)
+                Page.of(self).select_key(self.key)
 
     class SecTab(Static):
         def __init__(self, tab: str) -> None:
@@ -4344,8 +4673,8 @@ def build_tui(base: str, token: str, **kw):
             self.tab = tab
 
         def on_click(self) -> None:
-            self.screen.run_worker(self.screen.switch_to(self.screen.TABS.index(self.tab)),
-                                   group="sec-switch")
+            page = Page.of(self)
+            page.run_worker(page.switch_to(page.TABS.index(self.tab)), group="sec-switch")
 
     _SEV_COL = {"critical": "$error", "warn": "$warning"}
     _SEV_RANK = {"critical": 0, "warn": 1}
@@ -4655,13 +4984,14 @@ def build_tui(base: str, token: str, **kw):
              "call": calls_row, "refusal": calls_row,
              "profile": _row_profile}
 
-    class SecurityScreen(Screen):
+    class SecurityPage(Page):
         """Tabs: Queue · Network · Logs · Secrets · Persistent · Profiles. tab / →
         next, ← previous, 1-8 jump, ↑↓ select (detail below), esc back. Plain
         keys only (Terminal.app: no shift+arrows)."""
 
-        TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules",
-                "calls")
+        NAME = "security"
+        TITLE = "Security"
+        TABS = SECURITY_TABS
         LABELS = {"queue": "Queue", "network": "Network", "logs": "Logs",
                   "secrets": "Secrets", "persistent": "Persistent", "profiles": "Profiles",
                   "rules": "Rules", "calls": "Calls"}
@@ -4690,7 +5020,6 @@ def build_tui(base: str, token: str, **kw):
         LIMIT = 200
         GENERAL = "__general__"          # egress.py's shared baseline policy row
         DEFAULT_CSS = """
-        SecurityScreen { background: $background; }
         #sec-tabs { height: 1; padding: 0 2; margin: 1 0 0 0; }
         SecTab { width: auto; padding: 0 1; color: $text-muted; }  /* 8 tabs must fit 80 columns */
         SecTab.-on { background: $primary; color: auto 95%; text-style: bold; }
@@ -4740,10 +5069,11 @@ def build_tui(base: str, token: str, **kw):
             Binding("enter", "enter", show=False),
         ]
 
-        def __init__(self, tab: str = "queue", project: str | None = None,
+        def __init__(self, args=(), project: str | None = None,
                      conversation: int | None = None) -> None:
-            super().__init__()
-            self.tab = tab if tab in self.TABS else "queue"
+            super().__init__(args)
+            tab = self.args[0].lower() if self.args else self.TABS[0]
+            self.tab = tab if tab in self.TABS else self.TABS[0]
             self.project = project            # Network's filter; None = all projects
             self.conversation = conversation  # the chat /security was opened from (Calls' c)
             self.calls_only = False           # Calls: only that conversation's calls
@@ -4768,6 +5098,25 @@ def build_tui(base: str, token: str, **kw):
             self._last_services: list[dict] = []
             self._sig = None
             self._lock = asyncio.Lock()
+
+        @classmethod
+        def build(cls, app, args) -> "SecurityPage":
+            return cls(args, project=app.project, conversation=app.cid)
+
+        @property
+        def page_title(self) -> str:
+            return f"{self.TITLE} · {self.LABELS[self.tab]}"
+
+        def set_args(self, args) -> None:
+            """/security calls while it is showing: switch to that tab."""
+            super().set_args(args)
+            tab = self.args[0].lower() if self.args else self.TABS[0]
+            self.run_worker(self.switch_to(self.TABS.index(tab) if tab in self.TABS else 0),
+                            group="sec-switch")
+
+        def page_shown(self) -> None:
+            if self.shown_count > 1 and not self.locked:    # back from another page
+                self.run_worker(self.load(self.tab), group="sec-load", exclusive=True)
 
         @property
         def locked(self) -> bool:
@@ -4796,10 +5145,14 @@ def build_tui(base: str, token: str, **kw):
             yield Static(id="sec-foot")
 
         async def on_mount(self) -> None:
+            # a widget has no size until its first layout: remember what the first
+            # draw saw, so the first Resize (the real width) draws again if it differs
+            self._narrow = self.size.width < 100
+            self._was_tight = (self._tight(), self.size.width < 80)
             await self.rebuild()
             if not self.locked:
                 self.run_worker(self._first_load(), group="sec-load")
-            self.set_interval(self.POLL_SECONDS, self._tick)
+            self.poll(self.POLL_SECONDS, self._tick)
 
         async def _first_load(self) -> None:
             await self.load(self.tab)
@@ -4809,7 +5162,7 @@ def build_tui(base: str, token: str, **kw):
             await self.rebuild()
 
         def _tick(self) -> None:
-            if not self.locked and self.app.screen is self:
+            if not self.locked and self.active:
                 self.run_worker(self.load(self.tab), group="sec-load", exclusive=True)
 
         # -- data -------------------------------------------------------------------------
@@ -4901,7 +5254,7 @@ def build_tui(base: str, token: str, **kw):
                           or e.get("created_at") or "")}
                   for e in alerts if not e.get("acknowledged")]
             al.sort(key=lambda x: x["ts"], reverse=True)
-            al.sort(key=lambda x: SecurityScreen._rank(x["raw"]))
+            al.sort(key=lambda x: SecurityPage._rank(x["raw"]))
             return asks + al                  # what waits on a verdict comes first
 
         @staticmethod
@@ -5685,7 +6038,7 @@ def build_tui(base: str, token: str, **kw):
             when a resize crosses that width."""
             narrow = self.size.width < 100
             if narrow != getattr(self, "_narrow", narrow) and self.tab == "calls" \
-                    and type(self) is SecurityScreen:
+                    and type(self) is SecurityPage:
                 self.run_worker(self.rebuild(), group="rebuild", exclusive=True)
             self._narrow = narrow
             tight = self._tight()
@@ -5806,7 +6159,7 @@ def build_tui(base: str, token: str, **kw):
                 await self.load(self.tab)
 
         def action_back(self) -> None:
-            self.app.pop_screen()
+            self.leave()
 
         def _act(self, coro) -> None:
             if self.locked:
@@ -6638,14 +6991,16 @@ def build_tui(base: str, token: str, **kw):
     _ROWS.update({"box": _row_box, "variant": _row_variant, "version": _row_version,
                   "leftover": _row_leftover})
 
-    class VmsScreen(SecurityScreen):
-        """/vms: Boxes · Images · Catalogue. The Security screen's frame (tabs,
+    class VmsPage(SecurityPage):
+        """/vms: Boxes · Images · Catalogue. The Security page's frame (tabs,
         list, detail, plain keys) over /api/vm/boxes, /api/vm/leftovers,
         /api/vm/images and /api/packages. Boxes refresh live (the rows update in
         place, the cursor stays on its box). Every action asks first; chat-only
         logins are locked."""
 
-        TABS = ("boxes", "images", "catalogue")
+        NAME = "vms"
+        TITLE = "VMs"
+        TABS = VMS_TABS
         LABELS = {"boxes": "Boxes", "images": "Images", "catalogue": "Catalogue"}
         EMPTY = {"boxes": "no boxes", "images": "no image variants",
                  "catalogue": "no package requests"}
@@ -6660,17 +7015,20 @@ def build_tui(base: str, token: str, **kw):
         # one line per row, however long (the frame's `SecRow { height: 1 }`
         # does not reach this subclass's rows); the head gets two more lines
         DEFAULT_CSS = """
-        VmsScreen SecRow { height: 1; }
-        VmsScreen #sec-sub { max-height: 6; }
+        VmsPage SecRow { height: 1; }
+        VmsPage #sec-sub { max-height: 6; }
         """
 
-        def __init__(self, tab: str = "boxes") -> None:
-            super().__init__(tab)
-            self.tab = tab if tab in self.TABS else "boxes"
+        def __init__(self, args=()) -> None:
+            super().__init__(args)
             self.vm: dict = {}
             self.leftovers: dict = {}            # GET /api/vm/leftovers
             self.hist_box: str | None = None     # enter: the box whose history shows
             self.hist: list[dict] = []
+
+        @classmethod
+        def build(cls, app, args) -> "VmsPage":
+            return cls(args)
 
         def counts(self) -> dict:
             pend = sum((e["raw"].get("status") or "pending") == "pending"
@@ -7278,6 +7636,10 @@ def build_tui(base: str, token: str, **kw):
         #prompt.agent { border-left: thick $secondary; }
         #prompt.temp { border-left: thick $warning; }
         #prompt.busy { border-left: thick $accent; }
+        /* a page other than the chat is showing: the prompt is one line that runs
+           /page commands (the chat's meta row has nothing to say there) */
+        #bottom.paged #prompt { margin-top: 0; padding: 0 2; }
+        #bottom.paged #meta { display: none; }
         Editor { height: auto; max-height: 12; min-height: 1; border: none; padding: 0;
                  background: $surface; }
         Editor:focus { border: none; }
@@ -7327,6 +7689,9 @@ def build_tui(base: str, token: str, **kw):
         # keys the dialogs need for themselves
         _MAIN_ONLY = {"leader", "new", "toggle_sidebar", "toggle_tools", "external_editor",
                       "scroll_log", "ctrl_d"}
+        # ...and of those, the ones that mean the chat: a page keeps pgup/pgdn, ctrl+o,
+        # ctrl+g and ctrl+d for itself
+        _CHAT_ONLY = {"toggle_tools", "external_editor", "scroll_log", "ctrl_d"}
 
         def __init__(self, base: str, token: str | None, *,
                      server_override: str | None = None,
@@ -7382,6 +7747,8 @@ def build_tui(base: str, token: str, **kw):
             self.arg_deliberate = False     # the argument menu was opened by Tab or ↑ ↓
             self.initial = (resume, cont, prompt)
             self.client = None
+            self.page_classes = {"agents": AgentsPage, "security": SecurityPage,
+                                 "vms": VmsPage}
             self.commands = self._commands()
             self.frame = 0
             self.example = EXAMPLES[int(time.time()) % len(EXAMPLES)]
@@ -7391,9 +7758,11 @@ def build_tui(base: str, token: str, **kw):
         def compose(self) -> ComposeResult:
             with Horizontal(id="main"):
                 with Vertical(id="left"):
-                    yield Static(id="header")
-                    yield ChatLog(Home(), id="log")
-                    yield NewHint(id="new-hint")
+                    with PageHost(id="host"):
+                        with ChatPage(id="chat-page"):
+                            yield Static(id="header")
+                            yield ChatLog(Home(), id="log")
+                            yield NewHint(id="new-hint")
                     with Vertical(id="bottom"):
                         yield OptionList(id="popup")
                         with Vertical(id="prompt"):
@@ -7412,6 +7781,25 @@ def build_tui(base: str, token: str, **kw):
                     yield Static(id="sb-todo")
                     yield Static(id="sb-notes")
                     yield Static(id="sb-foot")
+
+        @property
+        def host(self):
+            return self.query_one("#host", PageHost)
+
+        @property
+        def page(self):
+            """The page showing in the host (the chat, unless another page is over it)."""
+            return self.host.current
+
+        @property
+        def top(self):
+            """What the operator is looking at: the dialog over everything, else the page."""
+            return self.screen if isinstance(self.screen, ModalScreen) else self.page
+
+        @property
+        def paged(self) -> bool:
+            """A page other than the chat is showing."""
+            return not isinstance(self.page, ChatPage)
 
         @property
         def log_view(self):
@@ -7956,6 +8344,10 @@ def build_tui(base: str, token: str, **kw):
             prompt.set_class(bool(self.agent), "agent")
             prompt.set_class(self.ephemeral, "temp")
             prompt.set_class(self.busy, "busy")
+            paged = self.paged
+            self.query_one("#bottom").set_class(paged, "paged")
+            self.editor.placeholder = ("/ for a command · /work back to the chat" if paged
+                                       else f'Ask anything… "{self.example}"')
             who = f"[$secondary b]{_esc(self.agent)}[/]" if self.agent else "[$primary b]Jav3[/]"
             model = self._model_label()
             bits = [who, f"[$text]{_esc(model.split('/')[-1])}[/]"]
@@ -8010,6 +8402,20 @@ def build_tui(base: str, token: str, **kw):
                              if self.size.width >= SIDEBAR_MIN_COLS else ""))
 
         def _status_parts(self) -> list[tuple[str, str, int]]:
+            """The left side while a page is showing: its name, then its way out (a turn
+            running in the chat behind it keeps its own line, without the esc that
+            would interrupt it); the chat's own row otherwise."""
+            if not self.paged:
+                return self._chat_status_parts()
+            title = self.page.page_title
+            head = [(title, f"[$primary b]{_esc(title)}[/]", 0)]
+            if not (self.busy and self.turn is not None):
+                return head + [("esc back", "[$text-muted]esc back[/]", 1),
+                               ("/ command", "[$text-muted]/ command[/]", 2)]
+            return (head + [("esc back", "[$text-muted]esc back[/]", 1)]
+                    + [p for p in self._chat_status_parts() if not p[0].startswith("esc")])
+
+        def _chat_status_parts(self) -> list[tuple[str, str, int]]:
             """The status row's left side as (plain, markup, rank) parts — while a
             turn runs one steady line, `working 2m 13s · 14 tools · 2 agents · $0.02`,
             that the ▣ footer repeats when it ends; while tool rows are being
@@ -8892,7 +9298,7 @@ def build_tui(base: str, token: str, **kw):
             """Keys a dialog turned away because it had just opened go back to the
             prompt they were typed at (when that prompt is what is behind it)."""
             base = [s for s in self.screen_stack if not isinstance(s, ModalScreen)]
-            if base and base[-1] is self.screen_stack[0]:
+            if base and base[-1] is self.screen_stack[0] and not self.paged:
                 with contextlib.suppress(Exception):
                     base[-1].query_one("#editor", Editor).insert(text)
 
@@ -8969,8 +9375,7 @@ def build_tui(base: str, token: str, **kw):
             """This chat is the one on screen and the terminal has the focus (a
             reply that lands in front of you needs no toast and no unread count).
             A terminal that reports no focus changes always has it."""
-            elsewhere = len(self.screen_stack) > 1 and not isinstance(self.screen, ModalScreen)
-            return cid == self.cid and self.app_focus and not elsewhere
+            return cid == self.cid and self.app_focus and not self.paged
 
         async def _end_turn(self) -> None:
             t = self.turn
@@ -9087,6 +9492,8 @@ def build_tui(base: str, token: str, **kw):
             elif not self.token or self.logged_in is False:
                 self.run_worker(self.note(NOT_LOGGED_IN, "warn"), group="cmd")
             else:
+                if self.paged:
+                    self.run_worker(self.host.home(), group="nav")    # the chat takes it
                 self.send(text[text.index("/") + 1:] if s.startswith("//") else text)
 
         async def run_command(self, line: str) -> None:
@@ -9099,8 +9506,17 @@ def build_tui(base: str, token: str, **kw):
                 self.notify(f"/{name} waits for the turn to finish — esc interrupts it",
                             severity="warning")
                 return
+            arg = arg.strip()
+            if cmd.page:
+                # `/page [args] [panel]`: the page gets its args; a trailing `panel`
+                # asks for a new panel (the next step), so for now it opens in place
+                words, panel = parse_page_args(arg)
+                arg = " ".join(words)
+                if panel:
+                    await self.note(f"/{name}: panels arrive in the next step — opening "
+                                    "it in place")
             try:
-                await cmd.fn(arg.strip())
+                await cmd.fn(arg)
             except CliError as e:
                 await self.note(str(e), "error")
             except Exception as e:      # noqa: BLE001 - one bad command must not take the app down
@@ -9288,11 +9704,33 @@ def build_tui(base: str, token: str, **kw):
         # -- keys ---------------------------------------------------------------------------------
 
         def check_action(self, action: str, parameters) -> bool | None:
-            if action in self._MAIN_ONLY and isinstance(self.screen, (ModalScreen,
-                                                                      AgentsScreen,
-                                                                      SecurityScreen)):
+            if action in self._MAIN_ONLY and (
+                    isinstance(self.screen, ModalScreen)
+                    or (action in self._CHAT_ONLY and self.paged)):
                 return False
             return True
+
+        async def _on_key(self, event) -> None:
+            """Two keys that belong to the app whichever page has the focus: the key
+            after ctrl+x (a page's own letters must not catch it), and `/` on a page,
+            which goes to the prompt line with the slash typed."""
+            if isinstance(self.screen, ModalScreen):
+                return
+            if self.leader:
+                event.stop()
+                event.prevent_default()
+                self.run_leader(event.key)
+            elif event.key == "slash" and self.paged and isinstance(self.focused, Page) \
+                    and self.focused.SLASH_TO_PROMPT:
+                event.stop()
+                event.prevent_default()
+                self.editor.focus()
+                self.editor.text = "/"
+                self.editor.move_cursor(self.editor.document.end)
+
+        def on_page_host_changed(self, message) -> None:
+            """A page was shown or dropped: the prompt, status row and sidebar follow."""
+            self.refresh_chrome()
 
         def action_leader(self) -> None:
             self.leader = True
@@ -9321,8 +9759,8 @@ def build_tui(base: str, token: str, **kw):
                     return          # opened a moment ago while they typed: not an answer
                 self.screen.dismiss(None)
                 return
-            if isinstance(self.screen, (AgentsScreen, SecurityScreen)):
-                self.pop_screen()
+            if self.paged:
+                self.run_worker(self.host.home(), group="nav")     # out of the page, to the chat
                 return
             if self.editor.text:
                 self.editor.text = ""
@@ -9346,6 +9784,10 @@ def build_tui(base: str, token: str, **kw):
                 self._leader_off()
             elif self.popup_open():
                 self.hide_popup()
+            elif self.paged:
+                # the prompt was a command line over a page: esc gives the keys back to it
+                self.editor.text = ""
+                self.page.focus_target().focus()
             elif self.child_of is not None and not self.editor.text:
                 # someone else's agent: the habit from the other screens (esc back)
                 # must not stop it. ctrl+c or /stop does that.
@@ -9369,13 +9811,13 @@ def build_tui(base: str, token: str, **kw):
             self.dispatch("/new")
 
         def action_agents_view(self) -> None:
-            if not isinstance(self.screen, AgentsScreen):
-                self.hide_popup()
-                self.push_screen(AgentsScreen(self.cid))
+            """← on an empty prompt (a drawer in the next step): /agents."""
+            self.run_worker(self.open_page("agents"), group="nav")
 
         async def open_node(self, node: dict) -> None:
-            """Open an agents-screen node here: its transcript, and if it is
+            """Open an agents-page node here: its transcript, and if it is
             running, its live stream (typing then messages it mid-turn)."""
+            await self.host.home()
             await self._leave_turn()
             try:
                 await self.open_conversation(node["id"], running=bool(node.get("running")),
@@ -9468,15 +9910,15 @@ def build_tui(base: str, token: str, **kw):
             c = {
                 "help": Command(self.c_help, "commands and keys", busy_ok=True, leader="h"),
                 "new": Command(self.c_new, "start a fresh chat", leader="n"),
-                "sessions": Command(self.c_sessions, "switch to another chat", "[id]",
-                                    takes_arg=True, leader="l"),
+                "sessions": Command(self.c_sessions, "switch to another chat (the → drawer "
+                                    "lists them all)", "[id]", takes_arg=True, leader="l"),
                 "models": Command(self.c_model, "pick the model (full access: switch "
                                   "models on/off, set the default)", "[provider/id]",
                                   takes_arg=True, leader="m"),
                 "provider": Command(self.c_provider, "add a provider's API key / base URL, "
                                     "then test it", "[id]", takes_arg=True, leader="k"),
                 "persona": Command(self.c_agent, "start a new chat as an agent preset (what "
-                                   "is running now: /agents-view)", "[slug]",
+                                   "is running now: /agents)", "[slug]",
                                    takes_arg=True, leader="a"),
                 "project": Command(self.c_project, "pin this chat to a project (or make "
                                    "a new one)", "[slug|none|follow]", takes_arg=True,
@@ -9519,8 +9961,8 @@ def build_tui(base: str, token: str, **kw):
                                    busy_ok=True),
                 "detach": Command(self.c_detach, "drop pending !command output",
                                   busy_ok=True),
-                "web": Command(self.c_web, "open this chat in the web app (Work)",
-                               busy_ok=True,
+                "web": Command(self.c_web, "open this chat in the web app (Work), or a page "
+                               "of it", "[page]", takes_arg=True, busy_ok=True,
                                leader="w"),
                 "status": Command(self.c_status, "server, chat, model, usage", busy_ok=True,
                                   leader="s"),
@@ -9529,19 +9971,8 @@ def build_tui(base: str, token: str, **kw):
                 "orchestration": Command(self.c_orchestrate, "brain-dump a problem; an "
                                          "orchestrator sends agents at it", "[project]",
                                          takes_arg=True, leader="o"),
-                "agents-view": Command(self.c_agents_view, "every agent and chat that is "
-                                       "running, across projects (← on an empty prompt; "
-                                       "/persona starts one)",
-                                       busy_ok=True, leader="g"),
                 "dnd": Command(self.c_dnd, "do not disturb: silence pings (full access)",
                                "[1h|4h|90m|tomorrow|off]", takes_arg=True, busy_ok=True),
-                "security": Command(self.c_security, "the Security area: "
-                                    + ", ".join(SecurityScreen.TABS) + " (full access)",
-                                    "[" + "|".join(SecurityScreen.TABS) + "]",
-                                    takes_arg=True, busy_ok=True, leader="v"),
-                "vms": Command(self.c_vms, "boxes, images and the package catalogue "
-                               "(full access)", "[boxes|images|catalogue]", takes_arg=True,
-                               busy_ok=True, leader="c"),
                 "login": Command(self.c_login, "log in: the line from Settings (chat only) "
                                  "or your password (full access)", "[line|password]"),
                 "logout": Command(self.c_logout, "log out: /logout says who, /logout yes does it "
@@ -9549,17 +9980,26 @@ def build_tui(base: str, token: str, **kw):
                 "exit": Command(self.c_exit, "quit (a running turn keeps going)",
                                 busy_ok=True, leader="q"),
             }
+            # the pages: /work /agents /security /vms /sessions and the web-only ones
+            for spec in PAGE_SPECS:
+                if spec.name not in c:
+                    c[spec.name] = Command(
+                        self._page_fn(spec.name), spec.help, spec.hint,
+                        takes_arg=bool(spec.hint), busy_ok=True, leader=spec.leader,
+                        page=spec.name)
+                c[spec.name].page = spec.name
             for alias, name in (("quit", "exit"),
-                                ("history", "sessions"), ("model", "models"),
-                                ("agent", "persona"), ("agents", "persona"),
+                                ("model", "models"),
+                                ("agent", "persona"),
                                 ("theme", "themes"),
-                                ("clear", "new"), ("tools", "details"),
-                                ("providers", "provider"),
+                                ("clear", "new"), ("providers", "provider"),
                                 ("orchestrate", "orchestration"),
-                                ("review", "security"),
                                 ("stop-project", "stop-a"), ("perms", "permissions"),
                                 ("mode", "permissions")):
                 c[alias] = c[name]
+            for spec in PAGE_SPECS:
+                for alias in spec.aliases:
+                    c[alias] = c[spec.name]
             return c
 
         def unique_commands(self):
@@ -9607,15 +10047,10 @@ def build_tui(base: str, token: str, **kw):
                 return [(m, self.PERM_HINT[m]) for m in self.PERM_MODES]
             if fn == self.c_login:
                 return [("password", "full access"), ("line", "chat only")]
-            if fn == self.c_security:
-                return [("queue", "waiting on you"), ("network", "egress policy and feed"),
-                        ("logs", "security events"), ("secrets", "names and hosts"),
-                        ("persistent", "processes and services in every box"),
-                        ("profiles", "security profiles and their projects")]
-            if fn == self.c_vms:
-                return [("boxes", "running and reserved boxes"),
-                        ("images", "variants and versions"),
-                        ("catalogue", "package requests")]
+            if fn == self.c_web:
+                return [(n, "the web app's page") for n in WEB_PAGES]
+            if cmd and cmd.page:
+                return list(PAGES[cmd.page].options.items())
             return []
 
         async def pick(self, title: str, rows, current=None, custom=False, hint="",
@@ -9632,11 +10067,14 @@ def build_tui(base: str, token: str, **kw):
                                    "next step)"),
                          ("shift+tab", "permissions: yolo (the default: agents run in the VM "
                                        "without asking) → auto → ask; /permissions picks"),
-                         ("← (empty prompt)", "agents screen: everything working, "
+                         ("← (empty prompt)", "agents page: everything working, "
                                               "across projects"),
+                         ("/ (on a page)", "type a /page command on the prompt line: "
+                                           "/vms images, /security calls; esc goes back, "
+                                           "/work or ctrl+c to the chat"),
                          ("/security (ctrl+x v)",
-                          " · ".join(SecurityScreen.TABS)
-                          + f": tab → ← or 1-{len(SecurityScreen.TABS)} switch, esc back. "
+                          " · ".join(SECURITY_TABS)
+                          + f": tab → ← or 1-{len(SECURITY_TABS)} switch, esc back. "
                             "Rules are the always-allow answers; Calls is how the model "
                             "key is used"),
                          ("in /security", "y approve · n reject (services: 1 2 3 placement, "
@@ -9681,6 +10119,7 @@ def build_tui(base: str, token: str, **kw):
             await self.push_screen_wait(Help(plain, view))
 
         async def c_new(self, arg: str = "") -> None:
+            await self.host.home()
             self.cid, self.title_text, self.last_reply = None, None, ""
             self.child_of = None
             self.shown_model, self.info, self.todos = None, None, []
@@ -9722,6 +10161,7 @@ def build_tui(base: str, token: str, **kw):
 
         async def open_conversation(self, cid: int, running: bool = False,
                                     parent: int | None = None) -> None:
+            await self.host.home()
             r = await self.api("GET", f"/api/conversations/{cid}/messages")
             self.cid, self.ephemeral = cid, False
             self.child_of = parent          # an agent's chat: esc goes back to its parent
@@ -10156,8 +10596,12 @@ def build_tui(base: str, token: str, **kw):
 
         async def c_web(self, arg: str) -> None:
             import webbrowser
-            # /c/<id> opens that chat in the web app's Work page; / is Work
-            url = self.base + (f"/c/{self.cid}" if self.cid else "/")
+            # /c/<id> opens that chat in the web app's Work page; / is Work; /web memory is
+            # the Memory page (the names the terminal does not have yet, /memory ...)
+            page = arg.strip().strip("/").lower()
+            if page and not re.fullmatch(r"[a-z][a-z0-9/_-]*", page):
+                raise CliError(f"no web page called {arg.strip()!r}")
+            url = self.base + (f"/{page}" if page else f"/c/{self.cid}" if self.cid else "/")
             webbrowser.open(url)
             self.notify(f"opened {url}")
 
@@ -10509,26 +10953,40 @@ def build_tui(base: str, token: str, **kw):
             self.refresh_chrome()
             self.send(dump)
 
-        async def c_agents_view(self, arg: str) -> None:
-            self.action_agents_view()
+        # -- pages: the router -----------------------------------------------------------------
 
-        async def c_security(self, arg: str) -> None:
-            await self._tabbed(SecurityScreen, (arg or "").strip().lower() or "queue",
-                               lambda tab: SecurityScreen(tab, self.project, self.cid))
+        def _page_fn(self, name: str):
+            async def go(arg: str = "") -> None:
+                await self.open_page(name, arg)
+            return go
 
-        async def c_vms(self, arg: str) -> None:
-            await self._tabbed(VmsScreen, (arg or "").strip().lower() or "boxes", VmsScreen)
-
-        async def _tabbed(self, cls, tab: str, make) -> None:
-            """Open a tabbed screen on `tab`, or switch tabs when it is already
-            open; the other tabbed screen on top gives way first."""
-            if type(self.screen) is cls:
-                await self.screen.switch_to(cls.TABS.index(tab) if tab in cls.TABS else 0)
+        async def open_page(self, name: str, arg: str = "") -> None:
+            """/name args: show a page in the host. The page showing already is told its new
+            args; one lower in the stack gives way to a fresh one on top. `work` is the
+            chat; a page the terminal does not have yet says where it lives."""
+            spec = PAGES[name]
+            args = (arg or "").split()
+            if spec.kind == "web":
+                await self.note(not_in_terminal(name), "warn")
                 return
-            if isinstance(self.screen, SecurityScreen):
-                self.pop_screen()
             self.hide_popup()
-            self.push_screen(make(tab))
+            if name == "sessions":
+                await self.c_sessions(arg)
+                return
+            if spec.kind == "chat":
+                await self.host.home()
+                return
+            if (name == "agents" and args and args[0] not in AGENTS_VIEW_BLURB
+                    and args[0] != "active"):
+                # the old spelling: /agents <slug> starts a chat as that agent preset
+                await self.c_agent(arg)
+                return
+            cls = self.page_classes[name]
+            if type(self.page) is cls:
+                self.page.set_args(args)
+                self.page.focus_target().focus()
+                return
+            await self.host.push(cls.build(self, args))
 
         async def c_exit(self, arg: str = "") -> None:
             self.exit()

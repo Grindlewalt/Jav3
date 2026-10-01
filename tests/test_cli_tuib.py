@@ -75,7 +75,7 @@ async def _until(pilot, cond, tries=80):
 
 
 def _top(app) -> str:
-    return type(app.screen).__name__
+    return type(app.top).__name__
 
 
 def _rows(scr):
@@ -85,8 +85,8 @@ def _rows(scr):
 async def _security(pilot, app, tab="queue", cmd="/security"):
     await pilot.pause(0.3)
     app.dispatch(f"{cmd} {tab}".strip() if tab else cmd)
-    assert await _until(pilot, lambda: _top(app) in ("SecurityScreen", "VmsScreen"))
-    scr = app.screen
+    assert await _until(pilot, lambda: _top(app) in ("SecurityPage", "VmsPage"))
+    scr = app.top
     assert await _until(pilot, lambda: scr.loaded.get(tab, True))
     await pilot.pause(0.15)
     return scr
@@ -128,7 +128,7 @@ async def test_slash_login_with_a_bad_address_leaves_the_app_running():
         app.note = note
         app.dispatch("/login password")
         assert await _until(pilot, lambda: _top(app) == "Ask")
-        app.screen.query_one("#answer").value = "10.0.0.999:8000"
+        app.top.query_one("#answer").value = "10.0.0.999:8000"
         await pilot.press("enter")
         assert await _until(pilot, lambda: any("not a valid server address" in t
                                                for t, _ in notes))      # said at the address step
@@ -175,7 +175,7 @@ async def test_enter_on_a_profile_row_opens_its_details():
         assert await _until(pilot, lambda: _top(app) == "View")
         assert app.is_running
         await pilot.press("escape")
-        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+        assert await _until(pilot, lambda: _top(app) == "SecurityPage")
         assert "enter" in str(scr.query_one("#sec-foot").render())
 
 
@@ -217,7 +217,7 @@ def _everything(seen=None):
 async def _leave(pilot, app, scr, tries=6):
     """Close whatever dialog is open with esc until we are back on the screen."""
     for _ in range(tries):
-        if app.screen is scr or not app.is_running:
+        if app.top is scr or not app.is_running:
             return
         await pilot.press("escape")
         await pilot.pause(0.15)
@@ -234,15 +234,15 @@ async def test_enter_on_the_first_row_of_every_tab_never_crashes(cmd, tabs):
         await pilot.pause(0.3)
         for tab in tabs:
             app.dispatch(f"{cmd} {tab}")
-            assert await _until(pilot, lambda: _top(app) in ("SecurityScreen", "VmsScreen"))
-            scr = app.screen
+            assert await _until(pilot, lambda: _top(app) in ("SecurityPage", "VmsPage"))
+            scr = app.top
             assert await _until(pilot, lambda: scr.loaded.get(tab))
             await pilot.pause(0.15)
             await pilot.press("enter")
             await pilot.pause(0.3)
             assert app.is_running, tab
             await _leave(pilot, app, scr)
-            assert app.screen is scr, f"{tab}: stuck on {_top(app)}"
+            assert app.top is scr, f"{tab}: stuck on {_top(app)}"
             await pilot.press("escape")
             await pilot.pause(0.1)
 
@@ -332,17 +332,17 @@ async def test_enter_declines_the_destroy_and_the_data_disk_prompts():
         scr.select_key("Xp-alpha")
         await pilot.press("d")
         assert await _until(pilot, lambda: _top(app) == "Confirm")
-        keys = str(app.screen.query_one("#confirm-keys").render())
+        keys = str(app.top.query_one("#confirm-keys").render())
         assert "enter" in keys and "y" in keys
         await pilot.press("enter")                   # a habit: nothing is destroyed
         await pilot.pause(0.3)
-        assert _top(app) == "VmsScreen"
+        assert _top(app) == "VmsPage"
         assert not [c for c in seen if c[0] == "POST"]
         await pilot.press("d")
         assert await _until(pilot, lambda: _top(app) == "Confirm")
         await pilot.press("y")                       # destroy it ...
         assert await _until(pilot, lambda: _top(app) == "Confirm"
-                            and "data disk" in app.screen.question)
+                            and "data disk" in app.top.question)
         await pilot.press("enter")                   # ... a second habitual enter keeps the disk
         assert await _until(pilot, lambda: any(
             c[0] == "POST" and c[1] == "/api/vm/boxes/p-alpha/destroy" for c in seen))
@@ -359,7 +359,7 @@ async def test_a_plain_confirm_still_takes_enter_and_says_so():
         await pilot.pause(0.4)
         app.dispatch("/project brandnew")
         assert await wait_for(lambda: top(app) == "Confirm")
-        assert "y / enter" in str(app.screen.query_one("#confirm-keys").render())
+        assert "y / enter" in str(app.top.query_one("#confirm-keys").render())
         await pilot.press("enter")
         assert await wait_for(lambda: srv.created == [{"name": "brandnew"}])
 
@@ -514,8 +514,8 @@ async def test_agents_screen_counts_a_blocked_child_and_shows_why_before_the_age
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/agents-view")
-        assert await _until(pilot, lambda: _top(app) == "AgentsScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: _top(app) == "AgentsPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded and len(list(scr.query("AgentRow"))) > 2)
         head = _plain(str(scr.query_one("#ag-head").render()))
         assert "1 running" in head and "1 need you" in head
@@ -525,21 +525,24 @@ async def test_agents_screen_counts_a_blocked_child_and_shows_why_before_the_age
         assert "!" in row and re.search(r"waiting on your permission.*\d+[smhd]\s*$", row), row
 
 
-async def test_persona_is_the_preset_picker_and_agents_still_works_TUI15():
+async def test_persona_is_the_preset_picker_and_agents_is_the_page_TUI15():
     pytest.importorskip("textual")
     app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.3)
-        assert app.commands["persona"] is app.commands["agents"] is app.commands["agent"]
-        assert "agents-view" in app.commands["persona"].help
-        assert "/persona" in app.commands["agents-view"].help
+        assert app.commands["persona"] is app.commands["agent"]
+        assert app.commands["agents"] is app.commands["agents-view"]     # the page; jav3.2 P0
+        assert app.commands["agents"].page == "agents"
+        assert "/agents" in app.commands["persona"].help
+        assert "/persona" in app.commands["agents"].help
         names = [n for n, _ in app.unique_commands()]
-        assert "persona" in names and "agents" not in names
+        assert "persona" in names and "agents" in names and "agents-view" not in names
         app.dispatch("/agents frontend")                     # the old spelling still takes a slug
         assert await _until(pilot, lambda: app.agent == "frontend")
-        await pilot.press(*"/agents")                        # bare, it finds the running-agents view
+        assert _top(app) == "ChatPage"                        # ...and is not the page
+        await pilot.press(*"/agents")                        # bare, it is the running-agents page
         await pilot.pause(0.2)
-        assert app.popup_items and app.popup_items[0][1] == "agents-view"
+        assert app.popup_items and app.popup_items[0][1] == "agents"
 
 
 # --- TUIB-15 / TUIB-16: the login flows ----------------------------------------------------------------
@@ -562,11 +565,11 @@ async def test_the_tui_login_warns_about_plain_http_before_the_password_is_asked
         await pilot.pause(0.3)
         app.dispatch("/login password")
         assert await _until(pilot, lambda: _top(app) == "Ask")
-        ask = app.screen
+        ask = app.top
         assert "10.0.0.82:8000" in ask.query_one("#answer").placeholder    # an example
         await pilot.press(*"203.0.113.1:8000", "enter")
         assert await _until(pilot, lambda: _top(app) == "Confirm")         # before the password
-        assert "plain http" in app.screen.question and "/api/auth/login" not in sent
+        assert "plain http" in app.top.question and "/api/auth/login" not in sent
         await pilot.press("n")                                             # declined: stops here
         await pilot.pause(0.3)
         assert _top(app) not in ("Ask", "Confirm") and "/api/auth/login" not in sent
@@ -587,7 +590,7 @@ async def test_a_loopback_address_needs_no_plain_http_confirm_TUIB15(monkeypatch
         assert await _until(pilot, lambda: _top(app) == "Ask")
         await pilot.press(*"127.0.0.1:8000", "enter")
         assert await _until(pilot, lambda: _top(app) == "Ask"
-                            and app.screen.question == "Username")
+                            and app.top.question == "Username")
         await pilot.press("escape")
 
 
@@ -635,7 +638,7 @@ async def test_the_permission_ask_numbers_its_no_and_declines_with_it_TUIB13():
         await open_chat(pilot, app, srv)
         srv.feed.put(_perm())
         assert await wait_for(lambda: top(app) == "AskUser")
-        scr = app.screen
+        scr = app.top
         type(scr).GRACE = 0
         head, rows = scr.markup(scr.ev, scr.qs, 0, 0, set(), "", scr.free_label)
         assert rows.splitlines()[2].lstrip("[reverse]").startswith("3. ( ) No")
@@ -656,7 +659,7 @@ async def test_yes_still_answers_yes_and_never_sends_the_no_row_TUIB13():
         await open_chat(pilot, app, srv)
         srv.feed.put(_perm())
         assert await wait_for(lambda: top(app) == "AskUser")
-        type(app.screen).GRACE = 0
+        type(app.top).GRACE = 0
         await pilot.press("enter")
         assert await wait_for(lambda: srv.answers)
         assert srv.answers[0] == {"id": "perm_1", "answers": [{"selected": ["Yes"], "text": None}]}
@@ -674,7 +677,7 @@ async def test_esc_on_a_later_question_warns_before_dropping_the_earlier_answers
             {"question": "DB?", "options": ["Postgres", "SQLite"]},
             {"question": "Port?", "options": ["80", "8080"]}]})
         assert await wait_for(lambda: top(app) == "AskUser")
-        scr = app.screen
+        scr = app.top
         type(scr).GRACE = 0
         await pilot.press("1", "enter")                 # question 1 answered
         await pilot.press("escape")                     # question 2: warns, does not skip
@@ -699,8 +702,8 @@ async def test_a_free_text_only_question_reads_right_TUIB13():
         srv.feed.put({"type": "ask_user", "id": "f1", "conversation_id": 4, "questions": [
             {"question": "Name it", "options": []}]})
         assert await wait_for(lambda: top(app) == "AskUser")
-        type(app.screen).GRACE = 0
-        foot = app.screen._foot_text()
+        type(app.top).GRACE = 0
+        foot = app.top._foot_text()
         assert "1 picks" not in foot and "type your answer" in foot
         await pilot.press("escape")
         assert await wait_for(lambda: srv.answers)
@@ -763,7 +766,7 @@ async def test_y_and_n_on_an_alert_say_why_nothing_happens_TUIB20():
         await pilot.press("y")
         await pilot.pause(0.2)
         assert "not an approval" in _plain(scr.sub_markup())
-        assert _top(app) == "SecurityScreen"
+        assert _top(app) == "SecurityPage"
 
 
 async def test_a_pending_host_shows_y_and_n_in_the_footer_TUIB20():
@@ -819,7 +822,7 @@ async def test_revoking_an_always_allow_rule_asks_first_TUIB24():
         assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
         await pilot.press("d")
         assert await _until(pilot, lambda: _top(app) == "Confirm")
-        assert "run_code" in app.screen.question and "npm" in app.screen.question
+        assert "run_code" in app.top.question and "npm" in app.top.question
         await pilot.press("n")
         await pilot.pause(0.3)
         assert not [c for c in seen if c[0] == "DELETE"]
@@ -840,7 +843,7 @@ async def test_the_help_and_palette_list_every_security_tab_TUIB21():
             assert tab in cmd.help and tab in cmd.usage
         app.dispatch("/help")
         assert await _until(pilot, lambda: _top(app) == "Help")
-        text = app.screen.text                                # the plain form of the list
+        text = app.top.text                                # the plain form of the list
         assert "1-8" in text and "1-6" not in text
 
 
@@ -907,7 +910,7 @@ async def test_the_profile_form_fits_80x24_and_follows_the_cursor():
         assert await _until(pilot, lambda: len(_rows(scr)) >= 1)
         await pilot.press("a")
         assert await _until(pilot, lambda: _top(app) == "ProfileForm")
-        form = app.screen
+        form = app.top
         await pilot.pause(0.3)
         dlg, hint = form.query_one("#dialog"), form.query_one("#pf-hint")
         body = form.query_one("#view-body")
@@ -937,8 +940,8 @@ async def test_logged_out_says_not_logged_in_once_and_enter_offers_the_login():
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/security")
-        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: _top(app) == "SecurityPage")
+        scr = app.top
         await pilot.pause(0.2)
         sub = str(scr.query_one("#sec-sub").render())
         assert "not logged in" in sub and "device token" not in sub
@@ -947,9 +950,9 @@ async def test_logged_out_says_not_logged_in_once_and_enter_offers_the_login():
         assert "device token" not in " ".join(_rows(scr))
         await pilot.press("enter")                    # offers the password login
         assert await _until(pilot, lambda: _top(app) == "Ask")
-        assert "Server address" in str(app.screen.query_one("Static").render())
+        assert "Server address" in str(app.top.query_one("Static").render())
         await pilot.press("escape")
-        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
+        assert await _until(pilot, lambda: _top(app) == "SecurityPage")
 
 
 async def test_a_chat_only_token_is_told_so():
@@ -958,9 +961,9 @@ async def test_a_chat_only_token_is_told_so():
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/vms")
-        assert await _until(pilot, lambda: _top(app) == "VmsScreen")
+        assert await _until(pilot, lambda: _top(app) == "VmsPage")
         await pilot.pause(0.2)
-        sub = str(app.screen.query_one("#sec-sub").render())
+        sub = str(app.top.query_one("#sec-sub").render())
         assert "chat only" in sub and "full access" in sub and "not logged in" not in sub
 
 
@@ -981,8 +984,8 @@ async def test_an_unreachable_server_is_not_an_all_clear():
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/security")
-        assert await _until(pilot, lambda: _top(app) == "SecurityScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: _top(app) == "SecurityPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded["queue"] and scr.loaded["secrets"])
         await pilot.pause(0.2)
         sub = _plain(scr.sub_markup())
@@ -1018,14 +1021,14 @@ async def test_a_picker_keeps_the_first_letter_when_it_is_t():
         await pilot.pause(0.4)
         app.dispatch("/project")
         assert await wait_for(lambda: _top(app) == "Picker")
-        hint = str(app.screen.query_one("#dialog-hint").render())
+        hint = str(app.top.query_one("#dialog-hint").render())
         assert "type to filter" in hint and "t type" not in hint
         await pilot.press(*"tetris")
-        f = app.screen.query_one("#filter")
+        f = app.top.query_one("#filter")
         assert f.value == "tetris"
         await pilot.press("enter")
         assert await wait_for(lambda: _top(app) == "Confirm")
-        assert "'tetris'" in app.screen.question
+        assert "'tetris'" in app.top.question
         await pilot.press("n")
 
 
