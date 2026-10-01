@@ -4101,15 +4101,6 @@ def build_tui(base: str, token: str, **kw):
         def action_leave(self) -> None:
             self.leave()
 
-        def on_key(self, event) -> None:
-            """`/` on a page types a command: the prompt line takes the focus, slash
-            first. (Here, not in the app: the page's queue is ordered, so the letters
-            typed after the slash find the focus already moved.)"""
-            if event.key == "slash" and self.SLASH_TO_PROMPT and self.page_visible:
-                event.stop()
-                event.prevent_default()
-                self.app.command_line("/")
-
         @staticmethod
         def of(widget) -> "Page | None":
             """The page a widget inside it belongs to."""
@@ -4158,17 +4149,20 @@ def build_tui(base: str, token: str, **kw):
 
         async def push(self, page: Page) -> None:
             """Show `page` over the one showing. An older page of the same kind lower
-            in the stack gives way (opening it again starts it fresh)."""
+            in the stack gives way (opening it again starts it fresh). The page is
+            mounted hidden and becomes `current` once it is there, so nothing sees a
+            page that is not on screen yet."""
+            page.display = False
+            await self.mount(page)
             cur = self.current
             stale = [p for p in self.stack[1:] if p.NAME == page.NAME]
             cur.set_visible(False)
+            self.stack.append(page)
+            page.set_visible(True)
             for old in stale:
                 self.stack.remove(old)
                 old.set_visible(False)
                 await old.remove()
-            self.stack.append(page)
-            await self.mount(page)
-            page.set_visible(True)
             while len(self.stack) > self.MAX_DEPTH + 1:
                 gone = self.stack.pop(1)
                 await gone.remove()
@@ -4180,6 +4174,7 @@ def build_tui(base: str, token: str, **kw):
                 return False
             old = self.stack.pop()
             old.set_visible(False)
+            self.current.set_visible(True)
             await old.remove()
             self._shown(self.current)
             return True
@@ -4188,22 +4183,26 @@ def build_tui(base: str, token: str, **kw):
             """Back to the chat, the pages between dropped."""
             if len(self.stack) < 2:
                 return
-            while len(self.stack) > 1:
-                old = self.stack.pop()
+            gone = self.stack[1:]
+            for old in gone:
                 old.set_visible(False)
+            del self.stack[1:]
+            self.current.set_visible(True)
+            for old in gone:
                 await old.remove()
             self._shown(self.current)
 
         def _shown(self, page: Page) -> None:
             page.set_visible(True)
-            self.call_after_refresh(self._focus, page)
+            self._focus(page)                   # now: the page that had it may be gone
+            self.call_after_refresh(self._focus, page)    # and again once it is laid out
             self.post_message(self.Changed(page))
 
         def _focus(self, page: Page) -> None:
             if page is self.current and page.is_attached:
                 target = page.focus_target()
                 if target is not None and target.is_attached:
-                    target.focus()
+                    self.app.set_focus(target)
 
         def on_page_leave(self, message) -> None:
             message.stop()
@@ -7696,6 +7695,10 @@ def build_tui(base: str, token: str, **kw):
             Binding("pageup", "scroll_log(-1)", show=False, priority=True),
             Binding("pagedown", "scroll_log(1)", show=False, priority=True),
             Binding("ctrl+d", "ctrl_d", show=False, priority=True),
+            # `/` on a page: the prompt line takes the focus, slash typed. A priority
+            # binding, so the focus has moved before the next key is handed out (the
+            # letters typed right after it must reach the prompt, not the page)
+            Binding("slash", "command_line", show=False, priority=True),
         ]
         # keys the dialogs need for themselves
         _MAIN_ONLY = {"leader", "new", "toggle_sidebar", "toggle_tools", "external_editor",
@@ -9724,6 +9727,10 @@ def build_tui(base: str, token: str, **kw):
         # -- keys ---------------------------------------------------------------------------------
 
         def check_action(self, action: str, parameters) -> bool | None:
+            if action == "command_line":
+                focus = self.focused
+                return (isinstance(focus, Page) and focus.SLASH_TO_PROMPT and self.paged
+                        and not isinstance(self.screen, ModalScreen))
             if action in self._MAIN_ONLY and (
                     isinstance(self.screen, ModalScreen)
                     or (action in self._CHAT_ONLY and self.paged)):
@@ -9738,9 +9745,14 @@ def build_tui(base: str, token: str, **kw):
                 event.prevent_default()
                 self.run_leader(event.key)
 
+        def action_command_line(self) -> None:
+            self.command_line("/")
+
         def command_line(self, text: str = "/") -> None:
-            """Over a page the prompt is a command line: focus it with `text` typed."""
-            self.editor.focus()
+            """Over a page the prompt is a command line: focus it with `text` typed. The
+            focus moves now, not later (`widget.focus()` is deferred, and the keys already
+            queued would go to the page's own bindings)."""
+            self.set_focus(self.editor)
             self.editor.text = text
             self.editor.move_cursor(self.editor.document.end)
 
@@ -9749,7 +9761,7 @@ def build_tui(base: str, token: str, **kw):
             gives the keys back to the page."""
             self.editor.text = ""
             self.hide_popup()
-            self.page.focus_target().focus()
+            self.set_focus(self.page.focus_target())
 
         def on_page_host_changed(self, message) -> None:
             """A page was shown or dropped: the prompt, status row and sidebar follow."""

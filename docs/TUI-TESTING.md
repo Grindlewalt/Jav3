@@ -77,7 +77,6 @@ touching the client. Not covered: live spinners and durations (the live-turn tes
 
 Pages are widgets in a `PageHost` (see the comment above `class Page` in the client): a page's keys
 work while it has focus, so a driven page needs no extra step after its command. The prompt under a
-page is a command line: `type:/` then a short `wait:0.3` before the rest, and a `wait:0.4` before
-`key:enter` after a command that has an argument (the argument menu is still updating while typing at
-machine speed, and Enter takes its highlighted row). `tests/test_cli_pages.py` is the pilot-level
+page is a command line: `/` on a page moves the focus to it at once, so `type:/vms images|key:enter`
+works from a page too. `tests/test_cli_pages.py` is the pilot-level
 test of the router and the back stack; `app.top` is the dialog over everything, else the page.

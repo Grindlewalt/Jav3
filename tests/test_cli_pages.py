@@ -144,9 +144,8 @@ async def test_a_page_opens_by_command_with_its_args_and_esc_goes_back_to_the_ch
         assert app.focused is page                                  # its keys work at once
         assert app.query_one("#bottom").has_class("paged")
         await pilot.press("escape")
-        assert await _until(pilot, lambda: _name(app) == "ChatPage")
+        assert await _until(pilot, lambda: _name(app) == "ChatPage" and app.focused is app.editor)
         assert not app.query_one("#bottom").has_class("paged")
-        assert app.focused is app.editor
         # the same with /vms images and /agents finished
         page = await _go(pilot, app, "/vms images", "VmsPage")
         assert page.tab == "images" and page.args == ["images"]
@@ -216,7 +215,8 @@ async def test_work_is_the_chat_and_left_on_an_empty_prompt_opens_the_agents_pag
         await _go(pilot, app, "/vms", "VmsPage")
         app.dispatch("/work")
         assert await _until(pilot, lambda: _name(app) == "ChatPage")
-        assert len(app.host.stack) == 1 and app.focused is app.editor
+        assert len(app.host.stack) == 1
+        assert await _until(pilot, lambda: app.focused is app.editor)
         app.dispatch("/work")                                        # already there: nothing
         await pilot.pause(0.2)
         assert _name(app) == "ChatPage"
@@ -300,6 +300,24 @@ async def test_slash_on_a_page_types_a_command_and_esc_gives_the_page_its_keys_b
         await pilot.press("enter")
         assert await _until(pilot, lambda: _name(app) == "VmsPage")
         assert app.page.tab == "images" and app.focused is app.page
+
+
+async def test_letters_typed_right_after_a_slash_reach_the_prompt_not_the_page():
+    """Posted back to back (a fast typist, a paste of keys): the slash moves the focus
+    before the next key is handed out, so `a` is not the Security page's acknowledge."""
+    pytest.importorskip("textual")
+    from textual import events
+    app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause(0.3)
+        await _go(pilot, app, "/security", "SecurityPage")
+        for ch in "/agents finished":
+            app.post_message(events.Key("slash" if ch == "/" else "space" if ch == " "
+                                        else ch, ch))
+        assert await _until(pilot, lambda: app.editor.text == "/agents finished")
+        app.post_message(events.Key("enter", None))
+        assert await _until(pilot, lambda: _name(app) == "AgentsPage")
+        assert app.page.mode == "finished"
 
 
 async def test_plain_text_typed_on_the_prompt_over_a_page_goes_to_the_chat():
