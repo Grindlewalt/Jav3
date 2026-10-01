@@ -237,13 +237,20 @@ async def test_an_orchestrators_ask_does_not_park_the_supervision_loop(client, m
                           json={"id": a.id, "answers": [{"selected": ["SQLite"]}]})
     assert r.status_code == 200
     assert not operator_ask._pending
-    db = await get_db()
-    try:
-        async with db.execute("SELECT body, from_operator FROM agent_messages "
-                              "WHERE to_conversation_id = ?", (cid,)) as cur:
-            rows = await cur.fetchall()
-    finally:
-        await db.close()
+    # the answer is delivered as a message by a fire-and-forget task: wait for
+    # it rather than racing it (this flaked under load)
+    rows = []
+    for _ in range(100):
+        db = await get_db()
+        try:
+            async with db.execute("SELECT body, from_operator FROM agent_messages "
+                                  "WHERE to_conversation_id = ?", (cid,)) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await db.close()
+        if rows:
+            break
+        await asyncio.sleep(0.02)
     assert len(rows) == 1 and rows[0]["from_operator"] == 1
     assert "SQLite" in rows[0]["body"] and "Which database?" in rows[0]["body"]
     agentmsg.forget_operator_inbox(cid)
