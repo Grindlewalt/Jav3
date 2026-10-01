@@ -161,8 +161,12 @@ async def _handle(loop, conn) -> None:
                     on_tool_call=None):
                 await send(ev)
         except Exception as e:  # noqa: BLE001 — surface any loop crash as a final
+            # `error` marks it as a failure, not an answer: the host raises it
+            # (after the edits come home) so the chat shows an error; `content`
+            # keeps older hosts working
             await send({"type": "final",
-                        "content": f"(guest loop error: {type(e).__name__}: {e})"})
+                        "content": f"(guest loop error: {type(e).__name__}: {e})",
+                        "error": f"{type(e).__name__}: {e}"})
 
         # ship the guest's staged edits back for host-side reconcile + approval
         if owns_workspace:

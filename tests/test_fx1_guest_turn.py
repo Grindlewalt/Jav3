@@ -346,6 +346,23 @@ async def test_a_final_with_no_staged_is_rescued_and_still_delivered(env, monkey
     assert (settings.projects_dir / "fx1" / "d.txt").read_text() == "late\n"
 
 
+async def test_a_guest_loop_crash_is_raised_not_answered(env, monkeypatch):
+    """M2's note: when the model stream failed for good, the guest sent its
+    crash as a `final` that read like an answer. It now carries `error`, and
+    the host raises it after the edits came home."""
+    from backend.vm import guest_turn as gt
+    _pull_returns(monkeypatch, {})
+
+    async def crashed(loop, sock, spec):
+        await _send(loop, sock, {"type": "final", "content": "(guest loop error: X)",
+                                 "error": "ModelError: stream dropped"})
+        await _send(loop, sock, _staged({"kept.txt": "kept\n"}))
+
+    with pytest.raises(gt.GuestLoopError, match="stream dropped"):
+        await _drive(monkeypatch, crashed)
+    assert (settings.projects_dir / "fx1" / "kept.txt").read_text() == "kept\n"
+
+
 async def test_a_completed_turn_does_not_pull_again(env, monkeypatch):
     calls = []
     _pull_returns(monkeypatch, {}, calls=calls)

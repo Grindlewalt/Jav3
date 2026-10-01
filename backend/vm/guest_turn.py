@@ -42,6 +42,11 @@ RESCUE_TIMEOUT = 20.0
 MAX_LINE = 192 * 1024 * 1024
 
 
+class GuestLoopError(RuntimeError):
+    """The guest's agent loop crashed (e.g. the model stream failed for good):
+    a failure to report, never an answer to store."""
+
+
 class GuestStreamError(ConnectionError):
     """The guest's stream ended before the turn did: the socket closed with no
     `final` (the guest crashed or ran out of memory, or its VM was reaped)."""
@@ -277,6 +282,8 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                     # operator reads and what the next turn's history keeps)
                     held_final = ev
                     continue
+                if ev.get("error"):
+                    raise GuestLoopError(str(ev["error"])[:500])
             yield ev
         if not saw_final:
             raise GuestStreamError(
@@ -290,6 +297,8 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                 held_final = {**held_final, "content": (held_final.get("content") or "") + (
                     workspace_xfer.describe_unapplied(res) if res is not None
                     else workspace_xfer.LOST_NOTE)}
+            if held_final.get("error"):
+                raise GuestLoopError(str(held_final["error"])[:500])
             yield held_final
     finally:
         # a stop must also stop what the guest had brokered to the host (a
