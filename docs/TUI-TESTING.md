@@ -14,10 +14,21 @@ colours) and **no shift+arrows** (every key route needs a plain key).
 - Pages (jav3.2): `/agents [finished]`, `/security [tab]`, `/vms [tab]` open over the chat with the
   prompt left as one line under them. On a page `/` jumps to that line (type `/vms images`, enter),
   `esc` goes back to the page before (the chat first), `ctrl+c` or `/work` straight to the chat,
-  and `ctrl+x` plus a letter works there as everywhere. A trailing `panel` (`/vms images panel`) is
-  understood but panels come in the next step: for now it opens in place and says so. Pages the web
-  has and the terminal does not (`/memory /settings /logs /schedules /tools /artifacts`) answer
-  "not in the terminal yet"; `/web memory` opens that page in the browser.
+  and `ctrl+x` plus a letter works there as everywhere. Pages the web has and the terminal does
+  not (`/memory /settings /logs /schedules /tools /artifacts`) answer "not in the terminal yet";
+  `/web memory` opens that page in the browser.
+- Panels (jav3.2): the area above the prompt tiles like tmux, up to four panels. `/new-panel`
+  splits the focused panel along its longer side with a new chat; a trailing `panel` on a page
+  command (`/vms images panel`, `/sessions 7 panel`, `/work panel`) opens it in a new panel. Each
+  panel has its own chat (several turns stream at once) and its own back stack; its border title
+  says its number, what it shows and `● running` / `needs input`. One prompt line under all of
+  them types into the focused panel's chat (the placeholder names it) and runs `/page` commands
+  from anywhere. Keys: `ctrl+x` then `←↑↓→` moves to the neighbouring panel, `1`-`4` jumps, `z`
+  zooms the focused panel and back, `0` closes it (its chat keeps running on the server; the
+  last panel cannot be closed); on an agents row `p` opens that chat in a new panel. The sidebar
+  is hidden while there are two or more panels. A dialog for a turn in another panel opens over
+  everything with the panel number in its title. At 80x24 three panels fit (two side by side, one
+  split across); a split that would leave a tile under 28x8 says so and refuses.
 - What to try, per page (a build is fine if each of these does what it says):
   - Home: `/help` lists the keys; `←` on the empty prompt opens agents; `ctrl+p` palette.
   - Chat: send a message; tool rows show on one line, enter on a picked row opens it; `ctrl+c`
@@ -64,7 +75,8 @@ Against the Pi: read-only. Open pages; do not send chat messages or press approv
 ### Snapshots
 
 `tests/test_tui_snapshots.py` opens home, a finished chat, /vms, /security, /help, the agents page
-(by `←` and by `/agents finished`), `/security calls`, `/vms images` and a web-only page (`/memory`)
+(by `←` and by `/agents finished`), `/security calls`, `/vms images`, a web-only page (`/memory`), two and three
+chat panels and a page in a new panel (`panels-2`, `panels-3`, `panels-page`)
 at 80x24 and 160x48 and compares `tests/tui_snapshots/<page>-<cols>x<rows>.txt` (the text, then fg/bg runs per
 row as xterm-256 indexes). It also fails on any truecolor code. ~25 s alone, ~8 s under `-n 6`.
 It skips without pexpect, pyte or textual. After an intended UI change:
@@ -82,3 +94,13 @@ work while it has focus, so a driven page needs no extra step after its command.
 page is a command line: `/` on a page moves the focus to it at once, so `type:/vms images|key:enter`
 works from a page too. `tests/test_cli_pages.py` is the pilot-level
 test of the router and the back stack; `app.top` is the dialog over everything, else the page.
+
+Panels: `tests/test_cli_panels.py` has the pure split-tree tests (split, close, normalize, rects,
+neighbour, the cut direction) and the pilot tests (focus routing, two chats streaming through two
+FakeServer feeds, `panel` and `/new-panel`, the cap, ctrl+x keys, a dialog for an unfocused panel,
+closing a panel). In a test `app.chats` maps a panel number to its `ChatState` (`.panel`, `.log`,
+`.cid`, `.turn`, `.busy`); `app.cid`, `app.turn`, `app.busy`... are the focused panel's (the chat
+in context: a worker keeps the chat that started it). `app.focus_panel(n)` moves the focus,
+`app.panel_area.size` is the room the tiles share. Driven: `scripts/tui_drive.py --fake
+"type:/new-panel|key:enter|waitfor:2 chat (new)@10|key:ctrl+x|key:left|show"` (`key:ctrl+x` then
+`key:z`, `key:0`, `key:1`...), and `fg:╔` / `fg:╭` give the focused and unfocused border colours.

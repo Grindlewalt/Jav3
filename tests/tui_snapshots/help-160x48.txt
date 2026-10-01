@@ -15,7 +15,7 @@
                            / (on a page)         type a /page command on the prompt line: /vms images, /security calls; esc goes
                                                  back, /work or ctrl+c to the chat
                            /security (ctrl+x v)  queue · network · logs · secrets · persistent · profiles · rules · calls: tab → ←
-                                                 or 1-8 switch, esc back. Rules are the always-allow answers; Calls is how the     ▂▂
+                                                 or 1-8 switch, esc back. Rules are the always-allow answers; Calls is how the     ▅▅
                                                  model key is used
                            in /security          y approve · n reject (services: 1 2 3 placement, ↑↓ port, space expose) · a
                                                  acknowledge / add · e edit · p project · enter open · s stop · d delete / revoke
@@ -27,6 +27,8 @@
                            esc esc (idle)        clear the prompt
                            ctrl+c                clear prompt · interrupt · twice to quit
                            ctrl+x then a key     leader: see the table above; b = notifications
+                           panels                /new-panel splits this one (at most 4); /vms panel opens a page in a new one.
+                                                 ctrl+x then ←↑↓→ moves, 1-4 jumps, z zooms, 0 closes
                            ctrl+p                command palette
                            ctrl+n                new chat
                            ctrl+b                notifications sidebar (● n = unread)
@@ -40,8 +42,6 @@
                                                  click it)
                            ctrl+g                edit the prompt in $EDITOR
                            pgup / pgdn           scroll the transcript
-                           ↑ ↓                   prompt history
-                           tab                   complete a /command, its argument or an @path
   █
   █  Ask anything… "Fix the failing test in tests/"
   █

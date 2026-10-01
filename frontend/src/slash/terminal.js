@@ -24,6 +24,7 @@ export const TERMINAL_ONLY = {
   dnd: 'do not disturb is in Settings → Alerts; while it is on, the top bar says so',
   update: 'the terminal client updates itself: /update there, or jav3 update in a shell; '
     + 'this page is always the server’s newest',
+  'new-panel': 'panels are the terminal client’s /new-panel — the Work page has its own windows',
 }
 
 // the terminal client's aliases for the above

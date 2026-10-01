@@ -234,18 +234,19 @@ async def test_agents_with_a_slug_is_still_the_persona_picker():
 
 # -- `panel`, and the pages the terminal does not have -------------------------------------
 
-async def test_a_trailing_panel_opens_in_place_with_a_one_line_note():
+async def test_a_trailing_panel_opens_the_page_in_a_new_panel_not_in_place():
     pytest.importorskip("textual")
     app = jav3.build_tui("http://h:1", SESSION, transport=_srv())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause(0.3)
         page = await _go(pilot, app, "/vms images panel", "VmsPage")
         assert page.args == ["images"]                               # `panel` is not an arg
-        assert await _until(pilot, lambda: "panels arrive in the next step" in _notes(app))
-        # a page that is not the chat: the note is also a toast, so it is seen
-        app.dispatch("/security panel")
+        assert sorted(app.chats) == [1, 2] and app.focus_no == 2     # (tests/test_cli_panels.py)
+        assert type(app.chats[1].panel.host.current).__name__ == "ChatPage"
+        # without it the page replaces the view in the focused panel
+        app.dispatch("/security")
         assert await _until(pilot, lambda: _name(app) == "SecurityPage")
-        assert app.page.tab == "queue"
+        assert app.page.tab == "queue" and sorted(app.chats) == [1, 2]
 
 
 async def test_web_only_pages_say_where_they_live_and_leave_the_view_alone(monkeypatch):
